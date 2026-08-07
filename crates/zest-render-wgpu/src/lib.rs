@@ -98,6 +98,21 @@ impl Renderer {
     /// encode is wrong (see `shaders/resolve.wgsl`). Handing it an `*Srgb`
     /// format would encode twice and wash everything out.
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        Self::with_cache(device, target_format, None)
+    }
+
+    /// As [`Renderer::new`], reusing a driver pipeline cache.
+    ///
+    /// Pipeline creation is ~400-500ms of a cold start and is entirely
+    /// re-derivable, so a warm cache is the single biggest remaining startup
+    /// win. The cache itself is created by the caller because loading one from
+    /// disk is `unsafe` -- bad data can crash a driver -- and this crate is
+    /// `forbid(unsafe_code)`. The unsafety belongs with whoever owns the file.
+    pub fn with_cache(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        cache: Option<&wgpu::PipelineCache>,
+    ) -> Self {
         debug_assert!(
             !target_format.is_srgb(),
             "the resolve pass encodes sRGB itself; an sRGB target would encode twice"
@@ -113,6 +128,7 @@ impl Renderer {
         //
         // Resolve stays separate: it has a different bind group layout and no
         // use for any of the shared code.
+        let t_shader = std::time::Instant::now();
         let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("zest grid"),
             source: wgpu::ShaderSource::Wgsl(
@@ -132,6 +148,9 @@ impl Renderer {
             label: Some("zest resolve"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/resolve.wgsl").into()),
         });
+
+        tracing::debug!(ms = t_shader.elapsed().as_millis(), "shader modules");
+        let t_pipe = std::time::Instant::now();
 
         // --- globals ---
         let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -172,6 +191,7 @@ impl Renderer {
             ("vs_rect", "fs_rect"),
             &[&globals_layout],
             rect_vertex_layout(),
+            cache,
         );
         let glyph_pipeline = make_pipeline(
             device,
@@ -180,6 +200,7 @@ impl Renderer {
             ("vs_glyph", "fs_glyph"),
             &[&globals_layout, &atlas_bind_group_layout],
             glyph_vertex_layout(),
+            cache,
         );
         let decor_pipeline = make_pipeline(
             device,
@@ -188,6 +209,7 @@ impl Renderer {
             ("vs_decor", "fs_decor"),
             &[&globals_layout],
             decor_vertex_layout(),
+            cache,
         );
 
         // --- resolve ---
@@ -253,7 +275,7 @@ impl Renderer {
             depth_stencil: None,
             multisample: Default::default(),
             multiview_mask: None,
-            cache: None,
+            cache,
         });
 
         let resolve_params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -267,6 +289,8 @@ impl Renderer {
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
+
+        tracing::debug!(ms = t_pipe.elapsed().as_millis(), "pipeline objects");
 
         Self {
             rect_pipeline,
@@ -501,6 +525,7 @@ fn make_pipeline(
     entry_points: (&str, &str),
     bind_group_layouts: &[&wgpu::BindGroupLayout],
     vertex_layout: wgpu::VertexBufferLayout<'_>,
+    cache: Option<&wgpu::PipelineCache>,
 ) -> wgpu::RenderPipeline {
     let layouts: Vec<Option<&wgpu::BindGroupLayout>> =
         bind_group_layouts.iter().map(|l| Some(*l)).collect();
@@ -550,7 +575,7 @@ fn make_pipeline(
         depth_stencil: None,
         multisample: Default::default(),
         multiview_mask: None,
-        cache: None,
+        cache,
     })
 }
 

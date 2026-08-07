@@ -87,16 +87,29 @@ didn't want to switch back."* Not feature parity with WezTerm.
 - [ ] **11. Window chrome + motion.** Borderless window, GPU-drawn titlebar and
       tabs, per-OS backdrop, springs, smooth scroll, `reduce_motion`.
 - [ ] **12. Polish.** Title, DECSCUSR cursor styles, font zoom, DPI changes.
-- [ ] **12b. Startup latency.** The window now appears at ~800ms painted with
-      the theme background (it used to be ~1.9s of white). Remaining budget,
-      measured on an RTX 3080 Ti / Vulkan:
-      - ~400ms Vulkan instance + adapter enumeration
-      - ~300ms swapchain configuration  → **window becomes visible here**
-      - ~440ms pipeline creation
-      The pipeline cost is `create_render_pipeline`, not shader parsing —
-      merging four modules into two changed nothing measurable. The real fix is
-      a **persistent pipeline cache** (`Features::PIPELINE_CACHE`), which should
-      remove most of it on warm launches.
+- [x] **12b. Startup latency.** Window at **~50ms**, prompt on the first frame.
+      Was ~1.9s of white.
+
+      The fix was to stop waiting for the GPU at all: a window does not need one
+      to be the right colour, so a class background brush lets Windows paint it
+      immediately while the driver comes up behind. Spawning the shell *before*
+      GPU init then overlaps pwsh's ~400ms startup with the driver's ~850ms, so
+      the prompt is already waiting when the first frame is drawn.
+
+      Remaining cost before content, on an RTX 3080 Ti / Vulkan:
+      - ~350ms Vulkan instance creation (the loader)
+      - ~120ms device, ~290ms swapchain configuration
+      - **~245ms naga WGSL → SPIR-V** at `create_shader_module`
+      - ~90ms pipeline objects, with the cache warm
+
+      Two things that did **not** help, recorded so they are not retried:
+      merging shader modules (the cost is translation, not per-module overhead),
+      and preferring DX12 (it redistributes driver init — 27ms instance but
+      370ms adapter — and totals the same).
+
+      Next lever is the 245ms: precompile WGSL to SPIR-V at build time and use
+      `SPIRV_SHADER_PASSTHROUGH`. Vulkan-only and `unsafe`, so it needs a WGSL
+      fallback for other backends.
 - [ ] **13. Performance validation.** vtebench, >500 MB/s throughput, <2 ms CPU
       frame, <10 ms keypress→pixel, **0% GPU when idle and animations settled**.
 

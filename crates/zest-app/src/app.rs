@@ -14,6 +14,8 @@ use zest_render_wgpu::{Chrome, Renderer, Scene, Viewport};
 
 use crate::input;
 use crate::mouse::{self, MouseState};
+use crate::pipeline_cache;
+use crate::platform;
 use crate::session::{Session, Wakeup};
 
 /// Padding between the window edge and the grid, in logical pixels.
@@ -315,24 +317,38 @@ impl ApplicationHandler<Wakeup> for App {
             .with_inner_size(winit::dpi::LogicalSize::new(960.0, 600.0));
         let window = Arc::new(el.create_window(attrs).expect("create window"));
 
+        // Show it NOW, painted by the OS in the theme colour.
+        //
+        // Bringing up the GPU is ~700ms of serial driver init with nothing to
+        // overlap it with, so waiting for a presentable frame means the window
+        // cannot appear in under three quarters of a second. It does not need
+        // the GPU to be the right colour: a class background brush makes Windows
+        // erase it on the first paint. The first real frame is the same colour,
+        // so the handover is invisible.
+        let bg = self.palette.background;
+        platform::set_background_color(&window, bg.r, bg.g, bg.b);
+        window.set_visible(true);
+        tracing::debug!(elapsed_ms = t0.elapsed().as_millis(), "window shown");
+
         let scale = window.scale_factor() as f32;
         let typo = Typography { scale_factor: scale, ..self.config.typography };
         let fonts = Fonts::new(&self.config.font_families, typo).expect("no usable font");
         let metrics = fonts.cell_metrics();
         tracing::debug!(elapsed_ms = t0.elapsed().as_millis(), "fonts ready");
 
-        // The surface is NOT sRGB (the resolve pass encodes), so the clear value
-        // is written verbatim -- pass the theme background already in sRGB.
-        let bg = self.palette.background;
-        let clear = wgpu::Color {
-            r: f64::from(bg.r) / 255.0,
-            g: f64::from(bg.g) / 255.0,
-            b: f64::from(bg.b) / 255.0,
-            a: f64::from(self.config.opacity),
-        };
-        let gpu = pollster::block_on(init_gpu(&window, self.config.opacity < 1.0, clear));
-        tracing::debug!(elapsed_ms = t0.elapsed().as_millis(), "gpu ready");
-        let (cols, rows) = metrics.grid_size(gpu.config.width, gpu.config.height, PADDING);
+        // SPAWN THE SHELL BEFORE THE GPU.
+        //
+        // Bringing up the GPU is ~850ms and starting pwsh is ~400ms, and neither
+        // needs the other. Doing them in sequence means the prompt only starts
+        // arriving once the GPU is finished, so the first frame is empty and the
+        // prompt appears later still. Started here, the shell is running while
+        // the driver initializes and its prompt is usually already waiting by
+        // the time there is anything to draw it with.
+        //
+        // The grid size comes from the window and the font metrics, both of
+        // which are known now -- it never needed the GPU.
+        let size = window.inner_size();
+        let (cols, rows) = metrics.grid_size(size.width.max(1), size.height.max(1), PADDING);
 
         let proxy = self.proxy.clone();
         let mut spec = CommandSpec::default_shell();
@@ -354,8 +370,28 @@ impl ApplicationHandler<Wakeup> for App {
             },
         )
         .expect("spawn shell");
-
         session.terminal.lock().set_palette(self.palette.clone());
+        tracing::debug!(elapsed_ms = t0.elapsed().as_millis(), cols, rows, "shell spawned");
+
+        // The surface is NOT sRGB (the resolve pass encodes), so the clear value
+        // is written verbatim -- pass the theme background already in sRGB.
+        let bg = self.palette.background;
+        let clear = wgpu::Color {
+            r: f64::from(bg.r) / 255.0,
+            g: f64::from(bg.g) / 255.0,
+            b: f64::from(bg.b) / 255.0,
+            a: f64::from(self.config.opacity),
+        };
+        let gpu = pollster::block_on(init_gpu(&window, self.config.opacity < 1.0, clear));
+        tracing::debug!(elapsed_ms = t0.elapsed().as_millis(), "gpu ready");
+
+        // The surface may have landed on a slightly different size than the
+        // window reported, so reconcile before the first frame.
+        let (gpu_cols, gpu_rows) =
+            metrics.grid_size(gpu.config.width, gpu.config.height, PADDING);
+        if (gpu_cols, gpu_rows) != (cols, rows) {
+            session.resize(gpu_cols, gpu_rows);
+        }
 
         self.fonts = Some(fonts);
         self.gpu = Some(gpu);
@@ -625,13 +661,28 @@ async fn init_gpu(
         &[wgpu::Backends::VULKAN, wgpu::Backends::GL]
     };
 
+    // `ZESTERM_BACKEND=dx12|vulkan|gl` forces one, for measuring.
+    let forced = std::env::var("ZESTERM_BACKEND").ok().and_then(|s| {
+        match s.to_ascii_lowercase().as_str() {
+            "dx12" => Some(wgpu::Backends::DX12),
+            "vulkan" => Some(wgpu::Backends::VULKAN),
+            "gl" => Some(wgpu::Backends::GL),
+            _ => None,
+        }
+    });
+    let forced_list = forced.map(|b| vec![b]);
+    let preferred: &[wgpu::Backends] = forced_list.as_deref().unwrap_or(preferred);
+
     let mut found = None;
     for &backends in preferred {
+        let t_inst = std::time::Instant::now();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
+        tracing::debug!(?backends, ms = t_inst.elapsed().as_millis(), "instance created");
         let Ok(surface) = instance.create_surface(Arc::clone(window)) else { continue };
+        tracing::debug!(ms = t_inst.elapsed().as_millis(), "surface created");
         if let Ok(adapter) = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 compatible_surface: Some(&surface),
@@ -656,6 +707,16 @@ async fn init_gpu(
     // validation outright. Raise only the dimension limits to what the adapter
     // actually offers, and keep the conservative values for everything else so
     // the renderer stays runnable on weak hardware.
+    // Pipeline caching removes most of the ~450ms spent creating pipelines on a
+    // cold start. Requested only when the adapter offers it, so a machine
+    // without it simply pays the old cost.
+    let want_cache = adapter.features().contains(wgpu::Features::PIPELINE_CACHE);
+    let features = if want_cache {
+        wgpu::Features::PIPELINE_CACHE
+    } else {
+        wgpu::Features::empty()
+    };
+
     let adapter_limits = adapter.limits();
     let limits = wgpu::Limits {
         max_texture_dimension_1d: adapter_limits.max_texture_dimension_1d,
@@ -668,7 +729,7 @@ async fn init_gpu(
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("zesterm"),
-            required_features: wgpu::Features::empty(),
+            required_features: features,
             required_limits: limits,
             ..Default::default()
         })
@@ -728,21 +789,31 @@ async fn init_gpu(
     surface.configure(&device, &config);
     tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "surface configured");
 
-    // Show the window HERE, painted with the theme background, rather than
-    // after the pipelines exist.
-    //
-    // Compiling four shader modules costs ~450ms, and none of it is needed to
-    // put a correctly-coloured window on screen -- a render pass with a clear
-    // load op needs no pipeline at all. Waiting for the pipelines delays the
-    // window by that much for no visible benefit, and the alternative (showing
-    // earlier without painting) is the white flash this is all fixing.
+    // Paint the surface the theme colour before the pipelines exist, so the
+    // handover from the OS-painted background is seamless. A clear needs no
+    // pipeline, so this costs nothing and avoids a flicker at the moment the
+    // swapchain starts covering the window.
     clear_to(&device, &queue, &surface, clear_color);
-    window.set_visible(true);
-    tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "window shown");
+    tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "first gpu paint");
 
-    let mut renderer = Renderer::new(&device, format);
+    let info = adapter.get_info();
+    let cached = pipeline_cache::load(&info);
+    let previous_len = cached.as_ref().map_or(0, Vec::len);
+    let cache = pipeline_cache::create(&device, want_cache, cached.as_deref());
+
+    let mut renderer = Renderer::with_cache(&device, format, cache.as_ref());
     renderer.resize(&device, config.width, config.height);
-    tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "pipelines");
+    tracing::debug!(
+        elapsed_ms = t.elapsed().as_millis(),
+        cached = cache.is_some(),
+        "pipelines"
+    );
+
+    // Saved after the pipelines exist, so the blob contains what was just
+    // compiled. Only writes when something new was added.
+    if let Some(cache) = cache.as_ref() {
+        pipeline_cache::save(cache, &info, previous_len);
+    }
 
     Gpu { surface, device, queue, config, renderer }
 }

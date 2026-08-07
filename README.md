@@ -24,6 +24,8 @@ triple-click a line, Alt-drag for a rectangle. Ctrl+Shift+C / Ctrl+Shift+V copy
 and paste; right-click copies when there is a selection and pastes otherwise;
 middle-click pastes.
 
+The window appears in **~50ms** and the shell prompt is on the first frame.
+
 > Run the **binary**, not `cargo run`. Cargo re-resolves the workspace and
 > freshness-checks every source file before it execs anything, which costs
 > ~500ms on this workspace even when there is nothing to rebuild — comparable to
