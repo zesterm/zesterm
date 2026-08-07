@@ -25,13 +25,21 @@ spawns a shell, parses its output, and prints the resulting grid.
 | `zest-font` — metrics, shaping, rasterization, fallback | working, 22 tests |
 | `zest-theme` — tokens, OKLCH colour math, built-ins, importers | working, 44 tests |
 | Transparency capability probe | done — see ADR-003 |
-| `zest-render-wgpu`, `zest-input`, `zest-config` | not started |
+| `zest-render-wgpu` — atlas, 3 pipelines, offscreen resolve | renders offscreen, 14 tests |
+| `zest-input`, `zest-config` | not started |
 
 The font layer renders a sample sheet to a PNG with no GPU involved, which is
 where font bugs are cheapest to find:
 
 ```
 cargo run -p zest-font --example font_dump -- --size 24 --ligatures
+```
+
+The renderer does the same — a real terminal grid to a PNG, no window involved,
+on a fallback adapter so it runs in CI:
+
+```
+cargo run -p zest-render-wgpu --example render_dump
 ```
 
 ## Layout

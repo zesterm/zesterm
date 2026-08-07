@@ -11,6 +11,8 @@ authors.workspace = true
 [dependencies]
 zest-core.workspace = true
 zest-theme.workspace = true
+zest-font.workspace = true
+rustc-hash.workspace = true
 wgpu.workspace = true
 raw-window-handle.workspace = true
 bytemuck.workspace = true
@@ -34,9 +36,15 @@ wgpu = { workspace = true, features = ["vulkan"] }
 name = "alpha_probe"
 path = "examples/alpha_probe.rs"
 
+[[example]]
+name = "render_dump"
+path = "examples/render_dump.rs"
+
 [dev-dependencies]
 winit.workspace = true
 pollster = "0.4"
+image.workspace = true
+zest-theme.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { workspace = true, features = [

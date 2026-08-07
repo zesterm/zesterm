@@ -3811,14 +3811,17 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "etagere",
+ "image",
  "pollster",
  "raw-window-handle",
+ "rustc-hash 2.1.3",
  "thiserror 2.0.19",
  "tracing",
  "wgpu",
  "windows-sys 0.60.2",
  "winit",
  "zest-core",
+ "zest-font",
  "zest-theme",
 ]
 

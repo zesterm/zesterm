@@ -26,12 +26,12 @@ for the decisions that are expensive to reach and cheap to accidentally undo.
 | `zest-core` | ✅ grid, scrollback, VT parsing, modes, OSC, palette |
 | `zest-font` | ✅ metrics, shaping, rasterization, system fallback, colour glyphs |
 | `zest-theme` | ✅ tokens, OKLCH derivation, 5 built-ins, 4 importers |
-| `zest-render-wgpu` | ⬜ transparency probe done, nothing else |
+| `zest-render-wgpu` | 🟡 pipelines + atlas + offscreen resolve; renders offscreen, no window yet |
 | `zest-input` | ⬜ |
 | `zest-config` | ⬜ |
 | `zest-app` | 🟡 headless example only; no window |
 
-148 tests. `cargo run -p zest-app --example headless` is a working terminal
+162 tests. `cargo run -p zest-app --example headless` is a working terminal
 without a window.
 
 ---
@@ -57,13 +57,16 @@ didn't want to switch back."* Not feature parity with WezTerm.
 - [x] **4b. `zest-theme`.** The five built-in themes, OKLCH derivation of `ui.*`
       tokens, and importers for iTerm2 / Windows Terminal / base16 / Alacritty.
 - [ ] **5. `zest-render-wgpu`.** Three pipelines, one render pass:
-      - [ ] SDF rects — cell backgrounds, selection, cursor, *and* all window
+      - [x] SDF rects — cell backgrounds, selection, cursor, *and* all window
             chrome. One pipeline for everything rectangular.
-      - [ ] Glyphs — instanced quads from a dual atlas (R8 masks + RGBA colour),
+      - [x] Glyphs — instanced quads from a dual atlas (R8 masks + RGBA colour),
             `etagere` shelf allocator, generation-based bulk eviction.
-      - [ ] Decorations — underline, undercurl, strikethrough.
-      - [ ] `Rgba16Float` offscreen + resolve pass (gamma, premultiplication in
+      - [x] Decorations — underline, undercurl, strikethrough.
+      - [x] `Rgba16Float` offscreen + resolve pass (gamma, premultiplication in
             encoded space, free OS-driven repaints).
+      - [x] Offscreen PNG harness (`--example render_dump`), runs on a fallback
+            adapter so it works in CI.
+      - [ ] Selection rendering (needs the selection model from step 8).
       - [ ] Validate gamma side-by-side against Windows Terminal. **Do not defer
             this** — it ships broken constantly and reads as "looks slightly off".
 - [ ] **6. `zest-app` — the moment.** winit, PTY thread, fair mutex, first
