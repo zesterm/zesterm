@@ -12,8 +12,7 @@ use zest_font::{Fonts, Typography};
 use zest_pty::{CommandSpec, PtySize};
 use zest_render_wgpu::{Chrome, Renderer, Scene, Viewport};
 
-use crate::input;
-use crate::mouse::{self, MouseState};
+use zest_input::{key, mouse, select, MouseState};
 use crate::pipeline_cache;
 use crate::platform;
 use crate::session::{Session, Wakeup};
@@ -269,16 +268,16 @@ impl App {
                 return false;
             }
             let b = match button {
-                MouseButton::Left => input::MouseButton::Left,
-                MouseButton::Middle => input::MouseButton::Middle,
-                MouseButton::Right => input::MouseButton::Right,
+                MouseButton::Left => mouse::MouseButton::Left,
+                MouseButton::Middle => mouse::MouseButton::Middle,
+                MouseButton::Right => mouse::MouseButton::Right,
                 _ => return false,
             };
             let action = match state {
-                ElementState::Pressed => input::MouseAction::Press,
-                ElementState::Released => input::MouseAction::Release,
+                ElementState::Pressed => mouse::MouseAction::Press,
+                ElementState::Released => mouse::MouseAction::Release,
             };
-            input::encode_mouse(b, action, row, col, self.modifiers, modes)
+            mouse::encode_mouse(b, action, row, col, self.modifiers, modes)
         };
 
         match encoded {
@@ -308,12 +307,12 @@ impl App {
                 return false;
             }
             let action = if self.mouse.is_dragging() {
-                input::MouseAction::Drag
+                mouse::MouseAction::Drag
             } else {
-                input::MouseAction::Motion
+                mouse::MouseAction::Motion
             };
-            input::encode_mouse(
-                input::MouseButton::Left,
+            mouse::encode_mouse(
+                mouse::MouseButton::Left,
                 action,
                 row,
                 col,
@@ -343,11 +342,11 @@ impl App {
             return false;
         }
 
-        let button = if up { input::MouseButton::WheelUp } else { input::MouseButton::WheelDown };
+        let button = if up { mouse::MouseButton::WheelUp } else { mouse::MouseButton::WheelDown };
         let mut out = Vec::new();
         for _ in 0..count.max(1) {
             if let Some(b) =
-                input::encode_mouse(button, input::MouseAction::Press, row, col, self.modifiers, modes)
+                mouse::encode_mouse(button, mouse::MouseAction::Press, row, col, self.modifiers, modes)
             {
                 out.extend_from_slice(&b);
             }
@@ -879,7 +878,7 @@ impl ApplicationHandler<Wakeup> for App {
                     }
                 }
 
-                if let Some(bytes) = input::encode(&event, self.modifiers, modes) {
+                if let Some(bytes) = key::encode(&event, self.modifiers, modes) {
                     // Written synchronously, before anything else. Deferring
                     // input to the next frame adds a whole frame of latency for
                     // nothing.
@@ -949,7 +948,7 @@ impl ApplicationHandler<Wakeup> for App {
                         let mode = self.mouse.press(row, col);
                         let mut term = session.terminal().lock();
                         if let Some(pos) = term.abs_pos(row, col) {
-                            let sel = mouse::begin(&term, pos, mode, self.modifiers.alt_key());
+                            let sel = select::begin(&term, pos, mode, self.modifiers.alt_key());
                             term.set_selection(Some(sel));
                         }
                         drop(term);

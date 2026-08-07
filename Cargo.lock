@@ -4062,6 +4062,7 @@ dependencies = [
  "zest-config",
  "zest-core",
  "zest-font",
+ "zest-input",
  "zest-pty",
  "zest-render-wgpu",
  "zest-theme",
@@ -4124,6 +4125,10 @@ dependencies = [
 [[package]]
 name = "zest-input"
 version = "0.1.0"
+dependencies = [
+ "winit",
+ "zest-core",
+]
 
 [[package]]
 name = "zest-mesh"

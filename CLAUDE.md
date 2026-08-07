@@ -56,7 +56,9 @@ of three that quietly diverge.
 cargo xtask check-deps
 ```
 
-CI runs it. If a dependency genuinely belongs, move the *code* up a layer rather
+CI runs it on every push and pull request, along with the full suite on Windows,
+macOS and Linux and the wasm32 build — see `.github/workflows/ci.yml`. If a
+dependency genuinely belongs, move the *code* up a layer rather
 than relaxing the rule.
 
 ## Commands
