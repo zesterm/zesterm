@@ -193,7 +193,10 @@ impl Fonts {
         }
 
         if !fonts.styles.contains_key(&Style::default()) {
-            // Last resort: whatever the system calls monospace.
+            // Last resort: whatever the system calls monospace. `resolve` maps
+            // this to the generic rather than looking for a family with that
+            // literal name -- see the comment there for why that distinction
+            // kept the safety net from ever catching anything.
             let generic = ["monospace".to_string()];
             if let Some(id) = fonts.resolve(&generic, Style::default()) {
                 fonts.styles.insert(Style::default(), id);
@@ -225,7 +228,16 @@ impl Fonts {
         let mut found: Option<(fontique::Blob<u8>, u32, u8)> = None;
         {
             let mut query = self.collection.query(&mut self.source_cache);
-            query.set_families(families.iter().map(|f| fontique::QueryFamily::Named(f)));
+            // A CSS generic is not a family name. `monospace` is the last entry
+            // in the default stack and in most hand-written settings files, and
+            // asked for by name it matches nothing on any platform -- so the
+            // entry every user believes is their safety net was doing nothing.
+            // Route the eleven generics through the API that resolves them and
+            // leave everything else a literal name.
+            query.set_families(families.iter().map(|f| {
+                fontique::GenericFamily::parse(f)
+                    .map_or(fontique::QueryFamily::Named(f), fontique::QueryFamily::Generic)
+            }));
             query.set_attributes(attrs);
             query.matches_with(|font| {
                 // fontique reports what it had to fake to satisfy the request.
@@ -400,6 +412,39 @@ impl Fonts {
                 }
             }
         }
+
+        // Box drawing, block elements and arrows: the third `Zyyy` case, after
+        // emoji and the PUA, and the one that shows up as tofu in every TUI
+        // border rather than in something exotic.
+        //
+        // The script fallback above cannot find these for the same structural
+        // reason it cannot find emoji -- they are script Common, so "a font
+        // covering Common" answers with the body text font, which on macOS is
+        // Menlo, which has no box drawing at all. It never surfaced on Windows
+        // because Cascadia Mono carries them, so the primary face answered and
+        // fallback was never consulted.
+        //
+        // Sweeping every installed family for one codepoint would be a real
+        // scan, so this only tries the families already known to be
+        // symbol-rich: the Nerd Fonts found at startup, then whatever the
+        // system calls monospace. Cached per character like every other
+        // fallback, so the cost is paid once.
+        if is_box_drawing(ch) {
+            let candidates = self.symbol_families.clone();
+            for family in &candidates {
+                if let Some(id) = self.resolve(std::slice::from_ref(family), style) {
+                    if self.face_has_glyph(id, ch) {
+                        return Some(id);
+                    }
+                }
+            }
+            if let Some(id) = self.resolve_generic(fontique::GenericFamily::Monospace, style) {
+                if self.face_has_glyph(id, ch) {
+                    return Some(id);
+                }
+            }
+        }
+
         None
     }
 
@@ -620,6 +665,23 @@ fn discover_symbol_families(collection: &mut fontique::Collection) -> Vec<String
     found
 }
 
+/// True for the line-drawing and block characters TUIs are built out of.
+///
+/// Deliberately *not* every symbol block. These are the ranges a monospace face
+/// is expected to carry at exactly one cell wide, so borrowing them from
+/// another monospace font keeps the grid aligned. Widening this to all of
+/// Miscellaneous Symbols would start pulling proportional glyphs into cells.
+fn is_box_drawing(ch: char) -> bool {
+    matches!(ch as u32,
+        0x2190..=0x21FF   // arrows
+        | 0x2500..=0x257F // box drawing
+        | 0x2580..=0x259F // block elements
+        | 0x25A0..=0x25FF // geometric shapes
+        | 0x2800..=0x28FF // braille patterns, used for spinners and sparklines
+        | 0xE0B0..=0xE0BF // powerline separators that escaped the PUA sweep
+    )
+}
+
 /// True for characters that want an emoji font rather than a text font.
 ///
 /// Deliberately a range check rather than a full Unicode property lookup: the
@@ -785,6 +847,33 @@ mod tests {
             let cm = f.cell_metrics();
             assert!(cm.cell_w > 0 && cm.cell_h > 0);
             assert!(cm.baseline > 0 && cm.baseline < cm.cell_h, "baseline sits inside the cell");
+        }
+
+        /// The one test in this module that must not skip.
+        ///
+        /// Every other test here starts `let Some(..) = fonts() else { return }`,
+        /// so on a machine where the named families are all absent they pass
+        /// while asserting nothing -- which is precisely what happened on macOS,
+        /// where none of Cascadia Mono, Consolas or DejaVu Sans Mono exists and
+        /// the `"monospace"` safety net was being looked up as a literal family
+        /// name that no platform has. Eight green font tests, zero coverage.
+        ///
+        /// `Fonts::new`'s contract is that a machine with no monospace font at
+        /// all is not one we can serve. Every machine this could run on has one,
+        /// so failing here is the correct outcome, not a reason to skip.
+        #[test]
+        fn the_generic_monospace_family_resolves_by_itself() {
+            let generic = ["monospace".to_string()];
+            let fonts = Fonts::new(&generic, Typography::default())
+                .expect("the CSS generic `monospace` must resolve with no named family to help it");
+
+            let cm = fonts.cell_metrics();
+            assert!(
+                cm.cell_w > 0 && cm.cell_h > 0,
+                "a resolved face must produce a usable cell, got {}x{}",
+                cm.cell_w,
+                cm.cell_h
+            );
         }
 
         #[test]
