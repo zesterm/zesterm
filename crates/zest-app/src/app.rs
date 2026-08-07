@@ -714,7 +714,15 @@ impl App {
 
     /// Rebuild the font stack and resize the grid to match the new cell size.
     fn rebuild_fonts(&mut self) {
-        match Fonts::new(&self.config.font_families, self.config.typography) {
+        // The window's scale factor has to be composed back in.
+        //
+        // `config.typography` carries the *logical* size from the settings
+        // file; the scale factor is a property of the display and lives on the
+        // window. Rebuilding from the config alone rasterizes every glyph at
+        // 1x, so on a Retina display a config reload silently halved the text.
+        let scale = self.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
+        let typo = Typography { scale_factor: scale, ..self.config.typography };
+        match Fonts::new(&self.config.font_families, typo) {
             Ok(fonts) => self.fonts = Some(fonts),
             Err(e) => {
                 // Keeping the old fonts is the only safe answer: there is no

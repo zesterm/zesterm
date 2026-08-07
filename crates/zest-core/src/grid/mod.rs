@@ -305,9 +305,28 @@ impl Grid {
         }
 
         if rows != self.rows {
-            // Keep scrollback exactly as it is and resize only the viewport
-            // portion. Growing exposes blank rows at the bottom; shrinking
-            // drops them. Scrollback is never disturbed by a resize.
+            // Shrinking gives up the blank rows *below the cursor* first.
+            //
+            // Taking everything off the top instead is what a viewport does
+            // when the cursor is already at the bottom, and it is catastrophic
+            // in the far more common case where it is not: a screen with five
+            // lines of output, a prompt on row 5, and nine blank rows beneath
+            // it loses the output *and the prompt*, keeping nine blank rows
+            // that held nothing. Every resize of an idle terminal did this.
+            //
+            // xterm has always worked this way, and this is why.
+            if rows < self.rows {
+                let below = self.rows - 1 - self.cursor.row.min(self.rows - 1);
+                let from_bottom = (self.rows - rows).min(below);
+                self.storage.truncate_bottom(from_bottom);
+            }
+
+            // Whatever could not be found below the cursor comes off the top,
+            // where it becomes scrollback rather than being lost. The cursor
+            // clamp below lands on exactly the right row when that happens:
+            // reaching here with rows still to drop means the cursor was at or
+            // past the new height, and `new_rows - 1` is precisely where it
+            // ends up after the content above it scrolls away.
             let target = self.scrollback_len + rows;
             self.storage.resize_rows(target, cols, template);
             self.rows = rows;
@@ -436,6 +455,68 @@ impl Grid {
 
 #[cfg(test)]
 mod tests {
+
+    /// The case that is true almost all the time: output at the top, the
+    /// cursor just after it, blank rows below.
+    #[test]
+    fn shrinking_gives_up_the_blank_rows_below_the_cursor_first() {
+        // Taking rows off the top instead loses the output *and* the prompt,
+        // keeping blank rows that held nothing -- which is what every resize
+        // of an idle terminal used to do.
+        let mut g = Grid::new(40, 15, 100);
+        for row in 0..6 {
+            write_text(&mut g, row, &format!("line {row}"));
+        }
+        g.cursor.row = 5;
+
+        g.resize(40, 8, &Cell::default());
+
+        assert_eq!(g.rows(), 8);
+        assert_eq!(g.row(5).text().trim_end(), "line 5", "the cursor's own row was dropped");
+        assert_eq!(g.row(0).text().trim_end(), "line 0", "content above the cursor was dropped");
+        assert_eq!(g.cursor.row, 5, "the cursor moved even though it did not have to");
+        assert_eq!(g.scrollback_len(), 0, "nothing needed to become scrollback");
+    }
+
+    #[test]
+    fn shrinking_past_the_cursor_scrolls_content_into_scrollback() {
+        // When there is not enough blank space below the cursor, the rest has
+        // to come off the top -- and the cursor must end up on the last row
+        // rather than pointing outside the grid.
+        let mut g = Grid::new(40, 10, 100);
+        for row in 0..10 {
+            write_text(&mut g, row, &format!("row {row}"));
+        }
+        g.cursor.row = 9;
+
+        g.resize(40, 4, &Cell::default());
+
+        assert_eq!(g.rows(), 4);
+        assert_eq!(g.row(3).text().trim_end(), "row 9", "the cursor's row must stay visible");
+        assert_eq!(g.cursor.row, 3, "the cursor must land on the last row");
+    }
+
+    #[test]
+    fn a_shrink_and_a_grow_leave_the_cursor_line_where_it_was() {
+        // Dragging a window smaller and back is one gesture, and losing the
+        // prompt half way through it is what makes a terminal feel broken.
+        let mut g = Grid::new(40, 20, 100);
+        write_text(&mut g, 0, "important");
+        g.cursor.row = 1;
+
+        g.resize(40, 5, &Cell::default());
+        g.resize(40, 20, &Cell::default());
+
+        assert_eq!(g.row(0).text().trim_end(), "important", "content did not survive the round trip");
+    }
+
+    fn write_text(g: &mut Grid, row: usize, text: &str) {
+        for (col, ch) in text.chars().enumerate() {
+            if let Some(cell) = g.cell_mut(row, col) {
+                cell.ch = ch;
+            }
+        }
+    }
     use super::*;
 
     fn write(grid: &mut Grid, row: usize, text: &str) {

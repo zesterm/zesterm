@@ -341,6 +341,29 @@ impl SessionSource for RemoteSession {
         let _ = self
             .tx
             .send(Outbound::Msg(ClientMessage::Resize { session: self.addr, cols, rows }));
+
+        // And ask for the whole state back.
+        //
+        // Nothing else would tell this client the grid changed shape. There is
+        // no `DeltaOp::Resize`, and the size only ever travels in a keyframe --
+        // so on a *shrink* the deltas that follow describe rows 0..new_rows,
+        // every one of which lands inside the client's older, larger grid. No
+        // row falls past the end, `Applied::NeedsKeyframe` never fires, and the
+        // client keeps a grid the host no longer has: the rows below the new
+        // height stay on screen holding whatever they last held, and everything
+        // above is misaligned against a viewport that has moved.
+        //
+        // Growing happened to work by accident, because a taller grid does push
+        // rows past the end and trips the resync. That asymmetry is exactly why
+        // this is explicit rather than left to the applier.
+        //
+        // The host's answer is authoritative, which matters: another client may
+        // be attached at a different size, so what this one asked for is a
+        // request, not a fact. Resizing is human-speed, so a whole state costs
+        // nothing worth counting.
+        let _ = self
+            .tx
+            .send(Outbound::Msg(ClientMessage::RequestKeyframe { session: self.addr }));
     }
 
     fn take_dirty(&self) -> bool {
@@ -651,6 +674,35 @@ mod tests {
             wait_for(|| s.terminal().lock().screen_text().contains("round-trip")),
             "the echo never came back; grid was:\n{}",
             s.terminal().lock().screen_text()
+        );
+    }
+
+    #[test]
+    fn shrinking_the_viewport_resizes_the_local_grid_too() {
+        // The size only ever travels in a keyframe -- there is no
+        // DeltaOp::Resize -- so on a shrink every following row lands inside
+        // the client's older, larger grid, no row falls past the end, and
+        // `NeedsKeyframe` never fires. Without an explicit request the client
+        // keeps a grid the host no longer has.
+        //
+        // Growing happened to work by accident, because a taller grid does
+        // push rows past the end. That asymmetry is why this is tested from
+        // the shrinking side.
+        let h = Harness::start("shrink");
+        let s = h.attach("/bin/sh", |_| {});
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(s.terminal().lock().grid().rows(), 6, "attached at the wrong size");
+
+        s.resize(20, 3);
+
+        assert!(
+            wait_for(|| {
+                let t = s.terminal().lock();
+                t.grid().rows() == 3 && t.grid().cols() == 20
+            }),
+            "the client kept a {}x{} grid after asking for 20x3",
+            s.terminal().lock().grid().cols(),
+            s.terminal().lock().grid().rows()
         );
     }
 

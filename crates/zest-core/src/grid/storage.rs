@@ -309,6 +309,21 @@ impl Storage {
         }
     }
 
+    /// Drop `n` rows from the bottom — the newest, nearest the cursor.
+    ///
+    /// The counterpart of `resize_rows`, which drops from the top. Shrinking a
+    /// viewport needs both: blank rows below the cursor are given up first, and
+    /// only what cannot be found there is taken off the top, where it becomes
+    /// scrollback.
+    pub fn truncate_bottom(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        self.normalize();
+        let keep = self.rows.len().saturating_sub(n);
+        self.rows.truncate(keep.max(1));
+    }
+
     pub fn resize_cols(&mut self, cols: usize, template: &Cell) {
         for row in &mut self.rows {
             row.resize(cols, template);
