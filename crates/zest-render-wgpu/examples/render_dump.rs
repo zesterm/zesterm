@@ -61,20 +61,35 @@ async fn run() {
         .await
         .expect("request device");
 
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let opt = |name: &str| -> Option<String> {
+        argv.iter().position(|a| a == name).and_then(|i| argv.get(i + 1)).cloned()
+    };
+
     // --- fonts ---
-    let families: Vec<String> = ["Cascadia Mono", "Consolas", "DejaVu Sans Mono", "monospace"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let families: Vec<String> = match opt("--family") {
+        Some(f) => vec![f],
+        None => ["Cascadia Mono", "Consolas", "DejaVu Sans Mono", "monospace"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    };
     let typo = Typography { size_pt: 16.0, line_height: 1.25, ..Default::default() };
     let mut fonts = Fonts::new(&families, typo).expect("no usable font");
     let metrics = fonts.cell_metrics();
 
     // --- terminal ---
-    let cols = 46usize;
-    let rows = 10usize;
+    //
+    // `--replay` takes a raw capture from `pty_dump` or a fixture, which is how
+    // a bug seen in the live window gets reproduced without one. Sized wider,
+    // because real captures are written for a real terminal's width.
+    let replay = opt("--replay").map(|p| std::fs::read(&p).expect("read --replay file"));
+    let (cols, rows) = if replay.is_some() { (100usize, 6usize) } else { (46usize, 10usize) };
     let mut term = Terminal::new(cols, rows, 100);
-    term.advance(SAMPLE.as_bytes());
+    match &replay {
+        Some(bytes) => term.advance(bytes),
+        None => term.advance(SAMPLE.as_bytes()),
+    }
 
     // Seed the palette from a real theme, so this exercises the same path the
     // app will use rather than the terminal's built-in defaults.

@@ -116,6 +116,33 @@ fn main() {
     }
     println!("└{}┘", "─".repeat(COLS as usize));
 
+    // Colour lives in the cells, not in the text, so a text-only dump cannot
+    // tell "the program sent no colour" apart from "we dropped it" -- and those
+    // have completely different fixes.
+    if args.iter().any(|a| a == "--colors") {
+        println!("\n[headless] non-default backgrounds by row:");
+        for row in 0..grid.rows() {
+            let r = grid.row(row);
+            let mut runs: Vec<String> = Vec::new();
+            let mut col = 0usize;
+            while col < grid.cols() {
+                let bg = r.get(col).copied().unwrap_or_default().bg;
+                let start = col;
+                while col < grid.cols()
+                    && r.get(col).copied().unwrap_or_default().bg == bg
+                {
+                    col += 1;
+                }
+                if !matches!(bg, zest_core::Color::Default) {
+                    runs.push(format!("{start}..{col} {bg:?}"));
+                }
+            }
+            if !runs.is_empty() {
+                println!("  row {row}: {}", runs.join(", "));
+            }
+        }
+    }
+
     let cursor = term.cursor();
     eprintln!(
         "[headless] {total} bytes in {:.2}s | seq {} | cursor {},{} | scrollback {} | modes {:?}",

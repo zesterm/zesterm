@@ -467,11 +467,11 @@ impl ApplicationHandler<Wakeup> for App {
         if let Some(shell) = &self.config.shell {
             spec.command_line = shell.clone();
         }
-        // TERM is what programs consult to decide which escape sequences are
-        // safe. Claiming xterm-256color is the conventional, widely-supported
-        // answer until a `zesterm` terminfo exists.
-        spec.env.push(("TERM".into(), "xterm-256color".into()));
-        spec.env.push(("COLORTERM".into(), "truecolor".into()));
+        // TERM, COLORTERM and the TERM_PROGRAM pair come from
+        // `zest_pty::terminal_env`, which `default_shell` already applied --
+        // deliberately in one place, because a child that learns the wrong
+        // terminal identity produces a monochrome prompt that looks like a
+        // renderer bug.
 
         let session = Session::spawn(
             &spec,

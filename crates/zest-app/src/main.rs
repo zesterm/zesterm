@@ -21,6 +21,26 @@ use winit::event_loop::EventLoop;
 use app::{App, Config};
 use session::Wakeup;
 
+/// Rebuild a command line from separate arguments.
+///
+/// `CreateProcessW` takes one string and re-splits it, so any argument that
+/// contained a space has to be re-quoted or it silently becomes two arguments —
+/// which is exactly how `-e code --wait "my file.txt"` ends up opening two
+/// files.
+fn join_command(parts: &[String]) -> String {
+    parts
+        .iter()
+        .map(|p| {
+            if p.contains(' ') && !p.starts_with('"') {
+                format!("\"{}\"", p.replace('"', "\\\""))
+            } else {
+                p.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn main() {
     console::attach_to_parent();
 
@@ -60,11 +80,20 @@ fn main() {
                 }
                 i += 2;
             }
+            // Everything after -e is the command, as xterm and alacritty do.
+            //
+            // Requiring a single pre-quoted string instead looks equivalent and
+            // is not: shells and process launchers routinely split an argument
+            // list without re-quoting, so `-e "pwsh -NoLogo"` arrives as two
+            // separate arguments and the terminal rejects the second one.
             "-e" | "--command" => {
-                if let Some(v) = args.get(i + 1) {
-                    config.shell = Some(v.clone());
+                let rest: Vec<String> = args[i + 1..].to_vec();
+                if rest.is_empty() {
+                    eprintln!("-e needs a command");
+                    std::process::exit(2);
                 }
-                i += 2;
+                config.shell = Some(join_command(&rest));
+                break;
             }
             "--themes" => {
                 for t in zest_theme::builtin::all() {
@@ -79,7 +108,8 @@ fn main() {
                      --font <family>   preferred font family\n\
                      --size <pt>       font size in points\n\
                      --opacity <0..1>  window background opacity\n\
-                     -e <command>      run a command instead of the shell\n\
+                     -e <command>...   run a command instead of the shell\n\
+                     \x20                 (must come last; takes all remaining args)\n\
                      --themes          list built-in themes"
                 );
                 return;
@@ -98,4 +128,39 @@ fn main() {
 
     let mut app = App::new(config, proxy);
     event_loop.run_app(&mut app).expect("run");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::join_command;
+
+    fn v(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn plain_args_join_with_spaces() {
+        assert_eq!(join_command(&v(&["pwsh", "-NoLogo", "-NoExit"])), "pwsh -NoLogo -NoExit");
+    }
+
+    #[test]
+    fn args_with_spaces_are_requoted() {
+        // Without this the path becomes two arguments and the child opens the
+        // wrong file -- or, more often, nothing at all.
+        assert_eq!(
+            join_command(&v(&["code", "C:\\My Docs\\a.txt"])),
+            "code \"C:\\My Docs\\a.txt\""
+        );
+    }
+
+    #[test]
+    fn already_quoted_args_are_left_alone() {
+        assert_eq!(join_command(&v(&["sh", "\"a b\""])), "sh \"a b\"");
+    }
+
+    #[test]
+    fn embedded_quotes_are_escaped() {
+        assert_eq!(join_command(&v(&["say", "he said hi"])), "say \"he said hi\"");
+        assert_eq!(join_command(&v(&["say", "a \"b\" c"])), "say \"a \\\"b\\\" c\"");
+    }
 }

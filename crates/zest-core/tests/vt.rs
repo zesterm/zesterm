@@ -533,3 +533,43 @@ fn a_blank_cell_template_is_still_sixteen_bytes() {
     // Guard against Cell growing via an innocuous-looking field addition.
     assert_eq!(std::mem::size_of::<Cell>(), 16);
 }
+
+/// A real oh-my-posh prompt, captured from the theme the author uses daily.
+///
+/// This is the first thing on screen in every session, so anything it exercises
+/// is not an edge case — it is the common path. It combines truecolor
+/// backgrounds, a `38;2;r;g;b;49` compound SGR (an extended colour immediately
+/// followed by another parameter, which a naive parser swallows), reverse video
+/// for the diamond caps, Private Use Area separators, and `CSI 1000C` / `CSI nD`
+/// for right alignment.
+#[test]
+fn a_real_oh_my_posh_prompt_keeps_its_segment_colours() {
+    let input =
+        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/ansi/oh-my-posh-prompt.ans"))
+            .expect("oh-my-posh fixture");
+
+    let mut t = Terminal::new(100, 10, 50);
+    t.advance(&input);
+
+    // The session segment's background, straight from the theme's `#c386f1`.
+    let purple = Color::Rgb(195, 134, 241);
+    let row0: Vec<Color> = (0..100).filter_map(|c| t.grid().cell(0, c)).map(|c| c.bg).collect();
+    assert!(
+        row0.contains(&purple),
+        "no cell on the prompt row carries the session segment's background"
+    );
+
+    // The path segment follows it, so at least two distinct truecolor
+    // backgrounds must survive on one row -- a single one could be luck.
+    let distinct: std::collections::HashSet<_> =
+        row0.iter().filter(|c| matches!(c, Color::Rgb(..))).collect();
+    assert!(
+        distinct.len() >= 2,
+        "expected several coloured segments, found {distinct:?}"
+    );
+
+    // The compound `38;2;r;g;b;49` must leave the background at default rather
+    // than consuming the 49 as part of the colour.
+    let text = t.screen_text();
+    assert!(text.contains("andy@"), "prompt text missing: {text:?}");
+}

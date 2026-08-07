@@ -88,6 +88,17 @@ Each of these cost real time and is documented where it bites:
   `zesterm --themes` returns the prompt before printing. That is normal for a
   GUI app; use `Start-Process -Wait` when scripting against it. Debug builds
   keep the console subsystem so the dev loop is unaffected.
+- **The agent shell sets `NO_COLOR=1`**, and a pty child inherits it. PowerShell
+  honours it by forcing `$PSStyle.OutputRendering = 'PlainText'`, which strips
+  every escape *before* it reaches the pty — so a colour test launched from here
+  renders monochrome and looks exactly like a broken renderer. It cost a long
+  detour once. `Remove-Item Env:\NO_COLOR` before any visual check, and confirm
+  a suspected colour bug offscreen with
+  `render_dump --replay <capture>` before believing the window.
+- **`Start-Process -ArgumentList` does not re-quote array elements**, so
+  `'--font','My Font'` reaches the program as two arguments. Quote inside the
+  string (`'"My Font"'`). This is the harness, not the argument parser — verify
+  which before changing code.
 
 ## Related work on this machine
 

@@ -64,8 +64,40 @@ impl CommandSpec {
         #[cfg(not(windows))]
         let command_line = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
 
-        Self { command_line, cwd: None, env: Vec::new() }
+        Self { command_line, cwd: None, env: terminal_env() }
     }
+}
+
+/// How the shell learns what terminal it is talking to.
+///
+/// Programs do not probe for capabilities — they read environment variables and
+/// believe them. A PTY child that inherits nothing gets no `TERM` at all, and
+/// the well-behaved response to that is to assume a dumb terminal: oh-my-posh
+/// drops its segment backgrounds, `ls` drops its colours, `bat` and `delta` fall
+/// back to plain text. The grid renders those bytes perfectly; they are just
+/// never sent. That failure looks exactly like a broken renderer, which is what
+/// makes it worth stating here.
+///
+/// Inherited terminal identity is also removed, not just overridden. Launching
+/// zesterm from Windows Terminal otherwise passes `WT_SESSION` down, and
+/// anything keying off it — oh-my-posh among them — takes the wrong branch.
+#[must_use]
+pub fn terminal_env() -> Vec<(String, String)> {
+    let mut env = vec![
+        // 256 colours is what a bare `xterm-256color` promises; COLORTERM is the
+        // de-facto signal for the 24-bit support we actually have. Both are
+        // needed -- most programs check one or the other, not both.
+        ("TERM".to_string(), "xterm-256color".to_string()),
+        ("COLORTERM".to_string(), "truecolor".to_string()),
+        ("TERM_PROGRAM".to_string(), "zesterm".to_string()),
+        ("TERM_PROGRAM_VERSION".to_string(), env!("CARGO_PKG_VERSION").to_string()),
+    ];
+    for stale in ["WT_SESSION", "WT_PROFILE_ID", "TERMINUS_SUBLIME", "ConEmuANSI"] {
+        if std::env::var_os(stale).is_some() {
+            env.push((stale.to_string(), String::new()));
+        }
+    }
+    env
 }
 
 #[derive(Debug, thiserror::Error)]

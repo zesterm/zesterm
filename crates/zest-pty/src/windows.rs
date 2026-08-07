@@ -484,7 +484,14 @@ fn build_env_block(extra: &[(String, String)]) -> Option<Vec<u16>> {
     // duplicate `Path`/`PATH` pair produces genuinely confusing behavior.
     let mut vars: Vec<(String, String)> = std::env::vars().collect();
     for (k, v) in extra {
-        if let Some(slot) = vars.iter_mut().find(|(ek, _)| ek.eq_ignore_ascii_case(k)) {
+        // An empty value means *unset*, not "set to the empty string". Clearing
+        // an inherited terminal identity needs the variable to be genuinely
+        // absent: the common test is `if os.Getenv("WT_SESSION") != ""` but
+        // plenty of code only checks for presence, and that code would still
+        // take the wrong branch.
+        if v.is_empty() {
+            vars.retain(|(ek, _)| !ek.eq_ignore_ascii_case(k));
+        } else if let Some(slot) = vars.iter_mut().find(|(ek, _)| ek.eq_ignore_ascii_case(k)) {
             slot.1 = v.clone();
         } else {
             vars.push((k.clone(), v.clone()));
@@ -691,5 +698,34 @@ mod tests {
     #[test]
     fn no_overrides_means_inherit() {
         assert!(build_env_block(&[]).is_none());
+    }
+
+    #[test]
+    fn an_empty_value_removes_the_variable_entirely() {
+        // Not "sets it to empty" -- code that only checks for presence would
+        // still see an inherited WT_SESSION and take the Windows Terminal path.
+        std::env::set_var("ZESTERM_TEST_STALE", "inherited");
+        let block = build_env_block(&[("ZESTERM_TEST_STALE".into(), String::new())])
+            .expect("a removal is still an override");
+
+        let text = String::from_utf16_lossy(&block);
+        assert!(
+            !text.to_ascii_lowercase().contains("zesterm_test_stale="),
+            "the variable is still present in the block"
+        );
+    }
+
+    #[test]
+    fn the_default_shell_advertises_a_colour_terminal() {
+        // The bug this guards is invisible in the renderer and total in effect:
+        // with no TERM, oh-my-posh emits no colour at all and the prompt is
+        // monochrome no matter how correct the GPU path is.
+        let env = CommandSpec::default_shell().env;
+        let get = |k: &str| env.iter().find(|(ek, _)| ek == k).map(|(_, v)| v.as_str());
+
+        assert_eq!(get("TERM"), Some("xterm-256color"));
+        assert_eq!(get("COLORTERM"), Some("truecolor"));
+        assert_eq!(get("TERM_PROGRAM"), Some("zesterm"));
+        assert!(get("TERM_PROGRAM_VERSION").is_some_and(|v| !v.is_empty()));
     }
 }
