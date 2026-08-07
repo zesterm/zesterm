@@ -761,6 +761,23 @@ impl App {
             let (cols, rows) = fonts.cell_metrics().grid_size(width, height, PADDING);
             session.resize(cols, rows);
         }
+
+        // Draw a frame at the new size, now.
+        //
+        // Nothing else will. A frame is only drawn when the terminal is dirty,
+        // and a resize does not touch the grid -- so on a quiet session the
+        // last frame stays on screen while the surface underneath it changes
+        // shape, and the compositor stretches it to fit. Dragging an edge then
+        // scales the text continuously instead of re-laying it out, which reads
+        // as the font resizing with the window.
+        //
+        // Marking dirty rather than drawing inline keeps the single render path
+        // intact: this is the same "something changed" signal the parser sends,
+        // and it coalesces the same way when a drag produces a hundred of them.
+        session.mark_dirty();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
     }
 }
 
