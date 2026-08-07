@@ -1,0 +1,16 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Recorded VT corpora are large; the small curated set under
+# crates/zest-core/tests/corpus is committed, ad-hoc captures are not.
+/captures
+*.vtrec.tmp
+
+# Generated
+/bindings
+/dist
+NOTICE.generated
+
+.DS_Store
+Thumbs.db

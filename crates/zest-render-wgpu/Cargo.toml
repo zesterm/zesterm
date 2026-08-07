@@ -1,0 +1,11 @@
+[package]
+name = "zest-render-wgpu"
+description = "GPU renderer: glyph atlas, SDF rect / glyph / decoration pipelines. No winit."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

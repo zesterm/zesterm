@@ -1,0 +1,13 @@
+# LLD links 2-5x faster than MSVC's link.exe.
+#
+# Deliberately left disabled until a baseline build with the default linker is
+# verified working. Changing the linker at the same time as standing up a fresh
+# MSVC toolchain makes failures ambiguous -- get one green build first, then
+# uncomment this and confirm it's still green.
+#
+# [target.x86_64-pc-windows-msvc]
+# linker = "rust-lld.exe"
+# rustflags = ["-C", "linker-flavor=lld-link"]
+
+[alias]
+xtask = "run --package xtask --"

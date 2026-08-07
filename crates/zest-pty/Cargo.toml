@@ -1,0 +1,26 @@
+[package]
+name = "zest-pty"
+description = "Pseudo-terminal spawning and byte I/O. ConPTY on Windows, forkpty elsewhere."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+    "Win32_System_Pipes",
+    "Win32_Security",
+    "Win32_System_Memory",
+] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["pty", "process", "termios", "stdio"] }

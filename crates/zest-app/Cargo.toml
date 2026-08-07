@@ -1,0 +1,20 @@
+[package]
+name = "zest-app"
+description = "The zesterm application: window, chrome, motion, and wiring."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "zesterm"
+path = "src/main.rs"
+
+[dependencies]
+zest-core.workspace = true
+zest-pty.workspace = true
+zest-theme.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

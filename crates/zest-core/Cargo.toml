@@ -1,0 +1,29 @@
+[package]
+name = "zest-core"
+description = "Headless terminal emulation: VT parsing, grid, scrollback. No UI, no OS process APIs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# INVARIANT: this crate must never depend on wgpu, winit, windows, or tokio.
+# It must build for wasm32-unknown-unknown with --no-default-features.
+# Enforced by `cargo xtask check-deps` in CI.
+[dependencies]
+vte.workspace = true
+unicode-width.workspace = true
+bitflags.workspace = true
+rustc-hash.workspace = true
+serde = { workspace = true, optional = true }
+
+[features]
+default = ["std"]
+std = []
+# Enables serialization of grid snapshots and deltas -- required by the M3
+# daemon and the web/mobile clients, not by the native app.
+serde = ["dep:serde", "bitflags/serde"]
+
+[dev-dependencies]
+insta.workspace = true

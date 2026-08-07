@@ -1,0 +1,29 @@
+[package]
+name = "zest-theme"
+description = "Theme token schema, perceptual color math, and scheme importers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Pure data + math. No GPU, no filesystem, no window. This crate's types cross
+# the wire to the web and mobile clients, so it derives ts-rs from day one.
+[dependencies]
+serde.workspace = true
+palette.workspace = true
+thiserror.workspace = true
+schemars = { workspace = true, optional = true }
+ts-rs = { workspace = true, optional = true }
+
+[features]
+default = []
+# Emit TypeScript definitions for the web/Lynx clients.
+typescript = ["dep:ts-rs"]
+# Emit a JSON Schema so remote settings UIs can be generated rather than hand-written.
+jsonschema = ["dep:schemars"]
+
+[dev-dependencies]
+toml.workspace = true
+serde_json.workspace = true
