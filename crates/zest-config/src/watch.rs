@@ -38,16 +38,29 @@ impl Watcher {
     {
         use notify::Watcher as _;
 
-        let watched = path.to_path_buf();
         // The directory, not the file: an atomic-rename save removes the inode
         // the file watch was attached to, and every later save goes unnoticed.
         let dir = path.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         std::fs::create_dir_all(&dir).ok();
 
+        // macOS delivers events under the *resolved* path -- `/var` and `/tmp`
+        // are symlinks into `/private`, so an event for a file the caller named
+        // as `/var/folders/.../config.toml` arrives as
+        // `/private/var/folders/.../config.toml` and a literal comparison
+        // silently never matches. Nothing errors; the config just stops
+        // reloading. Accepting either spelling costs one `canonicalize`.
+        let mut watched = vec![path.to_path_buf()];
+        if let Some(name) = path.file_name() {
+            let resolved = dir.canonicalize().unwrap_or_else(|_| dir.clone()).join(name);
+            if !watched.contains(&resolved) {
+                watched.push(resolved);
+            }
+        }
+
         let (tx, rx) = mpsc::channel::<()>();
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             let Ok(event) = res else { return };
-            if event.paths.iter().any(|p| p == &watched) {
+            if event.paths.iter().any(|p| watched.contains(p)) {
                 let _ = tx.send(());
             }
         })?;

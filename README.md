@@ -96,7 +96,19 @@ with VC Tools:
 winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.Windows11SDK.26100"
 ```
 
-Then:
+On macOS the Xcode Command Line Tools are the whole requirement — the linker and
+SDK come with them, and nothing else needs installing:
+
+```
+xcode-select --install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Use rustup rather than Homebrew's `rust` formula: only rustup honours the
+`rust-toolchain.toml` pin, and a mismatched compiler against a workspace that
+sets `rust-version` fails in ways that look like code errors.
+
+Then, on either platform:
 
 ```
 cargo build --workspace

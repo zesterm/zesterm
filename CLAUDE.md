@@ -103,6 +103,22 @@ Each of these cost real time and is documented where it bites:
 - **`ClosePseudoConsole` deadlocks** unless the reader is still draining, which
   dictates the whole shutdown protocol. The reader also cannot observe child
   exit at all.
+- **On macOS, `TIOCSWINSZ` on the pty master fails with `ENOTTY` until the slave
+  has been opened once.** Setting the initial size right after `unlockpt` — the
+  obvious place, and what Linux accepts — therefore fails with an error saying
+  the fd is not a terminal, which it plainly is. Set it on the slave.
+  (`zest-pty/src/unix.rs`, gotcha 3.)
+- **A unix pty master reports EOF as `EIO`, not as a zero-length read.** Treat it
+  as EOF or every clean shell exit logs an I/O error and looks like a crash.
+  (`zest-pty/src/unix.rs`, gotcha 2.)
+- **macOS's `/bin/sh` does not pass `SIGINT` on when non-interactive**, so a
+  `sh -c 'sleep 30'` test child survives a `^C` that a working pty delivered
+  correctly. It makes a correct implementation look broken; spawn the binary
+  directly in tests. Verified against a C reference before believing it.
+- **macOS delivers filesystem events under the resolved path** — `/var` and
+  `/tmp` are symlinks into `/private` — so comparing a watched path literally
+  against `notify`'s event paths silently never matches, and the config simply
+  stops reloading. (`zest-config/src/watch.rs`.)
 - **DX12 cannot do per-pixel alpha** through wgpu's ordinary surface path.
   Transparency on Windows is adapter-dependent. Premultiply everywhere
   regardless. (ADR-003.)

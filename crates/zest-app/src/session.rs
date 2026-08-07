@@ -217,16 +217,26 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::time::{Duration, Instant};
 
+    /// A command that prints `text` and exits.
+    ///
+    /// The session layer is platform-independent, but the thing it spawns
+    /// cannot be — and hardcoding `cmd.exe` is what made these tests fail the
+    /// first time the workspace was built on macOS.
+    fn echo(text: &str) -> CommandSpec {
+        let command_line = if cfg!(windows) {
+            format!("cmd.exe /c echo {text}")
+        } else {
+            format!("/bin/echo {text}")
+        };
+        CommandSpec { command_line, cwd: None, env: Vec::new() }
+    }
+
     #[test]
     fn a_session_runs_a_command_and_reports_its_output() {
         let woken = Arc::new(AtomicUsize::new(0));
         let w = Arc::clone(&woken);
 
-        let cmd = CommandSpec {
-            command_line: "cmd.exe /c echo session-probe".into(),
-            cwd: None,
-            env: Vec::new(),
-        };
+        let cmd = echo("session-probe");
         let session = Session::spawn(&cmd, PtySize::new(80, 24), 100, move |_| {
             w.fetch_add(1, Ordering::Relaxed);
         })
@@ -275,11 +285,7 @@ mod tests {
 
     #[test]
     fn dirty_state_round_trips() {
-        let cmd = CommandSpec {
-            command_line: "cmd.exe /c exit".into(),
-            cwd: None,
-            env: Vec::new(),
-        };
+        let cmd = echo("dirty-probe");
         let session = Session::spawn(&cmd, PtySize::new(80, 24), 0, |_| {}).expect("spawn");
 
         session.mark_dirty();

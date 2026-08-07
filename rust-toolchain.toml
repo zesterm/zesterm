@@ -1,4 +1,7 @@
 [toolchain]
 channel = "1.93.1"
 components = ["rustfmt", "clippy"]
-targets = ["x86_64-pc-windows-msvc"]
+# The host triple is always installed; listing it buys nothing and costs a
+# useless Windows std download on a mac. wasm32 is here because the zest-core
+# portability invariant is checked by building for it.
+targets = ["wasm32-unknown-unknown"]
