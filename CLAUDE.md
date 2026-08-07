@@ -130,6 +130,14 @@ Each of these cost real time and is documented where it bites:
   `/tmp` are symlinks into `/private` — so comparing a watched path literally
   against `notify`'s event paths silently never matches, and the config simply
   stops reloading. (`zest-config/src/watch.rs`.)
+- **A DNS-SD *instance name* is not a *host name*.** The instance is
+  `andy-mac (1f2a3b4c)` — spaces and parentheses are legal and expected — while
+  the SRV target must be a DNS label, `[A-Za-z0-9-]`. Derive one from the other
+  and the responder cheerfully publishes the service, no A record ever resolves
+  for that target, and peers find the host with an **empty address set**. It
+  then appears in the fleet listing with no route, which is indistinguishable
+  from a laptop that is asleep. The host name is built from the `HostId`
+  instead. (`zest-mesh/src/discovery/mdns.rs`, sharp edge 5.)
 - **DX12 cannot do per-pixel alpha** through wgpu's ordinary surface path.
   Transparency on Windows is adapter-dependent. Premultiply everywhere
   regardless. (ADR-003.)

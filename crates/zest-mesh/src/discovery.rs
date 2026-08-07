@@ -1,10 +1,60 @@
 //! Finding peers on the local network.
 //!
-//! **Skeleton — WS-H owns the implementation.** The trait is here so
-//! `zest-daemon` can be written against it before mDNS exists, and so a test
+//! The trait is here so `zest-daemon` can be written against it, and so a test
 //! fleet can be assembled from a static list without any network at all.
+//!
+//! # The three pieces, and why they are separate
+//!
+//! [`txt`] and [`roster`] are pure: a wire format and a state machine, with no
+//! socket and no mDNS type in any signature. [`mdns`] is a thin adapter that
+//! turns a responder's events into the [`roster`]'s vocabulary and pumps a
+//! thread. [`layered`] merges sources.
+//!
+//! The split is not tidiness. Almost everything that can go wrong in discovery
+//! is a *rule* — which record to skip, which address cannot be dialled, what a
+//! host that stopped announcing should look like — and rules tested through a
+//! socket are rules tested on whichever network the test happened to run on.
+//! CI runners have no reliable multicast and no second machine, so anything
+//! that needed one would be a test that gets muted within a week.
 
 use crate::{MeshError, Peer};
+
+pub mod layered;
+pub mod roster;
+pub mod txt;
+
+#[cfg(feature = "lan")]
+pub mod mdns;
+
+/// How present a peer is.
+///
+/// Not a field on [`Peer`]: `Peer` is a frozen contract that `zest-daemon` and
+/// the clients are already built against, and presence is a property of *how* a
+/// peer was learned rather than of the peer itself. A host configured by hand
+/// is [`Presence::Unseen`] forever, and that is correct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    /// Advertising on the link right now.
+    Online,
+    /// Was advertising and stopped. The laptop closed its lid.
+    Away,
+    /// Configured by hand and never observed. Normal for a host on a VPN.
+    Unseen,
+}
+
+/// A peer plus what discovery knows about it that [`Peer`] has no room for.
+///
+/// `endpoints.is_empty()` already tells a listing to grey a row out. This tells
+/// it *why*, which is the difference between "your laptop is asleep" and "this
+/// machine has never been seen" — two things a user can act on differently.
+#[derive(Debug, Clone)]
+pub struct PeerRecord {
+    pub peer: Peer,
+    pub presence: Presence,
+    /// `None` if never seen. An `Instant` rather than a wall clock, so a
+    /// machine that resyncs its time does not make a peer look hours stale.
+    pub last_seen: Option<std::time::Instant>,
+}
 
 /// A source of peers.
 ///

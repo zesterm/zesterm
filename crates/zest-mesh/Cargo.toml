@@ -9,14 +9,63 @@ repository.workspace = true
 authors.workspace = true
 
 [features]
-default = ["lan"]
+default = ["lan", "os-keystore"]
 # mDNS discovery and direct LAN sockets. The M3 path.
-lan = []
+lan = ["dep:mdns-sd"]
 # Cloudflare Tunnel + Access. The M4 path.
 cloud = []
+# The OS credential store. Default-on because a host that keeps its private key
+# anywhere else is not a host worth shipping. Separable because the identity
+# tests do not need it, and because on Linux it drags the whole zbus stack into
+# a cold `cargo test`.
+os-keystore = ["dep:keyring"]
 
 [dependencies]
 zest-proto.workspace = true
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+# No lock poisoning: a panic while formatting one peer must not make every later
+# `peers()` call fail for the rest of the process. A fleet listing is exactly the
+# wrong place for a lock that can become permanently unusable.
+parking_lot = { workspace = true }
+
+# The four below carry explicit versions rather than `.workspace = true`. The
+# root manifest registers no crypto and no networking, and it is shared with
+# every other stream -- extending it would put a conflict in the one file that
+# must not conflict. Adding a dependency to your own crate's manifest is the
+# sanctioned alternative. -> CLAUDE.md.
+
+# Default features kept deliberately: `zeroize` is what makes `SigningKey` scrub
+# itself on drop, and `fast` is the precomputed-tables backend.
+ed25519-dalek = "3.0"
+# The OS RNG, and nothing else. An Ed25519 secret key is 32 uniform bytes, so
+# `SigningKey::generate` would only add dalek's `rand_core` feature and a
+# `SysRng`/`UnwrapErr` dance to arrive at the same place.
+getrandom = "0.4"
+zeroize = "1.9"
+
+# Keychain on macOS, Credential Manager on Windows, Secret Service elsewhere.
+#
+# Version 4 rather than 3 for one concrete reason: 4's Secret Service backend is
+# `zbus` + `crypto-rust`, which is pure Rust, where 3's links `libdbus-1-dev`.
+# CI's Linux job installs only the windowing and font libraries, so keyring 3
+# would mean editing a workflow file this stream does not own.
+keyring = { version = "4.1", optional = true }
+
+# Pure Rust and, decisively, no async runtime: `ServiceDaemon` is one thread and
+# a channel. `tokio` is permitted in this crate by `cargo xtask check-deps`, but
+# `Discovery` is a synchronous trait and the workspace has no runtime anywhere --
+# adding one to satisfy a library would be the tail wagging the dog.
+#
+# `default-features = false` drops flume's async machinery and the `log` facade;
+# `tracing` is this workspace's logging, and a second facade with no bridge only
+# produces records nobody reads.
+mdns-sd = { version = "0.20.3", default-features = false, optional = true }
+
+# Advertises and browses, and prints what it can see. The two-machine check that
+# no unit test can perform. Gated, or `--no-default-features` fails on an example
+# rather than on the crate, which reads like a real break.
+[[example]]
+name = "mesh_probe"
+required-features = ["lan"]

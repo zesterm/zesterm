@@ -26,6 +26,8 @@ fine. Changing a signature, renaming a variant, or removing a method is not.
 | `ChangeSource`, `Update`, `update_for` | `zest-core/src/subscribe.rs` | **frozen** — `release_before` removed, see below | WS-F |
 | `SessionSource`, `Origin` | `zest-app/src/source.rs` | **frozen** | WS-A, WS-B, WS-F |
 | `Peer`, `Endpoint`, `Reachability`, `Discovery` | `zest-mesh/` | **frozen** | WS-F, WS-H |
+| `HostIdentity`, `ClientIdentity`, `Signature`, `Nonce`, `Purpose` | `zest-mesh/src/identity.rs` | draft — WS-H may change freely | WS-H only |
+| `KeyStore` | `zest-mesh/src/keystore.rs` | draft — WS-H may change freely | WS-H only |
 | `DaemonConfig`, `SessionHandle`, `SessionState` | `zest-daemon/src/lib.rs` | draft — WS-F may change freely | WS-F only |
 
 "Draft" means one stream owns it and nobody else has built on it yet. It freezes when a second
