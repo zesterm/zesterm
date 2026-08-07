@@ -24,7 +24,8 @@ use zest_proto::decode::GridView;
 use zest_proto::delta::CursorState;
 use zest_proto::encode::Encoder;
 
-const CORPUS: &[&str] = &["basic-echo", "dir-colors", "git-log", "unicode-wide"];
+const CORPUS: &[&str] =
+    &["basic-echo", "dir-colors", "git-log", "unicode-wide", "vim-macos"];
 
 fn corpus_path(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -256,4 +257,16 @@ fn the_corpus_contains_real_terminal_output() {
             "{name}: no escape sequences, so this exercises nothing"
         );
     }
+}
+
+/// A real macOS vim session: alt-screen, truecolour, UTF-8, heavy repaints.
+///
+/// Recorded on the machine that first ran the unix pty, and by some distance
+/// the hardest thing in the corpus — 10KB against the next largest at under 1KB.
+/// A full-screen editor is where the encoder is most likely to be wrong, because
+/// it repaints regions rather than appending lines and it switches screens
+/// underneath the scroll detection.
+#[test]
+fn a_real_vim_session() {
+    replay("vim-macos", 80, 24);
 }

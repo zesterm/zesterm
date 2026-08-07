@@ -55,7 +55,7 @@ move.
 | `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema |
 | `zest-input` | 🟡 keys + SGR mouse, still inline in `zest-app` |
 | `zest-app` | ✅ real window, real shell, sessions behind `SessionSource` |
-| `zest-proto` | 🟡 wire types frozen, encoding unimplemented |
+| `zest-proto` | 🟡 wire types frozen; encoder, decoder and conformance corpus done — ⬜ framing |
 | `zest-mesh` | 🟡 identity and transport seams frozen, discovery unimplemented |
 | `zest-daemon` | ⬜ skeleton |
 
@@ -73,10 +73,10 @@ Each has its own issue, self-contained enough to hand to an agent on its own.
 
 | | Stream | Owns | Status | Issue |
 |---|---|---|---|---|
-| **A** | [Windows chrome, motion, polish](#ws-a) | `zest-app/src/{chrome,motion,platform}*`, `zest-render-wgpu/` | After B | [#5](https://github.com/zesterm/zesterm/issues/5) |
-| **B** | [`zest-input`](#ws-b) | `crates/zest-input/` | Ready — **go first** | [#2](https://github.com/zesterm/zesterm/issues/2) |
-| **C** | [Unix PTY + macOS host](#ws-c) | `zest-pty/src/unix.rs`, macOS platform | Ready — **critical path** | [#3](https://github.com/zesterm/zesterm/issues/3) |
-| **D** | [Linux host](#ws-d) | Linux platform + packaging | After C1 | [#9](https://github.com/zesterm/zesterm/issues/9) |
+| **A** | [Windows chrome, motion, polish](#ws-a) | `zest-app/src/{chrome,motion,platform}*`, `zest-render-wgpu/` | **Ready** — B unblocked it | [#5](https://github.com/zesterm/zesterm/issues/5) |
+| **B** | [`zest-input`](#ws-b) | `crates/zest-input/` | Extracted; IME + Kitty open | [#2](https://github.com/zesterm/zesterm/issues/2) |
+| **C** | [Unix PTY + macOS host](#ws-c) | `zest-pty/src/unix.rs`, macOS platform | **C1 done**, C2 open | [#3](https://github.com/zesterm/zesterm/issues/3) |
+| **D** | [Linux host](#ws-d) | Linux platform + packaging | **Ready** — C1 landed `unix.rs` | [#9](https://github.com/zesterm/zesterm/issues/9) |
 | **E** | [Command blocks](#ws-e) | `zest-core/src/blocks.rs`, OSC 133, shell integration | Ready | [#6](https://github.com/zesterm/zesterm/issues/6) |
 | **F** | [`zest-proto` + `zest-daemon`](#ws-f) | `crates/zest-proto/`, `crates/zest-daemon/` | Ready — **the lead** | [#4](https://github.com/zesterm/zesterm/issues/4) |
 | **G** | [Web client](#ws-g) | `clients/web/` | Ready (decoder) | [#8](https://github.com/zesterm/zesterm/issues/8) |
@@ -137,7 +137,7 @@ Extraction from `zest-app` collides with WS-A, so **land it early and small**.
 
 **Critical path for M3.** `PtyTransport` is already frozen, so this drops in.
 
-**C1 — reachable (small, do this first)**
+**C1 — reachable** ✅ *(landed in #10)*
 - [x] `zest-pty/src/unix.rs`: `openpt` + `Command` with `setsid`/`TIOCSCTTY` in
       `pre_exec`, resize via `TIOCSWINSZ`. `#[cfg(unix)] pub use unix::UnixPty as
       NativePty`. No shutdown protocol is needed — closing the master is a
