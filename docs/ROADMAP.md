@@ -5,223 +5,315 @@ The durable plan. Mirrored as tracking issue
 of truth** — update it in the same commit as the work it describes, then refresh
 the issue.
 
-## The goal, and why the architecture looks like this
+## The goal
 
 A terminal in the Warp performance class — GPU-rendered, low input latency,
-deeply themable — on Windows, macOS and Linux. Beyond being a good local
-terminal, the end goal is to **reach this machine's shells from the internet**,
-driving them from a browser and a phone.
+deeply themable — on Windows, macOS and Linux. And then the part that makes it
+worth building: **every machine reachable from every device.**
 
-That end goal dictates everything. A terminal built as a monolithic GUI app
-cannot grow a remote head without a rewrite, because its state lives inside the
-renderer. So `zest-core` is headless and knows nothing about pixels, and the
-native app is merely the first frontend. See [ARCHITECTURE.md](ARCHITECTURE.md)
-for the decisions that are expensive to reach and cheap to accidentally undo.
+Not one machine exposed to the internet. A fleet. The Mac's shell in a window on
+the Windows box. A Linux build watched from a phone on a train. Sessions that
+outlive the window they were started in, picked up wherever you are.
+
+That goal dictates everything. A terminal built as a monolithic GUI app cannot
+grow a remote head without a rewrite, because its state lives inside the
+renderer. So `zest-core` is headless and knows nothing about pixels; the daemon
+owns sessions on every machine; and the native app is a client of its own daemon
+exactly as the phone is a client over the network.
+
+Start with [ARCHITECTURE.md](ARCHITECTURE.md) for the decisions that were
+expensive to reach, and [CONTRACTS.md](CONTRACTS.md) for the seams that must not
+move.
+
+```
+        ┌── phone (Lynx)          ┐
+        ├── browser (SignalX)     │  clients
+        ├── zesterm.exe (Windows) ┘
+        │
+        │   LAN direct (~0.3ms) where possible,
+        │   Cloudflare Tunnel (~60ms) when away
+        │
+   ┌────┴──────────┬──────────────┬───────────────┐
+   │ zest-daemon   │ zest-daemon  │ zest-daemon   │  hosts
+   │ (Windows)     │ (Mac)        │ (Linux)       │
+   │  PTYs, grid, scrollback, command blocks      │
+   └──────────────────────────────────────────────┘
+
+   Cloudflare holds a *directory* only: which hosts exist, are they up,
+   how to reach them. No grid, no scrollback, never in the data path.
+```
 
 ## Status
 
 | Crate | State |
 |---|---|
-| `zest-pty` | ✅ ConPTY, resize, shutdown protocol, `.vtrec` recorder |
-| `zest-core` | ✅ grid, scrollback, VT parsing, modes, OSC, palette |
+| `zest-pty` | ✅ ConPTY, resize, shutdown protocol, `.vtrec` recorder — ⬜ unix backend |
+| `zest-core` | ✅ grid, scrollback, VT parsing, modes, OSC, palette — 🟡 block and subscriber seams frozen, unimplemented |
 | `zest-font` | ✅ metrics, shaping, rasterization, system fallback, colour glyphs |
 | `zest-theme` | ✅ tokens, OKLCH derivation, 5 built-ins, 4 importers |
-| `zest-render-wgpu` | 🟡 pipelines + atlas + offscreen resolve; renders offscreen, no window yet |
-| `zest-input` | 🟡 keys + SGR mouse, still inline in zest-app; no IME, no Kitty protocol |
-| `zest-config` | ⬜ |
-| `zest-app` | 🟡 real window, real shell; input is basic |
+| `zest-render-wgpu` | ✅ pipelines, atlas, offscreen resolve, selection — ⬜ gamma validation |
+| `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema |
+| `zest-input` | 🟡 keys + SGR mouse, still inline in `zest-app` |
+| `zest-app` | ✅ real window, real shell, sessions behind `SessionSource` |
+| `zest-proto` | 🟡 wire types frozen, encoding unimplemented |
+| `zest-mesh` | 🟡 identity and transport seams frozen, discovery unimplemented |
+| `zest-daemon` | ⬜ skeleton |
 
-212 tests. `cargo run -p zest-app --example headless` is a working terminal
-without a window.
+297 tests. `--startup-probe` reports first paint at ~43ms against a 100ms budget.
 
 ---
 
-## Milestone 1 — a terminal worth using on Windows
+# Workstreams
+
+Bounded pieces that can run in parallel, each with its own issue. **Own only
+your paths.** A job that seems to need another stream's files means the seam is
+wrong — say so rather than reaching across.
+
+| | Stream | Owns | Status |
+|---|---|---|---|
+| **A** | [Windows chrome, motion, polish](#ws-a) | `zest-app/src/{chrome,motion,platform}*`, `zest-render-wgpu/` | Ready |
+| **B** | [`zest-input`](#ws-b) | `crates/zest-input/` | Ready — **go first** |
+| **C** | [Unix PTY + macOS host](#ws-c) | `zest-pty/src/unix.rs`, macOS platform | Ready — **critical path** |
+| **D** | [Linux host](#ws-d) | Linux platform + packaging | After C1 |
+| **E** | [Command blocks](#ws-e) | `zest-core/src/blocks.rs`, OSC 133, shell integration | Ready |
+| **F** | [`zest-proto` + `zest-daemon`](#ws-f) | `crates/zest-proto/`, `crates/zest-daemon/` | Ready — **the lead** |
+| **G** | [Web client](#ws-g) | `clients/web/` | Ready (decoder) |
+| **H** | [Mesh identity, discovery, transports](#ws-h) | `crates/zest-mesh/`, `cloud/` | After F |
+
+**The insight worth naming:** *"make the Mac's terminals reachable"* (WS-C1 — a
+`forkpty` backend behind an already-frozen trait, plus a headless daemon) is far
+smaller than *"port the GPU terminal to macOS"* (WS-C2 — Metal,
+`NSVisualEffectView`, traffic lights, CoreText). C1 unlocks the fleet; C2 can
+trail by weeks.
+
+### WS-A — Windows chrome, motion, polish
+
+M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
+`zest-render-wgpu/`. Consumes `SessionSource`.
+
+- [ ] Borderless window, GPU-drawn titlebar and tab strip through the SDF rect
+      pipeline. `WM_NCCALCSIZE` returning 0 with `top` untouched removes the
+      caption while keeping frame, shadow and snap — **but when maximized you
+      must also inset `top`** by `SM_CYSIZEFRAME + SM_CXPADDEDBORDER` or the tab
+      bar hangs off the monitor. `HTMAXBUTTON` over the maximize rect is what
+      enables Snap Layouts, and it suppresses ordinary mouse messages over that
+      rect, so hover comes from `WM_NCMOUSEMOVE`.
+- [ ] `ChromeHitMap` produced by the layout pass and consumed by **both** the
+      renderer and the input path, so visuals and hit regions cannot drift.
+- [ ] Animation clock. Springs `(response, damping)`, not easing curves —
+      terminal motion is interruption-dominated and a spring absorbs a changed
+      target with continuous velocity for free. Substep the integrator
+      (`h = dt/ceil(dt·240)`) or a spring tuned at 60Hz behaves differently at
+      144Hz. One clock, shared.
+- [ ] Smooth scroll as a fractional row offset, **suppressed in the alt screen**.
+- [ ] `reduce_motion`, honouring `SPI_GETCLIENTAREAANIMATION`.
+- [ ] Per-OS backdrop: Mica via `DWMWA_SYSTEMBACKDROP_TYPE`.
+- [ ] Polish: OSC 0/2 title, DECSCUSR cursor styles, font zoom, DPI changes.
+- [ ] Validate gamma side-by-side against Windows Terminal. **Do not defer** —
+      it ships broken constantly and reads as "looks slightly off".
+- [ ] Perf validation: vtebench, >500 MB/s, <2ms CPU frame, <10ms keypress→pixel.
+
+✅ **Every animator provably settles** — assert zero frames 250ms after the last
+input. An animator that asymptotically approaches its target burns GPU forever at
+0.01px/frame, and that is how the 0%-idle guarantee is lost.
+
+### WS-B — `zest-input`
+
+Extraction from `zest-app` collides with WS-A, so **land it early and small**.
+
+- [ ] Move key/mouse encoding out of `zest-app/src/{input,mouse}.rs` into the
+      crate. Behaviour-preserving; the 39 existing tests move with it.
+- [ ] IME and dead keys via winit `Ime`.
+- [ ] Kitty keyboard protocol (CSI u) behind a mode flag.
+
+### WS-C — Unix PTY + macOS host
+
+**Critical path for M3.** `PtyTransport` is already frozen, so this drops in.
+
+**C1 — reachable (small, do this first)**
+- [ ] `zest-pty/src/unix.rs`: `forkpty`, resize via `TIOCSWINSZ`, the same
+      shutdown protocol. `#[cfg(unix)] pub use unix::UnixPty as NativePty`.
+- [ ] `zest-pty`'s `terminal_env()` on unix — `TERM`, `COLORTERM`,
+      `TERM_PROGRAM`, and clearing inherited terminal identity.
+- [ ] `cargo test -p zest-core -p zest-pty` green on macOS.
+- [ ] The `headless` example runs a real shell on macOS.
+
+✅ **The Mac can host.** With WS-F, its shells appear on Windows.
+
+**C2 — the GPU app on macOS (can trail)**
+- [ ] Metal surface, CoreText fallback verification, `NSVisualEffectView`.
+- [ ] **Do not go borderless on macOS.** It costs traffic lights, native
+      full-screen, Sequoia tiling and accessibility, and gains nothing over
+      `titlebar_transparent` + `title_hidden` + `fullsize_content_view`. The
+      traffic-light inset is not a constant — recompute on full-screen changes.
+
+### WS-D — Linux host
+
+Shares `unix.rs` with WS-C; owns only Linux-specific parts.
+
+- [ ] Vulkan surface, fontconfig fallback verification.
+- [ ] Negotiate `zxdg_toplevel_decoration_v1` or KDE gives you *two* titlebars.
+- [ ] Transparency via an ARGB visual. **Blur has no portable path** — X11/KWin
+      has `_KDE_NET_WM_BLUR_BEHIND_REGION`, picom needs user rules, Wayland has
+      no protocol. Degrade honestly rather than pretending in the settings UI.
+- [ ] Packaging.
+
+### WS-E — Command blocks
+
+M2. Owns `zest-core/src/blocks.rs` and the OSC 133 path. Hot spot: coordinate
+`perform.rs` edits, which WS-F also reads.
+
+- [ ] OSC 133 A/B/C/D, OSC 7 (cwd), OSC 633 (VS Code alias) → `BlockIndex`.
+      The markers are already recognized and ignored, so they never reach the
+      grid as garbage.
+- [ ] Shell integration for PowerShell/bash/zsh/fish with consented
+      auto-install. oh-my-posh can emit these.
+- [ ] Block folding, re-run, copy-output in the native UI.
+
+> The strongest reason this project owns its grid rather than depending on
+> `alacritty_terminal`: blocks need new row fields, a side index surviving
+> scrollback eviction, and OSC handler hooks. Each would be a fork of an
+> explicitly-unstable crate.
+
+### WS-F — `zest-proto` + `zest-daemon`
+
+**The lead stream.** Wire types are frozen; encoding and the daemon are not.
+
+- [ ] Implement `ChangeSource` on `Terminal` — the `update_for` rule is already
+      settled and tested.
+- [ ] Delta encoder: attribute interning, `SCROLL` before `ROW`, explicit cell
+      counts. MessagePack envelope; do **not** msgpack individual cells.
+- [ ] `ts-rs` codegen with golden-fixture contract tests in CI.
+- [ ] `zest-daemon`: session ownership, loopback transport, SQLite scrollback.
+- [ ] `zest-app` gains a daemon-attached `SessionSource`. **Find-or-spawn goes
+      in the slot the shell spawn occupies today** — after the window is
+      visible, overlapping driver init. `--startup-probe` must still pass.
+- [ ] **Conformance corpus**: replay the `.vtrec` files, apply deltas in the
+      client, assert cell-for-cell identity at every frame. This is the spine.
+- [ ] Chaos-resync 10,000 times at random disconnect points.
+
+### WS-G — Web client
+
+Owns `clients/web/`. The decoder can be built against golden fixtures before the
+daemon exists.
+
+- [ ] TypeScript delta decoder against the `ts-rs` bindings.
+- [ ] Grid renderer. **`@sigx/terminal` cannot be reused** — it paints TSX *to* a
+      TTY, which is the inverse of what a web client needs.
+- [ ] SignalX app: session list, attach, input.
+- [ ] Local echo prediction for high-latency links (mosh's other trick): predict
+      printable-char echo when not in alt-screen, render dim, reconcile on delta
+      arrival. The largest perceived-latency win available.
+
+### WS-H — Mesh identity, discovery, transports
+
+- [ ] Ed25519 host and client keypairs; `HostId` as the public-key fingerprint.
+- [ ] mDNS discovery implementing `Discovery`. **M3 needs only this.**
+- [ ] Pairing: desktop approval modal with a matching code, signed nonce on
+      every `Hello`. A stolen session alone must not get a shell.
+- [ ] Cloudflare Tunnel + Access per host. **Origin-side JWT validation is
+      mandatory** — the origin never trusts the tunnel.
+- [ ] The directory Worker: host ids, labels, last-seen endpoints. **No session
+      state, never in the data path.** → ADR-006.
+- [ ] Remote access **off by default**, persistent indicator, audit log.
+
+---
+
+# Milestones
+
+## M1 — a terminal worth using on Windows
 
 **Win condition:** *"I used this instead of Windows Terminal for a week and
 didn't want to switch back."* Not feature parity with WezTerm.
 
 - [x] **0. Toolchain.** VS Build Tools. The Windows SDK alone is not enough —
       `libstd` needs the MSVC CRT for `__CxxFrameHandler3` and `__chkstk`.
-- [x] **1. Workspace + enforced boundaries.** `cargo xtask check-deps` fails the
-      build if `zest-core` grows a dependency on wgpu/winit/windows/tokio.
+- [x] **1. Workspace + enforced boundaries.** `cargo xtask check-deps`, 7
+      boundaries.
 - [x] **1.5. Transparency probe.** Settled premultiplied alpha before any shader
       existed. → ADR-003.
-- [x] **2. `zest-pty`.** ConPTY with the shutdown protocol, plus `.vtrec`
-      recording for the replay corpus.
+- [x] **2. `zest-pty`.** ConPTY with the shutdown protocol, `.vtrec` recording,
+      and a terminal identity for the child.
 - [x] **3. `zest-core`.** Ring storage, 16-byte `Cell`, deferred wrap, scroll
-      regions, alt screen, CSI/SGR/OSC. Absolute line IDs and a sequence counter
-      for M3.
-- [x] **4. `zest-font`.** swash + fontique. Integer physical-pixel metrics,
-      shaping, system fallback, COLR/CBDT colour glyphs, and Nerd Font / PUA
-      icons for shell prompts. PNG dump for diagnosis.
-- [x] **4b. `zest-theme`.** The five built-in themes, OKLCH derivation of `ui.*`
-      tokens, and importers for iTerm2 / Windows Terminal / base16 / Alacritty.
-- [ ] **5. `zest-render-wgpu`.** Three pipelines, one render pass:
-      - [x] SDF rects — cell backgrounds, selection, cursor, *and* all window
-            chrome. One pipeline for everything rectangular.
-      - [x] Glyphs — instanced quads from a dual atlas (R8 masks + RGBA colour),
-            `etagere` shelf allocator, generation-based bulk eviction.
-      - [x] Decorations — underline, undercurl, strikethrough.
-      - [x] `Rgba16Float` offscreen + resolve pass (gamma, premultiplication in
-            encoded space, free OS-driven repaints).
-      - [x] Offscreen PNG harness (`--example render_dump`), runs on a fallback
-            adapter so it works in CI.
-      - [x] Selection rendering.
-      - [ ] Validate gamma side-by-side against Windows Terminal. **Do not defer
-            this** — it ships broken constantly and reads as "looks slightly off".
-- [x] **6. `zest-app` — the moment.** winit, PTY thread, fair mutex, first
-      window with real output. **A working terminal.**
-- [ ] **7. `zest-input`.** Still inline in `zest-app`. Covers keys, modifiers,
-      DECCKM, Alt-as-ESC, F-keys, and SGR-1006 mouse (press/release/drag/motion,
-      wheel), with the mouse yielding to a mouse-aware program and Shift as the
-      override. Alt-screen wheel maps to arrow keys so `less` and `man` scroll.
-      Still to do: extract the crate, IME/dead keys, and the Kitty keyboard
-      protocol behind a flag — plan that now, retrofitting hurts.
-- [x] **8. Selection + clipboard.** Absolute `LineId` coordinates, so a
-      selection survives scrolling, new output, and falling out of scrollback.
-      Word/line/block modes, wrapped-line copy without a spurious newline,
-      bracketed paste. Still to do: copy-on-select as an option, and selection
-      auto-scroll when a drag leaves the window.
-- [x] **9. Scrollback + scrolling.** Wheel, alt-screen wheel→arrows, Shift+PgUp/
-      PgDn (a page is one screen less a line of overlap), and `scroll_on_output`
-      — off by default, because on it makes scrollback unreadable while anything
-      is running. The load-bearing fix was in the grid: output used to slide the
-      view forward one line at a time under a reader who had scrolled back.
-- [x] **10. `zest-config`.** Cascade (defaults → system → user → profile →
-      workspace → CLI) with per-key provenance, profiles, migrations, `notify`
-      hot reload with invalidation classes, JSON Schema export to
-      `schemas/zesterm.schema.json`, and a trust prompt for workspace configs —
-      `shell.command` makes an auto-loaded `.zesterm.toml` remote code
-      execution. Flags are a cascade layer, not a mutation, so `--size 20` is
-      recorded as *set by command line* and survives a config reload.
-      The load-bearing test walks the generated schema and fails if any key has
-      no invalidation class, which is what stops a new setting from silently
-      needing a restart. `default-features = false` drops the filesystem half so
-      the types and schema still reach the wasm clients.
-      Verified live: editing `config.toml` switched theme dark→light and font
-      15pt→22pt with the grid and pty resized, no restart.
-- [ ] **11. Window chrome + motion.** Borderless window, GPU-drawn titlebar and
-      tabs, per-OS backdrop, springs, smooth scroll, `reduce_motion`.
-- [ ] **12. Polish.** Title, DECSCUSR cursor styles, font zoom, DPI changes.
-- [x] **12b. Startup latency.** Window at **~50ms**, prompt on the first frame.
-      Was ~1.9s of white.
+      regions, alt screen, CSI/SGR/OSC, absolute line IDs, sequence counter.
+- [x] **4. `zest-font`.** swash + fontique, system fallback, COLR/CBDT colour
+      glyphs, Nerd Font / PUA icons. PNG dump for diagnosis.
+- [x] **4b. `zest-theme`.** Five built-ins, OKLCH `ui.*` derivation, four
+      importers.
+- [x] **5. `zest-render-wgpu`.** Three pipelines, one pass, `Rgba16Float`
+      offscreen + resolve, offscreen PNG harness with `--replay`.
+- [x] **6. `zest-app`.** winit, PTY thread, fair mutex. **A working terminal.**
+- [ ] **7. `zest-input`.** → WS-B.
+- [x] **8. Selection + clipboard.** Absolute `LineId`, word/line/block modes,
+      wrapped-line copy, bracketed paste.
+- [x] **9. Scrollback + scrolling.** Wheel, alt-screen wheel→arrows,
+      Shift+PgUp/PgDn, `scroll_on_output`.
+- [x] **10. `zest-config`.** Cascade with provenance, profiles, migrations, hot
+      reload with invalidation classes, JSON Schema export, workspace trust.
+- [ ] **11–13. Chrome, motion, polish, perf.** → WS-A.
+- [x] **12b. Startup latency.** Window at ~43ms, prompt on the first frame. Was
+      ~1.9s of white.
 
-      The fix was to stop waiting for the GPU at all: a window does not need one
-      to be the right colour, so a class background brush lets Windows paint it
-      immediately while the driver comes up behind. Spawning the shell *before*
-      GPU init then overlaps pwsh's ~400ms startup with the driver's ~850ms, so
-      the prompt is already waiting when the first frame is drawn.
+      The fix was to stop waiting for the GPU: a window does not need one to be
+      the right colour, so a class background brush lets Windows paint it
+      immediately. Spawning the shell *before* GPU init overlaps pwsh's ~400ms
+      with the driver's ~850ms.
 
-      Remaining cost before content, on an RTX 3080 Ti / Vulkan:
-      - ~350ms Vulkan instance creation (the loader)
-      - ~120ms device, ~290ms swapchain configuration
-      - **~245ms naga WGSL → SPIR-V** at `create_shader_module`
-      - ~90ms pipeline objects, with the cache warm
+      Remaining cost before content, on an RTX 3080 Ti / Vulkan: ~350ms Vulkan
+      instance, ~120ms device, ~290ms swapchain, **~245ms naga WGSL→SPIR-V**,
+      ~90ms pipelines with the cache warm.
 
       Two things that did **not** help, recorded so they are not retried:
       merging shader modules (the cost is translation, not per-module overhead),
-      and preferring DX12 (it redistributes driver init — 27ms instance but
-      370ms adapter — and totals the same).
+      and preferring DX12 (it redistributes driver init and totals the same).
 
-      Next lever is the 245ms: precompile WGSL to SPIR-V at build time and use
-      `SPIRV_SHADER_PASSTHROUGH`. Vulkan-only and `unsafe`, so it needs a WGSL
-      fallback for other backends.
-- [ ] **13. Performance validation.** vtebench, >500 MB/s throughput, <2 ms CPU
-      frame, <10 ms keypress→pixel, **0% GPU when idle and animations settled**.
+      Next lever is the 245ms: precompile WGSL to SPIR-V at build time with
+      `SPIRV_SHADER_PASSTHROUGH`. Vulkan-only and `unsafe`, needs a WGSL
+      fallback.
 
-### Sequencing risks
+## M2 — command blocks
 
-Three things are cheap now and force a rewrite later. They are already decided —
-do not undo them:
+→ WS-E.
 
-1. **Premultiplied alpha + offscreen resolve.** Retrofit = rewrite every shader.
-2. **`GlyphInstance` carries absolute physical-pixel position and RGBA colour**,
-   not `(row, col)` and a palette index. Retrofit = rewrite the glyph pipeline
-   and every call site. This is what lets chrome text, tab titles, the command
-   palette and block headers all share the grid's atlas.
-3. **`render(&[Viewport], &Chrome)`** even though M1 always passes one viewport.
-   Retrofit = restructure the render loop for M3 panes.
+## M3 — the fleet, on your LAN
 
-### If M1 must not slip, cut in this order
+**Win condition:** *"My Mac's shell, in a window on my Windows box, at desk
+latency."*
 
-Theme importers → macOS/Linux chrome parity → cursor smear (ship the spring,
-default `trail = "none"`) → theme gallery UI (a CLI is enough).
-
-**Do not cut:** the three items above, `PaletteSnapshot` in core, or the
-settings `diff()`/`Invalidation` machinery.
-
----
-
-## Milestone 2 — command blocks
-
-OSC 133 A/B/C/D plus OSC 7 (cwd) and OSC 633 (VS Code alias), parsed in
-`zest-core` and attached to absolute line ranges. Shell integration for
-PowerShell/bash/zsh/fish with consented auto-install — oh-my-posh can emit these.
-Block folding, re-run, copy-output.
-
-The markers are already recognized and ignored, so they never reach the grid as
-garbage.
-
-> This is the strongest reason not to depend on `alacritty_terminal` wholesale:
-> blocks need new row fields, a side index surviving scrollback eviction, and OSC
-> handler hooks. Every one is a fork of an explicitly-unstable crate.
-
----
-
-## Milestone 3 — "my phone on my wifi drives a terminal"
-
-No Cloudflare, no actors yet. Prove the protocol in isolation.
+No Cloudflare, no identity infrastructure — which is what makes this reachable
+much sooner than the old "phone over the internet" framing. → WS-C1, WS-F,
+WS-H (discovery only).
 
 **The crux: ship grid deltas, not raw PTY bytes.** Raw bytes (ttyd/wetty) are
 simpler and proven, but lose on four counts — resync is unsolvable on a
-reconnecting mobile link, deltas coalesce and bytes don't, blocks are semantic
-rather than textual, and two VT emulators means two truths. This is mosh's State
-Synchronization Protocol plus a semantic block layer. → ADR-004.
+reconnecting link, deltas coalesce and bytes don't, blocks are semantic rather
+than textual, and two VT emulators means two truths. → ADR-004.
 
-- [ ] `zest-core` subscriber API: `subscribe` / `delta` / `keyframe` / `ack` /
-      `scrollback`. Absolute line IDs and the sequence counter already exist.
-- [ ] `zest-proto`: binary WebSocket, MessagePack envelope, packed delta ops
-      (`SCROLL`, `ROW`, `CURSOR`, `ERASE`, `ATTRDEF`, `SBPUSH`, `IMAGE`).
-      Attribute interning and `SCROLL`-before-`ROW` carry most of the win.
-- [ ] `ts-rs` codegen with golden-fixture contract tests in CI.
-- [ ] `zest-daemon`: axum + tokio-tungstenite, SQLite scrollback.
-- [ ] A minimal SignalX web client.
-- [ ] **Conformance corpus**: replay the `.vtrec` files, apply deltas in the TS
-      client, assert cell-for-cell identity at every frame. This is the spine.
-- [ ] Chaos-resync 10,000 times at random disconnect points.
-- [ ] Bun `--compile` spike for the M4 sidecar — one day, done early.
+## M4 — the fleet, anywhere
 
----
+Cloudflare Tunnel + Access per host, device enrollment, the directory Worker,
+the web client. → WS-G, WS-H.
 
-## Milestone 4 — anywhere, over Cloudflare, with blocks
-
-**Actors are the control plane, never the data plane**, and they run **locally**.
-→ ADR-005.
+**Actors are the control plane, never the data plane**, and they run **locally**
+on each host. → ADR-005, ADR-006.
 
 - [ ] Bun single-file sidecar hosting `@sigx/actors`, spawned as a child of the
       daemon, length-prefixed msgpack over stdio. Never in the PTY hot path.
-- [ ] `SessionActor`, `DaemonActor`, `WorkspaceActor`.
-- [ ] Cloudflare Tunnel + Access. **Origin-side JWT validation is mandatory** —
-      the origin never trusts the tunnel.
 - [ ] Device enrollment: non-extractable Ed25519 key, desktop approval modal
-      with a matching code. A stolen Access session alone must not get a shell.
+      with a matching code.
 - [ ] Attach tickets (30s TTL, single use) minted by the actor.
-- [ ] Remote access **off by default**, persistent indicator, audit log.
 
----
+## M5 — phone, AI, end-to-end encryption
 
-## Milestone 5 — phone, AI, end-to-end encryption
-
-- [ ] Lynx app. **Blocks-first, not grid-first** — a phone is excellent at lists,
-      and you drop into grid view only when `Modes.altScreen` is true. Sticky
-      `Ctrl` toggle, local history from the block index, long-press to re-run.
-- [ ] **E2E encryption of the data plane** (Noise IK / HPKE, keys bound to device
-      enrollment). The only mitigation that survives a hostile relay — first
-      class, not a stretch goal.
-- [ ] `AiActor` over sigx `streams:`, with per-block consent and redaction.
-- [ ] Edge `DeviceActor` for push only: `new_sqlite_classes` (irreversible),
-      `define: __DEV__`, `nodejs_compat`, export a factory not an instance.
+- [ ] Lynx app. **Blocks-first, not grid-first** — a phone is excellent at
+      lists, and you drop into grid view only when `alt_screen` is true, which
+      the host already reports. Sticky `Ctrl` toggle, local history from the
+      block index, long-press to re-run.
+- [ ] **E2E encryption of the data plane** (Noise IK / HPKE, keys bound to
+      device enrollment). The only mitigation that survives a hostile relay —
+      first class, not a stretch goal. It converts Cloudflare from a trusted
+      party into a dumb pipe.
+- [ ] `AiActor` over sigx `streams:`, per-block consent, redaction.
 
 ---
 

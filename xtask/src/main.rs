@@ -31,6 +31,24 @@ const BOUNDARIES: &[Boundary] = &[
         forbidden: &["wgpu", "winit", "windows", "windows-sys", "tokio", "notify", "directories"],
         args: &["--no-default-features"],
     },
+    // The wire types are read by the daemon, the desktop app acting as a
+    // client, and -- through generated bindings -- the browser and the phone.
+    // A renderer or a runtime in here would make the contract carry an
+    // implementation, which is how a protocol stops being a protocol.
+    Boundary {
+        krate: "zest-proto",
+        forbidden: &["wgpu", "winit", "windows", "windows-sys", "tokio", "zest-pty"],
+        args: &[],
+    },
+    // Discovery and transport selection decide *how* to reach a host, never
+    // what a session is. `zest-core` is reachable from here through the wire
+    // types and that is fine; owning a pty or a window is not, because routing
+    // that can start a shell has stopped being routing.
+    Boundary {
+        krate: "zest-mesh",
+        forbidden: &["wgpu", "winit", "zest-pty", "zest-app", "zest-render-wgpu"],
+        args: &[],
+    },
 ];
 
 /// A crate, the dependencies it must not have, and the feature set to check.

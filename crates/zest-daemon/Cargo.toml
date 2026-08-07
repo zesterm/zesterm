@@ -1,0 +1,23 @@
+[package]
+name = "zest-daemon"
+description = "Owns the PTYs on a machine and serves them to attached clients."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "zest-daemon"
+path = "src/main.rs"
+
+[dependencies]
+zest-core.workspace = true
+zest-pty.workspace = true
+zest-proto.workspace = true
+zest-mesh.workspace = true
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

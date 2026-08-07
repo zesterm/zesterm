@@ -15,6 +15,7 @@ mod mouse;
 mod pipeline_cache;
 mod platform;
 mod session;
+mod source;
 
 use winit::event_loop::EventLoop;
 
@@ -110,6 +111,7 @@ fn main() {
     // the config file disagrees with.
     let mut cli = CliLayer::default();
     let mut profile = None;
+    let mut startup_probe = false;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -146,6 +148,10 @@ fn main() {
             "--profile" => {
                 profile = args.get(i + 1).cloned();
                 i += 2;
+            }
+            "--startup-probe" => {
+                startup_probe = true;
+                i += 1;
             }
             "--scroll-on-output" => {
                 cli.set_bool("scrolling.scroll_on_output", true);
@@ -200,6 +206,7 @@ fn main() {
                      \x20                 (must come last; takes all remaining args)\n\
                      --themes          list built-in themes\n\
                      --config          print the config file path\n\
+                     --startup-probe   report time to first paint, then exit\n\
                      --schema          print the settings JSON Schema\n\n\
                      Flags are the strongest layer of the settings cascade;\n\
                      everything else lives in the config file."
@@ -243,6 +250,9 @@ fn main() {
     let proxy = event_loop.create_proxy();
 
     let mut app = App::new(load.resolved.settings, cli_table, profile_name, proxy);
+    if startup_probe {
+        app = app.with_startup_probe();
+    }
     event_loop.run_app(&mut app).expect("run");
 }
 

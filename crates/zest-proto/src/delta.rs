@@ -1,0 +1,267 @@
+//! Grid deltas.
+//!
+//! Three encoding decisions carry most of the win, and all three are shapes
+//! rather than optimizations — they cannot be added later without changing the
+//! wire:
+//!
+//! **Attribute interning.** A syntax-highlighted row has ~50 style changes and
+//! perhaps 8 distinct styles. [`AttrDef`] names each style once per session;
+//! [`Run`] refers to it by [`AttrId`]. Inline styles would put the colours on
+//! the wire fifty times per row.
+//!
+//! **`Scroll` before `Row`.** A `tail -f` line is one 7-byte [`DeltaOp::Scroll`]
+//! plus one [`DeltaOp::Row`], instead of a full repaint. Ordering matters: the
+//! scroll must be applied first or the row indices refer to the old grid.
+//!
+//! **Runs carry an explicit cell count.** Three renderers — wgpu, the browser,
+//! Lynx — will not agree on `wcwidth` for every emoji and combining sequence,
+//! and a client that computes width itself will drift from the host's grid in a
+//! way that is nearly impossible to diagnose. The host has already decided how
+//! many cells the text occupies; it says so, and clients obey.
+
+use serde::{Deserialize, Serialize};
+use zest_core::{CellFlags, Color};
+
+/// An interned attribute, scoped to one session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct AttrId(pub u16);
+
+/// The style an [`AttrId`] stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct AttrDef {
+    pub id: AttrId,
+    /// Unresolved, exactly as the grid holds it.
+    ///
+    /// `Color::Indexed(1)` stays indexed all the way to the client, so the same
+    /// session can render under a dark theme on the desktop and a light one on
+    /// the phone at the same time. Resolving host-side would make the theme a
+    /// property of the session. → ADR-002.
+    #[cfg_attr(feature = "ts", ts(type = "unknown"))]
+    pub fg: Color,
+    #[cfg_attr(feature = "ts", ts(type = "unknown"))]
+    pub bg: Color,
+    /// Bold, italic, underline, inverse and the rest, as raw bits.
+    ///
+    /// Pinned to an integer rather than taking `bitflags`' own representation,
+    /// which is a names-string (`"BOLD | ITALIC"`) in human-readable formats and
+    /// bits otherwise. A wire type that changes shape with the encoding is a
+    /// trap for three client implementations, and the names would have to be
+    /// kept in sync by hand in each of them.
+    #[serde(with = "flags_as_bits")]
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub flags: CellFlags,
+}
+
+mod flags_as_bits {
+    use super::CellFlags;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(flags: &CellFlags, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_u16(flags.bits())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<CellFlags, D::Error> {
+        // Unknown bits are dropped rather than rejected. A newer host that has
+        // learned an attribute this client does not know about should render
+        // slightly plainer here, not fail to render at all.
+        Ok(CellFlags::from_bits_truncate(u16::deserialize(d)?))
+    }
+}
+
+/// A stretch of cells sharing one attribute.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct Run {
+    pub attr: AttrId,
+    /// How many grid cells this run occupies.
+    ///
+    /// Not derivable from `text`: a CJK character is one `char` and two cells, a
+    /// ZWJ family emoji is seven codepoints and two cells. The host knows;
+    /// clients must not recompute. See the module docs.
+    pub cells: u16,
+    pub text: String,
+}
+
+/// One row, as runs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct RowPayload {
+    /// Absolute line id — stable across scrolling and scrollback eviction.
+    ///
+    /// Absolute rather than viewport-relative so a selection, a command block,
+    /// and a scrollback request all name the same thing on every client even as
+    /// output pushes the viewport along.
+    pub line: i64,
+    pub runs: Vec<Run>,
+    /// The line continues onto the next one rather than ending.
+    ///
+    /// Carried so a client can copy a wrapped line without a spurious newline,
+    /// and so reflow becomes possible later without a wire change.
+    pub wrapped: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct CursorState {
+    pub row: u16,
+    pub col: u16,
+    pub visible: bool,
+    /// DECSCUSR shape, as the program asked for it.
+    pub shape: u8,
+}
+
+/// One change to the grid.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum DeltaOp {
+    /// Rows moved. Emitted **before** any `Row` in the same delta.
+    Scroll { top: u16, bottom: u16, lines: i16 },
+    /// A row's new content.
+    Row { row: u16, payload: RowPayload },
+    /// A rectangle cleared to an attribute.
+    Erase { top: u16, left: u16, bottom: u16, right: u16, attr: AttrId },
+    Cursor { cursor: CursorState },
+    /// A line left the viewport into scrollback.
+    ///
+    /// Sent separately from `Scroll` because a client keeps history the host may
+    /// have already evicted, and needs to know what to append rather than
+    /// inferring it from a scroll it might have coalesced away.
+    SbPush { payload: RowPayload },
+    /// The program entered or left the alternate screen.
+    ///
+    /// The phone client switches between blocks view and grid view on this.
+    AltScreen { active: bool },
+    /// The window title changed (OSC 0/2).
+    Title { title: String },
+}
+
+/// A batch applied atomically.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct Delta {
+    /// Attributes first used in this batch. Cumulative for the session.
+    pub attrs: Vec<AttrDef>,
+    pub ops: Vec<DeltaOp>,
+}
+
+impl Delta {
+    /// Whether the ops are in an order a client can apply directly.
+    ///
+    /// Applying a `Row` before a `Scroll` in the same batch writes to the row
+    /// the scroll is about to move, so the grid ends up subtly wrong in a way
+    /// that only shows under `tail -f`. Asserted in tests rather than sorted at
+    /// runtime, because a producer emitting them out of order has a bug that
+    /// silently reordering would hide.
+    #[must_use]
+    pub fn scrolls_come_first(&self) -> bool {
+        let last_scroll = self.ops.iter().rposition(|o| matches!(o, DeltaOp::Scroll { .. }));
+        let first_row = self.ops.iter().position(|o| matches!(o, DeltaOp::Row { .. }));
+        match (last_scroll, first_row) {
+            (Some(s), Some(r)) => s < r,
+            _ => true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(line: i64) -> RowPayload {
+        RowPayload {
+            line,
+            runs: vec![Run { attr: AttrId(0), cells: 5, text: "hello".to_string() }],
+            wrapped: false,
+        }
+    }
+
+    #[test]
+    fn a_run_states_its_cell_count_independently_of_its_text() {
+        // The property that keeps three renderers agreeing. Two CJK characters
+        // are two chars and four cells; a client that counted chars would draw
+        // everything after them in the wrong column.
+        let run = Run { attr: AttrId(0), cells: 4, text: "世界".to_string() };
+        assert_eq!(run.text.chars().count(), 2);
+        assert_eq!(run.cells, 4, "the host's cell count is the truth");
+    }
+
+    #[test]
+    fn scroll_before_row_is_detectable() {
+        let good = Delta {
+            attrs: vec![],
+            ops: vec![
+                DeltaOp::Scroll { top: 0, bottom: 23, lines: 1 },
+                DeltaOp::Row { row: 23, payload: row(100) },
+            ],
+        };
+        assert!(good.scrolls_come_first());
+
+        let bad = Delta {
+            attrs: vec![],
+            ops: vec![
+                DeltaOp::Row { row: 23, payload: row(100) },
+                DeltaOp::Scroll { top: 0, bottom: 23, lines: 1 },
+            ],
+        };
+        assert!(!bad.scrolls_come_first(), "a row written before the scroll that moves it");
+    }
+
+    #[test]
+    fn a_delta_with_no_scroll_is_trivially_ordered() {
+        let d = Delta { attrs: vec![], ops: vec![DeltaOp::Row { row: 0, payload: row(1) }] };
+        assert!(d.scrolls_come_first());
+    }
+
+    #[test]
+    fn colours_stay_unresolved_on_the_wire() {
+        // Resolving host-side would make the theme a property of the session,
+        // so the desktop and the phone could not render it differently.
+        let def = AttrDef {
+            id: AttrId(1),
+            fg: Color::Indexed(4),
+            bg: Color::Default,
+            flags: CellFlags::BOLD,
+        };
+        let json = serde_json::to_string(&def).expect("serialize");
+        let back: AttrDef = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.fg, Color::Indexed(4), "an index was resolved to rgb");
+        assert_eq!(back.bg, Color::Default);
+    }
+
+    #[test]
+    fn flags_are_an_integer_in_every_encoding() {
+        let def = AttrDef {
+            id: AttrId(1),
+            fg: Color::Default,
+            bg: Color::Default,
+            flags: CellFlags::BOLD | CellFlags::ITALIC,
+        };
+        let json = serde_json::to_string(&def).expect("serialize");
+        let expected = (CellFlags::BOLD | CellFlags::ITALIC).bits();
+        assert!(json.contains(&format!("\"flags\":{expected}")), "{json}");
+
+        let back: AttrDef = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.flags, def.flags);
+    }
+
+    #[test]
+    fn an_unknown_attribute_bit_renders_plainer_rather_than_failing() {
+        // A newer host may know an attribute this client does not. Dropping the
+        // bit degrades the look; rejecting the message loses the whole frame.
+        let json = r#"{"id":1,"fg":"Default","bg":"Default","flags":65535}"#;
+        let parsed: AttrDef = serde_json::from_str(json).expect("tolerated");
+        assert!(parsed.flags.contains(CellFlags::BOLD));
+    }
+
+    #[test]
+    fn rows_are_addressed_by_absolute_line_id() {
+        // Viewport-relative ids would make a scrollback request and a selection
+        // mean different things on different clients as output arrives.
+        let payload = row(-1);
+        let json = serde_json::to_string(&payload).expect("serialize");
+        assert!(json.contains("\"line\":-1"), "{json}");
+    }
+}

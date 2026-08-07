@@ -17,9 +17,18 @@ use crate::mouse::{self, MouseState};
 use crate::pipeline_cache;
 use crate::platform;
 use crate::session::{Session, Wakeup};
+use crate::source::{Origin, SessionSource};
 
 /// Padding between the window edge and the grid, in logical pixels.
 const PADDING: u32 = 8;
+
+/// How long the window may take to appear, in milliseconds.
+///
+/// Measured on this machine at ~50ms. The budget is twice that: tight enough
+/// that adding real work before the first paint fails it, loose enough that a
+/// slower machine or a cold file cache does not. Checked by
+/// `zesterm --startup-probe`.
+const STARTUP_BUDGET_MS: u64 = 100;
 
 pub struct Config {
     pub font_families: Vec<String>,
@@ -88,7 +97,13 @@ pub struct App {
 
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
-    session: Option<Session>,
+    /// The terminal this window shows, wherever its shell actually runs.
+    ///
+    /// Behind [`SessionSource`] rather than being a concrete local `Session`,
+    /// because a window on this machine showing a shell on the Mac is the point
+    /// of the whole project. Boxing costs one indirection per keystroke and per
+    /// frame, against a path that already takes a mutex.
+    session: Option<Box<dyn SessionSource>>,
     fonts: Option<Fonts>,
     palette: zest_core::PaletteSnapshot,
 
@@ -113,6 +128,8 @@ pub struct App {
     profile: Option<String>,
     /// Dropping this stops watching the config file.
     config_watcher: Option<zest_config::Watcher>,
+    /// Report time-to-first-paint and exit, instead of running a terminal.
+    startup_probe: bool,
 }
 
 impl App {
@@ -157,7 +174,20 @@ impl App {
             cli_layer,
             profile,
             config_watcher: None,
+            startup_probe: false,
         }
+    }
+
+    /// Measure time to first paint, print it, and exit.
+    ///
+    /// A flag rather than a `#[test]`: first paint means a real window on a real
+    /// compositor, which a headless test runner cannot produce. This makes the
+    /// number a command anyone — or any CI job with a desktop — can run, instead
+    /// of an assertion that would have to be silently skipped.
+    #[must_use]
+    pub fn with_startup_probe(mut self) -> Self {
+        self.startup_probe = true;
+        self
     }
 
     /// Start watching the config file.
@@ -194,7 +224,7 @@ impl App {
         let text = self
             .session
             .as_ref()
-            .and_then(|s| s.terminal.lock().selection_text());
+            .and_then(|s| s.terminal().lock().selection_text());
         if let Some(text) = text {
             self.set_clipboard(text);
         }
@@ -207,9 +237,9 @@ impl App {
             Ok(text) if !text.is_empty() => {
                 // The terminal owns the encoding: it knows whether the program
                 // asked for bracketed paste, and it normalizes line endings.
-                let bytes = session.terminal.lock().encode_paste(&text);
+                let bytes = session.terminal().lock().encode_paste(&text);
                 session.write(bytes);
-                session.terminal.lock().scroll_to_bottom();
+                session.terminal().lock().scroll_to_bottom();
             }
             Ok(_) => {}
             Err(e) => tracing::debug!(error = %e, "nothing to paste"),
@@ -233,7 +263,7 @@ impl App {
         let Some(session) = self.session.as_ref() else { return false };
 
         let encoded = {
-            let term = session.terminal.lock();
+            let term = session.terminal().lock();
             let modes = term.modes();
             if !modes.mouse_enabled() {
                 return false;
@@ -273,7 +303,7 @@ impl App {
         let Some(session) = self.session.as_ref() else { return false };
 
         let encoded = {
-            let modes = session.terminal.lock().modes();
+            let modes = session.terminal().lock().modes();
             if !modes.mouse_enabled() {
                 return false;
             }
@@ -308,7 +338,7 @@ impl App {
         let Some(session) = self.session.as_ref() else { return false };
         let (row, col) = self.pointer_cell;
 
-        let modes = session.terminal.lock().modes();
+        let modes = session.terminal().lock().modes();
         if !modes.mouse_enabled() {
             return false;
         }
@@ -336,7 +366,7 @@ impl App {
         let row = ((y - f64::from(PADDING)).max(0.0) / f64::from(m.cell_h)) as usize;
 
         let Some(session) = self.session.as_ref() else { return (row, col) };
-        let term = session.terminal.lock();
+        let term = session.terminal().lock();
         let grid = term.grid();
         (row.min(grid.rows().saturating_sub(1)), col.min(grid.cols().saturating_sub(1)))
     }
@@ -401,7 +431,7 @@ impl App {
         // ordering overlaps the CPU work with the wait and is the single
         // highest-leverage latency trick in the renderer.
         {
-            let term = session.terminal.lock();
+            let term = session.terminal().lock();
             self.scene.build(
                 &gpu.device,
                 &gpu.queue,
@@ -531,7 +561,7 @@ impl App {
         // `OSC 4` set before the theme change is deliberately lost -- a theme
         // change is exactly the moment the seed should win.
         if let Some(session) = self.session.as_ref() {
-            session.terminal.lock().set_palette(self.palette.clone());
+            session.terminal().lock().set_palette(self.palette.clone());
         }
         if let Some(w) = self.window.as_ref() {
             let bg = resolved.background;
@@ -617,7 +647,32 @@ impl ApplicationHandler<Wakeup> for App {
         let bg = self.palette.background;
         platform::set_background_color(&window, bg.r, bg.g, bg.b);
         window.set_visible(true);
-        tracing::debug!(elapsed_ms = t0.elapsed().as_millis(), "window shown");
+        let first_paint = t0.elapsed();
+        tracing::debug!(elapsed_ms = first_paint.as_millis(), "window shown");
+
+        // The number the daemon work must not quietly ruin.
+        //
+        // Attaching to a daemon (ADR-007) puts a find-or-spawn and a socket
+        // handshake into startup, and the tempting place to put them is right
+        // here — before the window exists, so the session is ready when it does.
+        // That would trade a hard-won 50ms for several hundred. This prints on
+        // demand so the regression is a failing command rather than a vague
+        // sense that it used to feel faster.
+        if self.startup_probe {
+            println!("first_paint_ms={}", first_paint.as_millis());
+            if first_paint > std::time::Duration::from_millis(STARTUP_BUDGET_MS) {
+                eprintln!(
+                    "FAIL: first paint took {}ms, budget is {STARTUP_BUDGET_MS}ms.\n\
+                     Something now runs before the window is shown. The window does \
+                     not need a GPU, a font, a shell or a daemon to be the right \
+                     colour -- see the comment above this check.",
+                    first_paint.as_millis()
+                );
+                std::process::exit(1);
+            }
+            el.exit();
+            return;
+        }
 
         let scale = window.scale_factor() as f32;
         let typo = Typography { scale_factor: scale, ..self.config.typography };
@@ -659,7 +714,7 @@ impl ApplicationHandler<Wakeup> for App {
             },
         )
         .expect("spawn shell");
-        session.terminal.lock().set_palette(self.palette.clone());
+        session.terminal().lock().set_palette(self.palette.clone());
         tracing::debug!(elapsed_ms = t0.elapsed().as_millis(), cols, rows, "shell spawned");
 
         // The surface is NOT sRGB (the resolve pass encodes), so the clear value
@@ -684,7 +739,10 @@ impl ApplicationHandler<Wakeup> for App {
 
         self.fonts = Some(fonts);
         self.gpu = Some(gpu);
-        self.session = Some(session);
+        // Boxed into the trait here and nowhere else: everything downstream of
+        // this line works the same whether the shell is in this process or on
+        // another machine, which is the property the abstraction exists for.
+        self.session = Some(Box::new(session));
         self.window = Some(window);
 
         // The window is already visible and painted with the theme background
@@ -705,6 +763,7 @@ impl ApplicationHandler<Wakeup> for App {
             rows,
             scale,
             startup_ms = t0.elapsed().as_millis(),
+            origin = ?self.session.as_ref().map_or(Origin::InProcess, |s| s.origin()),
             "zesterm ready"
         );
 
@@ -792,7 +851,7 @@ impl ApplicationHandler<Wakeup> for App {
                     }
                 }
 
-                let modes = session.terminal.lock().modes();
+                let modes = session.terminal().lock().modes();
 
                 // Shift+PgUp/PgDn pages the scrollback. The shift is what makes
                 // this unambiguous: bare PgUp still belongs to the program, and
@@ -809,9 +868,9 @@ impl ApplicationHandler<Wakeup> for App {
                         // A page is one screen less a line of overlap, which is
                         // what makes paged reading continuous rather than
                         // guessing where the seam was.
-                        let rows = session.terminal.lock().grid().rows();
+                        let rows = session.terminal().lock().grid().rows();
                         let lines = dir * (rows.saturating_sub(1).max(1)) as isize;
-                        session.terminal.lock().scroll_display(lines);
+                        session.terminal().lock().scroll_display(lines);
                         session.mark_dirty();
                         if let Some(w) = self.window.as_ref() {
                             w.request_redraw();
@@ -825,7 +884,7 @@ impl ApplicationHandler<Wakeup> for App {
                     // input to the next frame adds a whole frame of latency for
                     // nothing.
                     session.write(bytes);
-                    let mut term = session.terminal.lock();
+                    let mut term = session.terminal().lock();
                     // Typing scrolls back to the bottom, which is what every
                     // terminal does and what users expect.
                     term.scroll_to_bottom();
@@ -850,7 +909,7 @@ impl ApplicationHandler<Wakeup> for App {
                     return;
                 }
                 let Some(session) = self.session.as_ref() else { return };
-                let mut term = session.terminal.lock();
+                let mut term = session.terminal().lock();
                 if let (Some(mut sel), Some(pos)) =
                     (term.selection(), term.abs_pos(cell.0, cell.1))
                 {
@@ -888,7 +947,7 @@ impl ApplicationHandler<Wakeup> for App {
                 match (button, state) {
                     (MouseButton::Left, ElementState::Pressed) => {
                         let mode = self.mouse.press(row, col);
-                        let mut term = session.terminal.lock();
+                        let mut term = session.terminal().lock();
                         if let Some(pos) = term.abs_pos(row, col) {
                             let sel = mouse::begin(&term, pos, mode, self.modifiers.alt_key());
                             term.set_selection(Some(sel));
@@ -913,7 +972,7 @@ impl ApplicationHandler<Wakeup> for App {
                         // borrow ends before the clipboard calls, which need
                         // `&mut self`.
                         let text = {
-                            let mut term = session.terminal.lock();
+                            let mut term = session.terminal().lock();
                             let text = term.selection_text();
                             if text.is_some() {
                                 term.set_selection(None);
@@ -955,7 +1014,7 @@ impl ApplicationHandler<Wakeup> for App {
                 // screen there is no scrollback to move through anyway -- `less`
                 // and `man` expect the wheel as arrow keys, so scrolling our own
                 // (empty) history would look like the wheel doing nothing.
-                let alt = session.terminal.lock().modes().contains(zest_core::Modes::ALT_SCREEN);
+                let alt = session.terminal().lock().modes().contains(zest_core::Modes::ALT_SCREEN);
                 let count = whole.abs() as usize * 3;
                 let up = whole > 0.0;
 
@@ -972,7 +1031,7 @@ impl ApplicationHandler<Wakeup> for App {
                     return;
                 }
 
-                session.terminal.lock().scroll_display(whole as isize * 3);
+                session.terminal().lock().scroll_display(whole as isize * 3);
                 session.mark_dirty();
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
@@ -983,7 +1042,7 @@ impl ApplicationHandler<Wakeup> for App {
                 // Damage gates the frame entirely. An idle terminal must use 0%
                 // GPU -- that is a hard requirement, and it is what separates a
                 // real terminal from a demo.
-                let dirty = self.session.as_ref().is_some_and(Session::take_dirty);
+                let dirty = self.session.as_ref().is_some_and(|s| s.take_dirty());
                 if dirty {
                     // Applied here rather than in the parser thread: the policy
                     // is about what the user is looking at, and the parser has
@@ -991,7 +1050,7 @@ impl ApplicationHandler<Wakeup> for App {
                     // snap per frame, not one per line.
                     if self.config.scroll_on_output {
                         if let Some(session) = self.session.as_ref() {
-                            session.terminal.lock().scroll_to_bottom();
+                            session.terminal().lock().scroll_to_bottom();
                         }
                     }
                     self.redraw();

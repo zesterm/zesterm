@@ -1,0 +1,22 @@
+[package]
+name = "zest-mesh"
+description = "Host identity, peer discovery, and transport selection for the fleet."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["lan"]
+# mDNS discovery and direct LAN sockets. The M3 path.
+lan = []
+# Cloudflare Tunnel + Access. The M4 path.
+cloud = []
+
+[dependencies]
+zest-proto.workspace = true
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

@@ -4095,6 +4095,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "zest-daemon"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.19",
+ "tracing",
+ "tracing-subscriber",
+ "zest-core",
+ "zest-mesh",
+ "zest-proto",
+ "zest-pty",
+]
+
+[[package]]
 name = "zest-font"
 version = "0.1.0"
 dependencies = [
@@ -4110,6 +4124,27 @@ dependencies = [
 [[package]]
 name = "zest-input"
 version = "0.1.0"
+
+[[package]]
+name = "zest-mesh"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.19",
+ "tracing",
+ "zest-proto",
+]
+
+[[package]]
+name = "zest-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "ts-rs",
+ "zest-core",
+]
 
 [[package]]
 name = "zest-pty"

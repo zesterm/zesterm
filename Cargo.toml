@@ -1,5 +1,12 @@
 [workspace]
 resolver = "2"
+# Every crate the project will have is registered here up front, including the
+# ones that are still skeletons.
+#
+# This looks like premature structure and is the opposite: parallel workstreams
+# each adding a crate would each edit this list and `Cargo.lock`, which is the
+# one file guaranteed to conflict between them. Registering the whole set once
+# means a stream only ever touches files inside its own crate.
 members = [
     "crates/zest-core",
     "crates/zest-pty",
@@ -8,6 +15,9 @@ members = [
     "crates/zest-render-wgpu",
     "crates/zest-input",
     "crates/zest-config",
+    "crates/zest-proto",
+    "crates/zest-mesh",
+    "crates/zest-daemon",
     "crates/zest-app",
     "xtask",
 ]
@@ -29,6 +39,9 @@ zest-font = { path = "crates/zest-font" }
 zest-render-wgpu = { path = "crates/zest-render-wgpu" }
 zest-input = { path = "crates/zest-input" }
 zest-config = { path = "crates/zest-config" }
+zest-proto = { path = "crates/zest-proto" }
+zest-mesh = { path = "crates/zest-mesh" }
+zest-daemon = { path = "crates/zest-daemon" }
 
 # --- graphics: these three MUST move together. Version skew between wgpu,
 #     winit and raw-window-handle is the single most common wgpu papercut. ---

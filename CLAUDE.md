@@ -1,15 +1,49 @@
 # zesterm — orientation
 
-A GPU-accelerated, themable terminal, built so it can later be driven from a
-browser and a phone.
+A GPU-accelerated, themable terminal, and a **fleet**: every machine runs a
+daemon and can be reached from every device. The Mac's shell in a window on
+Windows; a Linux build watched from a phone.
 
 ## Read these first
 
-1. **[docs/ROADMAP.md](docs/ROADMAP.md)** — the plan, with current state. This is
-   the source of truth; a GitHub tracking issue mirrors it.
-2. **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — decisions that were
+1. **[docs/ROADMAP.md](docs/ROADMAP.md)** — the plan, current state, and the
+   workstream map. Source of truth; issue #1 mirrors it.
+2. **[docs/CONTRACTS.md](docs/CONTRACTS.md)** — the frozen seams between
+   workstreams. **Read this before touching a shared type.**
+3. **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — decisions that were
    expensive to reach and are cheap to accidentally undo. Argue with the
    reasoning there before changing any of them.
+
+## If you are working on one workstream
+
+Several run in parallel. The rules exist so that stays cheaper than working
+serially — which it stops being the moment two streams edit the same file.
+
+- **Find your stream in the ROADMAP table** and work only inside the paths it
+  owns. If the job seems to need a file another stream owns, that is a signal
+  the seam is wrong: say so rather than reaching across.
+- **Never edit the root `Cargo.toml` or `Cargo.lock`.** Every crate the project
+  will have is registered already, including the skeletons. Adding a
+  *dependency* to your own crate's manifest is fine.
+- **Never change a frozen contract.** Open an issue and wait — see
+  [docs/CONTRACTS.md](docs/CONTRACTS.md). Adding a new type beside one is fine.
+- **One git worktree and branch per stream**, or agents fight over `target/`
+  and each other's edits:
+  ```
+  git worktree add ../zesterm-ws-c ws/c-unix-pty
+  ```
+  Merge to `main` at stream boundaries, not continuously.
+- **Update the roadmap in the same commit as the work**, then refresh the issue.
+  A roadmap that lags is one nobody trusts.
+
+Four gates, all of which must pass before you call something done:
+
+```
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo xtask check-deps
+cargo xtask check-schema
+```
 
 ## The one invariant
 
@@ -34,7 +68,10 @@ cargo clippy --workspace --all-targets
 cargo xtask check-deps
 cargo build -p zest-core --no-default-features --target wasm32-unknown-unknown
 
+cargo xtask schema                             # regenerate the settings JSON Schema
+
 cargo run --profile fast -p zest-app           # the terminal, quick rebuild
+./target/fast/zesterm --startup-probe          # time to first paint; fails over 100ms
 cargo build --release && ./target/release/zesterm   # the shipping build
 cargo run -p zest-app  --example headless      # a terminal with no window
 cargo run -p zest-font --example font_dump     # font sample sheet as a PNG

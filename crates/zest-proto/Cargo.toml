@@ -1,0 +1,29 @@
+[package]
+name = "zest-proto"
+description = "Wire types for the mesh: host and session identity, grid deltas, envelopes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+# `ts-rs` generates the TypeScript the web and phone clients decode against. Off
+# by default so the daemon does not carry a codegen dependency into a release
+# build; `cargo test -p zest-proto --features ts` writes the bindings.
+default = []
+ts = ["dep:ts-rs"]
+
+# This crate crosses to the browser and the phone, so it holds the same line
+# `zest-core` does: no wgpu, no winit, no tokio, no platform APIs. It is data and
+# the rules for encoding it, nothing else. `cargo xtask check-deps` enforces it.
+[dependencies]
+zest-core = { workspace = true, features = ["serde"] }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+ts-rs = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

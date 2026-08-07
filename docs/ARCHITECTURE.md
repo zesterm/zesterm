@@ -138,3 +138,94 @@ origin-initiated. There is no address to advertise. The host-to-host mount also 
 policies, so it would expose an unauthenticated RPC surface.
 
 Do not "simplify" toward edge actors.
+
+---
+
+## ADR-006 — zesterm is a fleet of hosts, not one machine exposed to the internet
+
+**Status:** accepted (design; implementation is M3–M4)
+
+The original framing was *"reach **this** machine's shells from the internet"*: one host, many
+clients. That is not what the tool is for. Its author works across a Mac, a Windows box and
+Linux machines, and the thing worth having is **every machine reachable from every device** — the
+Mac's shell in a window on Windows, a Linux build watched from a phone.
+
+So every machine runs a daemon and is a **host**; every window, browser tab and phone is a
+**client**; and a machine is routinely both. One client holds sessions from several hosts at
+once.
+
+### What this forces, and why it is here on day one
+
+**Sessions are addressed `(HostId, SessionId)` from the first protocol byte.** Retrofitting the
+host half means a protocol version bump and a change to every client — desktop, browser, phone —
+released separately. The first daemon will only ever serve one host, and the address still carries
+both.
+
+**Identities are public keys, not random ids.** "Is this really my Mac" has to be answerable by
+asking it to sign a nonce. A UUID is equally unique and proves nothing, and the difference only
+shows up once a relay is in the path — by which point every stored id would need reissuing.
+
+**The LAN is a first-class path, not an optimization.** Two machines on one desk are ~0.3ms apart;
+routing their keystrokes through Cloudflare and back adds 40–100ms to something that should be
+imperceptible. Discovery finds peers locally and connects directly; the tunnel is the fallback for
+when you are away. Both carry identical `zest-proto` messages, so identity, authorization and
+end-to-end encryption are written once.
+
+### The edge directory, and why it does not contradict ADR-005
+
+A fleet needs an answer to *"which of my machines exist, are they up, how do I reach them?"* — and
+that answer cannot live on any single host, because the machine you want to ask about is the one
+that is asleep. So there is a small Cloudflare component: **a directory**.
+
+It holds host ids, labels, and last-seen endpoints. It holds **no session state**: no grid, no
+scrollback, no command text, no cwd. It is not in the data path — clients connect to hosts
+directly, and a directory outage costs discovery, never a running session.
+
+**This is not licence to move sessions to the edge.** ADR-005 stands in full, and its reasoning is
+untouched by the fleet: two extra WAN legs per keystroke are just as bad with five hosts as with
+one, shell output on someone else's disk is just as unacceptable, and a *local* terminal that stops
+working when Cloudflare is unreachable is just as broken. The mesh multiplies the number of hosts;
+it does not change where a session lives. If a future change proposes putting session actors at
+the edge because "the fleet needs a coordination point", the coordination point is the directory
+and it already exists.
+
+---
+
+## ADR-007 — The daemon owns sessions; the GUI app is a client of its own daemon
+
+**Status:** accepted (design; implementation is M3)
+
+Every machine's terminals are owned by `zest-daemon`. The desktop app attaches to its own local
+daemon over a loopback socket — a named pipe on Windows, a unix socket elsewhere — using exactly
+the protocol the phone uses over the network.
+
+**Rejected: the app owns local sessions in-process, and the daemon exists only for remote access.**
+That is faster by an IPC hop and was still the wrong call:
+
+- **Two session paths drift.** The local path is the one exercised every day; the remote one is
+  the one that breaks. Bugs would be found by the client that is hardest to debug.
+- **Closing the window would kill the shell.** For a fleet whose point is picking a session up
+  somewhere else, a session that cannot outlive its window is the feature negated. Close the lid
+  on the laptop, reattach from the phone — that only works if nothing about the session was ever
+  the window's.
+- **The app would have to grow the remote path anyway**, since a window here must show a shell
+  there. Having built it, keeping a second one for local sessions is a choice to maintain two.
+
+### The cost, and where it is actually dangerous
+
+A keystroke now crosses a process boundary: roughly 50–100µs over a loopback socket, against a
+10ms budget. Affordable, and worth measuring rather than assuming.
+
+**Startup is where this genuinely threatens something already won.** The window currently paints
+at ~43ms because a class background brush lets the OS paint it before any GPU exists, and the
+prompt is on the first frame because the shell is spawned *before* GPU initialization so its
+~400ms overlaps the driver's ~850ms.
+
+Find-or-spawn-daemon must occupy that same slot — after the window is visible, overlapping the
+driver. It must never sit between creating the window and showing it. On the warm path, which is
+every launch after the first, it is a pipe open costing microseconds.
+
+`zesterm --startup-probe` prints time-to-first-paint and fails above 100ms, so this is a failing
+command rather than a vague sense that it used to feel faster. A flag rather than a `#[test]`
+because first paint means a real window on a real compositor, and an assertion that gets silently
+skipped in CI protects nothing.

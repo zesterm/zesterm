@@ -205,6 +205,7 @@ impl Session {
     /// Wanted by the coming "restart in <cwd>" affordance, which keeps a dead
     /// session on screen with its history rather than closing the window.
     #[allow(dead_code)]
+    #[allow(dead_code, reason = "the daemon client will need it; the local path uses Wakeup::Exited")]
     pub fn has_exited(&self) -> bool {
         self.exited.load(Ordering::Acquire)
     }
