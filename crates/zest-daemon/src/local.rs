@@ -17,7 +17,6 @@
 //! the remote one's ceremony while getting weaker isolation than it could have
 //! had for free.
 
-use std::io::{Read, Write};
 use std::sync::Arc;
 
 use crate::server::Registry;
@@ -106,7 +105,8 @@ mod imp {
 
 #[cfg(windows)]
 mod imp {
-    use super::{Arc, DaemonConfig, DaemonError, Read, Registry, Write};
+    use super::{Arc, DaemonConfig, DaemonError, Registry};
+    use std::io::{Read, Write};
     use std::ffi::OsStr;
     use std::io;
     use std::os::windows::ffi::OsStrExt;
@@ -386,6 +386,10 @@ pub use imp::{connect, listen};
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Imported here rather than at module level: the unix backend needs neither,
+    // so a module-level import is an unused-import error on macOS and Linux and
+    // invisible on Windows, where the pipe implementation happens to use both.
+    use std::io::{Read, Write};
     use std::time::{Duration, Instant};
     use zest_proto::{frame, ClientId, ClientMessage, HostId, HostMessage, PROTOCOL_VERSION};
 
