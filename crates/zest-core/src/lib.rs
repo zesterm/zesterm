@@ -23,8 +23,17 @@
 
 extern crate alloc;
 
+pub mod cell;
 pub mod color;
+pub mod grid;
+pub mod modes;
 pub mod palette;
+mod perform;
+pub mod term;
 
+pub use cell::{Cell, CellFlags};
 pub use color::{Color, NamedColor};
+pub use grid::{Cursor, Grid, LineId, Row, ScrollRegion};
+pub use modes::{CursorShape, CursorStyle, Modes};
 pub use palette::{Palette, PaletteSnapshot, Rgb};
+pub use term::{Damage, TermEvent, Terminal};
