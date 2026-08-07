@@ -88,3 +88,17 @@ codegen-units = 1
 debug = 1          # keep line tables for profiling
 # NOTE: deliberately NOT panic = "abort" -- we want unwinding for the
 # fuzz harness and for catching parser panics without killing the session.
+
+# For actually running the terminal while working on it.
+#
+# `release` is tuned for shipping: thin LTO and a single codegen unit make a
+# fast binary and a slow build, and rebuilding it to try a one-line change is
+# minutes of waiting. This drops both and is within a few percent at runtime --
+# fast enough that startup and frame timings measured here are still meaningful.
+#
+#     cargo run --profile fast -p zest-app
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true

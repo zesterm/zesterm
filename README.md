@@ -16,6 +16,13 @@ cargo build --release
 ./target/release/zesterm
 ```
 
+While working on it, use the `fast` profile instead — `release` uses thin LTO and
+a single codegen unit, so a one-line change costs ~51s to rebuild versus ~3.6s:
+
+```
+cargo run --profile fast -p zest-app
+```
+
 A window with a real shell in it — GPU-rendered, themed, with working input,
 scrollback, and selection.
 
