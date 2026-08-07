@@ -16,8 +16,13 @@ cargo build --release
 ./target/release/zesterm
 ```
 
-A window with a real shell in it — GPU-rendered, themed, with working input and
-scrollback.
+A window with a real shell in it — GPU-rendered, themed, with working input,
+scrollback, and selection.
+
+Mouse: drag to select, double-click a word (paths and identifiers stay whole),
+triple-click a line, Alt-drag for a rectangle. Ctrl+Shift+C / Ctrl+Shift+V copy
+and paste; right-click copies when there is a selection and pastes otherwise;
+middle-click pastes.
 
 > Run the **binary**, not `cargo run`. Cargo re-resolves the workspace and
 > freshness-checks every source file before it execs anything, which costs
@@ -36,7 +41,7 @@ Milestone 1 (good enough to replace Windows Terminal daily) is in progress; see
 | `zest-theme` — tokens, OKLCH colour math, built-ins, importers | working, 44 tests |
 | Transparency capability probe | done — see ADR-003 |
 | `zest-render-wgpu` — atlas, 3 pipelines, offscreen resolve | renders offscreen, 14 tests |
-| `zest-app` — window, threads, input | working, 17 tests |
+| `zest-app` — window, threads, input, selection | working, 24 tests |
 | `zest-config` | not started |
 
 The font layer renders a sample sheet to a PNG with no GPU involved, which is

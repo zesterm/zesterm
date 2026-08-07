@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
@@ -13,6 +13,7 @@ use zest_pty::{CommandSpec, PtySize};
 use zest_render_wgpu::{Chrome, Renderer, Scene, Viewport};
 
 use crate::input;
+use crate::mouse::{self, MouseState};
 use crate::session::{Session, Wakeup};
 
 /// Padding between the window edge and the grid, in logical pixels.
@@ -65,6 +66,11 @@ pub struct App {
     scene: Scene,
     modifiers: ModifiersState,
     focused: bool,
+    mouse: MouseState,
+    /// Pointer position in cells, updated on every move.
+    pointer_cell: (usize, usize),
+    clipboard: Option<arboard::Clipboard>,
+    selection_bg: zest_core::Rgb,
     /// Accumulated fractional wheel lines, so trackpads do not lose precision.
     scroll_accum: f32,
 }
@@ -73,7 +79,13 @@ impl App {
     pub fn new(config: Config, proxy: EventLoopProxy<Wakeup>) -> Self {
         let theme = zest_theme::builtin::get(&config.theme)
             .unwrap_or_else(zest_theme::builtin::obsidian);
-        let palette = to_core_palette(&zest_theme::resolve(&theme));
+        let resolved = zest_theme::resolve(&theme);
+        let palette = to_core_palette(&resolved);
+        let selection_bg = zest_core::Rgb::new(
+            resolved.selection_bg.r,
+            resolved.selection_bg.g,
+            resolved.selection_bg.b,
+        );
 
         Self {
             config,
@@ -86,8 +98,64 @@ impl App {
             scene: Scene::default(),
             modifiers: ModifiersState::empty(),
             focused: true,
+            mouse: MouseState::default(),
+            pointer_cell: (0, 0),
+            // Created once: constructing a Clipboard opens an OS connection, and
+            // doing that per copy is both slow and flaky under contention.
+            clipboard: arboard::Clipboard::new()
+                .map_err(|e| tracing::warn!(error = %e, "clipboard unavailable"))
+                .ok(),
+            selection_bg,
             scroll_accum: 0.0,
         }
+    }
+
+    fn set_clipboard(&mut self, text: String) {
+        let Some(clipboard) = self.clipboard.as_mut() else { return };
+        if let Err(e) = clipboard.set_text(text) {
+            tracing::warn!(error = %e, "copy failed");
+        }
+    }
+
+    fn copy_selection(&mut self) {
+        // Read through the session first, then hand the owned text on, so the
+        // session borrow does not overlap the `&mut self` clipboard access.
+        let text = self
+            .session
+            .as_ref()
+            .and_then(|s| s.terminal.lock().selection_text());
+        if let Some(text) = text {
+            self.set_clipboard(text);
+        }
+    }
+
+    fn paste(&mut self) {
+        let Some(session) = self.session.as_ref() else { return };
+        let Some(clipboard) = self.clipboard.as_mut() else { return };
+        match clipboard.get_text() {
+            Ok(text) if !text.is_empty() => {
+                // The terminal owns the encoding: it knows whether the program
+                // asked for bracketed paste, and it normalizes line endings.
+                let bytes = session.terminal.lock().encode_paste(&text);
+                session.write(bytes);
+                session.terminal.lock().scroll_to_bottom();
+            }
+            Ok(_) => {}
+            Err(e) => tracing::debug!(error = %e, "nothing to paste"),
+        }
+    }
+
+    /// Pointer pixels to a grid cell, clamped into the viewport.
+    fn cell_at(&self, x: f64, y: f64) -> (usize, usize) {
+        let Some(fonts) = self.fonts.as_ref() else { return (0, 0) };
+        let m = fonts.cell_metrics();
+        let col = ((x - f64::from(PADDING)).max(0.0) / f64::from(m.cell_w)) as usize;
+        let row = ((y - f64::from(PADDING)).max(0.0) / f64::from(m.cell_h)) as usize;
+
+        let Some(session) = self.session.as_ref() else { return (row, col) };
+        let term = session.terminal.lock();
+        let grid = term.grid();
+        (row.min(grid.rows().saturating_sub(1)), col.min(grid.cols().saturating_sub(1)))
     }
 
 
@@ -169,6 +237,8 @@ impl App {
                     scroll_px: 0.0,
                     focused: self.focused,
                     opacity: self.config.opacity,
+                    selection: term.selection(),
+                    selection_bg: self.selection_bg,
                 }],
                 &Chrome::default(),
             );
@@ -369,15 +439,119 @@ impl ApplicationHandler<Wakeup> for App {
                 }
                 let Some(session) = self.session.as_ref() else { return };
 
+                // Ctrl+Shift+C / V, the terminal convention -- plain Ctrl+C must
+                // stay SIGINT.
+                if self.modifiers.control_key() && self.modifiers.shift_key() {
+                    if let winit::keyboard::Key::Character(c) = &event.logical_key {
+                        match c.to_ascii_lowercase().as_str() {
+                            "c" => {
+                                self.copy_selection();
+                                return;
+                            }
+                            "v" => {
+                                self.paste();
+                                if let Some(w) = self.window.as_ref() {
+                                    w.request_redraw();
+                                }
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
                 let modes = session.terminal.lock().modes();
                 if let Some(bytes) = input::encode(&event, self.modifiers, modes) {
                     // Written synchronously, before anything else. Deferring
                     // input to the next frame adds a whole frame of latency for
                     // nothing.
                     session.write(bytes);
+                    let mut term = session.terminal.lock();
                     // Typing scrolls back to the bottom, which is what every
                     // terminal does and what users expect.
-                    session.terminal.lock().scroll_to_bottom();
+                    term.scroll_to_bottom();
+                    // ...and clears the selection, which is now stale.
+                    term.set_selection(None);
+                }
+            }
+
+            WindowEvent::CursorMoved { position, .. } => {
+                let cell = self.cell_at(position.x, position.y);
+                self.pointer_cell = cell;
+                if !self.mouse.is_dragging() {
+                    return;
+                }
+                let Some(session) = self.session.as_ref() else { return };
+                let mut term = session.terminal.lock();
+                if let (Some(mut sel), Some(pos)) =
+                    (term.selection(), term.abs_pos(cell.0, cell.1))
+                {
+                    // Word mode extends by whole words, so dragging after a
+                    // double-click grows the selection a word at a time rather
+                    // than reverting to characters.
+                    sel.head = if sel.mode == zest_core::SelectionMode::Word {
+                        term.word_at(pos).1
+                    } else {
+                        pos
+                    };
+                    term.set_selection(Some(sel));
+                    drop(term);
+                    session.mark_dirty();
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                }
+            }
+
+            WindowEvent::MouseInput { state, button, .. } => {
+                let Some(session) = self.session.as_ref() else { return };
+                let (row, col) = self.pointer_cell;
+
+                match (button, state) {
+                    (MouseButton::Left, ElementState::Pressed) => {
+                        let mode = self.mouse.press(row, col);
+                        let mut term = session.terminal.lock();
+                        if let Some(pos) = term.abs_pos(row, col) {
+                            let sel = mouse::begin(&term, pos, mode, self.modifiers.alt_key());
+                            term.set_selection(Some(sel));
+                        }
+                        drop(term);
+                        session.mark_dirty();
+                    }
+                    (MouseButton::Left, ElementState::Released) => {
+                        self.mouse.release();
+                        // Copy-on-select is deliberately NOT the default: it
+                        // silently replaces the clipboard, which surprises people
+                        // who selected only to read.
+                    }
+                    // Middle-click pastes the selection, as X11 users expect.
+                    (MouseButton::Middle, ElementState::Pressed) => self.paste(),
+                    (MouseButton::Right, ElementState::Pressed) => {
+                        // Right-click copies when there is a selection and pastes
+                        // otherwise -- the PowerShell/conhost convention Windows
+                        // users already have in their fingers.
+                        //
+                        // Everything touching `session` happens first so its
+                        // borrow ends before the clipboard calls, which need
+                        // `&mut self`.
+                        let text = {
+                            let mut term = session.terminal.lock();
+                            let text = term.selection_text();
+                            if text.is_some() {
+                                term.set_selection(None);
+                            }
+                            text
+                        };
+                        match text {
+                            Some(t) => self.set_clipboard(t),
+                            None => self.paste(),
+                        }
+                    }
+                    _ => {}
+                }
+
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
                 }
             }
 

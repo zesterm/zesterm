@@ -28,6 +28,10 @@ pub struct Viewport<'a> {
     /// `@sigx/terminal-ui` box — must stay opaque. Applying opacity to every
     /// cell double-darkens *and* makes every TUI look broken. → ADR-003.
     pub opacity: f32,
+    /// The active selection, if any.
+    pub selection: Option<zest_core::Selection>,
+    /// Colour of the selection highlight.
+    pub selection_bg: zest_core::Rgb,
 }
 
 /// Pre-built chrome instances.
@@ -109,6 +113,14 @@ impl Scene {
         for row in 0..grid.rows() {
             let y = oy + row as f32 * ch;
             self.emit_row_backgrounds(grid, row, vp, ox, y, cw, ch, clip);
+        }
+
+        // Selection sits above cell backgrounds but below the glyphs, so text
+        // stays readable through it.
+        self.emit_selection(grid, vp, ox, oy, cw, ch, clip);
+
+        for row in 0..grid.rows() {
+            let y = oy + row as f32 * ch;
             self.emit_row_glyphs(device, queue, atlas, fonts, metrics, grid, row, vp, ox, y, clip);
         }
 
@@ -307,6 +319,51 @@ impl Scene {
 
         if cell.flags.contains(CellFlags::STRIKEOUT) {
             push(DecorKind::Strikethrough, y + metrics.strikeout_y as f32);
+        }
+    }
+
+    /// Highlight the selected span on each visible row.
+    ///
+    /// Only visible rows: the selection may extend far into scrollback, but
+    /// there is nothing on screen to paint for those lines. `span_on` is keyed
+    /// on the absolute line id, so scrolling moves the highlight with the text
+    /// rather than leaving it behind.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_selection(
+        &mut self,
+        grid: &Grid,
+        vp: &Viewport<'_>,
+        ox: f32,
+        oy: f32,
+        cw: f32,
+        ch: f32,
+        clip: [f32; 4],
+    ) {
+        let Some(sel) = vp.selection else { return };
+        if sel.is_empty() {
+            return;
+        }
+
+        let c = vp.selection_bg;
+        let fill = LinearRgba::opaque(c.r, c.g, c.b);
+        let cols = grid.cols();
+
+        for row in 0..grid.rows() {
+            let Some(line) = grid.line_id_at(row) else { continue };
+            let Some((from, to)) = sel.span_on(line, cols) else { continue };
+            if to <= from {
+                continue;
+            }
+            self.rects.push(RectInstance::filled(
+                [
+                    ox + from as f32 * cw,
+                    oy + row as f32 * ch,
+                    (to - from) as f32 * cw,
+                    ch,
+                ],
+                fill,
+                clip,
+            ));
         }
     }
 

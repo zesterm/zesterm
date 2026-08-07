@@ -31,7 +31,7 @@ for the decisions that are expensive to reach and cheap to accidentally undo.
 | `zest-config` | ⬜ |
 | `zest-app` | 🟡 real window, real shell; input is basic |
 
-179 tests. `cargo run -p zest-app --example headless` is a working terminal
+201 tests. `cargo run -p zest-app --example headless` is a working terminal
 without a window.
 
 ---
@@ -66,7 +66,7 @@ didn't want to switch back."* Not feature parity with WezTerm.
             encoded space, free OS-driven repaints).
       - [x] Offscreen PNG harness (`--example render_dump`), runs on a fallback
             adapter so it works in CI.
-      - [ ] Selection rendering (needs the selection model from step 8).
+      - [x] Selection rendering.
       - [ ] Validate gamma side-by-side against Windows Terminal. **Do not defer
             this** — it ships broken constantly and reads as "looks slightly off".
 - [x] **6. `zest-app` — the moment.** winit, PTY thread, fair mutex, first
@@ -75,8 +75,11 @@ didn't want to switch back."* Not feature parity with WezTerm.
       modifiers, DECCKM, Alt-as-ESC and F-keys. Still to do: extract the crate,
       IME/dead keys, SGR-1006 mouse, and the Kitty keyboard protocol behind a
       flag — plan that now, retrofitting hurts.
-- [ ] **8. Selection + clipboard.** Absolute coordinates so selection survives
-      scrolling and eviction. Wrapped-line copy must not insert a newline.
+- [x] **8. Selection + clipboard.** Absolute `LineId` coordinates, so a
+      selection survives scrolling, new output, and falling out of scrollback.
+      Word/line/block modes, wrapped-line copy without a spurious newline,
+      bracketed paste. Still to do: copy-on-select as an option, and selection
+      auto-scroll when a drag leaves the window.
 - [ ] **9. Scrollback + scrolling.** Wheel, Shift+PgUp/PgDn, alt-screen wheel →
       arrow keys so `less` and `man` scroll.
 - [ ] **10. `zest-config`.** Cascade, profiles, provenance, migrations, hot

@@ -87,6 +87,12 @@ pub struct TermState {
     pub(crate) seq: u64,
     pub(crate) title: String,
     pub(crate) cursor_style: CursorStyle,
+    /// The active selection, if any.
+    ///
+    /// Lives on the terminal rather than the app because text extraction needs
+    /// the grid, and because a future daemon has to serialize it to remote
+    /// clients alongside everything else.
+    pub(crate) selection: Option<crate::Selection>,
     /// The active OSC 8 hyperlink, if any.
     pub(crate) current_hyperlink: Option<u16>,
     pub(crate) next_hyperlink_id: u16,
@@ -178,6 +184,69 @@ impl Terminal {
         self.state.grid_mut().scroll_to_bottom();
         self.state.damage.mark_full();
     }
+
+    #[must_use]
+    pub fn selection(&self) -> Option<crate::Selection> {
+        self.state.selection
+    }
+
+    pub fn set_selection(&mut self, selection: Option<crate::Selection>) {
+        if self.state.selection != selection {
+            self.state.selection = selection;
+            self.state.damage.mark_full();
+        }
+    }
+
+    /// The selected text, or `None` when nothing is selected.
+    ///
+    /// `None` rather than an empty string so a stray click cannot clobber the
+    /// clipboard.
+    #[must_use]
+    pub fn selection_text(&self) -> Option<String> {
+        let sel = self.state.selection?;
+        let text = self.state.grid().selection_text(&sel);
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Translate a viewport cell to an absolute position.
+    ///
+    /// Returns `None` for a row outside the viewport, which happens when a drag
+    /// leaves the window.
+    #[must_use]
+    pub fn abs_pos(&self, row: usize, col: usize) -> Option<crate::AbsPos> {
+        let grid = self.state.grid();
+        grid.line_id_at(row.min(grid.rows().saturating_sub(1)))
+            .map(|line| crate::AbsPos::new(line, col.min(grid.cols().saturating_sub(1))))
+    }
+
+    /// Expand a position to the word around it, for double-click.
+    #[must_use]
+    pub fn word_at(&self, pos: crate::AbsPos) -> (crate::AbsPos, crate::AbsPos) {
+        self.state.grid().word_at(pos)
+    }
+
+    /// Wrap pasted text in bracketed-paste markers when the program asked for
+    /// them.
+    ///
+    /// Without this, pasting multi-line text into a shell executes every line,
+    /// and pasting into vim in insert mode triggers autoindent on each one.
+    /// Programs enable mode 2004 precisely so they can tell a paste from typing.
+    #[must_use]
+    pub fn encode_paste(&self, text: &str) -> Vec<u8> {
+        // Normalize line endings: a pty expects CR, and pasted text routinely
+        // carries CRLF from a Windows clipboard.
+        let normalized: String = text.replace("\r\n", "\r").replace('\n', "\r");
+
+        if self.state.modes.contains(Modes::BRACKETED_PASTE) {
+            let mut out = Vec::with_capacity(normalized.len() + 12);
+            out.extend_from_slice(b"\x1b[200~");
+            out.extend_from_slice(normalized.as_bytes());
+            out.extend_from_slice(b"\x1b[201~");
+            out
+        } else {
+            normalized.into_bytes()
+        }
+    }
 }
 
 impl TermState {
@@ -204,6 +273,7 @@ impl TermState {
             seq: 0,
             title: String::new(),
             cursor_style: CursorStyle::default(),
+            selection: None,
             current_hyperlink: None,
             next_hyperlink_id: 0,
         }

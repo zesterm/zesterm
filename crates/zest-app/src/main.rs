@@ -11,6 +11,7 @@ mod app;
 mod console;
 mod fair_mutex;
 mod input;
+mod mouse;
 mod session;
 
 use winit::event_loop::EventLoop;
