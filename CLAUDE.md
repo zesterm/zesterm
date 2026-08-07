@@ -79,7 +79,19 @@ cargo run -p zest-app  --example headless      # a terminal with no window
 cargo run -p zest-font --example font_dump     # font sample sheet as a PNG
 cargo run -p zest-pty  --example pty_dump      # raw VT stream / corpus recorder
 cargo run -p zest-render-wgpu --example alpha_probe   # transparency capability
+
+zest-daemon --socket-path                      # where this user's daemon listens
+zest-daemon --socket <path>                    # serve this machine's terminals
+cargo run -p zest-daemon --example attach      # drive a daemon session, no GUI
+cargo run -p zest-mesh   --example mesh_probe  # advertise and browse the fleet
 ```
+
+Each `--example` above answers "which layer is wrong" without the ones above it.
+`attach` is the daemon's `headless`: when a session renders wrongly in the app it
+says whether the daemon or the renderer is at fault, with no window, GPU or font
+involved. `mesh_probe` is the two-machine check no unit test can perform — it
+reports **self-visible** separately from **peers**, so "my multicast is not
+leaving this box" and "nothing else is advertising" are distinguishable.
 
 ## Conventions
 
