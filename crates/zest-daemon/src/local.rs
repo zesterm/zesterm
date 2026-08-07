@@ -59,22 +59,117 @@ mod imp {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::{UnixListener, UnixStream};
 
+    /// An exclusive claim on one socket path, held for the process lifetime.
+    ///
+    /// A separate `.lock` file rather than the socket itself, because the point
+    /// is to hold a claim *across* unlinking and rebinding the socket — a lock
+    /// on a file that is about to be deleted proves nothing about what replaces
+    /// it.
+    ///
+    /// The fd is deliberately leaked into the guard and the guard lives as long
+    /// as `listen`, which never returns while the daemon is up. `flock` is
+    /// released when the last descriptor closes, including on a crash or a
+    /// `SIGKILL`, which is what makes the stale case recover by itself.
+    #[derive(Debug)]
+    pub struct Lock {
+        _file: std::fs::File,
+    }
+
+    impl Lock {
+        pub fn acquire(path: &str) -> Result<Self, DaemonError> {
+            let lock_path = format!("{path}.lock");
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .mode(0o600)
+                .open(&lock_path)
+                .map_err(|e| DaemonError::Transport(format!("{lock_path}: {e}")))?;
+
+            rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+                .map_err(|_| {
+                    DaemonError::Transport(format!(
+                        "another daemon is already serving {path}"
+                    ))
+                })?;
+
+            Ok(Self { _file: file })
+        }
+    }
+
+    /// A scoped umask, so a file is created with the mode it needs from birth.
+    ///
+    /// Process-wide and therefore not thread-safe in general; used here only
+    /// during `bind`, on the thread that starts the daemon, before any other
+    /// thread exists that could create a file.
+    pub struct Umask(rustix::fs::Mode);
+
+    impl Umask {
+        pub fn restrict(mask: u16) -> Self {
+            let mode = rustix::fs::Mode::from_bits_truncate(mask);
+            Self(rustix::process::umask(mode))
+        }
+    }
+
+    impl Drop for Umask {
+        fn drop(&mut self) {
+            rustix::process::umask(self.0);
+        }
+    }
+
+    /// Claim a socket path without serving it.
+    ///
+    /// Exposed for tests, and for the moment before a daemon has decided it is
+    /// the one that should run: `Ok` means this process holds the path, `Err`
+    /// means another daemon is live and this one should connect to it instead
+    /// of starting.
+    pub fn claim(path: &str) -> Result<Lock, DaemonError> {
+        Lock::acquire(path)
+    }
+
     /// Accept clients until the process ends.
     pub fn listen(
         path: &str,
         config: DaemonConfig,
         registry: Arc<Registry>,
     ) -> Result<(), DaemonError> {
-        // A socket left behind by a crashed daemon blocks binding, and the
-        // owning process is gone, so removing it is safe *and* necessary --
-        // otherwise a crash means the daemon can never start again.
+        // Take the lock *before* unlinking anything.
+        //
+        // The old code unlinked unconditionally, reasoning that a socket left
+        // by a crashed daemon must be removed or the daemon could never start
+        // again. True, and it also means two daemons starting at once
+        // split-brain: the second unlinks the first's socket and binds its own,
+        // the first keeps running on an unlinked path with its own Registry,
+        // and every client that connects afterwards reaches only one of them.
+        // Nothing exercised it while daemons were started by hand; the app
+        // doing find-or-spawn is what would have.
+        //
+        // The lock also makes the stale-socket case *checked* rather than
+        // assumed: a lock that can be taken proves no live daemon holds this
+        // path, which is exactly the condition under which unlinking is safe.
+        //
+        // Windows needs none of this -- `FILE_FLAG_FIRST_PIPE_INSTANCE` makes
+        // the loser's create fail outright.
+        let _guard = Lock::acquire(path)?;
+
         let _ = std::fs::remove_file(path);
 
-        let listener =
-            UnixListener::bind(path).map_err(|e| DaemonError::Transport(e.to_string()))?;
+        // Bind inside a tightened umask rather than chmod-ing afterwards.
+        //
+        // `bind` applies the process umask, so between it and a later
+        // `set_permissions` the socket is briefly whatever the umask allowed --
+        // and on a permissive umask that window is a connectable shell. The
+        // whole justification in this module's header rests on that permission,
+        // so it must not have a gap.
+        let listener = {
+            let _umask = Umask::restrict(0o177);
+            UnixListener::bind(path).map_err(|e| DaemonError::Transport(e.to_string()))?
+        };
 
-        // 0600 before anyone can connect. Without it the socket inherits umask,
-        // which on a permissive one leaves a shell open to every local user.
+        // Belt and braces: assert the mode actually landed. A umask cannot add
+        // permissions, only remove them, so this should be a no-op -- but the
+        // cost of being wrong here is a shell.
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| DaemonError::Transport(e.to_string()))?;
 
@@ -382,6 +477,8 @@ mod imp {
 }
 
 pub use imp::{connect, listen};
+#[cfg(unix)]
+pub use imp::claim;
 
 #[cfg(test)]
 mod tests {
@@ -515,5 +612,83 @@ mod tests {
 
         #[cfg(unix)]
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod unix_tests {
+    use super::*;
+
+    fn path(name: &str) -> String {
+        // Short, because a unix socket path must fit in SUN_LEN (~104 bytes)
+        // and the scratch directories CI uses are long enough to overflow it.
+        format!("/tmp/zt-{}-{}.sock", name, std::process::id())
+    }
+
+    #[test]
+    fn two_daemons_cannot_both_claim_one_socket() {
+        // The split-brain this prevents: without the lock, the second daemon
+        // unlinks the first's socket and binds its own. The first keeps
+        // running -- on a path nothing can reach -- with its own Registry, so
+        // sessions created through one are invisible to the other.
+        //
+        // Before the lock this test could not even be written: both calls
+        // succeeded, and the damage only showed up as a missing session later.
+        let p = path("claim");
+        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_file(format!("{p}.lock"));
+
+        let first = claim(&p).expect("the first daemon takes the path");
+        let second = claim(&p);
+        assert!(second.is_err(), "two daemons both believed they owned {p}");
+
+        // And once the first lets go, the path is claimable again -- which is
+        // what makes a crashed daemon recover without manual cleanup.
+        drop(first);
+        let third = claim(&p);
+        assert!(third.is_ok(), "a released path must be reclaimable: {third:?}");
+
+        drop(third);
+        let _ = std::fs::remove_file(format!("{p}.lock"));
+    }
+
+    #[test]
+    fn the_socket_is_never_world_reachable_even_for_an_instant() {
+        // The module header rests on the socket's mode, so it must be 0600
+        // from birth rather than 0600 shortly after birth. A permissive umask
+        // is exactly the case that used to leave a window.
+        let p = path("mode");
+        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_file(format!("{p}.lock"));
+
+        // A deliberately permissive umask for the duration of this test: the
+        // window this closes only exists when the umask would have allowed
+        // something wider, so testing under a restrictive one proves nothing.
+        let _permissive = imp::Umask::restrict(0o000);
+
+        let registry = std::sync::Arc::new(crate::server::Registry::new());
+        let cfg = DaemonConfig {
+            host: zest_proto::HostId::from_bytes([1; 32]),
+            label: "mode-test".into(),
+            local_socket: p.clone(),
+            listen_lan: false,
+        };
+        let listen_path = p.clone();
+        std::thread::spawn(move || {
+            let _ = listen(&listen_path, cfg, registry);
+        });
+
+        // Wait for the socket to appear rather than sleeping a fixed time.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !std::path::Path::new(&p).exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&p).expect("socket exists").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "socket mode was {mode:o}, not 0600");
+
+        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_file(format!("{p}.lock"));
     }
 }

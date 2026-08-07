@@ -18,6 +18,14 @@ use zest_pty::{CommandSpec, PtySize};
 use crate::session::{Session, Update};
 use crate::{DaemonConfig, DaemonError};
 
+/// Most rows one `RequestScrollback` may fetch.
+///
+/// A client scrolling up wants a screenful at a time, not the whole history in
+/// one frame. Without a bound, a request for ten thousand rows produces a
+/// payload the 8 MiB frame limit then refuses — which is a much worse way to
+/// discover the limit than being handed the first page.
+const SCROLLBACK_PAGE: usize = 500;
+
 /// Every session this machine owns.
 ///
 /// Shared between connections, because the point of the daemon is that a session
@@ -169,15 +177,15 @@ impl Connection {
             let addr = SessionAddr::new(self.config.host, SessionId(id));
 
             match session.poll(handle) {
-                Some(Update::Delta(delta)) => out.push(HostMessage::Update {
+                Some((base, seq, Update::Delta(delta))) => out.push(HostMessage::Update {
                     session: addr,
-                    base: Seq(0),
-                    seq: Seq(0),
+                    base: Seq(base),
+                    seq: Seq(seq),
                     delta,
                 }),
-                Some(Update::Keyframe(k)) => out.push(HostMessage::Keyframe {
+                Some((_, seq, Update::Keyframe(k))) => out.push(HostMessage::Keyframe {
                     session: addr,
-                    seq: Seq(0),
+                    seq: Seq(seq),
                     cols: k.cols,
                     rows: k.rows,
                     rows_data: k.rows_data,
@@ -283,9 +291,17 @@ impl Connection {
                 let Some(s) = self.registry.get(session.session) else {
                     return vec![Self::no_such(session)];
                 };
+                // Attaching twice on one connection is how a client resyncs by
+                // reattaching. Without this the old subscriber is dropped from
+                // the map here but stays in the *session*, holding a ~48KB
+                // encoder shadow and a waker for a poll that never comes again
+                // -- one leak per resync, for the life of the session.
+                if let Some(stale) = self.attached.remove(&session.session.0) {
+                    s.detach(stale);
+                }
                 s.resize(cols, rows);
                 let waker = self.waker.clone();
-                let (handle, keyframe) = s.attach_with(Box::new(move || {
+                let (handle, seq, keyframe) = s.attach_with(Box::new(move || {
                     if let Some(w) = &waker {
                         w();
                     }
@@ -293,7 +309,7 @@ impl Connection {
                 self.attached.insert(session.session.0, handle);
                 vec![HostMessage::Keyframe {
                     session,
-                    seq: Seq(0),
+                    seq: Seq(seq),
                     cols: keyframe.cols,
                     rows: keyframe.rows,
                     rows_data: keyframe.rows_data,
@@ -362,13 +378,28 @@ impl Connection {
                 Vec::new()
             }
 
-            // Acknowledgement is tracked inside the session's subscriber, which
-            // advances on every successful poll. Kept in the protocol because a
-            // lossy transport will need it; a no-op over a reliable stream.
-            ClientMessage::Ack { .. } => Vec::new(),
+            ClientMessage::Ack { session, seq } => {
+                if let (Some(s), Some(&handle)) =
+                    (self.registry.get(session.session), self.attached.get(&session.session.0))
+                {
+                    s.ack(handle, seq.0);
+                }
+                Vec::new()
+            }
 
-            ClientMessage::RequestScrollback { session, from_line, .. } => {
-                vec![HostMessage::Scrollback { session, from_line, rows_data: Vec::new() }]
+            ClientMessage::RequestScrollback { session, from_line, count } => {
+                let Some(s) = self.registry.get(session.session) else {
+                    return vec![Self::no_such(session)];
+                };
+                // A negative line is not history: absolute ids start at 0, and
+                // the encoder uses `i64::MIN` as its own "never seen" marker.
+                let from = u64::try_from(from_line).unwrap_or(0);
+                // Bounded so one request cannot ask a host to encode its entire
+                // scrollback into a single frame. `MAX_FRAME` would refuse it
+                // afterwards, which is a worse way to find out.
+                let count = (count as usize).min(SCROLLBACK_PAGE);
+                let (rows_data, attrs) = s.scrollback(from, count);
+                vec![HostMessage::Scrollback { session, from_line, rows_data, attrs }]
             }
 
             ClientMessage::CloseSession { session } => {

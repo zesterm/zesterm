@@ -110,6 +110,24 @@ impl CursorStyle {
             _ => Self::default(),
         }
     }
+
+    /// Encode back to a DECSCUSR parameter, for the wire.
+    ///
+    /// Never 0. Both 0 and 1 decode to a blinking block, so encoding as 1
+    /// keeps `from_decscusr(to_decscusr(x)) == x` — 0 would round-trip in
+    /// value but means "reset to the default", which is a different statement
+    /// and stops being true the moment the default changes.
+    #[must_use]
+    pub fn to_decscusr(self) -> u16 {
+        match (self.shape, self.blinking) {
+            (CursorShape::Block, true) => 1,
+            (CursorShape::Block, false) => 2,
+            (CursorShape::Underline, true) => 3,
+            (CursorShape::Underline, false) => 4,
+            (CursorShape::Bar, true) => 5,
+            (CursorShape::Bar, false) => 6,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -144,5 +162,27 @@ mod tests {
         assert!(!CursorStyle::from_decscusr(6).blinking);
         // 0 means "reset to default", which is a blinking block.
         assert_eq!(CursorStyle::from_decscusr(0), CursorStyle::default());
+    }
+
+    #[test]
+    fn every_cursor_style_survives_the_wire() {
+        // The remote protocol carries the DECSCUSR parameter, not the struct,
+        // so a style that does not round-trip is one a remote client renders
+        // differently from the machine the program is running on.
+        for param in 1..=6u16 {
+            let style = CursorStyle::from_decscusr(param);
+            assert_eq!(
+                style.to_decscusr(),
+                param,
+                "DECSCUSR {param} did not survive a round trip"
+            );
+        }
+        for shape in [CursorShape::Block, CursorShape::Underline, CursorShape::Bar] {
+            for blinking in [true, false] {
+                let style = CursorStyle { shape, blinking };
+                assert_eq!(CursorStyle::from_decscusr(style.to_decscusr()), style);
+            }
+        }
+        assert_ne!(CursorStyle::default().to_decscusr(), 0, "0 means reset, not a style");
     }
 }

@@ -45,7 +45,7 @@ move.
 
 ## Status
 
-**452 tests, four gates green**, measured on macOS rather than remembered.
+**459 tests, four gates green**, measured on macOS rather than remembered.
 First paint 35ms **on Windows**; the Mac paints against a different compositor
 and its number (48ms) is reported rather than gated.
 
@@ -61,7 +61,7 @@ and its number (48ms) is reported rather than gated.
 | `zest-app` | ✅ window, shell, sessions behind `SessionSource` — runs on Windows *and* macOS (Metal) — ⬜ daemon-attached source, macOS chrome |
 | `zest-proto` | ✅ protocol 2, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, cell-for-cell conformance, chaos-resync |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet — ⬜ pairing, transports |
-| `zest-daemon` | ✅ session ownership, protocol loop, loopback transport — ⬜ LAN listener, no authentication, `Seq` and `Ack` not yet real |
+| `zest-daemon` | ✅ session ownership, protocol loop, loopback transport, real `Seq`/`Ack`, scrollback, socket locking — ⬜ LAN listener, no authentication |
 
 ### What works end to end today
 
@@ -105,11 +105,12 @@ the one that decides whether M3's win condition is worth having:
   `DeltaOp::Modes` and `Keyframe.modes` now carry `Modes::bits()`, so an
   attached client can encode its own keystrokes correctly. Verified over a real
   socket: `APP_CURSOR`, `BRACKETED_PASTE` and `MOUSE_CLICK` reach the client.
-- **The daemon unlinks its socket before binding** (`local.rs:71`), so two
-  daemons starting at once split-brain: the second unlinks the first's socket
-  and binds its own, and the first keeps running with its own `Registry`.
-  Nothing exercises it because nothing auto-spawns a daemon — the app doing
-  find-or-spawn is exactly what will.
+- ~~**The daemon unlinks its socket before binding.**~~ **Fixed.** An
+  advisory lock on `<socket>.lock` is taken *before* anything is unlinked, so
+  the second daemon refuses to start rather than stealing the path — and the
+  stale-socket case becomes checked rather than assumed, since a lock that can
+  be taken proves no live daemon holds it. Windows already had this via
+  `FILE_FLAG_FIRST_PIPE_INSTANCE`.
 
 ---
 
@@ -292,9 +293,12 @@ M2. Owns `zest-core/src/blocks.rs` and the OSC 133 path. Hot spot: coordinate
       one named door into a grid that is not the VT parser; `zest-proto`'s
       `Applier` drives it from the wire. `GridView` stays as the reference for
       TypeScript clients, and the two are checked against each other.
-- [ ] The daemon tells the truth about sequence: `Update`/`Keyframe` carry
-      `Seq(0)` today and `Ack` is a no-op, so a conforming client cannot detect a
-      gap. Latent over one reliable stream; not over a reconnecting one.
+- [x] The daemon tells the truth about sequence. Every update names the state
+      it builds on and the one it produces, in an unbroken chain; `Ack` is
+      recorded as a *separate* number from what was sent, because advancing one
+      counter on send is the host asserting that everything it wrote was
+      applied. `RequestScrollback` is answered from `Grid::lines_by_id`, with
+      the attributes those rows name.
 - [ ] `zest-app` gains a daemon-attached `SessionSource`. **Find-or-spawn goes
       in the slot the shell spawn occupies today** — after the window is
       visible, overlapping driver init. `--startup-probe` must still pass.

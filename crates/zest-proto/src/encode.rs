@@ -171,6 +171,21 @@ impl Encoder {
         }
     }
 
+    /// Encode rows of history, self-contained.
+    ///
+    /// Returns the payloads *and* every attribute they name, because scrollback
+    /// is prepended to a client's history rather than diffed against anything —
+    /// there is no later delta that would define the attributes for it.
+    ///
+    /// Use a fresh `Encoder` for this, never a subscriber's: interning these
+    /// rows into that table would assign ids the delta stream then never
+    /// defines, and the client would render live output in whatever style it
+    /// happened to be holding.
+    pub fn history(&mut self, rows: &[&zest_core::Row]) -> (Vec<RowPayload>, Vec<AttrDef>) {
+        let payloads: Vec<RowPayload> = rows.iter().map(|r| self.encode_row(r)).collect();
+        (payloads, self.all_attrs())
+    }
+
     /// Every attribute defined so far, for a keyframe.
     fn all_attrs(&self) -> Vec<AttrDef> {
         let mut v: Vec<AttrDef> = self

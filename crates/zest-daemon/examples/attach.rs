@@ -107,19 +107,22 @@ fn main() {
                         }
                     }
                 }
-                HostMessage::Keyframe { rows_data, attrs, modes, .. } => {
+                HostMessage::Keyframe { rows_data, attrs, modes, seq, .. } => {
                     eprintln!(
-                        "[attach] keyframe: {} rows, {} attrs, modes {:?}",
+                        "[attach] keyframe @seq {}: {} rows, {} attrs, modes {:?}",
+                        seq.0,
                         rows_data.len(),
                         attrs.len(),
                         zest_core::Modes::from_bits_truncate(modes)
                     );
                     print_rows(&rows_data);
                 }
-                HostMessage::Update { delta, .. } => {
+                HostMessage::Update { delta, base, seq, .. } => {
                     eprintln!(
-                        "[attach] +{}ms delta: {} ops, {} new attrs",
+                        "[attach] +{}ms delta {}->{}: {} ops, {} new attrs",
                         start.elapsed().as_millis(),
+                        base.0,
+                        seq.0,
                         delta.ops.len(),
                         delta.attrs.len()
                     );

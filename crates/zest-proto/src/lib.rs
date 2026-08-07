@@ -224,7 +224,19 @@ pub enum HostMessage {
     /// keyframe rather than applying it out of order.
     Update { session: SessionAddr, base: Seq, seq: Seq, delta: Delta },
     /// Requested history.
-    Scrollback { session: SessionAddr, from_line: i64, rows_data: Vec<RowPayload> },
+    Scrollback {
+        session: SessionAddr,
+        from_line: i64,
+        rows_data: Vec<RowPayload>,
+        /// Every attribute these rows name.
+        ///
+        /// Additive, so a peer that predates it still decodes — but a peer that
+        /// ignores it renders history in whatever style it last held, because
+        /// scrollback is prepended rather than diffed and no later delta will
+        /// define these ids.
+        #[serde(default)]
+        attrs: Vec<AttrDef>,
+    },
     /// The child process ended.
     Exited { session: SessionAddr, code: Option<i32> },
     /// Something went wrong, phrased for a person.

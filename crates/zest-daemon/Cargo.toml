@@ -22,6 +22,12 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+# `flock` on the socket path, so two daemons starting at once cannot each
+# unlink the other's socket and serve half the clients. Already in the tree via
+# zest-pty, so this costs no build time.
+rustix = { workspace = true, features = ["fs", "process"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",

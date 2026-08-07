@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use zest_core::{ChangeSource, Modes, Terminal, TermEvent};
 use zest_proto::delta::CursorState;
-use zest_proto::{Delta, Encoder, Keyframe, SessionId};
+use zest_proto::{AttrDef, Delta, Encoder, Keyframe, RowPayload, SessionId};
 use zest_pty::{CommandSpec, PtySize, PtyTransport};
 
 use crate::DaemonError;
@@ -34,8 +34,29 @@ const PARSE_CHUNK: usize = 64 * 1024;
 /// One client's view of a session.
 struct Subscriber {
     encoder: Encoder,
-    /// Highest sequence this client has confirmed applying.
+    /// Sequence of the last update this subscriber was *sent*.
+    ///
+    /// The `base` of the next one, and the only thing the delta chain depends
+    /// on — the encoder's shadow holds exactly the state this names, so a delta
+    /// is a difference from it whether or not the client ever confirmed it.
+    sent: u64,
+    /// Highest sequence the client has confirmed *applying*.
+    ///
+    /// Deliberately a second number rather than the same one. Conflating them
+    /// is what the daemon used to do, and it amounts to the host asserting that
+    /// everything it wrote was applied — which is false for exactly the client
+    /// that matters, the one that died mid-write.
+    ///
+    /// Nothing in the delta chain reads this: correctness rests on `base` being
+    /// on the wire and the client refusing what it cannot apply. What this
+    /// buys is evidence — how far behind a client is, and whether it is
+    /// claiming to hold something that was never sent.
     acked: u64,
+    /// Force a keyframe on the next poll.
+    ///
+    /// Set by `RequestKeyframe`, and by an acknowledgement of a sequence this
+    /// subscriber was never sent.
+    needs_keyframe: bool,
     /// Called when this subscriber has something to collect.
     ///
     /// Without it a connection blocked in `read` never learns that the shell
@@ -155,12 +176,16 @@ impl Session {
     /// Every attach starts with a keyframe: a client that has just connected has
     /// no base for a delta, and one that is reattaching after an hour asleep is
     /// indistinguishable from a new one.
-    pub fn attach(&self) -> (u64, Keyframe) {
+    pub fn attach(&self) -> (u64, u64, Keyframe) {
         self.attach_with(Box::new(|| {}))
     }
 
     /// Attach, and be told when there is something to collect.
-    pub fn attach_with(&self, wake: Box<dyn Fn() + Send>) -> (u64, Keyframe) {
+    ///
+    /// Returns `(handle, seq, keyframe)`. The sequence is what the keyframe
+    /// describes and what the client will acknowledge; without it on the wire a
+    /// client has no baseline to compare the next update's `base` against.
+    pub fn attach_with(&self, wake: Box<dyn Fn() + Send>) -> (u64, u64, Keyframe) {
         let mut encoder = Encoder::new();
         let (keyframe, seq) = {
             let term = self.terminal.lock().expect("terminal lock");
@@ -174,9 +199,9 @@ impl Session {
         self.subscribers
             .lock()
             .expect("subscriber lock")
-            .insert(handle, Subscriber { encoder, acked: seq, wake });
+            .insert(handle, Subscriber { encoder, sent: seq, acked: seq, needs_keyframe: false, wake });
 
-        (handle, keyframe)
+        (handle, seq, keyframe)
     }
 
     /// Rebuild a complete state for a subscriber that cannot apply what it has.
@@ -193,8 +218,12 @@ impl Session {
         let sub = subs.get_mut(&handle)?;
         let term = self.terminal.lock().expect("terminal lock");
         let seq = ChangeSource::seq(&*term);
-        let k = sub.encoder.keyframe(term.grid(), cursor_of(&term), term.modes(), &self.title.lock().expect("title lock").clone());
-        sub.acked = seq;
+        let title = self.title.lock().expect("title lock").clone();
+        let k = sub.encoder.keyframe(term.grid(), cursor_of(&term), term.modes(), &title);
+        // A keyframe *is* the new baseline: the encoder's shadow now holds
+        // exactly what was sent, so the next delta is a difference from it.
+        sub.sent = seq;
+        sub.needs_keyframe = false;
         Some((seq, k))
     }
 
@@ -212,46 +241,111 @@ impl Session {
         !self.subscribers.lock().expect("subscriber lock").is_empty()
     }
 
-    /// What this subscriber has not yet seen.
+    /// What this subscriber has not yet seen, and the sequences that name it.
     ///
     /// `None` when it is caught up — an idle terminal generates no traffic, the
     /// network counterpart of drawing no frames.
-    pub fn poll(&self, handle: u64) -> Option<Update> {
+    ///
+    /// Returns `(base, seq, update)`: `base` is the state the update is a
+    /// difference *from*, `seq` the state it produces. A client whose own
+    /// applied sequence is not `base` must discard the update and resync, which
+    /// is the whole reason both numbers are on the wire.
+    pub fn poll(&self, handle: u64) -> Option<(u64, u64, Update)> {
         let mut subs = self.subscribers.lock().expect("subscriber lock");
         let sub = subs.get_mut(&handle)?;
 
         let term = self.terminal.lock().expect("terminal lock");
         let seq = ChangeSource::seq(&*term);
-        if seq == sub.acked {
+        if seq == sub.sent && !sub.needs_keyframe {
             return None;
         }
 
         let cursor = cursor_of(&term);
         let modes = term.modes();
         let title = self.title();
+        let base = sub.sent;
 
-        let out = match ChangeSource::update_for(&*term, sub.acked) {
-            zest_core::Update::Idle => return None,
-            // Far enough behind that the delta chain would exceed the state it
-            // describes. Normal after a sleep, not an error.
-            zest_core::Update::Keyframe { .. } => {
-                Update::Keyframe(sub.encoder.keyframe(term.grid(), cursor, modes, &title))
-            }
-            zest_core::Update::Delta { .. } => {
-                let d = sub.encoder.delta(term.grid(), cursor, modes, &title);
-                if d.ops.is_empty() && d.attrs.is_empty() {
-                    // The sequence moved but nothing observable changed -- a
-                    // cursor save, a mode the client already has. Acknowledge
-                    // and send nothing.
-                    sub.acked = seq;
-                    return None;
+        // `update_for` is asked about `sent`, not `acked`. The encoder's shadow
+        // holds the state named by `sent`, so that is what a delta can be a
+        // difference from. Asking about `acked` -- which lags by however long a
+        // round trip takes -- would push a busy session past the keyframe
+        // threshold and turn every frame into a full repaint.
+        let out = if sub.needs_keyframe {
+            sub.needs_keyframe = false;
+            Update::Keyframe(sub.encoder.keyframe(term.grid(), cursor, modes, &title))
+        } else {
+            match ChangeSource::update_for(&*term, sub.sent) {
+                zest_core::Update::Idle => return None,
+                // Far enough behind that the delta chain would exceed the state
+                // it describes. Normal after a sleep, not an error.
+                zest_core::Update::Keyframe { .. } => {
+                    Update::Keyframe(sub.encoder.keyframe(term.grid(), cursor, modes, &title))
                 }
-                Update::Delta(d)
+                zest_core::Update::Delta { .. } => {
+                    let d = sub.encoder.delta(term.grid(), cursor, modes, &title);
+                    if d.ops.is_empty() && d.attrs.is_empty() {
+                        // The sequence moved but nothing observable changed -- a
+                        // cursor save, a mode the client already has. Advance
+                        // the baseline and send nothing.
+                        sub.sent = seq;
+                        return None;
+                    }
+                    Update::Delta(d)
+                }
             }
         };
 
-        sub.acked = seq;
-        Some(out)
+        sub.sent = seq;
+        Some((base, seq, out))
+    }
+
+    /// Record what a client says it has applied.
+    ///
+    /// An acknowledgement of something never sent means the client is talking
+    /// about a different session — a daemon that restarted under it, or state
+    /// kept across a host it should not have. There is nothing to rewind to,
+    /// because the encoder keeps a shadow rather than a history, so the honest
+    /// answer is a full state.
+    pub fn ack(&self, handle: u64, seq: u64) {
+        let mut subs = self.subscribers.lock().expect("subscriber lock");
+        let Some(sub) = subs.get_mut(&handle) else { return };
+        if seq > sub.sent {
+            tracing::warn!(
+                session = self.id.0,
+                acked = seq,
+                sent = sub.sent,
+                "client acknowledged a sequence it was never sent; resending the state"
+            );
+            sub.needs_keyframe = true;
+            return;
+        }
+        sub.acked = sub.acked.max(seq);
+    }
+
+    /// How far behind a subscriber's confirmations are, in sequence numbers.
+    ///
+    /// For diagnostics: a number that keeps growing is a client that is
+    /// receiving and not applying, which looks identical to a healthy one from
+    /// every other angle.
+    #[must_use]
+    pub fn ack_lag(&self, handle: u64) -> Option<u64> {
+        let subs = self.subscribers.lock().expect("subscriber lock");
+        subs.get(&handle).map(|s| s.sent.saturating_sub(s.acked))
+    }
+
+    /// History this client does not hold, oldest first.
+    ///
+    /// Answers `RequestScrollback`. Bounded by what the host still has: a phone
+    /// that was asleep for an hour may ask for lines this session evicted long
+    /// ago, and the honest answer is the part that survives rather than an
+    /// error.
+    pub fn scrollback(&self, from_line: u64, count: usize) -> (Vec<RowPayload>, Vec<AttrDef>) {
+        let term = self.terminal.lock().expect("terminal lock");
+        // A fresh encoder, so the payloads are self-contained -- see
+        // `Encoder::history` for why a subscriber's must not be used.
+        let mut enc = Encoder::new();
+        let rows = term.grid().lines_by_id(from_line, count);
+        enc.history(&rows)
     }
 
     /// Send bytes to the child.
@@ -331,7 +425,10 @@ fn cursor_of(term: &Terminal) -> CursorState {
         row: u16::try_from(c.row).unwrap_or(0),
         col: u16::try_from(c.col).unwrap_or(0),
         visible: term.modes().contains(Modes::SHOW_CURSOR),
-        shape: 0,
+        // The real style, not 0. A program that asked for a bar cursor with
+        // DECSCUSR got a block on every remote client, which reads as the
+        // terminal ignoring the escape rather than as the wire dropping it.
+        shape: u8::try_from(term.cursor_style().to_decscusr()).unwrap_or(0),
     }
 }
 
@@ -373,7 +470,7 @@ mod tests {
     #[test]
     fn a_session_runs_a_command_and_a_client_sees_its_output() {
         let s = session("daemon-probe");
-        let (handle, _) = s.attach();
+        let (handle, _, _) = s.attach();
 
         assert!(
             wait_for(|| s.poll(handle).is_some()),
@@ -386,14 +483,14 @@ mod tests {
         // The property the whole daemon exists for. If detaching ever implied
         // stopping the shell, the fleet story is gone.
         let s = session("survives");
-        let (handle, _) = s.attach();
+        let (handle, _, _) = s.attach();
         assert!(s.attached());
 
         s.detach(handle);
         assert!(!s.attached(), "the subscriber was not removed");
 
         // The session is still usable: a new client attaches and gets state.
-        let (second, keyframe) = s.attach();
+        let (second, _, keyframe) = s.attach();
         assert!(!keyframe.rows_data.is_empty(), "reattaching produced no state");
         assert_ne!(second, handle, "handles were reused");
     }
@@ -403,12 +500,129 @@ mod tests {
         // The 0%-idle guarantee across the network. An idle terminal must not
         // generate traffic any more than it generates frames.
         let s = session("quiet");
-        let (handle, _) = s.attach();
+        let (handle, _, _) = s.attach();
 
         wait_for(|| s.poll(handle).is_some());
         // Drain whatever is outstanding, then confirm it stays quiet.
         while s.poll(handle).is_some() {}
         assert!(s.poll(handle).is_none(), "an idle session kept producing updates");
+    }
+
+    #[test]
+    fn every_update_chains_onto_the_last() {
+        // The property a client's resync rule rests on: each update's `base` is
+        // the previous update's `seq`, unbroken. A gap means the client is
+        // being asked to apply a difference from a state it was never sent, and
+        // it has no way to know unless both numbers are on the wire.
+        //
+        // Both were hardcoded to 0 before this, which made every update look
+        // like a valid continuation of every other.
+        // Several separate writes, so there is a chain rather than one update.
+        let script = "for i in 1 2 3 4 5; do printf 'line %s\\n' $i; sleep 0.05; done";
+        let spec = CommandSpec {
+            command_line: format!("/bin/sh -c \"{script}\""),
+            cwd: None,
+            env: zest_pty::terminal_env(),
+        };
+        let s = Session::spawn(SessionId(5), &spec, PtySize::new(80, 24), 100, |_| {})
+            .expect("spawn");
+
+        // Attach *before* anything is drained: `poll` consumes, so waiting for
+        // output by polling would eat the very updates under test.
+        let (handle, attach_seq, _) = s.attach();
+
+        let mut previous = attach_seq;
+        let mut seen = 0;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && seen < 3 {
+            let Some((base, seq, _)) = s.poll(handle) else {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            };
+            assert_eq!(
+                base, previous,
+                "update {seen} claimed to build on {base} when the last one produced {previous}"
+            );
+            assert!(seq > base, "an update must advance the sequence: {base} -> {seq}");
+            previous = seq;
+            seen += 1;
+        }
+        assert!(seen >= 2, "only {seen} updates arrived, so the chain was barely tested");
+    }
+
+    #[test]
+    fn a_sequence_that_was_never_sent_is_refused_with_a_keyframe() {
+        // A client acknowledging something it cannot have been sent is talking
+        // about a different session -- a daemon that restarted under it. There
+        // is nothing to rewind to, because the encoder keeps a shadow rather
+        // than a history, so the only honest answer is a full state.
+        let s = session("badack");
+        let (handle, _, _) = s.attach();
+        wait_for(|| s.poll(handle).is_some());
+        while s.poll(handle).is_some() {}
+
+        s.ack(handle, u64::MAX);
+
+        let (_, _, update) = s.poll(handle).expect("a bad ack must produce a resend");
+        assert!(
+            matches!(update, Update::Keyframe(_)),
+            "expected a keyframe after an impossible acknowledgement"
+        );
+    }
+
+    #[test]
+    fn acknowledgements_are_tracked_separately_from_what_was_sent() {
+        // The distinction this stage exists for. The host used to advance one
+        // number on send and call it "acked", which is the host asserting that
+        // everything it wrote was applied -- false for exactly the client that
+        // matters, the one that died mid-write.
+        let s = session("lag");
+        let (handle, _, _) = s.attach();
+        wait_for(|| s.poll(handle).is_some());
+        while s.poll(handle).is_some() {}
+
+        let lag = s.ack_lag(handle).expect("attached");
+        assert!(lag > 0, "a client that has acknowledged nothing must show as behind");
+
+        // Acknowledging what was actually sent brings it level.
+        let sent = {
+            let subs = s.subscribers.lock().expect("subscriber lock");
+            subs.get(&handle).expect("attached").sent
+        };
+        s.ack(handle, sent);
+        assert_eq!(s.ack_lag(handle), Some(0), "a caught-up client must show no lag");
+    }
+
+    #[test]
+    fn scrollback_comes_back_with_the_attributes_it_names() {
+        // Scrollback is prepended to a client's history rather than diffed, so
+        // no later delta will define these attribute ids. Without them the
+        // client renders history in whatever style it last held.
+        // Enough coloured lines to push some off a three-row screen, so there
+        // is history that carries a non-default attribute.
+        let script = "for i in 1 2 3 4 5 6 7 8 9 10; do \
+                      printf '\\033[31mline %s\\033[0m\\n' $i; done";
+        let spec = CommandSpec {
+            command_line: format!("/bin/sh -c \"{script}\""),
+            cwd: None,
+            env: zest_pty::terminal_env(),
+        };
+        let s = Session::spawn(SessionId(77), &spec, PtySize::new(40, 3), 200, |_| {})
+            .expect("spawn");
+        wait_for(|| s.has_exited());
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let (rows, attrs) = s.scrollback(0, 20);
+        assert!(!rows.is_empty(), "a session that scrolled must have history");
+        for row in &rows {
+            for run in &row.runs {
+                assert!(
+                    attrs.iter().any(|a| a.id == run.attr),
+                    "history names attribute {:?} that no AttrDef defines",
+                    run.attr
+                );
+            }
+        }
     }
 
     #[test]
@@ -418,7 +632,7 @@ mod tests {
         let s = session("state");
         wait_for(|| s.has_exited());
 
-        let (_, k) = s.attach();
+        let (_, _, k) = s.attach();
         assert_eq!(k.rows as usize, k.rows_data.len(), "the keyframe is not a whole screen");
     }
 
@@ -427,12 +641,12 @@ mod tests {
         // Desk and phone on one session is a real case. A shared encoder would
         // give each of them the other's deltas as their base.
         let s = session("shared");
-        let (a, _) = s.attach();
+        let (a, _, _) = s.attach();
         wait_for(|| s.poll(a).is_some());
         while s.poll(a).is_some() {}
 
         // B attaches late and must still receive full state, not A's leftovers.
-        let (b, kb) = s.attach();
+        let (b, _, kb) = s.attach();
         assert!(!kb.rows_data.is_empty());
         assert!(s.poll(b).is_none(), "a freshly attached client was owed a delta");
     }
