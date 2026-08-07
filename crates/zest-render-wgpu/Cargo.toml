@@ -9,3 +9,38 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+zest-core.workspace = true
+zest-theme.workspace = true
+wgpu.workspace = true
+raw-window-handle.workspace = true
+bytemuck.workspace = true
+etagere.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+wgpu = { workspace = true, features = ["dx12", "vulkan"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { workspace = true, features = ["metal"] }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+wgpu = { workspace = true, features = ["vulkan"] }
+
+# The spike that decides whether every shader in this crate premultiplies.
+# Kept as an example rather than a test: it needs a real window and a real
+# adapter, and its output is a decision, not an assertion.
+[[example]]
+name = "alpha_probe"
+path = "examples/alpha_probe.rs"
+
+[dev-dependencies]
+winit.workspace = true
+pollster = "0.4"
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+] }
