@@ -69,16 +69,23 @@ Bounded pieces that can run in parallel, each with its own issue. **Own only
 your paths.** A job that seems to need another stream's files means the seam is
 wrong — say so rather than reaching across.
 
-| | Stream | Owns | Status |
-|---|---|---|---|
-| **A** | [Windows chrome, motion, polish](#ws-a) | `zest-app/src/{chrome,motion,platform}*`, `zest-render-wgpu/` | Ready |
-| **B** | [`zest-input`](#ws-b) | `crates/zest-input/` | Ready — **go first** |
-| **C** | [Unix PTY + macOS host](#ws-c) | `zest-pty/src/unix.rs`, macOS platform | Ready — **critical path** |
-| **D** | [Linux host](#ws-d) | Linux platform + packaging | After C1 |
-| **E** | [Command blocks](#ws-e) | `zest-core/src/blocks.rs`, OSC 133, shell integration | Ready |
-| **F** | [`zest-proto` + `zest-daemon`](#ws-f) | `crates/zest-proto/`, `crates/zest-daemon/` | Ready — **the lead** |
-| **G** | [Web client](#ws-g) | `clients/web/` | Ready (decoder) |
-| **H** | [Mesh identity, discovery, transports](#ws-h) | `crates/zest-mesh/`, `cloud/` | After F |
+Each has its own issue, self-contained enough to hand to an agent on its own.
+
+| | Stream | Owns | Status | Issue |
+|---|---|---|---|---|
+| **A** | [Windows chrome, motion, polish](#ws-a) | `zest-app/src/{chrome,motion,platform}*`, `zest-render-wgpu/` | After B | [#5](https://github.com/zesterm/zesterm/issues/5) |
+| **B** | [`zest-input`](#ws-b) | `crates/zest-input/` | Ready — **go first** | [#2](https://github.com/zesterm/zesterm/issues/2) |
+| **C** | [Unix PTY + macOS host](#ws-c) | `zest-pty/src/unix.rs`, macOS platform | Ready — **critical path** | [#3](https://github.com/zesterm/zesterm/issues/3) |
+| **D** | [Linux host](#ws-d) | Linux platform + packaging | After C1 | [#9](https://github.com/zesterm/zesterm/issues/9) |
+| **E** | [Command blocks](#ws-e) | `zest-core/src/blocks.rs`, OSC 133, shell integration | Ready | [#6](https://github.com/zesterm/zesterm/issues/6) |
+| **F** | [`zest-proto` + `zest-daemon`](#ws-f) | `crates/zest-proto/`, `crates/zest-daemon/` | Ready — **the lead** | [#4](https://github.com/zesterm/zesterm/issues/4) |
+| **G** | [Web client](#ws-g) | `clients/web/` | Ready (decoder) | [#8](https://github.com/zesterm/zesterm/issues/8) |
+| **H** | [Mesh identity, discovery, transports](#ws-h) | `crates/zest-mesh/`, `cloud/` | After F | [#7](https://github.com/zesterm/zesterm/issues/7) |
+
+**Ordering that matters.** B before A — B extracts `zest-input` out of
+`zest-app`, and A then builds chrome and motion in the same file; the other
+order is a guaranteed conflict. C1 before D, since C1 writes the `unix.rs` that
+serves both. F before H's transports, though H's identity work can start now.
 
 **The insight worth naming:** *"make the Mac's terminals reachable"* (WS-C1 — a
 `forkpty` backend behind an already-frozen trait, plus a headless daemon) is far
