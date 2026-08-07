@@ -114,6 +114,33 @@ impl Grid {
         self.storage.next_id()
     }
 
+    /// Adopt a line-id counter decided by a remote host.
+    ///
+    /// See [`crate::RemoteWriter::sync_next_line_id`]; this is not for a grid
+    /// that owns its own output.
+    pub fn set_next_line_id(&mut self, id: LineId) {
+        self.storage.set_next_id(id);
+    }
+
+    /// Prepend history fetched from a host, oldest first.
+    ///
+    /// Grows scrollback up to the configured limit and drops the excess from
+    /// the *oldest* end — a client that asked for more history than it is
+    /// willing to keep should end up holding the newest of it.
+    pub fn push_history(&mut self, rows: &[(LineId, Vec<Cell>, bool)]) {
+        if rows.is_empty() {
+            return;
+        }
+        let room = self.scrollback_limit.saturating_sub(self.scrollback_len);
+        if room == 0 {
+            return;
+        }
+        let take = rows.len().min(room);
+        let rows = &rows[rows.len() - take..];
+        self.storage.prepend(rows, self.cols);
+        self.scrollback_len += take;
+    }
+
     /// Index into storage of the first visible row, honoring scroll position.
     #[inline]
     fn viewport_base(&self) -> usize {

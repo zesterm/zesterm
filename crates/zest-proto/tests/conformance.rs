@@ -20,6 +20,7 @@
 //! both agreeing with the terminal is.
 
 use zest_core::{Modes, Terminal};
+use zest_proto::apply::{Applied, Applier};
 use zest_proto::decode::GridView;
 use zest_proto::delta::CursorState;
 use zest_proto::encode::Encoder;
@@ -117,12 +118,38 @@ fn replay(name: &str, cols: usize, rows: usize) {
     let mut enc = Encoder::new();
     let mut view = GridView::new();
 
-    view.apply_keyframe(&enc.keyframe(term.grid(), cursor(&term), term.modes(), ""));
+    // The third participant: a real `Terminal` the deltas are applied into,
+    // which is what a Rust client actually holds. `GridView` is the reference
+    // for the TypeScript clients and keeps a flat row list; comparing only
+    // against it would miss everything that depends on there being two grids,
+    // a scrollback, and a cursor -- which is where the alt-screen ordering bug
+    // lived.
+    let mut client = Terminal::new(cols, rows, 2000);
+    let mut applier = Applier::new();
+
+    let k = enc.keyframe(term.grid(), cursor(&term), term.modes(), "");
+    view.apply_keyframe(&k);
+    applier.apply_keyframe(&mut client, &k, 0);
 
     for (step, chunk) in chunks(name).iter().enumerate() {
         term.advance(chunk);
         let d = enc.delta(term.grid(), cursor(&term), term.modes(), "");
+
+        // Both ordering invariants, on every real delta the encoder produces.
+        // These are producer bugs, so asserting here catches them against five
+        // recorded sessions rather than against hand-built fixtures.
+        assert!(d.scrolls_come_first(), "{name} step {step}: {:?}", d.ops);
+        assert!(d.screen_switch_comes_first(), "{name} step {step}: {:?}", d.ops);
+
         view.apply_delta(&d);
+        let base = applier.applied();
+        let applied = applier.apply_delta(&mut client, &d, base, term.seq());
+        assert_eq!(
+            applied,
+            Applied::Ok,
+            "{name} step {step}: the applier could not apply a delta the encoder \
+             produced for a grid of the same size"
+        );
 
         // Reference 1: the incremental path must match the full one.
         let mut probe = Encoder::new();
@@ -163,7 +190,154 @@ fn replay(name: &str, cols: usize, rows: usize) {
                 );
             }
         }
+
+        // Reference 3: two real terminals, cell for cell.
+        //
+        // This is the claim CONTRACTS.md makes -- that the renderer's path is
+        // identical at both ends -- and only two real `Terminal`s can
+        // demonstrate it. The text comparisons above are projections, and a
+        // projection can agree while the things behind it differ: same
+        // characters, wrong colours.
+        assert_cells_agree(&term, &client, name, step);
+
+        // State the renderer reads that no text comparison covers.
+        assert_eq!(
+            client.modes().contains(Modes::ALT_SCREEN),
+            term.modes().contains(Modes::ALT_SCREEN),
+            "{name} step {step}: the client is on the wrong screen"
+        );
+        assert_eq!(
+            client.grid().row(0).id,
+            term.grid().row(0).id,
+            "{name} step {step}: absolute line ids diverged -- selections and \
+             command blocks would name different rows on the two machines"
+        );
+        assert_eq!(
+            client.seq(),
+            term.seq(),
+            "{name} step {step}: the client would acknowledge the wrong sequence"
+        );
     }
+}
+
+/// The two references must agree about an op neither has ever received.
+///
+/// `DeltaOp::Erase` is not emitted by the current encoder, so nothing in the
+/// corpus exercises it and the replay above cannot reach it. Both `GridView`
+/// and `Applier` implement it, and if their readings differ, the first person
+/// to find out is whoever writes the encoder that starts sending it — or worse,
+/// a client author whose grid quietly disagrees with the desktop's.
+#[test]
+fn both_references_read_erase_the_same_way() {
+    let mut term = Terminal::new(20, 3, 100);
+    term.advance(b"abcdefghij\r\nklmnopqrst\r\nuvwxyz");
+
+    let mut enc = Encoder::new();
+    let mut view = GridView::new();
+    let mut client = Terminal::new(20, 3, 100);
+    let mut applier = Applier::new();
+
+    let k = enc.keyframe(term.grid(), cursor(&term), term.modes(), "");
+    view.apply_keyframe(&k);
+    applier.apply_keyframe(&mut client, &k, term.seq());
+
+    let bg = zest_core::Color::Indexed(4);
+    let attr = zest_proto::AttrId(9_000);
+    let d = zest_proto::Delta {
+        attrs: vec![zest_proto::AttrDef {
+            id: attr,
+            fg: zest_core::Color::Default,
+            bg,
+            flags: zest_core::CellFlags::empty(),
+        }],
+        ops: vec![zest_proto::DeltaOp::Erase { top: 0, left: 2, bottom: 1, right: 5, attr }],
+    };
+
+    view.apply_delta(&d);
+    let base = applier.applied();
+    assert_eq!(applier.apply_delta(&mut client, &d, base, term.seq() + 1), Applied::Ok);
+
+    for r in 0..2usize {
+        let flat: String = view.rows()[r]
+            .runs
+            .iter()
+            .flat_map(|run| {
+                let mut chars = run.text.chars();
+                (0..run.cells).map(move |_| chars.next().unwrap_or(' ')).collect::<Vec<_>>()
+            })
+            .collect();
+        let from_terminal: String =
+            (0..20).map(|c| client.grid().cell(r, c).map_or(' ', |x| x.ch)).collect();
+        assert_eq!(
+            flat.trim_end(),
+            from_terminal.trim_end(),
+            "row {r}: the two references disagree about Erase"
+        );
+
+        for c in 2..=5usize {
+            assert_eq!(
+                client.grid().cell(r, c).unwrap().bg,
+                bg,
+                "row {r} col {c}: Erase must paint the attribute it names"
+            );
+        }
+    }
+}
+
+/// Compare every cell of the host's grid against the client's.
+///
+/// **Exactly two fields are excluded, and both are named in the failure
+/// message** so that a later failure cannot be "fixed" by quietly widening the
+/// exclusion list. Neither is an applier bug; both are pre-existing gaps in the
+/// *encoder* that this comparison is what finally documents.
+fn assert_cells_agree(host: &Terminal, client: &Terminal, name: &str, step: usize) {
+    let (hg, cg) = (host.grid(), client.grid());
+    assert_eq!(cg.rows(), hg.rows(), "{name} step {step}: grid height diverged");
+    assert_eq!(cg.cols(), hg.cols(), "{name} step {step}: grid width diverged");
+
+    for r in 0..hg.rows() {
+        for c in 0..hg.cols() {
+            let (h, k) = (hg.cell(r, c).copied(), cg.cell(r, c).copied());
+            let (Some(h), Some(k)) = (h, k) else { continue };
+
+            assert_eq!(
+                k.ch, h.ch,
+                "{name} step {step}: character differs at row {r} col {c}\n\
+                 host {:?} client {:?}",
+                h.ch, k.ch
+            );
+            assert_eq!(
+                k.bg, h.bg,
+                "{name} step {step}: background differs at row {r} col {c}"
+            );
+            assert_eq!(
+                k.flags, h.flags,
+                "{name} step {step}: flags differ at row {r} col {c}"
+            );
+
+            // Excluded: foreground on a cell that paints nothing.
+            //
+            // `Encoder::encode_row` trims trailing cells by testing `ch`, `bg`
+            // and `flags` -- not `fg` -- so a run of coloured spaces at the end
+            // of a row is dropped and rebuilt with the default foreground.
+            // Invisible to a renderer, because there is no glyph to colour.
+            let paints = h.ch != ' ' || h.bg != zest_core::Color::Default;
+            if paints {
+                assert_eq!(
+                    k.fg, h.fg,
+                    "{name} step {step}: foreground differs at row {r} col {c} \
+                     on a cell that paints"
+                );
+            }
+        }
+    }
+
+    // Excluded: `Cell::extra`, the combining-mark side table.
+    //
+    // `Encoder::encode_row` writes `Cell::ch` and never touches it, so `e` +
+    // U+0301 arrives as a bare `e`. That is a real gap in the wire format, not
+    // an applier bug -- tracked separately, and deliberately not papered over
+    // here by comparing only what survives.
 }
 
 #[test]

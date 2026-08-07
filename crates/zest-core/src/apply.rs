@@ -1,0 +1,349 @@
+//! Writing state that was computed somewhere else.
+//!
+//! A session running on another machine is parsed by *that* machine's
+//! `Terminal`, shipped as grid deltas, and applied into a local `Terminal`
+//! here. `docs/CONTRACTS.md` puts it plainly under "deliberately not
+//! abstracted":
+//!
+//! > A *remote* session keeps a real local `Terminal` that deltas are applied
+//! > into, so the renderer's path is identical at both ends of the mesh.
+//!
+//! [`RemoteWriter`] is that door. It exists so there is exactly one named,
+//! documented place that can write a grid without parsing VT — the alternative
+//! is making `TermState`'s fields public, after which "who else writes this
+//! grid" has no answer short of reading the whole workspace.
+//!
+//! # The one rule
+//!
+//! **Never mix this with [`Terminal::advance`] on the same terminal.** A parser
+//! and a delta stream are two authorities over one grid and the loser is
+//! whichever wrote last. A local session has a pty and no deltas; a remote one
+//! has deltas and no pty. Nothing legitimately has both.
+//!
+//! # Sequence numbers are assigned, not counted
+//!
+//! On a host, `seq` counts mutations. On a client it *is the host's number* —
+//! the value to acknowledge, and the value the next delta will name as its
+//! base. So [`RemoteWriter::set_seq`] assigns; it never increments. Applying a
+//! batch bumps `seq` incidentally through the ordinary mutation paths, and the
+//! assignment at the end of the batch overwrites that with the truth.
+
+use alloc::vec::Vec;
+
+use crate::grid::LineId;
+use crate::term::TermState;
+use crate::{Cell, CursorStyle, Modes, ScrollRegion, Terminal};
+
+impl Terminal {
+    /// A handle for applying state computed on another machine.
+    ///
+    /// See the [module docs](self) — in particular that this must never be
+    /// mixed with [`Terminal::advance`] on the same terminal.
+    pub fn remote(&mut self) -> RemoteWriter<'_> {
+        RemoteWriter { state: &mut self.state }
+    }
+}
+
+/// Writes a grid from decoded state rather than from a byte stream.
+pub struct RemoteWriter<'a> {
+    state: &'a mut TermState,
+}
+
+impl RemoteWriter<'_> {
+    // --- grid ------------------------------------------------------------
+
+    /// Overwrite one viewport row.
+    ///
+    /// `cells` shorter than the grid is padded with blanks and longer is
+    /// truncated, because the encoder drops trailing blanks and the client is
+    /// the side that knows the width. Out-of-range rows are ignored; the caller
+    /// is expected to have noticed and asked for a keyframe.
+    pub fn write_row(&mut self, row: usize, id: LineId, cells: &[Cell], wrapped: bool) {
+        let cols = self.state.grid().cols();
+        if row >= self.state.grid().rows() {
+            return;
+        }
+        let grid = self.state.grid_mut();
+        let target = grid.row_mut(row);
+        target.id = id;
+        // Both the row flag and the cells are copied exactly as the host sent
+        // them, and neither is derived from the other.
+        //
+        // `Grid::set_wrapped` is the tempting call here and is wrong: it sets
+        // `CellFlags::WRAPLINE` on the last cell *from* `row.wrapped`, so on a
+        // host row where the two disagree — which happens, because the parser
+        // sets them at different moments — it would erase a flag that arrived
+        // in the cells. The client's job is to reproduce the host, including
+        // any inconsistency in it, not to normalize on the way in.
+        target.wrapped = wrapped;
+        let dst = target.cells_mut();
+        for (i, slot) in dst.iter_mut().enumerate() {
+            *slot = cells.get(i).copied().unwrap_or_default();
+        }
+        let _ = cols;
+        self.state.touch();
+    }
+
+    /// Move rows within a region.
+    ///
+    /// Positive `lines` moves content up, which is what ordinary output does. A
+    /// **full-height region feeds scrollback**, exactly as local output does,
+    /// so a client gets correct history for free from the same op that moves
+    /// the viewport. A shorter region is a `DECSTBM` scroll and does not.
+    pub fn scroll(&mut self, top: usize, bottom: usize, lines: i32) {
+        if lines == 0 || top > bottom {
+            return;
+        }
+        let template = self.state.template;
+        let rows = self.state.grid().rows();
+        let full = top == 0 && bottom + 1 >= rows;
+
+        let grid = self.state.grid_mut();
+        let saved = grid.region;
+        if !full {
+            grid.region = ScrollRegion { top, bottom: bottom.min(rows.saturating_sub(1)) };
+        }
+        #[allow(clippy::cast_sign_loss, reason = "sign is tested immediately above")]
+        if lines > 0 {
+            grid.scroll_up(lines as usize, &template);
+        } else {
+            grid.scroll_down((-lines) as usize, &template);
+        }
+        if !full {
+            grid.region = saved;
+        }
+        self.state.touch_full();
+    }
+
+    /// Clear a rectangle to an attribute, corners inclusive.
+    pub fn erase(&mut self, top: usize, left: usize, bottom: usize, right: usize, template: &Cell) {
+        let rows = self.state.grid().rows();
+        let cols = self.state.grid().cols();
+        if top > bottom || left > right || top >= rows || left >= cols {
+            return;
+        }
+        let grid = self.state.grid_mut();
+        for row in top..=bottom.min(rows - 1) {
+            grid.erase_in_row(row, left, right.min(cols - 1), template);
+        }
+        self.state.touch();
+    }
+
+    /// Prepend history this client did not hold, oldest first.
+    ///
+    /// For `RequestScrollback`: a keyframe is a *viewport*, so anything that
+    /// scrolled past before this client attached exists only on the host.
+    pub fn prepend_history(&mut self, rows: &[(LineId, Vec<Cell>, bool)]) {
+        if rows.is_empty() {
+            return;
+        }
+        self.state.grid_mut().push_history(rows);
+        self.state.touch_full();
+    }
+
+    /// Keep the client's line-id counter level with the host's.
+    ///
+    /// Rows exposed by a scroll are stamped from the *client's* counter, which
+    /// knows nothing of the host's. Every such row is re-sent by the encoder
+    /// and restamped by [`Self::write_row`], so the cells are right either way
+    /// — but `Grid::next_line_id` and therefore `ChangeSource::oldest_line`
+    /// would drift, and command blocks are indexed by absolute line.
+    pub fn sync_next_line_id(&mut self, next: LineId) {
+        self.state.grid_mut().set_next_line_id(next);
+    }
+
+    // --- terminal state --------------------------------------------------
+
+    pub fn set_cursor(&mut self, row: usize, col: usize) {
+        let grid = self.state.grid_mut();
+        grid.cursor.row = row.min(grid.rows().saturating_sub(1));
+        grid.cursor.col = col.min(grid.cols().saturating_sub(1));
+        self.state.touch();
+    }
+
+    pub fn set_cursor_style(&mut self, style: CursorStyle) {
+        self.state.cursor_style = style;
+        self.state.touch();
+    }
+
+    /// Switch between the primary and alternate screens.
+    ///
+    /// **Must be applied before the rows of the batch that carries it**, or the
+    /// rows describing one screen land in the other. The encoder guarantees the
+    /// order and `Delta::screen_switch_comes_first` asserts it.
+    pub fn set_alt_screen(&mut self, active: bool) {
+        self.state.set_alt_screen(active);
+    }
+
+    pub fn set_title(&mut self, title: &str) {
+        self.state.title.clear();
+        self.state.title.push_str(title);
+        self.state.touch();
+    }
+
+    /// Mirror the host's modes.
+    ///
+    /// This is what lets an attached client encode its own keystrokes: whether
+    /// an arrow key is `ESC [ A` or `ESC O A` is `APP_CURSOR`, and the client
+    /// is the side holding the keyboard.
+    ///
+    /// `ALT_SCREEN` is applied through [`Self::set_alt_screen`] rather than
+    /// written straight into the bits, because entering the alternate screen
+    /// allocates a second grid — setting the bit alone would claim a screen
+    /// switch that never happened.
+    pub fn set_modes(&mut self, modes: Modes) {
+        let want_alt = modes.contains(Modes::ALT_SCREEN);
+        if want_alt != self.state.modes.contains(Modes::ALT_SCREEN) {
+            self.state.set_alt_screen(want_alt);
+        }
+        self.state.modes = modes;
+        self.state.touch();
+    }
+
+    pub fn resize(&mut self, cols: usize, rows: usize) {
+        self.state.resize(cols, rows);
+    }
+
+    // --- bookkeeping -----------------------------------------------------
+
+    /// Adopt the host's sequence number. **Assigned, never incremented.**
+    ///
+    /// Call last in a batch, so the value describes a fully applied state: it
+    /// is what the client acknowledges, and acknowledging a half-applied batch
+    /// tells the host to send a delta from a state that does not exist.
+    ///
+    /// Deliberately unchecked. A monotonicity assertion here looks obviously
+    /// right and is wrong: every write above bumps `seq` through the ordinary
+    /// mutation path, so between two assignments the field is a local mutation
+    /// count that is *expected* to exceed the host's number and then be
+    /// overwritten by it. Ordering is the caller's to enforce, and it has the
+    /// information to — a client discards any update whose `base` is not the
+    /// sequence it last applied.
+    pub fn set_seq(&mut self, seq: u64) {
+        self.state.seq = seq;
+    }
+
+    /// Mark the viewport dirty without changing it.
+    pub fn mark(&mut self) {
+        self.state.touch();
+    }
+
+    /// Mark everything dirty — a scroll, a screen switch, a resize.
+    pub fn mark_full(&mut self) {
+        self.state.touch_full();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cell(ch: char) -> Cell {
+        Cell { ch, ..Cell::default() }
+    }
+
+    fn row_of(text: &str) -> Vec<Cell> {
+        text.chars().map(cell).collect()
+    }
+
+    #[test]
+    fn a_written_row_carries_the_hosts_line_id() {
+        // The absolute id is what makes scroll detection exact and what command
+        // blocks are indexed by. A client that stamps its own would answer
+        // "which line is this" differently from the host.
+        let mut t = Terminal::new(10, 3, 100);
+        t.remote().write_row(1, 42, &row_of("hello"), false);
+        assert_eq!(t.grid().row(1).id, 42);
+        assert_eq!(t.grid().row(1).text().trim_end(), "hello");
+    }
+
+    #[test]
+    fn a_short_row_is_padded_rather_than_left_stale() {
+        // The encoder drops trailing blanks, so almost every row arrives short.
+        // Leaving the tail alone would keep whatever was there before.
+        let mut t = Terminal::new(10, 3, 100);
+        t.remote().write_row(0, 1, &row_of("XXXXXXXXXX"), false);
+        t.remote().write_row(0, 2, &row_of("ab"), false);
+        assert_eq!(t.grid().row(0).text().trim_end(), "ab");
+    }
+
+    #[test]
+    fn a_full_height_scroll_feeds_scrollback() {
+        // The client gets correct history from the same op that moves the
+        // viewport -- no separate bookkeeping, and nothing to get out of step.
+        let mut t = Terminal::new(10, 3, 100);
+        for r in 0..3 {
+            t.remote().write_row(r, r as LineId, &row_of("line"), false);
+        }
+        assert_eq!(t.grid().scrollback_len(), 0);
+        t.remote().scroll(0, 2, 1);
+        assert_eq!(t.grid().scrollback_len(), 1, "the displaced row became history");
+    }
+
+    #[test]
+    fn a_region_scroll_does_not_feed_scrollback() {
+        // A DECSTBM scroll inside a region is not lines leaving the screen.
+        // Treating it as history is how a client's scrollback fills with the
+        // middle of a redrawing TUI.
+        let mut t = Terminal::new(10, 5, 100);
+        t.remote().scroll(1, 3, 1);
+        assert_eq!(t.grid().scrollback_len(), 0);
+    }
+
+    #[test]
+    fn a_negative_scroll_moves_content_down() {
+        let mut t = Terminal::new(10, 3, 100);
+        t.remote().write_row(0, 0, &row_of("top"), false);
+        t.remote().scroll(0, 2, -1);
+        assert_eq!(t.grid().row(1).text().trim_end(), "top");
+    }
+
+    #[test]
+    fn history_is_prepended_oldest_first() {
+        let mut t = Terminal::new(10, 2, 100);
+        t.remote().prepend_history(&[
+            (100, row_of("older"), false),
+            (101, row_of("newer"), false),
+        ]);
+        assert_eq!(t.grid().scrollback_len(), 2);
+        assert_eq!(t.grid().line(0).map(|r| r.text().trim_end().to_string()).unwrap(), "older");
+        assert_eq!(t.grid().line(1).map(|r| r.text().trim_end().to_string()).unwrap(), "newer");
+    }
+
+    #[test]
+    fn the_sequence_is_adopted_not_counted() {
+        // On a client `seq` is the host's number: the value to acknowledge, and
+        // the base the next delta will name. Counting local mutations here
+        // would ack a sequence the host never sent.
+        let mut t = Terminal::new(10, 3, 100);
+        t.remote().write_row(0, 0, &row_of("a"), false);
+        t.remote().write_row(1, 1, &row_of("b"), false);
+        t.remote().set_seq(9_000);
+        assert_eq!(t.seq(), 9_000);
+    }
+
+    #[test]
+    fn setting_the_alt_screen_bit_switches_the_screen() {
+        // Writing the bit straight into `modes` would claim a screen switch
+        // that never happened -- the alternate grid is allocated lazily.
+        let mut t = Terminal::new(10, 3, 100);
+        t.remote().write_row(0, 0, &row_of("primary"), false);
+
+        t.remote().set_modes(Modes::ALT_SCREEN);
+        assert!(t.modes().contains(Modes::ALT_SCREEN));
+        assert_ne!(t.grid().row(0).text().trim_end(), "primary", "still on the primary grid");
+
+        t.remote().set_modes(Modes::empty());
+        assert_eq!(t.grid().row(0).text().trim_end(), "primary", "the primary grid survived");
+    }
+
+    #[test]
+    fn a_row_past_the_end_is_ignored_rather_than_growing_the_grid() {
+        // The grid's size is something the shell on the other side also
+        // believes in. Growing it here to fit a stray row would leave the two
+        // permanently disagreeing about how wide the screen is.
+        let mut t = Terminal::new(10, 3, 100);
+        t.remote().write_row(99, 99, &row_of("nope"), false);
+        assert_eq!(t.grid().rows(), 3);
+    }
+}

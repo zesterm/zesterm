@@ -112,11 +112,24 @@ impl GridView {
                     }
                 }
                 DeltaOp::Erase { top, left, bottom, right, attr } => {
-                    let _ = (top, left, bottom, right, attr);
                     // Not emitted by the current encoder, which sends whole
-                    // rows. Left unimplemented rather than guessed: a decoder
-                    // that silently mis-handles an op it has never received is
-                    // worse than one that has visibly not met it yet.
+                    // rows -- and implemented anyway, because the *other*
+                    // reference (`Applier`) implements it, and two references
+                    // for one wire format that disagree about an op is how a
+                    // client author learns the format is ambiguous.
+                    //
+                    // A run list has no cells to clear in place, so the erased
+                    // span is rebuilt as a run of spaces in the named
+                    // attribute. `cells` stays authoritative for width.
+                    let (top, bottom) = (usize::from(*top), usize::from(*bottom));
+                    let (left, right) = (usize::from(*left), usize::from(*right));
+                    if top > bottom || left > right {
+                        continue;
+                    }
+                    for r in top..=bottom.min(self.rows.len().saturating_sub(1)) {
+                        let Some(row) = self.rows.get_mut(r) else { continue };
+                        *row = erase_span(row, left, right, *attr);
+                    }
                 }
                 DeltaOp::Cursor { cursor } => self.cursor = *cursor,
                 DeltaOp::SbPush { payload } => self.scrollback.push(payload.clone()),
@@ -132,6 +145,42 @@ impl GridView {
     pub fn rows(&self) -> &[RowPayload] {
         &self.rows
     }
+}
+
+/// Rebuild one row with `[left, right]` replaced by blanks in `attr`.
+///
+/// Runs are re-split cell by cell and then coalesced, which is not the fastest
+/// possible thing and is the clearest: `Erase` is rare, and a clever in-place
+/// splice across run boundaries is exactly where an off-by-one lives.
+fn erase_span(row: &RowPayload, left: usize, right: usize, attr: AttrId) -> RowPayload {
+    // Flatten to (attr, char) per cell. A run's text may be shorter than its
+    // cell count -- that is a wide character's spacer -- so the same padding
+    // rule as everywhere else applies: take characters in order, then spaces.
+    let mut flat: Vec<(AttrId, char)> = Vec::new();
+    for run in &row.runs {
+        let mut chars = run.text.chars();
+        for _ in 0..run.cells {
+            flat.push((run.attr, chars.next().unwrap_or(' ')));
+        }
+    }
+    if right >= flat.len() {
+        flat.resize(right + 1, (attr, ' '));
+    }
+    for slot in &mut flat[left..=right] {
+        *slot = (attr, ' ');
+    }
+
+    let mut runs: Vec<crate::delta::Run> = Vec::new();
+    for (a, ch) in flat {
+        match runs.last_mut() {
+            Some(last) if last.attr == a => {
+                last.cells += 1;
+                last.text.push(ch);
+            }
+            _ => runs.push(crate::delta::Run { attr: a, cells: 1, text: ch.to_string() }),
+        }
+    }
+    RowPayload { line: row.line, runs, wrapped: row.wrapped }
 }
 
 #[cfg(test)]

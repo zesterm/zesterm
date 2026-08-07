@@ -23,6 +23,7 @@
 
 extern crate alloc;
 
+pub mod apply;
 pub mod blocks;
 pub mod cell;
 pub mod color;
@@ -34,6 +35,7 @@ pub mod selection;
 pub mod subscribe;
 pub mod term;
 
+pub use apply::RemoteWriter;
 pub use blocks::{Block, BlockId, BlockIndex, BlockState};
 pub use cell::{Cell, CellFlags};
 pub use color::{Color, NamedColor};

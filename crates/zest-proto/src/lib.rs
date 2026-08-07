@@ -30,6 +30,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod apply;
 pub mod auth;
 pub mod decode;
 pub mod delta;
@@ -38,6 +39,7 @@ pub mod frame;
 pub(crate) mod hex;
 pub mod ids;
 
+pub use apply::{Applied, Applier};
 pub use auth::{AuthFailure, Nonce32, Sig64};
 pub use delta::{AttrDef, AttrId, CursorState, Delta, DeltaOp, Run, RowPayload};
 pub use decode::GridView;

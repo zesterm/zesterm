@@ -45,21 +45,21 @@ move.
 
 ## Status
 
-**417 tests, four gates green** — re-measured on macOS, not remembered. First
-paint 35ms **on Windows**; the Mac paints against a different compositor and its
-number is reported rather than gated.
+**452 tests, four gates green**, measured on macOS rather than remembered.
+First paint 35ms **on Windows**; the Mac paints against a different compositor
+and its number (48ms) is reported rather than gated.
 
 | Crate | State |
 |---|---|
 | `zest-pty` | ✅ ConPTY *and* unix (`openpt`), resize, shutdown, `.vtrec` recorder |
-| `zest-core` | ✅ grid, scrollback, VT, modes, OSC, palette, `ChangeSource` — 🟡 `BlockIndex` types frozen, OSC 133 not wired |
+| `zest-core` | ✅ grid, scrollback, VT, modes, OSC, palette, `ChangeSource`, `RemoteWriter` — 🟡 `BlockIndex` types frozen, OSC 133 not wired |
 | `zest-font` | ✅ metrics, shaping, fallback, colour glyphs, Nerd Font PUA |
 | `zest-theme` | ✅ tokens, OKLCH derivation, 5 built-ins, 4 importers |
 | `zest-render-wgpu` | ✅ pipelines, atlas, offscreen resolve, selection — ⬜ gamma validation |
 | `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema |
 | `zest-input` | ✅ extracted; keys + SGR mouse + selection — ⬜ IME, Kitty protocol |
 | `zest-app` | ✅ window, shell, sessions behind `SessionSource` — runs on Windows *and* macOS (Metal) — ⬜ daemon-attached source, macOS chrome |
-| `zest-proto` | ✅ wire types, encoder, reference decoder for TS clients, framing, conformance corpus — ⬜ no `Delta` → `Terminal` applier, no modes on the wire |
+| `zest-proto` | ✅ protocol 2, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, cell-for-cell conformance, chaos-resync |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet — ⬜ pairing, transports |
 | `zest-daemon` | ✅ session ownership, protocol loop, loopback transport — ⬜ LAN listener, no authentication, `Seq` and `Ack` not yet real |
 
@@ -72,6 +72,9 @@ number is reported rather than gated.
 - `zest-daemon` serving a session over a named pipe or unix socket, with a
   client attaching and receiving live output as deltas
   (`cargo run -p zest-daemon --example attach`).
+- A client `Terminal` reconstructed from those deltas that is **cell-for-cell
+  identical to the host's** at every frame of five recorded sessions, and that
+  converges again after a dropped frame at any of 10,000 points.
 - Two machines minting verifiable identities and finding each other by mDNS
   (`cargo run -p zest-mesh --example mesh_probe`).
 
@@ -89,10 +92,9 @@ And four things underneath them that reading the code turned up. Each is
 recorded here because none is visible from the feature list, and the third is
 the one that decides whether M3's win condition is worth having:
 
-- **There is no `Delta` → `Terminal` applier.** `decode.rs`'s `GridView` is the
-  reference decoder *for TypeScript clients* and rebuilds a flat row list.
-  CONTRACTS.md promises a remote session keeps a real local `Terminal` so the
-  renderer's path is identical at both ends; nothing implements that yet.
+- ~~**There is no `Delta` → `Terminal` applier.**~~ **Done.** `RemoteWriter` in
+  `zest-core` and `Applier` in `zest-proto`, checked cell-for-cell against the
+  host across five recordings and 10,000 random disconnect points.
 - ~~**`DeltaOp::AltScreen` is emitted after `DeltaOp::Row`.**~~ **Fixed in
   protocol 2**, before anything could apply it wrongly. A screen switch now
   precedes the rows that describe it, guarded by
@@ -286,23 +288,25 @@ M2. Owns `zest-core/src/blocks.rs` and the OSC 133 path. Hot spot: coordinate
       counts. MessagePack envelope; individual cells are **not** msgpacked.
 - [x] `zest-daemon`: session ownership, loopback transport (unix socket and
       overlapped named pipe), protocol loop.
-- [ ] **The `Delta` → `Terminal` applier.** `decode.rs`'s `GridView` is the
-      reference for TypeScript clients and reconstructs a flat row list; nothing
-      applies a delta into a real `Terminal`, which is what CONTRACTS.md promises
-      a remote session keeps. This is the gap the client half rests on.
+- [x] **The `Delta` → `Terminal` applier.** `zest-core`'s `RemoteWriter` is the
+      one named door into a grid that is not the VT parser; `zest-proto`'s
+      `Applier` drives it from the wire. `GridView` stays as the reference for
+      TypeScript clients, and the two are checked against each other.
 - [ ] The daemon tells the truth about sequence: `Update`/`Keyframe` carry
       `Seq(0)` today and `Ack` is a no-op, so a conforming client cannot detect a
       gap. Latent over one reliable stream; not over a reconnecting one.
 - [ ] `zest-app` gains a daemon-attached `SessionSource`. **Find-or-spawn goes
       in the slot the shell spawn occupies today** — after the window is
       visible, overlapping driver init. `--startup-probe` must still pass.
-- [ ] **Conformance corpus**: the `.vtrec` replay exists and compares the host
-      `Terminal` against `GridView` at every frame. Add the applier as a third
-      participant and assert **two real `Terminal`s** are cell-for-cell equal —
-      a projection can agree while the things behind it differ. This is the spine.
-- [ ] Chaos-resync 10,000 times at random disconnect points. There is a resync
-      test at every chunk boundary today; the missing half is a *stale* update
-      whose `base` no longer matches, which is the path a real drop takes.
+- [x] **Conformance corpus**: the `.vtrec` replay now has three participants —
+      the host `Terminal`, `GridView`, and a client `Terminal` fed by the
+      applier — and asserts **two real `Terminal`s are cell-for-cell equal at
+      every frame**, with exactly two exclusions, both named in the failure
+      message so nobody widens them quietly. This is the spine.
+- [x] Chaos-resync 10,000 times at random disconnect points, from three seeds,
+      in under a second — so it runs on every `cargo test` rather than behind
+      `--ignored`, where CI would never see it. The stale-`base` path is
+      exercised on every iteration, not once in a fixture.
 - [ ] `ts-rs` codegen with golden-fixture contract tests in CI. The `ts` feature
       exists on the delta types; nothing generates or checks bindings yet.
 - [ ] SQLite scrollback. Scrollback is in memory and bounded; a session that

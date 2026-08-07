@@ -201,6 +201,45 @@ impl Storage {
         self.next_id
     }
 
+    /// Adopt a counter decided elsewhere.
+    ///
+    /// Only for a grid being written from a remote host's state: its line ids
+    /// are the host's, and a client counting its own would answer "which line
+    /// is this" differently from the machine the shell is running on.
+    /// Monotonic, so a late message cannot rewind it.
+    pub fn set_next_id(&mut self, id: LineId) {
+        self.next_id = self.next_id.max(id);
+    }
+
+    /// Insert rows above the oldest, as history that arrived after the fact.
+    ///
+    /// `resize_rows` only grows at the bottom, which is right for a viewport
+    /// that got taller and wrong for scrollback fetched with
+    /// `RequestScrollback` — that arrives *older* than everything held.
+    pub fn prepend(&mut self, rows: &[(LineId, Vec<Cell>, bool)], cols: usize) {
+        if rows.is_empty() {
+            return;
+        }
+        // Rebuilt in logical order rather than rotated in place: `origin` makes
+        // "insert before the first" a wrapping splice, and getting that subtly
+        // wrong shows up as history in the wrong order much later.
+        let mut out: Vec<Row> = Vec::with_capacity(self.rows.len() + rows.len());
+        for (id, cells, wrapped) in rows {
+            let mut row = Row::new(cols, *id);
+            let dst = row.cells_mut();
+            for (i, slot) in dst.iter_mut().enumerate() {
+                *slot = cells.get(i).copied().unwrap_or_default();
+            }
+            row.wrapped = *wrapped;
+            out.push(row);
+        }
+        for i in 0..self.rows.len() {
+            out.push(self.rows[self.physical(i)].clone());
+        }
+        self.rows = out;
+        self.origin = 0;
+    }
+
     #[inline]
     fn physical(&self, logical: usize) -> usize {
         debug_assert!(logical < self.rows.len(), "row {logical} out of range");
