@@ -45,21 +45,42 @@ move.
 
 ## Status
 
+**417 tests, four gates green, first paint 35ms.** `main` is the handover point;
+everything below is measured on it rather than remembered.
+
 | Crate | State |
 |---|---|
-| `zest-pty` | ✅ ConPTY, resize, shutdown protocol, `.vtrec` recorder, unix backend |
-| `zest-core` | ✅ grid, scrollback, VT parsing, modes, OSC, palette — 🟡 block and subscriber seams frozen, unimplemented |
-| `zest-font` | ✅ metrics, shaping, rasterization, system fallback, colour glyphs |
+| `zest-pty` | ✅ ConPTY *and* unix (`openpt`), resize, shutdown, `.vtrec` recorder |
+| `zest-core` | ✅ grid, scrollback, VT, modes, OSC, palette, `ChangeSource` — 🟡 `BlockIndex` types frozen, OSC 133 not wired |
+| `zest-font` | ✅ metrics, shaping, fallback, colour glyphs, Nerd Font PUA |
 | `zest-theme` | ✅ tokens, OKLCH derivation, 5 built-ins, 4 importers |
 | `zest-render-wgpu` | ✅ pipelines, atlas, offscreen resolve, selection — ⬜ gamma validation |
 | `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema |
-| `zest-input` | 🟡 keys + SGR mouse, still inline in `zest-app` |
-| `zest-app` | ✅ real window, real shell, sessions behind `SessionSource` |
-| `zest-proto` | 🟡 wire types frozen; encoder, decoder and conformance corpus done — ⬜ framing |
-| `zest-mesh` | ✅ Ed25519 identity, OS key store, mDNS discovery — ⬜ pairing, transports, cloud |
-| `zest-daemon` | ⬜ skeleton |
+| `zest-input` | ✅ extracted; keys + SGR mouse + selection — ⬜ IME, Kitty protocol |
+| `zest-app` | ✅ window, shell, sessions behind `SessionSource` — ⬜ daemon-attached source |
+| `zest-proto` | ✅ wire types, encoder, decoder, framing, conformance corpus |
+| `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet — ⬜ pairing, transports |
+| `zest-daemon` | ✅ session ownership, protocol loop, loopback transport — ⬜ LAN listener |
 
-385 tests. `--startup-probe` reports first paint at ~43ms against a 100ms budget.
+### What works end to end today
+
+- A terminal you can use on Windows: themes, settings with hot reload,
+  selection, scrollback, Nerd Font prompts, 35ms to first paint.
+- `zest-daemon` serving a session over a named pipe or unix socket, with a
+  client attaching and receiving live output as deltas
+  (`cargo run -p zest-daemon --example attach`).
+- Two machines minting verifiable identities and finding each other by mDNS
+  (`cargo run -p zest-mesh --example mesh_probe`).
+
+### The gap to M3
+
+Three things, and no more:
+
+1. **A LAN listener on the daemon** — it currently listens only on the loopback
+   socket. → WS-F
+2. **Pairing**, so `listen_lan` can be turned on without handing out shells.
+   → WS-H item 3
+3. **`zest-app` attaching to a daemon** rather than owning a pty. → WS-F
 
 ---
 
@@ -74,24 +95,29 @@ Each has its own issue, self-contained enough to hand to an agent on its own.
 | | Stream | Owns | Status | Issue |
 |---|---|---|---|---|
 | **A** | [Windows chrome, motion, polish](#ws-a) | `zest-app/src/{chrome,motion,platform}*`, `zest-render-wgpu/` | **Ready** — B unblocked it | [#5](https://github.com/zesterm/zesterm/issues/5) |
-| **B** | [`zest-input`](#ws-b) | `crates/zest-input/` | Extracted; IME + Kitty open | [#2](https://github.com/zesterm/zesterm/issues/2) |
-| **C** | [Unix PTY + macOS host](#ws-c) | `zest-pty/src/unix.rs`, macOS platform | **C1 done**, C2 open | [#3](https://github.com/zesterm/zesterm/issues/3) |
+| **B** | [`zest-input`](#ws-b) | `crates/zest-input/` | Extracted ✅ · IME + Kitty open | [#2](https://github.com/zesterm/zesterm/issues/2) |
+| **C** | [Unix PTY + macOS host](#ws-c) | `zest-pty/src/unix.rs`, macOS platform | C1 ✅ · C2 open, **not needed for M3** | [#3](https://github.com/zesterm/zesterm/issues/3) |
 | **D** | [Linux host](#ws-d) | Linux platform + packaging | **Ready** — C1 landed `unix.rs` | [#9](https://github.com/zesterm/zesterm/issues/9) |
 | **E** | [Command blocks](#ws-e) | `zest-core/src/blocks.rs`, OSC 133, shell integration | Ready | [#6](https://github.com/zesterm/zesterm/issues/6) |
-| **F** | [`zest-proto` + `zest-daemon`](#ws-f) | `crates/zest-proto/`, `crates/zest-daemon/` | Ready — **the lead** | [#4](https://github.com/zesterm/zesterm/issues/4) |
+| **F** | [`zest-proto` + `zest-daemon`](#ws-f) | `crates/zest-proto/`, `crates/zest-daemon/` | Protocol + daemon ✅ · **LAN listener + app attach next** | [#4](https://github.com/zesterm/zesterm/issues/4) |
 | **G** | [Web client](#ws-g) | `clients/web/` | Ready (decoder) | [#8](https://github.com/zesterm/zesterm/issues/8) |
-| **H** | [Mesh identity, discovery, transports](#ws-h) | `crates/zest-mesh/`, `cloud/` | **H1–H2 done**, pairing after F | [#7](https://github.com/zesterm/zesterm/issues/7) |
+| **H** | [Mesh identity, discovery, transports](#ws-h) | `crates/zest-mesh/`, `cloud/` | Identity + discovery ✅ · **pairing next** | [#7](https://github.com/zesterm/zesterm/issues/7) |
 
-**Ordering that matters.** B before A — B extracts `zest-input` out of
-`zest-app`, and A then builds chrome and motion in the same file; the other
-order is a guaranteed conflict. C1 before D, since C1 writes the `unix.rs` that
-serves both. F before H's transports, though H's identity work can start now.
+**Ordering that mattered, and is now settled.** B landed before A, so `zest-app`
+is free of input code and A can fill it with chrome. C1 landed before D, so
+`unix.rs` exists for Linux to build on. H's identity landed independently of F,
+as planned.
 
-**The insight worth naming:** *"make the Mac's terminals reachable"* (WS-C1 — a
-`forkpty` backend behind an already-frozen trait, plus a headless daemon) is far
-smaller than *"port the GPU terminal to macOS"* (WS-C2 — Metal,
-`NSVisualEffectView`, traffic lights, CoreText). C1 unlocks the fleet; C2 can
-trail by weeks.
+**What remains ordered.** WS-F's LAN listener and WS-H's pairing are the two
+halves of M3 and meet at the handshake — neither blocks the other, but
+`listen_lan` must not be turned on until pairing exists. That is the one
+sequencing rule still live.
+
+**The insight, now demonstrated:** *"make the Mac's terminals reachable"* was a
+`forkpty` backend behind an already-frozen trait — days, and it landed. *"Port
+the GPU terminal to macOS"* is Metal, CoreText and traffic lights, and **M3 does
+not need it**: the Mac only has to host, the Windows box renders. C2 can trail
+indefinitely without holding up the fleet.
 
 ### WS-A — Windows chrome, motion, polish
 
