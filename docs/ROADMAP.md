@@ -218,10 +218,12 @@ input. An animator that asymptotically approaches its target burns GPU forever a
 
 ### WS-B — `zest-input`
 
-Extraction from `zest-app` collides with WS-A, so **land it early and small**.
+Extraction from `zest-app` collides with WS-A, so it landed early and small.
 
-- [ ] Move key/mouse encoding out of `zest-app/src/{input,mouse}.rs` into the
-      crate. Behaviour-preserving; the 39 existing tests move with it.
+- [x] Key and mouse encoding live in the crate; `zest-app` holds none of it.
+- [x] Super/Command belongs to the desktop, never the terminal, and copy/paste
+      accepts both the `Ctrl+Shift` and Command conventions. Without this every
+      Cmd chord on macOS typed its own letter — `Cmd+V` inserted a `v`.
 - [ ] IME and dead keys via winit `Ime`.
 - [ ] Kitty keyboard protocol (CSI u) behind a mode flag.
 

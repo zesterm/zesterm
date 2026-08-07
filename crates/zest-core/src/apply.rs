@@ -59,7 +59,6 @@ impl RemoteWriter<'_> {
     /// the side that knows the width. Out-of-range rows are ignored; the caller
     /// is expected to have noticed and asked for a keyframe.
     pub fn write_row(&mut self, row: usize, id: LineId, cells: &[Cell], wrapped: bool) {
-        let cols = self.state.grid().cols();
         if row >= self.state.grid().rows() {
             return;
         }
@@ -80,7 +79,6 @@ impl RemoteWriter<'_> {
         for (i, slot) in dst.iter_mut().enumerate() {
             *slot = cells.get(i).copied().unwrap_or_default();
         }
-        let _ = cols;
         self.state.touch();
     }
 

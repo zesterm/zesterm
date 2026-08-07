@@ -415,7 +415,6 @@ impl Grid {
         let mut i = 0;
         while i < old_rows.len() {
             // Collect one logical line.
-            let start = i;
             let mut cells: Vec<(Cell, Option<CellExtra>)> = Vec::new();
             let mut cursor_offset: Option<usize> = None;
             loop {
@@ -448,12 +447,10 @@ impl Grid {
                 i += 1;
             }
             i += 1;
-            let _ = start;
 
             // Re-break it.
             let mut col = 0;
             let mut row = Row::new(new_cols, next_id);
-            let mut emitted = false;
             for (index, (cell, extra)) in cells.iter().enumerate() {
                 // Never split a wide character across the edge.
                 if cell.flags.contains(CellFlags::WIDE) && col + 1 >= new_cols && new_cols > 1 {
@@ -461,14 +458,12 @@ impl Grid {
                     out.push(core::mem::replace(&mut row, Row::new(new_cols, next_id + 1)));
                     next_id += 1;
                     col = 0;
-                    emitted = true;
                 }
                 if col >= new_cols {
                     row.wrapped = true;
                     out.push(core::mem::replace(&mut row, Row::new(new_cols, next_id + 1)));
                     next_id += 1;
                     col = 0;
-                    emitted = true;
                 }
                 if cursor_offset == Some(index) {
                     cursor_target = Some((out.len(), col));
@@ -482,7 +477,6 @@ impl Grid {
                 let (r, c) = if col >= new_cols { (out.len() + 1, 0) } else { (out.len(), col) };
                 cursor_target = Some((r, c));
             }
-            let _ = emitted;
             out.push(row);
             next_id += 1;
         }
