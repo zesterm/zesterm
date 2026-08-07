@@ -1,7 +1,9 @@
 # zesterm roadmap
 
-The durable plan. Mirrored as a GitHub tracking issue, but **this file is the
-source of truth** — update it in the same commit as the work it describes.
+The durable plan. Mirrored as tracking issue
+[#1](https://github.com/zesterm/zesterm/issues/1), but **this file is the source
+of truth** — update it in the same commit as the work it describes, then refresh
+the issue.
 
 ## The goal, and why the architecture looks like this
 
