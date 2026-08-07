@@ -9,14 +9,11 @@ the very first commit.
 
 ## Status
 
-Milestone 1 (a local Windows terminal good enough to replace Windows Terminal) is in
-progress. Everything upstream of the renderer works:
+**It runs.** `cargo run --release -p zest-app` opens a window with a real shell in
+it — GPU-rendered, themed, with working input and scrollback.
 
-```
-cargo run -p zest-app --example headless
-```
-
-spawns a shell, parses its output, and prints the resulting grid.
+Milestone 1 (good enough to replace Windows Terminal daily) is in progress; see
+[docs/ROADMAP.md](docs/ROADMAP.md).
 
 | Piece | State |
 |---|---|
@@ -26,7 +23,8 @@ spawns a shell, parses its output, and prints the resulting grid.
 | `zest-theme` — tokens, OKLCH colour math, built-ins, importers | working, 44 tests |
 | Transparency capability probe | done — see ADR-003 |
 | `zest-render-wgpu` — atlas, 3 pipelines, offscreen resolve | renders offscreen, 14 tests |
-| `zest-input`, `zest-config` | not started |
+| `zest-app` — window, threads, input | working, 17 tests |
+| `zest-config` | not started |
 
 The font layer renders a sample sheet to a PNG with no GPU involved, which is
 where font bugs are cheapest to find:

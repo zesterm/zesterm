@@ -27,11 +27,11 @@ for the decisions that are expensive to reach and cheap to accidentally undo.
 | `zest-font` | ✅ metrics, shaping, rasterization, system fallback, colour glyphs |
 | `zest-theme` | ✅ tokens, OKLCH derivation, 5 built-ins, 4 importers |
 | `zest-render-wgpu` | 🟡 pipelines + atlas + offscreen resolve; renders offscreen, no window yet |
-| `zest-input` | ⬜ |
+| `zest-input` | 🟡 keys live in zest-app for now; no mouse, no Kitty protocol |
 | `zest-config` | ⬜ |
-| `zest-app` | 🟡 headless example only; no window |
+| `zest-app` | 🟡 real window, real shell; input is basic |
 
-162 tests. `cargo run -p zest-app --example headless` is a working terminal
+179 tests. `cargo run -p zest-app --example headless` is a working terminal
 without a window.
 
 ---
@@ -69,11 +69,12 @@ didn't want to switch back."* Not feature parity with WezTerm.
       - [ ] Selection rendering (needs the selection model from step 8).
       - [ ] Validate gamma side-by-side against Windows Terminal. **Do not defer
             this** — it ships broken constantly and reads as "looks slightly off".
-- [ ] **6. `zest-app` — the moment.** winit, PTY thread, fair mutex, first
-      window with real output.
-- [ ] **7. `zest-input`.** Modifiers, DECCKM, Alt-as-ESC, F-keys, IME, SGR-1006
-      mouse. Kitty keyboard protocol behind a flag — plan it now, retrofitting
-      hurts.
+- [x] **6. `zest-app` — the moment.** winit, PTY thread, fair mutex, first
+      window with real output. **A working terminal.**
+- [ ] **7. `zest-input`.** Currently inline in `zest-app` and covers keys,
+      modifiers, DECCKM, Alt-as-ESC and F-keys. Still to do: extract the crate,
+      IME/dead keys, SGR-1006 mouse, and the Kitty keyboard protocol behind a
+      flag — plan that now, retrofitting hurts.
 - [ ] **8. Selection + clipboard.** Absolute coordinates so selection survives
       scrolling and eviction. Wrapped-line copy must not insert a newline.
 - [ ] **9. Scrollback + scrolling.** Wheel, Shift+PgUp/PgDn, alt-screen wheel →
