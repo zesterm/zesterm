@@ -21,6 +21,14 @@ const BOUNDARIES: &[Boundary] = &[
         args: &[],
     },
     Boundary { krate: "zest-font", forbidden: &["wgpu", "winit", "tokio"], args: &[] },
+    // Encoding a keystroke needs to know what key was pressed, so `winit` is
+    // allowed and a translation layer would serve nobody. Owning a pty or a
+    // renderer is not: input turns events into bytes and hands them on.
+    Boundary {
+        krate: "zest-input",
+        forbidden: &["wgpu", "tokio", "zest-pty", "zest-render-wgpu"],
+        args: &[],
+    },
     Boundary { krate: "zest-render-wgpu", forbidden: &["winit"], args: &[] },
     // Settings cross to the web and phone clients as data, so the types and the
     // schema must build without touching a filesystem. Checked with default

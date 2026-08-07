@@ -8,4 +8,17 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+# `winit` types stay in the public API, deliberately.
+#
+# The tempting alternative is a keyboard vocabulary of our own so the web and
+# phone clients could reuse this encoder. They cannot: they are TypeScript, and
+# the protocol has them encode keystrokes at the keyboard precisely because
+# modifier conventions belong to the platform that produced them. Every Rust
+# consumer -- the app driving a local shell, and the same app driving a shell on
+# another machine -- already has a `winit::KeyEvent` in hand.
+#
+# A translation layer would therefore cost an allocation and a mapping table per
+# keystroke to serve nobody.
 [dependencies]
+zest-core.workspace = true
+winit.workspace = true

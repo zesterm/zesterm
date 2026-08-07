@@ -10,8 +10,6 @@
 mod app;
 mod console;
 mod fair_mutex;
-mod input;
-mod mouse;
 mod pipeline_cache;
 mod platform;
 mod session;

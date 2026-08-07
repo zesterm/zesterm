@@ -19,6 +19,7 @@ zest-theme.workspace = true
 zest-font.workspace = true
 zest-render-wgpu.workspace = true
 zest-config.workspace = true
+zest-input.workspace = true
 toml.workspace = true
 winit.workspace = true
 wgpu.workspace = true
