@@ -1,7 +1,7 @@
 //! Watching a terminal change, without being the renderer.
 //!
-//! **Frozen contract, skeleton implementation.** WS-F fills this in; it is here
-//! so the daemon and the protocol can be written against a settled shape.
+//! **Frozen contract.** The daemon and the protocol are built against this
+//! shape, so changing it is a coordinated change — see `docs/CONTRACTS.md`.
 //!
 //! # The problem it solves
 //!
@@ -56,10 +56,10 @@ pub const KEYFRAME_THRESHOLD: u64 = 256;
 
 /// Reading changes out of a terminal.
 ///
-/// Implemented on `Terminal` by WS-F. Kept as a trait so the daemon and its
-/// tests can be written against a fake that produces a scripted sequence of
-/// updates without a pty, which is what makes the chaos-resync test — ten
-/// thousand disconnects at random points — possible at all.
+/// A trait rather than inherent methods so the daemon and its tests can run
+/// against a fake that produces a scripted sequence of updates without a pty.
+/// That is what makes the chaos-resync test — a disconnect at every point of
+/// every recording — possible at all.
 pub trait ChangeSource {
     /// The current state number. Bumped on every mutation.
     fn seq(&self) -> u64;
@@ -69,14 +69,21 @@ pub trait ChangeSource {
 
     /// The oldest line still held, so a client knows what it can still request.
     fn oldest_line(&self) -> LineId;
-
-    /// Forget history no subscriber still needs.
-    ///
-    /// Called with the minimum acknowledgement across all subscribers. A session
-    /// with no subscribers keeps nothing, which is what stops a detached session
-    /// on a machine nobody has opened in a week from growing without bound.
-    fn release_before(&mut self, seq: u64);
 }
+
+// Deliberately *not* on this trait: `release_before`.
+//
+// It was here when the plan assumed the terminal would retain a delta history
+// that subscribers acknowledged their way through. The encoder instead keeps a
+// shadow of what each subscriber last saw and diffs against it
+// (`zest-proto::encode`), so there is no shared history and nothing to release.
+//
+// Removed rather than left as a no-op: a memory-management method that manages
+// nothing tells every caller that memory *is* being managed, which is exactly
+// the belief that stops someone checking. The property it was protecting —
+// a detached session on a machine nobody has opened in a week must not grow
+// without bound — now holds by construction, because per-subscriber state
+// disappears when the subscriber does.
 
 /// Decide what to send, given a subscriber's acknowledgement.
 ///
@@ -95,6 +102,23 @@ pub fn update_for(current_seq: u64, acked: u64) -> Update {
         Update::Keyframe { at: current_seq }
     } else {
         Update::Delta { from: acked, to: current_seq }
+    }
+}
+
+impl ChangeSource for crate::Terminal {
+    fn seq(&self) -> u64 {
+        crate::Terminal::seq(self)
+    }
+
+    fn update_for(&self, acked: u64) -> Update {
+        update_for(crate::Terminal::seq(self), acked)
+    }
+
+    fn oldest_line(&self) -> LineId {
+        // The first line still held, which is where scrollback begins. A client
+        // asking for anything older is asking for something that has been
+        // evicted, and needs to be told so rather than handed blanks.
+        self.grid().row(0).id.saturating_sub(self.grid().scrollback_len() as u64)
     }
 }
 
@@ -137,5 +161,59 @@ mod tests {
         assert!(matches!(just_under, Update::Delta { .. }));
         let just_over = update_for(KEYFRAME_THRESHOLD + 2, 1);
         assert!(matches!(just_over, Update::Keyframe { .. }));
+    }
+}
+
+#[cfg(test)]
+mod terminal_impl_tests {
+    use super::*;
+    use crate::Terminal;
+
+    #[test]
+    fn a_terminal_that_has_not_changed_needs_nothing_sent() {
+        let mut t = Terminal::new(20, 5, 100);
+        t.advance(b"hello");
+        let seq = ChangeSource::seq(&t);
+        assert_eq!(ChangeSource::update_for(&t, seq), Update::Idle);
+    }
+
+    #[test]
+    fn writing_moves_the_sequence_forward() {
+        let mut t = Terminal::new(20, 5, 100);
+        let before = ChangeSource::seq(&t);
+        t.advance(b"x");
+        assert!(ChangeSource::seq(&t) > before, "a write did not bump the sequence");
+        assert!(matches!(ChangeSource::update_for(&t, before), Update::Delta { .. }));
+    }
+
+    #[test]
+    fn the_oldest_line_is_where_scrollback_begins() {
+        // What a client is told it may still ask for. Reporting the viewport's
+        // first line instead would make every scrollback request past the top of
+        // the screen look unavailable.
+        let mut t = Terminal::new(20, 3, 100);
+        for i in 0..10 {
+            t.advance(format!("line{i}\r\n").as_bytes());
+        }
+        let oldest = ChangeSource::oldest_line(&t);
+        let viewport_top = t.grid().row(0).id;
+        assert!(
+            oldest < viewport_top,
+            "oldest {oldest} should precede the viewport top {viewport_top}"
+        );
+    }
+
+    #[test]
+    fn an_evicted_session_still_reports_a_sane_oldest_line() {
+        // Past the scrollback limit the oldest line advances rather than going
+        // negative or wrapping, which a saturating subtraction is there to
+        // guarantee -- LineId is unsigned.
+        let mut t = Terminal::new(20, 3, 2);
+        for i in 0..50 {
+            t.advance(format!("l{i}\r\n").as_bytes());
+        }
+        let oldest = ChangeSource::oldest_line(&t);
+        assert!(oldest > 0, "scrollback evicted but oldest_line stayed at 0");
+        assert!(oldest <= t.grid().row(0).id);
     }
 }

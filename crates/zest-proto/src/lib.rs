@@ -33,11 +33,13 @@ use serde::{Deserialize, Serialize};
 pub mod decode;
 pub mod delta;
 pub mod encode;
+pub mod frame;
 pub mod ids;
 
 pub use delta::{AttrDef, AttrId, CursorState, Delta, DeltaOp, Run, RowPayload};
 pub use decode::GridView;
 pub use encode::{Encoder, Keyframe};
+pub use frame::{FrameError, FrameReader};
 pub use ids::{ClientId, HostId, SessionAddr, SessionId};
 
 /// Wire format version.

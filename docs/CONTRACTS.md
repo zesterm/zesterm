@@ -23,7 +23,7 @@ fine. Changing a signature, renaming a variant, or removing a method is not.
 | `ClientMessage`, `HostMessage`, `SessionInfo` | `zest-proto/src/lib.rs` | **frozen** | WS-F, WS-G |
 | `Delta`, `DeltaOp`, `Run`, `RowPayload`, `AttrDef` | `zest-proto/src/delta.rs` | **frozen** | WS-F, WS-G |
 | `Block`, `BlockIndex`, `BlockState` | `zest-core/src/blocks.rs` | **frozen** | WS-E, WS-F, WS-G |
-| `ChangeSource`, `Update`, `update_for` | `zest-core/src/subscribe.rs` | **frozen** | WS-F |
+| `ChangeSource`, `Update`, `update_for` | `zest-core/src/subscribe.rs` | **frozen** — `release_before` removed, see below | WS-F |
 | `SessionSource`, `Origin` | `zest-app/src/source.rs` | **frozen** | WS-A, WS-B, WS-F |
 | `Peer`, `Endpoint`, `Reachability`, `Discovery` | `zest-mesh/` | **frozen** | WS-F, WS-H |
 | `DaemonConfig`, `SessionHandle`, `SessionState` | `zest-daemon/src/lib.rs` | draft — WS-F may change freely | WS-F only |
@@ -68,6 +68,14 @@ so the renderer's path is identical at both ends of the mesh.
 **`has_exited` on `SessionSource`.** Nothing calls it — exit arrives as a `Wakeup::Exited` event.
 A contract that three streams implement should carry only what is used; speculative methods are
 how an interface becomes something people satisfy without knowing why.
+
+**`release_before` on `ChangeSource`** — removed after the fact, by its only consumer. It assumed
+the terminal would retain a delta history that subscribers acknowledged their way through. The
+encoder instead keeps a shadow of what each subscriber last saw and diffs against it, so there is
+no shared history and nothing to release. A memory-management method that manages nothing tells
+every caller memory *is* being managed, which is precisely the belief that stops someone checking.
+The property it protected now holds by construction: per-subscriber state disappears with the
+subscriber.
 
 ---
 
