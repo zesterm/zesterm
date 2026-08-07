@@ -197,6 +197,18 @@ impl Applier {
         outcome
     }
 
+    /// Learn attributes that arrived outside a delta.
+    ///
+    /// `HostMessage::Scrollback` carries its own attribute definitions, because
+    /// history is prepended rather than diffed and no later delta will define
+    /// the ids it names. Without this the rows render in whatever style the
+    /// client last held.
+    pub fn absorb_attrs(&mut self, attrs: &[AttrDef]) {
+        for a in attrs {
+            self.attrs.insert(a.id, *a);
+        }
+    }
+
     /// History fetched with `RequestScrollback`, oldest first.
     pub fn apply_scrollback(&mut self, term: &mut Terminal, rows: &[RowPayload]) {
         let expanded: Vec<(u64, Vec<Cell>, bool)> =

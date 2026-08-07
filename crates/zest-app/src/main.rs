@@ -9,9 +9,11 @@
 
 mod app;
 mod console;
+mod daemon;
 mod fair_mutex;
 mod pipeline_cache;
 mod platform;
+mod remote;
 mod session;
 mod source;
 
@@ -110,6 +112,8 @@ fn main() {
     let mut cli = CliLayer::default();
     let mut profile = None;
     let mut startup_probe = false;
+    let mut no_daemon = false;
+    let mut attach_probe = false;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -149,6 +153,14 @@ fn main() {
             }
             "--startup-probe" => {
                 startup_probe = true;
+                i += 1;
+            }
+            "--no-daemon" => {
+                no_daemon = true;
+                i += 1;
+            }
+            "--attach-probe" => {
+                attach_probe = true;
                 i += 1;
             }
             "--scroll-on-output" => {
@@ -205,6 +217,8 @@ fn main() {
                      --themes          list built-in themes\n\
                      --config          print the config file path\n\
                      --startup-probe   report time to first paint, then exit\n\
+                     --attach-probe    report what attaching to the daemon cost, then exit\n\
+                     --no-daemon       own the pty in this process, do not attach\n\
                      --schema          print the settings JSON Schema\n\n\
                      Flags are the strongest layer of the settings cascade;\n\
                      everything else lives in the config file."
@@ -250,6 +264,12 @@ fn main() {
     let mut app = App::new(load.resolved.settings, cli_table, profile_name, proxy);
     if startup_probe {
         app = app.with_startup_probe();
+    }
+    if no_daemon {
+        app = app.with_no_daemon();
+    }
+    if attach_probe {
+        app = app.with_attach_probe();
     }
     event_loop.run_app(&mut app).expect("run");
 }

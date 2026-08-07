@@ -45,7 +45,7 @@ move.
 
 ## Status
 
-**459 tests, four gates green**, measured on macOS rather than remembered.
+**468 tests, four gates green**, measured on macOS rather than remembered.
 First paint 35ms **on Windows**; the Mac paints against a different compositor
 and its number (48ms) is reported rather than gated.
 
@@ -58,7 +58,7 @@ and its number (48ms) is reported rather than gated.
 | `zest-render-wgpu` | ✅ pipelines, atlas, offscreen resolve, selection — ⬜ gamma validation |
 | `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema |
 | `zest-input` | ✅ extracted; keys + SGR mouse + selection — ⬜ IME, Kitty protocol |
-| `zest-app` | ✅ window, shell, sessions behind `SessionSource` — runs on Windows *and* macOS (Metal) — ⬜ daemon-attached source, macOS chrome |
+| `zest-app` | ✅ window, sessions behind `SessionSource`, **attached to its own daemon** — runs on Windows *and* macOS (Metal) — ⬜ macOS chrome |
 | `zest-proto` | ✅ protocol 2, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, cell-for-cell conformance, chaos-resync |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet — ⬜ pairing, transports |
 | `zest-daemon` | ✅ session ownership, protocol loop, loopback transport, real `Seq`/`Ack`, scrollback, socket locking — ⬜ LAN listener, no authentication |
@@ -69,6 +69,9 @@ and its number (48ms) is reported rather than gated.
   selection, scrollback, Nerd Font prompts, 35ms to first paint.
 - The same terminal on macOS: Metal, a real `zsh`, truecolor, wide CJK, colour
   emoji, box drawing and Nerd Font icons, 48ms to first paint.
+- **The window is a client of its own daemon.** Everything above renders
+  identically with the shell in another process, reached over a unix socket as
+  grid deltas. Close the window and the shell keeps running.
 - `zest-daemon` serving a session over a named pipe or unix socket, with a
   client attaching and receiving live output as deltas
   (`cargo run -p zest-daemon --example attach`).
@@ -86,7 +89,10 @@ Three things at the level of features:
    socket. → WS-F
 2. **Pairing**, so `listen_lan` can be turned on without handing out shells.
    → WS-H item 3
-3. **`zest-app` attaching to a daemon** rather than owning a pty. → WS-F
+3. ~~**`zest-app` attaching to a daemon** rather than owning a pty.~~ **Done.**
+   The window is a client of this machine's daemon over the loopback socket,
+   using the same protocol the phone will use. Closing it detaches; the shell
+   keeps running.
 
 And four things underneath them that reading the code turned up. Each is
 recorded here because none is visible from the feature list, and the third is
@@ -299,9 +305,12 @@ M2. Owns `zest-core/src/blocks.rs` and the OSC 133 path. Hot spot: coordinate
       counter on send is the host asserting that everything it wrote was
       applied. `RequestScrollback` is answered from `Grid::lines_by_id`, with
       the attributes those rows name.
-- [ ] `zest-app` gains a daemon-attached `SessionSource`. **Find-or-spawn goes
-      in the slot the shell spawn occupies today** — after the window is
-      visible, overlapping driver init. `--startup-probe` must still pass.
+- [x] `zest-app` gains a daemon-attached `SessionSource`, in the slot the shell
+      spawn occupied — after the window is visible, overlapping driver init.
+      `--startup-probe` still passes (39ms on the Mac). Measured with
+      `--attach-probe`: **0.02ms to connect warm**, ~1ms to the first keyframe,
+      ~7ms when it has to start the daemon. `--no-daemon` keeps the pty
+      in-process, and so does any failure to reach a daemon.
 - [x] **Conformance corpus**: the `.vtrec` replay now has three participants —
       the host `Terminal`, `GridView`, and a client `Terminal` fed by the
       applier — and asserts **two real `Terminal`s are cell-for-cell equal at

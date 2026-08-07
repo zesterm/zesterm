@@ -29,6 +29,30 @@ const PADDING: u32 = 8;
 /// `zesterm --startup-probe`.
 const STARTUP_BUDGET_MS: u64 = 100;
 
+/// How long to wait for a freshly spawned daemon to start listening.
+///
+/// Only ever paid on the very first launch on a machine; after that the daemon
+/// is already running and finding it is a `connect` call.
+const DAEMON_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A throwaway client identity for a loopback connection.
+///
+/// Random per process and never stored. On loopback the socket's permissions
+/// are the authorization, so this identifies the connection in a log and
+/// authorizes nothing -- which is exactly what keeps the OS keychain, and its
+/// prompt, off the startup path.
+fn ephemeral_client_id() -> [u8; 32] {
+    let mut id = [0u8; 32];
+    let pid = std::process::id().to_le_bytes();
+    id[..4].copy_from_slice(&pid);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64)
+        .to_le_bytes();
+    id[4..12].copy_from_slice(&nanos);
+    id
+}
+
 pub struct Config {
     pub font_families: Vec<String>,
     pub typography: Typography,
@@ -129,6 +153,13 @@ pub struct App {
     config_watcher: Option<zest_config::Watcher>,
     /// Report time-to-first-paint and exit, instead of running a terminal.
     startup_probe: bool,
+    /// Own the pty in-process instead of attaching to a daemon.
+    ///
+    /// For developing against a build whose daemon is broken, and for the
+    /// startup measurements that predate the daemon existing.
+    no_daemon: bool,
+    /// Report the cost of finding and attaching to the daemon, then exit.
+    attach_probe: bool,
 }
 
 impl App {
@@ -174,6 +205,8 @@ impl App {
             profile,
             config_watcher: None,
             startup_probe: false,
+            no_daemon: false,
+            attach_probe: false,
         }
     }
 
@@ -187,6 +220,117 @@ impl App {
     pub fn with_startup_probe(mut self) -> Self {
         self.startup_probe = true;
         self
+    }
+
+    /// Keep the pty in this process rather than attaching to a daemon.
+    pub fn with_no_daemon(mut self) -> Self {
+        self.no_daemon = true;
+        self
+    }
+
+    /// Print what attaching to the daemon cost, then exit.
+    ///
+    /// A failing command rather than a `#[test]`, for the same reason
+    /// `--startup-probe` is one: this measures a real process reaching a real
+    /// socket, and an assertion CI silently skips for want of a daemon
+    /// protects nothing. → ADR-007.
+    pub fn with_attach_probe(mut self) -> Self {
+        self.attach_probe = true;
+        self
+    }
+
+    /// Find or start this machine's daemon and attach a session to it.
+    ///
+    /// `None` means fall back to an in-process pty. **Never an error the caller
+    /// has to handle**: a terminal that refuses to open because a helper binary
+    /// is missing has failed at the only job it has, and both paths already
+    /// exist behind `SessionSource`.
+    fn attach_to_daemon(
+        &self,
+        spec: &CommandSpec,
+        cols: u16,
+        rows: u16,
+        proxy: &EventLoopProxy<Wakeup>,
+    ) -> Option<Box<dyn SessionSource>> {
+        if self.no_daemon {
+            return None;
+        }
+
+        let socket = zest_daemon::default_socket_path();
+        let attached = match crate::daemon::find_or_spawn(&socket, DAEMON_START_TIMEOUT) {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!(error = %e, "no daemon; keeping this session in-process");
+                return None;
+            }
+        };
+        let connect_ms = attached.elapsed.as_secs_f64() * 1000.0;
+        let spawned = attached.spawned;
+
+        let started = std::time::Instant::now();
+        let proxy = proxy.clone();
+        let session = crate::remote::RemoteSession::attach(
+            attached.read,
+            attached.write,
+            &crate::remote::AttachOptions {
+                // An ephemeral identity. On loopback the socket's permissions
+                // are the authorization -- a process that can reach it runs as
+                // this user and could ptrace the daemon anyway -- so a stored
+                // key would buy nothing and would put the OS keychain, and its
+                // prompt, on the startup path.
+                client: zest_proto::ClientId::from_bytes(ephemeral_client_id()),
+                label: "zesterm",
+                command: &spec.command_line,
+                cols,
+                rows,
+                scrollback: self.config.scrollback,
+                // The probe adopts so that measuring the number repeatedly does
+                // not leave one more idle shell on the machine each time.
+                adopt: self.attach_probe,
+                local: true,
+            },
+            move |w| {
+                let _ = proxy.send_event(w);
+            },
+        );
+
+        match session {
+            Ok(session) => {
+                let attach_ms = started.elapsed().as_secs_f64() * 1000.0;
+                tracing::debug!(
+                    connect_ms = format!("{connect_ms:.2}"),
+                    attach_ms = format!("{attach_ms:.2}"),
+                    spawned,
+                    "daemon attached"
+                );
+                if self.attach_probe {
+                    println!("daemon_connect_ms={connect_ms:.2}");
+                    println!("attach_keyframe_ms={attach_ms:.2}");
+                    println!("daemon_spawned={spawned}");
+                    // Dropped explicitly, because `process::exit` below runs no
+                    // destructors: without this the Detach is never written,
+                    // the daemon goes on believing a dead client is attached,
+                    // and the next probe cannot adopt the session it left.
+                    drop(session);
+                    let budget = if spawned { 150.0 } else { 10.0 };
+                    let total = connect_ms + attach_ms;
+                    if total > budget {
+                        eprintln!(
+                            "FAIL: attaching took {total:.2}ms, budget is {budget:.0}ms \
+                             ({} path)",
+                            if spawned { "cold" } else { "warm" }
+                        );
+                        std::process::exit(1);
+                    }
+                    std::process::exit(0);
+                }
+                Some(Box::new(session))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not attach; keeping this session in-process");
+                None
+            }
+        }
     }
 
     /// Start watching the config file.
@@ -704,17 +848,31 @@ impl ApplicationHandler<Wakeup> for App {
         // terminal identity produces a monochrome prompt that looks like a
         // renderer bug.
 
-        let session = Session::spawn(
-            &spec,
-            PtySize::new(cols, rows),
-            self.config.scrollback,
-            move |w| {
-                let _ = proxy.send_event(w);
-            },
-        )
-        .expect("spawn shell");
+        // Find or spawn this machine's daemon and attach to it, falling back to
+        // an in-process pty. This slot -- after the window is visible and the
+        // first paint is measured, before GPU init -- is the one ADR-007 names,
+        // and nothing above line 649 may move below it.
+        let session: Box<dyn SessionSource> = self
+            .attach_to_daemon(&spec, cols, rows, &proxy)
+            .unwrap_or_else(|| {
+                let session = Session::spawn(
+                    &spec,
+                    PtySize::new(cols, rows),
+                    self.config.scrollback,
+                    move |w| {
+                        let _ = proxy.send_event(w);
+                    },
+                )
+                .expect("spawn shell");
+                tracing::debug!(
+                    elapsed_ms = t0.elapsed().as_millis(),
+                    cols,
+                    rows,
+                    "shell spawned in-process"
+                );
+                Box::new(session)
+            });
         session.terminal().lock().set_palette(self.palette.clone());
-        tracing::debug!(elapsed_ms = t0.elapsed().as_millis(), cols, rows, "shell spawned");
 
         // The surface is NOT sRGB (the resolve pass encodes), so the clear value
         // is written verbatim -- pass the theme background already in sRGB.
@@ -738,10 +896,10 @@ impl ApplicationHandler<Wakeup> for App {
 
         self.fonts = Some(fonts);
         self.gpu = Some(gpu);
-        // Boxed into the trait here and nowhere else: everything downstream of
-        // this line works the same whether the shell is in this process or on
-        // another machine, which is the property the abstraction exists for.
-        self.session = Some(Box::new(session));
+        // Everything downstream of this line works the same whether the shell
+        // is in this process or on another machine, which is the property the
+        // abstraction exists for.
+        self.session = Some(session);
         self.window = Some(window);
 
         // The window is already visible and painted with the theme background
@@ -781,6 +939,19 @@ impl ApplicationHandler<Wakeup> for App {
                 }
             }
             Wakeup::Exited => el.exit(),
+            // The link died, not the shell. The window stays open showing the
+            // last state that was true -- closing it would throw away a session
+            // that is still running in a daemon that does not care we went
+            // away, which is the property ADR-007 exists to provide.
+            Wakeup::Detached => {
+                tracing::warn!("the daemon connection dropped; the session is still running");
+                if let Some(s) = self.session.as_ref() {
+                    s.mark_dirty();
+                }
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
             Wakeup::ConfigChanged => self.reload_config(),
         }
     }
@@ -788,7 +959,18 @@ impl ApplicationHandler<Wakeup> for App {
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => el.exit(),
+            // Detach, never close. The session keeps running in the daemon and
+            // can be picked up from another window or another device -- which
+            // is the whole payoff of ADR-007, and is lost the moment closing a
+            // window is allowed to mean "end the shell".
+            //
+            // Dropping the session is what sends the Detach: a destructor
+            // covers every way this process can end, including the ones no
+            // `CloseRequested` arm would see.
+            WindowEvent::CloseRequested => {
+                self.session = None;
+                el.exit();
+            }
 
             WindowEvent::Resized(size) => self.resize_surface(size.width, size.height),
 

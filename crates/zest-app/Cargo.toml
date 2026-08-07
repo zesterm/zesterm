@@ -20,6 +20,11 @@ zest-font.workspace = true
 zest-render-wgpu.workspace = true
 zest-config.workspace = true
 zest-input.workspace = true
+# The app is a client of its own daemon (ADR-007), so it speaks the same
+# protocol the phone does and starts the same binary the fleet runs.
+zest-proto.workspace = true
+zest-daemon.workspace = true
+thiserror = { workspace = true }
 toml.workspace = true
 winit.workspace = true
 wgpu.workspace = true
@@ -31,6 +36,10 @@ directories.workspace = true
 pollster = "0.4"
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# `setsid` for the spawned daemon, so it outlives the window that started it.
+rustix = { workspace = true, features = ["process"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [

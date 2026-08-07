@@ -38,8 +38,15 @@ const PARSE_CHUNK: usize = 64 * 1024;
 pub enum Wakeup {
     /// New output arrived, or the terminal otherwise changed.
     Redraw,
-    /// The child exited.
+    /// The child exited. The window closes.
     Exited,
+    /// The connection to the daemon dropped.
+    ///
+    /// **Not `Exited`.** The shell is still running in a daemon that does not
+    /// care that a client went away — that is the whole point of ADR-007, and
+    /// conflating the two would close the window on every Wi-Fi hiccup. The
+    /// grid stays on screen showing the last state that was true.
+    Detached,
     /// The config file settled after a write.
     ///
     /// Carries nothing: the watcher runs on its own thread and must not read
