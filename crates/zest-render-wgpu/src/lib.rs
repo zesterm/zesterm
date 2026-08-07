@@ -472,6 +472,23 @@ impl Renderer {
     pub fn size(&self) -> (u32, u32) {
         self.size
     }
+
+    /// Drop every cached glyph.
+    ///
+    /// Called when the font stack, size, or DPI changes — anything that makes
+    /// the cached rasterizations wrong. Bulk, not per-glyph: re-rastering the
+    /// visible set costs a few milliseconds and only happens on a deliberate
+    /// user action, whereas a per-glyph LRU is where terminals over-engineer
+    /// themselves into cache thrash.
+    pub fn clear_atlas(&mut self) {
+        self.atlas.clear();
+    }
+
+    /// The current atlas generation, which changes on every clear.
+    #[must_use]
+    pub fn atlas_generation(&self) -> u64 {
+        self.atlas.generation()
+    }
 }
 
 /// An instance buffer that grows by reallocation.

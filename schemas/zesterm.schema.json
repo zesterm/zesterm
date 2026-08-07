@@ -1,0 +1,494 @@
+{
+  "$defs": {
+    "Appearance": {
+      "properties": {
+        "follow_system_theme": {
+          "default": false,
+          "description": "Follow the OS light/dark setting.",
+          "type": "boolean",
+          "x_zest_group": "Appearance",
+          "x_zest_widget": "toggle"
+        },
+        "light_theme": {
+          "default": "",
+          "description": "Theme used when the OS reports a light appearance.\n\nEmpty means \"follow `theme` regardless\", which is what someone who has\ndeliberately chosen a dark theme expects.",
+          "type": "string",
+          "x_zest_group": "Appearance",
+          "x_zest_widget": "theme-picker"
+        },
+        "text_contrast": {
+          "default": 0.0,
+          "description": "Additional contrast applied at resolve time.",
+          "format": "float",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number",
+          "x_zest_group": "Appearance",
+          "x_zest_widget": "number"
+        },
+        "text_gamma": {
+          "default": 1.0,
+          "description": "Stem darkening for text on dark backgrounds.\n\nApplied once in the resolve pass rather than baked into the atlas, so\ntuning it is a repaint rather than a re-rasterization.",
+          "format": "float",
+          "maximum": 2.5,
+          "minimum": 0.5,
+          "type": "number",
+          "x_zest_group": "Appearance",
+          "x_zest_widget": "number"
+        },
+        "theme": {
+          "default": "obsidian",
+          "description": "Theme id, from the built-ins or the user's theme directory.",
+          "type": "string",
+          "x_zest_group": "Appearance",
+          "x_zest_widget": "theme-picker"
+        }
+      },
+      "type": "object"
+    },
+    "Backdrop": {
+      "description": "What the compositor puts behind the window.\n\nSeparate from [`Window::opacity`] on purpose. Merging them makes \"opaque\nMica-tinted chrome over an opaque grid\" inexpressible, and that is a real and\npopular look.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "No platform backdrop; `opacity` alone decides.",
+          "type": "string"
+        },
+        {
+          "const": "mica",
+          "description": "Windows 11 Mica.",
+          "type": "string"
+        },
+        {
+          "const": "mica-alt",
+          "description": "Windows 11 Mica Alt, the tabbed-app variant.",
+          "type": "string"
+        },
+        {
+          "const": "acrylic",
+          "description": "Acrylic blur. Undocumented on Windows; best-effort on Linux.",
+          "type": "string"
+        },
+        {
+          "const": "vibrancy",
+          "description": "macOS `NSVisualEffectView` vibrancy.",
+          "type": "string"
+        }
+      ]
+    },
+    "Cursor": {
+      "properties": {
+        "blink": {
+          "default": true,
+          "description": "Blink the cursor.\n\nBlinking is the most common way a terminal loses its 0%-idle claim: it\nmust stop on focus loss and wake on a timer, never spin.",
+          "type": "boolean",
+          "x_zest_group": "Cursor",
+          "x_zest_widget": "toggle"
+        },
+        "blink_interval_ms": {
+          "default": 530,
+          "description": "Blink interval in milliseconds.",
+          "format": "uint64",
+          "maximum": 5000,
+          "minimum": 100,
+          "type": "integer",
+          "x_zest_group": "Cursor",
+          "x_zest_widget": "number"
+        },
+        "shape": {
+          "$ref": "#/$defs/CursorShape",
+          "default": "block",
+          "description": "Shape, unless the program sets one with DECSCUSR.",
+          "x_zest_group": "Cursor",
+          "x_zest_widget": "select"
+        },
+        "trail": {
+          "$ref": "#/$defs/CursorTrail",
+          "default": "none",
+          "description": "Motion between cells.",
+          "x_zest_group": "Cursor",
+          "x_zest_widget": "select"
+        }
+      },
+      "type": "object"
+    },
+    "CursorShape": {
+      "enum": [
+        "block",
+        "underline",
+        "bar"
+      ],
+      "type": "string"
+    },
+    "CursorTrail": {
+      "description": "How the cursor moves between cells.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Jump straight to the target.",
+          "type": "string"
+        },
+        {
+          "const": "smooth",
+          "description": "Spring the cursor rect toward the target.",
+          "type": "string"
+        },
+        {
+          "const": "smear",
+          "description": "The Neovide-style tapered smear. Deliberately not the default.",
+          "type": "string"
+        }
+      ]
+    },
+    "Motion": {
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Animate at all. The OS accessibility setting can still override this.",
+          "type": "boolean",
+          "x_zest_group": "Motion",
+          "x_zest_widget": "toggle"
+        },
+        "respect_system_reduce_motion": {
+          "default": true,
+          "description": "Honour the OS \"reduce motion\" setting.",
+          "type": "boolean",
+          "x_zest_group": "Motion",
+          "x_zest_widget": "toggle"
+        },
+        "smooth_scroll": {
+          "default": true,
+          "description": "Smooth scrolling as a fractional row offset.\n\nSuppressed in the alternate screen regardless: `vim` and `less` scroll by\ndesign, and animating that fights the program.",
+          "type": "boolean",
+          "x_zest_group": "Motion",
+          "x_zest_widget": "toggle"
+        },
+        "spring_damping": {
+          "default": 1.0,
+          "description": "Spring damping ratio. 1.0 is critically damped; below that overshoots.",
+          "format": "float",
+          "maximum": 2.0,
+          "minimum": 0.1,
+          "type": "number",
+          "x_zest_group": "Motion",
+          "x_zest_widget": "number"
+        },
+        "spring_response": {
+          "default": 0.1599999964237213,
+          "description": "Spring response in seconds — roughly, time to reach the target.",
+          "format": "float",
+          "maximum": 2.0,
+          "minimum": 0.01,
+          "type": "number",
+          "x_zest_group": "Motion",
+          "x_zest_widget": "number"
+        }
+      },
+      "type": "object"
+    },
+    "Scrolling": {
+      "properties": {
+        "lines_per_notch": {
+          "default": 3,
+          "description": "Lines moved per wheel notch.",
+          "format": "uint",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer",
+          "x_zest_group": "Scrolling",
+          "x_zest_widget": "number"
+        },
+        "scroll_on_keypress": {
+          "default": true,
+          "description": "Jump to the bottom when a key is pressed. On by default, as everywhere.",
+          "type": "boolean",
+          "x_zest_group": "Scrolling",
+          "x_zest_widget": "toggle"
+        },
+        "scroll_on_output": {
+          "default": false,
+          "description": "Jump to the bottom whenever the program writes.\n\nOff by default: with it on, scrollback cannot be read while anything is\nrunning, because every emitted line yanks the view away.",
+          "type": "boolean",
+          "x_zest_group": "Scrolling",
+          "x_zest_widget": "toggle"
+        },
+        "scrollback": {
+          "default": 10000,
+          "description": "Lines of history retained per session.",
+          "format": "uint",
+          "maximum": 10000000,
+          "minimum": 0,
+          "type": "integer",
+          "x_zest_group": "Scrolling",
+          "x_zest_widget": "number"
+        }
+      },
+      "type": "object"
+    },
+    "Shell": {
+      "properties": {
+        "command": {
+          "default": "",
+          "description": "Command line to run. Empty means the platform's default shell.\n\nThis is why a workspace-local config file cannot be trusted\nautomatically: it is remote code execution wearing a settings hat.",
+          "type": "string",
+          "x_zest_group": "Shell",
+          "x_zest_widget": "text"
+        },
+        "cwd": {
+          "default": "",
+          "description": "Working directory. Empty inherits.",
+          "type": "string",
+          "x_zest_group": "Shell",
+          "x_zest_widget": "path"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Extra environment entries. An empty value *unsets* the variable.",
+          "type": "object",
+          "x_zest_group": "Shell",
+          "x_zest_widget": "key-value"
+        }
+      },
+      "type": "object"
+    },
+    "Typography": {
+      "properties": {
+        "families": {
+          "default": [
+            "Cascadia Mono",
+            "Consolas",
+            "DejaVu Sans Mono",
+            "monospace"
+          ],
+          "description": "Font families in preference order; the first one with a glyph wins.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x_zest_group": "Text",
+          "x_zest_widget": "font-list"
+        },
+        "features": {
+          "default": [],
+          "description": "OpenType features, `liga`-style. Prefix with `-` to disable.\n\nPart of the shaped-run cache key — a stale entry here produces glyphs\nthat are correct for the previous setting and maddening to debug.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x_zest_group": "Text",
+          "x_zest_widget": "tag-list"
+        },
+        "letter_spacing": {
+          "default": 0.0,
+          "description": "Extra space between cells, in pixels. Also geometry.",
+          "format": "float",
+          "maximum": 20.0,
+          "minimum": -5.0,
+          "type": "number",
+          "x_zest_group": "Text",
+          "x_zest_widget": "number"
+        },
+        "ligatures": {
+          "default": false,
+          "description": "Programming ligatures. Off by default; it is a per-run decision, so\nturning it on later costs nothing.",
+          "type": "boolean",
+          "x_zest_group": "Text",
+          "x_zest_widget": "toggle"
+        },
+        "line_height": {
+          "default": 1.25,
+          "description": "Line height as a multiple of the font's natural height.\n\nThis is a *geometry* setting: changing it changes the cell height, which\nchanges how many rows fit, which must resize the pty.",
+          "format": "float",
+          "maximum": 3.0,
+          "minimum": 0.5,
+          "type": "number",
+          "x_zest_group": "Text",
+          "x_zest_widget": "number"
+        },
+        "size_pt": {
+          "default": 13.0,
+          "description": "Font size in points.",
+          "format": "float",
+          "maximum": 144.0,
+          "minimum": 4.0,
+          "type": "number",
+          "x_zest_group": "Text",
+          "x_zest_widget": "number"
+        }
+      },
+      "type": "object"
+    },
+    "Window": {
+      "properties": {
+        "backdrop": {
+          "$ref": "#/$defs/Backdrop",
+          "default": "none",
+          "description": "Platform backdrop material.",
+          "x_zest_group": "Window",
+          "x_zest_widget": "select"
+        },
+        "chrome_opacity": {
+          "default": 1.0,
+          "description": "Chrome opacity, independent of the grid's.",
+          "format": "float",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number",
+          "x_zest_group": "Window",
+          "x_zest_widget": "slider"
+        },
+        "columns": {
+          "default": 100,
+          "description": "Initial size in cells.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer",
+          "x_zest_group": "Window",
+          "x_zest_widget": "number"
+        },
+        "custom_chrome": {
+          "default": false,
+          "description": "Draw our own titlebar and tab strip instead of the system's.",
+          "type": "boolean",
+          "x_zest_group": "Window",
+          "x_zest_restart": true,
+          "x_zest_widget": "toggle"
+        },
+        "opacity": {
+          "default": 1.0,
+          "description": "Background opacity, applied *only* to cells with a default background.\n\nApplying it to explicit backgrounds too would double-darken and make\n`ls` colours and TUI panels see-through, which is the single most common\ntransparency bug.",
+          "format": "float",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number",
+          "x_zest_group": "Window",
+          "x_zest_widget": "slider"
+        },
+        "padding": {
+          "default": 8,
+          "description": "Padding between the window edge and the grid, in logical pixels.",
+          "format": "uint32",
+          "maximum": 64,
+          "minimum": 0,
+          "type": "integer",
+          "x_zest_group": "Window",
+          "x_zest_widget": "number"
+        },
+        "rows": {
+          "default": 30,
+          "description": "Initial size in cells.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer",
+          "x_zest_group": "Window",
+          "x_zest_widget": "number"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The whole configuration, after merging every layer.",
+  "properties": {
+    "appearance": {
+      "$ref": "#/$defs/Appearance",
+      "default": {
+        "follow_system_theme": false,
+        "light_theme": "",
+        "text_contrast": 0.0,
+        "text_gamma": 1.0,
+        "theme": "obsidian"
+      },
+      "description": "Colours and the theme they come from."
+    },
+    "cursor": {
+      "$ref": "#/$defs/Cursor",
+      "default": {
+        "blink": true,
+        "blink_interval_ms": 530,
+        "shape": "block",
+        "trail": "none"
+      },
+      "description": "Cursor shape and blink."
+    },
+    "motion": {
+      "$ref": "#/$defs/Motion",
+      "default": {
+        "enabled": true,
+        "respect_system_reduce_motion": true,
+        "smooth_scroll": true,
+        "spring_damping": 1.0,
+        "spring_response": 0.1599999964237213
+      },
+      "description": "Animation, and how much of it."
+    },
+    "profiles": {
+      "additionalProperties": true,
+      "description": "Named overrides, selected at launch.\n\nA profile is the whole settings tree again, partially specified. The\n`k8s-prod` profile with a red theme is a genuinely useful safety feature,\nnot a toy.\n\nSchematized as free-form objects: a profile is the settings tree again,\npartially specified, and a schema that said so would be recursive. The\nsettings UI edits profiles through the same generated form as the root.",
+      "type": "object"
+    },
+    "schema_version": {
+      "default": 1,
+      "description": "Config format version. Files without one are assumed to be current.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "scrolling": {
+      "$ref": "#/$defs/Scrolling",
+      "default": {
+        "lines_per_notch": 3,
+        "scroll_on_keypress": true,
+        "scroll_on_output": false,
+        "scrollback": 10000
+      },
+      "description": "Scrollback and scrolling behaviour."
+    },
+    "shell": {
+      "$ref": "#/$defs/Shell",
+      "default": {
+        "command": "",
+        "cwd": "",
+        "env": {}
+      },
+      "description": "What to run, and where."
+    },
+    "typography": {
+      "$ref": "#/$defs/Typography",
+      "default": {
+        "families": [
+          "Cascadia Mono",
+          "Consolas",
+          "DejaVu Sans Mono",
+          "monospace"
+        ],
+        "features": [],
+        "letter_spacing": 0.0,
+        "ligatures": false,
+        "line_height": 1.25,
+        "size_pt": 13.0
+      },
+      "description": "Fonts, size, and the metrics derived from them."
+    },
+    "window": {
+      "$ref": "#/$defs/Window",
+      "default": {
+        "backdrop": "none",
+        "chrome_opacity": 1.0,
+        "columns": 100,
+        "custom_chrome": false,
+        "opacity": 1.0,
+        "padding": 8,
+        "rows": 30
+      },
+      "description": "Window shape, transparency, and chrome."
+    }
+  },
+  "title": "Settings",
+  "type": "object"
+}

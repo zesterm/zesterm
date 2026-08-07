@@ -88,8 +88,19 @@ didn't want to switch back."* Not feature parity with WezTerm.
       — off by default, because on it makes scrollback unreadable while anything
       is running. The load-bearing fix was in the grid: output used to slide the
       view forward one line at a time under a reader who had scrolled back.
-- [ ] **10. `zest-config`.** Cascade, profiles, provenance, migrations, hot
-      reload with invalidation classes, JSON Schema export.
+- [x] **10. `zest-config`.** Cascade (defaults → system → user → profile →
+      workspace → CLI) with per-key provenance, profiles, migrations, `notify`
+      hot reload with invalidation classes, JSON Schema export to
+      `schemas/zesterm.schema.json`, and a trust prompt for workspace configs —
+      `shell.command` makes an auto-loaded `.zesterm.toml` remote code
+      execution. Flags are a cascade layer, not a mutation, so `--size 20` is
+      recorded as *set by command line* and survives a config reload.
+      The load-bearing test walks the generated schema and fails if any key has
+      no invalidation class, which is what stops a new setting from silently
+      needing a restart. `default-features = false` drops the filesystem half so
+      the types and schema still reach the wasm clients.
+      Verified live: editing `config.toml` switched theme dark→light and font
+      15pt→22pt with the grid and pty resized, no restart.
 - [ ] **11. Window chrome + motion.** Borderless window, GPU-drawn titlebar and
       tabs, per-OS backdrop, springs, smooth scroll, `reduce_motion`.
 - [ ] **12. Polish.** Title, DECSCUSR cursor styles, font zoom, DPI changes.

@@ -37,20 +37,39 @@ pub struct Config {
     pub scroll_on_output: bool,
 }
 
-impl Default for Config {
-    fn default() -> Self {
+impl From<&zest_config::Settings> for Config {
+    /// Project the settings tree onto what the app actually runs on.
+    ///
+    /// Kept as a projection rather than using `Settings` directly, so the
+    /// renderer and the window never reach into a user-editable tree: anything
+    /// they need has been validated and clamped exactly once, here.
+    fn from(s: &zest_config::Settings) -> Self {
         Self {
-            font_families: ["Cascadia Mono", "Consolas", "DejaVu Sans Mono", "monospace"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-            typography: Typography { size_pt: 13.0, line_height: 1.25, ..Default::default() },
-            theme: zest_theme::builtin::DEFAULT_DARK.to_string(),
-            scrollback: 10_000,
-            opacity: 1.0,
-            shell: None,
-            scroll_on_output: false,
+            font_families: s.typography.families.clone(),
+            typography: Typography {
+                // Clamped rather than trusted. These come from a file a user
+                // edits by hand, and a zero or negative size reaches
+                // `f32::clamp` in the metrics code as a panic.
+                size_pt: s.typography.size_pt.clamp(4.0, 144.0),
+                line_height: s.typography.line_height.clamp(0.5, 3.0),
+                letter_spacing: s.typography.letter_spacing.clamp(-5.0, 20.0),
+                ..Default::default()
+            },
+            theme: s.appearance.theme.clone(),
+            scrollback: s.scrolling.scrollback,
+            opacity: s.window.opacity.clamp(0.0, 1.0),
+            shell: (!s.shell.command.is_empty()).then(|| s.shell.command.clone()),
+            scroll_on_output: s.scrolling.scroll_on_output,
         }
+    }
+}
+
+impl Default for Config {
+    /// Delegated to the settings defaults, so there is exactly one place a
+    /// default lives. Two lists of defaults drift, and the one that drifts is
+    /// always the one nobody is looking at.
+    fn default() -> Self {
+        Self::from(&zest_config::Settings::default())
     }
 }
 
@@ -83,10 +102,27 @@ pub struct App {
     selection_bg: zest_core::Rgb,
     /// Accumulated fractional wheel lines, so trackpads do not lose precision.
     scroll_accum: f32,
+
+    /// The settings this `config` was projected from.
+    ///
+    /// Kept alongside rather than discarded, because a reload has to diff
+    /// against what is live to decide what the change costs.
+    settings: zest_config::Settings,
+    /// Flags, replayed on every reload so a `--size` is not lost to a file save.
+    cli_layer: toml::Table,
+    profile: Option<String>,
+    /// Dropping this stops watching the config file.
+    config_watcher: Option<zest_config::Watcher>,
 }
 
 impl App {
-    pub fn new(config: Config, proxy: EventLoopProxy<Wakeup>) -> Self {
+    pub fn new(
+        settings: zest_config::Settings,
+        cli_layer: toml::Table,
+        profile: Option<String>,
+        proxy: EventLoopProxy<Wakeup>,
+    ) -> Self {
+        let config = Config::from(&settings);
         let theme = zest_theme::builtin::get(&config.theme)
             .unwrap_or_else(zest_theme::builtin::obsidian);
         let resolved = zest_theme::resolve(&theme);
@@ -117,6 +153,31 @@ impl App {
                 .ok(),
             selection_bg,
             scroll_accum: 0.0,
+            settings,
+            cli_layer,
+            profile,
+            config_watcher: None,
+        }
+    }
+
+    /// Start watching the config file.
+    ///
+    /// Deliberately not fatal if it fails: the terminal works fine without hot
+    /// reload, and a filesystem that will not support a watch — a network share,
+    /// a container mount — is not a reason to refuse to run.
+    fn watch_config(&mut self) {
+        let Some(path) = zest_config::paths::config_dir().map(|d| d.join("config.toml")) else {
+            return;
+        };
+        let proxy = self.proxy.clone();
+        match zest_config::Watcher::new(&path, move || {
+            let _ = proxy.send_event(Wakeup::ConfigChanged);
+        }) {
+            Ok(w) => {
+                tracing::debug!(path = %path.display(), "watching config");
+                self.config_watcher = Some(w);
+            }
+            Err(e) => tracing::warn!(error = %e, "config hot reload unavailable"),
         }
     }
 
@@ -388,6 +449,114 @@ impl App {
         gpu.queue.present(frame);
     }
 
+    /// Re-read the config and apply whatever changed, at its own cost.
+    ///
+    /// Nothing here reaches for a restart: a class the app cannot yet act on is
+    /// logged as such, so "this needs a restart" is a statement rather than an
+    /// excuse. The layers are re-read from scratch rather than patched, because
+    /// a removed key has to fall back through the cascade, and there is no way
+    /// to know what it falls back *to* without redoing the merge.
+    fn reload_config(&mut self) {
+        let load = zest_config::load(&zest_config::Options {
+            profile: self.profile.clone(),
+            workspace_dir: std::env::current_dir().ok(),
+            cli: Some(self.cli_layer.clone()),
+            system_light: false,
+        });
+
+        if !load.errors.is_empty() {
+            // The last good settings stay in place. A config being saved
+            // mid-edit is the common case, not an exception.
+            for e in &load.errors {
+                tracing::error!(error = %e, "config reload failed; keeping the last good settings");
+            }
+            return;
+        }
+
+        let new = &load.resolved.settings;
+        let class = zest_config::diff(&self.settings, new);
+        let changed = zest_config::invalidate::changed_keys(&self.settings, new);
+        if class == zest_config::Invalidation::None {
+            return;
+        }
+        tracing::info!(?class, keys = ?changed, "config changed");
+
+        self.settings = new.clone();
+        self.config = Config::from(new);
+
+        match class {
+            zest_config::Invalidation::None => {}
+            zest_config::Invalidation::Free => self.apply_theme(),
+            // Everything above Free needs the font stack rebuilt, and geometry
+            // needs the pty told afterwards. `rebuild_fonts` handles both,
+            // because the second without the first leaves the shell drawing for
+            // a grid whose cells are the wrong size.
+            zest_config::Invalidation::AtlasBump | zest_config::Invalidation::Geometry => {
+                self.apply_theme();
+                self.rebuild_fonts();
+            }
+            zest_config::Invalidation::SurfaceRebuild => {
+                self.apply_theme();
+                if let (Some(gpu), Some(w)) = (self.gpu.as_ref(), self.window.as_ref()) {
+                    let size = w.inner_size();
+                    let _ = gpu;
+                    self.resize_surface(size.width, size.height);
+                }
+            }
+            zest_config::Invalidation::Restart => {
+                tracing::warn!(keys = ?changed, "these settings apply on the next launch");
+            }
+        }
+
+        if let Some(session) = self.session.as_ref() {
+            session.mark_dirty();
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Re-resolve the theme into the live palette.
+    fn apply_theme(&mut self) {
+        let theme = zest_theme::builtin::get(&self.config.theme)
+            .unwrap_or_else(zest_theme::builtin::obsidian);
+        let resolved = zest_theme::resolve(&theme);
+        self.palette = to_core_palette(&resolved);
+        self.selection_bg = zest_core::Rgb::new(
+            resolved.selection_bg.r,
+            resolved.selection_bg.g,
+            resolved.selection_bg.b,
+        );
+        // Seeding replaces the palette the escape sequences mutate, so an
+        // `OSC 4` set before the theme change is deliberately lost -- a theme
+        // change is exactly the moment the seed should win.
+        if let Some(session) = self.session.as_ref() {
+            session.terminal.lock().set_palette(self.palette.clone());
+        }
+        if let Some(w) = self.window.as_ref() {
+            let bg = resolved.background;
+            platform::set_background_color(w, bg.r, bg.g, bg.b);
+        }
+    }
+
+    /// Rebuild the font stack and resize the grid to match the new cell size.
+    fn rebuild_fonts(&mut self) {
+        match Fonts::new(&self.config.font_families, self.config.typography) {
+            Ok(fonts) => self.fonts = Some(fonts),
+            Err(e) => {
+                // Keeping the old fonts is the only safe answer: there is no
+                // such thing as a terminal with no font.
+                tracing::error!(error = %e, "new font stack unusable; keeping the previous one");
+                return;
+            }
+        }
+        if let (Some(gpu), Some(w)) = (self.gpu.as_mut(), self.window.as_ref()) {
+            gpu.renderer.clear_atlas();
+            let size = w.inner_size();
+            self.resize_surface(size.width, size.height);
+        }
+    }
+
     fn resize_surface(&mut self, width: u32, height: u32) {
         let (Some(gpu), Some(session)) = (self.gpu.as_mut(), self.session.as_ref()) else {
             return;
@@ -538,6 +707,11 @@ impl ApplicationHandler<Wakeup> for App {
             startup_ms = t0.elapsed().as_millis(),
             "zesterm ready"
         );
+
+        // Last, and off the measured path: watching costs a thread and an
+        // inotify/ReadDirectoryChanges handle, and none of it is needed to show
+        // the first frame.
+        self.watch_config();
     }
 
     /// A wakeup from the parser thread.
@@ -549,8 +723,10 @@ impl ApplicationHandler<Wakeup> for App {
                 }
             }
             Wakeup::Exited => el.exit(),
+            Wakeup::ConfigChanged => self.reload_config(),
         }
     }
+
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {

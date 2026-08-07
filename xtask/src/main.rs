@@ -9,17 +9,50 @@ use std::process::{Command, ExitCode};
 /// being UI-free is what lets the daemon, the browser client, and the mobile
 /// client share one terminal implementation instead of three that drift.
 /// A boundary that isn't checked by CI decays within a month, so it is checked.
-const BOUNDARIES: &[(&str, &[&str])] = &[
-    ("zest-core", &["wgpu", "winit", "windows", "windows-sys", "tokio", "raw-window-handle"]),
-    ("zest-theme", &["wgpu", "winit", "windows", "windows-sys", "tokio"]),
-    ("zest-font", &["wgpu", "winit", "tokio"]),
-    ("zest-render-wgpu", &["winit"]),
+const BOUNDARIES: &[Boundary] = &[
+    Boundary {
+        krate: "zest-core",
+        forbidden: &["wgpu", "winit", "windows", "windows-sys", "tokio", "raw-window-handle"],
+        args: &[],
+    },
+    Boundary {
+        krate: "zest-theme",
+        forbidden: &["wgpu", "winit", "windows", "windows-sys", "tokio"],
+        args: &[],
+    },
+    Boundary { krate: "zest-font", forbidden: &["wgpu", "winit", "tokio"], args: &[] },
+    Boundary { krate: "zest-render-wgpu", forbidden: &["winit"], args: &[] },
+    // Settings cross to the web and phone clients as data, so the types and the
+    // schema must build without touching a filesystem. Checked with default
+    // features off, because with them on the crate legitimately watches files --
+    // and a rule that had to allow `windows-sys` would stop meaning anything.
+    Boundary {
+        krate: "zest-config",
+        forbidden: &["wgpu", "winit", "windows", "windows-sys", "tokio", "notify", "directories"],
+        args: &["--no-default-features"],
+    },
 ];
+
+/// A crate, the dependencies it must not have, and the feature set to check.
+struct Boundary {
+    krate: &'static str,
+    forbidden: &'static [&'static str],
+    args: &'static [&'static str],
+}
+
+/// Where the generated JSON Schema is committed.
+///
+/// Committed rather than generated on demand so editors can pick it up through
+/// taplo without a build step, and so a change to the settings shows up as a
+/// reviewable diff.
+const SCHEMA_PATH: &str = "schemas/zesterm.schema.json";
 
 fn main() -> ExitCode {
     let cmd = std::env::args().nth(1);
     match cmd.as_deref() {
         Some("check-deps") => check_deps(),
+        Some("schema") => write_schema(false),
+        Some("check-schema") => write_schema(true),
         Some(other) => {
             eprintln!("unknown command: {other}");
             usage();
@@ -33,15 +66,60 @@ fn main() -> ExitCode {
 }
 
 fn usage() {
-    eprintln!("usage: cargo xtask <command>\n\ncommands:\n  check-deps   verify crate boundary invariants");
+    eprintln!(
+        "usage: cargo xtask <command>\n\ncommands:\n  \
+         check-deps     verify crate boundary invariants\n  \
+         schema         regenerate {SCHEMA_PATH}\n  \
+         check-schema   fail if {SCHEMA_PATH} is stale"
+    );
+}
+
+/// Write the settings JSON Schema, or check that the committed one matches.
+///
+/// `check-schema` is what keeps the file from drifting: adding a setting without
+/// regenerating leaves the web and phone settings UIs a version behind, and
+/// nothing else would notice.
+fn write_schema(check_only: bool) -> ExitCode {
+    let generated = zest_config::schema::json_schema_string();
+    let path = std::path::Path::new(SCHEMA_PATH);
+
+    if check_only {
+        let committed = std::fs::read_to_string(path).unwrap_or_default();
+        // Compared after normalizing line endings: a checkout with
+        // `core.autocrlf` on would otherwise fail every time on Windows.
+        if committed.replace("\r\n", "\n").trim() == generated.replace("\r\n", "\n").trim() {
+            println!("{SCHEMA_PATH} is up to date");
+            return ExitCode::SUCCESS;
+        }
+        eprintln!("{SCHEMA_PATH} is stale -- run `cargo xtask schema`");
+        return ExitCode::FAILURE;
+    }
+
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("could not create {}: {e}", parent.display());
+            return ExitCode::FAILURE;
+        }
+    }
+    match std::fs::write(path, format!("{generated}\n")) {
+        Ok(()) => {
+            println!("wrote {SCHEMA_PATH}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("could not write {SCHEMA_PATH}: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn check_deps() -> ExitCode {
     let mut violations = Vec::new();
 
-    for (krate, forbidden) in BOUNDARIES {
+    for Boundary { krate, forbidden, args } in BOUNDARIES {
         let out = match Command::new(env!("CARGO"))
             .args(["tree", "--package", krate, "--edges", "normal", "--prefix", "none"])
+            .args(*args)
             .output()
         {
             Ok(o) if o.status.success() => o.stdout,

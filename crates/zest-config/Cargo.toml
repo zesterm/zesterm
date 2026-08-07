@@ -8,4 +8,25 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+# Deliberately a pure data crate: no wgpu, no winit, no font machinery. The app
+# maps `Settings` onto those. That is what lets the same settings tree be served
+# to the web and phone clients later without dragging a renderer along.
+[features]
+# On by default because the native app wants all of it. Off is what matters:
+# the settings *types* and the generated schema have to reach the browser and
+# phone clients, and neither can link a file watcher. Keeping the split in
+# features rather than in a second crate means the types cannot drift.
+default = ["fs"]
+fs = ["dep:directories", "dep:notify", "dep:toml_edit"]
+
 [dependencies]
+serde = { workspace = true }
+toml = { workspace = true }
+schemars = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+
+toml_edit = { version = "0.22", optional = true }
+directories = { workspace = true, optional = true }
+notify = { workspace = true, optional = true }

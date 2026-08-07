@@ -18,7 +18,7 @@ mod session;
 
 use winit::event_loop::EventLoop;
 
-use app::{App, Config};
+use app::App;
 use session::Wakeup;
 
 /// Rebuild a command line from separate arguments.
@@ -41,6 +41,59 @@ fn join_command(parts: &[String]) -> String {
         .join(" ")
 }
 
+/// Command-line flags, collected as a settings layer.
+///
+/// Built as a `toml::Table` rather than by mutating the resolved config, so a
+/// flag participates in the cascade like any other layer — it wins, and it is
+/// *recorded* as having won. Without that, the settings UI would show a value it
+/// could not explain and the config file would appear to be ignored.
+#[derive(Default)]
+struct CliLayer {
+    table: toml::Table,
+}
+
+impl CliLayer {
+    fn set(&mut self, key: &str, value: toml::Value) {
+        // Keys are dotted; the layer is nested, so walk and create as needed.
+        let mut parts = key.split('.').peekable();
+        let mut node = &mut self.table;
+        while let Some(part) = parts.next() {
+            if parts.peek().is_none() {
+                node.insert(part.to_string(), value);
+                return;
+            }
+            let entry = node
+                .entry(part.to_string())
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            match entry.as_table_mut() {
+                Some(t) => node = t,
+                None => return,
+            }
+        }
+    }
+
+    fn set_str(&mut self, key: &str, value: &str) {
+        self.set(key, toml::Value::String(value.to_string()));
+    }
+
+    fn set_float(&mut self, key: &str, value: f64) {
+        self.set(key, toml::Value::Float(value));
+    }
+
+    fn set_bool(&mut self, key: &str, value: bool) {
+        self.set(key, toml::Value::Boolean(value));
+    }
+
+    fn set_array(&mut self, key: &str, values: &[String]) {
+        let items = values.iter().cloned().map(toml::Value::String).collect();
+        self.set(key, toml::Value::Array(items));
+    }
+
+    fn into_table(self) -> toml::Table {
+        self.table
+    }
+}
+
 fn main() {
     console::attach_to_parent();
 
@@ -51,38 +104,66 @@ fn main() {
         )
         .init();
 
-    let mut config = Config::default();
+    // Flags become the strongest layer of the settings cascade rather than
+    // mutating a config directly. That is what lets `--size 20` show up in the
+    // settings UI as "set by command line" instead of as an unexplained value
+    // the config file disagrees with.
+    let mut cli = CliLayer::default();
+    let mut profile = None;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--theme" => {
                 if let Some(v) = args.get(i + 1) {
-                    config.theme = v.clone();
+                    cli.set_str("appearance.theme", v);
                 }
                 i += 2;
             }
             "--font" => {
                 if let Some(v) = args.get(i + 1) {
-                    config.font_families.insert(0, v.clone());
+                    // Prepended, not substituted. `--font "Some Font"` for a
+                    // font that turns out not to be installed must still leave
+                    // a usable terminal rather than an empty stack.
+                    let mut families = vec![v.clone()];
+                    families.extend(zest_config::Typography::default().families);
+                    cli.set_array("typography.families", &families);
                 }
                 i += 2;
             }
             "--size" => {
-                if let Some(v) = args.get(i + 1).and_then(|s| s.parse().ok()) {
-                    config.typography.size_pt = v;
+                if let Some(v) = args.get(i + 1).and_then(|s| s.parse::<f64>().ok()) {
+                    cli.set_float("typography.size_pt", v);
                 }
                 i += 2;
             }
             "--opacity" => {
-                if let Some(v) = args.get(i + 1).and_then(|s| s.parse().ok()) {
-                    config.opacity = v;
+                if let Some(v) = args.get(i + 1).and_then(|s| s.parse::<f64>().ok()) {
+                    cli.set_float("window.opacity", v);
                 }
                 i += 2;
             }
+            "--profile" => {
+                profile = args.get(i + 1).cloned();
+                i += 2;
+            }
             "--scroll-on-output" => {
-                config.scroll_on_output = true;
+                cli.set_bool("scrolling.scroll_on_output", true);
                 i += 1;
+            }
+            "--config" => {
+                match zest_config::paths::config_file() {
+                    Some(p) => println!("{}", p.display()),
+                    None => match zest_config::paths::config_dir() {
+                        Some(d) => println!("{} (does not exist yet)", d.join("config.toml").display()),
+                        None => println!("no config directory available"),
+                    },
+                }
+                return;
+            }
+            "--schema" => {
+                println!("{}", zest_config::schema::json_schema_string());
+                return;
             }
             // Everything after -e is the command, as xterm and alacritty do.
             //
@@ -96,7 +177,7 @@ fn main() {
                     eprintln!("-e needs a command");
                     std::process::exit(2);
                 }
-                config.shell = Some(join_command(&rest));
+                cli.set_str("shell.command", &join_command(&rest));
                 break;
             }
             "--themes" => {
@@ -112,10 +193,16 @@ fn main() {
                      --font <family>   preferred font family\n\
                      --size <pt>       font size in points\n\
                      --opacity <0..1>  window background opacity\n\
-                     --scroll-on-output  jump to the bottom on new output\n\
+                     --profile <name>  apply a named profile from the config\n\
+                     --scroll-on-output\n\
+                     \x20                 jump to the bottom on new output\n\
                      -e <command>...   run a command instead of the shell\n\
                      \x20                 (must come last; takes all remaining args)\n\
-                     --themes          list built-in themes"
+                     --themes          list built-in themes\n\
+                     --config          print the config file path\n\
+                     --schema          print the settings JSON Schema\n\n\
+                     Flags are the strongest layer of the settings cascade;\n\
+                     everything else lives in the config file."
                 );
                 return;
             }
@@ -126,12 +213,36 @@ fn main() {
         }
     }
 
+    // Kept, not consumed: a config file save re-runs the cascade, and the flags
+    // have to be replayed on top or `--size 20` would vanish the first time the
+    // user edits anything.
+    let cli_table = cli.into_table();
+    let profile_name = profile;
+    let load = zest_config::load(&zest_config::Options {
+        profile: profile_name.clone(),
+        workspace_dir: std::env::current_dir().ok(),
+        cli: Some(cli_table.clone()),
+        system_light: false,
+    });
+
+    // Reported, never fatal. A terminal that refuses to start because of a typo
+    // has locked the user out of the editor they would fix it with.
+    for e in &load.errors {
+        tracing::error!(error = %e, "config problem; that layer was skipped");
+    }
+    if let Some(m) = &load.migration {
+        tracing::info!(from = m.from, to = m.to, "config migrated");
+    }
+    for (key, source) in &load.resolved.provenance {
+        tracing::debug!(key = %key, source = %source, "setting");
+    }
+
     let event_loop = EventLoop::<Wakeup>::with_user_event()
         .build()
         .expect("create event loop");
     let proxy = event_loop.create_proxy();
 
-    let mut app = App::new(config, proxy);
+    let mut app = App::new(load.resolved.settings, cli_table, profile_name, proxy);
     event_loop.run_app(&mut app).expect("run");
 }
 

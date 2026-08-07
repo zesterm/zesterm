@@ -40,6 +40,12 @@ pub enum Wakeup {
     Redraw,
     /// The child exited.
     Exited,
+    /// The config file settled after a write.
+    ///
+    /// Carries nothing: the watcher runs on its own thread and must not read
+    /// settings, because deciding what a change costs means comparing against
+    /// the live ones. The reload happens on the main thread.
+    ConfigChanged,
 }
 
 pub struct Session {
