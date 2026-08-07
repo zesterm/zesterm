@@ -21,9 +21,9 @@ spawns a shell, parses its output, and prints the resulting grid.
 | Piece | State |
 |---|---|
 | `zest-pty` — ConPTY, resize, shutdown, `.vtrec` recording | working |
-| `zest-core` — grid, scrollback, VT parsing, modes, OSC | working, 86 tests |
+| `zest-core` — grid, scrollback, VT parsing, modes, OSC | working, 77 tests |
 | `zest-font` — metrics, shaping, rasterization, fallback | working, 22 tests |
-| `zest-theme` — token schema matching `@sigx/terminal-zero` | schema only |
+| `zest-theme` — tokens, OKLCH colour math, built-ins, importers | working, 44 tests |
 | Transparency capability probe | done — see ADR-003 |
 | `zest-render-wgpu`, `zest-input`, `zest-config` | not started |
 

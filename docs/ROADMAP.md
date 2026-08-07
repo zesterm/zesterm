@@ -25,13 +25,13 @@ for the decisions that are expensive to reach and cheap to accidentally undo.
 | `zest-pty` | ✅ ConPTY, resize, shutdown protocol, `.vtrec` recorder |
 | `zest-core` | ✅ grid, scrollback, VT parsing, modes, OSC, palette |
 | `zest-font` | ✅ metrics, shaping, rasterization, system fallback, colour glyphs |
-| `zest-theme` | 🟡 token schema only; no importers, no colour math |
+| `zest-theme` | ✅ tokens, OKLCH derivation, 5 built-ins, 4 importers |
 | `zest-render-wgpu` | ⬜ transparency probe done, nothing else |
 | `zest-input` | ⬜ |
 | `zest-config` | ⬜ |
 | `zest-app` | 🟡 headless example only; no window |
 
-108 tests. `cargo run -p zest-app --example headless` is a working terminal
+148 tests. `cargo run -p zest-app --example headless` is a working terminal
 without a window.
 
 ---
@@ -54,7 +54,7 @@ didn't want to switch back."* Not feature parity with WezTerm.
       for M3.
 - [x] **4. `zest-font`.** swash + fontique. Integer physical-pixel metrics,
       shaping, system fallback, COLR/CBDT colour glyphs. PNG dump for diagnosis.
-- [ ] **4b. `zest-theme`.** The five built-in themes, OKLCH derivation of `ui.*`
+- [x] **4b. `zest-theme`.** The five built-in themes, OKLCH derivation of `ui.*`
       tokens, and importers for iTerm2 / Windows Terminal / base16 / Alacritty.
 - [ ] **5. `zest-render-wgpu`.** Three pipelines, one render pass:
       - [ ] SDF rects — cell backgrounds, selection, cursor, *and* all window

@@ -16,8 +16,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod builtin;
+pub mod import;
+pub mod oklch;
+pub mod resolve;
 pub mod tokens;
 
+pub use resolve::{derive_ui_tokens, resolve, theme_from_scheme, ResolvedPalette};
 pub use tokens::{
     AnsiPalette, ParseColorError, Rgba8, TerminalColors, Theme, ThemeEffects, ThemeMode, UiTokens,
     CURRENT_SCHEMA,
