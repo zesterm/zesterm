@@ -22,9 +22,17 @@ spawns a shell, parses its output, and prints the resulting grid.
 |---|---|
 | `zest-pty` — ConPTY, resize, shutdown, `.vtrec` recording | working |
 | `zest-core` — grid, scrollback, VT parsing, modes, OSC | working, 86 tests |
+| `zest-font` — metrics, shaping, rasterization, fallback | working, 22 tests |
 | `zest-theme` — token schema matching `@sigx/terminal-zero` | schema only |
 | Transparency capability probe | done — see ADR-003 |
-| `zest-font`, `zest-render-wgpu`, `zest-input`, `zest-config` | not started |
+| `zest-render-wgpu`, `zest-input`, `zest-config` | not started |
+
+The font layer renders a sample sheet to a PNG with no GPU involved, which is
+where font bugs are cheapest to find:
+
+```
+cargo run -p zest-font --example font_dump -- --size 24 --ligatures
+```
 
 ## Layout
 
