@@ -21,6 +21,7 @@ ts = ["dep:ts-rs"]
 [dependencies]
 zest-core = { workspace = true, features = ["serde"] }
 serde = { workspace = true }
+rmp-serde = "1"
 thiserror = { workspace = true }
 
 ts-rs = { workspace = true, optional = true }

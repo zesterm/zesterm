@@ -105,6 +105,15 @@ Each of these cost real time and is documented where it bites:
 - **`ClosePseudoConsole` deadlocks** unless the reader is still draining, which
   dictates the whole shutdown protocol. The reader also cannot observe child
   exit at all.
+- **Windows serializes I/O per handle on a *synchronous* named pipe**, so a
+  reader thread sitting in `ReadFile` — which is exactly what a server does
+  while a client is quiet — holds off a writer thread on that same handle. The
+  writes return success and simply never arrive, and the peer sees a connection
+  that is established, greeted, and then silent. `DuplicateHandle` does not help;
+  it names the same file object. The fix is `FILE_FLAG_OVERLAPPED` on both ends
+  with a per-operation `OVERLAPPED` and event — and `ConnectNamedPipe` must then
+  be overlapped too, or it returns without waiting and the server serves a
+  connection nobody made. (`zest-daemon/src/local.rs`.)
 - **On macOS, `TIOCSWINSZ` on the pty master fails with `ENOTTY` until the slave
   has been opened once.** Setting the initial size right after `unlockpt` — the
   obvious place, and what Linux accepts — therefore fails with an error saying

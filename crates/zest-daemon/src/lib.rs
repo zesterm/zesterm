@@ -1,6 +1,7 @@
 //! The process that owns this machine's terminals.
 //!
-//! **Skeleton — WS-F owns the implementation.**
+//! Session ownership works ([`session`]), served over the loopback transport
+//! ([`local`]). The LAN transport waits on discovery landing in WS-H.
 //!
 //! # Why a daemon at all, on every machine
 //!
@@ -28,6 +29,14 @@
 //! path — the daemon is already running, which is every launch after the first —
 //! it is a pipe open costing microseconds. There is a regression test on first
 //! paint so this has a number to break rather than a memory to argue with.
+
+pub mod local;
+pub mod server;
+pub mod session;
+
+pub use local::{connect, default_socket_path, listen};
+pub use server::{serve, Connection, Registry};
+pub use session::{Session, Update};
 
 use zest_proto::{HostId, SessionAddr, SessionId};
 
