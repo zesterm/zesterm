@@ -18,8 +18,11 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Console",
     "Win32_System_Threading",
     "Win32_System_Pipes",
+    "Win32_Storage_FileSystem",
+    # ReadFile/WriteFile take an OVERLAPPED*, so their bindings are gated on
+    # Win32_System_IO even though we always pass null (blocking I/O).
+    "Win32_System_IO",
     "Win32_Security",
-    "Win32_System_Memory",
 ] }
 
 [target.'cfg(unix)'.dependencies]
