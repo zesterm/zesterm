@@ -122,6 +122,39 @@ impl Row {
         }
     }
 
+    /// One cell together with whatever the side table holds for it.
+    ///
+    /// Reflow moves cells between rows, and `Cell::extra` is an index into the
+    /// row that owns it — carrying the cell alone would leave every combining
+    /// mark and hyperlink pointing into the wrong table.
+    #[must_use]
+    pub fn detach(&self, col: usize) -> Option<(Cell, Option<CellExtra>)> {
+        let cell = *self.cells.get(col)?;
+        Some((cell, self.extra(&cell).cloned()))
+    }
+
+    /// Put a detached cell at `col`, re-interning its side-table entry.
+    pub fn attach(&mut self, col: usize, cell: Cell, extra: Option<CellExtra>) {
+        let Some(slot) = self.cells.get_mut(col) else { return };
+        *slot = cell;
+        match extra {
+            Some(e) if self.extras.len() < NO_EXTRA as usize => {
+                let id = self.extras.len() as ExtraId;
+                self.extras.push(e);
+                if let Some(slot) = self.cells.get_mut(col) {
+                    slot.extra = id;
+                }
+            }
+            // No side data, or no room for it. Losing a combining mark is far
+            // better than losing the line it was attached to.
+            _ => {
+                if let Some(slot) = self.cells.get_mut(col) {
+                    slot.extra = NO_EXTRA;
+                }
+            }
+        }
+    }
+
     /// Blank the row, keeping its allocation. This is what makes steady-state
     /// scrolling allocation-free.
     pub fn reset(&mut self, template: &Cell, id: LineId) {
@@ -340,6 +373,18 @@ impl Storage {
 
     pub fn iter(&self) -> impl Iterator<Item = &Row> {
         (0..self.rows.len()).map(move |i| self.row(i))
+    }
+
+    /// Replace every row, in logical order.
+    pub fn replace_all(&mut self, rows: Vec<Row>) {
+        self.rows = rows;
+        self.origin = 0;
+    }
+
+    /// Rows in logical order, taken out.
+    pub fn take_all(&mut self) -> Vec<Row> {
+        self.normalize();
+        core::mem::take(&mut self.rows)
     }
 }
 

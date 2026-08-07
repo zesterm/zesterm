@@ -298,6 +298,13 @@ impl TermState {
     }
 
     pub(crate) fn resize(&mut self, cols: usize, rows: usize) {
+        // A width change rewraps, which renumbers lines -- so a selection
+        // anchored to the old ids now names different text. Clearing it is what
+        // every terminal does, and is far better than highlighting whatever
+        // happens to be at those coordinates afterwards.
+        if cols != self.grid.cols() {
+            self.selection = None;
+        }
         let template = self.template;
         self.grid.resize(cols, rows, &template);
         if let Some(alt) = self.alt_grid.as_mut() {

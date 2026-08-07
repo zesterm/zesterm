@@ -300,7 +300,16 @@ impl Grid {
         }
 
         if cols != self.cols {
-            self.storage.resize_cols(cols, template);
+            if self.scrollback_limit == 0 {
+                // The alternate screen. **Never reflow it.** A full-screen
+                // program repaints on SIGWINCH and its frame is a picture, not
+                // a paragraph: rewrapping it would mangle the box drawing that
+                // is about to be redrawn anyway. `scrollback_limit == 0` is
+                // exactly how the alt grid is built.
+                self.storage.resize_cols(cols, template);
+            } else {
+                self.reflow(cols, template);
+            }
             self.cols = cols;
         }
 
@@ -360,6 +369,160 @@ impl Grid {
         self.cursor.col = self.cursor.col.min(self.cols - 1);
         self.cursor.pending_wrap = false;
         self.display_offset = self.display_offset.min(self.scrollback_len);
+    }
+
+    /// Rewrap every logical line to a new width.
+    ///
+    /// A *logical line* is a run of rows joined by `wrapped`: what the user
+    /// typed or the program printed, before the screen decided where to break
+    /// it. Reflow joins each one back together and re-breaks it.
+    ///
+    /// Without this, narrowing a window destroys the columns past the new width
+    /// and widening cannot bring them back, because they are simply gone.
+    ///
+    /// # Line ids are renumbered
+    ///
+    /// They have to be: rewrapping changes how many rows a logical line
+    /// occupies, so a one-to-one mapping does not exist. The *first* row of the
+    /// oldest line keeps its id and the rest follow consecutively, so ids stay
+    /// monotonic top to bottom — which is what scroll detection and
+    /// `lines_by_id` actually depend on. Anything holding an id across a column
+    /// change must re-anchor; the selection is cleared for exactly that reason,
+    /// and command blocks (WS-E) will need to reindex here.
+    ///
+    /// # A wide character is never split
+    ///
+    /// If one would land in the last column with its spacer past the edge, the
+    /// column is left blank and the character starts the next row. Splitting it
+    /// would produce a spacer with nothing to be the second half of.
+    fn reflow(&mut self, new_cols: usize, template: &Cell) {
+        let old_rows = self.storage.take_all();
+        if old_rows.is_empty() {
+            return;
+        }
+
+        // Where the cursor is, as an offset into its logical line -- the only
+        // description that survives rewrapping.
+        let cursor_abs = self
+            .storage_index_of_cursor(old_rows.len())
+            .min(old_rows.len().saturating_sub(1));
+
+        let first_id = old_rows[0].id;
+        let mut next_id = first_id;
+        let mut out: Vec<Row> = Vec::with_capacity(old_rows.len());
+        let mut cursor_target: Option<(usize, usize)> = None;
+
+        let mut i = 0;
+        while i < old_rows.len() {
+            // Collect one logical line.
+            let start = i;
+            let mut cells: Vec<(Cell, Option<CellExtra>)> = Vec::new();
+            let mut cursor_offset: Option<usize> = None;
+            loop {
+                let row = &old_rows[i];
+                // A wrapped row is full by definition; only the last row of a
+                // logical line has trailing blanks worth dropping.
+                //
+                // And one cell further if that blank is a wide character's
+                // spacer: `trimmed_len` sees a space with a default background
+                // and calls it padding, which would leave the character it
+                // belongs to alone at the end of the line with nothing to be
+                // its second half.
+                let mut end = if row.wrapped { row.len() } else { row.trimmed_len() };
+                if end < row.len()
+                    && row.cells()[end].flags.contains(CellFlags::WIDE_SPACER)
+                {
+                    end += 1;
+                }
+                if i == cursor_abs {
+                    cursor_offset = Some(cells.len() + self.cursor.col.min(row.len()));
+                }
+                for col in 0..end {
+                    if let Some(detached) = row.detach(col) {
+                        cells.push(detached);
+                    }
+                }
+                if !row.wrapped || i + 1 >= old_rows.len() {
+                    break;
+                }
+                i += 1;
+            }
+            i += 1;
+            let _ = start;
+
+            // Re-break it.
+            let mut col = 0;
+            let mut row = Row::new(new_cols, next_id);
+            let mut emitted = false;
+            for (index, (cell, extra)) in cells.iter().enumerate() {
+                // Never split a wide character across the edge.
+                if cell.flags.contains(CellFlags::WIDE) && col + 1 >= new_cols && new_cols > 1 {
+                    row.wrapped = true;
+                    out.push(core::mem::replace(&mut row, Row::new(new_cols, next_id + 1)));
+                    next_id += 1;
+                    col = 0;
+                    emitted = true;
+                }
+                if col >= new_cols {
+                    row.wrapped = true;
+                    out.push(core::mem::replace(&mut row, Row::new(new_cols, next_id + 1)));
+                    next_id += 1;
+                    col = 0;
+                    emitted = true;
+                }
+                if cursor_offset == Some(index) {
+                    cursor_target = Some((out.len(), col));
+                }
+                row.attach(col, *cell, extra.clone());
+                col += 1;
+            }
+            // The cursor can sit one past the last character -- at a prompt it
+            // almost always does.
+            if cursor_offset == Some(cells.len()) {
+                let (r, c) = if col >= new_cols { (out.len() + 1, 0) } else { (out.len(), col) };
+                cursor_target = Some((r, c));
+            }
+            let _ = emitted;
+            out.push(row);
+            next_id += 1;
+        }
+
+        // The viewport is the tail; everything above it is history.
+        let rows = self.rows;
+        while out.len() < rows {
+            let mut blank = Row::new(new_cols, next_id);
+            blank.reset(template, next_id);
+            out.push(blank);
+            next_id += 1;
+        }
+        let mut scrollback = out.len() - rows;
+        if scrollback > self.scrollback_limit {
+            let excess = scrollback - self.scrollback_limit;
+            out.drain(..excess);
+            scrollback = self.scrollback_limit;
+        }
+
+        self.cols = new_cols;
+        self.scrollback_len = scrollback;
+        self.storage.set_next_id(next_id);
+        self.storage.replace_all(out);
+
+        if let Some((abs_row, abs_col)) = cursor_target {
+            // Back into viewport coordinates, remembering rows may have been
+            // dropped off the top by the scrollback limit.
+            let base = self.storage.len().saturating_sub(rows);
+            self.cursor.row = abs_row.saturating_sub(base).min(rows - 1);
+            self.cursor.col = abs_col.min(new_cols - 1);
+        } else {
+            self.cursor.col = self.cursor.col.min(new_cols - 1);
+        }
+        self.cursor.pending_wrap = false;
+        self.display_offset = self.display_offset.min(self.scrollback_len);
+    }
+
+    /// Storage index of the row the cursor is on.
+    fn storage_index_of_cursor(&self, total: usize) -> usize {
+        total.saturating_sub(self.rows + self.display_offset) + self.cursor.row
     }
 
     // --- editing ---------------------------------------------------------
@@ -478,6 +641,130 @@ impl Grid {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn narrowing_and_widening_restores_the_text() {
+        // Without reflow, narrowing destroys the columns past the new width and
+        // widening cannot bring them back, because they are gone. This is the
+        // whole feature in one assertion.
+        let mut t = crate::Terminal::new(40, 8, 500);
+        t.advance(b"the quick brown fox jumps over the lazy dog\r\nsecond line\r\n");
+        let before = t.screen_text();
+
+        t.resize(20, 8);
+        assert!(
+            t.screen_text().contains("lazy"),
+            "text past the new width was lost: {}",
+            t.screen_text()
+        );
+
+        t.resize(40, 8);
+        assert_eq!(t.screen_text(), before, "the round trip did not restore the text");
+    }
+
+    #[test]
+    fn a_wrapped_line_is_rejoined_before_it_is_re_broken() {
+        // The definition of a logical line: rows joined by `wrapped` are one
+        // thing the program printed, and reflow works on that rather than on
+        // rows.
+        let mut t = crate::Terminal::new(10, 6, 500);
+        t.advance(b"abcdefghijklmno");
+        assert!(t.grid().row(0).wrapped, "the fixture did not wrap");
+
+        t.resize(20, 6);
+        assert_eq!(
+            t.grid().row(0).text().trim_end(),
+            "abcdefghijklmno",
+            "the two halves were not rejoined"
+        );
+        assert!(!t.grid().row(0).wrapped, "the rejoined line is still marked wrapped");
+    }
+
+    #[test]
+    fn a_wide_character_is_never_split_across_the_edge() {
+        // Splitting one leaves a spacer with nothing to be the second half of,
+        // which renders as a stray blank and breaks every column count after it.
+        let mut t = crate::Terminal::new(10, 4, 500);
+        t.advance("aaa世界世界".as_bytes());
+
+        t.resize(5, 4);
+
+        for row in 0..t.grid().rows() {
+            for col in 0..t.grid().cols() {
+                let cell = t.grid().cell(row, col).expect("cell");
+                if cell.flags.contains(CellFlags::WIDE) {
+                    let next = t.grid().cell(row, col + 1);
+                    assert!(
+                        next.is_some_and(|c| c.flags.contains(CellFlags::WIDE_SPACER)),
+                        "a wide character at {row},{col} lost its spacer"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_cursor_follows_the_text_it_was_sitting_after() {
+        // A prompt is a logical line with the cursor one past its last
+        // character. If the cursor does not move with it, typing lands
+        // somewhere else entirely.
+        let mut t = crate::Terminal::new(40, 6, 500);
+        t.advance(b"$ ");
+        assert_eq!(t.cursor().col, 2);
+
+        t.resize(20, 6);
+        assert_eq!(t.cursor().col, 2, "the cursor left the end of the prompt");
+
+        // And on a line long enough to wrap, the cursor stays on the *same
+        // character* rather than at the same coordinates. Asserting the
+        // character rather than the row is the point: whether the continuation
+        // ends up at viewport row 1 or row 0 depends on how much scrolled into
+        // scrollback, and neither answer is the property being tested.
+        let mut t = crate::Terminal::new(40, 12, 500);
+        t.advance(b"012345678901234567890123456789012345678Z");
+        let under_cursor = t.grid().cell(t.cursor().row, t.cursor().col).expect("cell").ch;
+        assert_eq!(under_cursor, 'Z', "the fixture did not leave the cursor on the last character");
+
+        t.resize(20, 12);
+        assert_eq!(
+            t.grid().cell(t.cursor().row, t.cursor().col).expect("cell").ch,
+            'Z',
+            "the cursor left the character it was on"
+        );
+    }
+
+    #[test]
+    fn the_alternate_screen_is_never_reflowed() {
+        // A full-screen program repaints on SIGWINCH, and its frame is a
+        // picture rather than a paragraph -- rewrapping would mangle box
+        // drawing that is about to be redrawn anyway.
+        let mut t = crate::Terminal::new(20, 4, 500);
+        t.advance(b"\x1b[?1049h");
+        t.advance(b"\x1b[H\xe2\x94\x8c\xe2\x94\x80\xe2\x94\x80\xe2\x94\x90");
+
+        t.resize(10, 4);
+
+        // Truncated, not rewrapped: nothing moved onto a second row.
+        assert_eq!(t.grid().rows(), 4);
+        assert!(
+            !t.grid().row(0).wrapped,
+            "the alternate screen was rewrapped"
+        );
+    }
+
+    #[test]
+    fn combining_marks_survive_being_moved_between_rows() {
+        // `Cell::extra` indexes the row that owns it, so carrying a cell
+        // without its side-table entry would silently drop every accent.
+        let mut t = crate::Terminal::new(6, 4, 500);
+        t.advance("abcde\u{0301}f".as_bytes());
+        let before = t.screen_text();
+
+        t.resize(3, 4);
+        t.resize(6, 4);
+
+        assert_eq!(t.screen_text(), before, "a combining mark was lost in the move");
+    }
 
     /// The case that is true almost all the time: output at the top, the
     /// cursor just after it, blank rows below.

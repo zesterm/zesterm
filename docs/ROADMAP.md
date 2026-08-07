@@ -45,7 +45,7 @@ move.
 
 ## Status
 
-**524 tests, four gates green**, measured on macOS rather than remembered.
+**530 tests, four gates green**, measured on macOS rather than remembered.
 First paint 35ms **on Windows**; the Mac paints against a different compositor
 and its number (48ms) is reported rather than gated.
 
@@ -84,6 +84,23 @@ and its number (48ms) is reported rather than gated.
   advertises what it bound, and serves only devices that prove a key and are
   trusted. An unknown device makes the host print a matching code and wait for
   a person (`cargo run -p zest-daemon --example pair`).
+
+### Reflow
+
+Resizing the width rewraps, rather than truncating and losing the text. A
+*logical line* — rows joined by `wrapped`, which is what the program actually
+printed — is rejoined and re-broken at the new width, so narrowing a window and
+widening it again restores the screen exactly.
+
+Two rules that are not obvious and are load-bearing:
+
+- **The alternate screen is never reflowed.** A full-screen program repaints on
+  `SIGWINCH` and its frame is a picture, not a paragraph.
+- **Line ids are renumbered**, because rewrapping changes how many rows a
+  logical line occupies and no one-to-one mapping exists. They stay monotonic
+  top to bottom, which is what scroll detection and `lines_by_id` depend on.
+  The selection is cleared for this reason, and command blocks (WS-E) will need
+  to reindex here.
 
 ### The gap to M3
 
