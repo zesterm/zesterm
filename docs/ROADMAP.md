@@ -58,7 +58,7 @@ number is reported rather than gated.
 | `zest-render-wgpu` | ✅ pipelines, atlas, offscreen resolve, selection — ⬜ gamma validation |
 | `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema |
 | `zest-input` | ✅ extracted; keys + SGR mouse + selection — ⬜ IME, Kitty protocol |
-| `zest-app` | ✅ window, shell, sessions behind `SessionSource` on Windows — 🟡 macOS bring-up in progress — ⬜ daemon-attached source |
+| `zest-app` | ✅ window, shell, sessions behind `SessionSource` — runs on Windows *and* macOS (Metal) — ⬜ daemon-attached source, macOS chrome |
 | `zest-proto` | ✅ wire types, encoder, reference decoder for TS clients, framing, conformance corpus — ⬜ no `Delta` → `Terminal` applier, no modes on the wire |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet — ⬜ pairing, transports |
 | `zest-daemon` | ✅ session ownership, protocol loop, loopback transport — ⬜ LAN listener, no authentication, `Seq` and `Ack` not yet real |
@@ -67,6 +67,8 @@ number is reported rather than gated.
 
 - A terminal you can use on Windows: themes, settings with hot reload,
   selection, scrollback, Nerd Font prompts, 35ms to first paint.
+- The same terminal on macOS: Metal, a real `zsh`, truecolor, wide CJK, colour
+  emoji, box drawing and Nerd Font icons, 48ms to first paint.
 - `zest-daemon` serving a session over a named pipe or unix socket, with a
   client attaching and receiving live output as deltas
   (`cargo run -p zest-daemon --example attach`).
@@ -218,17 +220,30 @@ half ends in "look at the window" — an app that will not launch here means the
 attach path ships compiled and unseen. The slice below is *runs and is usable*,
 not *polished*; the rest of C2 can still trail.
 
-- [ ] Metal surface, CoreText fallback verification. Check the font stack with
-      `cargo run -p zest-font --example font_dump` **first** — a fallback bug
-      diagnosed through a Metal surface costs an afternoon guessing which layer
-      is wrong.
+- [x] **The app runs.** Metal on an Apple M4, 119×27, a real `zsh`, clean exit
+      on `^D` with no stray processes. **`zest-app` needed no code changes at
+      all** — winit and wgpu already do the right thing, and the only thing
+      standing in the way was the font stack.
+- [x] Font fallback verified through `font_dump` **before** the renderer, which
+      is what it is for: it found three bugs in one run that would each have
+      looked like a broken renderer. See the commit — the short version is that
+      a CSS generic is not a family name, that the `system` font tests skip
+      themselves when nothing resolves, and that box drawing is the third `Zyyy`
+      case after emoji and the PUA.
+- [x] Verified by eye in the window: bold, truecolor, background colour, box
+      drawing, block elements, arrows, wide CJK, Greek, colour emoji and Nerd
+      Font prompt icons.
+- [x] `--startup-probe` reports **48ms** here. It measures a different thing
+      than on Windows — different compositor, and none of the class-background
+      brush that bought the 35ms — so **the 100ms budget stays a Windows
+      assertion** and this number is reported, not gated.
 - [ ] **Do not go borderless on macOS.** It costs traffic lights, native
       full-screen, Sequoia tiling and accessibility, and gains nothing over
       `titlebar_transparent` + `title_hidden` + `fullsize_content_view`. The
       traffic-light inset is not a constant — recompute on full-screen changes.
-- [ ] `--startup-probe` measures a different thing here: a different compositor,
-      and none of the Windows class-background-brush trick that bought the 35ms.
-      **Report the macOS number; the 100ms budget stays a Windows assertion.**
+      **Deliberately not done yet:** a transparent full-size titlebar with
+      nothing drawn into it is an empty strip, not an improvement. It wants to
+      land with WS-A's chrome, which is what fills it.
 - [ ] `NSVisualEffectView`, and the rest of the polish — still trailing.
 
 ### WS-D — Linux host
