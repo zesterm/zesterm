@@ -9,8 +9,21 @@ the very first commit.
 
 ## Status
 
-**It runs.** `cargo run --release -p zest-app` opens a window with a real shell in
-it — GPU-rendered, themed, with working input and scrollback.
+**It runs.** Build once, then run the binary:
+
+```
+cargo build --release
+./target/release/zesterm
+```
+
+A window with a real shell in it — GPU-rendered, themed, with working input and
+scrollback.
+
+> Run the **binary**, not `cargo run`. Cargo re-resolves the workspace and
+> freshness-checks every source file before it execs anything, which costs
+> ~500ms on this workspace even when there is nothing to rebuild — comparable to
+> zesterm's entire startup. Measured: `cargo run --release -p zest-app` ~560ms
+> versus ~22ms direct, for a command that does nothing but print and exit.
 
 Milestone 1 (good enough to replace Windows Terminal daily) is in progress; see
 [docs/ROADMAP.md](docs/ROADMAP.md).

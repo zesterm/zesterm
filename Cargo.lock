@@ -3770,6 +3770,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wgpu",
+ "windows-sys 0.60.2",
  "winit",
  "zest-core",
  "zest-font",

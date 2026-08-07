@@ -1,6 +1,14 @@
 //! zesterm.
 
+// A terminal emulator must not be a console application: built as WINDOWS_CUI,
+// launching from Explorer or a shortcut pops a console window that then sits
+// behind the terminal. Release builds are GUI-subsystem and attach to the
+// parent console when there is one, so CLI flags and logs still work from a
+// shell (see `console`). Debug builds keep the console for a simpler dev loop.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
+mod console;
 mod fair_mutex;
 mod input;
 mod session;
@@ -11,6 +19,8 @@ use app::{App, Config};
 use session::Wakeup;
 
 fn main() {
+    console::attach_to_parent();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("ZESTERM_LOG")

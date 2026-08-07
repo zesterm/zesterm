@@ -34,6 +34,7 @@ cargo clippy --workspace --all-targets
 cargo xtask check-deps
 cargo build -p zest-core --no-default-features --target wasm32-unknown-unknown
 
+cargo build --release && ./target/release/zesterm   # the actual terminal
 cargo run -p zest-app  --example headless      # a terminal with no window
 cargo run -p zest-font --example font_dump     # font sample sheet as a PNG
 cargo run -p zest-pty  --example pty_dump      # raw VT stream / corpus recorder
@@ -73,6 +74,13 @@ Each of these cost real time and is documented where it bites:
   Applying it to every cell makes TUI panels see-through.
 - **A failing pty test that prints raw VT clears your terminal** and scrambles
   its own failure message. Escape test output.
+- **`cargo run` costs ~500ms** of workspace resolution and freshness checking
+  before the process starts, which is comparable to zesterm's whole startup.
+  Measure and demo with the built binary, or startup numbers are meaningless.
+- **Release builds are GUI-subsystem**, so a shell will not wait for them and
+  `zesterm --themes` returns the prompt before printing. That is normal for a
+  GUI app; use `Start-Process -Wait` when scripting against it. Debug builds
+  keep the console subsystem so the dev loop is unaffected.
 
 ## Related work on this machine
 
