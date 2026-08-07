@@ -106,10 +106,23 @@ pub struct Typography {
 impl Default for Typography {
     fn default() -> Self {
         Self {
-            families: ["Cascadia Mono", "Consolas", "DejaVu Sans Mono", "monospace"]
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect(),
+            // Ordered so each platform hits its own preferred face before the
+            // generic. The macOS entries are only ever reached when the Windows
+            // ones are absent, so this leaves the Windows result unchanged.
+            // `JetBrainsMono Nerd Font` sits ahead of `Menlo` because Menlo has
+            // no Private Use Area coverage, and a prompt built out of Nerd Font
+            // icons renders as blank boxes without it.
+            families: [
+                "Cascadia Mono",
+                "Consolas",
+                "JetBrainsMono Nerd Font",
+                "Menlo",
+                "DejaVu Sans Mono",
+                "monospace",
+            ]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
             size_pt: 13.0,
             line_height: 1.25,
             letter_spacing: 0.0,

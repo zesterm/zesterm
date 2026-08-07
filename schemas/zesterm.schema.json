@@ -260,6 +260,8 @@
           "default": [
             "Cascadia Mono",
             "Consolas",
+            "JetBrainsMono Nerd Font",
+            "Menlo",
             "DejaVu Sans Mono",
             "monospace"
           ],
@@ -464,6 +466,8 @@
         "families": [
           "Cascadia Mono",
           "Consolas",
+          "JetBrainsMono Nerd Font",
+          "Menlo",
           "DejaVu Sans Mono",
           "monospace"
         ],
