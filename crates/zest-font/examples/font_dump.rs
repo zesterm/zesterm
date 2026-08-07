@@ -30,6 +30,16 @@ const SAMPLE: &[(&str, Style)] = &[
     ("Box ┌─┬─┐ │ ├─┼─┤ └─┴─┘ █▓▒░", Style::new(false, false)),
     // Colour glyphs. These take the COLR/CBDT path, not the outline path.
     ("Emoji 👋 🚀 ✅ 🔥", Style::new(false, false)),
+    // Nerd Font / Powerline glyphs, which live in the Private Use Area.
+    //
+    // PUA codepoints have no Unicode script, so script-based fallback cannot
+    // resolve them -- the same structural gap that made emoji render as boxes.
+    // These are what oh-my-posh and Starship prompts are built from, so getting
+    // them wrong means the user's prompt is broken on every line.
+    (
+        "Prompt \u{e0b0}\u{e0b1}\u{e0b2}\u{e0b3} \u{f07b} \u{e725} \u{f0e7} \u{f015}",
+        Style::new(false, false),
+    ),
 ];
 
 fn main() {

@@ -31,7 +31,7 @@ for the decisions that are expensive to reach and cheap to accidentally undo.
 | `zest-config` | ⬜ |
 | `zest-app` | 🟡 real window, real shell; input is basic |
 
-209 tests. `cargo run -p zest-app --example headless` is a working terminal
+212 tests. `cargo run -p zest-app --example headless` is a working terminal
 without a window.
 
 ---
@@ -53,7 +53,8 @@ didn't want to switch back."* Not feature parity with WezTerm.
       regions, alt screen, CSI/SGR/OSC. Absolute line IDs and a sequence counter
       for M3.
 - [x] **4. `zest-font`.** swash + fontique. Integer physical-pixel metrics,
-      shaping, system fallback, COLR/CBDT colour glyphs. PNG dump for diagnosis.
+      shaping, system fallback, COLR/CBDT colour glyphs, and Nerd Font / PUA
+      icons for shell prompts. PNG dump for diagnosis.
 - [x] **4b. `zest-theme`.** The five built-in themes, OKLCH derivation of `ui.*`
       tokens, and importers for iTerm2 / Windows Terminal / base16 / Alacritty.
 - [ ] **5. `zest-render-wgpu`.** Three pipelines, one render pass:

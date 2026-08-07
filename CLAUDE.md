@@ -69,8 +69,10 @@ Each of these cost real time and is documented where it bites:
 - **DX12 cannot do per-pixel alpha** through wgpu's ordinary surface path.
   Transparency on Windows is adapter-dependent. Premultiply everywhere
   regardless. (ADR-003.)
-- **Emoji are script `Zyyy`**, so script-based font fallback structurally cannot
-  find them — they need an explicit `GenericFamily::Emoji` path.
+- **Emoji are script `Zyyy` and Nerd Font icons are Private Use Area**, so
+  script-based font fallback structurally cannot find either. Emoji need an
+  explicit `GenericFamily::Emoji` path; PUA needs an installed Nerd Font,
+  discovered by name. Get this wrong and the user's shell prompt is blank.
 - **Window opacity applies only to cells whose background is `Color::Default`.**
   Applying it to every cell makes TUI panels see-through.
 - **A failing pty test that prints raw VT clears your terminal** and scrambles

@@ -132,6 +132,8 @@ pub struct Fonts {
     typo: Typography,
     cell: CellMetrics,
     requested: Vec<String>,
+    /// Families to try for Private Use Area codepoints, best first.
+    symbol_families: Vec<String>,
 }
 
 impl Fonts {
@@ -163,9 +165,19 @@ impl Fonts {
                 strikeout_y: 0,
             },
             requested: families.to_vec(),
+            symbol_families: Vec::new(),
             collection,
             source_cache,
         };
+
+        // Found once at startup: enumerating installed families is a real scan,
+        // and the answer does not change while the process runs.
+        fonts.symbol_families = discover_symbol_families(&mut fonts.collection);
+        if fonts.symbol_families.is_empty() {
+            tracing::debug!("no Nerd Font installed; prompt icons will not render");
+        } else {
+            tracing::debug!(families = ?fonts.symbol_families, "symbol fonts");
+        }
 
         // Resolve all four styles up front. Doing it lazily would mean a
         // first-bold-character hitch mid-session.
@@ -339,6 +351,22 @@ impl Fonts {
     }
 
     fn resolve_fallback(&mut self, ch: char, style: Style) -> Option<FontId> {
+        // Private Use Area: Nerd Font and Powerline icons, which is what shell
+        // prompts are made of. No script, so the generic path below cannot find
+        // them -- see `is_private_use`.
+        if is_private_use(ch) {
+            let families = self.symbol_families.clone();
+            for family in &families {
+                if let Some(id) = self.resolve(std::slice::from_ref(family), style) {
+                    if self.face_has_glyph(id, ch) {
+                        return Some(id);
+                    }
+                }
+            }
+            // Nothing installed carries it. Fall through rather than giving up:
+            // a few PUA ranges are covered by ordinary system fonts.
+        }
+
         // Emoji need their own path. Script-based fallback cannot find them:
         // emoji are script `Zyyy` (Common), the same bucket as punctuation and
         // digits, so asking for "a font that covers Common" returns the body
@@ -534,6 +562,62 @@ impl Fonts {
     pub fn face_count(&self) -> usize {
         self.faces.len()
     }
+
+    /// Families consulted for Private Use Area glyphs, best first.
+    #[must_use]
+    pub fn symbol_families(&self) -> &[String] {
+        &self.symbol_families
+    }
+
+    /// Override the auto-discovered symbol families, for when configuration
+    /// lands and a user wants a specific icon font.
+    pub fn set_symbol_families(&mut self, families: Vec<String>) {
+        self.symbol_families = families;
+        self.fallback_cache.clear();
+    }
+}
+
+/// True for Private Use Area codepoints.
+///
+/// This is where Nerd Fonts and Powerline put their glyphs, so it is what every
+/// oh-my-posh, Starship or p10k prompt is built from. Like emoji, PUA
+/// codepoints carry **no Unicode script**, so script-based fallback structurally
+/// cannot resolve them — asking for "a font covering this script" returns the
+/// body font, which has no icons. A terminal that does not special-case this
+/// renders the user's prompt as a row of blanks.
+fn is_private_use(ch: char) -> bool {
+    matches!(ch as u32,
+        0xE000..=0xF8FF        // BMP Private Use Area
+        | 0xF0000..=0xFFFFD    // Supplementary PUA-A
+        | 0x100000..=0x10FFFD  // Supplementary PUA-B
+    )
+}
+
+/// Families likely to carry Nerd Font / Powerline glyphs.
+///
+/// Discovered by name rather than configured, because a user who installed a
+/// Nerd Font to make their prompt work should not then have to name it in a
+/// config file for the terminal to find it. Mono variants sort first: they are
+/// designed to occupy one cell, which is what a grid wants.
+fn discover_symbol_families(collection: &mut fontique::Collection) -> Vec<String> {
+    let mut found: Vec<String> = collection
+        .family_names()
+        .filter(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower.contains("nerd font")
+                || lower.ends_with(" nf")
+                || lower.contains("powerline")
+                || lower.contains("symbols only")
+        })
+        .map(str::to_string)
+        .collect();
+
+    found.sort_by_key(|name| {
+        let lower = name.to_ascii_lowercase();
+        // Mono first, then everything else; stable within each group.
+        (!lower.contains("mono"), lower.clone())
+    });
+    found
 }
 
 /// True for characters that want an emoji font rather than a text font.
@@ -647,6 +731,19 @@ mod tests {
     }
 
     #[test]
+    fn private_use_ranges_are_recognized() {
+        assert!(is_private_use('\u{e0b0}'), "powerline separator");
+        assert!(is_private_use('\u{f07b}'), "nerd font folder icon");
+        assert!(is_private_use('\u{f8ff}'), "top of the BMP PUA");
+        // Ordinary text must not take the symbol path -- it would cost a wasted
+        // lookup on every fallback.
+        assert!(!is_private_use('a'));
+        assert!(!is_private_use('世'));
+        assert!(!is_private_use('─'), "box drawing is real Unicode, not PUA");
+        assert!(!is_private_use('🚀'));
+    }
+
+    #[test]
     fn emoji_are_recognized_but_text_symbols_are_not() {
         assert!(is_emoji('👋'));
         assert!(is_emoji('🚀'));
@@ -708,6 +805,59 @@ mod tests {
                     f.glyph_for(ch, Style::default()).is_some(),
                     "no glyph found anywhere for {ch:?} -- this renders as tofu"
                 );
+            }
+        }
+
+        /// Shell prompts are made of Private Use Area glyphs.
+        ///
+        /// The bug this guards is the emoji bug's twin: PUA codepoints carry no
+        /// Unicode script, so script-based fallback returns the body font and
+        /// every icon in an oh-my-posh or Starship prompt renders as a blank.
+        /// Confirmed broken before the symbol-font path existed.
+        #[test]
+        fn nerd_font_prompt_glyphs_resolve() {
+            let Some(mut f) = fonts() else { return };
+            if f.symbol_families().is_empty() {
+                // No Nerd Font on this machine; nothing to assert.
+                return;
+            }
+
+            for ch in [
+                '\u{e0b0}', // powerline right arrow
+                '\u{e0b2}', // powerline left arrow
+                '\u{f07b}', // folder
+                '\u{f015}', // home
+            ] {
+                let found = f.glyph_for(ch, Style::default());
+                assert!(
+                    found.is_some(),
+                    "no glyph for U+{:04X} -- prompt icons would render as blanks",
+                    ch as u32
+                );
+                let (id, gid) = found.unwrap();
+                let img = f.rasterize(f.key(id, gid));
+                assert!(
+                    img.is_some_and(|i| !i.is_empty()),
+                    "U+{:04X} resolved but rasterized to nothing",
+                    ch as u32
+                );
+            }
+        }
+
+        #[test]
+        fn symbol_families_prefer_mono_variants() {
+            let Some(f) = fonts() else { return };
+            let fams = f.symbol_families();
+            if fams.len() < 2 {
+                return;
+            }
+            // Mono variants occupy one cell, which is what a grid wants; a
+            // proportional icon font overlaps its neighbour.
+            let first_mono = fams.iter().position(|n| n.to_ascii_lowercase().contains("mono"));
+            let first_non_mono =
+                fams.iter().position(|n| !n.to_ascii_lowercase().contains("mono"));
+            if let (Some(m), Some(p)) = (first_mono, first_non_mono) {
+                assert!(m < p, "mono symbol fonts should be tried first: {fams:?}");
             }
         }
 
