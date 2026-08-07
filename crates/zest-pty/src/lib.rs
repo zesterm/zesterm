@@ -3,7 +3,11 @@
 //! Written directly against ConPTY rather than taking a dependency on
 //! `portable-pty`, because ConPTY is the highest-risk component on Windows and
 //! its sharp edges have to be controlled rather than abstracted over. See
-//! [`windows`] for the specifics.
+//! [`windows`] for the specifics. The unix side is a normal `openpt` pair and
+//! is much less exotic, but it has its own three sharp edges — see [`unix`].
+//!
+//! Both backends are exposed as `NativePty` so nothing above this crate needs a
+//! `cfg`.
 
 use std::io::{Read, Write};
 
@@ -12,6 +16,12 @@ pub mod windows;
 
 #[cfg(windows)]
 pub use windows::ConPty as NativePty;
+
+#[cfg(unix)]
+pub mod unix;
+
+#[cfg(unix)]
+pub use unix::UnixPty as NativePty;
 
 /// Size of the terminal in character cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +91,14 @@ impl CommandSpec {
 /// Inherited terminal identity is also removed, not just overridden. Launching
 /// zesterm from Windows Terminal otherwise passes `WT_SESSION` down, and
 /// anything keying off it — oh-my-posh among them — takes the wrong branch.
+///
+/// The unix hosts have more of these than Windows does, not fewer, and they are
+/// easy to miss because `TERM_PROGRAM` *is* overridden above and looks like it
+/// settles the question. It does not: launching from iTerm leaves
+/// `ITERM_SESSION_ID` and `LC_TERMINAL` behind, and shell integrations key off
+/// those directly. `LC_TERMINAL` is the worst of them — it is an `LC_*`
+/// variable, so ssh forwards it by default and the wrong identity survives a
+/// hop to another machine.
 #[must_use]
 pub fn terminal_env() -> Vec<(String, String)> {
     let mut env = vec![
@@ -92,12 +110,55 @@ pub fn terminal_env() -> Vec<(String, String)> {
         ("TERM_PROGRAM".to_string(), "zesterm".to_string()),
         ("TERM_PROGRAM_VERSION".to_string(), env!("CARGO_PKG_VERSION").to_string()),
     ];
-    for stale in ["WT_SESSION", "WT_PROFILE_ID", "TERMINUS_SUBLIME", "ConEmuANSI"] {
+    // An empty value means *unset* to both backends, not "set to the empty
+    // string" -- code that only tests for presence must not see these at all.
+    const STALE_IDENTITY: &[&str] = &[
+        // Windows hosts.
+        "WT_SESSION",
+        "WT_PROFILE_ID",
+        "TERMINUS_SUBLIME",
+        "ConEmuANSI",
+        // macOS Terminal.app.
+        "TERM_SESSION_ID",
+        // iTerm2. LC_TERMINAL travels over ssh; see the note above.
+        "ITERM_SESSION_ID",
+        "ITERM_PROFILE",
+        "LC_TERMINAL",
+        "LC_TERMINAL_VERSION",
+        // The cross-platform emulators, which are as likely to be the launcher
+        // as anything native.
+        "KITTY_WINDOW_ID",
+        "KITTY_PID",
+        "KITTY_LISTEN_ON",
+        "ALACRITTY_WINDOW_ID",
+        "ALACRITTY_SOCKET",
+        "ALACRITTY_LOG",
+        "WEZTERM_PANE",
+        "WEZTERM_UNIX_SOCKET",
+        "WEZTERM_EXECUTABLE",
+        "GHOSTTY_RESOURCES_DIR",
+        // VTE-based terminals on Linux (GNOME Terminal, Tilix, Terminator).
+        "VTE_VERSION",
+    ];
+    for stale in STALE_IDENTITY {
         if std::env::var_os(stale).is_some() {
-            env.push((stale.to_string(), String::new()));
+            env.push(((*stale).to_string(), String::new()));
         }
     }
     env
+}
+
+/// Why `wait_for_child` returned.
+///
+/// Lives here rather than in a backend so callers — `pty_dump` among them — can
+/// match on it without a `cfg`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildStatus {
+    /// The child process exited, with this code. A unix child killed by a
+    /// signal is reported as `128 + signal`, following shell convention.
+    Exited(u32),
+    /// The wait timed out; the child is still running.
+    StillRunning,
 }
 
 #[derive(Debug, thiserror::Error)]

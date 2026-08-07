@@ -88,6 +88,11 @@ use windows_sys::Win32::System::Threading::{
 
 use crate::{CommandSpec, PtyError, PtySize, PtyTransport};
 
+// `ChildStatus` moved up to the crate root when the unix backend needed the
+// same type. Re-exported here so `zest_pty::windows::ChildStatus` keeps
+// resolving for anything already naming it.
+pub use crate::ChildStatus;
+
 /// An owned Win32 handle that closes exactly once.
 #[derive(Debug)]
 struct OwnedHandle(HANDLE);
@@ -216,15 +221,6 @@ pub struct ConPty {
     writer: OwnedHandle,
     process: OwnedHandle,
     _thread: OwnedHandle,
-}
-
-/// Why [`ConPty::wait_for_child`] returned.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChildStatus {
-    /// The child process exited, with this code.
-    Exited(u32),
-    /// The wait timed out; the child is still running.
-    StillRunning,
 }
 
 impl ConPty {

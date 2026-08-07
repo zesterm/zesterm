@@ -47,7 +47,7 @@ move.
 
 | Crate | State |
 |---|---|
-| `zest-pty` | ✅ ConPTY, resize, shutdown protocol, `.vtrec` recorder — ⬜ unix backend |
+| `zest-pty` | ✅ ConPTY, resize, shutdown protocol, `.vtrec` recorder, unix backend |
 | `zest-core` | ✅ grid, scrollback, VT parsing, modes, OSC, palette — 🟡 block and subscriber seams frozen, unimplemented |
 | `zest-font` | ✅ metrics, shaping, rasterization, system fallback, colour glyphs |
 | `zest-theme` | ✅ tokens, OKLCH derivation, 5 built-ins, 4 importers |
@@ -138,12 +138,21 @@ Extraction from `zest-app` collides with WS-A, so **land it early and small**.
 **Critical path for M3.** `PtyTransport` is already frozen, so this drops in.
 
 **C1 — reachable (small, do this first)**
-- [ ] `zest-pty/src/unix.rs`: `forkpty`, resize via `TIOCSWINSZ`, the same
-      shutdown protocol. `#[cfg(unix)] pub use unix::UnixPty as NativePty`.
-- [ ] `zest-pty`'s `terminal_env()` on unix — `TERM`, `COLORTERM`,
-      `TERM_PROGRAM`, and clearing inherited terminal identity.
-- [ ] `cargo test -p zest-core -p zest-pty` green on macOS.
-- [ ] The `headless` example runs a real shell on macOS.
+- [x] `zest-pty/src/unix.rs`: `openpt` + `Command` with `setsid`/`TIOCSCTTY` in
+      `pre_exec`, resize via `TIOCSWINSZ`. `#[cfg(unix)] pub use unix::UnixPty as
+      NativePty`. No shutdown protocol is needed — closing the master is a
+      complete, non-blocking teardown, so ConPTY's ordering constraint has no
+      unix counterpart.
+- [x] `zest-pty`'s `terminal_env()` on unix — `TERM`, `COLORTERM`,
+      `TERM_PROGRAM`, and clearing inherited terminal identity (Terminal.app,
+      iTerm2 including the ssh-forwarded `LC_TERMINAL`, kitty, Alacritty,
+      WezTerm, Ghostty, VTE).
+- [x] `cargo test -p zest-core -p zest-pty` green on macOS.
+- [x] The `headless` example runs a real `zsh` on macOS and prints its prompt.
+- [x] Colour survives to the cells: `Indexed` and `Rgb` backgrounds both.
+- [x] A macOS `vim` capture recorded to the corpus and replaying through
+      `zest-core` (`crates/zest-core/tests/corpus/vim-macos.vtrec`).
+- [x] Exit is clean — no hang, no zombie.
 
 ✅ **The Mac can host.** With WS-F, its shells appear on Windows.
 
