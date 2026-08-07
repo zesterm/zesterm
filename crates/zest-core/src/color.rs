@@ -82,12 +82,18 @@ impl NamedColor {
 /// A cell's foreground or background color, unresolved.
 ///
 /// Fits in 4 bytes so that [`crate::Cell`] can stay at 16.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Color {
     /// The theme's default foreground/background, depending on which slot this
     /// occupies. Kept distinct from `Indexed(7)`/`Indexed(0)` on purpose: a cell
     /// that never set a color must follow the theme when the theme changes.
+    ///
+    /// Also the marker that decides whether window opacity applies: only cells
+    /// whose background is `Default` become translucent. Cells with an explicit
+    /// background (dir colors, TUI panels) must stay opaque, or every TUI looks
+    /// broken over a transparent window.
+    #[default]
     Default,
     /// A palette index. 0..=15 are the named colors, 16..=231 the 6x6x6 cube,
     /// 232..=255 the grayscale ramp.
@@ -101,12 +107,6 @@ impl Color {
     #[must_use]
     pub const fn is_default(self) -> bool {
         matches!(self, Color::Default)
-    }
-}
-
-impl Default for Color {
-    fn default() -> Self {
-        Color::Default
     }
 }
 

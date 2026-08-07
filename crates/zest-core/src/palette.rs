@@ -65,10 +65,10 @@ impl PaletteSnapshot {
         // the values xterm uses and that every other terminal matches.
         const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
         let mut i = 16usize;
-        for r in 0..6 {
-            for g in 0..6 {
-                for b in 0..6 {
-                    self.colors[i] = Rgb::new(LEVELS[r], LEVELS[g], LEVELS[b]);
+        for &r in &LEVELS {
+            for &g in &LEVELS {
+                for &b in &LEVELS {
+                    self.colors[i] = Rgb::new(r, g, b);
                     i += 1;
                 }
             }
