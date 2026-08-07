@@ -28,6 +28,13 @@ pub struct Config {
     pub scrollback: usize,
     pub opacity: f32,
     pub shell: Option<String>,
+    /// Jump back to the bottom whenever the program writes something.
+    ///
+    /// Off by default, and that is the interesting half: with it on, scrollback
+    /// is unreadable while anything is running, because every line emitted yanks
+    /// the view away. It exists because a minority genuinely prefer never
+    /// missing live output.
+    pub scroll_on_output: bool,
 }
 
 impl Default for Config {
@@ -42,6 +49,7 @@ impl Default for Config {
             scrollback: 10_000,
             opacity: 1.0,
             shell: None,
+            scroll_on_output: false,
         }
     }
 }
@@ -609,6 +617,33 @@ impl ApplicationHandler<Wakeup> for App {
                 }
 
                 let modes = session.terminal.lock().modes();
+
+                // Shift+PgUp/PgDn pages the scrollback. The shift is what makes
+                // this unambiguous: bare PgUp still belongs to the program, and
+                // in the alternate screen there is no scrollback to page through
+                // at all -- `less` and `vim` do their own paging and would be
+                // left showing a stale screen.
+                if self.modifiers.shift_key() && !modes.contains(zest_core::Modes::ALT_SCREEN) {
+                    let page = match &event.logical_key {
+                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::PageUp) => Some(1isize),
+                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::PageDown) => Some(-1),
+                        _ => None,
+                    };
+                    if let Some(dir) = page {
+                        // A page is one screen less a line of overlap, which is
+                        // what makes paged reading continuous rather than
+                        // guessing where the seam was.
+                        let rows = session.terminal.lock().grid().rows();
+                        let lines = dir * (rows.saturating_sub(1).max(1)) as isize;
+                        session.terminal.lock().scroll_display(lines);
+                        session.mark_dirty();
+                        if let Some(w) = self.window.as_ref() {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                }
+
                 if let Some(bytes) = input::encode(&event, self.modifiers, modes) {
                     // Written synchronously, before anything else. Deferring
                     // input to the next frame adds a whole frame of latency for
@@ -774,6 +809,15 @@ impl ApplicationHandler<Wakeup> for App {
                 // real terminal from a demo.
                 let dirty = self.session.as_ref().is_some_and(Session::take_dirty);
                 if dirty {
+                    // Applied here rather than in the parser thread: the policy
+                    // is about what the user is looking at, and the parser has
+                    // no business knowing that. It also means a flood costs one
+                    // snap per frame, not one per line.
+                    if self.config.scroll_on_output {
+                        if let Some(session) = self.session.as_ref() {
+                            session.terminal.lock().scroll_to_bottom();
+                        }
+                    }
                     self.redraw();
                 }
             }

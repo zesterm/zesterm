@@ -80,6 +80,10 @@ fn main() {
                 }
                 i += 2;
             }
+            "--scroll-on-output" => {
+                config.scroll_on_output = true;
+                i += 1;
+            }
             // Everything after -e is the command, as xterm and alacritty do.
             //
             // Requiring a single pre-quoted string instead looks equivalent and
@@ -108,6 +112,7 @@ fn main() {
                      --font <family>   preferred font family\n\
                      --size <pt>       font size in points\n\
                      --opacity <0..1>  window background opacity\n\
+                     --scroll-on-output  jump to the bottom on new output\n\
                      -e <command>...   run a command instead of the shell\n\
                      \x20                 (must come last; takes all remaining args)\n\
                      --themes          list built-in themes"

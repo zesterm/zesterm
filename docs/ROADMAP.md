@@ -83,8 +83,11 @@ didn't want to switch back."* Not feature parity with WezTerm.
       Word/line/block modes, wrapped-line copy without a spurious newline,
       bracketed paste. Still to do: copy-on-select as an option, and selection
       auto-scroll when a drag leaves the window.
-- [ ] **9. Scrollback + scrolling.** Wheel and alt-screen wheel→arrows are done
-      (with step 7). Still to do: Shift+PgUp/PgDn, and scroll-on-output config.
+- [x] **9. Scrollback + scrolling.** Wheel, alt-screen wheel→arrows, Shift+PgUp/
+      PgDn (a page is one screen less a line of overlap), and `scroll_on_output`
+      — off by default, because on it makes scrollback unreadable while anything
+      is running. The load-bearing fix was in the grid: output used to slide the
+      view forward one line at a time under a reader who had scrolled back.
 - [ ] **10. `zest-config`.** Cascade, profiles, provenance, migrations, hot
       reload with invalidation classes, JSON Schema export.
 - [ ] **11. Window chrome + motion.** Borderless window, GPU-drawn titlebar and

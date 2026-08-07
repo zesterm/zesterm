@@ -187,6 +187,19 @@ impl Grid {
                 let last = self.storage.len() - 1;
                 self.storage.recycle(last, template);
             }
+
+            // A reader scrolled back stays on the text they are reading.
+            //
+            // `viewport_base` is measured from the *end* of storage, so leaving
+            // the offset alone would slide the view forward by one line for
+            // every line the program emits -- text crawling upward while a build
+            // runs, which makes scrollback useless exactly when it is wanted.
+            // The offset is what holds the view still; snapping to the bottom on
+            // output is a separate, opt-in policy.
+            if self.display_offset > 0 {
+                let max = self.storage.len().saturating_sub(self.rows);
+                self.display_offset = (self.display_offset + 1).min(max);
+            }
         }
     }
 
@@ -432,6 +445,47 @@ mod tests {
         assert_eq!(g.row(0).text(), "first", "scrolled back to the first line");
         g.scroll_to_bottom();
         assert_eq!(g.row(1).text(), "latest");
+    }
+
+    #[test]
+    fn output_does_not_drag_the_view_out_from_under_a_reader() {
+        // The failure this pins down is subtle to describe and obvious to see:
+        // scroll back to read something, and every line a running build emits
+        // slides your text up by one.
+        let mut g = Grid::new(20, 2, 100);
+        write(&mut g, 0, "anchor");
+        for _ in 0..5 {
+            g.scroll_up(1, &Cell::default());
+        }
+        g.scroll_display(5);
+        assert_eq!(g.row(0).text(), "anchor");
+
+        for _ in 0..20 {
+            g.scroll_up(1, &Cell::default());
+        }
+        assert_eq!(g.row(0).text(), "anchor", "output moved the view");
+
+        // And the bottom is still reachable afterwards.
+        g.scroll_to_bottom();
+        assert_eq!(g.display_offset(), 0);
+    }
+
+    #[test]
+    fn a_view_falling_off_the_end_of_scrollback_pins_to_the_oldest_line() {
+        // Once history is evicted there is nothing to hold the view on, so it
+        // must clamp rather than run past the top of storage.
+        let mut g = Grid::new(20, 2, 3);
+        write(&mut g, 0, "doomed");
+        for _ in 0..2 {
+            g.scroll_up(1, &Cell::default());
+        }
+        g.scroll_display(2);
+        assert_eq!(g.row(0).text(), "doomed");
+
+        for _ in 0..50 {
+            g.scroll_up(1, &Cell::default());
+        }
+        assert_eq!(g.display_offset(), g.scrollback_len(), "clamped to the oldest line held");
     }
 
     #[test]
