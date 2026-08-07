@@ -18,7 +18,7 @@ struct RectInstance {
     @location(9) shape: u32,
 };
 
-struct VsOut {
+struct RectVsOut {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) pixel: vec2<f32>,
     @location(1) rect: vec4<f32>,
@@ -35,7 +35,7 @@ const SHAPE_ROUNDED_BOX: u32 = 0u;
 const SHAPE_HULL_OF_TWO: u32 = 1u;
 
 @vertex
-fn vs(@builtin(vertex_index) vi: u32, inst: RectInstance) -> VsOut {
+fn vs_rect(@builtin(vertex_index) vi: u32, inst: RectInstance) -> RectVsOut {
     let corner = unit_quad(vi);
 
     // Expand for the shadow, or it gets clipped to the box that casts it.
@@ -53,7 +53,7 @@ fn vs(@builtin(vertex_index) vi: u32, inst: RectInstance) -> VsOut {
 
     let pixel = mix(lo, hi, corner);
 
-    var out: VsOut;
+    var out: RectVsOut;
     out.clip_position = pixel_to_clip(pixel);
     out.pixel = pixel;
     out.rect = inst.rect;
@@ -88,7 +88,7 @@ fn sd_round_box(p: vec2<f32>, rect: vec4<f32>, radii: vec4<f32>) -> f32 {
 }
 
 @fragment
-fn fs(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_rect(in: RectVsOut) -> @location(0) vec4<f32> {
     if clipped_out(in.pixel, in.clip_rect) {
         discard;
     }

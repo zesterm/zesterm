@@ -103,33 +103,27 @@ impl Renderer {
             "the resolve pass encodes sRGB itself; an sRGB target would encode twice"
         );
 
-        let shader_src = format!(
-            "{}\n{}",
-            include_str!("shaders/common.wgsl"),
-            include_str!("shaders/rect.wgsl")
-        );
-        let rect_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("zest rect"),
-            source: wgpu::ShaderSource::Wgsl(shader_src.into()),
-        });
-        let glyph_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("zest glyph"),
+        // One module for all three grid pipelines, not three.
+        //
+        // Shader module creation is parse + validate + backend codegen, and it
+        // was ~450ms of a ~1.9s cold start. Three modules meant parsing
+        // common.wgsl three times and paying the fixed per-module cost three
+        // times, for shaders that share every helper. Entry points are named
+        // per-stage (`vs_rect`, `fs_glyph`, ...) so they can coexist.
+        //
+        // Resolve stays separate: it has a different bind group layout and no
+        // use for any of the shared code.
+        let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("zest grid"),
             source: wgpu::ShaderSource::Wgsl(
-                format!(
-                    "{}\n{}",
+                concat!(
                     include_str!("shaders/common.wgsl"),
-                    include_str!("shaders/glyph.wgsl")
-                )
-                .into(),
-            ),
-        });
-        let decor_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("zest decor"),
-            source: wgpu::ShaderSource::Wgsl(
-                format!(
-                    "{}\n{}",
-                    include_str!("shaders/common.wgsl"),
-                    include_str!("shaders/decor.wgsl")
+                    "\n",
+                    include_str!("shaders/rect.wgsl"),
+                    "\n",
+                    include_str!("shaders/glyph.wgsl"),
+                    "\n",
+                    include_str!("shaders/decor.wgsl"),
                 )
                 .into(),
             ),
@@ -174,21 +168,24 @@ impl Renderer {
         let rect_pipeline = make_pipeline(
             device,
             "zest rect",
-            &rect_shader,
+            &grid_shader,
+            ("vs_rect", "fs_rect"),
             &[&globals_layout],
             rect_vertex_layout(),
         );
         let glyph_pipeline = make_pipeline(
             device,
             "zest glyph",
-            &glyph_shader,
+            &grid_shader,
+            ("vs_glyph", "fs_glyph"),
             &[&globals_layout, &atlas_bind_group_layout],
             glyph_vertex_layout(),
         );
         let decor_pipeline = make_pipeline(
             device,
             "zest decor",
-            &decor_shader,
+            &grid_shader,
+            ("vs_decor", "fs_decor"),
             &[&globals_layout],
             decor_vertex_layout(),
         );
@@ -501,6 +498,7 @@ fn make_pipeline(
     device: &wgpu::Device,
     label: &str,
     shader: &wgpu::ShaderModule,
+    entry_points: (&str, &str),
     bind_group_layouts: &[&wgpu::BindGroupLayout],
     vertex_layout: wgpu::VertexBufferLayout<'_>,
 ) -> wgpu::RenderPipeline {
@@ -517,13 +515,13 @@ fn make_pipeline(
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: shader,
-            entry_point: Some("vs"),
+            entry_point: Some(entry_points.0),
             buffers: &[Some(vertex_layout)],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fs"),
+            entry_point: Some(entry_points.1),
             targets: &[Some(wgpu::ColorTargetState {
                 format: OFFSCREEN_FORMAT,
                 // Premultiplied source-over, in every pipeline without

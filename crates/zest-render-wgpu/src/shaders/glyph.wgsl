@@ -15,7 +15,7 @@ struct GlyphInstance {
     @location(6) flags: u32,
 };
 
-struct VsOut {
+struct GlyphVsOut {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) pixel: vec2<f32>,
     @location(1) uv: vec2<f32>,
@@ -35,14 +35,14 @@ const FLAG_COLOR: u32 = 1u;
 const LAYER_SIZE: f32 = 2048.0;
 
 @vertex
-fn vs(@builtin(vertex_index) vi: u32, inst: GlyphInstance) -> VsOut {
+fn vs_glyph(@builtin(vertex_index) vi: u32, inst: GlyphInstance) -> GlyphVsOut {
     let corner = unit_quad(vi);
 
     // grid_origin carries the sub-row smooth-scroll offset. Chrome passes zero,
     // so the same pipeline serves both without a branch or a second uniform.
     let pixel = inst.pos + corner * inst.size + globals.grid_origin;
 
-    var out: VsOut;
+    var out: GlyphVsOut;
     out.clip_position = pixel_to_clip(pixel);
     out.pixel = pixel;
     out.uv = (inst.uv + corner * inst.size) / LAYER_SIZE;
@@ -54,7 +54,7 @@ fn vs(@builtin(vertex_index) vi: u32, inst: GlyphInstance) -> VsOut {
 }
 
 @fragment
-fn fs(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_glyph(in: GlyphVsOut) -> @location(0) vec4<f32> {
     if clipped_out(in.pixel, in.clip_rect) {
         discard;
     }

@@ -91,6 +91,45 @@ impl App {
     }
 
 
+    /// Rasterize printable ASCII in all four styles before the first frame.
+    ///
+    /// Roughly 380 glyphs and a couple of milliseconds. Without it, the first
+    /// frame containing a prompt pays to rasterize every character in it, which
+    /// lands as a visible hitch immediately after the window appears — and then
+    /// again the first time anything bold or italic shows up.
+    fn prewarm_atlas(&mut self) {
+        let (Some(gpu), Some(fonts)) = (self.gpu.as_mut(), self.fonts.as_mut()) else {
+            return;
+        };
+        let started = std::time::Instant::now();
+
+        for style in [
+            zest_font::Style::new(false, false),
+            zest_font::Style::new(true, false),
+            zest_font::Style::new(false, true),
+            zest_font::Style::new(true, true),
+        ] {
+            for ch in ' '..='~' {
+                let Some((font, glyph)) = fonts.glyph_for(ch, style) else { continue };
+                let key = fonts.key(font, glyph);
+                if gpu.renderer.atlas.get(&key).is_some() {
+                    continue;
+                }
+                if let Some(image) = fonts.rasterize(key) {
+                    gpu.renderer
+                        .atlas
+                        .insert(&gpu.device, &gpu.queue, key, &image);
+                }
+            }
+        }
+
+        tracing::debug!(
+            glyphs = gpu.renderer.atlas.len(),
+            elapsed_ms = started.elapsed().as_millis(),
+            "atlas pre-warmed"
+        );
+    }
+
     fn redraw(&mut self) {
         let (Some(gpu), Some(fonts), Some(session), Some(window)) = (
             self.gpu.as_mut(),
@@ -189,9 +228,20 @@ impl ApplicationHandler<Wakeup> for App {
             return;
         }
 
+        let t0 = std::time::Instant::now();
+
+        // Created HIDDEN, shown only once a real frame has been presented.
+        //
+        // A visible window shows the OS default background -- white on Windows --
+        // for as long as startup takes, and startup is several hundred
+        // milliseconds: adapter enumeration, device creation, shader
+        // compilation, font resolution, then spawning a shell. Painting nothing
+        // into a visible window is what produces the white flash; the fix is to
+        // not be visible until there is something to show.
         let attrs = Window::default_attributes()
             .with_title("zesterm")
             .with_transparent(self.config.opacity < 1.0)
+            .with_visible(false)
             .with_inner_size(winit::dpi::LogicalSize::new(960.0, 600.0));
         let window = Arc::new(el.create_window(attrs).expect("create window"));
 
@@ -199,8 +249,19 @@ impl ApplicationHandler<Wakeup> for App {
         let typo = Typography { scale_factor: scale, ..self.config.typography };
         let fonts = Fonts::new(&self.config.font_families, typo).expect("no usable font");
         let metrics = fonts.cell_metrics();
+        tracing::debug!(elapsed_ms = t0.elapsed().as_millis(), "fonts ready");
 
-        let gpu = pollster::block_on(init_gpu(&window, self.config.opacity < 1.0));
+        // The surface is NOT sRGB (the resolve pass encodes), so the clear value
+        // is written verbatim -- pass the theme background already in sRGB.
+        let bg = self.palette.background;
+        let clear = wgpu::Color {
+            r: f64::from(bg.r) / 255.0,
+            g: f64::from(bg.g) / 255.0,
+            b: f64::from(bg.b) / 255.0,
+            a: f64::from(self.config.opacity),
+        };
+        let gpu = pollster::block_on(init_gpu(&window, self.config.opacity < 1.0, clear));
+        tracing::debug!(elapsed_ms = t0.elapsed().as_millis(), "gpu ready");
         let (cols, rows) = metrics.grid_size(gpu.config.width, gpu.config.height, PADDING);
 
         let proxy = self.proxy.clone();
@@ -226,12 +287,31 @@ impl ApplicationHandler<Wakeup> for App {
 
         session.terminal.lock().set_palette(self.palette.clone());
 
-        tracing::info!(cols, rows, scale, "zesterm ready");
-
         self.fonts = Some(fonts);
         self.gpu = Some(gpu);
         self.session = Some(session);
         self.window = Some(window);
+
+        // The window is already visible and painted with the theme background
+        // (see init_gpu). Present the first real frame on top of it.
+        //
+        // Pre-warming the atlas here matters too: without it the first frame
+        // that actually contains text pays for rasterizing the whole prompt,
+        // which lands as a visible hitch right after the window appears.
+        self.prewarm_atlas();
+        self.redraw();
+
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+
+        tracing::info!(
+            cols,
+            rows,
+            scale,
+            startup_ms = t0.elapsed().as_millis(),
+            "zesterm ready"
+        );
     }
 
     /// A wakeup from the parser thread.
@@ -346,21 +426,53 @@ impl ApplicationHandler<Wakeup> for App {
     }
 }
 
-async fn init_gpu(window: &Arc<Window>, want_transparency: bool) -> Gpu {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
-        ..wgpu::InstanceDescriptor::new_without_display_handle()
-    });
-    let surface = instance
-        .create_surface(Arc::clone(window))
-        .expect("create surface");
-    let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions {
-            compatible_surface: Some(&surface),
-            ..Default::default()
-        })
-        .await
-        .expect("no suitable GPU adapter");
+async fn init_gpu(
+    window: &Arc<Window>,
+    want_transparency: bool,
+    clear_color: wgpu::Color,
+) -> Gpu {
+    let t = std::time::Instant::now();
+
+    // One backend at a time, preferred first.
+    //
+    // Probing several costs real startup latency -- initializing a Vulkan *and*
+    // a DX12 instance, then enumerating adapters on both, was ~670ms of the
+    // ~1.9s launch. `Backends::all()` is worse still, since it also spins up an
+    // OpenGL stack we will never use.
+    //
+    // Vulkan leads on Windows because it is the only backend that reports
+    // `PreMultiplied` alpha there (ADR-003); DX12 reports `Opaque` on every
+    // adapter, so preferring it would silently cost transparency.
+    let preferred: &[wgpu::Backends] = if cfg!(target_os = "macos") {
+        &[wgpu::Backends::METAL]
+    } else if cfg!(windows) {
+        &[wgpu::Backends::VULKAN, wgpu::Backends::DX12]
+    } else {
+        &[wgpu::Backends::VULKAN, wgpu::Backends::GL]
+    };
+
+    let mut found = None;
+    for &backends in preferred {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let Ok(surface) = instance.create_surface(Arc::clone(window)) else { continue };
+        if let Ok(adapter) = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                compatible_surface: Some(&surface),
+                ..Default::default()
+            })
+            .await
+        {
+            found = Some((surface, adapter));
+            break;
+        }
+        tracing::debug!(?backends, "no adapter; trying the next backend");
+    }
+
+    let (surface, adapter) = found.expect("no suitable GPU adapter on any backend");
+    tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "adapter");
     tracing::info!(adapter = %adapter.get_info().name, backend = ?adapter.get_info().backend, "gpu");
 
     // Conservative limits everywhere except texture size.
@@ -388,6 +500,7 @@ async fn init_gpu(window: &Arc<Window>, want_transparency: bool) -> Gpu {
         })
         .await
         .expect("request device");
+    tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "device");
 
     let caps = surface.get_capabilities(&adapter);
 
@@ -439,11 +552,55 @@ async fn init_gpu(window: &Arc<Window>, want_transparency: bool) -> Gpu {
         view_formats: vec![],
     };
     surface.configure(&device, &config);
+    tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "surface configured");
+
+    // Show the window HERE, painted with the theme background, rather than
+    // after the pipelines exist.
+    //
+    // Compiling four shader modules costs ~450ms, and none of it is needed to
+    // put a correctly-coloured window on screen -- a render pass with a clear
+    // load op needs no pipeline at all. Waiting for the pipelines delays the
+    // window by that much for no visible benefit, and the alternative (showing
+    // earlier without painting) is the white flash this is all fixing.
+    clear_to(&device, &queue, &surface, clear_color);
+    window.set_visible(true);
+    tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "window shown");
 
     let mut renderer = Renderer::new(&device, format);
     renderer.resize(&device, config.width, config.height);
+    tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "pipelines");
 
     Gpu { surface, device, queue, config, renderer }
+}
+
+/// Paint the surface a solid colour. Needs no pipeline, only a clear.
+fn clear_to(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    surface: &wgpu::Surface<'static>,
+    color: wgpu::Color,
+) {
+    let frame = match surface.get_current_texture() {
+        wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+        _ => return,
+    };
+    let view = frame.texture.create_view(&Default::default());
+    let mut encoder = device.create_command_encoder(&Default::default());
+    drop(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("zest first paint"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(color),
+                store: wgpu::StoreOp::Store,
+            },
+            depth_slice: None,
+        })],
+        ..Default::default()
+    }));
+    queue.submit([encoder.finish()]);
+    queue.present(frame);
 }
 
 /// `zest-theme` and `zest-core` deliberately do not depend on each other, so the

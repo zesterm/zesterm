@@ -84,6 +84,16 @@ didn't want to switch back."* Not feature parity with WezTerm.
 - [ ] **11. Window chrome + motion.** Borderless window, GPU-drawn titlebar and
       tabs, per-OS backdrop, springs, smooth scroll, `reduce_motion`.
 - [ ] **12. Polish.** Title, DECSCUSR cursor styles, font zoom, DPI changes.
+- [ ] **12b. Startup latency.** The window now appears at ~800ms painted with
+      the theme background (it used to be ~1.9s of white). Remaining budget,
+      measured on an RTX 3080 Ti / Vulkan:
+      - ~400ms Vulkan instance + adapter enumeration
+      - ~300ms swapchain configuration  → **window becomes visible here**
+      - ~440ms pipeline creation
+      The pipeline cost is `create_render_pipeline`, not shader parsing —
+      merging four modules into two changed nothing measurable. The real fix is
+      a **persistent pipeline cache** (`Features::PIPELINE_CACHE`), which should
+      remove most of it on warm launches.
 - [ ] **13. Performance validation.** vtebench, >500 MB/s throughput, <2 ms CPU
       frame, <10 ms keypress→pixel, **0% GPU when idle and animations settled**.
 

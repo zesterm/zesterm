@@ -10,7 +10,7 @@ struct DecorInstance {
     @location(3) kind: u32,
 };
 
-struct VsOut {
+struct DecorVsOut {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) pixel: vec2<f32>,
     @location(1) rect: vec4<f32>,
@@ -25,7 +25,7 @@ const KIND_UNDERCURL: u32 = 2u;
 const KIND_STRIKETHROUGH: u32 = 3u;
 
 @vertex
-fn vs(@builtin(vertex_index) vi: u32, inst: DecorInstance) -> VsOut {
+fn vs_decor(@builtin(vertex_index) vi: u32, inst: DecorInstance) -> DecorVsOut {
     let corner = unit_quad(vi);
 
     // Undercurl and the double underline need vertical room beyond the nominal
@@ -41,7 +41,7 @@ fn vs(@builtin(vertex_index) vi: u32, inst: DecorInstance) -> VsOut {
     let hi = inst.rect.xy + inst.rect.zw + vec2<f32>(0.0, extra);
     let pixel = mix(lo, hi, corner) + globals.grid_origin;
 
-    var out: VsOut;
+    var out: DecorVsOut;
     out.clip_position = pixel_to_clip(pixel);
     out.pixel = pixel;
     out.rect = inst.rect;
@@ -52,7 +52,7 @@ fn vs(@builtin(vertex_index) vi: u32, inst: DecorInstance) -> VsOut {
 }
 
 @fragment
-fn fs(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_decor(in: DecorVsOut) -> @location(0) vec4<f32> {
     if clipped_out(in.pixel, in.clip_rect) {
         discard;
     }
