@@ -36,6 +36,13 @@ struct Subscriber {
     encoder: Encoder,
     /// Highest sequence this client has confirmed applying.
     acked: u64,
+    /// Called when this subscriber has something to collect.
+    ///
+    /// Without it a connection blocked in `read` never learns that the shell
+    /// produced output, so a client that attaches and then goes quiet -- which
+    /// is every client, most of the time -- sees nothing again. Polling on a
+    /// timer would fix it and cost the 0%-idle guarantee.
+    wake: Box<dyn Fn() + Send>,
 }
 
 /// A running shell, and everyone watching it.
@@ -44,7 +51,7 @@ pub struct Session {
     terminal: Arc<Mutex<Terminal>>,
     pty: Arc<dyn PtyTransport + Send + Sync>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    subscribers: Mutex<HashMap<u64, Subscriber>>,
+    subscribers: Arc<Mutex<HashMap<u64, Subscriber>>>,
     next_subscriber: Mutex<u64>,
     exited: Arc<AtomicBool>,
     title: Arc<Mutex<String>>,
@@ -76,10 +83,13 @@ impl Session {
         let exited = Arc::new(AtomicBool::new(false));
         let title = Arc::new(Mutex::new(String::new()));
 
+        let subscribers: Arc<Mutex<HashMap<u64, Subscriber>>> = Arc::default();
+
         {
             let terminal = Arc::clone(&terminal);
             let exited = Arc::clone(&exited);
             let title = Arc::clone(&title);
+            let subscribers = Arc::clone(&subscribers);
             let mut reply = pty.writer();
 
             std::thread::Builder::new()
@@ -117,11 +127,13 @@ impl Session {
                         }
 
                         wake(id);
+                        wake_subscribers(&subscribers);
                         std::thread::yield_now();
                     }
 
                     exited.store(true, Ordering::Release);
                     wake(id);
+                    wake_subscribers(&subscribers);
                 })
                 .map_err(|e| DaemonError::Spawn(e.to_string()))?;
         }
@@ -131,7 +143,7 @@ impl Session {
             terminal,
             pty: Arc::new(pty),
             writer: Arc::new(Mutex::new(writer)),
-            subscribers: Mutex::new(HashMap::new()),
+            subscribers,
             next_subscriber: Mutex::new(0),
             exited,
             title,
@@ -144,6 +156,11 @@ impl Session {
     /// no base for a delta, and one that is reattaching after an hour asleep is
     /// indistinguishable from a new one.
     pub fn attach(&self) -> (u64, Keyframe) {
+        self.attach_with(Box::new(|| {}))
+    }
+
+    /// Attach, and be told when there is something to collect.
+    pub fn attach_with(&self, wake: Box<dyn Fn() + Send>) -> (u64, Keyframe) {
         let mut encoder = Encoder::new();
         let (keyframe, seq) = {
             let term = self.terminal.lock().expect("terminal lock");
@@ -162,7 +179,7 @@ impl Session {
         self.subscribers
             .lock()
             .expect("subscriber lock")
-            .insert(handle, Subscriber { encoder, acked: seq });
+            .insert(handle, Subscriber { encoder, acked: seq, wake });
 
         (handle, keyframe)
     }
@@ -271,6 +288,18 @@ impl Session {
             .lock()
             .map(|t| t.modes().contains(Modes::ALT_SCREEN))
             .unwrap_or(false)
+    }
+}
+
+/// Tell every subscriber there is something new.
+///
+/// Called from the session's reader thread, so it must not block: the wakers
+/// are channel sends, and a client that has gone away simply fails to receive.
+fn wake_subscribers(subscribers: &Mutex<HashMap<u64, Subscriber>>) {
+    if let Ok(subs) = subscribers.lock() {
+        for sub in subs.values() {
+            (sub.wake)();
+        }
     }
 }
 
