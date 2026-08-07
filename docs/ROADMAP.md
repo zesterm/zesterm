@@ -56,10 +56,10 @@ move.
 | `zest-input` | 🟡 keys + SGR mouse, still inline in `zest-app` |
 | `zest-app` | ✅ real window, real shell, sessions behind `SessionSource` |
 | `zest-proto` | 🟡 wire types frozen; encoder, decoder and conformance corpus done — ⬜ framing |
-| `zest-mesh` | 🟡 identity and transport seams frozen, discovery unimplemented |
+| `zest-mesh` | ✅ Ed25519 identity, OS key store, mDNS discovery — ⬜ pairing, transports, cloud |
 | `zest-daemon` | ⬜ skeleton |
 
-297 tests. `--startup-probe` reports first paint at ~43ms against a 100ms budget.
+385 tests. `--startup-probe` reports first paint at ~43ms against a 100ms budget.
 
 ---
 
@@ -80,7 +80,7 @@ Each has its own issue, self-contained enough to hand to an agent on its own.
 | **E** | [Command blocks](#ws-e) | `zest-core/src/blocks.rs`, OSC 133, shell integration | Ready | [#6](https://github.com/zesterm/zesterm/issues/6) |
 | **F** | [`zest-proto` + `zest-daemon`](#ws-f) | `crates/zest-proto/`, `crates/zest-daemon/` | Ready — **the lead** | [#4](https://github.com/zesterm/zesterm/issues/4) |
 | **G** | [Web client](#ws-g) | `clients/web/` | Ready (decoder) | [#8](https://github.com/zesterm/zesterm/issues/8) |
-| **H** | [Mesh identity, discovery, transports](#ws-h) | `crates/zest-mesh/`, `cloud/` | After F | [#7](https://github.com/zesterm/zesterm/issues/7) |
+| **H** | [Mesh identity, discovery, transports](#ws-h) | `crates/zest-mesh/`, `cloud/` | **H1–H2 done**, pairing after F | [#7](https://github.com/zesterm/zesterm/issues/7) |
 
 **Ordering that matters.** B before A — B extracts `zest-input` out of
 `zest-app`, and A then builds chrome and motion in the same file; the other
@@ -223,8 +223,16 @@ daemon exists.
 
 ### WS-H — Mesh identity, discovery, transports
 
-- [ ] Ed25519 host and client keypairs; `HostId` as the public-key fingerprint.
-- [ ] mDNS discovery implementing `Discovery`. **M3 needs only this.**
+- [x] Ed25519 host and client keypairs; `HostId` **is** the public key, since
+      both are 32 bytes and a fingerprint of something already that short only
+      buys a second field to carry the key in. Private keys through Keychain /
+      Credential Manager / Secret Service, never a file — a machine with no
+      store refuses to start rather than writing one.
+- [x] mDNS discovery implementing `Discovery`. **M3 needs only this.** The wire
+      format and the roster are pure functions, so every rule is tested without
+      a socket; `--ignored` covers the rest. `LayeredDiscovery` merges
+      `StaticDiscovery` with mDNS by `HostId`, which is where "the LAN beats the
+      tunnel" actually happens.
 - [ ] Pairing: desktop approval modal with a matching code, signed nonce on
       every `Hello`. A stolen session alone must not get a shell.
 - [ ] Cloudflare Tunnel + Access per host. **Origin-side JWT validation is

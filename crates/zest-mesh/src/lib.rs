@@ -1,8 +1,16 @@
 //! Finding the other machines, and choosing how to reach them.
 //!
-//! **Skeleton.** The types here are the frozen seam between `zest-daemon`
-//! (WS-F) and the discovery and cloud work (WS-H); the implementations are
-//! WS-H's. See `docs/CONTRACTS.md`.
+//! The types in this file are the frozen seam between `zest-daemon` (WS-F) and
+//! the discovery and cloud work (WS-H). See `docs/CONTRACTS.md`.
+//!
+//! # Where to start reading
+//!
+//! [`identity`] first: a `HostId` *is* a machine's Ed25519 public key, and
+//! everything else here — which peer a record belongs to, which peer is
+//! filtered out of its own fleet listing, and later which peer is allowed a
+//! shell — is asking a question about one. [`discovery`] then answers "which
+//! hosts exist and how do I reach them", and [`keystore`] is where the private
+//! half sleeps when the process is not running.
 //!
 //! # Why a transport trait rather than "a WebSocket"
 //!
@@ -22,6 +30,8 @@ use std::fmt;
 use zest_proto::HostId;
 
 pub mod discovery;
+pub mod identity;
+pub mod keystore;
 
 /// How a peer was found, and therefore how much it should be trusted before
 /// anything else has proved it.
@@ -96,6 +106,17 @@ pub enum MeshError {
     Discovery(String),
     #[error("{0} is not enrolled in this fleet")]
     NotEnrolled(String),
+    /// This machine could not read or create its own identity.
+    ///
+    /// Separate from [`MeshError::BadSignature`] because the two demand
+    /// opposite responses: this one is an operator problem and should stop
+    /// startup loudly, where a peer failing to prove itself is a security event
+    /// to log and rate-limit.
+    #[error("identity unavailable: {0}")]
+    Identity(String),
+    /// A peer claimed an id and could not prove it.
+    #[error("{0} did not prove its identity")]
+    BadSignature(String),
 }
 
 #[cfg(test)]
