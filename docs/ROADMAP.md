@@ -27,11 +27,11 @@ for the decisions that are expensive to reach and cheap to accidentally undo.
 | `zest-font` | ✅ metrics, shaping, rasterization, system fallback, colour glyphs |
 | `zest-theme` | ✅ tokens, OKLCH derivation, 5 built-ins, 4 importers |
 | `zest-render-wgpu` | 🟡 pipelines + atlas + offscreen resolve; renders offscreen, no window yet |
-| `zest-input` | 🟡 keys live in zest-app for now; no mouse, no Kitty protocol |
+| `zest-input` | 🟡 keys + SGR mouse, still inline in zest-app; no IME, no Kitty protocol |
 | `zest-config` | ⬜ |
 | `zest-app` | 🟡 real window, real shell; input is basic |
 
-201 tests. `cargo run -p zest-app --example headless` is a working terminal
+209 tests. `cargo run -p zest-app --example headless` is a working terminal
 without a window.
 
 ---
@@ -71,17 +71,19 @@ didn't want to switch back."* Not feature parity with WezTerm.
             this** — it ships broken constantly and reads as "looks slightly off".
 - [x] **6. `zest-app` — the moment.** winit, PTY thread, fair mutex, first
       window with real output. **A working terminal.**
-- [ ] **7. `zest-input`.** Currently inline in `zest-app` and covers keys,
-      modifiers, DECCKM, Alt-as-ESC and F-keys. Still to do: extract the crate,
-      IME/dead keys, SGR-1006 mouse, and the Kitty keyboard protocol behind a
-      flag — plan that now, retrofitting hurts.
+- [ ] **7. `zest-input`.** Still inline in `zest-app`. Covers keys, modifiers,
+      DECCKM, Alt-as-ESC, F-keys, and SGR-1006 mouse (press/release/drag/motion,
+      wheel), with the mouse yielding to a mouse-aware program and Shift as the
+      override. Alt-screen wheel maps to arrow keys so `less` and `man` scroll.
+      Still to do: extract the crate, IME/dead keys, and the Kitty keyboard
+      protocol behind a flag — plan that now, retrofitting hurts.
 - [x] **8. Selection + clipboard.** Absolute `LineId` coordinates, so a
       selection survives scrolling, new output, and falling out of scrollback.
       Word/line/block modes, wrapped-line copy without a spurious newline,
       bracketed paste. Still to do: copy-on-select as an option, and selection
       auto-scroll when a drag leaves the window.
-- [ ] **9. Scrollback + scrolling.** Wheel, Shift+PgUp/PgDn, alt-screen wheel →
-      arrow keys so `less` and `man` scroll.
+- [ ] **9. Scrollback + scrolling.** Wheel and alt-screen wheel→arrows are done
+      (with step 7). Still to do: Shift+PgUp/PgDn, and scroll-on-output config.
 - [ ] **10. `zest-config`.** Cascade, profiles, provenance, migrations, hot
       reload with invalidation classes, JSON Schema export.
 - [ ] **11. Window chrome + motion.** Borderless window, GPU-drawn titlebar and

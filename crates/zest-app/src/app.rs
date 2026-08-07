@@ -147,6 +147,118 @@ impl App {
         }
     }
 
+    /// Send a mouse event to the program, if it wants one.
+    ///
+    /// Returns true when the event was consumed, so the caller skips selection.
+    fn forward_mouse(
+        &self,
+        button: MouseButton,
+        state: ElementState,
+        row: usize,
+        col: usize,
+    ) -> bool {
+        // Shift always means "I want to select", overriding the program.
+        if self.modifiers.shift_key() {
+            return false;
+        }
+        let Some(session) = self.session.as_ref() else { return false };
+
+        let encoded = {
+            let term = session.terminal.lock();
+            let modes = term.modes();
+            if !modes.mouse_enabled() {
+                return false;
+            }
+            let b = match button {
+                MouseButton::Left => input::MouseButton::Left,
+                MouseButton::Middle => input::MouseButton::Middle,
+                MouseButton::Right => input::MouseButton::Right,
+                _ => return false,
+            };
+            let action = match state {
+                ElementState::Pressed => input::MouseAction::Press,
+                ElementState::Released => input::MouseAction::Release,
+            };
+            input::encode_mouse(b, action, row, col, self.modifiers, modes)
+        };
+
+        match encoded {
+            Some(bytes) => {
+                session.write(bytes);
+                true
+            }
+            // The program has mouse reporting on but does not want this
+            // particular event. It still owns the mouse, so do not select.
+            None => true,
+        }
+    }
+
+    /// Send pointer movement to the program, if it wants it.
+    ///
+    /// Whether this is a drag or bare motion depends on whether a button is
+    /// down, and the two are gated on different modes (1002 vs 1003).
+    fn forward_motion(&self, row: usize, col: usize) -> bool {
+        if self.modifiers.shift_key() {
+            return false;
+        }
+        let Some(session) = self.session.as_ref() else { return false };
+
+        let encoded = {
+            let modes = session.terminal.lock().modes();
+            if !modes.mouse_enabled() {
+                return false;
+            }
+            let action = if self.mouse.is_dragging() {
+                input::MouseAction::Drag
+            } else {
+                input::MouseAction::Motion
+            };
+            input::encode_mouse(
+                input::MouseButton::Left,
+                action,
+                row,
+                col,
+                self.modifiers,
+                modes,
+            )
+        };
+
+        if let Some(bytes) = encoded {
+            session.write(bytes);
+        }
+        // The program owns the mouse either way; it simply may not have asked
+        // for this particular event.
+        true
+    }
+
+    /// Send a wheel event to the program, if it wants one.
+    fn forward_wheel(&self, up: bool, count: usize) -> bool {
+        if self.modifiers.shift_key() {
+            return false;
+        }
+        let Some(session) = self.session.as_ref() else { return false };
+        let (row, col) = self.pointer_cell;
+
+        let modes = session.terminal.lock().modes();
+        if !modes.mouse_enabled() {
+            return false;
+        }
+
+        let button = if up { input::MouseButton::WheelUp } else { input::MouseButton::WheelDown };
+        let mut out = Vec::new();
+        for _ in 0..count.max(1) {
+            if let Some(b) =
+                input::encode_mouse(button, input::MouseAction::Press, row, col, self.modifiers, modes)
+            {
+                out.extend_from_slice(&b);
+            }
+        }
+        if !out.is_empty() {
+            session.write(out);
+        }
+        true
+    }
+
     /// Pointer pixels to a grid cell, clamped into the viewport.
     fn cell_at(&self, x: f64, y: f64) -> (usize, usize) {
         let Some(fonts) = self.fonts.as_ref() else { return (0, 0) };
@@ -513,7 +625,16 @@ impl ApplicationHandler<Wakeup> for App {
 
             WindowEvent::CursorMoved { position, .. } => {
                 let cell = self.cell_at(position.x, position.y);
+                let moved = cell != self.pointer_cell;
                 self.pointer_cell = cell;
+
+                // Programs that enabled 1002 or 1003 want movement too -- that
+                // is how a tmux pane drag or an htop hover works. Only on a cell
+                // change: reporting every pixel would flood the pty.
+                if moved && self.forward_motion(cell.0, cell.1) {
+                    return;
+                }
+
                 if !self.mouse.is_dragging() {
                     return;
                 }
@@ -542,6 +663,16 @@ impl ApplicationHandler<Wakeup> for App {
             WindowEvent::MouseInput { state, button, .. } => {
                 let Some(session) = self.session.as_ref() else { return };
                 let (row, col) = self.pointer_cell;
+
+                // When the program asked for mouse reporting, the mouse belongs
+                // to it -- vim, htop, tmux and every TUI expect their clicks.
+                // Selecting instead would make them appear broken.
+                //
+                // Shift is the escape hatch every terminal implements: hold it
+                // to select text over a mouse-aware program anyway.
+                if self.forward_mouse(button, state, row, col) {
+                    return;
+                }
 
                 match (button, state) {
                     (MouseButton::Left, ElementState::Pressed) => {
@@ -605,12 +736,35 @@ impl ApplicationHandler<Wakeup> for App {
                 self.scroll_accum += lines;
                 let whole = self.scroll_accum.trunc();
                 self.scroll_accum -= whole;
-                if whole != 0.0 {
-                    session.terminal.lock().scroll_display(whole as isize * 3);
-                    session.mark_dirty();
-                    if let Some(w) = self.window.as_ref() {
-                        w.request_redraw();
+                if whole == 0.0 {
+                    return;
+                }
+
+                // A mouse-aware program gets the wheel. And in the alternate
+                // screen there is no scrollback to move through anyway -- `less`
+                // and `man` expect the wheel as arrow keys, so scrolling our own
+                // (empty) history would look like the wheel doing nothing.
+                let alt = session.terminal.lock().modes().contains(zest_core::Modes::ALT_SCREEN);
+                let count = whole.abs() as usize * 3;
+                let up = whole > 0.0;
+
+                if self.forward_wheel(up, count) {
+                    return;
+                }
+                if alt && !self.modifiers.shift_key() {
+                    let key: &[u8] = if up { b"\x1b[A" } else { b"\x1b[B" };
+                    let mut out = Vec::with_capacity(key.len() * count);
+                    for _ in 0..count {
+                        out.extend_from_slice(key);
                     }
+                    session.write(out);
+                    return;
+                }
+
+                session.terminal.lock().scroll_display(whole as isize * 3);
+                session.mark_dirty();
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
                 }
             }
 
