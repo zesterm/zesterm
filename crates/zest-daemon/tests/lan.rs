@@ -1,0 +1,344 @@
+//! Serving the LAN, over a real TCP socket on loopback.
+//!
+//! The cheapest transport tests in the repo — unlike the unix-socket and
+//! named-pipe ones they need no per-platform path fixture and behave
+//! identically on all three OSes. They are also the only place the *refusal*
+//! paths run end to end, which is the half that matters: a listener that serves
+//! the right people and also serves the wrong ones is worse than no listener.
+
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use zest_daemon::{Authenticator, DaemonConfig, LanListener, Registry};
+use zest_mesh::identity::{ClientIdentity, HostIdentity, Nonce, Purpose};
+use zest_mesh::pairing::{auth_transcript, PairingQueue, Transcript};
+use zest_mesh::trust::{MemoryTrustStore, TrustRecord, TrustStore};
+use zest_proto::{frame, ClientMessage, FrameReader, HostMessage, PROTOCOL_VERSION};
+
+struct Host {
+    addr: std::net::SocketAddr,
+    trust: Arc<MemoryTrustStore>,
+    host_id: zest_proto::HostId,
+}
+
+fn host() -> Host {
+    let identity = Arc::new(HostIdentity::generate().expect("host key"));
+    let host_id = identity.host_id();
+    let trust = Arc::new(MemoryTrustStore::new());
+    let auth = Arc::new(Authenticator::new(
+        Arc::clone(&identity),
+        Arc::clone(&trust) as Arc<dyn TrustStore>,
+        PairingQueue::new(),
+        "lan-test",
+    ));
+
+    let listener = LanListener::bind("127.0.0.1", 0).expect("bind");
+    let addr = listener.local_addr();
+    let config = DaemonConfig {
+        host: host_id,
+        label: "lan-test".into(),
+        local_socket: String::new(),
+        listen_lan: true,
+        lan_bind: "127.0.0.1".into(),
+        lan_port: addr.port(),
+    };
+    let registry = Arc::new(Registry::new());
+    std::thread::spawn(move || {
+        let _ = listener.serve_forever(config, registry, auth);
+    });
+
+    Host { addr, trust, host_id }
+}
+
+fn trust(h: &Host, client: &ClientIdentity) {
+    h.trust
+        .insert(TrustRecord {
+            client: client.client_id(),
+            label: "known".into(),
+            paired_at: std::time::SystemTime::now(),
+            last_seen: None,
+        })
+        .expect("insert");
+}
+
+fn send(stream: &mut TcpStream, msg: &ClientMessage) {
+    let bytes = frame::encode(msg).expect("encode");
+    stream.write_all(&bytes).expect("write");
+    stream.flush().expect("flush");
+}
+
+fn wait_for(
+    stream: &mut TcpStream,
+    frames: &mut FrameReader,
+    mut f: impl FnMut(&HostMessage) -> bool,
+) -> Option<HostMessage> {
+    let mut buf = vec![0u8; 64 * 1024];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        while let Ok(Some(body)) = frames.next_frame() {
+            let msg = frame::decode::<HostMessage>(&body).expect("decode");
+            if f(&msg) {
+                return Some(msg);
+            }
+        }
+        if Instant::now() > deadline {
+            return None;
+        }
+        let n = stream.read(&mut buf).ok()?;
+        if n == 0 {
+            return None;
+        }
+        frames.feed(&buf[..n]);
+    }
+}
+
+/// Say hello and answer the challenge. Returns the encoded `Auth` frame, so a
+/// test can replay it.
+fn handshake(
+    stream: &mut TcpStream,
+    frames: &mut FrameReader,
+    identity: &ClientIdentity,
+) -> Vec<u8> {
+    let client_nonce = Nonce::from_bytes([0x5c; 32]);
+    send(
+        stream,
+        &ClientMessage::Hello {
+            version: PROTOCOL_VERSION,
+            client: identity.client_id(),
+            label: "test-device".into(),
+            nonce: zest_proto::Nonce32::from_bytes(*client_nonce.as_bytes()),
+        },
+    );
+
+    let challenge = wait_for(stream, frames, |m| matches!(m, HostMessage::Challenge { .. }))
+        .expect("no challenge arrived");
+    let HostMessage::Challenge { version, host, label, nonce, .. } = challenge else {
+        unreachable!()
+    };
+
+    let transcript = Transcript {
+        version,
+        host,
+        client: identity.client_id(),
+        host_nonce: Nonce::from_bytes(nonce.0),
+        client_nonce,
+        host_label: label,
+        client_label: "test-device".into(),
+    };
+    let sig = identity.sign(Purpose::Auth, &auth_transcript(&transcript));
+    let msg = ClientMessage::Auth { signature: zest_proto::Sig64::from_bytes(sig.to_bytes()) };
+    let bytes = frame::encode(&msg).expect("encode");
+    stream.write_all(&bytes).expect("write");
+    stream.flush().expect("flush");
+    bytes
+}
+
+#[test]
+fn an_unpaired_device_is_not_served_and_gets_no_session() {
+    // "Refused" alone is not the property. A host that says no and starts a
+    // shell anyway has still handed one out.
+    let h = host();
+    let mut stream = TcpStream::connect(h.addr).expect("connect");
+    let mut frames = FrameReader::new();
+    let client = ClientIdentity::generate().expect("client key");
+
+    handshake(&mut stream, &mut frames, &client);
+
+    let answer = wait_for(&mut stream, &mut frames, |m| {
+        matches!(m, HostMessage::AuthPending { .. } | HostMessage::Welcome { .. })
+    })
+    .expect("no answer");
+    assert!(
+        matches!(answer, HostMessage::AuthPending { .. }),
+        "an unpaired device was welcomed: {answer:?}"
+    );
+
+    send(&mut stream, &ClientMessage::ListSessions);
+    let answer = wait_for(&mut stream, &mut frames, |m| {
+        matches!(m, HostMessage::Sessions { .. } | HostMessage::Error { .. })
+    })
+    .expect("no answer");
+    assert!(
+        matches!(answer, HostMessage::Error { .. }),
+        "a device waiting for approval was served: {answer:?}"
+    );
+}
+
+#[test]
+fn a_paired_device_drives_a_session_over_tcp() {
+    let h = host();
+    let client = ClientIdentity::generate().expect("client key");
+    trust(&h, &client);
+
+    let mut stream = TcpStream::connect(h.addr).expect("connect");
+    let mut frames = FrameReader::new();
+    handshake(&mut stream, &mut frames, &client);
+
+    let welcome = wait_for(&mut stream, &mut frames, |m| matches!(m, HostMessage::Welcome { .. }))
+        .expect("no welcome");
+    let HostMessage::Welcome { host, .. } = welcome else { unreachable!() };
+    assert_eq!(host, h.host_id, "the host announced an identity that is not its own");
+
+    send(
+        &mut stream,
+        &ClientMessage::CreateSession {
+            command: "/bin/echo over-the-lan".into(),
+            cwd: String::new(),
+            cols: 80,
+            rows: 24,
+        },
+    );
+    let listing = wait_for(&mut stream, &mut frames, |m| matches!(m, HostMessage::Sessions { .. }))
+        .expect("no listing");
+    let HostMessage::Sessions { sessions } = listing else { unreachable!() };
+    assert_eq!(sessions.len(), 1, "the session was not created");
+}
+
+#[test]
+fn a_captured_proof_cannot_be_replayed_onto_a_second_connection() {
+    // Why the host contributes a nonce, and why there is no nonce cache
+    // anywhere: the host's nonce is per-connection state, so the connection
+    // *is* the replay window. Entirely doable in-process, which is what makes
+    // this a test rather than a claim in a comment.
+    let h = host();
+    let client = ClientIdentity::generate().expect("client key");
+    trust(&h, &client);
+
+    let mut first = TcpStream::connect(h.addr).expect("connect");
+    let mut frames = FrameReader::new();
+    let captured = handshake(&mut first, &mut frames, &client);
+    assert!(
+        wait_for(&mut first, &mut frames, |m| matches!(m, HostMessage::Welcome { .. })).is_some(),
+        "the first connection was not served"
+    );
+
+    let mut second = TcpStream::connect(h.addr).expect("connect");
+    let mut frames2 = FrameReader::new();
+    send(
+        &mut second,
+        &ClientMessage::Hello {
+            version: PROTOCOL_VERSION,
+            client: client.client_id(),
+            label: "test-device".into(),
+            nonce: zest_proto::Nonce32::from_bytes([0x5c; 32]),
+        },
+    );
+    assert!(
+        wait_for(&mut second, &mut frames2, |m| matches!(m, HostMessage::Challenge { .. }))
+            .is_some(),
+        "no challenge on the second connection"
+    );
+    second.write_all(&captured).expect("write");
+    second.flush().expect("flush");
+
+    let answer = wait_for(&mut second, &mut frames2, |m| {
+        matches!(m, HostMessage::Welcome { .. } | HostMessage::AuthFailed { .. })
+    })
+    .expect("no answer");
+    assert!(
+        matches!(
+            answer,
+            HostMessage::AuthFailed { reason: zest_proto::AuthFailure::Signature, .. }
+        ),
+        "a replayed proof was accepted: {answer:?}"
+    );
+}
+
+#[test]
+fn a_silent_connection_does_not_block_a_real_one() {
+    let h = host();
+    let _silent = TcpStream::connect(h.addr).expect("connect");
+
+    let client = ClientIdentity::generate().expect("client key");
+    trust(&h, &client);
+    let mut stream = TcpStream::connect(h.addr).expect("connect");
+    let mut frames = FrameReader::new();
+    handshake(&mut stream, &mut frames, &client);
+    assert!(
+        wait_for(&mut stream, &mut frames, |m| matches!(m, HostMessage::Welcome { .. })).is_some(),
+        "a connection that said nothing blocked a real one"
+    );
+}
+
+#[test]
+fn a_remote_device_may_not_approve_other_devices() {
+    // Refused even for a *paired* client: otherwise one compromised device
+    // enrols the rest.
+    let h = host();
+    let client = ClientIdentity::generate().expect("client key");
+    trust(&h, &client);
+
+    let mut stream = TcpStream::connect(h.addr).expect("connect");
+    let mut frames = FrameReader::new();
+    handshake(&mut stream, &mut frames, &client);
+    wait_for(&mut stream, &mut frames, |m| matches!(m, HostMessage::Welcome { .. }))
+        .expect("no welcome");
+
+    send(
+        &mut stream,
+        &ClientMessage::PairingDecision {
+            client: zest_proto::ClientId::from_bytes([0xaa; 32]),
+            approve: true,
+        },
+    );
+    assert!(
+        wait_for(&mut stream, &mut frames, |m| matches!(m, HostMessage::Error { .. })).is_some(),
+        "a remote device was allowed to approve another"
+    );
+}
+
+#[test]
+fn a_client_that_dialled_another_host_notices() {
+    // What the host signing first buys. An address learned from an mDNS
+    // advertisement is a claim; without this check "connect to my Mac" means
+    // "connect to whatever answered on that port".
+    let h = host();
+    let client = ClientIdentity::generate().expect("client key");
+    trust(&h, &client);
+
+    let mut stream = TcpStream::connect(h.addr).expect("connect");
+    let mut frames = FrameReader::new();
+    let client_nonce = Nonce::from_bytes([0x5c; 32]);
+    send(
+        &mut stream,
+        &ClientMessage::Hello {
+            version: PROTOCOL_VERSION,
+            client: client.client_id(),
+            label: "test-device".into(),
+            nonce: zest_proto::Nonce32::from_bytes(*client_nonce.as_bytes()),
+        },
+    );
+    let challenge = wait_for(&mut stream, &mut frames, |m| {
+        matches!(m, HostMessage::Challenge { .. })
+    })
+    .expect("no challenge");
+    let HostMessage::Challenge { version, host, label, nonce, signature } = challenge else {
+        unreachable!()
+    };
+
+    let transcript = Transcript {
+        version,
+        host,
+        client: client.client_id(),
+        host_nonce: Nonce::from_bytes(nonce.0),
+        client_nonce,
+        host_label: label,
+        client_label: "test-device".into(),
+    };
+    let host_sig = zest_mesh::identity::Signature::from_slice(&signature.0).expect("signature");
+
+    // The host proves itself to a client that dialled it...
+    assert!(zest_mesh::pairing::verify_challenge(Some(h.host_id), &transcript, &host_sig).is_ok());
+    // ...and cannot prove itself to one that meant to reach someone else.
+    assert!(
+        zest_mesh::pairing::verify_challenge(
+            Some(zest_proto::HostId::from_bytes([0xee; 32])),
+            &transcript,
+            &host_sig,
+        )
+        .is_err(),
+        "a client accepted a host it did not dial"
+    );
+}

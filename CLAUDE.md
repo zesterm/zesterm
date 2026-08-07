@@ -81,8 +81,13 @@ cargo run -p zest-render-wgpu --example alpha_probe   # transparency capability
 
 zest-daemon --socket-path                      # where this user's daemon listens
 zest-daemon --socket <path>                    # serve this machine's terminals
+zest-daemon --listen-lan                       # serve other machines too (off by default)
+zest-daemon --identity                         # this host's public key
+zest-daemon --trusted                          # which devices are paired
+zest-daemon --ephemeral                        # throwaway key, for the edit-run loop
 cargo run -p zest-daemon --example attach      # drive a daemon session, no GUI
 cargo run -p zest-mesh   --example mesh_probe  # advertise and browse the fleet
+cargo run -p zest-daemon --example pair -- --addr <host:port>   # pair with a host
 ```
 
 Each `--example` above answers "which layer is wrong" without the ones above it.

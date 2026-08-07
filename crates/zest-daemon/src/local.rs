@@ -510,6 +510,8 @@ mod tests {
             label: "loopback-test".into(),
             local_socket: path.to_string(),
             listen_lan: false,
+            lan_bind: "127.0.0.1".into(),
+            lan_port: 0,
         }
     }
 
@@ -727,6 +729,8 @@ mod unix_tests {
             label: "mode-test".into(),
             local_socket: p.clone(),
             listen_lan: false,
+            lan_bind: "127.0.0.1".into(),
+            lan_port: 0,
         };
         let listen_path = p.clone();
         std::thread::spawn(move || {

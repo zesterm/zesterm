@@ -717,22 +717,24 @@ impl Connection {
             "a device is asking to pair"
         );
 
-        let mut out = vec![HostMessage::AuthPending {
+        // `AuthPending` only. `PairingRequested` is the *local* notification --
+        // it exists so the desktop app can raise a modal -- and it belongs on
+        // whatever loopback connections are watching, not on the connection
+        // that caused it. Sending it here told the device asking to pair the
+        // address it was connecting from, which is at best noise and at worst
+        // an echo of something it did not know.
+        //
+        // Pushing it to other connections needs a subscription the daemon does
+        // not have yet, and neither does the modal that would consume it. The
+        // message stays defined; nothing sends it until there is somewhere for
+        // it to go.
+        vec![HostMessage::AuthPending {
             code: code.to_string(),
             expires_in_secs: u32::try_from(
                 zest_mesh::pairing::APPROVAL_TIMEOUT.as_secs()
             )
             .unwrap_or(u32::MAX),
-        }];
-        // And tell whoever is watching locally, so the desktop app can raise a
-        // modal over the same queue a terminal prompt reads.
-        out.push(HostMessage::PairingRequested {
-            client: request.client,
-            label: request.label,
-            code: request.code,
-            remote: request.remote,
-        });
-        out
+        }]
     }
 
     /// Apply a decision that arrived while this connection was waiting.
@@ -961,6 +963,8 @@ mod tests {
             label: "test-host".into(),
             local_socket: String::new(),
             listen_lan: false,
+            lan_bind: "127.0.0.1".into(),
+            lan_port: 0,
         }
     }
 

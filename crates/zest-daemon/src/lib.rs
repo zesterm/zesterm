@@ -31,11 +31,13 @@
 //! paint so this has a number to break rather than a memory to argue with.
 
 pub mod auth;
+pub mod lan;
 pub mod local;
 pub mod server;
 pub mod session;
 
 pub use auth::{Auth, Authenticator};
+pub use lan::LanListener;
 pub use local::{connect, default_socket_path, listen};
 pub use server::{serve, Connection, Registry};
 pub use session::{Session, Update};
@@ -58,6 +60,18 @@ pub struct DaemonConfig {
     /// Off by default. A daemon that serves only its own GUI app is the
     /// behaviour someone who never asked for a fleet should get.
     pub listen_lan: bool,
+    /// Which interface to serve the LAN on.
+    ///
+    /// `0.0.0.0` unless pinned. IPv6 dual-stack is deliberately not attempted:
+    /// `IPV6_V6ONLY` defaults differ between Windows and unix and `std` cannot
+    /// set it without `socket2`, so a v6-only network is a known limitation
+    /// rather than something that half-works.
+    pub lan_bind: String,
+    /// Which port to prefer. 0 means "always ephemeral".
+    ///
+    /// A preference, not a promise: if it is taken the listener falls back and
+    /// advertises what it actually bound.
+    pub lan_port: u16,
 }
 
 /// A session's lifecycle, as clients see it.

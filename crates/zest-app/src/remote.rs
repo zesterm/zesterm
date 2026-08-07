@@ -634,6 +634,8 @@ mod tests {
                 label: "harness".into(),
                 local_socket: path.clone(),
                 listen_lan: false,
+                lan_bind: "127.0.0.1".into(),
+                lan_port: 0,
             };
             {
                 let registry = Arc::clone(&registry);

@@ -45,7 +45,7 @@ move.
 
 ## Status
 
-**513 tests, four gates green**, measured on macOS rather than remembered.
+**524 tests, four gates green**, measured on macOS rather than remembered.
 First paint 35ms **on Windows**; the Mac paints against a different compositor
 and its number (48ms) is reported rather than gated.
 
@@ -60,8 +60,8 @@ and its number (48ms) is reported rather than gated.
 | `zest-input` | ✅ extracted; keys + SGR mouse + selection — ⬜ IME, Kitty protocol |
 | `zest-app` | ✅ window, sessions behind `SessionSource`, **attached to its own daemon** — runs on Windows *and* macOS (Metal) — ⬜ macOS chrome |
 | `zest-proto` | ✅ protocol 2, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, cell-for-cell conformance, chaos-resync |
-| `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store — ⬜ transports |
-| `zest-daemon` | ✅ session ownership, protocol loop, loopback transport, real `Seq`/`Ack`, scrollback, socket locking, **authentication** — ⬜ LAN listener |
+| `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store — ⬜ Cloudflare transport (M4) |
+| `zest-daemon` | ✅ session ownership, protocol loop, loopback *and* LAN transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing |
 
 ### What works end to end today
 
@@ -80,13 +80,18 @@ and its number (48ms) is reported rather than gated.
   converges again after a dropped frame at any of 10,000 points.
 - Two machines minting verifiable identities and finding each other by mDNS
   (`cargo run -p zest-mesh --example mesh_probe`).
+- **A daemon serving other machines**: `zest-daemon --listen-lan` binds TCP,
+  advertises what it bound, and serves only devices that prove a key and are
+  trusted. An unknown device makes the host print a matching code and wait for
+  a person (`cargo run -p zest-daemon --example pair`).
 
 ### The gap to M3
 
 Three things at the level of features:
 
-1. **A LAN listener on the daemon** — it currently listens only on the loopback
-   socket. → WS-F
+1. ~~**A LAN listener on the daemon**~~ **Done.** `--listen-lan` binds TCP,
+   advertises the port it actually bound over mDNS, and serves only clients
+   that prove a key and are trusted. Off by default.
 2. ~~**Pairing**, so `listen_lan` can be turned on without handing out shells.~~
    **Done.** Every connection proves a key, and an unknown one waits for a
    person. The gate is a type: the LAN listener will take an authenticator that
@@ -146,10 +151,11 @@ is free of input code and A can fill it with chrome. C1 landed before D, so
 `unix.rs` exists for Linux to build on. H's identity landed independently of F,
 as planned.
 
-**The sequencing rule still live.** `listen_lan` must not be turned on until
-pairing exists. It is now enforced by the types rather than by discipline — the
-LAN listener takes an authenticator it is impossible to construct from the
-loopback path.
+**The sequencing rule, now discharged.** `listen_lan` was not to be turned on
+until pairing existed. Both landed, and the ordering is enforced by the types
+rather than by discipline: `LanListener::serve_forever` takes an
+`Authenticator` by value, and `Auth::Transport` — the variant that skips the
+trust store — can only be constructed by the loopback listener.
 
 **The order M3 is being built in**, and why: the client half first (the delta
 applier, then `zest-app` attaching to its own daemon over loopback), because it

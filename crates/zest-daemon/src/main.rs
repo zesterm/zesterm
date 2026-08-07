@@ -40,7 +40,10 @@ fn main() {
              --forget <hex>      remove a trusted client\n\
              --trusted           list trusted clients and exit\n\
              --trust-file <path> where pairings are recorded\n\
-             --no-prompt         never ask on stdin; refuse unknown clients\n\n\
+             --no-prompt         never ask on stdin; refuse unknown clients\n\
+             --listen-lan        serve other machines (off by default)\n\
+             --lan-bind <addr>   which interface (default 0.0.0.0)\n\
+             --lan-port <port>   preferred port (default 7717)\n\n\
              Sessions outlive the clients attached to them. Closing a window\n\
              does not end a shell."
         );
@@ -98,6 +101,12 @@ fn main() {
     // --- trust ------------------------------------------------------------
 
     let trust: Arc<dyn TrustStore> = if ephemeral {
+        // Said out loud rather than ignored: someone who passed --trust-file
+        // and got a store that forgets on exit should hear about it here, not
+        // discover it when every device re-prompts after a restart.
+        if opt("--trust-file").is_some() {
+            tracing::warn!("--ephemeral overrides --trust-file; pairings will not be kept");
+        }
         Arc::new(MemoryTrustStore::new())
     } else {
         let path = opt("--trust-file").map_or_else(default_trust_path, std::path::PathBuf::from);
@@ -174,13 +183,16 @@ fn main() {
         return;
     }
 
+    let listen_lan = flag("--listen-lan");
     let config = DaemonConfig {
         host: identity.host_id(),
         label,
         local_socket: socket.clone(),
-        // Still off. The LAN listener is the next stage; this one only makes
-        // turning it on *possible* without handing out shells.
-        listen_lan: false,
+        listen_lan,
+        lan_bind: opt("--lan-bind").unwrap_or_else(|| "0.0.0.0".into()),
+        lan_port: opt("--lan-port")
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(zest_daemon::lan::DEFAULT_PORT),
     };
 
     tracing::info!(
@@ -199,10 +211,75 @@ fn main() {
     }
 
     let registry = Arc::new(Registry::new());
+
+    // The LAN, if it was asked for. Held for the life of the process: the
+    // advertiser unregisters on drop, so `let _ = ...` would take this machine
+    // off every fleet listing the instant it was announced.
+    let _advertiser = if config.listen_lan {
+        match start_lan(&config, &registry, &auth) {
+            Ok(a) => a,
+            Err(e) => {
+                // Refused, not degraded. Every failure here means this host
+                // cannot serve the LAN *correctly*, and serving it incorrectly
+                // is how shells get handed out. Loopback keeps running, so the
+                // desktop app still works while someone reads the error.
+                tracing::error!(error = %e, "not serving the LAN; loopback is unaffected");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     if let Err(e) = listen(&socket, config, registry, auth) {
         tracing::error!(error = %e, "could not listen");
         std::process::exit(1);
     }
+}
+
+/// Bind, advertise, and start serving other machines.
+///
+/// In that order, and the order is the point: the port must be known before it
+/// is announced, because SRV is the single source of truth for it and a second
+/// source that can disagree produces a connection refused with no obvious
+/// cause.
+fn start_lan(
+    config: &DaemonConfig,
+    registry: &Arc<Registry>,
+    auth: &Arc<Authenticator>,
+) -> Result<Option<zest_mesh::discovery::mdns::MdnsAdvertiser>, String> {
+    // A trust store that cannot persist means every device re-prompts on every
+    // reconnect, and a stream of prompts is how someone learns to approve
+    // without reading. Checked before the port is opened, not after.
+    auth.trust().list().map_err(|e| format!("the trust store is unusable: {e}"))?;
+
+    let listener = zest_daemon::LanListener::bind(&config.lan_bind, config.lan_port)
+        .map_err(|e| e.to_string())?;
+    let addr = listener.local_addr();
+
+    let advertiser =
+        zest_mesh::discovery::mdns::MdnsAdvertiser::start(config.host, &config.label, addr.port())
+            .map_err(|e| format!("could not advertise on the LAN: {e}"))?;
+
+    tracing::info!(
+        %addr,
+        host = %config.host.short(),
+        "serving the LAN; unpaired devices will have to be approved"
+    );
+
+    let config = config.clone();
+    let registry = Arc::clone(registry);
+    let auth = Arc::clone(auth);
+    std::thread::Builder::new()
+        .name("zest-daemon-lan".into())
+        .spawn(move || {
+            if let Err(e) = listener.serve_forever(config, registry, auth) {
+                tracing::error!(error = %e, "the LAN listener stopped");
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    Ok(Some(advertiser))
 }
 
 /// Ask on stdin when a device wants to pair.
