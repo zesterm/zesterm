@@ -305,28 +305,51 @@ impl Grid {
         }
 
         if rows != self.rows {
-            // Shrinking gives up the blank rows *below the cursor* first.
-            //
-            // Taking everything off the top instead is what a viewport does
-            // when the cursor is already at the bottom, and it is catastrophic
-            // in the far more common case where it is not: a screen with five
-            // lines of output, a prompt on row 5, and nine blank rows beneath
-            // it loses the output *and the prompt*, keeping nine blank rows
-            // that held nothing. Every resize of an idle terminal did this.
-            //
-            // xterm has always worked this way, and this is why.
             if rows < self.rows {
+                // Shrinking gives up the blank rows *below the cursor* first.
+                //
+                // Taking everything off the top instead is what a viewport does
+                // when the cursor is already at the bottom, and it is wrong in
+                // the far more common case where it is not: a screen with five
+                // lines of output, a prompt on row 5, and nine blank rows
+                // beneath it loses the output *and the prompt*, keeping nine
+                // blank rows that held nothing.
+                //
+                // xterm has always worked this way, and this is why.
                 let below = self.rows - 1 - self.cursor.row.min(self.rows - 1);
                 let from_bottom = (self.rows - rows).min(below);
                 self.storage.truncate_bottom(from_bottom);
+
+                // Whatever could not be found below the cursor leaves over the
+                // *top*, and those rows are history: they must become
+                // scrollback, not disappear.
+                //
+                // Growing `scrollback_len` is the whole of it. Without it the
+                // drain below removes them from storage outright -- ten lines
+                // of output shrunk to four rows left four lines in existence
+                // and six deleted, unreachable by scrolling because as far as
+                // the grid was concerned they had never been history. That is
+                // what "the lines pushed up and were lost" was.
+                let over_the_top = (self.rows - rows) - from_bottom;
+                if over_the_top > 0 {
+                    self.scrollback_len =
+                        (self.scrollback_len + over_the_top).min(self.scrollback_limit);
+                    // The cursor moved up with the content.
+                    self.cursor.row = self.cursor.row.saturating_sub(over_the_top);
+                }
+            } else {
+                // Growing pulls rows back down out of scrollback before it
+                // adds blank ones, so dragging a window smaller and back is one
+                // reversible gesture rather than a way to lose the screen. The
+                // rows are already in storage -- only the boundary moves.
+                let from_scrollback = (rows - self.rows).min(self.scrollback_len);
+                self.scrollback_len -= from_scrollback;
+                self.cursor.row += from_scrollback;
             }
 
-            // Whatever could not be found below the cursor comes off the top,
-            // where it becomes scrollback rather than being lost. The cursor
-            // clamp below lands on exactly the right row when that happens:
-            // reaching here with rows still to drop means the cursor was at or
-            // past the new height, and `new_rows - 1` is precisely where it
-            // ends up after the content above it scrolls away.
+            // Everything beyond what scrollback is allowed to keep. `target`
+            // is now the honest total, so this trims real excess instead of
+            // silently eating history.
             let target = self.scrollback_len + rows;
             self.storage.resize_rows(target, cols, template);
             self.rows = rows;
@@ -494,6 +517,73 @@ mod tests {
         assert_eq!(g.rows(), 4);
         assert_eq!(g.row(3).text().trim_end(), "row 9", "the cursor's row must stay visible");
         assert_eq!(g.cursor.row, 3, "the cursor must land on the last row");
+    }
+
+    #[test]
+    fn rows_pushed_off_the_top_become_scrollback_rather_than_vanishing() {
+        // The bug that was actually reported: "I resized it small and lines
+        // pushed upwards and lost". They were deleted outright -- storage went
+        // from holding ten lines to holding four, and the six that scrolled out
+        // of the viewport were unreachable by scrolling, because as far as the
+        // grid was concerned they had never been history at all.
+        let mut g = Grid::new(30, 10, 500);
+        for row in 0..10 {
+            write_text(&mut g, row, &format!("line {row}"));
+        }
+        g.cursor.row = 9;
+        assert_eq!(g.scrollback_len(), 0);
+
+        g.resize(30, 4, &Cell::default());
+
+        assert_eq!(g.rows(), 4);
+        assert_eq!(g.scrollback_len(), 6, "the displaced rows did not become history");
+        assert_eq!(g.total_lines(), 10, "rows were deleted rather than scrolled");
+        assert_eq!(
+            g.line(0).map(|r| r.text().trim_end().to_string()).as_deref(),
+            Some("line 0"),
+            "the oldest line must still be reachable by scrolling up"
+        );
+    }
+
+    #[test]
+    fn a_shrink_and_a_grow_restore_the_screen_exactly() {
+        // Dragging a window smaller and back is one gesture. Growing pulls rows
+        // back out of scrollback before adding blank ones, so it undoes the
+        // shrink instead of leaving the content stranded above the viewport.
+        let mut g = Grid::new(30, 10, 500);
+        for row in 0..10 {
+            write_text(&mut g, row, &format!("line {row}"));
+        }
+        g.cursor.row = 9;
+
+        g.resize(30, 4, &Cell::default());
+        g.resize(30, 10, &Cell::default());
+
+        assert_eq!(g.scrollback_len(), 0, "history was not pulled back down");
+        for row in 0..10 {
+            assert_eq!(
+                g.row(row).text().trim_end(),
+                format!("line {row}"),
+                "row {row} did not survive the round trip"
+            );
+        }
+        assert_eq!(g.cursor.row, 9, "the cursor did not come back with the content");
+    }
+
+    #[test]
+    fn history_beyond_the_scrollback_limit_is_still_trimmed() {
+        // The counterpart: turning displaced rows into scrollback must not let
+        // a resize grow storage past what the user asked to keep.
+        let mut g = Grid::new(30, 20, 5);
+        for row in 0..20 {
+            write_text(&mut g, row, &format!("line {row}"));
+        }
+        g.cursor.row = 19;
+
+        g.resize(30, 2, &Cell::default());
+
+        assert_eq!(g.scrollback_len(), 5, "scrollback exceeded its limit");
+        assert_eq!(g.total_lines(), 7, "storage grew past the limit plus the viewport");
     }
 
     #[test]

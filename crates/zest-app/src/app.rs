@@ -1019,9 +1019,9 @@ impl ApplicationHandler<Wakeup> for App {
                 }
                 let Some(session) = self.session.as_ref() else { return };
 
-                // Ctrl+Shift+C / V, the terminal convention -- plain Ctrl+C must
-                // stay SIGINT.
-                if self.modifiers.control_key() && self.modifiers.shift_key() {
+                // Copy and paste, on whichever chord this desktop uses.
+                // See `key::is_clipboard_chord`.
+                if key::is_clipboard_chord(self.modifiers) {
                     if let winit::keyboard::Key::Character(c) = &event.logical_key {
                         match c.to_ascii_lowercase().as_str() {
                             "c" => {

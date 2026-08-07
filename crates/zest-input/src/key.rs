@@ -12,12 +12,46 @@ use winit::event::KeyEvent;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use zest_core::Modes;
 
+/// Whether a chord belongs to the desktop rather than to the terminal.
+///
+/// The terminal modifier set is Ctrl, Alt and Shift. There is no escape
+/// sequence for Super/Command and no application expects one, so a chord that
+/// includes it is the window manager's or the app's — never the shell's.
+#[must_use]
+pub fn belongs_to_desktop(mods: ModifiersState) -> bool {
+    mods.super_key()
+}
+
+/// Whether this chord means copy/paste.
+///
+/// Two conventions, both accepted everywhere. `Ctrl+Shift+C/V` is what
+/// terminals use on Windows and Linux, and it exists only because plain
+/// `Ctrl+C` must stay SIGINT. macOS has no such conflict and universally uses
+/// Command — a terminal accepting only `Ctrl+Shift` there is one where paste
+/// appears not to work at all.
+///
+/// Accepting both rather than choosing by `cfg`: the other chord is unused on
+/// each platform, and accepting it costs nothing against someone's muscle
+/// memory from another machine.
+#[must_use]
+pub fn is_clipboard_chord(mods: ModifiersState) -> bool {
+    mods.super_key() || (mods.control_key() && mods.shift_key())
+}
+
 /// Encode a key press.
 ///
 /// Returns `None` for keys that produce nothing — bare modifiers, unhandled
-/// function keys — so the caller can distinguish "nothing to send" from "sent
-/// empty".
+/// function keys, anything the desktop has claimed — so the caller can
+/// distinguish "nothing to send" from "sent empty".
 pub fn encode(event: &KeyEvent, mods: ModifiersState, modes: Modes) -> Option<Vec<u8>> {
+    // Falling through with Super held would encode the *unmodified* key, so on
+    // macOS every Command shortcut types its own letter: Cmd+V pastes nothing
+    // and inserts a `v`. `None` leaves the chord to the caller, which is where
+    // the clipboard shortcuts live.
+    if belongs_to_desktop(mods) {
+        return None;
+    }
+
     let ctrl = mods.control_key();
     let alt = mods.alt_key();
     let shift = mods.shift_key();
@@ -189,6 +223,36 @@ mod tests {
     use super::*;
 
     const NONE: ModifiersState = ModifiersState::empty();
+
+    #[test]
+    fn command_chords_belong_to_the_desktop() {
+        // Without this the terminal encodes the bare key, and on macOS every
+        // Cmd shortcut types its own letter -- Cmd+V inserting a `v` is how
+        // this was found.
+        assert!(belongs_to_desktop(ModifiersState::SUPER));
+        assert!(belongs_to_desktop(ModifiersState::SUPER | ModifiersState::SHIFT));
+        assert!(!belongs_to_desktop(NONE));
+        assert!(!belongs_to_desktop(ModifiersState::CONTROL), "Ctrl is the terminal's");
+        assert!(!belongs_to_desktop(ModifiersState::ALT), "Alt is the terminal's");
+    }
+
+    #[test]
+    fn both_clipboard_conventions_are_accepted() {
+        assert!(is_clipboard_chord(ModifiersState::SUPER), "macOS uses Command");
+        assert!(
+            is_clipboard_chord(ModifiersState::CONTROL | ModifiersState::SHIFT),
+            "Windows and Linux use Ctrl+Shift"
+        );
+    }
+
+    #[test]
+    fn plain_control_is_never_a_clipboard_chord() {
+        // The whole reason the Ctrl+Shift convention exists: Ctrl+C is SIGINT,
+        // and a terminal that copied instead would be unusable.
+        assert!(!is_clipboard_chord(ModifiersState::CONTROL));
+        assert!(!is_clipboard_chord(ModifiersState::SHIFT));
+        assert!(!is_clipboard_chord(NONE));
+    }
 
     #[test]
     fn ctrl_letters_map_to_control_codes() {
