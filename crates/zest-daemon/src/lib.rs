@@ -30,10 +30,12 @@
 //! it is a pipe open costing microseconds. There is a regression test on first
 //! paint so this has a number to break rather than a memory to argue with.
 
+pub mod auth;
 pub mod local;
 pub mod server;
 pub mod session;
 
+pub use auth::{Auth, Authenticator};
 pub use local::{connect, default_socket_path, listen};
 pub use server::{serve, Connection, Registry};
 pub use session::{Session, Update};

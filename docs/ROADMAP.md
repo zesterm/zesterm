@@ -45,7 +45,7 @@ move.
 
 ## Status
 
-**468 tests, four gates green**, measured on macOS rather than remembered.
+**513 tests, four gates green**, measured on macOS rather than remembered.
 First paint 35ms **on Windows**; the Mac paints against a different compositor
 and its number (48ms) is reported rather than gated.
 
@@ -60,8 +60,8 @@ and its number (48ms) is reported rather than gated.
 | `zest-input` | ✅ extracted; keys + SGR mouse + selection — ⬜ IME, Kitty protocol |
 | `zest-app` | ✅ window, sessions behind `SessionSource`, **attached to its own daemon** — runs on Windows *and* macOS (Metal) — ⬜ macOS chrome |
 | `zest-proto` | ✅ protocol 2, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, cell-for-cell conformance, chaos-resync |
-| `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet — ⬜ pairing, transports |
-| `zest-daemon` | ✅ session ownership, protocol loop, loopback transport, real `Seq`/`Ack`, scrollback, socket locking — ⬜ LAN listener, no authentication |
+| `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store — ⬜ transports |
+| `zest-daemon` | ✅ session ownership, protocol loop, loopback transport, real `Seq`/`Ack`, scrollback, socket locking, **authentication** — ⬜ LAN listener |
 
 ### What works end to end today
 
@@ -87,8 +87,10 @@ Three things at the level of features:
 
 1. **A LAN listener on the daemon** — it currently listens only on the loopback
    socket. → WS-F
-2. **Pairing**, so `listen_lan` can be turned on without handing out shells.
-   → WS-H item 3
+2. ~~**Pairing**, so `listen_lan` can be turned on without handing out shells.~~
+   **Done.** Every connection proves a key, and an unknown one waits for a
+   person. The gate is a type: the LAN listener will take an authenticator that
+   the loopback path cannot construct.
 3. ~~**`zest-app` attaching to a daemon** rather than owning a pty.~~ **Done.**
    The window is a client of this machine's daemon over the loopback socket,
    using the same protocol the phone will use. Closing it detaches; the shell
@@ -350,8 +352,11 @@ daemon exists.
       a socket; `--ignored` covers the rest. `LayeredDiscovery` merges
       `StaticDiscovery` with mDNS by `HostId`, which is where "the LAN beats the
       tunnel" actually happens.
-- [ ] Pairing: desktop approval modal with a matching code, signed nonce on
-      every `Hello`. A stolen session alone must not get a shell.
+- [x] Pairing: a signed transcript on every connection, a matching code, and an
+      approval queue. A stolen session alone does not get a shell. The desktop
+      modal is not built — the daemon prompts on stdin and `--trust` covers a
+      headless host — but it is a front-end swap over the same queue, and the
+      wire messages for it already exist.
 - [ ] Cloudflare Tunnel + Access per host. **Origin-side JWT validation is
       mandatory** — the origin never trusts the tunnel.
 - [ ] The directory Worker: host ids, labels, last-seen endpoints. **No session

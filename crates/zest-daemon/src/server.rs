@@ -10,13 +10,90 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
 use zest_proto::{
-    frame, ClientMessage, FrameReader, HostMessage, HostId, SessionAddr, SessionId, SessionInfo,
-    Seq, PROTOCOL_VERSION,
+    frame, ClientId, ClientMessage, FrameReader, HostMessage, HostId, SessionAddr, SessionId,
+    SessionInfo, Seq, PROTOCOL_VERSION,
 };
 use zest_pty::{CommandSpec, PtySize};
 
 use crate::session::{Session, Update};
 use crate::{DaemonConfig, DaemonError};
+
+/// Whether a connection may be served.
+///
+/// Three states, not an `Option<Handshake>`. With an option, "no handshake in
+/// progress" is ambiguous between *served* and *refused*, and clearing it on a
+/// refusal is a one-character way to serve a client that just failed to prove
+/// itself. That is not hypothetical: it is what the first version of this did,
+/// and a test caught it answering `ListSessions` after a bad signature.
+enum Gate {
+    /// Mid-handshake. Only `Hello` and `Auth` are accepted.
+    Handshaking(Box<zest_mesh::pairing::HostHandshake>),
+    /// Proved. Everything is accepted.
+    Served,
+    /// Failed. **Nothing** is accepted, ever again on this connection.
+    Refused,
+}
+
+/// A trust store that trusts everyone, for the loopback path.
+///
+/// Not a bypass in the handshake -- the proof still runs, and the wire is
+/// identical -- but on loopback the *socket* is the authorization, so the
+/// question the trust store answers has already been answered. Making it a
+/// store rather than an `if` inside the handshake keeps the state machine with
+/// one shape and no security-relevant branch.
+struct AlwaysTrusted;
+
+static ALWAYS_TRUSTED: AlwaysTrusted = AlwaysTrusted;
+
+impl zest_mesh::trust::TrustStore for AlwaysTrusted {
+    fn get(
+        &self,
+        client: zest_proto::ClientId,
+    ) -> Result<Option<zest_mesh::trust::TrustRecord>, zest_mesh::MeshError> {
+        Ok(Some(zest_mesh::trust::TrustRecord {
+            client,
+            label: "local".into(),
+            paired_at: std::time::SystemTime::UNIX_EPOCH,
+            last_seen: None,
+        }))
+    }
+    fn list(&self) -> Result<Vec<zest_mesh::trust::TrustRecord>, zest_mesh::MeshError> {
+        Ok(Vec::new())
+    }
+    fn insert(&self, _: zest_mesh::trust::TrustRecord) -> Result<(), zest_mesh::MeshError> {
+        Ok(())
+    }
+    fn touch(
+        &self,
+        _: zest_proto::ClientId,
+        _: std::time::SystemTime,
+    ) -> Result<(), zest_mesh::MeshError> {
+        Ok(())
+    }
+    fn remove(&self, _: zest_proto::ClientId) -> Result<bool, zest_mesh::MeshError> {
+        Ok(false)
+    }
+    fn describe(&self) -> String {
+        "the loopback socket (permissions are the authorization)".into()
+    }
+}
+
+/// Human-facing text for a refusal.
+///
+/// Deliberately separate from the `AuthFailure` a client branches on: this can
+/// be reworded freely, and nothing depends on it.
+const fn message_for(reason: zest_proto::AuthFailure) -> &'static str {
+    match reason {
+        zest_proto::AuthFailure::Signature => "the connection did not prove its identity",
+        zest_proto::AuthFailure::UnknownClient => "this device is not paired with this host",
+        zest_proto::AuthFailure::Denied => "the request was declined",
+        zest_proto::AuthFailure::TimedOut => "nobody answered the pairing request",
+        zest_proto::AuthFailure::Revoked => "this device was removed",
+        zest_proto::AuthFailure::RateLimited => "too many attempts; try again shortly",
+        zest_proto::AuthFailure::Version => "protocol versions are not compatible",
+        _ => "refused",
+    }
+}
 
 /// Most rows one `RequestScrollback` may fetch.
 ///
@@ -115,21 +192,70 @@ pub struct Connection {
     /// Per connection, not per session: two devices watching one shell each need
     /// their own position in it.
     attached: HashMap<u64, u64>,
-    greeted: bool,
+    /// Where this connection stands. See [`Gate`].
+    gate: Gate,
+    /// Kept only so that dropping the connection cancels its approval prompt.
+    /// A prompt for a device that already hung up is what teaches someone to
+    /// dismiss prompts without reading them.
+    pending: Option<zest_mesh::pairing::PendingHandle>,
+    /// How this connection is authorized. See `auth::Auth`.
+    auth: crate::auth::Auth,
+    /// Where the peer is, for the approval prompt.
+    remote: String,
+    /// A decision that arrived while this connection was waiting.
+    ///
+    /// Written by the approval callback on whichever thread resolved it, read
+    /// by the writer loop after it is woken.
+    decided: Arc<Mutex<Option<zest_mesh::pairing::Decision>>>,
     /// Handed to each session on attach, so output wakes the writer.
     waker: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl Connection {
     #[must_use]
-    pub fn new(config: DaemonConfig, registry: Arc<Registry>) -> Self {
+    pub fn new(
+        config: DaemonConfig,
+        registry: Arc<Registry>,
+        auth: crate::auth::Auth,
+        remote: impl Into<String>,
+    ) -> Self {
+        let a = auth.authenticator();
+        let handshake = zest_mesh::pairing::HostHandshake::new(
+            Arc::clone(a.identity()),
+            a.label().to_string(),
+            PROTOCOL_VERSION,
+        );
         Self {
             config,
             registry,
             reader: FrameReader::new(),
             attached: HashMap::new(),
-            greeted: false,
+            gate: Gate::Handshaking(Box::new(handshake)),
+            pending: None,
+            auth,
+            remote: remote.into(),
+            decided: Arc::new(Mutex::new(None)),
             waker: None,
+        }
+    }
+
+    /// Whether the handshake has completed. Used by the LAN watchdog.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        matches!(self.gate, Gate::Served)
+    }
+
+    fn handshake_mut(&mut self) -> Option<&mut zest_mesh::pairing::HostHandshake> {
+        match &mut self.gate {
+            Gate::Handshaking(h) => Some(h),
+            _ => None,
+        }
+    }
+
+    fn handshake(&self) -> Option<&zest_mesh::pairing::HostHandshake> {
+        match &self.gate {
+            Gate::Handshaking(h) => Some(h),
+            _ => None,
         }
     }
 
@@ -204,63 +330,158 @@ impl Connection {
     }
 
     fn handle(&mut self, msg: ClientMessage) -> Vec<HostMessage> {
-        // `Hello` first, always. Serving a client whose protocol version has not
-        // been checked means a mismatch shows up as corrupt state rather than as
-        // a clear refusal.
-        if !self.greeted && !matches!(msg, ClientMessage::Hello { .. }) {
-            return vec![HostMessage::Error {
-                session: None,
-                message: "expected Hello first".into(),
-            }];
+        // Nothing is served before the handshake completes. Not "has said
+        // hello" -- has *proved* it may be here.
+        match &self.gate {
+            // A refused connection stays refused. Anything else and a client
+            // that failed to prove itself gets served its next message.
+            Gate::Refused => {
+                return vec![HostMessage::Error {
+                    session: None,
+                    message: "this connection was refused".into(),
+                }]
+            }
+            Gate::Handshaking(_)
+                if !matches!(
+                    msg,
+                    ClientMessage::Hello { .. }
+                        | ClientMessage::Auth { .. }
+                        | ClientMessage::PairingDecision { .. }
+                ) =>
+            {
+                return vec![HostMessage::Error {
+                    session: None,
+                    message: "expected Hello first".into(),
+                }]
+            }
+            _ => {}
         }
 
         match msg {
             ClientMessage::Hello { version, client, label, nonce } => {
-                if version != PROTOCOL_VERSION {
-                    // Refused, and said so. A version mismatch that silently
-                    // proceeds produces a corrupt grid on the client and looks
-                    // like a rendering bug.
-                    //
-                    // `greeted` stays false: a peer that failed the version
-                    // check is not a peer, and marking it greeted here meant
-                    // every message it sent afterwards was served anyway.
+                let Some(h) = self.handshake_mut() else {
                     return vec![HostMessage::Error {
                         session: None,
-                        message: format!(
-                            "protocol {version} is not compatible with {PROTOCOL_VERSION}"
-                        ),
+                        message: "already connected".into(),
                     }];
+                };
+                let step = h.on_hello(
+                    version,
+                    client,
+                    &label,
+                    zest_mesh::identity::Nonce::from_bytes(nonce.0),
+                );
+                match step {
+                    zest_mesh::pairing::HostStep::Challenge { nonce, signature } => {
+                        tracing::debug!(client = %client.short(), %label, "challenging");
+                        // The host id and label come from the *transcript*, not
+                        // from `config`. They are inside the signature, so a
+                        // second source for either is a signature no client can
+                        // verify -- which presents as "did not prove its
+                        // identity" and sends whoever is debugging it looking
+                        // at the crypto rather than at the two fields.
+                        let t = h.transcript().expect("challenged");
+                        vec![HostMessage::Challenge {
+                            version: t.version,
+                            host: t.host,
+                            label: t.host_label.clone(),
+                            nonce: zest_proto::Nonce32::from_bytes(*nonce.as_bytes()),
+                            signature: zest_proto::Sig64::from_bytes(signature.to_bytes()),
+                        }]
+                    }
+                    zest_mesh::pairing::HostStep::Refused(r) => self.refuse(r, client),
+                    // `on_hello` answers with a challenge or a refusal and
+                    // nothing else; the other arms are unreachable rather than
+                    // merely unexpected.
+                    other => {
+                        tracing::error!(?other, "unexpected handshake step for Hello");
+                        vec![HostMessage::AuthFailed {
+                            reason: zest_proto::AuthFailure::Signature,
+                            message: "handshake failed".into(),
+                        }]
+                    }
                 }
-                self.greeted = true;
-
-                // The nonce is carried and not yet answered. This daemon does
-                // not challenge, so it authorizes nobody -- which is why it
-                // listens on the loopback socket only, where the filesystem
-                // permissions are the authorization. The handshake that makes
-                // `listen_lan` safe is the next stage; the wire is ready for it
-                // so that landing it is not a second coordinated change.
-                let _ = nonce;
-
-                tracing::info!(client = %client.short(), %label, "client connected");
-                vec![HostMessage::Welcome {
-                    version: PROTOCOL_VERSION,
-                    host: self.config.host,
-                    label: self.config.label.clone(),
-                }]
             }
 
-            // Nothing challenged this client, so a proof is unexpected rather
-            // than merely unsupported. Saying so is better than ignoring it:
-            // a client that thinks it authenticated and did not should find out.
-            ClientMessage::Auth { .. } => vec![HostMessage::AuthFailed {
-                reason: zest_proto::AuthFailure::Signature,
-                message: "this host did not issue a challenge".into(),
-            }],
+            ClientMessage::Auth { signature } => {
+                if self.handshake().is_none() {
+                    return vec![HostMessage::Error {
+                        session: None,
+                        message: "already connected".into(),
+                    }];
+                }
+                let Ok(sig) = zest_mesh::identity::Signature::from_slice(&signature.0) else {
+                    self.gate = Gate::Refused;
+                    return vec![HostMessage::AuthFailed {
+                        reason: zest_proto::AuthFailure::Signature,
+                        message: "malformed signature".into(),
+                    }];
+                };
 
-            ClientMessage::PairingDecision { .. } => vec![HostMessage::Error {
-                session: None,
-                message: "this host has nothing to pair".into(),
-            }],
+                let auth = self.auth.clone();
+                let authenticator = auth.authenticator();
+
+                // On loopback the *socket* already authorized this connection:
+                // a process that can reach it runs as this user and could
+                // ptrace the daemon anyway. The proof still runs -- the wire is
+                // uniform -- but the trust store is not consulted, which is
+                // what lets the desktop app use a throwaway identity and keep
+                // the OS keychain off its startup path.
+                let store: &dyn zest_mesh::trust::TrustStore = if auth.checks_trust() {
+                    authenticator.trust().as_ref()
+                } else {
+                    &ALWAYS_TRUSTED
+                };
+
+                let h = self.handshake_mut().expect("checked above");
+                let step = h.on_auth(&sig, store);
+                match step {
+                    zest_mesh::pairing::HostStep::Welcome => self.welcome(),
+                    zest_mesh::pairing::HostStep::NeedsApproval { code } => {
+                        self.ask_for_approval(&code)
+                    }
+                    zest_mesh::pairing::HostStep::Refused(r) => {
+                        let client = self
+                            .handshake()
+                            .and_then(zest_mesh::pairing::HostHandshake::transcript)
+                            .map_or_else(|| ClientId::from_bytes([0; 32]), |t| t.client);
+                        self.refuse(r, client)
+                    }
+                    other => {
+                        tracing::error!(?other, "unexpected handshake step for Auth");
+                        vec![HostMessage::AuthFailed {
+                            reason: zest_proto::AuthFailure::Signature,
+                            message: "handshake failed".into(),
+                        }]
+                    }
+                }
+            }
+
+            ClientMessage::PairingDecision { client, approve } => {
+                // Loopback only, always. Reaching the loopback socket is a
+                // demonstration that you are logged in at this machine, which
+                // is exactly the authority enrolling a device requires --
+                // accepting it over the LAN would let one paired device enrol
+                // others.
+                if !self.auth.may_approve_devices() {
+                    tracing::warn!(
+                        remote = %self.remote,
+                        "a remote connection tried to approve a device"
+                    );
+                    return vec![HostMessage::Error {
+                        session: None,
+                        message: "only a local client may approve devices".into(),
+                    }];
+                }
+                let decision = if approve {
+                    zest_mesh::pairing::Decision::Approve
+                } else {
+                    zest_mesh::pairing::Decision::Deny
+                };
+                let n = self.auth.authenticator().decide(client, decision);
+                tracing::info!(client = %client.short(), approve, answered = n, "pairing decision");
+                Vec::new()
+            }
 
             ClientMessage::ListSessions => {
                 vec![HostMessage::Sessions { sessions: self.registry.list(self.config.host) }]
@@ -410,6 +631,140 @@ impl Connection {
         }
     }
 
+    /// Complete the handshake and start serving.
+    fn welcome(&mut self) -> Vec<HostMessage> {
+        if let Some(h) = self.handshake() {
+            if let Some(t) = h.transcript() {
+                tracing::info!(
+                    client = %t.client.short(),
+                    label = %t.client_label,
+                    remote = %self.remote,
+                    "client authenticated"
+                );
+                // Best-effort: a client is served whether or not the timestamp
+                // reaches the disk, and refusing over it would turn a full disk
+                // into an outage.
+                let _ = self
+                    .auth
+                    .authenticator()
+                    .trust()
+                    .touch(t.client, std::time::SystemTime::now());
+            }
+        }
+        self.gate = Gate::Served;
+        self.pending = None;
+        vec![HostMessage::Welcome {
+            version: PROTOCOL_VERSION,
+            host: self.config.host,
+            label: self.config.label.clone(),
+        }]
+    }
+
+    /// Say no, in terms the client can branch on.
+    fn refuse(&mut self, refusal: zest_mesh::pairing::Refusal, client: ClientId) -> Vec<HostMessage> {
+        // Refused, not "no longer handshaking". Nothing on this connection is
+        // served afterwards.
+        self.gate = Gate::Refused;
+        self.pending = None;
+        let reason = crate::auth::failure_for(refusal);
+        tracing::warn!(
+            client = %client.short(),
+            remote = %self.remote,
+            ?reason,
+            "refused a connection"
+        );
+        vec![HostMessage::AuthFailed { reason, message: message_for(reason).into() }]
+    }
+
+    /// Queue an approval request and tell the client to wait.
+    ///
+    /// **Returns immediately.** Blocking here would hold the connection lock --
+    /// the reader thread holds it across `on_bytes` -- for as long as someone
+    /// took to answer, which would also make it impossible to send the very
+    /// message telling them to answer.
+    fn ask_for_approval(&mut self, code: &str) -> Vec<HostMessage> {
+        let Some(h) = self.handshake() else { return Vec::new() };
+        let Some(t) = h.transcript() else { return Vec::new() };
+
+        let request = zest_mesh::pairing::PairingRequest {
+            client: t.client,
+            label: t.client_label.clone(),
+            code: code.to_string(),
+            remote: self.remote.clone(),
+            requested_at: std::time::Instant::now(),
+        };
+
+        // The decision arrives on the channel the writer is already blocked on,
+        // so nothing new has to be woken and no lock is held while waiting.
+        let waker = self.waker.clone();
+        let decided = self.decided.clone();
+        let handle = self.auth.authenticator().ask(
+            request.clone(),
+            Box::new(move |d| {
+                *decided.lock().expect("decision lock") = Some(d);
+                if let Some(w) = &waker {
+                    w();
+                }
+            }),
+        );
+        self.pending = Some(handle);
+
+        tracing::info!(
+            client = %request.client.short(),
+            label = %request.label,
+            remote = %request.remote,
+            code = %request.code,
+            "a device is asking to pair"
+        );
+
+        let mut out = vec![HostMessage::AuthPending {
+            code: code.to_string(),
+            expires_in_secs: u32::try_from(
+                zest_mesh::pairing::APPROVAL_TIMEOUT.as_secs()
+            )
+            .unwrap_or(u32::MAX),
+        }];
+        // And tell whoever is watching locally, so the desktop app can raise a
+        // modal over the same queue a terminal prompt reads.
+        out.push(HostMessage::PairingRequested {
+            client: request.client,
+            label: request.label,
+            code: request.code,
+            remote: request.remote,
+        });
+        out
+    }
+
+    /// Apply a decision that arrived while this connection was waiting.
+    ///
+    /// Called from the writer loop, which is where the wake lands.
+    pub fn take_decision(&mut self) -> Vec<HostMessage> {
+        let decision = self.decided.lock().expect("decision lock").take();
+        let Some(decision) = decision else { return Vec::new() };
+        if self.handshake().is_none() {
+            return Vec::new();
+        }
+        let client = self
+            .handshake()
+            .and_then(zest_mesh::pairing::HostHandshake::transcript)
+            .map_or_else(|| ClientId::from_bytes([0; 32]), |t| t.client);
+
+        match decision {
+            zest_mesh::pairing::Decision::Approve => {
+                let store = Arc::clone(self.auth.authenticator().trust());
+                let h = self.handshake_mut().expect("checked above");
+                match h.approved(store.as_ref()) {
+                    zest_mesh::pairing::HostStep::Welcome => self.welcome(),
+                    zest_mesh::pairing::HostStep::Refused(r) => self.refuse(r, client),
+                    _ => Vec::new(),
+                }
+            }
+            zest_mesh::pairing::Decision::Deny => {
+                self.refuse(zest_mesh::pairing::Refusal::Denied, client)
+            }
+        }
+    }
+
     fn no_such(session: SessionAddr) -> HostMessage {
         HostMessage::Error {
             session: Some(session),
@@ -434,12 +789,19 @@ pub fn serve<R, W>(
     mut writer: W,
     config: DaemonConfig,
     registry: Arc<Registry>,
+    auth: crate::auth::Auth,
+    remote: impl Into<String>,
 ) -> Result<(), DaemonError>
 where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
-    let conn = Arc::new(Mutex::new(Connection::new(config, Arc::clone(&registry))));
+    let conn = Arc::new(Mutex::new(Connection::new(
+        config,
+        Arc::clone(&registry),
+        auth,
+        remote,
+    )));
     let (tx, rx) = std::sync::mpsc::channel::<Wake>();
 
     {
@@ -492,7 +854,15 @@ where
             Wake::Send(msgs) => msgs,
             Wake::Poll => Vec::new(),
         };
-        outgoing.extend(conn.lock().expect("connection lock").poll());
+        {
+            let mut c = conn.lock().expect("connection lock");
+            // A pairing decision may have arrived while this connection was
+            // waiting. It is delivered through the same wake the writer is
+            // already blocked on, so nothing polls and no lock is held across
+            // however long someone took to answer.
+            outgoing.extend(c.take_decision());
+            outgoing.extend(c.poll());
+        }
         if outgoing.is_empty() {
             continue;
         }
@@ -532,6 +902,59 @@ mod tests {
     use std::time::{Duration, Instant};
     use zest_proto::ClientId;
 
+    /// A host identity and an empty trust store, for the connection tests.
+    fn test_authenticator() -> Arc<crate::auth::Authenticator> {
+        Arc::new(crate::auth::Authenticator::new(
+            Arc::new(zest_mesh::identity::HostIdentity::generate().expect("host key")),
+            Arc::new(zest_mesh::trust::MemoryTrustStore::new()),
+            zest_mesh::pairing::PairingQueue::new(),
+            "test-host",
+        ))
+    }
+
+    /// Drive a connection through the handshake, as a real client would.
+    ///
+    /// The tests below are about what happens *after* authentication, so each
+    /// needs a connection that has been through it -- which is itself the
+    /// clearest statement that nothing is served before then.
+    fn authenticate(c: &mut Connection) -> zest_proto::ClientId {
+        let client = zest_mesh::identity::ClientIdentity::generate().expect("client key");
+        let out = send(
+            c,
+            &ClientMessage::Hello {
+                version: PROTOCOL_VERSION,
+                client: client.client_id(),
+                label: "test".into(),
+                nonce: zest_proto::Nonce32::from_bytes([0x5c; 32]),
+            },
+        );
+        let [HostMessage::Challenge { nonce, host, label, version, .. }] = &out[..] else {
+            panic!("expected a challenge, got {out:?}");
+        };
+        let transcript = zest_mesh::pairing::Transcript {
+            version: *version,
+            host: *host,
+            client: client.client_id(),
+            host_nonce: zest_mesh::identity::Nonce::from_bytes(nonce.0),
+            client_nonce: zest_mesh::identity::Nonce::from_bytes([0x5c; 32]),
+            host_label: label.clone(),
+            client_label: "test".into(),
+        };
+        let sig = client.sign(
+            zest_mesh::identity::Purpose::Auth,
+            &zest_mesh::pairing::auth_transcript(&transcript),
+        );
+        let out = send(
+            c,
+            &ClientMessage::Auth { signature: zest_proto::Sig64::from_bytes(sig.to_bytes()) },
+        );
+        assert!(
+            matches!(&out[..], [HostMessage::Welcome { .. }]),
+            "loopback must welcome any proved client, got {out:?}"
+        );
+        client.client_id()
+    }
+
     fn config() -> DaemonConfig {
         DaemonConfig {
             host: HostId::from_bytes([5; 32]),
@@ -543,7 +966,17 @@ mod tests {
 
     fn conn() -> (Connection, Arc<Registry>) {
         let registry = Arc::new(Registry::new());
-        (Connection::new(config(), Arc::clone(&registry)), registry)
+        (
+            Connection::new(
+                config(),
+                Arc::clone(&registry),
+                // Loopback, which is what these tests exercise: the handshake
+                // still runs, the trust store is not consulted.
+                crate::auth::Auth::Transport(test_authenticator()),
+                "test",
+            ),
+            registry,
+        )
     }
 
     fn send(c: &mut Connection, msg: &ClientMessage) -> Vec<HostMessage> {
@@ -576,10 +1009,70 @@ mod tests {
     }
 
     #[test]
-    fn hello_is_answered_with_this_hosts_identity() {
+    fn hello_is_answered_with_a_challenge_not_a_welcome() {
+        // The whole of this stage in one assertion. Saying hello is not proof
+        // of anything, and a host that welcomed on it authorized nobody.
         let (mut c, _) = conn();
         let out = send(&mut c, &hello());
-        assert!(matches!(&out[..], [HostMessage::Welcome { host, .. }] if *host == config().host));
+        assert!(
+            matches!(&out[..], [HostMessage::Challenge { .. }]),
+            "a bare Hello was served: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_proved_client_is_welcomed_by_this_host() {
+        let (mut c, _) = conn();
+        authenticate(&mut c);
+        let out = send(&mut c, &ClientMessage::ListSessions);
+        assert!(matches!(&out[..], [HostMessage::Sessions { .. }]), "{out:?}");
+    }
+
+    #[test]
+    fn an_unsigned_client_is_never_served() {
+        // Answering the challenge with noise must not get anywhere, and must
+        // say why in a form a client can branch on.
+        let (mut c, _) = conn();
+        let out = send(&mut c, &hello());
+        assert!(matches!(&out[..], [HostMessage::Challenge { .. }]), "{out:?}");
+
+        let out = send(
+            &mut c,
+            &ClientMessage::Auth { signature: zest_proto::Sig64::from_bytes([0; 64]) },
+        );
+        assert!(
+            matches!(
+                &out[..],
+                [HostMessage::AuthFailed { reason: zest_proto::AuthFailure::Signature, .. }]
+            ),
+            "{out:?}"
+        );
+
+        // And it stays refused rather than being served the next message.
+        let out = send(&mut c, &ClientMessage::ListSessions);
+        assert!(matches!(&out[..], [HostMessage::Error { .. }]), "{out:?}");
+    }
+
+    #[test]
+    fn a_remote_connection_may_not_approve_devices() {
+        // Approving a device is the authority of whoever is logged in at the
+        // machine. Accepting it over the LAN would let one paired device enrol
+        // others.
+        let registry = Arc::new(Registry::new());
+        let mut c = Connection::new(
+            config(),
+            registry,
+            crate::auth::Auth::Proof(test_authenticator()),
+            "192.168.1.42:51314",
+        );
+        let out = send(
+            &mut c,
+            &ClientMessage::PairingDecision {
+                client: ClientId::from_bytes([9; 32]),
+                approve: true,
+            },
+        );
+        assert!(matches!(&out[..], [HostMessage::Error { .. }]), "{out:?}");
     }
 
     #[test]
@@ -596,11 +1089,17 @@ mod tests {
                 nonce: zest_proto::Nonce32::from_bytes([7; 32]),
             },
         );
-        assert!(matches!(&out[..], [HostMessage::Error { .. }]), "{out:?}");
+        assert!(
+            matches!(
+                &out[..],
+                [HostMessage::AuthFailed { reason: zest_proto::AuthFailure::Version, .. }]
+            ),
+            "a version mismatch must be refused by name, not as a generic error: {out:?}"
+        );
     }
 
     #[test]
-    fn nothing_is_served_before_hello() {
+    fn nothing_is_served_before_the_handshake() {
         let (mut c, _) = conn();
         let out = send(&mut c, &ClientMessage::ListSessions);
         assert!(matches!(&out[..], [HostMessage::Error { .. }]), "{out:?}");
@@ -611,7 +1110,7 @@ mod tests {
         // A newer client may send something this build has never heard of.
         // Dropping the connection would make every upgrade a hard cutover.
         let (mut c, _) = conn();
-        send(&mut c, &hello());
+        authenticate(&mut c);
 
         let mut junk = Vec::new();
         junk.extend_from_slice(&(4u32).to_le_bytes());
@@ -627,7 +1126,7 @@ mod tests {
     #[test]
     fn creating_a_session_lists_it() {
         let (mut c, registry) = conn();
-        send(&mut c, &hello());
+        authenticate(&mut c);
 
         let out = send(
             &mut c,
@@ -645,7 +1144,7 @@ mod tests {
     #[test]
     fn attaching_returns_a_keyframe_and_then_output() {
         let (mut c, registry) = conn();
-        send(&mut c, &hello());
+        authenticate(&mut c);
         send(
             &mut c,
             &ClientMessage::CreateSession {
@@ -670,7 +1169,7 @@ mod tests {
     fn detaching_leaves_the_session_in_the_registry() {
         // The property ADR-007 exists for: a client leaving must not end a shell.
         let (mut c, registry) = conn();
-        send(&mut c, &hello());
+        authenticate(&mut c);
         send(
             &mut c,
             &ClientMessage::CreateSession {
@@ -691,7 +1190,7 @@ mod tests {
     #[test]
     fn closing_a_session_removes_it() {
         let (mut c, registry) = conn();
-        send(&mut c, &hello());
+        authenticate(&mut c);
         send(
             &mut c,
             &ClientMessage::CreateSession {
@@ -710,7 +1209,7 @@ mod tests {
     #[test]
     fn input_for_an_unknown_session_is_an_error_not_a_panic() {
         let (mut c, _) = conn();
-        send(&mut c, &hello());
+        authenticate(&mut c);
         let addr = SessionAddr::new(config().host, SessionId(999));
         let out = send(&mut c, &ClientMessage::Input { session: addr, bytes: vec![b'x'] });
         assert!(matches!(&out[..], [HostMessage::Error { .. }]), "{out:?}");
@@ -720,7 +1219,7 @@ mod tests {
     fn a_listing_keeps_a_stable_order() {
         // A list that reshuffles between polls is unusable on a phone.
         let (mut c, registry) = conn();
-        send(&mut c, &hello());
+        authenticate(&mut c);
         for _ in 0..4 {
             send(
                 &mut c,
@@ -745,7 +1244,7 @@ mod tests {
         // The fleet property. A session named without its host is unreachable
         // from a client holding sessions from several machines.
         let (mut c, registry) = conn();
-        send(&mut c, &hello());
+        authenticate(&mut c);
         send(
             &mut c,
             &ClientMessage::CreateSession {

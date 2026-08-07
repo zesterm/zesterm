@@ -35,24 +35,6 @@ const STARTUP_BUDGET_MS: u64 = 100;
 /// is already running and finding it is a `connect` call.
 const DAEMON_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// A throwaway client identity for a loopback connection.
-///
-/// Random per process and never stored. On loopback the socket's permissions
-/// are the authorization, so this identifies the connection in a log and
-/// authorizes nothing -- which is exactly what keeps the OS keychain, and its
-/// prompt, off the startup path.
-fn ephemeral_client_id() -> [u8; 32] {
-    let mut id = [0u8; 32];
-    let pid = std::process::id().to_le_bytes();
-    id[..4].copy_from_slice(&pid);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos() as u64)
-        .to_le_bytes();
-    id[4..12].copy_from_slice(&nanos);
-    id
-}
-
 pub struct Config {
     pub font_families: Vec<String>,
     pub typography: Typography,
@@ -267,18 +249,28 @@ impl App {
         let connect_ms = attached.elapsed.as_secs_f64() * 1000.0;
         let spawned = attached.spawned;
 
+        // An ephemeral key, minted per launch and never stored.
+        //
+        // On loopback the socket's permissions are the authorization -- a
+        // process that can reach it runs as this user and could ptrace the
+        // daemon anyway -- so proving a *stored* key would buy nothing and
+        // would put the OS keychain, and its prompt, on the startup path. The
+        // handshake still runs, because the wire is uniform.
+        let identity = match zest_mesh::identity::ClientIdentity::generate() {
+            Ok(i) => i,
+            Err(e) => {
+                tracing::warn!(error = %e, "no randomness for a client key; staying in-process");
+                return None;
+            }
+        };
+
         let started = std::time::Instant::now();
         let proxy = proxy.clone();
         let session = crate::remote::RemoteSession::attach(
             attached.read,
             attached.write,
             &crate::remote::AttachOptions {
-                // An ephemeral identity. On loopback the socket's permissions
-                // are the authorization -- a process that can reach it runs as
-                // this user and could ptrace the daemon anyway -- so a stored
-                // key would buy nothing and would put the OS keychain, and its
-                // prompt, on the startup path.
-                client: zest_proto::ClientId::from_bytes(ephemeral_client_id()),
+                identity: &identity,
                 label: "zesterm",
                 command: &spec.command_line,
                 cols,
@@ -288,6 +280,9 @@ impl App {
                 // not leave one more idle shell on the machine each time.
                 adopt: self.attach_probe,
                 local: true,
+                // Loopback: the socket already answered "is this my machine",
+                // and there is no advertisement to have been misled by.
+                expect_host: None,
             },
             move |w| {
                 let _ = proxy.send_event(w);

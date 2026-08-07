@@ -14,7 +14,7 @@ use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
 use zest_daemon::{connect, default_socket_path};
-use zest_proto::{frame, ClientId, ClientMessage, FrameReader, HostMessage, PROTOCOL_VERSION};
+use zest_proto::{frame, ClientMessage, FrameReader, HostMessage, PROTOCOL_VERSION};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -42,23 +42,29 @@ fn main() {
         Write::flush(stream).expect("flush");
     };
 
+    // A throwaway key. This is a diagnostic, not a device: it should not
+    // accumulate a pairing on every host it is pointed at.
+    let identity = zest_mesh::identity::ClientIdentity::generate().expect("client key");
+    let client_nonce = zest_mesh::identity::Nonce::random().expect("nonce");
+    eprintln!("[attach] client {}", identity.client_id().short());
+
     send(
         &mut stream,
         &ClientMessage::Hello {
             version: PROTOCOL_VERSION,
-            client: ClientId::from_bytes([0xa7; 32]),
+            client: identity.client_id(),
             label: "attach".into(),
-            // A fixed value, because this example holds no key and the daemon
-            // does not yet challenge. It is deliberately not random: a nonce
-            // that looks fresh here would suggest this is doing something it
-            // is not.
-            nonce: zest_proto::Nonce32::from_bytes([0xa7; 32]),
+            nonce: zest_proto::Nonce32::from_bytes(*client_nonce.as_bytes()),
         },
     );
-    send(
-        &mut stream,
-        &ClientMessage::CreateSession { command: cmd, cwd: String::new(), cols: 100, rows: 30 },
-    );
+    // The session is created once the handshake completes, not before: a host
+    // that refuses this client should not have started a shell for it.
+    let mut create = Some(ClientMessage::CreateSession {
+        command: cmd,
+        cwd: String::new(),
+        cols: 100,
+        rows: 30,
+    });
 
     // The deadline is enforced by a separate thread, not by checking between
     // reads: `read` blocks until the daemon sends something, so a quiet session
@@ -90,7 +96,10 @@ fn main() {
         while let Some(body) = reader.next_frame().expect("framing") {
             match frame::decode::<HostMessage>(&body).expect("decode") {
                 HostMessage::Welcome { host, label, .. } => {
-                    eprintln!("[attach] host {} ({label})", host.short());
+                    eprintln!("[attach] authenticated to {} ({label})", host.short());
+                    if let Some(msg) = create.take() {
+                        send(&mut stream, &msg);
+                    }
                 }
                 HostMessage::Sessions { sessions } => {
                     for s in &sessions {
@@ -155,18 +164,44 @@ fn main() {
                 HostMessage::Error { message, .. } => eprintln!("[attach] error: {message}"),
                 HostMessage::Scrollback { .. } => {}
 
-                // This example holds no key, so it cannot answer a challenge.
-                // It says so and stops rather than retrying: a client looping
-                // against an authenticating host is how a log fills up.
-                HostMessage::Challenge { host, label, .. } => {
-                    eprintln!(
-                        "[attach] {} ({label}) wants a signed challenge; this example has no key",
-                        host.short()
+                HostMessage::Challenge { host, label, nonce, signature, version } => {
+                    eprintln!("[attach] host {} ({label}) challenged", host.short());
+                    let transcript = zest_mesh::pairing::Transcript {
+                        version,
+                        host,
+                        client: identity.client_id(),
+                        host_nonce: zest_mesh::identity::Nonce::from_bytes(nonce.0),
+                        client_nonce,
+                        host_label: label,
+                        client_label: "attach".into(),
+                    };
+                    let host_sig = zest_mesh::identity::Signature::from_slice(&signature.0)
+                        .expect("signature");
+                    // No expected host: this example is pointed at a socket by
+                    // hand, so there is no advertisement to have been misled by.
+                    if let Err(e) =
+                        zest_mesh::pairing::verify_challenge(None, &transcript, &host_sig)
+                    {
+                        eprintln!("[attach] the host did not prove itself: {e}");
+                        std::process::exit(1);
+                    }
+                    let sig = identity.sign(
+                        zest_mesh::identity::Purpose::Auth,
+                        &zest_mesh::pairing::auth_transcript(&transcript),
                     );
-                    std::process::exit(1);
+                    send(
+                        &mut stream,
+                        &ClientMessage::Auth {
+                            signature: zest_proto::Sig64::from_bytes(sig.to_bytes()),
+                        },
+                    );
                 }
                 HostMessage::AuthPending { code, expires_in_secs } => {
-                    eprintln!("[attach] waiting for approval, code {code} ({expires_in_secs}s)");
+                    // The code to compare with the one on the host's screen.
+                    // Not an error: the key is good, and nobody has said yes.
+                    eprintln!(
+                        "[attach] waiting for approval -- compare code {code} ({expires_in_secs}s)"
+                    );
                 }
                 HostMessage::AuthFailed { reason, message } => {
                     eprintln!("[attach] refused: {reason:?} -- {message}");

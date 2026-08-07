@@ -24,8 +24,10 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 use zest_core::Terminal;
+use zest_mesh::identity::{ClientIdentity, Nonce, Purpose, Signature};
+use zest_mesh::pairing::{auth_transcript, verify_challenge, Transcript};
 use zest_proto::{
-    frame, Applied, Applier, ClientId, ClientMessage, FrameReader, HostMessage, SessionAddr, Seq,
+    frame, Applied, Applier, ClientMessage, FrameReader, HostMessage, SessionAddr, Seq,
     PROTOCOL_VERSION,
 };
 
@@ -53,8 +55,14 @@ enum Outbound {
 /// What to attach to, and how to describe this client while doing it.
 #[derive(Debug, Clone, Copy)]
 pub struct AttachOptions<'a> {
-    pub client: ClientId,
-    /// Shown in the host's log and, once pairing lands, its approval prompt.
+    /// The key this client proves it holds.
+    ///
+    /// Not a bare id: the host challenges, and only the holder of the secret
+    /// can answer. On loopback the answer authorizes nothing -- the socket's
+    /// permissions already did -- which is why an ephemeral key is enough there
+    /// and the OS keychain stays off the startup path.
+    pub identity: &'a ClientIdentity,
+    /// Shown in the host's log and its approval prompt.
     pub label: &'a str,
     /// Empty means the host's default shell.
     pub command: &'a str,
@@ -71,9 +79,17 @@ pub struct AttachOptions<'a> {
     pub adopt: bool,
     /// Whether this connection is the loopback socket.
     ///
-    /// Not derived from comparing `HostId`s: every daemon reports `[0; 32]`
-    /// until pairing lands, so every host would look like every other.
+    /// Decided by the transport rather than by comparing `HostId`s, because
+    /// "did I reach this machine" and "did I reach the machine I dialled" are
+    /// different questions and only the second is about identity.
     pub local: bool,
+    /// The host this client believes it is dialling.
+    ///
+    /// Checked against the signed challenge, which is the whole reason the host
+    /// signs first: an address learned from an mDNS advertisement is a claim,
+    /// and without this "connect to my Mac" means "connect to whatever answered
+    /// on that port". `None` on loopback, where the socket is the answer.
+    pub expect_host: Option<zest_proto::HostId>,
 }
 
 pub struct RemoteSession {
@@ -123,7 +139,17 @@ impl RemoteSession {
         opts: &AttachOptions<'_>,
         wake: impl Fn(Wakeup) + Send + 'static,
     ) -> Result<Self, RemoteError> {
-        let &AttachOptions { client, label, command, cols, rows, scrollback, adopt, local } = opts;
+        let &AttachOptions {
+            identity,
+            label,
+            command,
+            cols,
+            rows,
+            scrollback,
+            adopt,
+            local,
+            expect_host,
+        } = opts;
         let (tx, rx): (Sender<Outbound>, Receiver<Outbound>) = crossbeam_channel::unbounded();
 
         // The handshake runs inline, before any thread starts, so a failure is
@@ -131,7 +157,7 @@ impl RemoteSession {
         // opens and then reports it has nothing to show.
         let mut conn = Handshake::new(read, write);
         let (host_label, addr, keyframe_seq, keyframe) =
-            conn.run(client, label, command, cols, rows, adopt)?;
+            conn.run(identity, label, command, cols, rows, adopt, expect_host)?;
         let (mut reader, writer) = conn.into_halves();
 
         let terminal = Arc::new(FairMutex::new(Terminal::new(
@@ -430,40 +456,74 @@ impl Handshake {
         }
     }
 
+    #[allow(clippy::too_many_arguments, reason = "one handshake, one call site")]
     fn run(
         &mut self,
-        client: ClientId,
+        identity: &ClientIdentity,
         label: &str,
         command: &str,
         cols: u16,
         rows: u16,
         adopt: bool,
+        expect_host: Option<zest_proto::HostId>,
     ) -> Result<(String, SessionAddr, u64, zest_proto::Keyframe), RemoteError> {
+        let client_nonce = Nonce::random().map_err(|e| RemoteError::Io(e.to_string()))?;
         self.send(&ClientMessage::Hello {
             version: PROTOCOL_VERSION,
-            client,
+            client: identity.client_id(),
             label: label.to_string(),
-            // No key yet: on loopback the socket's permissions are the
-            // authorization, and this daemon does not challenge. When pairing
-            // lands, a `Challenge` arrives here instead of a `Welcome`.
-            nonce: zest_proto::Nonce32::default(),
+            nonce: zest_proto::Nonce32::from_bytes(*client_nonce.as_bytes()),
         })?;
 
+        // Challenge -> Auth -> Welcome. Two round trips on connect, which on a
+        // loopback socket is tens of microseconds and on a LAN is under a
+        // millisecond -- paid once, against a session that lasts hours.
         let host_label = loop {
             match self.recv()? {
+                HostMessage::Challenge { version, host, label: host_label, nonce, signature } => {
+                    if version != PROTOCOL_VERSION {
+                        return Err(RemoteError::Version { ours: PROTOCOL_VERSION, theirs: version });
+                    }
+                    let transcript = Transcript {
+                        version,
+                        host,
+                        client: identity.client_id(),
+                        host_nonce: Nonce::from_bytes(nonce.0),
+                        client_nonce,
+                        host_label: host_label.clone(),
+                        client_label: label.to_string(),
+                    };
+                    let host_sig = Signature::from_slice(&signature.0)
+                        .map_err(|e| RemoteError::Refused(e.to_string()))?;
+
+                    // Before revealing anything: is this the machine that was
+                    // dialled? On a LAN the address came from an advertisement,
+                    // which is a claim rather than a fact.
+                    verify_challenge(expect_host, &transcript, &host_sig)
+                        .map_err(|e| RemoteError::Refused(e.to_string()))?;
+
+                    let sig = identity.sign(Purpose::Auth, &auth_transcript(&transcript));
+                    self.send(&ClientMessage::Auth {
+                        signature: zest_proto::Sig64::from_bytes(sig.to_bytes()),
+                    })?;
+                }
                 HostMessage::Welcome { version, label, .. } => {
                     if version != PROTOCOL_VERSION {
                         return Err(RemoteError::Version { ours: PROTOCOL_VERSION, theirs: version });
                     }
                     break label;
                 }
+                // Not an error: the key is good and nobody has said yes yet.
+                // The caller decides how long to wait.
+                HostMessage::AuthPending { code, expires_in_secs } => {
+                    tracing::info!(
+                        %code,
+                        expires_in_secs,
+                        "waiting for this device to be approved on the host"
+                    );
+                }
                 HostMessage::AuthFailed { reason, message } => {
                     return Err(RemoteError::Refused(format!("{reason:?}: {message}")));
-                }
-                HostMessage::Challenge { .. } => {
-                    return Err(RemoteError::Refused(
-                        "this host requires pairing, which this build cannot do yet".into(),
-                    ));
                 }
                 HostMessage::Error { message, .. } => return Err(RemoteError::Refused(message)),
                 _ => {}
@@ -561,6 +621,14 @@ mod tests {
             let _ = std::fs::remove_file(format!("{path}.lock"));
 
             let registry = Arc::new(zest_daemon::Registry::new());
+            // A real host key, because the handshake is real: these tests drive
+            // the same code the daemon binary does.
+            let auth = Arc::new(zest_daemon::Authenticator::new(
+                Arc::new(zest_mesh::identity::HostIdentity::generate().expect("host key")),
+                Arc::new(zest_mesh::trust::MemoryTrustStore::new()),
+                zest_mesh::pairing::PairingQueue::new(),
+                "harness",
+            ));
             let cfg = zest_daemon::DaemonConfig {
                 host: zest_proto::HostId::from_bytes([3; 32]),
                 label: "harness".into(),
@@ -571,7 +639,7 @@ mod tests {
                 let registry = Arc::clone(&registry);
                 let path = path.clone();
                 std::thread::spawn(move || {
-                    let _ = zest_daemon::listen(&path, cfg, registry);
+                    let _ = zest_daemon::listen(&path, cfg, registry, auth);
                 });
             }
 
@@ -585,11 +653,12 @@ mod tests {
         fn attach(&self, command: &str, wake: impl Fn(Wakeup) + Send + 'static) -> RemoteSession {
             let stream = zest_daemon::connect(&self.path).expect("connect");
             let write = stream.try_clone().expect("clone");
+            let identity = ClientIdentity::generate().expect("client key");
             RemoteSession::attach(
                 Box::new(stream),
                 Box::new(write),
                 &AttachOptions {
-                    client: ClientId::from_bytes([7; 32]),
+                    identity: &identity,
                     label: "test",
                     command,
                     cols: 40,
@@ -597,6 +666,7 @@ mod tests {
                     scrollback: 100,
                     adopt: false,
                     local: true,
+                    expect_host: None,
                 },
                 wake,
             )

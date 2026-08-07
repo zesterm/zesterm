@@ -21,6 +21,8 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Where the trust file lives, matching zest-config's directories.
+directories = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 # `flock` on the socket path, so two daemons starting at once cannot each

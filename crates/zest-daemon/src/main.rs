@@ -7,8 +7,12 @@
 
 use std::sync::Arc;
 
-use zest_daemon::{default_socket_path, listen, DaemonConfig, Registry};
-use zest_proto::HostId;
+use zest_daemon::{default_socket_path, listen, Authenticator, DaemonConfig, Registry};
+use zest_mesh::identity::HostIdentity;
+use zest_mesh::keystore::{KeyStore, MemoryKeyStore};
+use zest_mesh::pairing::{Decision, PairingQueue};
+use zest_mesh::trust::{FileTrustStore, MemoryTrustStore, TrustStore};
+use zest_proto::ClientId;
 
 fn main() {
     tracing_subscriber::fmt()
@@ -22,13 +26,21 @@ fn main() {
     let opt = |name: &str| -> Option<String> {
         args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
     };
+    let flag = |name: &str| args.iter().any(|a| a == name);
 
-    if args.iter().any(|a| a == "--help" || a == "-h") {
+    if flag("--help") || flag("-h") {
         println!(
             "zest-daemon\n\n\
-             --socket <path>   where to listen (default: per-user)\n\
-             --label <name>    how this machine appears in a fleet listing\n\
-             --socket-path     print the default socket path and exit\n\n\
+             --socket <path>     where to listen (default: per-user)\n\
+             --label <name>      how this machine appears in a fleet listing\n\
+             --socket-path       print the default socket path and exit\n\
+             --identity          print this host's id and exit\n\
+             --ephemeral         use a throwaway key, not the OS keychain\n\
+             --trust <hex>       trust a client id without a prompt\n\
+             --forget <hex>      remove a trusted client\n\
+             --trusted           list trusted clients and exit\n\
+             --trust-file <path> where pairings are recorded\n\
+             --no-prompt         never ask on stdin; refuse unknown clients\n\n\
              Sessions outlive the clients attached to them. Closing a window\n\
              does not end a shell."
         );
@@ -36,33 +48,253 @@ fn main() {
     }
 
     let socket = opt("--socket").unwrap_or_else(default_socket_path);
-
-    if args.iter().any(|a| a == "--socket-path") {
+    if flag("--socket-path") {
         println!("{socket}");
         return;
     }
 
+    // --- identity ---------------------------------------------------------
+    //
+    // The HostId *is* the public key, so this is what makes "is this really my
+    // Mac" answerable by asking it to sign a nonce. It replaces a hardcoded
+    // [0; 32], which was not merely a placeholder: an all-zero Ed25519 key is a
+    // small-order point that `verifying_key` already rejects, so nothing signed
+    // under it could ever have verified.
+    let ephemeral = flag("--ephemeral");
+    let store: Box<dyn KeyStore> = if ephemeral {
+        // For the edit-run loop. `keyring` keys access to the *binary*, so on
+        // macOS every rebuild re-prompts for the keychain -- and the outcome of
+        // that is a developer who turns authentication off to get work done.
+        Box::new(MemoryKeyStore::new())
+    } else {
+        match zest_mesh::keystore::OsKeyStore::new() {
+            Ok(s) => Box::new(s),
+            Err(e) => {
+                tracing::error!(error = %e, "no credential store; refusing to start");
+                eprintln!(
+                    "zest-daemon: this machine has no usable credential store.\n\
+                     A host that keeps its private key anywhere else is not one\n\
+                     worth shipping. Use --ephemeral for a throwaway key."
+                );
+                std::process::exit(1);
+            }
+        }
+    };
+
+    let identity = match HostIdentity::load_or_create(store.as_ref()) {
+        Ok(i) => Arc::new(i),
+        Err(e) => {
+            tracing::error!(error = %e, "could not load this host's identity");
+            std::process::exit(1);
+        }
+    };
+
+    if flag("--identity") {
+        println!("{}", hex(&identity.host_id().0));
+        println!("short: {}", identity.host_id().short());
+        return;
+    }
+
+    // --- trust ------------------------------------------------------------
+
+    let trust: Arc<dyn TrustStore> = if ephemeral {
+        Arc::new(MemoryTrustStore::new())
+    } else {
+        let path = opt("--trust-file").map_or_else(default_trust_path, std::path::PathBuf::from);
+        match FileTrustStore::open(&path) {
+            Ok(t) => Arc::new(t),
+            Err(e) => {
+                // Refusing rather than starting with an empty list. Silently
+                // forgetting every pairing makes every device prompt again, and
+                // a stream of prompts is how someone learns to approve without
+                // reading.
+                tracing::error!(error = %e, "could not read the trust store");
+                eprintln!("zest-daemon: {e}");
+                std::process::exit(1);
+            }
+        }
+    };
+
+    let queue = PairingQueue::new();
+    let label = opt("--label").unwrap_or_else(machine_label);
+    let auth = Arc::new(Authenticator::new(
+        Arc::clone(&identity),
+        Arc::clone(&trust),
+        Arc::clone(&queue),
+        label.clone(),
+    ));
+
+    if let Some(hex_id) = opt("--trust") {
+        match parse_client(&hex_id) {
+            Ok(client) => {
+                let name = opt("--label-for").unwrap_or_else(|| "trusted by hand".into());
+                match auth.trust_now(client, &name) {
+                    Ok(()) => println!("trusted {}", client.short()),
+                    Err(e) => {
+                        eprintln!("zest-daemon: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("zest-daemon: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if let Some(hex_id) = opt("--forget") {
+        match parse_client(&hex_id).and_then(|c| {
+            trust.remove(c).map(|existed| (c, existed)).map_err(|e| e.to_string())
+        }) {
+            Ok((client, true)) => println!("forgot {}", client.short()),
+            Ok((client, false)) => println!("{} was not trusted", client.short()),
+            Err(e) => {
+                eprintln!("zest-daemon: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if flag("--trusted") {
+        match trust.list() {
+            Ok(records) if records.is_empty() => println!("no clients are trusted"),
+            Ok(records) => {
+                for r in records {
+                    println!("{}  {}", r.client.short(), r.label);
+                }
+            }
+            Err(e) => {
+                eprintln!("zest-daemon: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     let config = DaemonConfig {
-        // A placeholder until WS-H (#7) lands real keypairs. `HostId` is meant
-        // to be the fingerprint of this machine's public key, so that a peer
-        // can verify it by asking it to sign a nonce; a fixed value proves
-        // nothing and must not survive into anything reachable from the LAN.
-        host: HostId::from_bytes([0; 32]),
-        label: opt("--label").unwrap_or_else(machine_label),
+        host: identity.host_id(),
+        label,
         local_socket: socket.clone(),
-        // Off until there is an identity to authorize against. A daemon that
-        // served the network before it could tell peers apart would be handing
-        // out shells.
+        // Still off. The LAN listener is the next stage; this one only makes
+        // turning it on *possible* without handing out shells.
         listen_lan: false,
     };
 
-    tracing::info!(socket = %socket, label = %config.label, "starting");
+    tracing::info!(
+        socket = %socket,
+        label = %config.label,
+        host = %identity.host_id().short(),
+        trust = %trust.describe(),
+        "starting"
+    );
+
+    // Someone has to be able to say yes. Without an approver, an unknown client
+    // waits two minutes and is denied -- correct, and useless if there is
+    // nobody to ask.
+    if !flag("--no-prompt") {
+        start_approver(&queue, &auth);
+    }
 
     let registry = Arc::new(Registry::new());
-    if let Err(e) = listen(&socket, config, registry) {
+    if let Err(e) = listen(&socket, config, registry, auth) {
         tracing::error!(error = %e, "could not listen");
         std::process::exit(1);
     }
+}
+
+/// Ask on stdin when a device wants to pair.
+///
+/// One of three front ends over the same queue — this, `--trust`, and later the
+/// desktop modal — which is what lets the modal land as a front-end swap rather
+/// than a second mechanism.
+fn start_approver(queue: &Arc<PairingQueue>, auth: &Arc<Authenticator>) {
+    let queue_for_hook = Arc::clone(queue);
+    let auth = Arc::clone(auth);
+
+    // Woken by the queue rather than polling: a daemon that wakes to check for
+    // nothing is a laptop that does not sleep.
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    queue.on_request(move || {
+        let _ = tx.send(());
+    });
+
+    std::thread::Builder::new()
+        .name("zest-daemon-approver".into())
+        .spawn(move || {
+            use std::io::BufRead as _;
+            while rx.recv().is_ok() {
+                for request in queue_for_hook.pending() {
+                    // Both halves are shown, because they answer different
+                    // questions: `short()` says what claims to be connecting,
+                    // the code says that this is the connection you are looking
+                    // at right now.
+                    println!(
+                        "\npair \"{}\" ({}) from {}?\n  code {}\n  [y/N] ",
+                        request.label,
+                        request.client.short(),
+                        request.remote,
+                        spaced(&request.code),
+                    );
+                    let mut line = String::new();
+                    if std::io::stdin().lock().read_line(&mut line).is_err() {
+                        // No stdin -- launchd, systemd, a detached spawn. Leave
+                        // the request to time out rather than spinning on EOF,
+                        // and say so once.
+                        tracing::warn!(
+                            "no stdin to prompt on; use --trust or --no-prompt"
+                        );
+                        return;
+                    }
+                    let approve = matches!(line.trim(), "y" | "Y" | "yes");
+                    auth.decide(
+                        request.client,
+                        if approve { Decision::Approve } else { Decision::Deny },
+                    );
+                }
+            }
+        })
+        .ok();
+}
+
+/// `428913` as `428 913`, which is how a person reads it aloud.
+fn spaced(code: &str) -> String {
+    let mid = code.len() / 2;
+    format!("{} {}", &code[..mid], &code[mid..])
+}
+
+/// Where pairings are recorded.
+///
+/// A `fleet/` subdirectory rather than the config root: `zest-config` watches
+/// the config directory non-recursively, so a pairing write here cannot even
+/// produce an event the watcher has to filter out.
+fn default_trust_path() -> std::path::PathBuf {
+    directories::ProjectDirs::from("dev", "zesterm", "zesterm").map_or_else(
+        || std::path::PathBuf::from("zesterm-trust.toml"),
+        |dirs| dirs.config_dir().join("fleet").join("trust.toml"),
+    )
+}
+
+fn parse_client(text: &str) -> Result<ClientId, String> {
+    let text = text.trim();
+    if text.len() != 64 {
+        return Err(format!(
+            "a client id is 64 hex characters; got {} in {text:?}",
+            text.len()
+        ));
+    }
+    let mut out = [0u8; 32];
+    for (i, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+        let s = std::str::from_utf8(pair).map_err(|_| "not hex".to_string())?;
+        out[i] = u8::from_str_radix(s, 16).map_err(|_| format!("not hex: {s}"))?;
+    }
+    Ok(ClientId::from_bytes(out))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A human name for this machine, for the fleet listing.

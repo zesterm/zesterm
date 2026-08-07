@@ -133,6 +133,7 @@ mod imp {
         path: &str,
         config: DaemonConfig,
         registry: Arc<Registry>,
+        auth: std::sync::Arc<crate::auth::Authenticator>,
     ) -> Result<(), DaemonError> {
         // Take the lock *before* unlinking anything.
         //
@@ -178,13 +179,19 @@ mod imp {
             let Ok(stream) = stream else { continue };
             let config = config.clone();
             let registry = Arc::clone(&registry);
+            let auth = std::sync::Arc::clone(&auth);
             // A thread per client. A handful of devices per machine does not
             // justify an async runtime, and the daemon's job is to sit still.
             std::thread::spawn(move || {
                 // Two handles on one socket: reading and writing must proceed
                 // independently, or a blocking read holds off every push.
                 let Ok(write_half) = stream.try_clone() else { return };
-                if let Err(e) = crate::server::serve(stream, write_half, config, registry) {
+                // `Auth::Transport`, constructed here and nowhere else: the
+                // socket's permissions are what authorized this connection.
+                let auth = crate::auth::Auth::Transport(auth);
+                if let Err(e) =
+                    crate::server::serve(stream, write_half, config, registry, auth, "loopback")
+                {
                     tracing::warn!(error = %e, "client disconnected");
                 }
             });
@@ -391,6 +398,7 @@ mod imp {
         path: &str,
         config: DaemonConfig,
         registry: Arc<Registry>,
+        auth: std::sync::Arc<crate::auth::Authenticator>,
     ) -> Result<(), DaemonError> {
         let name = wide(path);
         let mut first = true;
@@ -446,9 +454,15 @@ mod imp {
             let stream = PipeStream::new(handle, true);
             let config = config.clone();
             let registry = Arc::clone(&registry);
+            let auth = std::sync::Arc::clone(&auth);
             std::thread::spawn(move || {
                 let Ok(write_half) = stream.try_clone() else { return };
-                if let Err(e) = crate::server::serve(stream, write_half, config, registry) {
+                // `Auth::Transport`, constructed here and nowhere else: the
+                // socket's permissions are what authorized this connection.
+                let auth = crate::auth::Auth::Transport(auth);
+                if let Err(e) =
+                    crate::server::serve(stream, write_half, config, registry, auth, "loopback")
+                {
                     tracing::warn!(error = %e, "client disconnected");
                 }
             });
@@ -488,7 +502,7 @@ mod tests {
     // invisible on Windows, where the pipe implementation happens to use both.
     use std::io::{Read, Write};
     use std::time::{Duration, Instant};
-    use zest_proto::{frame, ClientId, ClientMessage, HostId, HostMessage, PROTOCOL_VERSION};
+    use zest_proto::{frame, ClientMessage, HostId, HostMessage, PROTOCOL_VERSION};
 
     fn config(path: &str) -> DaemonConfig {
         DaemonConfig {
@@ -544,7 +558,7 @@ mod tests {
             let cfg = cfg.clone();
             let registry = Arc::clone(&registry);
             std::thread::spawn(move || {
-                let _ = listen(&path, cfg, registry);
+                let _ = listen(&path, cfg, registry, test_authenticator());
             });
         }
 
@@ -560,13 +574,52 @@ mod tests {
             }
         };
 
+        // The handshake, over the real socket. A client that only says hello
+        // is no longer served, which is the point of this stage -- so this test
+        // has to hold a key and answer a challenge like any other client.
+        let client = zest_mesh::identity::ClientIdentity::generate().expect("client key");
+        let client_nonce = [5u8; 32];
         let hello = ClientMessage::Hello {
             version: PROTOCOL_VERSION,
-            client: ClientId::from_bytes([2; 32]),
+            client: client.client_id(),
             label: "test-client".into(),
-            nonce: zest_proto::Nonce32::from_bytes([5; 32]),
+            nonce: zest_proto::Nonce32::from_bytes(client_nonce),
         };
         stream.write_all(&frame::encode(&hello).expect("encode")).expect("write");
+        stream.flush().expect("flush");
+
+        let mut handshake = zest_proto::FrameReader::new();
+        let mut scratch = vec![0u8; 64 * 1024];
+        let challenge = loop {
+            if let Ok(Some(body)) = handshake.next_frame() {
+                match frame::decode::<HostMessage>(&body).expect("decode") {
+                    HostMessage::Challenge { host, label, nonce, version, .. } => {
+                        break (host, label, nonce, version);
+                    }
+                    other => panic!("expected a challenge, got {other:?}"),
+                }
+            }
+            let n = Read::read(&mut stream, &mut scratch).expect("read");
+            assert!(n > 0, "the daemon closed during the handshake");
+            handshake.feed(&scratch[..n]);
+        };
+        let (host, host_label, host_nonce, version) = challenge;
+        let transcript = zest_mesh::pairing::Transcript {
+            version,
+            host,
+            client: client.client_id(),
+            host_nonce: zest_mesh::identity::Nonce::from_bytes(host_nonce.0),
+            client_nonce: zest_mesh::identity::Nonce::from_bytes(client_nonce),
+            host_label,
+            client_label: "test-client".into(),
+        };
+        let sig = client.sign(
+            zest_mesh::identity::Purpose::Auth,
+            &zest_mesh::pairing::auth_transcript(&transcript),
+        );
+        let auth_msg =
+            ClientMessage::Auth { signature: zest_proto::Sig64::from_bytes(sig.to_bytes()) };
+        stream.write_all(&frame::encode(&auth_msg).expect("encode")).expect("write");
         stream.flush().expect("flush");
 
         let cmd = if cfg!(windows) {
@@ -579,7 +632,9 @@ mod tests {
         stream.flush().expect("flush");
 
         // Read until the welcome and the session listing have both arrived.
-        let mut reader = zest_proto::FrameReader::new();
+        // Continues from the handshake's reader, which may already hold the
+        // start of the next frame.
+        let mut reader = handshake;
         let mut buf = vec![0u8; 64 * 1024];
         let mut saw_welcome = false;
         let mut sessions = Vec::new();
@@ -675,7 +730,7 @@ mod unix_tests {
         };
         let listen_path = p.clone();
         std::thread::spawn(move || {
-            let _ = listen(&listen_path, cfg, registry);
+            let _ = listen(&listen_path, cfg, registry, test_authenticator());
         });
 
         // Wait for the socket to appear rather than sleeping a fixed time.
@@ -691,4 +746,16 @@ mod unix_tests {
         let _ = std::fs::remove_file(&p);
         let _ = std::fs::remove_file(format!("{p}.lock"));
     }
+}
+
+#[cfg(test)]
+fn test_authenticator() -> std::sync::Arc<crate::auth::Authenticator> {
+    std::sync::Arc::new(crate::auth::Authenticator::new(
+        std::sync::Arc::new(
+            zest_mesh::identity::HostIdentity::generate().expect("host key"),
+        ),
+        std::sync::Arc::new(zest_mesh::trust::MemoryTrustStore::new()),
+        zest_mesh::pairing::PairingQueue::new(),
+        "test-host",
+    ))
 }

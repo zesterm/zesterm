@@ -4941,6 +4941,7 @@ dependencies = [
  "zest-daemon",
  "zest-font",
  "zest-input",
+ "zest-mesh",
  "zest-proto",
  "zest-pty",
  "zest-render-wgpu",
@@ -4978,6 +4979,7 @@ dependencies = [
 name = "zest-daemon"
 version = "0.1.0"
 dependencies = [
+ "directories",
  "rustix 1.1.4",
  "serde",
  "thiserror 2.0.19",

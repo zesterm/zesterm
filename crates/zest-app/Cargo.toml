@@ -24,6 +24,9 @@ zest-input.workspace = true
 # protocol the phone does and starts the same binary the fleet runs.
 zest-proto.workspace = true
 zest-daemon.workspace = true
+# The client half of the pairing handshake: this app proves a key like any
+# other client, over the same wire the phone will use.
+zest-mesh.workspace = true
 thiserror = { workspace = true }
 toml.workspace = true
 winit.workspace = true
