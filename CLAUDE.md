@@ -6,33 +6,32 @@ Windows; a Linux build watched from a phone.
 
 ## Read these first
 
-1. **[docs/ROADMAP.md](docs/ROADMAP.md)** — the plan, current state, and the
-   workstream map. Source of truth; issue #1 mirrors it.
-2. **[docs/CONTRACTS.md](docs/CONTRACTS.md)** — the frozen seams between
-   workstreams. **Read this before touching a shared type.**
+1. **[docs/ROADMAP.md](docs/ROADMAP.md)** — the plan, current state, and what is
+   being built next. Source of truth; issue #1 mirrors it.
+2. **[docs/CONTRACTS.md](docs/CONTRACTS.md)** — the seams that hold the clients,
+   the daemon and the core together. **Read this before touching a shared type.**
 3. **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — decisions that were
    expensive to reach and are cheap to accidentally undo. Argue with the
    reasoning there before changing any of them.
 
-## If you are working on one workstream
+## How the work runs
 
-Several run in parallel. The rules exist so that stays cheaper than working
-serially — which it stops being the moment two streams edit the same file.
+**One lane, on `main`.** The project was built by several workstreams in
+parallel, each in its own worktree with its own paths; that is over. The streams
+survive as *names for bodies of work* in the roadmap — useful for saying what a
+commit is about — not as ownership boundaries or branches.
 
-- **Find your stream in the ROADMAP table** and work only inside the paths it
-  owns. If the job seems to need a file another stream owns, that is a signal
-  the seam is wrong: say so rather than reaching across.
-- **Never edit the root `Cargo.toml` or `Cargo.lock`.** Every crate the project
-  will have is registered already, including the skeletons. Adding a
+- **Sequential commits on `main`.** No worktree-per-stream, no path ownership. A
+  branch is for something genuinely speculative, not for routine work.
+- **Never edit the root `Cargo.toml` or `Cargo.lock` by hand.** Every crate the
+  project will have is registered already, including the skeletons. Adding a
   *dependency* to your own crate's manifest is fine.
-- **Never change a frozen contract.** Open an issue and wait — see
-  [docs/CONTRACTS.md](docs/CONTRACTS.md). Adding a new type beside one is fine.
-- **One git worktree and branch per stream**, or agents fight over `target/`
-  and each other's edits:
-  ```
-  git worktree add ../zesterm-ws-c ws/c-unix-pty
-  ```
-  Merge to `main` at stream boundaries, not continuously.
+- **A contract in [docs/CONTRACTS.md](docs/CONTRACTS.md) still does not move
+  casually.** With one lead the rule is no longer "open an issue and wait" — it
+  is: change it deliberately, land it with **every** consumer in one commit,
+  update the table, and say so on issue #1. A frozen contract with a
+  half-updated consumer is worse than either shape. Adding a new type beside one
+  is still free.
 - **Update the roadmap in the same commit as the work**, then refresh the issue.
   A roadmap that lags is one nobody trusts.
 

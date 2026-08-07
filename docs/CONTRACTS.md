@@ -1,16 +1,22 @@
 # Frozen contracts
 
-Several workstreams are being built at once, by different people, against shared seams. A seam
-that moves while three streams are building on it costs more than the change was worth.
+These seams were frozen because several workstreams were building against them at once, and a
+seam that moves under three streams costs more than the change was worth. **That reason has
+expired — one lead, one lane — and the freeze has not.**
 
-**The rule: a stream may not change a frozen contract. It opens an issue and waits.**
+What it protects now is different and longer-lived: a wire type is consumed by clients that are
+not in this repository and do not ship on this repository's schedule. Today those are the web
+client and the phone, and neither exists yet, which is exactly why now is the cheap moment for
+anything that has to change at all.
 
-That is not bureaucracy — it is the only thing that makes parallel work cheaper than serial work.
-A stream that quietly widens a trait to suit itself has just created a merge conflict for everyone
-else, and the person who finds it is whoever merges last.
+**The rule, restated for one lead:** a frozen contract does not move casually, and never moves
+half-way. To change one — land it with **every** consumer in the same commit, update the table
+below, and say so on issue #1. A frozen contract with a half-updated consumer is worse than
+either shape.
 
 Adding a *new* type next to a frozen one is always fine. Adding a `#[serde(default)]` field is
-fine. Changing a signature, renaming a variant, or removing a method is not.
+fine. Changing a signature, renaming a variant, or removing a method is a deliberate act with a
+paragraph of justification attached.
 
 ---
 
@@ -83,8 +89,11 @@ subscriber.
 
 ## Changing one anyway
 
-1. Open an issue against the master plan (#1) describing what breaks and why the current shape
-   cannot serve.
-2. Name every stream that consumes it — the table above is the list.
+1. Write down what breaks and why the current shape cannot serve. A comment on the master plan
+   (#1) is enough; the point is that the reasoning outlives the diff.
+2. Name every consumer — the table above is the list, and it must be *complete* before you start,
+   not discovered while compiling.
 3. Land the change and every consumer in one commit. A frozen contract with a half-updated
    consumer is worse than either shape.
+4. Update the table in the same commit. A row that no longer describes the code is worse than no
+   row, because it is believed.

@@ -45,8 +45,9 @@ move.
 
 ## Status
 
-**417 tests, four gates green, first paint 35ms.** `main` is the handover point;
-everything below is measured on it rather than remembered.
+**417 tests, four gates green** — re-measured on macOS, not remembered. First
+paint 35ms **on Windows**; the Mac paints against a different compositor and its
+number is reported rather than gated.
 
 | Crate | State |
 |---|---|
@@ -57,10 +58,10 @@ everything below is measured on it rather than remembered.
 | `zest-render-wgpu` | ✅ pipelines, atlas, offscreen resolve, selection — ⬜ gamma validation |
 | `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema |
 | `zest-input` | ✅ extracted; keys + SGR mouse + selection — ⬜ IME, Kitty protocol |
-| `zest-app` | ✅ window, shell, sessions behind `SessionSource` — ⬜ daemon-attached source |
-| `zest-proto` | ✅ wire types, encoder, decoder, framing, conformance corpus |
+| `zest-app` | ✅ window, shell, sessions behind `SessionSource` on Windows — 🟡 macOS bring-up in progress — ⬜ daemon-attached source |
+| `zest-proto` | ✅ wire types, encoder, reference decoder for TS clients, framing, conformance corpus — ⬜ no `Delta` → `Terminal` applier, no modes on the wire |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet — ⬜ pairing, transports |
-| `zest-daemon` | ✅ session ownership, protocol loop, loopback transport — ⬜ LAN listener |
+| `zest-daemon` | ✅ session ownership, protocol loop, loopback transport — ⬜ LAN listener, no authentication, `Seq` and `Ack` not yet real |
 
 ### What works end to end today
 
@@ -74,7 +75,7 @@ everything below is measured on it rather than remembered.
 
 ### The gap to M3
 
-Three things, and no more:
+Three things at the level of features:
 
 1. **A LAN listener on the daemon** — it currently listens only on the loopback
    socket. → WS-F
@@ -82,25 +83,48 @@ Three things, and no more:
    → WS-H item 3
 3. **`zest-app` attaching to a daemon** rather than owning a pty. → WS-F
 
+And four things underneath them that reading the code turned up. Each is
+recorded here because none is visible from the feature list, and the third is
+the one that decides whether M3's win condition is worth having:
+
+- **There is no `Delta` → `Terminal` applier.** `decode.rs`'s `GridView` is the
+  reference decoder *for TypeScript clients* and rebuilds a flat row list.
+  CONTRACTS.md promises a remote session keeps a real local `Terminal` so the
+  renderer's path is identical at both ends; nothing implements that yet.
+- **`DeltaOp::AltScreen` is emitted after `DeltaOp::Row`** (`encode.rs:245`).
+  Harmless for a flat row list — which is why it went unnoticed — and silent
+  corruption for a `Terminal`: the rows describing the alt screen land in the
+  primary grid, then the alt grid is created blank. Entering vim would show an
+  empty screen and leaving it would show corrupted scrollback.
+- **Terminal modes never cross the wire.** Only `AltScreen` does. `zest-app`
+  reads `Terminal::modes()` for mouse reporting, bracketed paste, application
+  cursor keys and keypad, so a daemon-attached session has none of them until
+  the wire carries modes. tmux, htop and vim mouse support are all behind this.
+- **The daemon unlinks its socket before binding** (`local.rs:71`), so two
+  daemons starting at once split-brain: the second unlinks the first's socket
+  and binds its own, and the first keeps running with its own `Registry`.
+  Nothing exercises it because nothing auto-spawns a daemon — the app doing
+  find-or-spawn is exactly what will.
+
 ---
 
 # Workstreams
 
-Bounded pieces that can run in parallel, each with its own issue. **Own only
-your paths.** A job that seems to need another stream's files means the seam is
-wrong — say so rather than reaching across.
+These were built in parallel, one worktree and one owner each. **That is over:
+one lead, one lane, sequential commits on `main`.** The streams stay as *names
+for bodies of work* — they make a commit's subject legible and each still has an
+issue worth reading — but they are no longer ownership boundaries, and nothing
+below means "do not touch this file".
 
-Each has its own issue, self-contained enough to hand to an agent on its own.
-
-| | Stream | Owns | Status | Issue |
+| | Stream | About | Status | Issue |
 |---|---|---|---|---|
-| **A** | [Windows chrome, motion, polish](#ws-a) | `zest-app/src/{chrome,motion,platform}*`, `zest-render-wgpu/` | **Ready** — B unblocked it | [#5](https://github.com/zesterm/zesterm/issues/5) |
+| **A** | [Windows chrome, motion, polish](#ws-a) | `zest-app/src/{chrome,motion,platform}*`, `zest-render-wgpu/` | Open — closes M1 | [#5](https://github.com/zesterm/zesterm/issues/5) |
 | **B** | [`zest-input`](#ws-b) | `crates/zest-input/` | Extracted ✅ · IME + Kitty open | [#2](https://github.com/zesterm/zesterm/issues/2) |
-| **C** | [Unix PTY + macOS host](#ws-c) | `zest-pty/src/unix.rs`, macOS platform | C1 ✅ · C2 open, **not needed for M3** | [#3](https://github.com/zesterm/zesterm/issues/3) |
-| **D** | [Linux host](#ws-d) | Linux platform + packaging | **Ready** — C1 landed `unix.rs` | [#9](https://github.com/zesterm/zesterm/issues/9) |
-| **E** | [Command blocks](#ws-e) | `zest-core/src/blocks.rs`, OSC 133, shell integration | Ready | [#6](https://github.com/zesterm/zesterm/issues/6) |
-| **F** | [`zest-proto` + `zest-daemon`](#ws-f) | `crates/zest-proto/`, `crates/zest-daemon/` | Protocol + daemon ✅ · **LAN listener + app attach next** | [#4](https://github.com/zesterm/zesterm/issues/4) |
-| **G** | [Web client](#ws-g) | `clients/web/` | Ready (decoder) | [#8](https://github.com/zesterm/zesterm/issues/8) |
+| **C** | [Unix PTY + macOS host](#ws-c) | `zest-pty/src/unix.rs`, macOS platform | C1 ✅ · **C2 in progress** — the app must run on the Mac to verify M3 there | [#3](https://github.com/zesterm/zesterm/issues/3) |
+| **D** | [Linux host](#ws-d) | Linux platform + packaging | Open — C1 landed `unix.rs` | [#9](https://github.com/zesterm/zesterm/issues/9) |
+| **E** | [Command blocks](#ws-e) | `zest-core/src/blocks.rs`, OSC 133, shell integration | Open | [#6](https://github.com/zesterm/zesterm/issues/6) |
+| **F** | [`zest-proto` + `zest-daemon`](#ws-f) | `crates/zest-proto/`, `crates/zest-daemon/` | Protocol + daemon ✅ · **applier, app attach, LAN listener next** | [#4](https://github.com/zesterm/zesterm/issues/4) |
+| **G** | [Web client](#ws-g) | `clients/web/` | Open (decoder) | [#8](https://github.com/zesterm/zesterm/issues/8) |
 | **H** | [Mesh identity, discovery, transports](#ws-h) | `crates/zest-mesh/`, `cloud/` | Identity + discovery ✅ · **pairing next** | [#7](https://github.com/zesterm/zesterm/issues/7) |
 
 **Ordering that mattered, and is now settled.** B landed before A, so `zest-app`
@@ -108,16 +132,21 @@ is free of input code and A can fill it with chrome. C1 landed before D, so
 `unix.rs` exists for Linux to build on. H's identity landed independently of F,
 as planned.
 
-**What remains ordered.** WS-F's LAN listener and WS-H's pairing are the two
-halves of M3 and meet at the handshake — neither blocks the other, but
-`listen_lan` must not be turned on until pairing exists. That is the one
-sequencing rule still live.
+**The sequencing rule still live.** `listen_lan` must not be turned on until
+pairing exists. It is now enforced by the types rather than by discipline — the
+LAN listener takes an authenticator it is impossible to construct from the
+loopback path.
 
-**The insight, now demonstrated:** *"make the Mac's terminals reachable"* was a
-`forkpty` backend behind an already-frozen trait — days, and it landed. *"Port
-the GPU terminal to macOS"* is Metal, CoreText and traffic lights, and **M3 does
-not need it**: the Mac only has to host, the Windows box renders. C2 can trail
-indefinitely without holding up the fleet.
+**The order M3 is being built in**, and why: the client half first (the delta
+applier, then `zest-app` attaching to its own daemon over loopback), because it
+is verifiable on one machine and it makes the daemon the everyday path. Pairing
+and the LAN listener come after, so switching the LAN on enables something that
+has been running in the dev loop for days rather than something never used.
+
+**C2 was going to trail indefinitely** — the Mac only has to host, and the
+Windows box renders. It has been pulled forward to a minimum slice for one
+reason: development moved to the Mac, and an app that will not launch here means
+the attach path ships compiled and unseen.
 
 ### WS-A — Windows chrome, motion, polish
 
@@ -182,12 +211,25 @@ Extraction from `zest-app` collides with WS-A, so **land it early and small**.
 
 ✅ **The Mac can host.** With WS-F, its shells appear on Windows.
 
-**C2 — the GPU app on macOS (can trail)**
-- [ ] Metal surface, CoreText fallback verification, `NSVisualEffectView`.
+**C2 — the GPU app on macOS**
+
+No longer trailing. Development moved to the Mac, and every stage of M3's client
+half ends in "look at the window" — an app that will not launch here means the
+attach path ships compiled and unseen. The slice below is *runs and is usable*,
+not *polished*; the rest of C2 can still trail.
+
+- [ ] Metal surface, CoreText fallback verification. Check the font stack with
+      `cargo run -p zest-font --example font_dump` **first** — a fallback bug
+      diagnosed through a Metal surface costs an afternoon guessing which layer
+      is wrong.
 - [ ] **Do not go borderless on macOS.** It costs traffic lights, native
       full-screen, Sequoia tiling and accessibility, and gains nothing over
       `titlebar_transparent` + `title_hidden` + `fullsize_content_view`. The
       traffic-light inset is not a constant — recompute on full-screen changes.
+- [ ] `--startup-probe` measures a different thing here: a different compositor,
+      and none of the Windows class-background-brush trick that bought the 35ms.
+      **Report the macOS number; the 100ms budget stays a Windows assertion.**
+- [ ] `NSVisualEffectView`, and the rest of the polish — still trailing.
 
 ### WS-D — Linux host
 
@@ -221,18 +263,34 @@ M2. Owns `zest-core/src/blocks.rs` and the OSC 133 path. Hot spot: coordinate
 
 **The lead stream.** Wire types are frozen; encoding and the daemon are not.
 
-- [ ] Implement `ChangeSource` on `Terminal` — the `update_for` rule is already
-      settled and tested.
-- [ ] Delta encoder: attribute interning, `SCROLL` before `ROW`, explicit cell
-      counts. MessagePack envelope; do **not** msgpack individual cells.
-- [ ] `ts-rs` codegen with golden-fixture contract tests in CI.
-- [ ] `zest-daemon`: session ownership, loopback transport, SQLite scrollback.
+- [x] `ChangeSource` on `Terminal` — `zest-core/src/subscribe.rs:108`, consumed
+      by `zest-daemon/src/session.rs`. The `update_for` rule is settled and
+      tested.
+- [x] Delta encoder: attribute interning, `SCROLL` before `ROW`, explicit cell
+      counts. MessagePack envelope; individual cells are **not** msgpacked.
+- [x] `zest-daemon`: session ownership, loopback transport (unix socket and
+      overlapped named pipe), protocol loop.
+- [ ] **The `Delta` → `Terminal` applier.** `decode.rs`'s `GridView` is the
+      reference for TypeScript clients and reconstructs a flat row list; nothing
+      applies a delta into a real `Terminal`, which is what CONTRACTS.md promises
+      a remote session keeps. This is the gap the client half rests on.
+- [ ] The daemon tells the truth about sequence: `Update`/`Keyframe` carry
+      `Seq(0)` today and `Ack` is a no-op, so a conforming client cannot detect a
+      gap. Latent over one reliable stream; not over a reconnecting one.
 - [ ] `zest-app` gains a daemon-attached `SessionSource`. **Find-or-spawn goes
       in the slot the shell spawn occupies today** — after the window is
       visible, overlapping driver init. `--startup-probe` must still pass.
-- [ ] **Conformance corpus**: replay the `.vtrec` files, apply deltas in the
-      client, assert cell-for-cell identity at every frame. This is the spine.
-- [ ] Chaos-resync 10,000 times at random disconnect points.
+- [ ] **Conformance corpus**: the `.vtrec` replay exists and compares the host
+      `Terminal` against `GridView` at every frame. Add the applier as a third
+      participant and assert **two real `Terminal`s** are cell-for-cell equal —
+      a projection can agree while the things behind it differ. This is the spine.
+- [ ] Chaos-resync 10,000 times at random disconnect points. There is a resync
+      test at every chunk boundary today; the missing half is a *stale* update
+      whose `base` no longer matches, which is the path a real drop takes.
+- [ ] `ts-rs` codegen with golden-fixture contract tests in CI. The `ts` feature
+      exists on the delta types; nothing generates or checks bindings yet.
+- [ ] SQLite scrollback. Scrollback is in memory and bounded; a session that
+      outlives its window does not yet outlive the daemon.
 
 ### WS-G — Web client
 
