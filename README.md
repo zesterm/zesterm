@@ -9,8 +9,22 @@ the very first commit.
 
 ## Status
 
-Early. Milestone 1 (a local Windows terminal good enough to replace Windows Terminal)
-is in progress.
+Milestone 1 (a local Windows terminal good enough to replace Windows Terminal) is in
+progress. Everything upstream of the renderer works:
+
+```
+cargo run -p zest-app --example headless
+```
+
+spawns a shell, parses its output, and prints the resulting grid.
+
+| Piece | State |
+|---|---|
+| `zest-pty` — ConPTY, resize, shutdown, `.vtrec` recording | working |
+| `zest-core` — grid, scrollback, VT parsing, modes, OSC | working, 86 tests |
+| `zest-theme` — token schema matching `@sigx/terminal-zero` | schema only |
+| Transparency capability probe | done — see ADR-003 |
+| `zest-font`, `zest-render-wgpu`, `zest-input`, `zest-config` | not started |
 
 ## Layout
 
