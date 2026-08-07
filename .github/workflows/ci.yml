@@ -1,0 +1,81 @@
+# The gates, on every platform the project claims to support.
+#
+# This did not exist until a macOS contributor pointed out that README.md and
+# CLAUDE.md both said "CI runs it" while there was no `.github/` directory at
+# all. Two real bugs shipped through that gap: `zest-pty` stayed Windows-only
+# longer than anyone noticed, and `zest-core` stopped building for wasm32
+# because a new module was missing its `use alloc::…` lines — invisible under
+# the default `std` feature, which is the only way anyone was building it.
+#
+# A gate nobody runs is a comment.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Warnings are failures here and only here: a warning in an editor is a note,
+  # a warning in CI that nobody fails on is noise that trains people to ignore
+  # the output.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    # Windows is the primary platform, macOS and Linux are hosts in the fleet,
+    # so all three run the full suite rather than one running it and the others
+    # merely compiling.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      # Linux needs the windowing and font libraries winit and fontique link
+      # against; without these the failure is a linker error that reads like a
+      # code problem.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libfontconfig1-dev
+
+      - run: cargo build --workspace
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets
+
+  invariants:
+    name: invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+
+      # The crate-boundary rules. `zest-core` staying free of wgpu/winit/tokio
+      # is what lets the app, the daemon and the clients share one terminal
+      # implementation instead of three that drift.
+      - run: cargo run -p xtask -- check-deps
+
+      # The settings JSON Schema is what the web and phone settings UIs are
+      # generated from. A stale one means a setting exists here and nowhere else.
+      - run: cargo run -p xtask -- check-schema
+
+      # The invariant that broke. `zest-core` and `zest-proto` cross to the
+      # clients, so they must build without std and without a platform.
+      - name: zest-core builds for wasm32
+        run: cargo build -p zest-core --no-default-features --target wasm32-unknown-unknown

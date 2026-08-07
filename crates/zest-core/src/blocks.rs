@@ -20,6 +20,9 @@
 //! 91,442" stays true. Row numbers would be stale within a second of a build
 //! starting, which is exactly when someone wants to fold the output.
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use crate::grid::LineId;
 
 /// A block, unique within a session.
