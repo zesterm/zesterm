@@ -32,6 +32,8 @@ use zest_proto::HostId;
 pub mod discovery;
 pub mod identity;
 pub mod keystore;
+pub mod pairing;
+pub mod trust;
 
 /// How a peer was found, and therefore how much it should be trusted before
 /// anything else has proved it.
@@ -117,6 +119,14 @@ pub enum MeshError {
     /// A peer claimed an id and could not prove it.
     #[error("{0} did not prove its identity")]
     BadSignature(String),
+    /// The record of who is trusted could not be read or written.
+    ///
+    /// Separate from [`MeshError::Identity`] because it is a *different*
+    /// operator problem: the host knows who it is and cannot remember who it
+    /// has agreed to serve. Serving the LAN anyway would mean re-prompting for
+    /// every device on every reconnect.
+    #[error("trust store: {0}")]
+    Store(String),
 }
 
 #[cfg(test)]

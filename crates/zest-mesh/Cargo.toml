@@ -39,6 +39,14 @@ parking_lot = { workspace = true }
 # Default features kept deliberately: `zeroize` is what makes `SigningKey` scrub
 # itself on drop, and `fast` is the precomputed-tables backend.
 ed25519-dalek = "3.0"
+# The trust file is TOML, matching zest-config's on-disk conventions -- a
+# paired ClientId is a public key, so it belongs somewhere a person can read
+# and diff rather than in a credential store.
+toml = { workspace = true }
+# The matching code is a hash of the handshake transcript. Already in the tree
+# via ed25519-dalek, so this costs no build time.
+sha2 = "0.10"
+
 # The OS RNG, and nothing else. An Ed25519 secret key is 32 uniform bytes, so
 # `SigningKey::generate` would only add dalek's `rand_core` feature and a
 # `SysRng`/`UnwrapErr` dance to arrive at the same place.
