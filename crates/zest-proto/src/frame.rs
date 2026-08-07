@@ -125,6 +125,7 @@ mod tests {
             version: PROTOCOL_VERSION,
             client: ClientId::from_bytes([3; 32]),
             label: "phone".into(),
+            nonce: crate::Nonce32::from_bytes([9; 32]),
         }
     }
 

@@ -26,8 +26,9 @@ paragraph of justification attached.
 |---|---|---|---|
 | `PtyTransport` | `zest-pty/src/lib.rs` | **frozen** | WS-C, WS-D |
 | `HostId`, `ClientId`, `SessionId`, `SessionAddr` | `zest-proto/src/ids.rs` | **frozen** | WS-F, WS-G, WS-H |
-| `ClientMessage`, `HostMessage`, `SessionInfo` | `zest-proto/src/lib.rs` | **frozen** | WS-F, WS-G |
-| `Delta`, `DeltaOp`, `Run`, `RowPayload`, `AttrDef` | `zest-proto/src/delta.rs` | **frozen** | WS-F, WS-G |
+| `ClientMessage`, `HostMessage`, `SessionInfo` | `zest-proto/src/lib.rs` | **frozen** at v2 — see below | WS-F, WS-G |
+| `Delta`, `DeltaOp`, `Run`, `RowPayload`, `AttrDef` | `zest-proto/src/delta.rs` | **frozen** at v2 — see below | WS-F, WS-G |
+| `Nonce32`, `Sig64`, `AuthFailure` | `zest-proto/src/auth.rs` | **frozen** — arrived with v2 | WS-F, WS-G, WS-H |
 | `Block`, `BlockIndex`, `BlockState` | `zest-core/src/blocks.rs` | **frozen** | WS-E, WS-F, WS-G |
 | `ChangeSource`, `Update`, `update_for` | `zest-core/src/subscribe.rs` | **frozen** — `release_before` removed, see below | WS-F |
 | `SessionSource`, `Origin` | `zest-app/src/source.rs` | **frozen** | WS-A, WS-B, WS-F |
@@ -97,3 +98,25 @@ subscriber.
    consumer is worse than either shape.
 4. Update the table in the same commit. A row that no longer describes the code is worse than no
    row, because it is believed.
+
+### Done once, deliberately: protocol 2
+
+Two changes a peer cannot ignore, made as one bump because the coordinated moment is the
+expensive part:
+
+- **A challenge/response handshake.** A signature carried on `Hello` alone proves nothing that
+  survives being recorded, because the client picks every byte it signs. The host has to
+  contribute freshness, which costs a round trip and two new messages.
+- **`DeltaOp::Modes`.** A client encodes its own keystrokes — that is what `Input` carries — and
+  cannot do it correctly without the host's mode bits. `APP_CURSOR` alone decides whether an arrow
+  key is `ESC [ A` or `ESC O A`. Without it an attached session had no mouse reporting, no
+  bracketed paste, and broken arrows in every full-screen program.
+
+Neither could ride on `serde`'s tolerance of unknown fields. **An auth field a peer may ignore is
+an auth field that does not exist**, and a mode a client never receives is not a degraded
+experience but a broken one.
+
+The whole consumer set at the time was `zest-daemon`, its tests and its `attach` example — three
+files. Once a web or phone client ships, the same change is a release across three codebases gated
+on an app-store cycle. That asymmetry is the argument for doing it now rather than later, and for
+doing it *once*.

@@ -133,9 +133,35 @@ pub enum DeltaOp {
     /// The program entered or left the alternate screen.
     ///
     /// The phone client switches between blocks view and grid view on this.
+    ///
+    /// Redundant with the `ALT_SCREEN` bit in [`DeltaOp::Modes`], and kept
+    /// anyway: it is the one signal a client acts on structurally rather than
+    /// by consulting a bitmask, and it is worth naming. The two cannot disagree
+    /// because the encoder derives both from a single `Modes` value in a single
+    /// batch — there is one producer, not two.
     AltScreen { active: bool },
     /// The window title changed (OSC 0/2).
     Title { title: String },
+    /// The terminal's mode bits changed.
+    ///
+    /// `zest_core::Modes::bits()`, truncated back with `from_bits_truncate` on
+    /// receipt for the same reason [`AttrDef::flags`] is: a newer host that has
+    /// learned a mode should leave this client slightly less capable, not
+    /// unable to decode.
+    ///
+    /// # Why this is on the wire at all
+    ///
+    /// A client encodes its own keystrokes — that is what
+    /// [`ClientMessage::Input`](crate::ClientMessage) carries — and it cannot do
+    /// that correctly without the host's modes. `APP_CURSOR` decides whether an
+    /// arrow key is `ESC [ A` or `ESC O A`, and getting it wrong breaks vim and
+    /// readline. `BRACKETED_PASTE` decides whether a paste is wrapped.
+    /// `MOUSE_*` decide whether a click is reported at all.
+    ///
+    /// Without this op an attached client has no mouse reporting, no bracketed
+    /// paste and broken arrow keys in every full-screen program — which is to
+    /// say tmux, htop and vim are all on the far side of it.
+    Modes { bits: u32 },
 }
 
 /// A batch applied atomically.
@@ -160,6 +186,36 @@ impl Delta {
         let last_scroll = self.ops.iter().rposition(|o| matches!(o, DeltaOp::Scroll { .. }));
         let first_row = self.ops.iter().position(|o| matches!(o, DeltaOp::Row { .. }));
         match (last_scroll, first_row) {
+            (Some(s), Some(r)) => s < r,
+            _ => true,
+        }
+    }
+
+    /// Whether a screen switch in this batch precedes the rows describing it.
+    ///
+    /// The same class of ordering bug as [`Self::scrolls_come_first`], and one
+    /// that hid for longer because it is invisible to a client that keeps a
+    /// flat list of rows. A client applying into a real grid has *two* grids —
+    /// primary and alternate — and `AltScreen`/`Modes` chooses which one the
+    /// following `Row` ops land in.
+    ///
+    /// Emit them in the wrong order and the rows describing the alternate
+    /// screen are written into the primary grid, after which the alternate grid
+    /// is created blank: starting `vim` shows an empty screen, and leaving it
+    /// shows scrollback with vim's first frame stamped into it.
+    ///
+    /// Asserted rather than sorted, for the reason above: silently reordering
+    /// would hide a producer bug.
+    #[must_use]
+    pub fn screen_switch_comes_first(&self) -> bool {
+        let last_switch = self.ops.iter().rposition(|o| {
+            matches!(o, DeltaOp::AltScreen { .. } | DeltaOp::Modes { .. })
+        });
+        let first_row = self
+            .ops
+            .iter()
+            .position(|o| matches!(o, DeltaOp::Row { .. } | DeltaOp::SbPush { .. }));
+        match (last_switch, first_row) {
             (Some(s), Some(r)) => s < r,
             _ => true,
         }

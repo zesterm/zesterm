@@ -14,7 +14,11 @@ use serde::{Deserialize, Serialize};
 /// A machine in the mesh. The fingerprint of its long-lived public key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-pub struct HostId(#[serde(with = "hex32")] pub [u8; 32]);
+pub struct HostId(
+    #[serde(with = "crate::hex")]
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
+    pub [u8; 32],
+);
 
 /// A device that attaches to hosts. Same construction, different role.
 ///
@@ -24,7 +28,11 @@ pub struct HostId(#[serde(with = "hex32")] pub [u8; 32]);
 /// asking the wrong question.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-pub struct ClientId(#[serde(with = "hex32")] pub [u8; 32]);
+pub struct ClientId(
+    #[serde(with = "crate::hex")]
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
+    pub [u8; 32],
+);
 
 /// A session, unique within one host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -55,7 +63,7 @@ impl HostId {
     /// what it is actually for.
     #[must_use]
     pub fn short(&self) -> String {
-        hex32::encode(&self.0[..4])
+        crate::hex::encode(&self.0[..4])
     }
 }
 
@@ -67,7 +75,7 @@ impl ClientId {
 
     #[must_use]
     pub fn short(&self) -> String {
-        hex32::encode(&self.0[..4])
+        crate::hex::encode(&self.0[..4])
     }
 }
 
@@ -83,45 +91,6 @@ impl fmt::Display for SessionAddr {
         write!(f, "{}:{}", self.host.short(), self.session.0)
     }
 }
-
-/// Hex, so an id in a log or a JSON payload can be read and compared by eye.
-///
-/// A raw `[u8; 32]` serializes as a 32-element array, which is unreadable in a
-/// log line and hostile in the TypeScript clients.
-mod hex32 {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn encode(bytes: &[u8]) -> String {
-        let mut s = String::with_capacity(bytes.len() * 2);
-        for b in bytes {
-            s.push(char::from_digit(u32::from(b >> 4), 16).unwrap_or('0'));
-            s.push(char::from_digit(u32::from(b & 0x0f), 16).unwrap_or('0'));
-        }
-        s
-    }
-
-    pub fn serialize<S: Serializer>(bytes: &[u8; 32], s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&encode(bytes))
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 32], D::Error> {
-        use serde::de::Error as _;
-        let text = String::deserialize(d)?;
-        if text.len() != 64 {
-            return Err(D::Error::custom("expected 64 hex characters"));
-        }
-        let mut out = [0u8; 32];
-        let chars: Vec<char> = text.chars().collect();
-        for (i, pair) in chars.chunks_exact(2).enumerate() {
-            let hi = pair[0].to_digit(16).ok_or_else(|| D::Error::custom("not hex"))?;
-            let lo = pair[1].to_digit(16).ok_or_else(|| D::Error::custom("not hex"))?;
-            out[i] = ((hi << 4) | lo) as u8;
-        }
-        Ok(out)
-    }
-}
-
-
 
 #[cfg(test)]
 mod tests {

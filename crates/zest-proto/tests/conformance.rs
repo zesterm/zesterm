@@ -117,17 +117,16 @@ fn replay(name: &str, cols: usize, rows: usize) {
     let mut enc = Encoder::new();
     let mut view = GridView::new();
 
-    let alt = |t: &Terminal| t.modes().contains(Modes::ALT_SCREEN);
-    view.apply_keyframe(&enc.keyframe(term.grid(), cursor(&term), alt(&term), ""));
+    view.apply_keyframe(&enc.keyframe(term.grid(), cursor(&term), term.modes(), ""));
 
     for (step, chunk) in chunks(name).iter().enumerate() {
         term.advance(chunk);
-        let d = enc.delta(term.grid(), cursor(&term), alt(&term), "");
+        let d = enc.delta(term.grid(), cursor(&term), term.modes(), "");
         view.apply_delta(&d);
 
         // Reference 1: the incremental path must match the full one.
         let mut probe = Encoder::new();
-        let truth = probe.keyframe(term.grid(), cursor(&term), alt(&term), "");
+        let truth = probe.keyframe(term.grid(), cursor(&term), term.modes(), "");
         assert_eq!(
             view.rows().len(),
             truth.rows_data.len(),
@@ -211,20 +210,19 @@ fn resyncing_at_every_point_lands_in_the_same_place() {
             let mut term = Terminal::new(80, 10, 2000);
             let mut enc = Encoder::new();
             let mut view = GridView::new();
-            let alt = |t: &Terminal| t.modes().contains(Modes::ALT_SCREEN);
-
-            view.apply_keyframe(&enc.keyframe(term.grid(), cursor(&term), alt(&term), ""));
+        
+            view.apply_keyframe(&enc.keyframe(term.grid(), cursor(&term), term.modes(), ""));
 
             for (i, chunk) in all.iter().enumerate() {
                 term.advance(chunk);
                 if i == drop_at {
                     // The connection dropped: the client missed this delta
                     // entirely and is resynced with a keyframe instead.
-                    let _lost = enc.delta(term.grid(), cursor(&term), alt(&term), "");
-                    let k = enc.keyframe(term.grid(), cursor(&term), alt(&term), "");
+                    let _lost = enc.delta(term.grid(), cursor(&term), term.modes(), "");
+                    let k = enc.keyframe(term.grid(), cursor(&term), term.modes(), "");
                     view.apply_keyframe(&k);
                 } else {
-                    view.apply_delta(&enc.delta(term.grid(), cursor(&term), alt(&term), ""));
+                    view.apply_delta(&enc.delta(term.grid(), cursor(&term), term.modes(), ""));
                 }
             }
 

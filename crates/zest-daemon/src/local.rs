@@ -467,6 +467,7 @@ mod tests {
             version: PROTOCOL_VERSION,
             client: ClientId::from_bytes([2; 32]),
             label: "test-client".into(),
+            nonce: zest_proto::Nonce32::from_bytes([5; 32]),
         };
         stream.write_all(&frame::encode(&hello).expect("encode")).expect("write");
         stream.flush().expect("flush");

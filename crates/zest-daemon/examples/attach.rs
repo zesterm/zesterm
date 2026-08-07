@@ -48,6 +48,11 @@ fn main() {
             version: PROTOCOL_VERSION,
             client: ClientId::from_bytes([0xa7; 32]),
             label: "attach".into(),
+            // A fixed value, because this example holds no key and the daemon
+            // does not yet challenge. It is deliberately not random: a nonce
+            // that looks fresh here would suggest this is doing something it
+            // is not.
+            nonce: zest_proto::Nonce32::from_bytes([0xa7; 32]),
         },
     );
     send(
@@ -102,8 +107,13 @@ fn main() {
                         }
                     }
                 }
-                HostMessage::Keyframe { rows_data, attrs, .. } => {
-                    eprintln!("[attach] keyframe: {} rows, {} attrs", rows_data.len(), attrs.len());
+                HostMessage::Keyframe { rows_data, attrs, modes, .. } => {
+                    eprintln!(
+                        "[attach] keyframe: {} rows, {} attrs, modes {:?}",
+                        rows_data.len(),
+                        attrs.len(),
+                        zest_core::Modes::from_bits_truncate(modes)
+                    );
                     print_rows(&rows_data);
                 }
                 HostMessage::Update { delta, .. } => {
@@ -116,12 +126,23 @@ fn main() {
                     // Show what the rows actually became, so this proves content
                     // arrived rather than merely that a message did.
                     for op in &delta.ops {
-                        if let zest_proto::DeltaOp::Row { row, payload } = op {
-                            let text: String =
-                                payload.runs.iter().map(|r| r.text.as_str()).collect();
-                            if !text.trim().is_empty() {
-                                println!("  row {row}: {}", text.trim_end());
+                        match op {
+                            zest_proto::DeltaOp::Row { row, payload } => {
+                                let text: String =
+                                    payload.runs.iter().map(|r| r.text.as_str()).collect();
+                                if !text.trim().is_empty() {
+                                    println!("  row {row}: {}", text.trim_end());
+                                }
                             }
+                            // Printed because this is the layer that answers
+                            // "why does the arrow key do nothing on the phone".
+                            zest_proto::DeltaOp::Modes { bits } => {
+                                println!(
+                                    "  modes: {:?}",
+                                    zest_core::Modes::from_bits_truncate(*bits)
+                                );
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -130,6 +151,27 @@ fn main() {
                 }
                 HostMessage::Error { message, .. } => eprintln!("[attach] error: {message}"),
                 HostMessage::Scrollback { .. } => {}
+
+                // This example holds no key, so it cannot answer a challenge.
+                // It says so and stops rather than retrying: a client looping
+                // against an authenticating host is how a log fills up.
+                HostMessage::Challenge { host, label, .. } => {
+                    eprintln!(
+                        "[attach] {} ({label}) wants a signed challenge; this example has no key",
+                        host.short()
+                    );
+                    std::process::exit(1);
+                }
+                HostMessage::AuthPending { code, expires_in_secs } => {
+                    eprintln!("[attach] waiting for approval, code {code} ({expires_in_secs}s)");
+                }
+                HostMessage::AuthFailed { reason, message } => {
+                    eprintln!("[attach] refused: {reason:?} -- {message}");
+                    std::process::exit(1);
+                }
+                HostMessage::PairingRequested { label, code, remote, .. } => {
+                    eprintln!("[attach] {label} at {remote} is asking to pair, code {code}");
+                }
             }
         }
     }

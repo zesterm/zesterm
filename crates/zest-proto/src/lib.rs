@@ -1,10 +1,10 @@
 //! The mesh wire protocol.
 //!
 //! **This crate is a frozen contract.** `zest-daemon`, the web client and the
-//! phone client are all built against these shapes, by different people at
-//! different times. Changing one is a coordinated release across three
-//! codebases, so changes go through an issue rather than a commit — see
-//! `docs/CONTRACTS.md`.
+//! phone client are all built against these shapes. Once any of them ships,
+//! changing one is a coordinated release across three codebases gated on an
+//! app-store cycle — so a change here is landed deliberately, with every
+//! consumer, in one commit, and written down. See `docs/CONTRACTS.md`.
 //!
 //! # What is on the wire, and why it is not PTY bytes
 //!
@@ -30,12 +30,15 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod auth;
 pub mod decode;
 pub mod delta;
 pub mod encode;
 pub mod frame;
+pub(crate) mod hex;
 pub mod ids;
 
+pub use auth::{AuthFailure, Nonce32, Sig64};
 pub use delta::{AttrDef, AttrId, CursorState, Delta, DeltaOp, Run, RowPayload};
 pub use decode::GridView;
 pub use encode::{Encoder, Keyframe};
@@ -48,7 +51,28 @@ pub use ids::{ClientId, HostId, SessionAddr, SessionId};
 /// `serde`'s tolerance of unknown fields instead, because a fleet is never
 /// upgraded atomically — the phone updates through an app store, the Mac daemon
 /// when someone remembers.
-pub const PROTOCOL_VERSION: u16 = 1;
+///
+/// # 1 → 2
+///
+/// Two changes that a peer *cannot* ignore, deliberately made together because
+/// the coordinated moment is the expensive part and doing it twice is the thing
+/// to avoid. At the time of the bump the entire consumer set was `zest-daemon`,
+/// its tests and its `attach` example. After a web or phone client ships, the
+/// same change is a release across three codebases gated on an app-store cycle.
+///
+/// **A challenge/response handshake.** A signature carried on `Hello` alone
+/// proves nothing that survives being recorded, because the client picks every
+/// byte it signs. See [`auth`].
+///
+/// **Terminal modes on the wire** ([`DeltaOp::Modes`]). A client encodes its own
+/// keystrokes and cannot do it correctly without them, so an attached session
+/// had no mouse reporting, no bracketed paste and broken arrow keys in every
+/// full-screen program.
+///
+/// Neither could ride on `serde`'s tolerance: a field an old peer silently
+/// ignores is exactly wrong for authentication, and a mode a client never
+/// receives is not a degraded experience but a broken one.
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// A monotonically increasing state number for one session.
 ///
@@ -70,8 +94,40 @@ pub enum ClientMessage {
         version: u16,
         client: ClientId,
         /// Human-readable, for the host's audit log and approval prompt.
+        ///
+        /// Covered by both signatures. An unsigned label would let anyone on
+        /// the path make the host's approval prompt read "pair with
+        /// andy-phone?" for a connection that is not the phone — and the prompt
+        /// text is the human's entire decision input.
         label: String,
+        /// The client's half of the handshake freshness.
+        ///
+        /// `#[serde(default)]` is deliberate and is not laxity. Without it a
+        /// version-1 `Hello` fails to *decode*, and the peer is told "message
+        /// was not understood" instead of the truthful "protocol 1 is not
+        /// compatible with 2". The default is all zeroes, which
+        /// [`Nonce32::is_absent`] recognises and the host refuses explicitly —
+        /// so the version check runs first and says the useful thing.
+        #[serde(default)]
+        nonce: Nonce32,
     },
+    /// The client's proof, answering [`HostMessage::Challenge`].
+    ///
+    /// Carries no id: the connection already knows which client is speaking,
+    /// and accepting an id here would invite a check against the wrong one.
+    Auth { signature: Sig64 },
+    /// Approve or refuse a pending pairing request.
+    ///
+    /// **Honoured on a loopback connection only.** Approving a device is the
+    /// authority of whoever is logged in at the machine, which is exactly what
+    /// reaching the loopback socket demonstrates. Accepting it over the LAN
+    /// would let one paired device enrol others.
+    PairingDecision { client: ClientId, approve: bool },
+    /// Resend the whole state; this client cannot apply what it is being sent.
+    ///
+    /// Detach-and-reattach has the same effect and is what a client had to do
+    /// before, at the cost of tearing down a subscriber to fix a dropped frame.
+    RequestKeyframe { session: SessionAddr },
     /// What sessions does this host have?
     ListSessions,
     /// Start a new one.
@@ -110,8 +166,35 @@ pub enum ClientMessage {
 #[serde(tag = "t", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum HostMessage {
-    /// Answer to `Hello`.
+    /// Answer to a completed handshake. The connection is now served.
     Welcome { version: u16, host: HostId, label: String },
+    /// Answer to `Hello`: the host's freshness, and its own proof.
+    ///
+    /// The host signs *first*, before it has any reason to trust the client.
+    /// That is what lets a client dialling an address learned from an mDNS
+    /// advertisement check that the machine which answered is the `HostId` the
+    /// advertisement claimed, and hang up before revealing anything.
+    ///
+    /// The cost, stated rather than hidden: the host is a free signing oracle
+    /// over an attacker-chosen nonce. Ed25519 has no chosen-message weakness
+    /// and the signing domain confines these to what they already are, so this
+    /// is a bounded CPU cost, not a key-recovery risk.
+    Challenge { version: u16, host: HostId, label: String, nonce: Nonce32, signature: Sig64 },
+    /// The client proved its key, but nobody has approved it yet.
+    ///
+    /// `code` is the matching code to display. A person compares it with the
+    /// one on the host's screen — a relay necessarily runs two handshakes with
+    /// two nonce pairs, so the codes differ, and that is the only defence
+    /// against a hostile network available before the data plane is encrypted.
+    AuthPending { code: String, expires_in_secs: u32 },
+    /// The connection will not be served. See [`AuthFailure`].
+    AuthFailed { reason: AuthFailure, message: String },
+    /// A device is asking to be paired; show it and call for a decision.
+    ///
+    /// Pushed to loopback connections only — the desktop app is a client of its
+    /// own daemon, so the approval modal is a front end over this rather than a
+    /// second mechanism. `remote` is for the prompt: "from 192.168.1.42".
+    PairingRequested { client: ClientId, label: String, code: String, remote: String },
     Sessions { sessions: Vec<SessionInfo> },
     /// A complete grid state.
     ///
@@ -125,6 +208,13 @@ pub enum HostMessage {
         rows_data: Vec<RowPayload>,
         attrs: Vec<AttrDef>,
         cursor: CursorState,
+        /// `zest_core::Modes::bits()`. See [`DeltaOp::Modes`].
+        ///
+        /// A keyframe is a complete state, and a client encodes its own
+        /// keystrokes — without this, a freshly attached session has broken
+        /// arrow keys until the host next happens to change a mode.
+        #[serde(default)]
+        modes: u32,
     },
     /// A change from `base` to `seq`.
     ///
@@ -189,10 +279,43 @@ mod tests {
             version: PROTOCOL_VERSION,
             client: ClientId::from_bytes([1; 32]),
             label: "phone".to_string(),
+            nonce: Nonce32::from_bytes([4; 32]),
         };
         let json = serde_json::to_string(&msg).expect("serialize");
         let back: ClientMessage = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn a_version_one_hello_still_decodes() {
+        // The entire reason `Hello.nonce` is `#[serde(default)]`.
+        //
+        // Without it this fails to *decode*, and the peer is told "could not
+        // understand that message" -- which sends whoever is debugging it
+        // looking for a framing bug. What they need to hear is that their
+        // protocol version is too old, and that answer is only reachable if
+        // the message parses far enough for the version to be read.
+        let json = r#"{"t":"hello","version":1,"client":"0101010101010101010101010101010101010101010101010101010101010101","label":"old"}"#;
+        let parsed: ClientMessage = serde_json::from_str(json).expect("a v1 Hello must decode");
+        let ClientMessage::Hello { version, nonce, .. } = parsed else {
+            panic!("expected Hello");
+        };
+        assert_eq!(version, 1, "so the version check can refuse it by name");
+        assert!(nonce.is_absent(), "a missing nonce must be recognisable, not silently zero");
+    }
+
+    #[test]
+    fn an_absent_nonce_is_not_a_valid_one() {
+        // The other half: having decoded, the all-zero default must not be
+        // mistaken for freshness a client actually supplied.
+        let msg = ClientMessage::Hello {
+            version: PROTOCOL_VERSION,
+            client: ClientId::from_bytes([2; 32]),
+            label: "no-nonce".into(),
+            nonce: Nonce32::default(),
+        };
+        let ClientMessage::Hello { nonce, .. } = msg else { panic!("expected Hello") };
+        assert!(nonce.is_absent());
     }
 
     #[test]

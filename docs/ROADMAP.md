@@ -93,15 +93,16 @@ the one that decides whether M3's win condition is worth having:
   reference decoder *for TypeScript clients* and rebuilds a flat row list.
   CONTRACTS.md promises a remote session keeps a real local `Terminal` so the
   renderer's path is identical at both ends; nothing implements that yet.
-- **`DeltaOp::AltScreen` is emitted after `DeltaOp::Row`** (`encode.rs:245`).
-  Harmless for a flat row list — which is why it went unnoticed — and silent
-  corruption for a `Terminal`: the rows describing the alt screen land in the
-  primary grid, then the alt grid is created blank. Entering vim would show an
-  empty screen and leaving it would show corrupted scrollback.
-- **Terminal modes never cross the wire.** Only `AltScreen` does. `zest-app`
-  reads `Terminal::modes()` for mouse reporting, bracketed paste, application
-  cursor keys and keypad, so a daemon-attached session has none of them until
-  the wire carries modes. tmux, htop and vim mouse support are all behind this.
+- ~~**`DeltaOp::AltScreen` is emitted after `DeltaOp::Row`.**~~ **Fixed in
+  protocol 2**, before anything could apply it wrongly. A screen switch now
+  precedes the rows that describe it, guarded by
+  `Delta::screen_switch_comes_first()` — the same shape as the existing
+  `scrolls_come_first()`, asserted rather than sorted at runtime because a
+  producer emitting them out of order has a bug that reordering would hide.
+- ~~**Terminal modes never cross the wire.**~~ **Fixed in protocol 2.**
+  `DeltaOp::Modes` and `Keyframe.modes` now carry `Modes::bits()`, so an
+  attached client can encode its own keystrokes correctly. Verified over a real
+  socket: `APP_CURSOR`, `BRACKETED_PASTE` and `MOUSE_CLICK` reach the client.
 - **The daemon unlinks its socket before binding** (`local.rs:71`), so two
   daemons starting at once split-brain: the second unlinks the first's socket
   and binds its own, and the first keeps running with its own `Registry`.

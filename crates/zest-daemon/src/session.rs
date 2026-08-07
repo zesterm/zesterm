@@ -164,12 +164,7 @@ impl Session {
         let mut encoder = Encoder::new();
         let (keyframe, seq) = {
             let term = self.terminal.lock().expect("terminal lock");
-            let k = encoder.keyframe(
-                term.grid(),
-                cursor_of(&term),
-                term.modes().contains(Modes::ALT_SCREEN),
-                &self.title(),
-            );
+            let k = encoder.keyframe(term.grid(), cursor_of(&term), term.modes(), &self.title());
             (k, ChangeSource::seq(&*term))
         };
 
@@ -182,6 +177,25 @@ impl Session {
             .insert(handle, Subscriber { encoder, acked: seq, wake });
 
         (handle, keyframe)
+    }
+
+    /// Rebuild a complete state for a subscriber that cannot apply what it has.
+    ///
+    /// Answers `ClientMessage::RequestKeyframe`. The subscriber's shadow is
+    /// replaced by what the keyframe describes, so the *next* delta is a
+    /// difference from a state the client demonstrably holds — which is the
+    /// whole point, and the reason this cannot be done by simply re-encoding.
+    ///
+    /// Before this existed a client with a dropped frame had to detach and
+    /// reattach, tearing down a subscriber to recover from one lost message.
+    pub fn keyframe_for(&self, handle: u64) -> Option<(u64, Keyframe)> {
+        let mut subs = self.subscribers.lock().expect("subscriber lock");
+        let sub = subs.get_mut(&handle)?;
+        let term = self.terminal.lock().expect("terminal lock");
+        let seq = ChangeSource::seq(&*term);
+        let k = sub.encoder.keyframe(term.grid(), cursor_of(&term), term.modes(), &self.title.lock().expect("title lock").clone());
+        sub.acked = seq;
+        Some((seq, k))
     }
 
     /// Stop watching.
@@ -213,7 +227,7 @@ impl Session {
         }
 
         let cursor = cursor_of(&term);
-        let alt = term.modes().contains(Modes::ALT_SCREEN);
+        let modes = term.modes();
         let title = self.title();
 
         let out = match ChangeSource::update_for(&*term, sub.acked) {
@@ -221,13 +235,14 @@ impl Session {
             // Far enough behind that the delta chain would exceed the state it
             // describes. Normal after a sleep, not an error.
             zest_core::Update::Keyframe { .. } => {
-                Update::Keyframe(sub.encoder.keyframe(term.grid(), cursor, alt, &title))
+                Update::Keyframe(sub.encoder.keyframe(term.grid(), cursor, modes, &title))
             }
             zest_core::Update::Delta { .. } => {
-                let d = sub.encoder.delta(term.grid(), cursor, alt, &title);
+                let d = sub.encoder.delta(term.grid(), cursor, modes, &title);
                 if d.ops.is_empty() && d.attrs.is_empty() {
                     // The sequence moved but nothing observable changed -- a
-                    // mode set, a cursor save. Acknowledge and send nothing.
+                    // cursor save, a mode the client already has. Acknowledge
+                    // and send nothing.
                     sub.acked = seq;
                     return None;
                 }

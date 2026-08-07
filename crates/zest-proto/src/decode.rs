@@ -31,6 +31,12 @@ pub struct GridView {
     pub attrs: HashMap<AttrId, AttrDef>,
     pub cursor: CursorState,
     pub alt_screen: bool,
+    /// The host's mode bits, raw.
+    ///
+    /// Left as an integer rather than `zest_core::Modes` because this type is
+    /// the reference *for the TypeScript clients*, and they have no bitflags
+    /// type to widen it into — what they need is exactly the number.
+    pub modes: u32,
     pub title: String,
     /// Lines that left the viewport, oldest first.
     ///
@@ -60,6 +66,8 @@ impl GridView {
             self.attrs.insert(a.id, *a);
         }
         self.cursor = k.cursor;
+        self.modes = k.modes.bits();
+        self.alt_screen = k.modes.contains(zest_core::Modes::ALT_SCREEN);
     }
 
     /// Apply a change.
@@ -114,6 +122,7 @@ impl GridView {
                 DeltaOp::SbPush { payload } => self.scrollback.push(payload.clone()),
                 DeltaOp::AltScreen { active } => self.alt_screen = *active,
                 DeltaOp::Title { title } => self.title.clone_from(title),
+                DeltaOp::Modes { bits } => self.modes = *bits,
             }
         }
     }
@@ -130,7 +139,7 @@ mod tests {
     use super::*;
     use crate::delta::Run;
     use crate::encode::Encoder;
-    use zest_core::Terminal;
+    use zest_core::{Modes, Terminal};
 
     fn cursor() -> CursorState {
         CursorState { row: 0, col: 0, visible: true, shape: 0 }
@@ -154,18 +163,17 @@ mod tests {
         let mut enc = Encoder::new();
         let mut view = GridView::new();
 
-        let k = enc.keyframe(term.grid(), cursor(), false, "");
+        let k = enc.keyframe(term.grid(), cursor(), Modes::empty(), "");
         view.apply_keyframe(&k);
 
         for (i, chunk) in chunks.iter().enumerate() {
             term.advance(chunk.as_bytes());
-            let alt = term.modes().contains(zest_core::Modes::ALT_SCREEN);
-            let d = enc.delta(term.grid(), cursor(), alt, "");
+            let d = enc.delta(term.grid(), cursor(), term.modes(), "");
             view.apply_delta(&d);
 
             // The host's own encoding of the same grid is the reference.
             let mut probe = Encoder::new();
-            let truth = probe.keyframe(term.grid(), cursor(), alt, "");
+            let truth = probe.keyframe(term.grid(), cursor(), term.modes(), "");
 
             assert_eq!(
                 view.rows().len(),
@@ -287,11 +295,11 @@ mod tests {
         let mut term = Terminal::new(20, 2, 100);
         let mut enc = Encoder::new();
         let mut view = GridView::new();
-        view.apply_keyframe(&enc.keyframe(term.grid(), cursor(), false, ""));
+        view.apply_keyframe(&enc.keyframe(term.grid(), cursor(), Modes::empty(), ""));
 
         for i in 0..5 {
             term.advance(format!("line{i}\r\n").as_bytes());
-            view.apply_delta(&enc.delta(term.grid(), cursor(), false, ""));
+            view.apply_delta(&enc.delta(term.grid(), cursor(), Modes::empty(), ""));
         }
         assert!(!view.scrollback.is_empty(), "nothing was pushed to scrollback");
     }

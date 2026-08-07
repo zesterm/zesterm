@@ -183,6 +183,7 @@ impl Connection {
                     rows_data: k.rows_data,
                     attrs: k.attrs,
                     cursor: k.cursor,
+                    modes: k.modes.bits(),
                 }),
                 None => {}
             }
@@ -206,12 +207,15 @@ impl Connection {
         }
 
         match msg {
-            ClientMessage::Hello { version, client, label } => {
-                self.greeted = true;
+            ClientMessage::Hello { version, client, label, nonce } => {
                 if version != PROTOCOL_VERSION {
                     // Refused, and said so. A version mismatch that silently
                     // proceeds produces a corrupt grid on the client and looks
                     // like a rendering bug.
+                    //
+                    // `greeted` stays false: a peer that failed the version
+                    // check is not a peer, and marking it greeted here meant
+                    // every message it sent afterwards was served anyway.
                     return vec![HostMessage::Error {
                         session: None,
                         message: format!(
@@ -219,6 +223,16 @@ impl Connection {
                         ),
                     }];
                 }
+                self.greeted = true;
+
+                // The nonce is carried and not yet answered. This daemon does
+                // not challenge, so it authorizes nobody -- which is why it
+                // listens on the loopback socket only, where the filesystem
+                // permissions are the authorization. The handshake that makes
+                // `listen_lan` safe is the next stage; the wire is ready for it
+                // so that landing it is not a second coordinated change.
+                let _ = nonce;
+
                 tracing::info!(client = %client.short(), %label, "client connected");
                 vec![HostMessage::Welcome {
                     version: PROTOCOL_VERSION,
@@ -226,6 +240,19 @@ impl Connection {
                     label: self.config.label.clone(),
                 }]
             }
+
+            // Nothing challenged this client, so a proof is unexpected rather
+            // than merely unsupported. Saying so is better than ignoring it:
+            // a client that thinks it authenticated and did not should find out.
+            ClientMessage::Auth { .. } => vec![HostMessage::AuthFailed {
+                reason: zest_proto::AuthFailure::Signature,
+                message: "this host did not issue a challenge".into(),
+            }],
+
+            ClientMessage::PairingDecision { .. } => vec![HostMessage::Error {
+                session: None,
+                message: "this host has nothing to pair".into(),
+            }],
 
             ClientMessage::ListSessions => {
                 vec![HostMessage::Sessions { sessions: self.registry.list(self.config.host) }]
@@ -272,7 +299,39 @@ impl Connection {
                     rows_data: keyframe.rows_data,
                     attrs: keyframe.attrs,
                     cursor: keyframe.cursor,
+                    modes: keyframe.modes.bits(),
                 }]
+            }
+
+            ClientMessage::RequestKeyframe { session } => {
+                let Some(handle) = self.attached.get(&session.session.0).copied() else {
+                    return vec![HostMessage::Error {
+                        session: Some(session),
+                        message: "not attached to that session".into(),
+                    }];
+                };
+                let Some(s) = self.registry.get(session.session) else {
+                    return vec![HostMessage::Error {
+                        session: Some(session),
+                        message: "no such session".into(),
+                    }];
+                };
+                match s.keyframe_for(handle) {
+                    Some((_seq, k)) => vec![HostMessage::Keyframe {
+                        session,
+                        seq: Seq(0),
+                        cols: k.cols,
+                        rows: k.rows,
+                        rows_data: k.rows_data,
+                        attrs: k.attrs,
+                        cursor: k.cursor,
+                        modes: k.modes.bits(),
+                    }],
+                    None => vec![HostMessage::Error {
+                        session: Some(session),
+                        message: "not attached to that session".into(),
+                    }],
+                }
             }
 
             ClientMessage::Detach { session } => {
@@ -466,6 +525,7 @@ mod tests {
             version: PROTOCOL_VERSION,
             client: ClientId::from_bytes([1; 32]),
             label: "test".into(),
+            nonce: zest_proto::Nonce32::from_bytes([6; 32]),
         }
     }
 
@@ -502,6 +562,7 @@ mod tests {
                 version: PROTOCOL_VERSION + 99,
                 client: ClientId::from_bytes([1; 32]),
                 label: "future".into(),
+                nonce: zest_proto::Nonce32::from_bytes([7; 32]),
             },
         );
         assert!(matches!(&out[..], [HostMessage::Error { .. }]), "{out:?}");
