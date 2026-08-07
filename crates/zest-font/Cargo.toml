@@ -9,3 +9,22 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+# swash gives exactly the two things a terminal needs and little else:
+# GSUB/GPOS shaping (ligatures) and hinted rasterization with COLR/CBDT colour
+# glyphs. It sits on Google's skrifa/Fontations stack.
+swash.workspace = true
+# Enumeration plus *real* system fallback -- DirectWrite on Windows, CoreText on
+# macOS, fontconfig on Linux. Hand-writing a fallback chain is how you get tofu.
+fontique.workspace = true
+rustc-hash.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# PNG output for the visual dump example. Dev-only: the library never encodes
+# images.
+image.workspace = true
+# The dump advances by display width so double-width CJK does not overlap,
+# mirroring what the grid does. The library itself has no opinion on width --
+# that is zest-core's job.
+unicode-width.workspace = true
