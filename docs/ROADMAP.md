@@ -45,7 +45,7 @@ move.
 
 ## Status
 
-**587 tests, six gates green**, measured on macOS rather than remembered.
+**596 tests, six gates green**, measured on macOS rather than remembered.
 First paint 35ms **on Windows**; the Mac paints against a different compositor
 and its number (48ms) is reported rather than gated.
 
@@ -473,6 +473,22 @@ M2. Owns `zest-core/src/blocks.rs` and the OSC 133 path. Hot spot: coordinate
       and gated by `check-fixtures`. The two catch different things — a shape
       that moved, and a client that decodes the right shapes and applies them
       wrongly — and only the second needs real recordings.
+- [x] **A first pairing survives long enough to be answered.** The handshake
+      watchdog was disarmed only by `welcome()`, and a device waiting for
+      approval is precisely the one that has not been welcomed — so every LAN
+      pairing was cut ten seconds into a window the host advertises as 120, and
+      approval-based pairing had never once worked. The watchdog's *deadline*
+      now moves out past the pairing window rather than the watchdog being
+      disarmed: the connection is still unauthenticated and still holds its
+      mid-handshake slot, so nobody can pin slots open by asking to pair and
+      never being answered. Found by two machines in one attempt; the
+      in-process test that was supposed to cover it proved the easy half.
+- [x] **A session is not collected before the client that made it can attach.**
+      Creating a session and attaching to it are two round trips, and a short
+      command exits in between — so the sweep took the session inside the gap
+      and the client was told no such session existed, for a shell that had run
+      perfectly. Sweeping now also requires that somebody has attached at least
+      once.
 - [x] **Sessions end when they should, and only then.** `CloseSession` now ends
       its child — it used to remove the registry entry and drop the transport,
       which on unix cannot hang up a pty whose reader is parked, and on Windows
@@ -681,6 +697,24 @@ having no TCP transport at all), is logged blow-by-blow on
 [#20](https://github.com/zesterm/zesterm/issues/20). Remaining before M3 is
 *closed*: stored identities so a window does not need re-approval per launch,
 and latency instrumentation to put a number on "desk latency".
+
+Two things the bring-up established that no test could have, both recorded so
+they are not re-litigated:
+
+- **mDNS crosses a real link, and the `HostId`-derived SRV target resolves.**
+  Cross-checked against the platform's own responder rather than ours —
+  `zesterm-<id>.local` answering with an address is what sharp edge 5 was
+  written to guarantee, and it does.
+- **Windows Defender did not block the inbound port.** No prompt, no rule, the
+  first dial simply arrived. Worth stating because the opposite is the natural
+  assumption and would send the next person configuring a firewall that was
+  never in the way.
+
+And two that it broke: a daemon killed rather than dropped keeps advertising, so
+a peer sees a host it cannot dial ([#22](https://github.com/zesterm/zesterm/issues/22)),
+and an approval written to the daemon's stdin can be swallowed
+([#21](https://github.com/zesterm/zesterm/issues/21)) — which means "an unknown
+device waits for a person" is, today, conditional on that person trying twice.
 
 No Cloudflare, no identity infrastructure — which is what makes this reachable
 much sooner than the old "phone over the internet" framing. → WS-C1, WS-F,
