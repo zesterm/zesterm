@@ -24,7 +24,7 @@ paragraph of justification attached.
 
 | Contract | Where | Status | Consumed by |
 |---|---|---|---|
-| `PtyTransport` | `zest-pty/src/lib.rs` | **frozen** | WS-C, WS-D |
+| `PtyTransport` | `zest-pty/src/lib.rs` | **frozen** — `hangup` added, see below | WS-C, WS-D, WS-F |
 | `HostId`, `ClientId`, `SessionId`, `SessionAddr` | `zest-proto/src/ids.rs` | **frozen** | WS-F, WS-G, WS-H |
 | `ClientMessage`, `HostMessage`, `SessionInfo` | `zest-proto/src/lib.rs` | **frozen** at v2 — see below | WS-F, WS-G |
 | `Delta`, `DeltaOp`, `Run`, `RowPayload`, `AttrDef` | `zest-proto/src/delta.rs` | **frozen** at v2 — see below | WS-F, WS-G |
@@ -120,3 +120,30 @@ The whole consumer set at the time was `zest-daemon`, its tests and its `attach`
 files. Once a web or phone client ships, the same change is a release across three codebases gated
 on an app-store cycle. That asymmetry is the argument for doing it now rather than later, and for
 doing it *once*.
+
+### Added once, deliberately: `PtyTransport::hangup`
+
+A session could be created and never ended. `CloseSession` removed the registry entry and dropped
+the transport, which reads like a teardown and is not one:
+
+- On unix the hangup fires when the **last** duplicate of the master fd closes, and a reader thread
+  parked in `read` is holding one. It cannot release it until the read returns, and the read will
+  not return until the hangup. Nothing outside that cycle breaks it, and every call involved
+  reports success.
+- On Windows dropping *is* the documented protocol and does work — but only if the `Arc` being
+  dropped is the last one, which the session layer cannot promise while a concurrent listing or
+  poll may hold a clone.
+
+So the trait grew one method rather than the daemon growing a workaround. The alternative — having
+`Registry::close` reach for a `NativePty` concrete type — would have put a `#[cfg]` in the daemon
+for something that is not a platform question but a lifecycle one.
+
+Both implementations escalate on the same timer: ask (`SIGHUP` to the session's process group,
+`ClosePseudoConsole`), wait 150ms, insist (`SIGKILL`, `TerminateProcess`). A shell gets to run its
+exit traps; a program that declines to leave still goes.
+
+**`hangup` is not called on `Detach`,** and that asymmetry is the whole of ADR-007. Consumers at
+the time: `zest-daemon` only — `zest-app` reaches a pty exclusively through `SessionSource`.
+
+*The Windows half is written to the protocol already documented in `windows.rs` and has not been
+run.* → issue #13.

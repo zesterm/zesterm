@@ -70,6 +70,7 @@ use std::ffi::OsStr;
 use std::io::{self, Read, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use windows_sys::Win32::Foundation::{
@@ -192,22 +193,40 @@ impl Write for PtyWriter {
 /// The pseudoconsole handle, shared so `resize` can be called from the UI thread
 /// while the reader thread holds the pty alive.
 #[derive(Debug)]
-struct Pseudoconsole(HPCON);
+struct Pseudoconsole {
+    handle: HPCON,
+    /// Set by whoever closes it, so `hangup` and `drop` cannot both close.
+    closed: AtomicBool,
+}
 
 // SAFETY: HPCON is an opaque kernel-managed pointer. ResizePseudoConsole and
 // ClosePseudoConsole are internally synchronized by conhost.
 unsafe impl Send for Pseudoconsole {}
 unsafe impl Sync for Pseudoconsole {}
 
-impl Drop for Pseudoconsole {
-    fn drop(&mut self) {
+impl Pseudoconsole {
+    /// Close it, exactly once, from whichever thread got here first.
+    ///
+    /// **Must not be called from the reader thread**, and the reader must still
+    /// be draining — see gotcha 2b. Both hold for the two callers: `hangup`,
+    /// which the session layer calls from a connection thread, and `drop`.
+    fn close(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
         // ORDER MATTERS. ClosePseudoConsole flushes a final frame and blocks
         // until it is drained, so the read handle must still be open and, ideally,
         // still being read. Closing the reader first deadlocks here
         // (microsoft/terminal#17688). ConPty's field order guarantees this runs
         // before the pipe handles drop.
-        // SAFETY: the HPCON is live and closed exactly once.
-        unsafe { ClosePseudoConsole(self.0) };
+        // SAFETY: the HPCON is live and closed exactly once, guarded above.
+        unsafe { ClosePseudoConsole(self.handle) };
+    }
+}
+
+impl Drop for Pseudoconsole {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -242,7 +261,7 @@ impl ConPty {
         if hr != 0 {
             return Err(PtyError::Create(io::Error::from_raw_os_error(hr)));
         }
-        let pcon = Arc::new(Pseudoconsole(hpcon));
+        let pcon = Arc::new(Pseudoconsole { handle: hpcon, closed: AtomicBool::new(false) });
 
         let process = spawn_child(cmd, hpcon).map_err(|source| PtyError::Spawn {
             command: cmd.command_line.clone(),
@@ -318,14 +337,45 @@ impl PtyTransport for ConPty {
     fn resize(&self, size: PtySize) -> Result<(), PtyError> {
         let coord = COORD { X: size.cols.max(1) as i16, Y: size.rows.max(1) as i16 };
         // SAFETY: the HPCON is live for as long as `self` is.
-        let hr = unsafe { ResizePseudoConsole(self.pcon.0, coord) };
+        let hr = unsafe { ResizePseudoConsole(self.pcon.handle, coord) };
         if hr != 0 {
             return Err(PtyError::Resize(io::Error::from_raw_os_error(hr)));
         }
         // Caller beware: ConPTY responds by re-emitting the whole screen.
         Ok(())
     }
+
+    fn hangup(&self) {
+        // This *is* the shutdown protocol of gotcha 2b, run deliberately rather
+        // than as a side effect of drop timing, and both of its preconditions
+        // hold: the caller is the session layer's thread, never the reader, and
+        // the reader is still parked in `ReadFile` draining the final frame.
+        //
+        // Closing the pseudoconsole is also the only thing that releases
+        // ConPTY's copy of the pipe's write end, so it is what lets the reader
+        // reach EOF at all. Dropping `ConPty` would do the same — but only if
+        // this `Arc` were the last, which the session layer cannot promise while
+        // a listing or a poll may hold a clone.
+        self.pcon.close();
+
+        // ConPTY signals its clients and they normally leave at once. The
+        // escalation mirrors the unix backend's SIGHUP → SIGKILL: a program that
+        // declines to exit still has to, since the user asked for this session
+        // to end and something must reach the child that ignores the close.
+        if matches!(self.wait_for_child(Some(HANGUP_GRACE)), ChildStatus::Exited(_)) {
+            return;
+        }
+        tracing::info!("child outlived the pseudoconsole closing; terminating");
+        // SAFETY: the process handle is live for as long as `self` is.
+        unsafe { windows_sys::Win32::System::Threading::TerminateProcess(self.process.raw(), 1) };
+    }
 }
+
+/// How long a child gets to leave on its own before it is terminated.
+///
+/// Matches the unix backend's grace so that "closing a session" costs the same
+/// on both, and short enough that it is not perceived as a hang.
+const HANGUP_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
 
 fn create_pipe() -> io::Result<(OwnedHandle, OwnedHandle)> {
     let mut read: HANDLE = ptr::null_mut();

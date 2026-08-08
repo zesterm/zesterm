@@ -241,6 +241,15 @@ impl Session {
         !self.subscribers.lock().expect("subscriber lock").is_empty()
     }
 
+    /// End the child, and let the reader thread finish.
+    ///
+    /// The opposite of [`detach`](Self::detach), and the only thing in this
+    /// module that deliberately kills anything. Blocking, and bounded by the
+    /// transport's own escalation.
+    pub fn hangup(&self) {
+        self.pty.hangup();
+    }
+
     /// What this subscriber has not yet seen, and the sequences that name it.
     ///
     /// `None` when it is caught up — an idle terminal generates no traffic, the

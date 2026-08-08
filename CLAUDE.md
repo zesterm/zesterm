@@ -137,6 +137,14 @@ Each of these cost real time and is documented where it bites:
   obvious place, and what Linux accepts — therefore fails with an error saying
   the fd is not a terminal, which it plainly is. Set it on the slave.
   (`zest-pty/src/unix.rs`, gotcha 3.)
+- **Closing a unix pty master cannot hang up a pty whose reader is parked in
+  `read`.** The hangup fires when the *last* duplicate of the master fd closes,
+  and the blocked reader holds one; it cannot let go until the read returns, and
+  the read will not return until the hangup. Every call involved succeeds and
+  the shell simply lives on. A short-lived owner never sees this — the process
+  exits and takes every fd with it — so it survived until a daemon started
+  closing one session out of many. `PtyTransport::hangup` signals the session's
+  process group instead. (`zest-pty/src/unix.rs`, gotcha 5.)
 - **A unix pty master reports EOF as `EIO`, not as a zero-length read.** Treat it
   as EOF or every clean shell exit logs an I/O error and looks like a crash.
   (`zest-pty/src/unix.rs`, gotcha 2.)

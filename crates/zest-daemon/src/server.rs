@@ -167,8 +167,48 @@ impl Registry {
     }
 
     /// Drop a session and end its child.
+    ///
+    /// The hangup is explicit and happens **outside** the registry lock. Two
+    /// reasons, and the first is correctness rather than contention: dropping
+    /// the `Arc` cannot be relied on to end anything, because a concurrent
+    /// `get`, `list` or `poll` may be holding a clone, and on unix even the last
+    /// drop would not hang up a pty whose reader is parked. The second is that
+    /// `hangup` blocks for as long as the child takes to leave, and holding the
+    /// registry lock across that would stall every other session's poll.
     pub fn close(&self, id: SessionId) {
-        self.sessions.lock().expect("registry lock").remove(&id.0);
+        let session = self.sessions.lock().expect("registry lock").remove(&id.0);
+        if let Some(s) = session {
+            s.hangup();
+        }
+    }
+
+    /// Forget sessions whose child has exited and that nobody is watching.
+    ///
+    /// Without this a shell that exits on its own is reported as `Exited` and
+    /// then kept forever, holding its terminal and the whole scrollback behind
+    /// it, and appearing in every listing as though it were alive. `close` only
+    /// covers the case where a client asks.
+    ///
+    /// **Both conditions are required.** Sweeping on exit alone would drop the
+    /// session before an attached client had been told, and a client that never
+    /// learns its shell exited waits for output that will never come. A
+    /// subscriber is released when its client detaches or its connection drops,
+    /// so this becomes true shortly afterwards either way.
+    pub fn sweep(&self) {
+        let dead: Vec<u64> = {
+            let sessions = self.sessions.lock().expect("registry lock");
+            sessions
+                .iter()
+                .filter(|(_, s)| s.has_exited() && !s.attached())
+                .map(|(&id, _)| id)
+                .collect()
+        };
+        for id in dead {
+            // Through `close`, so an exited-but-unreaped child is still reaped.
+            // `has_exited` means the reader saw EOF, which is not the same as
+            // the process having been waited on.
+            self.close(SessionId(id));
+        }
     }
 
     #[must_use]
@@ -216,6 +256,30 @@ pub struct Connection {
     on_ready: Option<Box<dyn FnOnce() + Send>>,
     /// Handed to each session on attach, so output wakes the writer.
     waker: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl Drop for Connection {
+    /// Release every subscription this connection held.
+    ///
+    /// A connection ends far more often by the socket dropping — a closed lid, a
+    /// lost Wi-Fi link — than by a polite `Detach`, and until this existed those
+    /// endings left the subscriber registered forever. Three things followed
+    /// from that: the ~48KB encoder shadow behind each one was never freed, the
+    /// session reported itself as attached in every listing, and — once sessions
+    /// began being swept — an exited shell could never be collected, because
+    /// something was permanently "watching" it.
+    ///
+    /// The sweep runs here rather than only in `poll` so that a daemon whose
+    /// last client just vanished still collects, instead of waiting for a client
+    /// that may not come back for hours.
+    fn drop(&mut self) {
+        for (&id, &handle) in &self.attached {
+            if let Some(s) = self.registry.get(SessionId(id)) {
+                s.detach(handle);
+            }
+        }
+        self.registry.sweep();
+    }
 }
 
 impl Connection {
@@ -339,6 +403,12 @@ impl Connection {
                 out.push(HostMessage::Exited { session: addr, code: None });
             }
         }
+        // After the loop: anything reported `Exited` above is still attached
+        // here, so it survives this pass and is collected once this connection
+        // detaches or drops. Sweeping from every connection's poll — rather than
+        // from a timer — is enough, because a session only becomes sweepable
+        // when a client goes away, and a client going away is itself a wakeup.
+        self.registry.sweep();
         out
     }
 
@@ -1073,6 +1143,18 @@ mod tests {
         if cfg!(windows) { "cmd.exe /c echo probe".into() } else { "/bin/echo probe".into() }
     }
 
+    /// A child that outlives the test unless something ends it.
+    ///
+    /// The lifetime is the point: anything about *closing* a session is vacuous
+    /// against a command that has already exited on its own.
+    fn sleep_cmd() -> String {
+        if cfg!(windows) {
+            "powershell.exe -NoProfile -Command Start-Sleep 30".into()
+        } else {
+            "/bin/sleep 30".into()
+        }
+    }
+
     fn wait_for(mut f: impl FnMut() -> bool) -> bool {
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
@@ -1311,6 +1393,125 @@ mod tests {
 
         send(&mut c, &ClientMessage::CloseSession { session: addr });
         assert_eq!(registry.len(), 0);
+    }
+
+    /// The half of `CloseSession` the registry cannot see.
+    ///
+    /// Removing the entry was the whole of `close` for a long time, and every
+    /// test asked only whether the map had shrunk — which it had, while the
+    /// shell went on running. The observable that distinguishes them is the
+    /// reader thread reaching EOF, so the session is held across the close and
+    /// asked whether its child actually left. A long-lived command is essential:
+    /// with `echo` the child is already gone and this passes either way.
+    #[test]
+    fn closing_a_session_ends_its_child() {
+        let (mut c, registry) = conn();
+        authenticate(&mut c);
+        send(
+            &mut c,
+            &ClientMessage::CreateSession {
+                command: sleep_cmd(),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+            },
+        );
+        let addr = registry.list(config().host)[0].addr;
+        let session = registry.get(addr.session).expect("the session was just created");
+        assert!(!session.has_exited(), "the child should still be running");
+
+        send(&mut c, &ClientMessage::CloseSession { session: addr });
+
+        assert!(
+            wait_for(|| session.has_exited()),
+            "the child outlived CloseSession. Removing the registry entry does \
+             not end anything: the pty's reader is parked holding the master \
+             open, so nothing closes and the shell runs until the daemon does"
+        );
+    }
+
+    /// A shell that exits on its own must not be kept forever.
+    ///
+    /// It was: `Exited` was reported to whoever was attached and the session
+    /// stayed in the registry with its whole terminal and scrollback, listed as
+    /// though it were alive. Both halves are asserted, because sweeping too
+    /// eagerly is its own bug — a client that never learns its shell exited
+    /// waits for output that is not coming.
+    #[test]
+    fn an_exited_session_is_kept_until_nobody_is_watching() {
+        let (mut c, registry) = conn();
+        authenticate(&mut c);
+        send(
+            &mut c,
+            &ClientMessage::CreateSession {
+                command: echo_cmd(),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+            },
+        );
+        let addr = registry.list(config().host)[0].addr;
+        send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+
+        assert!(
+            wait_for(|| c
+                .poll()
+                .iter()
+                .any(|m| matches!(m, HostMessage::Exited { .. }))),
+            "an attached client must be told its shell exited"
+        );
+        assert_eq!(
+            registry.len(),
+            1,
+            "swept while still attached: the client would be told about a \
+             session that no longer exists"
+        );
+
+        send(&mut c, &ClientMessage::Detach { session: addr });
+        c.poll();
+        assert_eq!(
+            registry.len(),
+            0,
+            "an exited session nobody is watching is dead, and keeping it holds \
+             its terminal and scrollback for the life of the daemon"
+        );
+    }
+
+    /// A connection that vanishes is the common case, not the polite `Detach`.
+    #[test]
+    fn a_dropped_connection_releases_its_subscriptions() {
+        let registry = Arc::new(Registry::new());
+        let session = {
+            let mut c = Connection::new(
+                config(),
+                Arc::clone(&registry),
+                crate::auth::Auth::Transport(test_authenticator()),
+                "test",
+            );
+            authenticate(&mut c);
+            send(
+                &mut c,
+                &ClientMessage::CreateSession {
+                    command: sleep_cmd(),
+                    cwd: String::new(),
+                    cols: 80,
+                    rows: 24,
+                },
+            );
+            let addr = registry.list(config().host)[0].addr;
+            send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+            let s = registry.get(addr.session).expect("just created");
+            assert!(s.attached(), "the attach did not register a subscriber");
+            s
+        };
+
+        assert!(
+            !session.attached(),
+            "a dropped connection left its subscriber behind. The encoder \
+             shadow behind it is never freed, the session reports itself as \
+             watched in every listing, and it can never be swept"
+        );
+        session.hangup();
     }
 
     #[test]

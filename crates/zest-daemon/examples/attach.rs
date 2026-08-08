@@ -9,8 +9,14 @@
 //! zest-daemon --socket \\.\pipe\zesterm-demo &
 //! cargo run -p zest-daemon --example attach -- --socket \\.\pipe\zesterm-demo --cmd "pwsh -NoLogo -c ls"
 //! ```
+//!
+//! `--close` ends the session on the way out instead of merely detaching. It is
+//! the only way to see the difference from outside the daemon: detaching leaves
+//! the child running by design, so "did closing actually end it" is a question
+//! about a process, answered with `ps`, not about anything on the wire.
 
 use std::io::{Read, Write};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use zest_daemon::{connect, default_socket_path};
@@ -25,6 +31,9 @@ fn main() {
     let socket = opt("--socket").unwrap_or_else(default_socket_path);
     let cmd = opt("--cmd").unwrap_or_default();
     let seconds: u64 = opt("--seconds").and_then(|s| s.parse().ok()).unwrap_or(5);
+    // `Detach` and `CloseSession` differ in exactly one observable — whether the
+    // child is still running afterwards — and nothing else here can show it.
+    let close = args.iter().any(|a| a == "--close");
 
     let mut stream = match connect(&socket) {
         Ok(s) => s,
@@ -71,11 +80,30 @@ fn main() {
     // would hold the loop past any deadline the loop itself could notice. That
     // is correct behaviour for a client and wrong for a diagnostic with a time
     // limit.
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(seconds));
-        eprintln!("[attach] done");
-        std::process::exit(0);
-    });
+    // Shared so the deadline thread can end the session the loop attached to.
+    let opened: Arc<Mutex<Option<zest_proto::SessionAddr>>> = Arc::new(Mutex::new(None));
+
+    {
+        let opened = Arc::clone(&opened);
+        let mut closer = stream.try_clone().expect("clone the stream for the deadline thread");
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(seconds));
+            if close {
+                if let Some(session) = *opened.lock().expect("session slot") {
+                    eprintln!("[attach] closing {session}");
+                    let bytes = frame::encode(&ClientMessage::CloseSession { session })
+                        .expect("encode");
+                    let _ = Write::write_all(&mut closer, &bytes);
+                    let _ = Write::flush(&mut closer);
+                    // The daemon hangs the child up synchronously, so give the
+                    // write time to be served before this process disappears.
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            }
+            eprintln!("[attach] done");
+            std::process::exit(0);
+        });
+    }
 
     let mut reader = FrameReader::new();
     let mut buf = vec![0u8; 64 * 1024];
@@ -112,6 +140,7 @@ fn main() {
                                 &mut stream,
                                 &ClientMessage::Attach { session: s.addr, cols: 100, rows: 30 },
                             );
+                            *opened.lock().expect("session slot") = Some(s.addr);
                             attached = true;
                         }
                     }

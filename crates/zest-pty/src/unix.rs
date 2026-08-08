@@ -43,6 +43,16 @@
 //!    because a future `#[unix_sigpipe]` attribute or a raw-`main` embedding
 //!    would silently remove it.
 //!
+//! 5. **Closing the master cannot hang up a pty whose reader is parked in
+//!    `read`.** The hangup fires when the last duplicate of the master fd is
+//!    closed, and a blocked reader is holding one; it cannot let go until the
+//!    read returns, and the read will not return until the hangup. Every API
+//!    call involved succeeds and the child simply lives on. A short-lived owner
+//!    never sees it — the process exits and takes every fd with it — but a
+//!    daemon closing one session out of many is exactly the case that does.
+//!    [`UnixPty::hangup`](PtyTransport::hangup) signals the child's process
+//!    group instead of waiting for a close that can never come.
+//!
 //! Unlike `ResizePseudoConsole`, [`UnixPty::resize`] does *not* cause the screen
 //! to be re-emitted. It updates the kernel's `winsize` and raises `SIGWINCH`;
 //! whether anything is redrawn is the child's decision.
@@ -168,35 +178,102 @@ impl UnixPty {
         let Ok(mut child) = self.child.lock() else {
             return ChildStatus::StillRunning;
         };
+        wait_locked(&mut child, timeout)
+    }
+}
 
-        match timeout {
-            None => match child.wait() {
-                Ok(status) => ChildStatus::Exited(exit_code(status)),
-                Err(e) => {
-                    tracing::warn!(error = %e, "waiting on child failed");
-                    ChildStatus::StillRunning
-                }
-            },
-            Some(limit) => {
-                // No portable "wait with timeout": `waitpid` is all-or-nothing
-                // and signal-based alternatives differ per platform. Polling is
-                // adequate because every caller is either shutting down or
-                // draining, and neither is latency-sensitive.
-                let deadline = std::time::Instant::now() + limit;
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(status)) => return ChildStatus::Exited(exit_code(status)),
-                        Ok(None) => {}
-                        Err(e) => {
-                            tracing::warn!(error = %e, "polling child failed");
-                            return ChildStatus::StillRunning;
-                        }
-                    }
-                    if std::time::Instant::now() >= deadline {
+/// How long a child gets to act on `SIGHUP` before it is killed.
+///
+/// A shell running its exit traps needs microseconds; this is generous enough
+/// that a slow one is not cut off, and short enough that closing a session is
+/// not perceived as a hang.
+const HANGUP_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// How long the kernel gets to deliver `SIGKILL` before the wait is abandoned.
+///
+/// Only reached by a process ignoring `SIGHUP`. Giving up leaves a zombie, which
+/// is why it is logged: one is a curiosity, a stream of them is a bug.
+const KILL_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
+
+impl UnixPty {
+    /// See [`PtyTransport::hangup`].
+    ///
+    /// `SIGHUP` to the child's process *group*, not to the child, because that
+    /// is what a real hangup delivers: the kernel signals the terminal's
+    /// foreground group. The child is a group leader (`setsid` in `pre_exec`,
+    /// so its pgid is its pid), so the group is exactly the right target.
+    ///
+    /// In practice the pid alone would usually do — when a session leader dies
+    /// the kernel runs the same cascade — but "usually" depends on which group
+    /// the shell put its jobs in, and this is the form that does not.
+    ///
+    /// A shell gets to run its exit traps. Only a program that *ignores*
+    /// `SIGHUP` reaches the `SIGKILL`, and by then the user has asked for the
+    /// session to end twice over.
+    fn hangup_child(&self) {
+        let Ok(mut child) = self.child.lock() else { return };
+
+        // Already gone and reaped: signalling now would either hit nothing or,
+        // far worse, hit whatever the OS has since given the pid to.
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not tell whether the child is alive; not signalling");
+                return;
+            }
+            Ok(None) => {}
+        }
+
+        if let Some(pid) = i32::try_from(child.id()).ok().and_then(rustix::process::Pid::from_raw) {
+            if let Err(e) = rustix::process::kill_process_group(pid, rustix::process::Signal::HUP) {
+                tracing::debug!(error = %e, "SIGHUP to the session group failed");
+            }
+        }
+
+        if matches!(wait_locked(&mut child, Some(HANGUP_GRACE)), ChildStatus::Exited(_)) {
+            return;
+        }
+
+        tracing::info!(pid = child.id(), "child ignored SIGHUP; killing");
+        let _ = child.kill();
+        if !matches!(wait_locked(&mut child, Some(KILL_GRACE)), ChildStatus::Exited(_)) {
+            tracing::warn!(pid = child.id(), "child survived SIGKILL; leaving it unreaped");
+        }
+    }
+}
+
+/// The body of [`UnixPty::wait_for_child`], with the lock already held.
+///
+/// Split out because `hangup_child` waits twice with the same lock held, and
+/// calling the `&self` method there would deadlock on the second acquisition.
+fn wait_locked(child: &mut Child, timeout: Option<std::time::Duration>) -> ChildStatus {
+    match timeout {
+        None => match child.wait() {
+            Ok(status) => ChildStatus::Exited(exit_code(status)),
+            Err(e) => {
+                tracing::warn!(error = %e, "waiting on child failed");
+                ChildStatus::StillRunning
+            }
+        },
+        Some(limit) => {
+            // No portable "wait with timeout": `waitpid` is all-or-nothing
+            // and signal-based alternatives differ per platform. Polling is
+            // adequate because every caller is either shutting down or
+            // draining, and neither is latency-sensitive.
+            let deadline = std::time::Instant::now() + limit;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => return ChildStatus::Exited(exit_code(status)),
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "polling child failed");
                         return ChildStatus::StillRunning;
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(5));
                 }
+                if std::time::Instant::now() >= deadline {
+                    return ChildStatus::StillRunning;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
             }
         }
     }
@@ -222,13 +299,25 @@ impl PtyTransport for UnixPty {
     fn resize(&self, size: PtySize) -> Result<(), PtyError> {
         set_winsize(self.master.as_fd(), size).map_err(PtyError::Resize)
     }
+
+    fn hangup(&self) {
+        self.hangup_child();
+    }
 }
 
 // Dropping the last master fd hangs up the pty, which sends SIGHUP to the
-// child's session — so there is no explicit kill here, and none is wanted: a
-// shell asked to hang up gets to run its exit traps. The reader and writer hold
-// their own duplicates, so the hangup lands when the last of them is dropped,
-// not when `UnixPty` is.
+// child's session — so there is no explicit kill in `Drop`, and none is wanted:
+// a shell asked to hang up gets to run its exit traps. The reader and writer
+// hold their own duplicates, so the hangup lands when the last of them is
+// dropped, not when `UnixPty` is.
+//
+// Sharp edge 5: that is enough for a *short-lived* owner, which is why it went
+// unnoticed for so long. It is not enough for a daemon. A reader thread parked
+// in `read` holds a duplicate it cannot release until the read returns, and the
+// read cannot return until the hangup — so a session that is closed while its
+// shell is idle keeps the shell, the thread, and the whole terminal with its
+// scrollback, forever. `hangup` breaks the cycle by signalling instead of
+// waiting for a close that can never come.
 
 fn open_master() -> io::Result<OwnedFd> {
     use rustix::pty::OpenptFlags;
@@ -514,5 +603,121 @@ mod tests {
             "the initial winsize must reach the child before it runs, or every \
              full-screen program starts at the wrong size: {text:?}"
         );
+    }
+
+    /// Sharp edge 5, in the exact shape a daemon produces.
+    ///
+    /// A reader thread parked in `read` holds a duplicate of the master, so the
+    /// implicit hangup can never fire: the duplicate is not released until the
+    /// read returns, and the read does not return until the hangup. This test
+    /// therefore drops the `UnixPty` first — which is all the session layer used
+    /// to do — and asserts the reader is *still* parked, before proving that
+    /// `hangup` on a clone of the transport unparks it.
+    #[test]
+    fn hangup_ends_a_child_whose_reader_is_parked() {
+        let spec = CommandSpec {
+            command_line: "/bin/sleep 30".into(),
+            cwd: None,
+            env: crate::terminal_env(),
+        };
+        let mut pty = UnixPty::spawn(&spec, PtySize::new(80, 24)).expect("spawn /bin/sleep");
+        let mut reader = pty.take_reader().expect("reader");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 1024];
+            // `sleep` writes nothing, so this parks until the pty hangs up.
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+            }
+            let _ = tx.send(());
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            rx.try_recv().is_err(),
+            "the reader must still be parked; if it is not, this test is no \
+             longer reproducing the case it exists for"
+        );
+
+        pty.hangup();
+
+        assert!(
+            matches!(pty.wait_for_child(Some(std::time::Duration::from_secs(5))), ChildStatus::Exited(_)),
+            "hangup must end the child. Dropping the transport cannot: the \
+             parked reader holds the last duplicate of the master hostage"
+        );
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
+            "the reader must reach EOF, or its thread and the terminal behind \
+             it leak for the lifetime of the daemon"
+        );
+    }
+
+    /// Nothing the shell started survives the hangup.
+    ///
+    /// Asserted on the grandchild's pid directly, because "the reader unparked"
+    /// cannot tell *everything* going from *the one process we knew about*
+    /// going.
+    ///
+    /// **This does not discriminate `kill_process_group` from `kill_process`,
+    /// and is not evidence for that choice** — it passes under both. When a
+    /// session leader dies the kernel hups the terminal's foreground process
+    /// group itself, and with job control off that group is the shell's, so the
+    /// cascade happens either way. Recorded here so the test is not later read
+    /// as proof of something it cannot see.
+    #[test]
+    fn hangup_ends_everything_the_shell_started() {
+        let spec = CommandSpec {
+            // `exec` on the last line is what makes this discriminating: the
+            // shell replaces itself, so the group leader is a `sleep` that will
+            // not forward SIGHUP to anything. With a *shell* still sitting there
+            // the test passes either way, because a shell hups its own jobs on
+            // the way out and does the group's work for us.
+            command_line: "/bin/sh -c 'sleep 30 & echo pid=$!; exec sleep 30'".into(),
+            cwd: None,
+            env: crate::terminal_env(),
+        };
+        let mut pty = UnixPty::spawn(&spec, PtySize::new(80, 24)).expect("spawn /bin/sh");
+        let mut reader = pty.take_reader().expect("reader");
+
+        // The pid of the backgrounded sleep, straight from the shell.
+        let mut out = String::new();
+        let mut buf = [0u8; 256];
+        let grandchild = loop {
+            let n = reader.read(&mut buf).expect("read pid from the shell");
+            assert!(n > 0, "the shell exited before printing a pid");
+            out.push_str(&String::from_utf8_lossy(&buf[..n]));
+            if let Some(rest) = out.split("pid=").nth(1) {
+                let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                if out.contains('\n') && !digits.is_empty() {
+                    break digits.parse::<i32>().expect("a pid is a number");
+                }
+            }
+        };
+
+        let pid = rustix::process::Pid::from_raw(grandchild).expect("a live pid is non-zero");
+        assert!(
+            rustix::process::test_kill_process(pid).is_ok(),
+            "the grandchild should be running before the hangup; without that \
+             this test asserts nothing"
+        );
+
+        pty.hangup();
+
+        // It is not our child, so it is reaped by init rather than by us --
+        // poll instead of waiting on it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while rustix::process::test_kill_process(pid).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the shell's background job survived the hangup; a session \
+                 that half-ends is worse than one that does not end at all, \
+                 because nothing is left to show for it"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }

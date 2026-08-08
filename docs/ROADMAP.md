@@ -45,13 +45,13 @@ move.
 
 ## Status
 
-**530 tests, four gates green**, measured on macOS rather than remembered.
+**548 tests, five gates green**, measured on macOS rather than remembered.
 First paint 35ms **on Windows**; the Mac paints against a different compositor
 and its number (48ms) is reported rather than gated.
 
 | Crate | State |
 |---|---|
-| `zest-pty` | ✅ ConPTY *and* unix (`openpt`), resize, shutdown, `.vtrec` recorder |
+| `zest-pty` | ✅ ConPTY *and* unix (`openpt`), resize, shutdown, explicit `hangup`, `.vtrec` recorder |
 | `zest-core` | ✅ grid, scrollback, VT, modes, OSC, palette, `ChangeSource`, `RemoteWriter` — 🟡 `BlockIndex` types frozen, OSC 133 not wired |
 | `zest-font` | ✅ metrics, shaping, fallback, colour glyphs, Nerd Font PUA |
 | `zest-theme` | ✅ tokens, OKLCH derivation, 5 built-ins, 4 importers |
@@ -61,7 +61,7 @@ and its number (48ms) is reported rather than gated.
 | `zest-app` | ✅ window, sessions behind `SessionSource`, **attached to its own daemon** — runs on Windows *and* macOS (Metal) — ⬜ macOS chrome |
 | `zest-proto` | ✅ protocol 2, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, cell-for-cell conformance, chaos-resync |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store — ⬜ Cloudflare transport (M4) |
-| `zest-daemon` | ✅ session ownership, protocol loop, loopback *and* LAN transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing |
+| `zest-daemon` | ✅ session ownership *and* lifecycle, protocol loop, loopback *and* LAN transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing |
 
 ### What works end to end today
 
@@ -347,8 +347,17 @@ M2. Owns `zest-core/src/blocks.rs` and the OSC 133 path. Hot spot: coordinate
       in under a second — so it runs on every `cargo test` rather than behind
       `--ignored`, where CI would never see it. The stale-`base` path is
       exercised on every iteration, not once in a fixture.
-- [ ] `ts-rs` codegen with golden-fixture contract tests in CI. The `ts` feature
-      exists on the delta types; nothing generates or checks bindings yet.
+- [x] `ts-rs` codegen, committed and gated in CI, so the web client's view of
+      the protocol cannot silently drift from Rust's.
+- [x] **Sessions end when they should, and only then.** `CloseSession` now ends
+      its child — it used to remove the registry entry and drop the transport,
+      which on unix cannot hang up a pty whose reader is parked, and on Windows
+      only works if that `Arc` happened to be the last. A shell that exits on
+      its own is collected once nobody is watching, rather than being reported
+      as exited and then kept, with its scrollback, forever. And a connection
+      that vanishes releases its subscriptions, which a polite `Detach` did but
+      a closed lid did not. → `PtyTransport::hangup`, a deliberate contract
+      change; see CONTRACTS.md.
 - [ ] SQLite scrollback. Scrollback is in memory and bounded; a session that
       outlives its window does not yet outlive the daemon.
 

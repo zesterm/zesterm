@@ -186,4 +186,26 @@ pub trait PtyTransport: Send {
     /// A write half. Cheap to clone; writes are independently synchronized.
     fn writer(&self) -> Box<dyn Write + Send>;
     fn resize(&self, size: PtySize) -> Result<(), PtyError>;
+
+    /// End the child, and make the reader reach EOF.
+    ///
+    /// Exists because on neither platform does dropping the transport suffice
+    /// while a reader thread is parked in `read`, which is precisely a daemon's
+    /// steady state:
+    ///
+    /// - On unix the hangup fires when the *last* duplicate of the master fd
+    ///   closes, and the parked reader holds one. It cannot drop its duplicate
+    ///   until the read returns, and the read cannot return until the hangup.
+    ///   Nothing outside that cycle breaks it.
+    /// - On Windows dropping is the whole shutdown protocol and does work — but
+    ///   only if the last `Arc` really is this one, which the session layer
+    ///   cannot promise, since a listing or a poll may be holding a clone.
+    ///
+    /// Idempotent, and safe to call on a child that has already exited.
+    /// Blocking, but bounded: the implementation escalates on a timer rather
+    /// than waiting on a program that has decided not to leave.
+    ///
+    /// **Not called when a client merely detaches.** Ending the child is the
+    /// point of `CloseSession` and the opposite of `Detach`. → ADR-007.
+    fn hangup(&self);
 }
