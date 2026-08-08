@@ -307,7 +307,15 @@ fn start_approver(queue: &Arc<PairingQueue>, auth: &Arc<Authenticator>) {
         .spawn(move || {
             use std::io::BufRead as _;
             while rx.recv().is_ok() {
-                for request in queue_for_hook.pending() {
+                let waiting = queue_for_hook.pending();
+                // A notification with nothing pending means the request was
+                // already resolved -- expired, or answered elsewhere. Worth
+                // seeing, because it is one of the ways a prompt and the queue
+                // can disagree about what is being asked.
+                if waiting.is_empty() {
+                    tracing::debug!("woken with no pending request");
+                }
+                for request in waiting {
                     // Both halves are shown, because they answer different
                     // questions: `short()` says what claims to be connecting,
                     // the code says that this is the connection you are looking
@@ -339,6 +347,21 @@ fn start_approver(queue: &Arc<PairingQueue>, auth: &Arc<Authenticator>) {
                         Ok(_) => {}
                     }
                     let approve = matches!(line.trim(), "y" | "Y" | "yes");
+                    // Instrumented because answers have gone missing (#21): a
+                    // pairing that fails because the approval was swallowed is
+                    // indistinguishable, from every log this daemon writes, from
+                    // one where nobody answered. Logging what was *read* and for
+                    // *which* request is what tells those apart -- an empty line
+                    // here means something consumed the answer, and a client id
+                    // that is not the one on screen means the queue moved under
+                    // the prompt.
+                    tracing::info!(
+                        client = %request.client.short(),
+                        answer = %line.trim().escape_debug().to_string(),
+                        bytes = line.len(),
+                        approve,
+                        "pairing answer read"
+                    );
                     auth.decide(
                         request.client,
                         if approve { Decision::Approve } else { Decision::Deny },
