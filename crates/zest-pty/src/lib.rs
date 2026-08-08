@@ -241,4 +241,27 @@ pub trait PtyTransport: Send {
     /// **Not called when a client merely detaches.** Ending the child is the
     /// point of `CloseSession` and the opposite of `Detach`. → ADR-007.
     fn hangup(&self);
+
+    /// Call `on_exit` once the child has exited, if the reader alone cannot
+    /// tell.
+    ///
+    /// The default does nothing, which is right for unix: when the last process
+    /// holding the slave goes, the master read fails with `EIO`, the reader
+    /// treats that as EOF and unwinds, and the owner learns from that. A second
+    /// waiter there would have to hold the child mutex to reap, which is the
+    /// same mutex [`hangup`](Self::hangup) needs — a deadlock in exchange for
+    /// nothing.
+    ///
+    /// Windows must override it. ConPTY keeps its own copy of the output pipe's
+    /// write end for as long as the `HPCON` lives, so a blocked `ReadFile` stays
+    /// blocked after the shell is gone (gotcha 2b) and EOF cannot be the signal.
+    /// Without this a shell that exits on its own is never noticed at all: no
+    /// `Exited` reaches any client, and the session is kept forever.
+    ///
+    /// Implementations must block on the OS's own wait rather than polling — a
+    /// per-session timer is exactly the sort of thing that costs the 0%-idle
+    /// guarantee.
+    fn watch_exit(&self, on_exit: Box<dyn FnOnce() + Send>) {
+        drop(on_exit);
+    }
 }

@@ -89,7 +89,7 @@ impl Session {
         cmd: &CommandSpec,
         size: PtySize,
         scrollback: usize,
-        wake: impl Fn(SessionId) + Send + 'static,
+        wake: impl Fn(SessionId) + Send + Sync + 'static,
     ) -> Result<Self, DaemonError> {
         let mut pty = zest_pty::NativePty::spawn(cmd, size)
             .map_err(|e| DaemonError::Spawn(e.to_string()))?;
@@ -105,8 +105,13 @@ impl Session {
         let title = Arc::new(Mutex::new(String::new()));
 
         let subscribers: Arc<Mutex<HashMap<u64, Subscriber>>> = Arc::default();
+        // Shared because two things now report the child leaving: the reader
+        // reaching EOF, and -- on Windows, where it cannot -- the process
+        // watcher below.
+        let wake = Arc::new(wake);
 
         {
+            let wake = Arc::clone(&wake);
             let terminal = Arc::clone(&terminal);
             let exited = Arc::clone(&exited);
             let title = Arc::clone(&title);
@@ -159,10 +164,29 @@ impl Session {
                 .map_err(|e| DaemonError::Spawn(e.to_string()))?;
         }
 
+        let pty: Arc<dyn PtyTransport + Send + Sync> = Arc::new(pty);
+
+        // Windows only, in effect: there the reader can never observe the child
+        // exiting, because ConPTY holds the output pipe's write end until the
+        // pseudoconsole closes. Without this a shell that exits on its own is
+        // never noticed -- no `Exited` reaches any client and the session is
+        // kept forever. On unix the reader's EOF already says it and this does
+        // nothing. See `PtyTransport::watch_exit`.
+        {
+            let exited = Arc::clone(&exited);
+            let subscribers = Arc::clone(&subscribers);
+            let wake = Arc::clone(&wake);
+            pty.watch_exit(Box::new(move || {
+                exited.store(true, Ordering::Release);
+                wake(id);
+                wake_subscribers(&subscribers);
+            }));
+        }
+
         Ok(Self {
             id,
             terminal,
-            pty: Arc::new(pty),
+            pty,
             writer: Arc::new(Mutex::new(writer)),
             subscribers,
             next_subscriber: Mutex::new(0),
@@ -533,6 +557,22 @@ mod tests {
         assert!(s.poll(handle).is_none(), "an idle session kept producing updates");
     }
 
+    /// Run a shell script, on whichever shell this platform has.
+    ///
+    /// These tests need a child that *writes several times*, which is the only
+    /// way to produce a chain of updates rather than one. `/bin/sh` was
+    /// hardcoded, so both of them failed on Windows with "The system cannot find
+    /// the file specified" -- an error about a path, for a test about sequence
+    /// numbers.
+    fn script_cmd(sh: &str, ps: &str) -> CommandSpec {
+        let command_line = if cfg!(windows) {
+            format!("powershell.exe -NoProfile -Command \"{ps}\"")
+        } else {
+            format!("/bin/sh -c \"{sh}\"")
+        };
+        CommandSpec { command_line, cwd: None, env: zest_pty::terminal_env() }
+    }
+
     #[test]
     fn every_update_chains_onto_the_last() {
         // The property a client's resync rule rests on: each update's `base` is
@@ -543,12 +583,10 @@ mod tests {
         // Both were hardcoded to 0 before this, which made every update look
         // like a valid continuation of every other.
         // Several separate writes, so there is a chain rather than one update.
-        let script = "for i in 1 2 3 4 5; do printf 'line %s\\n' $i; sleep 0.05; done";
-        let spec = CommandSpec {
-            command_line: format!("/bin/sh -c \"{script}\""),
-            cwd: None,
-            env: zest_pty::terminal_env(),
-        };
+        let spec = script_cmd(
+            "for i in 1 2 3 4 5; do printf 'line %s\\n' $i; sleep 0.05; done",
+            "1..5 | ForEach-Object { Write-Host \\\"line $_\\\"; Start-Sleep -Milliseconds 50 }",
+        );
         let s = Session::spawn(SessionId(5), &spec, PtySize::new(80, 24), 100, |_| {})
             .expect("spawn");
 
@@ -655,13 +693,11 @@ mod tests {
         // client renders history in whatever style it last held.
         // Enough coloured lines to push some off a three-row screen, so there
         // is history that carries a non-default attribute.
-        let script = "for i in 1 2 3 4 5 6 7 8 9 10; do \
-                      printf '\\033[31mline %s\\033[0m\\n' $i; done";
-        let spec = CommandSpec {
-            command_line: format!("/bin/sh -c \"{script}\""),
-            cwd: None,
-            env: zest_pty::terminal_env(),
-        };
+        let spec = script_cmd(
+            "for i in 1 2 3 4 5 6 7 8 9 10; do \
+             printf '\\033[31mline %s\\033[0m\\n' $i; done",
+            "1..10 | ForEach-Object { Write-Host -ForegroundColor Red \\\"line $_\\\" }",
+        );
         let s = Session::spawn(SessionId(77), &spec, PtySize::new(40, 3), 200, |_| {})
             .expect("spawn");
         wait_for(|| s.has_exited());
