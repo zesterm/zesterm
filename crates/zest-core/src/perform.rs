@@ -564,6 +564,18 @@ impl TermState {
         let command = command
             .or_else(|| self.pending_command.take())
             .unwrap_or_else(|| self.command_text());
+
+        // `C` fires when the shell is about to run the command, which is
+        // *before* it echoes the newline the user pressed -- so the cursor is
+        // still sitting at the end of the typed command, and this line is the
+        // command's, not the output's. `output_line` is documented as the first
+        // line of output and consumers rely on that: copy-output would
+        // otherwise hand back the prompt and the command it was asked to
+        // exclude.
+        //
+        // Column zero means the shell emitted the newline first, and then this
+        // line really is where output begins.
+        let line = if self.grid.cursor.col > 0 { line + 1 } else { line };
         self.blocks.begin_output(line, command);
         self.prompt_end = None;
         self.touch();
@@ -571,6 +583,20 @@ impl TermState {
 
     fn block_finish(&mut self, exit_code: Option<i32>) {
         let Some(line) = self.block_line() else { return };
+
+        // The mirror of the adjustment in `block_output_start`. `D` arrives
+        // after the command's last newline, so the cursor has already moved to
+        // the line the *next* prompt will be drawn on -- and a block that
+        // claims that line owns a row belonging to the command after it, which
+        // is what makes folding hide one line too many.
+        //
+        // A command whose output did not end in a newline leaves the cursor
+        // mid-line, and then this line really is the block's last.
+        let line = if self.grid.cursor.col == 0 { line.saturating_sub(1) } else { line };
+        // Never before its own prompt. A command that printed nothing at all
+        // ends where it began, and an end line above the start would make
+        // `contains` answer for no line and `evict_before` reason backwards.
+        let line = self.blocks.last().map_or(line, |b| line.max(b.prompt_line));
         self.blocks.finish(line, exit_code);
         self.prompt_end = None;
         self.pending_command = None;

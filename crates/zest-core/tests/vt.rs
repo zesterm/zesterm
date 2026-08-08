@@ -436,8 +436,14 @@ fn the_osc_fixture_produces_one_complete_block() {
     // The prompt is on row 1: row 0 is the title/hyperlink line the fixture
     // opens with, and `\r\n` moved to row 1 before `133;A` arrived.
     assert_eq!(b.prompt_line, 1, "the block starts where the prompt was drawn");
-    assert_eq!(b.output_line, Some(1), "`ls` was submitted from the prompt's own row");
-    assert_eq!(b.end_line, Some(3), "`133;D` arrived after `out` and its newline");
+    // Not row 1, where `133;C` arrived: that marker fires before the shell
+    // echoes the newline, so it lands on the row the command was typed on. The
+    // first line of output is the one after it, and `output_line` says what it
+    // means -- copy-output would otherwise hand back the prompt.
+    assert_eq!(b.output_line, Some(2), "`out` is on the row below the prompt");
+    // Likewise `133;D` arrives after the trailing newline, with the cursor
+    // already on the row the next prompt will use. The block ends on row 2.
+    assert_eq!(b.end_line, Some(2), "the block ends on its last output row");
     assert_eq!(b.command, "ls", "the command is the cells between B and C");
     assert_eq!(
         b.state,
@@ -560,8 +566,8 @@ fn widening_the_window_re_anchors_blocks_instead_of_losing_them() {
     let before = t.blocks().last().expect("one block").clone();
     assert_eq!(
         (before.prompt_line, before.output_line, before.end_line),
-        (2, Some(3), Some(5)),
-        "the block spans two wrapped rows at 10 columns"
+        (2, Some(4), Some(4)),
+        "the prompt wraps across rows 2-3, so output begins on row 4 and ends there"
     );
 
     t.resize(40, 5);
@@ -574,7 +580,7 @@ fn widening_the_window_re_anchors_blocks_instead_of_losing_them() {
     );
     assert_eq!(
         (after.prompt_line, after.output_line, after.end_line),
-        (1, Some(1), Some(3)),
+        (1, Some(2), Some(2)),
         "each end of the block follows its logical line to the new numbering"
     );
     assert_eq!(after.command, before.command, "re-anchoring must not disturb the command");
@@ -684,6 +690,23 @@ fn a_real_zsh_session_produces_real_blocks() {
 
     // OSC 7 rode along with the same hook.
     assert_eq!(finished[0].cwd, "/tmp/zestdemo");
+
+    // The boundaries, against a real shell rather than a hand-written sequence.
+    // `133;C` arrives before the shell echoes the newline and `133;D` after the
+    // trailing one, so a block that took both markers literally would claim the
+    // command's own row at one end and the next prompt's at the other — and
+    // copy-output would hand back a prompt at each end of what it copied.
+    let out = finished[0].output_line.expect("output began");
+    let row = t.grid().row_of_line(out).expect("still on screen");
+    assert_eq!(t.grid().row(row).text(), "hello", "output_line is the first line of output");
+    assert_eq!(finished[0].end_line, Some(out), "and `hello` is the whole of it");
+
+    // `false` printed nothing, so its range is empty rather than covering a
+    // neighbour's row.
+    assert!(
+        finished[1].output_line.expect("marked") > finished[1].end_line.expect("finished"),
+        "a command that printed nothing owns no output rows"
+    );
 }
 
 #[test]

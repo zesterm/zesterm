@@ -94,6 +94,9 @@ and its number (48ms) is reported rather than gated.
   and writes none of them, so blocks appear against whatever prompt they
   already had. VS Code's OSC 633 is understood too, for anyone who has its
   integration.
+- **Acting on a block.** `Cmd`/`Ctrl+Shift` + `O` copies what the last command
+  printed — its output alone, not the prompt and not the command — and `R` runs
+  it again. The same chord plus a click does it for any block in scrollback.
 
 ### Reflow
 
@@ -386,8 +389,31 @@ M2. Owns `zest-core/src/blocks.rs` and the OSC 133 path. Hot spot: coordinate
       override, so the failure is currently untested rather than handled; it
       wants detecting and reporting rather than looking like a shell that
       emits no markers.
-- [ ] Block folding, re-run, copy-output in the native UI. **Not blocked on
-      WS-A**, which is worth stating because it looks as though it should be.
+- [x] **Copy-output and re-run**, keyboard and mouse, on the same chord as copy
+      and paste (`Cmd` / `Ctrl+Shift`): `O` copies what the last command
+      printed — not its prompt, not the command — and `R` runs it again. The
+      chord plus a click does the same for a specific block anywhere in
+      scrollback, which is the thing a keyboard shortcut cannot express.
+
+      Both target the most recent block *with output*, not the block the cursor
+      is in: at a prompt the cursor's block has printed nothing, which is the
+      state a terminal spends most of its life in.
+
+      Writing this found a real bug in the markers. `133;C` fires before the
+      shell echoes the newline and `133;D` after the trailing one, so
+      `output_line` was landing on the command's own row and `end_line` on the
+      *next* prompt's. Taken literally, copy-output returns a prompt at each end
+      of what it copied, and folding hides one line too many. Both are adjusted
+      in the parser rather than in each consumer, so the wire and the phone get
+      the corrected meaning too.
+- [ ] Block folding. The one part that needs a renderer change: `Viewport` would
+      carry the ranges to skip, and the row loop compact over them. Selection
+      coordinates, mouse row→line mapping and the scroll maths all read that
+      same row list, which is why it is its own step rather than a rider on the
+      actions above.
+
+      Still **not blocked on WS-A**, which is worth stating because it looks as
+      though it should be.
       The renderer already has the rect pipeline, `Chrome { rects, glyphs }` and
       absolute-pixel `GlyphInstance`s, so block headers have somewhere to be
       drawn; and the actions themselves reuse what exists — `block_at` for

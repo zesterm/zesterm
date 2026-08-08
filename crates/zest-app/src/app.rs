@@ -13,6 +13,7 @@ use zest_pty::{CommandSpec, PtySize};
 use zest_render_wgpu::{Chrome, Renderer, Scene, Viewport};
 
 use zest_input::{key, mouse, select, MouseState};
+use crate::block_actions;
 use crate::pipeline_cache;
 use crate::platform;
 use crate::session::{Session, Wakeup};
@@ -395,6 +396,71 @@ impl App {
             .and_then(|s| s.terminal().lock().selection_text());
         if let Some(text) = text {
             self.set_clipboard(text);
+        }
+    }
+
+    /// Copy what the last command printed — not its prompt, not the command.
+    ///
+    /// Targets the most recent block with output rather than the one the cursor
+    /// is in: at a prompt the cursor's block has printed nothing, which is
+    /// almost always.
+    fn copy_block_output(&mut self) {
+        // Same borrow discipline as `copy_selection`: read through the session,
+        // drop the lock, then touch the clipboard behind `&mut self`.
+        let text = self.session.as_ref().and_then(|s| {
+            let term = s.terminal().lock();
+            let block = block_actions::last_with_output(&term)?;
+            block_actions::output_text(&term, &block)
+        });
+        match text {
+            Some(text) => self.set_clipboard(text),
+            // Silent would be indistinguishable from a broken shortcut, and the
+            // overwhelmingly likely cause is a shell with no integration rather
+            // than a bug.
+            None => tracing::info!("no command output to copy -- is shell integration loaded?"),
+        }
+    }
+
+    /// Copy the output of the block a particular viewport row belongs to.
+    ///
+    /// What the click can express and the keyboard cannot: a specific command
+    /// somewhere up the scrollback, rather than the last one.
+    fn copy_block_output_at(&mut self, row: usize) {
+        let text = self.session.as_ref().and_then(|s| {
+            let term = s.terminal().lock();
+            let block = block_actions::at_row(&term, row)?;
+            block_actions::output_text(&term, &block)
+        });
+        match text {
+            Some(text) => self.set_clipboard(text),
+            None => tracing::info!(row, "no command output on that row"),
+        }
+    }
+
+    /// Run the last command again.
+    ///
+    /// Sent as [`ClientMessage::Input`](zest_proto::ClientMessage) would be —
+    /// the command text and a carriage return. There is no "re-run" message,
+    /// because the host would have to take the client's word for the command
+    /// anyway, and typing it is exactly what re-running means.
+    fn rerun_last_command(&mut self) {
+        let Some(session) = self.session.as_ref() else { return };
+        let bytes = {
+            let term = session.terminal().lock();
+            block_actions::last_with_output(&term)
+                .as_ref()
+                .and_then(block_actions::rerun_bytes)
+        };
+        let Some(bytes) = bytes else {
+            tracing::info!("no command to re-run -- is shell integration loaded?");
+            return;
+        };
+        session.write(bytes);
+        // Jump to the bottom, as typing would. Re-running something and staying
+        // scrolled up in history means watching a command you cannot see.
+        session.terminal().lock().scroll_to_bottom();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
         }
     }
 
@@ -1179,6 +1245,20 @@ impl ApplicationHandler<Wakeup> for App {
                                 }
                                 return;
                             }
+                            // Command blocks. On the same chord as copy and
+                            // paste because they are the same kind of thing --
+                            // the desktop acting on the terminal rather than
+                            // the terminal receiving a keystroke -- and because
+                            // that chord is already the one the encoder refuses
+                            // to pass through to the shell.
+                            "o" => {
+                                self.copy_block_output();
+                                return;
+                            }
+                            "r" => {
+                                self.rerun_last_command();
+                                return;
+                            }
                             _ => {}
                         }
                     }
@@ -1274,6 +1354,20 @@ impl ApplicationHandler<Wakeup> for App {
                 // Shift is the escape hatch every terminal implements: hold it
                 // to select text over a mouse-aware program anyway.
                 if self.forward_mouse(button, state, row, col) {
+                    return;
+                }
+
+                // The desktop chord plus a click copies *that* block's output,
+                // wherever it is in scrollback -- which is the thing a keyboard
+                // shortcut cannot express, since it can only mean "the last
+                // one". No chrome and no hit map involved: a click in the grid
+                // already resolves to a line, and a line already knows its
+                // block.
+                if button == MouseButton::Left
+                    && state == ElementState::Pressed
+                    && key::is_clipboard_chord(self.modifiers)
+                {
+                    self.copy_block_output_at(row);
                     return;
                 }
 
