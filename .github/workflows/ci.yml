@@ -75,6 +75,13 @@ jobs:
       # generated from. A stale one means a setting exists here and nowhere else.
       - run: cargo run -p xtask -- check-schema
 
+      - name: TypeScript bindings match the Rust
+        # The web and phone clients decode against these. Regenerated and
+        # compared rather than trusted: protocol 2 moved every id from a byte
+        # array to a hex string, and without this that lands as a silent
+        # regeneration nobody reviews.
+        run: cargo run -p xtask -- check-bindings
+
       # The invariant that broke. `zest-core` and `zest-proto` cross to the
       # clients, so they must build without std and without a platform.
       - name: zest-core builds for wasm32

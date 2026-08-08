@@ -73,12 +73,21 @@ struct Boundary {
 /// reviewable diff.
 const SCHEMA_PATH: &str = "schemas/zesterm.schema.json";
 
+/// Where the generated TypeScript bindings are committed.
+///
+/// Committed for the same reason the schema is: the web and phone clients
+/// decode against these, and a change to the wire that silently regenerates
+/// them is a change nobody reviews. Protocol 2 moved every id from a byte array
+/// to a hex string — exactly the kind of change that must show up as a diff.
+const BINDINGS_DIR: &str = "crates/zest-proto/bindings";
+
 fn main() -> ExitCode {
     let cmd = std::env::args().nth(1);
     match cmd.as_deref() {
         Some("check-deps") => check_deps(),
         Some("schema") => write_schema(false),
         Some("check-schema") => write_schema(true),
+        Some("check-bindings") => check_bindings(),
         Some(other) => {
             eprintln!("unknown command: {other}");
             usage();
@@ -96,8 +105,78 @@ fn usage() {
         "usage: cargo xtask <command>\n\ncommands:\n  \
          check-deps     verify crate boundary invariants\n  \
          schema         regenerate {SCHEMA_PATH}\n  \
-         check-schema   fail if {SCHEMA_PATH} is stale"
+         check-schema   fail if {SCHEMA_PATH} is stale\n  \
+         check-bindings fail if {BINDINGS_DIR} is stale"
     );
+}
+
+/// Fail if the committed TypeScript bindings do not match the Rust.
+///
+/// `ts-rs` writes its output as a side effect of running the tests under the
+/// `ts` feature, so this regenerates into a scratch directory and compares
+/// rather than trying to compute the bindings directly.
+fn check_bindings() -> ExitCode {
+    let dir = std::path::Path::new(BINDINGS_DIR);
+    let before = read_bindings(dir);
+
+    // `TS_RS_EXPORT_DIR` is how ts-rs is told where to write. Sending it
+    // somewhere else would mean comparing two directories; letting it overwrite
+    // in place and comparing against what git had is simpler and catches the
+    // same drift, because CI checks out clean.
+    let status = std::process::Command::new(env!("CARGO"))
+        .args(["test", "-p", "zest-proto", "--features", "ts"])
+        .status();
+    match status {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            eprintln!("regenerating the bindings failed ({s})");
+            return ExitCode::FAILURE;
+        }
+        Err(e) => {
+            eprintln!("could not run cargo: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+
+    let after = read_bindings(dir);
+    if before == after {
+        println!("{BINDINGS_DIR} is up to date ({} files)", after.len());
+        return ExitCode::SUCCESS;
+    }
+
+    eprintln!(
+        "{BINDINGS_DIR} is stale -- run `cargo test -p zest-proto --features ts` and commit the result"
+    );
+    for (name, generated) in &after {
+        match before.get(name) {
+            None => eprintln!("  new:     {name}"),
+            Some(old) if old != generated => eprintln!("  changed: {name}"),
+            Some(_) => {}
+        }
+    }
+    for name in before.keys() {
+        if !after.contains_key(name) {
+            eprintln!("  removed: {name}");
+        }
+    }
+    ExitCode::FAILURE
+}
+
+/// Every `.ts` file in `dir`, keyed by name, with line endings normalized.
+fn read_bindings(dir: &std::path::Path) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(dir) else { return out };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "ts") {
+            if let (Some(name), Ok(text)) =
+                (path.file_name().and_then(|n| n.to_str()), std::fs::read_to_string(&path))
+            {
+                out.insert(name.to_string(), text.replace("\r\n", "\n"));
+            }
+        }
+    }
+    out
 }
 
 /// Write the settings JSON Schema, or check that the committed one matches.

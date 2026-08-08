@@ -35,13 +35,14 @@ commit is about — not as ownership boundaries or branches.
 - **Update the roadmap in the same commit as the work**, then refresh the issue.
   A roadmap that lags is one nobody trusts.
 
-Four gates, all of which must pass before you call something done:
+Five gates, all of which must pass before you call something done:
 
 ```
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo xtask check-deps
 cargo xtask check-schema
+cargo xtask check-bindings
 ```
 
 ## The one invariant
@@ -70,6 +71,7 @@ cargo xtask check-deps
 cargo build -p zest-core --no-default-features --target wasm32-unknown-unknown
 
 cargo xtask schema                             # regenerate the settings JSON Schema
+cargo test -p zest-proto --features ts         # regenerate the TypeScript bindings
 
 cargo run --profile fast -p zest-app           # the terminal, quick rebuild
 ./target/fast/zesterm --startup-probe          # time to first paint; fails over 100ms
