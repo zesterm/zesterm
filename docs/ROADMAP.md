@@ -342,14 +342,42 @@ M2. Owns `zest-core/src/blocks.rs` and the OSC 133 path. Hot spot: coordinate
       Verified over a real socket with a real `zsh`: `exit 0`, `exit 1` and a
       running command with no end line all arrive intact, along with the cwd
       from OSC 7 (`cargo run -p zest-daemon --example attach`).
-- [ ] Shell integration for PowerShell/bash/zsh/fish. **Env-only injection**,
-      as kitty, Ghostty and VS Code all do it — `ZDOTDIR` shim, bash `--posix` +
-      `ENV`, fish `XDG_DATA_DIRS`, pwsh `-NoExit -Command`. No file is ever
-      written, so there is nothing to consent to; `zesterm --shell-integration
-      <shell>` prints the hook for ssh, tmux and subshells, which injection
-      structurally cannot reach.
-- [ ] Block folding, re-run, copy-output in the native UI. Blocked on WS-A —
-      there is no chrome layer or `ChromeHitMap` to hit-test against yet.
+- [ ] Shell integration. **Env-only injection**, as kitty, Ghostty and VS Code
+      all do it — `ZDOTDIR` shim, bash `--posix` + `ENV`, fish `XDG_DATA_DIRS`,
+      pwsh `-NoExit -Command`. No file is ever written, so there is nothing to
+      consent to. Not "consented auto-install", which is what this said before
+      and is iTerm2's older model; kitty states the difference outright — *"No
+      files are added or modified."*
+
+      **`zsh` first and alone**, because it is the only one of the four that can
+      be *seen working* on the machine this is being built on: it is the macOS
+      default, and this Mac has no fish, no pwsh, and `/bin/bash` 3.2.57 —
+      Apple's patched build, where the `ENV` startup path is disabled and
+      Ghostty therefore excludes `/bin/bash` on Darwin outright. Writing the
+      other three blind is how the attach path nearly shipped compiled and
+      unseen.
+
+      `zesterm --shell-integration <shell>` prints the hook as text for all
+      four, which *is* testable here, and is the documented path for ssh, tmux
+      and subshells — which injection structurally cannot reach.
+
+      The trap that kills injection silently is a system `/etc/zshenv` that
+      re-sets `ZDOTDIR` after us; Ghostty has no fix for it and kitty tracks it
+      as #6330. This Mac has no such override, so it must be *tested* for rather
+      than assumed away.
+- [ ] Block folding, re-run, copy-output in the native UI. **Not blocked on
+      WS-A**, which is worth stating because it looks as though it should be.
+      The renderer already has the rect pipeline, `Chrome { rects, glyphs }` and
+      absolute-pixel `GlyphInstance`s, so block headers have somewhere to be
+      drawn; and the actions themselves reuse what exists — `block_at` for
+      folding, `Selection` + `selection_text` for copy-output, and
+      `ClientMessage::Input` for re-run, which needs no new protocol type.
+
+      Only *pointing* needs WS-A: `ChromeHitMap` is the seam that lets a click
+      land on a fold triangle. Keyboard-driven block actions need none of it, so
+      the sensible split is keyboard first, clickable when WS-A lands. The one
+      genuine renderer change is folding — skipping folded rows while building
+      the viewport, which is `zest-app`'s grid extract rather than chrome.
 
 > The strongest reason this project owns its grid rather than depending on
 > `alacritty_terminal`: blocks need new row fields, a side index surviving
