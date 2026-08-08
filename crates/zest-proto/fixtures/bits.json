@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "cell_flags": {
+    "BLINK": 512,
+    "BOLD": 1,
+    "DIM": 2,
+    "DOUBLE_UNDERLINE": 16,
+    "HIDDEN": 256,
+    "INVERSE": 128,
+    "ITALIC": 4,
+    "STRIKEOUT": 64,
+    "UNDERCURL": 32,
+    "UNDERLINE": 8,
+    "WIDE": 1024,
+    "WIDE_SPACER": 2048,
+    "WRAPLINE": 4096
+  },
+  "modes": {
+    "ALT_SCREEN": 128,
+    "APP_CURSOR": 4,
+    "APP_KEYPAD": 8,
+    "AUTO_WRAP": 1,
+    "BRACKETED_PASTE": 256,
+    "FOCUS_REPORTING": 8192,
+    "INSERT": 32,
+    "LINE_FEED_NEW_LINE": 64,
+    "MOUSE_CLICK": 512,
+    "MOUSE_DRAG": 1024,
+    "MOUSE_MOTION": 2048,
+    "MOUSE_SGR": 4096,
+    "ORIGIN": 2,
+    "SHOW_CURSOR": 16,
+    "SYNC_UPDATE": 16384,
+    "WIN32_INPUT": 32768
+  }
+}
