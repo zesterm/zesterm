@@ -219,7 +219,7 @@ fn main() {
     // The LAN, if it was asked for. Held for the life of the process: the
     // advertiser unregisters on drop, so `let _ = ...` would take this machine
     // off every fleet listing the instant it was announced.
-    let _advertiser = if config.listen_lan {
+    let advertiser = if config.listen_lan {
         match start_lan(&config, &registry, &auth) {
             Ok(a) => a,
             Err(e) => {
@@ -234,6 +234,34 @@ fn main() {
     } else {
         None
     };
+
+    // A signal runs no destructors, so without this the goodbye only goes out
+    // when the process *returns* -- which a daemon never does. Every pkill,
+    // Ctrl+C or service-manager stop then leaves this host on every fleet
+    // listing until the record's TTL expires (75 minutes for the PTR record,
+    // and mdns-sd exposes no way to shorten it) -- a row that resolves, refuses
+    // every dial, and is indistinguishable from a sleeping laptop. That is #22,
+    // and it cost two pairing windows in one afternoon.
+    //
+    // SIGKILL, TerminateProcess and crashes still leak the record; the honest
+    // fix for those is reachability-as-presence in the fleet listing, recorded
+    // in #22 rather than half-done here.
+    let advertiser = Arc::new(std::sync::Mutex::new(advertiser));
+    {
+        let advertiser = Arc::clone(&advertiser);
+        if let Err(e) = ctrlc::set_handler(move || {
+            if let Ok(mut slot) = advertiser.lock() {
+                if let Some(mut a) = slot.take() {
+                    tracing::info!("withdrawing the advertisement before exiting");
+                    a.stop();
+                }
+            }
+            std::process::exit(0);
+        }) {
+            // The daemon still works; it just dies rudely, as it always did.
+            tracing::warn!(error = %e, "no signal handler; a killed daemon will advertise until TTL");
+        }
+    }
 
     if let Err(e) = listen(&socket, config, registry, auth) {
         tracing::error!(error = %e, "could not listen");
