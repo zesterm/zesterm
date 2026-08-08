@@ -75,6 +75,12 @@ const CORPUS: &[(&str, usize, usize, Source)] = &[
     ("git-log", 100, 30, Source::Vtrec("git-log")),
     ("unicode-wide", 80, 24, Source::Vtrec("unicode-wide")),
     ("vim-macos", 80, 24, Source::Vtrec("vim-macos")),
+    // The only recording with command blocks in it, and therefore the only
+    // fixture that holds a TypeScript client to `Delta::blocks`. Without it a
+    // client could ignore the field entirely and pass every fixture here — the
+    // same gap `combining-marks` exists to close, and for the same reason: the
+    // other recordings predate the thing being tested.
+    ("blocks-zsh", 120, 30, Source::Vtrec("blocks-zsh")),
     // The same recordings at a viewport short enough to force heavy scrolling,
     // mirroring `conformance.rs::every_recording_survives_a_short_viewport`.
     //
@@ -307,7 +313,7 @@ fn replay(
 
     let mut frames = Vec::new();
 
-    let k = enc.keyframe(term.grid(), cursor(&term), term.modes(), term.title());
+    let k = enc.keyframe(term.grid(), cursor(&term), term.modes(), term.title(), term.blocks());
     view.apply_keyframe(&k);
     applier.apply_keyframe(&mut client, &k, term.seq());
     cov.see_attrs(&k.attrs);
@@ -328,6 +334,7 @@ fn replay(
             attrs: k.attrs.clone(),
             cursor: k.cursor,
             modes: k.modes.bits(),
+            blocks: k.blocks.clone(),
         })
         .expect("a keyframe frames")),
         expect: expect(&term),
@@ -335,7 +342,7 @@ fn replay(
 
     for (step, chunk) in input.iter().enumerate() {
         term.advance(chunk);
-        let d = enc.delta(term.grid(), cursor(&term), term.modes(), term.title());
+        let d = enc.delta(term.grid(), cursor(&term), term.modes(), term.title(), term.blocks());
 
         assert!(d.scrolls_come_first(), "{name} step {step}: {:?}", d.ops);
         assert!(d.screen_switch_comes_first(), "{name} step {step}: {:?}", d.ops);
@@ -535,6 +542,7 @@ struct Coverage {
     wide: usize,
     astral: usize,
     marks: usize,
+    blocks: usize,
     ops: BTreeSet<&'static str>,
 }
 
@@ -549,6 +557,9 @@ impl Coverage {
 
     fn see_delta(&mut self, d: &Delta) {
         self.see_attrs(&d.attrs);
+        // A field rather than an op, so it is invisible to the `ops` set below
+        // and needs counting of its own.
+        self.blocks += d.blocks.len();
         for op in &d.ops {
             match op {
                 DeltaOp::Scroll { .. } => {
@@ -599,14 +610,15 @@ impl Coverage {
     fn assert_the_corpus_is_worth_replaying(&self) {
         println!(
             "coverage: {} scrolls, {} sb_push, {} screen switches, {} titles, \
-             {} styled attrs, {} wide runs, {} marks",
+             {} styled attrs, {} wide runs, {} marks, {} block updates",
             self.scrolls,
             self.sb_pushes,
             self.screen_switches,
             self.titles,
             self.coloured,
             self.wide,
-            self.marks
+            self.marks,
+            self.blocks
         );
         println!("ops seen: {:?}", self.ops);
 
@@ -631,6 +643,11 @@ impl Coverage {
         assert!(
             self.marks > 0,
             "no combining marks -- the side table that 4b3152e added is untested"
+        );
+        assert!(
+            self.blocks > 0,
+            "no command blocks -- `Delta::blocks` is a field rather than an op, so a \
+             client that ignored it entirely would pass every fixture here"
         );
     }
 }
