@@ -244,6 +244,15 @@ Each of these cost real time and is documented where it bites:
   `'--font','My Font'` reaches the program as two arguments. Quote inside the
   string (`'"My Font"'`). This is the harness, not the argument parser — verify
   which before changing code.
+- **Git Bash rewrites unix-looking arguments before the program sees them**
+  (MSYS path conversion). `--socket '\\.\pipe\x'` arrives with a backslash
+  eaten and the daemon exits on os error 123; worse, `--cmd /bin/cat` sent to a
+  *remote* daemon becomes `C:/Program Files/Git/usr/bin/cat` on the wire, and
+  the far host tries to spawn a Windows path on macOS. Quoting does not help —
+  the conversion runs after the shell. Use PowerShell for anything carrying
+  pipe paths or paths destined for another machine, or set
+  `MSYS_NO_PATHCONV=1`. Both halves of this bit on the same day, over the same
+  feature. (#20.)
 
 ## Related work on this machine
 
