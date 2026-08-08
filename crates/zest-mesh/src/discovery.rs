@@ -40,6 +40,15 @@ pub enum Presence {
     Away,
     /// Configured by hand and never observed. Normal for a host on a VPN.
     Unseen,
+    /// Advertising, and its port refuses. The record outlived the daemon.
+    ///
+    /// The state a SIGKILLed or crashed host leaves behind (#22): nothing can
+    /// intercept those deaths to send a goodbye, and mDNS caches keep the
+    /// record for up to 75 minutes — a row that resolves fine and refuses
+    /// every dial. Distinct from [`Presence::Away`] because a user acts
+    /// differently on each: an away laptop will come back by itself; an
+    /// unreachable one has a daemon to restart.
+    Unreachable,
 }
 
 /// A peer plus what discovery knows about it that [`Peer`] has no room for.

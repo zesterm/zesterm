@@ -42,6 +42,8 @@ struct Options {
     advertise: bool,
     browse: bool,
     seconds: u64,
+    /// TCP-check advertised endpoints and mark the ones that refuse.
+    probe: bool,
 }
 
 fn main() {
@@ -51,7 +53,7 @@ fn main() {
             eprintln!("{message}\n");
             eprintln!(
                 "usage: mesh_probe [--label NAME] [--port N] [--seconds N] \
-                 [--browse-only | --advertise-only]"
+                 [--browse-only | --advertise-only] [--no-probe]"
             );
             std::process::exit(2);
         }
@@ -96,11 +98,55 @@ fn main() {
     println!();
 
     let deadline = Instant::now() + Duration::from_secs(options.seconds);
+    let mut last_probe: std::collections::HashMap<zest_proto::HostId, Instant> =
+        std::collections::HashMap::new();
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_secs(1));
         if let Some(d) = &discovery {
+            if options.probe {
+                probe(d, &mut last_probe);
+            }
             render(d);
         }
+    }
+}
+
+/// How often one peer is re-checked, and how long a check may take.
+///
+/// Ten seconds is deliberate slack: every probe lands in the far daemon's log,
+/// and a listing that is at most ten seconds stale beats a fleet whose hosts
+/// spend their lives logging our curiosity.
+const PROBE_INTERVAL: Duration = Duration::from_secs(10);
+const PROBE_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// TCP-check every peer that claims an endpoint, and tell the roster.
+///
+/// This is #22's second half: SIGKILL and crashes send no goodbye and mDNS
+/// caches keep the record for up to 75 minutes, so a row can resolve fine and
+/// refuse every dial. mDNS cannot see that; only a dial can. `Unreachable`
+/// peers are probed too — a daemon restarted on the same port re-announces an
+/// identical record, which the roster rightly refuses to trust, so a
+/// successful re-dial is the only way that host comes back.
+fn probe(
+    discovery: &MdnsDiscovery,
+    last_probe: &mut std::collections::HashMap<zest_proto::HostId, Instant>,
+) {
+    let now = Instant::now();
+    for record in discovery.records() {
+        if !matches!(record.presence, Presence::Online | Presence::Unreachable) {
+            continue;
+        }
+        let Some(endpoint) = record.peer.best_endpoint() else { continue };
+        let due = last_probe
+            .get(&record.peer.host)
+            .is_none_or(|t| now.duration_since(*t) >= PROBE_INTERVAL);
+        if !due {
+            continue;
+        }
+        last_probe.insert(record.peer.host, now);
+        let Ok(addr) = endpoint.address.parse() else { continue };
+        let connected = std::net::TcpStream::connect_timeout(&addr, PROBE_TIMEOUT).is_ok();
+        discovery.report_dial(record.peer.host, connected);
     }
 }
 
@@ -127,6 +173,8 @@ fn render(discovery: &MdnsDiscovery) {
             Presence::Online => "online",
             Presence::Away => "away",
             Presence::Unseen => "unseen",
+            // The row #22 is about: the record resolves, the port refuses.
+            Presence::Unreachable => "UNREACHABLE",
         };
         let last_seen = record
             .last_seen
@@ -165,10 +213,14 @@ fn parse_args() -> Result<Options, String> {
         advertise: true,
         browse: true,
         seconds: 60,
+        probe: true,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            // mDNS-only observation, for comparing against dns-sd/avahi
+            // without our SYNs appearing in anyone's daemon log.
+            "--no-probe" => options.probe = false,
             "--label" => {
                 options.label = args.next().ok_or("--label needs a value")?;
             }

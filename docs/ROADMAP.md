@@ -626,6 +626,18 @@ implements it. Everything below the first item waits on that.
       probe tick. SIGKILL/`Stop-Process`/crashes still leak the record —
       mdns-sd exposes no TTL control — so #22 stays open for
       reachability-as-presence in the fleet listing.
+- [x] **Reachability is presence** (#22, impolite half). SIGKILL and crashes
+      send no goodbye and mDNS caches keep the record for 75 minutes; only a
+      dial can see through it. `Presence::Unreachable` — advertising, port
+      refuses — fed by `Roster::report_dial`: a failed dial marks it, and only
+      a successful dial or a *changed* advertisement clears it, because a
+      cache renewing an identical record is the same claim repeated, not
+      evidence. The roster stays socket-free; `mesh_probe` carries the actual
+      prober (10s interval, so a listing is at most ten seconds wrong).
+      Verified live: a `TerminateProcess`'d daemon flipped to UNREACHABLE in
+      one interval and stayed there through 47s of cache re-announcements —
+      and a probed live daemon logs nothing, after the handshake watchdog
+      learned to warn only when it cuts a connection that still exists.
 - [ ] Cloudflare Tunnel + Access per host. **Origin-side JWT validation is
       mandatory** — the origin never trusts the tunnel.
 - [ ] The directory Worker: host ids, labels, last-seen endpoints. **No session

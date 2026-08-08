@@ -179,7 +179,13 @@ impl LanListener {
                     guard,
                 );
 
-                if watchdog.authenticated() {
+                // Read before disarming: `authenticated` is `!armed && !fired`,
+                // so disarming first would report every stranger's dropped
+                // connection as a success and starve the rate limiter -- the
+                // exact bug its comment says it once had.
+                let authenticated = watchdog.authenticated();
+                watchdog.disarm();
+                if authenticated {
                     limiter.succeeded(&peer);
                 } else {
                     limiter.failed(&peer);
@@ -275,7 +281,9 @@ impl Watchdog {
                     let Some(left) = want.checked_sub(started.elapsed()) else { break };
                     std::thread::sleep(left.min(Duration::from_millis(250)));
                 }
-                if armed.load(Ordering::Acquire) {
+                // `swap`, not `load`: the connection may be ending on its own
+                // right now, and exactly one of us gets to say what happened.
+                if armed.swap(false, Ordering::AcqRel) {
                     tracing::warn!("a connection never finished its handshake; closing");
                     fired.store(true, Ordering::Release);
                     let _ = cut.shutdown(std::net::Shutdown::Both);
@@ -291,6 +299,19 @@ impl Watchdog {
             armed: Arc::clone(&self.armed),
             deadline: Arc::clone(&self.deadline),
         }
+    }
+
+    /// The connection is over; there is nothing left to cut.
+    ///
+    /// Without this, the deadline fired for every connection that *ended*
+    /// unauthenticated — including a port probe that connected and closed in a
+    /// millisecond — and logged, ten seconds after the fact, that it was
+    /// closing a socket which no longer existed. One reachability probe every
+    /// ten seconds turned every daemon log into a scroll of warnings about
+    /// nothing. The warning now means the one thing worth warning about: a
+    /// live connection was cut.
+    fn disarm(&self) {
+        self.armed.store(false, Ordering::Release);
     }
 
     /// Whether this connection ever got past the handshake.

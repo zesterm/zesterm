@@ -152,6 +152,15 @@ impl MdnsDiscovery {
         self.roster.lock().saw_self()
     }
 
+    /// Record what happened when somebody dialled a peer. → `Roster::report_dial`.
+    ///
+    /// The dialling itself stays with the caller — a connect timeout on this
+    /// crate's discovery thread would stall the event loop that keeps the
+    /// listing fresh, which is exactly backwards.
+    pub fn report_dial(&self, host: zest_proto::HostId, connected: bool) -> bool {
+        self.roster.lock().report_dial(host, connected, std::time::Instant::now())
+    }
+
     /// Start browsing on a responder that may be shared. See [`node`].
     fn start_on(&mut self, responder: Arc<Responder>) -> Result<(), MeshError> {
         if self.running.is_some() {

@@ -130,6 +130,16 @@ impl Roster {
         self.by_fullname.insert(record.fullname, advertised.host);
         match self.by_host.get_mut(&advertised.host) {
             Some(existing) => {
+                // An unreachable host re-announcing the *same* claim stays
+                // unreachable: mDNS proving the record is alive says nothing
+                // about the port, and the record outliving the daemon is the
+                // exact failure this state exists for. A *changed* claim — a
+                // new port, a new address — is new evidence and gets a fresh
+                // chance.
+                if existing.presence == Presence::Unreachable && existing.peer == peer {
+                    existing.last_seen = Some(now);
+                    return false;
+                }
                 let changed =
                     existing.peer != peer || existing.presence != Presence::Online;
                 existing.peer = peer;
@@ -175,7 +185,11 @@ impl Roster {
     pub fn sweep(&mut self, now: Instant, max_age: Duration) -> bool {
         let mut changed = false;
         for record in self.by_host.values_mut() {
-            if record.presence != Presence::Online {
+            // `Unreachable` ages into `Away` like `Online` does: once the
+            // record finally falls out of the caches and stops being renewed,
+            // "dead daemon behind a live record" has resolved itself into an
+            // ordinary absence, and the row should say so.
+            if !matches!(record.presence, Presence::Online | Presence::Unreachable) {
                 continue;
             }
             let stale = record
@@ -188,6 +202,43 @@ impl Roster {
             }
         }
         changed
+    }
+
+    /// Fold in what actually happened when somebody dialled this host.
+    ///
+    /// The evidence half of #22: no handler can intercept SIGKILL or a crash,
+    /// so a record can outlive its daemon by up to 75 minutes of cache TTL —
+    /// and the only party who *knows* the host is not there is whoever just
+    /// failed to connect. Sockets stay out of this type; callers dial, this
+    /// records.
+    ///
+    /// A refused or timed-out dial marks the host [`Presence::Unreachable`].
+    /// Only a successful dial — or a *changed* advertisement, handled in
+    /// `resolved` — marks it back, because a re-announced identical record is
+    /// the same claim repeated, not new evidence.
+    pub fn report_dial(&mut self, host: HostId, connected: bool, now: Instant) -> bool {
+        let Some(record) = self.by_host.get_mut(&host) else {
+            // Dialled from an address book we never advertised. Not ours to
+            // judge.
+            return false;
+        };
+        if connected {
+            let changed = record.presence == Presence::Unreachable;
+            if changed {
+                record.presence = Presence::Online;
+            }
+            record.last_seen = Some(now);
+            changed
+        } else {
+            // Only a host we currently believe in can be contradicted. An
+            // `Away` host already offers no route, and marking `Unseen` hosts
+            // would let one failed VPN dial rewrite hand-written config.
+            let changed = record.presence == Presence::Online;
+            if changed {
+                record.presence = Presence::Unreachable;
+            }
+            changed
+        }
     }
 
     #[must_use]
@@ -543,6 +594,118 @@ mod tests {
             "a machine with six VPN tunnels should not make every connection \
              attempt six connection attempts"
         );
+    }
+
+    #[test]
+    fn a_refused_dial_marks_an_online_host_unreachable() {
+        let mut r = roster();
+        let now = Instant::now();
+        r.apply(Observation::Resolved(record(9, "mac", &["10.0.0.5"])), now);
+        assert!(
+            r.report_dial(host(9), false, now),
+            "the only party who knows a record outlived its daemon is whoever \
+             just failed to connect; that evidence must land somewhere"
+        );
+        assert_eq!(
+            r.records()[0].presence,
+            Presence::Unreachable,
+            "a host that advertises and refuses is neither online nor away -- \
+             it is the state a SIGKILLed daemon leaves behind, and a user acts \
+             on it differently (restart the daemon vs wait for the laptop)"
+        );
+        assert!(
+            !r.records()[0].peer.endpoints.is_empty(),
+            "the endpoints stay: they are the truth (an address IS advertised) \
+             and the prober needs something to re-check"
+        );
+    }
+
+    #[test]
+    fn a_successful_dial_restores_an_unreachable_host() {
+        let mut r = roster();
+        let now = Instant::now();
+        r.apply(Observation::Resolved(record(9, "mac", &["10.0.0.5"])), now);
+        r.report_dial(host(9), false, now);
+        assert!(
+            r.report_dial(host(9), true, now),
+            "a daemon restarted on the same port re-announces an identical \
+             record, which is the same claim repeated -- so a successful dial \
+             is the only evidence that can restore it, and it must"
+        );
+        assert_eq!(r.records()[0].presence, Presence::Online);
+    }
+
+    #[test]
+    fn an_identical_reannouncement_does_not_resurrect_an_unreachable_host() {
+        let mut r = roster();
+        let now = Instant::now();
+        let seen = record(9, "mac", &["10.0.0.5"]);
+        r.apply(Observation::Resolved(seen.clone()), now);
+        r.report_dial(host(9), false, now);
+        assert!(
+            !r.apply(Observation::Resolved(seen), now),
+            "mDNS caches renew a record without asking the host, so a \
+             re-resolution proves the record is alive, not the daemon -- \
+             trusting it would undo the one piece of real evidence we have"
+        );
+        assert_eq!(r.records()[0].presence, Presence::Unreachable);
+    }
+
+    #[test]
+    fn a_changed_advertisement_gives_an_unreachable_host_a_fresh_chance() {
+        let mut r = roster();
+        let now = Instant::now();
+        r.apply(Observation::Resolved(record(9, "mac", &["10.0.0.5"])), now);
+        r.report_dial(host(9), false, now);
+        r.apply(Observation::Resolved(record(9, "mac", &["10.0.0.9"])), now);
+        assert_eq!(
+            r.records()[0].presence,
+            Presence::Online,
+            "a new address or port is a new claim, not the cached one renewed; \
+             holding a grudge against it would keep a moved host unreachable \
+             forever"
+        );
+    }
+
+    #[test]
+    fn an_unreachable_record_that_expires_greys_out_like_any_other() {
+        let mut r = roster();
+        let start = Instant::now();
+        r.apply(Observation::Resolved(record(9, "mac", &["10.0.0.5"])), start);
+        r.report_dial(host(9), false, start);
+        assert!(
+            r.sweep(start + PRESENCE_TIMEOUT, PRESENCE_TIMEOUT),
+            "once the caches stop renewing the record, 'dead daemon behind a \
+             live record' has resolved into an ordinary absence"
+        );
+        assert_eq!(r.records()[0].presence, Presence::Away);
+        assert!(r.records()[0].peer.endpoints.is_empty());
+    }
+
+    #[test]
+    fn a_dial_report_for_an_unknown_host_changes_nothing() {
+        let mut r = roster();
+        assert!(
+            !r.report_dial(host(7), false, Instant::now()),
+            "a host dialled from hand-written config was never advertised here; \
+             judging it would let one failed VPN dial rewrite an address book"
+        );
+        assert!(r.peers().is_empty());
+    }
+
+    #[test]
+    fn an_away_host_cannot_be_marked_unreachable() {
+        let mut r = roster();
+        let now = Instant::now();
+        let seen = record(9, "mac", &["10.0.0.5"]);
+        r.apply(Observation::Resolved(seen.clone()), now);
+        r.apply(Observation::Removed { fullname: seen.fullname }, now);
+        assert!(
+            !r.report_dial(host(9), false, now),
+            "an away host already offers no route; a late failure report from a \
+             dial that raced the goodbye must not invent a third state for it"
+        );
+        assert_eq!(r.records()[0].presence, Presence::Away);
     }
 
     #[test]
