@@ -939,7 +939,19 @@ mod tests {
     }
 
     fn wait_for(f: impl Fn() -> bool) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        wait_up_to(Duration::from_secs(10), f)
+    }
+
+    /// A deadline has to be longer than the worst case it is waiting on.
+    ///
+    /// Reconnecting is the one thing here that legitimately takes seconds: the
+    /// redial backoff doubles from 200ms to a 5s ceiling, so five unlucky
+    /// attempts spend 6.2s before the sixth is even made. Ten seconds sits
+    /// *inside* that, which under load makes the test fail for doing exactly
+    /// what it is documented to do — and once produced a failure that vanished
+    /// on the next sixteen runs.
+    fn wait_up_to(limit: Duration, f: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + limit;
         while Instant::now() < deadline {
             if f() {
                 return true;
@@ -1145,7 +1157,7 @@ mod tests {
         // deliberately dropped, so writing before the reattach would prove
         // nothing except that the drop works.
         assert!(
-            wait_for(|| back.load(Ordering::Acquire) > 0),
+            wait_up_to(Duration::from_secs(30), || back.load(Ordering::Acquire) > 0),
             "never reattached; the window is dead to the user"
         );
 

@@ -28,7 +28,7 @@
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -239,6 +239,11 @@ impl Drop for Countdown {
 struct Watchdog {
     /// Cleared when the handshake completes. Read by the watching thread.
     armed: Arc<AtomicBool>,
+    /// How long, from the connection's start, before it is cut.
+    ///
+    /// Movable, because "has not finished the handshake" covers two states that
+    /// deserve different deadlines: silent, and waiting for a human to say yes.
+    deadline: Arc<AtomicU64>,
     /// Whether the watchdog ever fired, so the caller can tell a refused
     /// connection from one that simply ended.
     fired: Arc<AtomicBool>,
@@ -248,11 +253,28 @@ impl Watchdog {
     fn start(stream: &TcpStream, timeout: Duration) -> Self {
         let armed = Arc::new(AtomicBool::new(true));
         let fired = Arc::new(AtomicBool::new(false));
+        // Milliseconds from now, so the waiting thread can be told to wait
+        // longer without being restarted.
+        let deadline = Arc::new(AtomicU64::new(timeout.as_millis() as u64));
         if let Ok(cut) = stream.try_clone() {
             let armed = Arc::clone(&armed);
             let fired = Arc::clone(&fired);
+            let deadline = Arc::clone(&deadline);
             std::thread::spawn(move || {
-                std::thread::sleep(timeout);
+                let started = Instant::now();
+                // Slept in slices rather than once, because the deadline can
+                // move while we are asleep: a connection that reaches the
+                // approval prompt is waiting on a person, not stalled, and the
+                // bound that applies to it is the pairing window rather than the
+                // handshake one.
+                loop {
+                    if !armed.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let want = Duration::from_millis(deadline.load(Ordering::Acquire));
+                    let Some(left) = want.checked_sub(started.elapsed()) else { break };
+                    std::thread::sleep(left.min(Duration::from_millis(250)));
+                }
                 if armed.load(Ordering::Acquire) {
                     tracing::warn!("a connection never finished its handshake; closing");
                     fired.store(true, Ordering::Release);
@@ -260,12 +282,15 @@ impl Watchdog {
                 }
             });
         }
-        Self { armed, fired }
+        Self { armed, fired, deadline }
     }
 
     /// A handle the connection disarms when its handshake completes.
     fn handle(&self) -> WatchdogHandle {
-        WatchdogHandle { armed: Arc::clone(&self.armed) }
+        WatchdogHandle {
+            armed: Arc::clone(&self.armed),
+            deadline: Arc::clone(&self.deadline),
+        }
     }
 
     /// Whether this connection ever got past the handshake.
@@ -282,12 +307,31 @@ impl Watchdog {
 #[derive(Clone)]
 pub struct WatchdogHandle {
     armed: Arc<AtomicBool>,
+    deadline: Arc<AtomicU64>,
 }
 
 impl WatchdogHandle {
     /// The handshake completed; stop watching.
     pub fn completed(&self) {
         self.armed.store(false, Ordering::Release);
+    }
+
+    /// This connection is waiting for a person to approve it.
+    ///
+    /// **Not the same as completing.** The connection is still unauthenticated
+    /// and still holds its mid-handshake slot — releasing that here would let
+    /// anyone hold slots open by asking to pair and never being answered. Only
+    /// the deadline moves, to just past the pairing window, so the queue's own
+    /// expiry denies the request and the client is told *why* instead of
+    /// watching the socket vanish.
+    ///
+    /// Found on a real LAN: the host advertised a 120s window and cut the
+    /// connection after 10. The in-process tests missed it because they proved
+    /// the watchdog leaves a *welcomed* connection alone, and a device waiting
+    /// for approval is precisely the one that has not been welcomed.
+    pub fn awaiting_approval(&self, window: Duration) {
+        let ms = window.as_millis().min(u128::from(u64::MAX)) as u64;
+        self.deadline.fetch_max(ms, Ordering::AcqRel);
     }
 }
 
@@ -393,11 +437,65 @@ mod tests {
         // The bug: `done` was only set after `serve` returned, so the watchdog
         // fired on every connection ten seconds after accept -- a paired phone
         // was disconnected on a ten-second cycle forever.
-        let w = Watchdog { armed: Arc::new(AtomicBool::new(true)), fired: Arc::new(AtomicBool::new(false)) };
+        let w = Watchdog {
+            armed: Arc::new(AtomicBool::new(true)),
+            fired: Arc::new(AtomicBool::new(false)),
+            deadline: Arc::new(AtomicU64::new(10_000)),
+        };
         assert!(!w.authenticated(), "an armed watchdog means the handshake is unfinished");
 
         w.handle().completed();
         assert!(w.authenticated(), "completing the handshake must disarm it");
+    }
+
+    /// The case the other watchdog test is shaped wrong to see.
+    ///
+    /// `a_completed_handshake_disarms_the_watchdog` proves a *welcomed*
+    /// connection is left alone — and a device waiting to be approved is exactly
+    /// the one that has not been welcomed. So pairing over the LAN was cut at
+    /// the handshake timeout, ten seconds into a window the host itself
+    /// advertises as 120, and every in-process test agreed that was fine.
+    ///
+    /// Found by two machines on a real network, not here.
+    #[test]
+    fn waiting_for_a_person_extends_the_deadline_without_disarming() {
+        let w = Watchdog {
+            armed: Arc::new(AtomicBool::new(true)),
+            fired: Arc::new(AtomicBool::new(false)),
+            deadline: Arc::new(AtomicU64::new(10_000)),
+        };
+
+        w.handle().awaiting_approval(Duration::from_secs(130));
+
+        assert_eq!(
+            w.deadline.load(Ordering::Acquire),
+            130_000,
+            "the deadline must move past the pairing window, or the socket is \
+             cut long before anyone can answer the prompt"
+        );
+        assert!(
+            !w.authenticated(),
+            "still unauthenticated: waiting for approval is not the same as \
+             having been approved, and treating it as such would hand an \
+             unpaired device the rate limiter's benefit of the doubt"
+        );
+    }
+
+    /// The extension only ever moves outward.
+    #[test]
+    fn a_shorter_window_never_pulls_the_deadline_in() {
+        // Otherwise a second call with a smaller window -- a shorter pairing
+        // timeout, a retry -- would shorten a deadline already granted, and the
+        // connection would be cut mid-prompt for a reason nobody could see.
+        let w = Watchdog {
+            armed: Arc::new(AtomicBool::new(true)),
+            fired: Arc::new(AtomicBool::new(false)),
+            deadline: Arc::new(AtomicU64::new(10_000)),
+        };
+        let h = w.handle();
+        h.awaiting_approval(Duration::from_secs(130));
+        h.awaiting_approval(Duration::from_secs(5));
+        assert_eq!(w.deadline.load(Ordering::Acquire), 130_000);
     }
 
     #[test]
@@ -406,7 +504,11 @@ mod tests {
         // return true, `RateLimiter::failed` was unreachable and the
         // per-address limit that makes a six-digit code defensible did not
         // exist at all.
-        let w = Watchdog { armed: Arc::new(AtomicBool::new(true)), fired: Arc::new(AtomicBool::new(true)) };
+        let w = Watchdog {
+            armed: Arc::new(AtomicBool::new(true)),
+            fired: Arc::new(AtomicBool::new(true)),
+            deadline: Arc::new(AtomicU64::new(10_000)),
+        };
         assert!(!w.authenticated());
     }
 

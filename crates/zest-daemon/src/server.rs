@@ -266,6 +266,14 @@ pub struct Connection {
     /// handshaking" and "connection still open" are the same question, and both
     /// the watchdog and the connection cap answered the wrong one.
     on_ready: Option<Box<dyn FnOnce() + Send>>,
+    /// Called when this connection starts waiting for a person to approve it.
+    ///
+    /// Separate from `on_ready` because the two mean different things to the
+    /// LAN listener: ready means "stop watching and give back the slot", while
+    /// this means "still unauthenticated, still holding its slot, but waiting on
+    /// a human rather than stalled". Conflating them cut every pairing attempt
+    /// at the handshake timeout — ten seconds into a window advertised as 120.
+    on_pending: Option<Box<dyn FnOnce() + Send>>,
     /// Handed to each session on attach, so output wakes the writer.
     waker: Option<Arc<dyn Fn() + Send + Sync>>,
 }
@@ -319,6 +327,7 @@ impl Connection {
             remote: remote.into(),
             decided: Arc::new(Mutex::new(None)),
             on_ready: None,
+            on_pending: None,
             waker: None,
         }
     }
@@ -346,6 +355,10 @@ impl Connection {
     /// Be told when this connection finishes its handshake.
     pub fn set_on_ready(&mut self, f: Box<dyn FnOnce() + Send>) {
         self.on_ready = Some(f);
+    }
+
+    pub fn set_on_pending(&mut self, f: Box<dyn FnOnce() + Send>) {
+        self.on_pending = Some(f);
     }
 
     /// Set what an attached session calls when it has output.
@@ -828,6 +841,14 @@ impl Connection {
         );
         self.pending = Some(handle);
 
+        // Exactly here: the request is queued and the client is about to be told
+        // to wait. Anything watching this connection for a stalled handshake has
+        // to be told that a person is now in the loop, or it cuts the socket
+        // long before the person can answer.
+        if let Some(f) = self.on_pending.take() {
+            f();
+        }
+
         tracing::info!(
             client = %request.client.short(),
             label = %request.label,
@@ -917,7 +938,7 @@ where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
-    serve_with(reader, writer, config, registry, auth, remote, None)
+    serve_with(reader, writer, config, registry, auth, remote, Hooks::default())
 }
 
 fn serve_with<R, W>(
@@ -927,7 +948,7 @@ fn serve_with<R, W>(
     registry: Arc<Registry>,
     auth: crate::auth::Auth,
     remote: impl Into<String>,
-    on_ready: Option<Box<dyn FnOnce() + Send>>,
+    hooks: Hooks,
 ) -> Result<(), DaemonError>
 where
     R: Read + Send + 'static,
@@ -939,8 +960,11 @@ where
         auth,
         remote,
     )));
-    if let Some(f) = on_ready {
+    if let Some(f) = hooks.ready {
         conn.lock().expect("connection lock").set_on_ready(f);
+    }
+    if let Some(f) = hooks.pending {
+        conn.lock().expect("connection lock").set_on_pending(f);
     }
     let (tx, rx) = std::sync::mpsc::channel::<Wake>();
 
@@ -1044,10 +1068,45 @@ where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
-    serve_with(reader, writer, config, registry, auth, remote, Some(Box::new(move || {
-        watchdog.completed();
-        slot.release();
-    })))
+    let waiting = watchdog.clone();
+    serve_with(
+        reader,
+        writer,
+        config,
+        registry,
+        auth,
+        remote,
+        Hooks {
+            ready: Some(Box::new(move || {
+                watchdog.completed();
+                slot.release();
+            })),
+            // Waiting on a person, not stalled. The deadline moves out past the
+            // pairing window so the queue's own expiry denies the request and
+            // the client is told why — rather than the socket simply vanishing,
+            // which is indistinguishable from the host going away.
+            pending: Some(Box::new(move || {
+                waiting.awaiting_approval(
+                    zest_mesh::pairing::APPROVAL_TIMEOUT + std::time::Duration::from_secs(10),
+                );
+            })),
+        },
+    )
+}
+
+/// What the transport wants to know about a connection's progress.
+///
+/// One struct rather than two parameters because they are answers to the same
+/// question — how far has this connection got — and because the loopback
+/// transport wants neither, which `Hooks::default()` says more clearly than a
+/// pair of `None`s.
+#[derive(Default)]
+struct Hooks {
+    /// The handshake completed and the connection is being served.
+    ready: Option<Box<dyn FnOnce() + Send>>,
+    /// The connection is waiting for a person to approve it. Still
+    /// unauthenticated, still holding whatever the transport counted it against.
+    pending: Option<Box<dyn FnOnce() + Send>>,
 }
 
 /// Why the writer woke.

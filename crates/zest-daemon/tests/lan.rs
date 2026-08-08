@@ -316,6 +316,50 @@ fn an_authenticated_connection_outlives_the_handshake_watchdog() {
     );
 }
 
+/// A device waiting to be approved must outlive the handshake timeout.
+///
+/// `an_authenticated_connection_outlives_the_handshake_watchdog` above proves a
+/// *welcomed* connection is left alone — and a device waiting for approval is
+/// precisely the one that has **not** been welcomed. So every LAN pairing
+/// attempt was cut at the handshake timeout, ten seconds into a window the host
+/// itself advertises as 120, and the whole suite agreed that was correct.
+///
+/// Found by two machines on a real network: the Mac dialled the Windows box,
+/// both screens showed the same six digits, and the socket vanished before
+/// anyone could say yes.
+#[test]
+fn a_device_waiting_for_approval_outlives_the_handshake_watchdog() {
+    let h = host();
+    // Deliberately NOT trusted: being unknown is what sends this connection
+    // down the approval path instead of straight to a welcome.
+    let client = ClientIdentity::generate().expect("client key");
+
+    let mut stream = TcpStream::connect(h.addr).expect("connect");
+    let mut frames = FrameReader::new();
+    handshake(&mut stream, &mut frames, &client);
+
+    let pending = wait_for(&mut stream, &mut frames, |m| {
+        matches!(m, HostMessage::AuthPending { .. })
+    });
+    assert!(pending.is_some(), "an unknown device should be asked about, not refused");
+
+    std::thread::sleep(PAST_THE_WATCHDOG);
+
+    // The connection must still be there for a person to approve. A read that
+    // returns EOF means the host hung up on someone it had just asked to wait.
+    stream.set_read_timeout(Some(Duration::from_millis(300))).expect("timeout");
+    let mut buf = [0u8; 16];
+    // A timeout is the expected outcome: the host is waiting, quietly, for a
+    // decision this test never makes. EOF is the failure.
+    if let Ok(0) = stream.read(&mut buf) {
+        panic!(
+            "the host cut a connection it had just told to wait -- pairing over \
+             the LAN is impossible, because nobody can answer a prompt in less \
+             than the handshake timeout"
+        );
+    }
+}
+
 #[test]
 fn a_connection_that_never_speaks_is_cut() {
     // The other half: the watchdog must still do its job. Without this, the
