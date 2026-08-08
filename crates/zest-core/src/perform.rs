@@ -105,6 +105,7 @@ impl vte::Perform for TermState {
             ('S', _) => {
                 let t = self.template;
                 self.grid_mut().scroll_up(arg(0, 1), &t);
+                self.evict_blocks();
                 self.touch_full();
             }
             ('T', _) => {
@@ -265,10 +266,17 @@ impl vte::Perform for TermState {
                 self.palette.reset_cursor();
                 self.touch_full();
             }
-            // 133: semantic prompt markers. Parsed and ignored in M1 -- command
-            // blocks are M2 -- but recognized now so they never reach the grid
-            // as garbage.
-            Some(133) => {}
+            // 7: the shell's working directory, as a `file://` URL. Stamped
+            // onto the next block, and reported for a session nobody is
+            // attached to.
+            Some(7) => self.osc_cwd(params),
+            // 133: semantic prompt markers -- the shell saying where a command
+            // begins and ends. See [`crate::blocks`].
+            Some(133) => self.osc_prompt(params),
+            // 633: VS Code's dialect of 133. Handled because a great many
+            // people already have its shell integration installed and would
+            // otherwise get no blocks here while getting them there.
+            Some(633) => self.osc_vscode(params),
             _ => {}
         }
     }
@@ -378,6 +386,12 @@ impl TermState {
         self.palette.reset_foreground();
         self.palette.reset_background();
         self.palette.reset_cursor();
+        // RIS clears the screen the blocks index, so the index describes
+        // nothing. Keeping it would leave every block pointing at lines that
+        // have been blanked -- folding one would hide someone else's output.
+        self.blocks = crate::blocks::BlockIndex::new();
+        self.prompt_end = None;
+        self.pending_command = None;
         self.touch_full();
     }
 
@@ -439,6 +453,172 @@ impl TermState {
             }
         }
         self.touch();
+    }
+
+    // --- command blocks (OSC 133, 7, 633) --------------------------------
+    //
+    // The markers say *where*, never *what*: the text between `B` and `C` is
+    // the command, and the grid is the only place it exists. That is why these
+    // live in the parser rather than in a shell-integration layer -- only the
+    // parser knows which line the cursor was on when the marker arrived.
+
+    /// `OSC 133 ; A|B|C|D [; exit]`.
+    fn osc_prompt(&mut self, params: &[&[u8]]) {
+        // The first byte, not the whole segment: shells append their own
+        // key-value tails (`A;special_key=1`, `D;0;aid=3`) and every one of
+        // them is still an `A` or a `D`.
+        let Some(kind) = params.get(1).and_then(|p| p.first().copied()) else { return };
+        match kind {
+            b'A' => self.block_prompt_start(),
+            b'B' => self.block_prompt_end(),
+            b'C' => self.block_output_start(None),
+            b'D' => {
+                let exit = params.get(2).and_then(|p| parse_exit_status(p));
+                self.block_finish(exit);
+            }
+            _ => {}
+        }
+    }
+
+    /// `OSC 633 ; ...` -- VS Code's dialect.
+    ///
+    /// `A`/`B`/`C`/`D` are its 133 equivalents. `E` is the one genuine
+    /// addition: it carries the command line *explicitly*, which beats reading
+    /// it back off the grid because it is what the shell will actually run
+    /// rather than what the screen shows.
+    fn osc_vscode(&mut self, params: &[&[u8]]) {
+        let Some(kind) = params.get(1).and_then(|p| p.first().copied()) else { return };
+        match kind {
+            b'A' => self.block_prompt_start(),
+            b'B' => self.block_prompt_end(),
+            b'C' => self.block_output_start(None),
+            b'D' => {
+                let exit = params.get(2).and_then(|p| parse_exit_status(p));
+                self.block_finish(exit);
+            }
+            // `E ; <command> [; nonce]`. vte caps an OSC payload at 1024 bytes
+            // (`MAX_OSC_RAW`), so a very long command line arrives truncated --
+            // which is a shorter command, never a wrong one, and still better
+            // than a grid readback that has to guess where the prompt ended.
+            b'E' => {
+                if let Some(cmd) = params.get(2).and_then(|b| core::str::from_utf8(b).ok()) {
+                    self.pending_command = Some(unescape_vscode(cmd));
+                }
+            }
+            // `P ; Cwd=<path>` -- a plain path, not the `file://` URL of OSC 7.
+            b'P' => {
+                if let Some(rest) = params.get(2).and_then(|b| core::str::from_utf8(b).ok()) {
+                    if let Some(path) = rest.strip_prefix("Cwd=") {
+                        self.cwd = String::from(path);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `OSC 7 ; file://<host>/<path>`.
+    fn osc_cwd(&mut self, params: &[&[u8]]) {
+        let Some(url) = params.get(1).and_then(|b| core::str::from_utf8(b).ok()) else { return };
+        // The host part is deliberately discarded rather than compared against
+        // this machine's name: over ssh it names the *remote* host, and a cwd
+        // that silently blanks itself the moment you ssh somewhere is worse
+        // than one that is occasionally another machine's path.
+        let path = url.strip_prefix("file://").map_or(url, |rest| {
+            rest.find('/').map_or(rest, |slash| &rest[slash..])
+        });
+        self.cwd = percent_decode(path);
+    }
+
+    /// The line a marker names, in the **primary** grid's numbering.
+    ///
+    /// `None` on the alternate screen, which suppresses the marker entirely.
+    /// The alt screen is a separate `Grid` whose ids restart at zero, so a
+    /// marker recorded there names a line in the wrong numbering space -- and
+    /// it would be a plausible small id rather than an obviously wrong one,
+    /// which is the kind of bug that gets found months later. A full-screen
+    /// program owns the display and its content is not command history anyway.
+    fn block_line(&self) -> Option<crate::grid::LineId> {
+        if self.alt_grid.is_some() {
+            return None;
+        }
+        self.grid.line_id_at(self.grid.cursor.row)
+    }
+
+    fn block_prompt_start(&mut self) {
+        let Some(line) = self.block_line() else { return };
+        let cwd = self.cwd.clone();
+        self.blocks.begin_prompt(line, cwd);
+        self.prompt_end = None;
+        self.pending_command = None;
+        self.touch();
+    }
+
+    fn block_prompt_end(&mut self) {
+        let Some(line) = self.block_line() else { return };
+        self.prompt_end = Some((line, self.grid.cursor.col));
+    }
+
+    fn block_output_start(&mut self, command: Option<String>) {
+        let Some(line) = self.block_line() else { return };
+        let command = command
+            .or_else(|| self.pending_command.take())
+            .unwrap_or_else(|| self.command_text());
+        self.blocks.begin_output(line, command);
+        self.prompt_end = None;
+        self.touch();
+    }
+
+    fn block_finish(&mut self, exit_code: Option<i32>) {
+        let Some(line) = self.block_line() else { return };
+        self.blocks.finish(line, exit_code);
+        self.prompt_end = None;
+        self.pending_command = None;
+        self.touch();
+    }
+
+    /// The submitted command, read back from the grid between `B` and `C`.
+    ///
+    /// OSC 133 carries only positions, so the cells between the two markers
+    /// *are* the command. Rows are sliced by column rather than by offset into
+    /// `Row::text()`: that method drops wide-character spacers, so a character
+    /// index into it is not a column, and a CJK character anywhere in the
+    /// command would shift everything after it.
+    fn command_text(&self) -> String {
+        let Some((start_line, start_col)) = self.prompt_end else { return String::new() };
+        let Some(end_line) = self.grid.line_id_at(self.grid.cursor.row) else {
+            return String::new();
+        };
+
+        let mut out = String::new();
+        // Walk retained lines rather than viewport rows: a command long enough
+        // to wrap can have pushed its own first row into scrollback by the time
+        // `C` arrives.
+        for index in 0..self.grid.total_lines() {
+            let Some(row) = self.grid.line(index) else { continue };
+            if row.id < start_line || row.id > end_line {
+                continue;
+            }
+            let from = if row.id == start_line { start_col } else { 0 };
+            // A wrapped row is full by definition; only the last row of a
+            // logical line has trailing blanks worth dropping.
+            let to = if row.wrapped { row.len() } else { row.trimmed_len() };
+            for col in from..to {
+                let Some(cell) = row.get(col) else { break };
+                if cell.flags.contains(crate::cell::CellFlags::WIDE_SPACER) {
+                    continue;
+                }
+                out.push(cell.ch);
+                if let Some(extra) = row.extra(cell) {
+                    out.extend(extra.zerowidth.iter());
+                }
+            }
+            // Rows joined by `wrapped` are one command, not two.
+            if !row.wrapped && row.id != end_line {
+                break;
+            }
+        }
+        String::from(out.trim_end())
     }
 
     fn osc_palette(&mut self, params: &[&[u8]]) {
@@ -504,6 +684,83 @@ impl TermState {
             self.touch_full();
         }
     }
+}
+
+/// The exit status from `OSC 133;D;<status>`.
+///
+/// **A missing or unparseable status is `None`, never zero.** Plenty of shells
+/// emit `D` bare, and a green tick on a command that actually failed is worse
+/// than no tick at all — see [`crate::BlockState::Finished`].
+///
+/// A status is accepted from a leading run of digits so that `D;1;aid=7` parses
+/// as `1`; anything that does not start with a digit is unknown, not success.
+fn parse_exit_status(param: &[u8]) -> Option<i32> {
+    let s = core::str::from_utf8(param).ok()?;
+    let digits = s.find(|c: char| !c.is_ascii_digit()).map_or(s, |i| &s[..i]);
+    digits.parse::<i32>().ok()
+}
+
+/// Undo the escaping VS Code applies to the `OSC 633;E` command line.
+///
+/// It escapes the characters that would otherwise terminate or split the
+/// sequence — a literal semicolon in a command is otherwise a new OSC
+/// parameter, which is how `grep -e 'a;b'` would arrive cut in half.
+fn unescape_vscode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('x') => {
+                let hex: String = chars.by_ref().take(2).collect();
+                match u8::from_str_radix(&hex, 16) {
+                    Ok(b) => out.push(b as char),
+                    // Not a valid escape: keep the bytes rather than dropping
+                    // them, so a command with a literal backslash survives.
+                    Err(_) => {
+                        out.push('\\');
+                        out.push('x');
+                        out.push_str(&hex);
+                    }
+                }
+            }
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// Decode `%XX` escapes in an OSC 7 path.
+///
+/// A path with a space arrives as `%20`, and a shell prompt reporting
+/// `/Users/me/My%20Code` is a directory that does not exist.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = core::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(b) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    // A path that is not UTF-8 after decoding is left as it arrived rather than
+    // replaced with U+FFFD, which would name a different directory.
+    String::from_utf8(out).unwrap_or_else(|_| String::from(s))
 }
 
 /// Parse an XParseColor-style spec: `rgb:RR/GG/BB` with 1-4 hex digits per

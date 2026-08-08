@@ -414,6 +414,239 @@ fn ansi_fixtures_parse_without_panicking() {
     assert!(checked >= 4, "expected the ansi fixtures to be present, found {checked}");
 }
 
+// --- command blocks (OSC 133 / 7 / 633) ----------------------------------
+
+/// The fixture's block markers, so a change to the file is a change to one
+/// place rather than to five tests.
+const OSC_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/ansi/osc.ans");
+
+#[test]
+fn the_osc_fixture_produces_one_complete_block() {
+    // `osc.ans` has carried a full A/B/C/D sequence since M1, when the markers
+    // were recognized and discarded. This is the test that stopped discarding
+    // them being true.
+    let bytes = std::fs::read(OSC_FIXTURE).expect("osc fixture");
+    let mut t = Terminal::new(80, 24, 100);
+    t.advance(&bytes);
+
+    let blocks = t.blocks().blocks();
+    assert_eq!(blocks.len(), 1, "one prompt, one command, one block");
+    let b = &blocks[0];
+
+    // The prompt is on row 1: row 0 is the title/hyperlink line the fixture
+    // opens with, and `\r\n` moved to row 1 before `133;A` arrived.
+    assert_eq!(b.prompt_line, 1, "the block starts where the prompt was drawn");
+    assert_eq!(b.output_line, Some(1), "`ls` was submitted from the prompt's own row");
+    assert_eq!(b.end_line, Some(3), "`133;D` arrived after `out` and its newline");
+    assert_eq!(b.command, "ls", "the command is the cells between B and C");
+    assert_eq!(
+        b.state,
+        zest_core::BlockState::Finished { exit_code: Some(0) },
+        "the fixture reports a successful exit"
+    );
+    assert!(!b.failed());
+    assert!(b.contains(2), "the output line belongs to the block that produced it");
+}
+
+#[test]
+fn a_bare_d_marker_is_unknown_rather_than_success() {
+    // Plenty of shells emit `133;D` with no status. A green tick on a command
+    // that actually failed is worse than no tick at all, so the parser must not
+    // invent a zero. `blocks.rs` tests the index; this tests the wire form.
+    let t = run(20, 4, "\x1b]133;A\x07$ \x1b]133;B\x07x\x1b]133;C\x07\r\n\x1b]133;D\x07");
+    let b = t.blocks().last().expect("one block");
+    assert_eq!(b.state, zest_core::BlockState::Finished { exit_code: None });
+    assert!(!b.failed(), "unknown is not failure");
+}
+
+#[test]
+fn a_nonzero_status_survives_a_trailing_key_value_tail() {
+    // `133;D;1;aid=7` is what several shells actually emit. Parsing the status
+    // as "the whole parameter" would make it unknown, which reads as a command
+    // that failed silently.
+    let t = run(20, 4, "\x1b]133;A\x07$ \x1b]133;B\x07x\x1b]133;C\x07\r\n\x1b]133;D;1;aid=7\x07");
+    assert!(t.blocks().last().expect("one block").failed(), "exit 1 is a failure");
+}
+
+#[test]
+fn a_running_block_has_no_end_and_covers_output_still_arriving() {
+    // What makes a long build readable while it runs rather than only after it
+    // finishes.
+    let t = run(20, 6, "\x1b]133;A\x07$ \x1b]133;B\x07make\x1b]133;C\x07\r\nline one\r\n");
+    let b = t.blocks().last().expect("one block");
+    assert!(b.is_running());
+    assert_eq!(b.command, "make");
+    assert_eq!(b.end_line, None, "a running command has not ended");
+    assert!(b.contains(9_999), "so it extends to wherever output has reached");
+}
+
+#[test]
+fn a_wrapped_command_is_read_back_whole() {
+    // The command lives in the grid, not in the marker, so a command long
+    // enough to wrap must be rejoined across rows. Splitting it would put a
+    // newline in the middle of something someone will re-run.
+    let t = run(10, 4, "\x1b]133;A\x07$ \x1b]133;B\x07echo abcdefgh\x1b]133;C\x07\r\n");
+    assert_eq!(
+        t.blocks().last().expect("one block").command,
+        "echo abcdefgh",
+        "rows joined by `wrapped` are one command"
+    );
+}
+
+#[test]
+fn markers_on_the_alternate_screen_are_ignored() {
+    // The alt screen is a separate grid whose line ids restart at zero, so a
+    // marker recorded there names a line in the primary grid's numbering that
+    // holds entirely different text -- and it would be a plausible small id,
+    // not an obviously wrong one.
+    let t = run(
+        20,
+        4,
+        "\x1b[?1049h\x1b]133;A\x07$ \x1b]133;B\x07vim\x1b]133;C\x07\r\n\x1b]133;D;0\x07",
+    );
+    assert!(t.blocks().blocks().is_empty(), "a full-screen program has no command history");
+}
+
+#[test]
+fn a_full_reset_clears_the_block_index() {
+    // RIS blanks the screen the index describes. Keeping the blocks would leave
+    // every one of them pointing at lines that no longer hold their output.
+    let mut t = Terminal::new(20, 4, 100);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07x\x1b]133;C\x07\r\n\x1b]133;D;0\x07");
+    assert_eq!(t.blocks().blocks().len(), 1);
+    t.advance(b"\x1bc");
+    assert!(t.blocks().blocks().is_empty(), "RIS leaves nothing for a block to describe");
+}
+
+#[test]
+fn a_session_past_its_scrollback_bound_does_not_grow_its_index() {
+    // The leak with a long fuse: a fleet makes a session that has been running
+    // for weeks the normal case, and an index that only ever grows is how that
+    // session dies.
+    let mut t = Terminal::new(20, 3, 4);
+    for i in 0..40 {
+        t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07x\x1b]133;C\x07\r\n");
+        t.advance(format!("out {i}\r\n").as_bytes());
+        t.advance(b"\x1b]133;D;0\x07");
+    }
+    let held = t.blocks().blocks().len();
+    assert!(held > 0, "the recent blocks are still there");
+    assert!(
+        held < 40,
+        "40 blocks through a 4-line scrollback should have evicted most of them, kept {held}"
+    );
+
+    // And what is left is genuinely reachable, not a stale id.
+    let oldest = &t.blocks().blocks()[0];
+    assert!(
+        oldest.end_line.expect("finished") >= t.grid().row(0).id - t.grid().scrollback_len() as u64,
+        "a retained block must not point past the oldest line still held"
+    );
+}
+
+#[test]
+fn widening_the_window_re_anchors_blocks_instead_of_losing_them() {
+    // Reflow renumbers line ids, so a block that is not re-anchored names
+    // different text afterwards. The selection is cleared in this situation;
+    // a block must not be, because losing the block for a build because the
+    // window was widened while it ran is the case blocks exist for.
+    // A wrapped line *above* the prompt, so rejoining it shifts every id below
+    // — without that, the block starts at line 0 and the test passes whether
+    // anything was re-anchored or not.
+    let mut t = Terminal::new(10, 5, 100);
+    t.advance(b"0123456789abcde\r\n");
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07echo abcdefgh\x1b]133;C\x07\r\nout\r\n\x1b]133;D;0\x07");
+
+    let before = t.blocks().last().expect("one block").clone();
+    assert_eq!(
+        (before.prompt_line, before.output_line, before.end_line),
+        (2, Some(3), Some(5)),
+        "the block spans two wrapped rows at 10 columns"
+    );
+
+    t.resize(40, 5);
+    let after = t.blocks().last().expect("the block survived the resize");
+
+    assert_ne!(
+        after.prompt_line, before.prompt_line,
+        "rewrapping renumbered the lines, so an un-re-anchored block would be untouched here \
+         and would name the wrong row"
+    );
+    assert_eq!(
+        (after.prompt_line, after.output_line, after.end_line),
+        (1, Some(1), Some(3)),
+        "each end of the block follows its logical line to the new numbering"
+    );
+    assert_eq!(after.command, before.command, "re-anchoring must not disturb the command");
+
+    let row = t.grid().row_of_line(after.prompt_line).expect("the prompt line still exists");
+    assert_eq!(
+        t.grid().row(row).text(),
+        "$ echo abcdefgh",
+        "the block still points at its own prompt"
+    );
+}
+
+#[test]
+fn the_block_path_is_independent_of_chunk_boundaries() {
+    // A pty hands over arbitrary chunks, so an OSC handler that accumulated
+    // state outside the parser would produce a different index depending on
+    // where a read happened to split. `vt.rs` already asserts this for the
+    // grid; blocks have their own state and need their own claim.
+    let bytes = std::fs::read(OSC_FIXTURE).expect("osc fixture");
+
+    let mut whole = Terminal::new(80, 24, 100);
+    whole.advance(&bytes);
+
+    let mut split = Terminal::new(80, 24, 100);
+    for b in &bytes {
+        split.advance(&[*b]);
+    }
+
+    assert_eq!(
+        split.blocks().blocks(),
+        whole.blocks().blocks(),
+        "the same bytes produced a different block index when split differently"
+    );
+}
+
+#[test]
+fn osc_7_gives_the_next_block_its_working_directory() {
+    // OSC 7 arrives *before* the prompt marker that consumes it, which is why
+    // it is held rather than pushed as an event.
+    let t = run(
+        40,
+        4,
+        "\x1b]7;file://andy-mac/Users/andy/My%20Code\x07\x1b]133;A\x07$ \x1b]133;B\x07x\x1b]133;C\x07",
+    );
+    assert_eq!(t.cwd(), "/Users/andy/My Code", "the host is dropped and %XX decoded");
+    assert_eq!(
+        t.blocks().last().expect("one block").cwd,
+        "/Users/andy/My Code",
+        "the block records where it ran"
+    );
+}
+
+#[test]
+fn osc_633_indexes_the_same_blocks_as_133() {
+    // VS Code's dialect. A great many people already have its shell
+    // integration installed, and getting no blocks here while getting them
+    // there would look like zesterm was broken.
+    let t = run(
+        40,
+        4,
+        "\x1b]633;P;Cwd=/tmp\x07\x1b]633;A\x07$ \x1b]633;B\x07\x1b]633;E;git commit -m 'a\\x3bb'\x07\
+         git commit\x1b]633;C\x07\r\nout\r\n\x1b]633;D;0\x07",
+    );
+    let b = t.blocks().last().expect("one block");
+    assert_eq!(b.cwd, "/tmp");
+    assert_eq!(
+        b.command, "git commit -m 'a;b'",
+        "633;E states the command explicitly, and its escaping must be undone"
+    );
+    assert_eq!(b.state, zest_core::BlockState::Finished { exit_code: Some(0) });
+}
+
 #[test]
 fn truecolor_fixture_produces_distinct_colors() {
     let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/ansi/truecolor.ans"))

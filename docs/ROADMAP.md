@@ -45,14 +45,14 @@ move.
 
 ## Status
 
-**554 tests, six gates green**, measured on macOS rather than remembered.
+**569 tests, six gates green**, measured on macOS rather than remembered.
 First paint 35ms **on Windows**; the Mac paints against a different compositor
 and its number (48ms) is reported rather than gated.
 
 | Crate | State |
 |---|---|
 | `zest-pty` | ✅ ConPTY *and* unix (`openpt`), resize, shutdown, explicit `hangup`, `.vtrec` recorder |
-| `zest-core` | ✅ grid, scrollback, VT, modes, OSC, palette, `ChangeSource`, `RemoteWriter` — 🟡 `BlockIndex` types frozen, OSC 133 not wired |
+| `zest-core` | ✅ grid, scrollback, VT, modes, OSC, palette, `ChangeSource`, `RemoteWriter`, command blocks from OSC 133/7/633 — ⬜ blocks not yet on the wire |
 | `zest-font` | ✅ metrics, shaping, fallback, colour glyphs, Nerd Font PUA |
 | `zest-theme` | ✅ tokens, OKLCH derivation, 5 built-ins, 4 importers |
 | `zest-render-wgpu` | ✅ pipelines, atlas, offscreen resolve, selection — ⬜ gamma validation |
@@ -99,8 +99,11 @@ Two rules that are not obvious and are load-bearing:
 - **Line ids are renumbered**, because rewrapping changes how many rows a
   logical line occupies and no one-to-one mapping exists. They stay monotonic
   top to bottom, which is what scroll detection and `lines_by_id` depend on.
-  The selection is cleared for this reason, and command blocks (WS-E) will need
-  to reindex here.
+  Anything anchored to an id must re-anchor, and `Grid::resize` returns a
+  `Reindex` saying where each one went. The selection is *cleared* rather than
+  mapped — it names a column as well as a line, and rewrapping moves both —
+  while command blocks are re-anchored, because losing the block for a build
+  because the window was widened while it ran is the case blocks exist for.
 
 ### The gap to M3
 
@@ -307,12 +310,34 @@ Shares `unix.rs` with WS-C; owns only Linux-specific parts.
 M2. Owns `zest-core/src/blocks.rs` and the OSC 133 path. Hot spot: coordinate
 `perform.rs` edits, which WS-F also reads.
 
-- [ ] OSC 133 A/B/C/D, OSC 7 (cwd), OSC 633 (VS Code alias) → `BlockIndex`.
-      The markers are already recognized and ignored, so they never reach the
-      grid as garbage.
-- [ ] Shell integration for PowerShell/bash/zsh/fish with consented
-      auto-install. oh-my-posh can emit these.
-- [ ] Block folding, re-run, copy-output in the native UI.
+- [x] **OSC 133 A/B/C/D, OSC 7 (cwd), OSC 633 (VS Code alias) → `BlockIndex`.**
+      The index lives on `TermState`, so `Terminal::blocks()` answers for a
+      local session and — once the wire carries them — for one running on
+      another machine, through the same accessor.
+
+      Four things that each produce a plausible-looking wrong index, and are
+      therefore tested rather than assumed: **the alternate screen is a
+      separate grid whose ids restart at zero**, so markers there are ignored
+      outright; **`133;D` with no status is `None`, never `Some(0)`**, because a
+      green tick on a command that failed is worse than no tick; **`Grid::reflow`
+      returns a `Reindex`** and blocks re-anchor through it; and **eviction is
+      wired**, guarded so the common case is one comparison rather than a scan
+      of the index per line of output.
+
+      The command text is read back from the grid between `B` and `C` — the
+      markers carry positions, not text — except under OSC 633, whose `E`
+      states it outright and is preferred.
+- [ ] Blocks on the wire, so a client sees them. **Required, not optional:** the
+      window is a client of its own daemon, so a block parsed host-side is
+      invisible until `zest-proto` carries it.
+- [ ] Shell integration for PowerShell/bash/zsh/fish. **Env-only injection**,
+      as kitty, Ghostty and VS Code all do it — `ZDOTDIR` shim, bash `--posix` +
+      `ENV`, fish `XDG_DATA_DIRS`, pwsh `-NoExit -Command`. No file is ever
+      written, so there is nothing to consent to; `zesterm --shell-integration
+      <shell>` prints the hook for ssh, tmux and subshells, which injection
+      structurally cannot reach.
+- [ ] Block folding, re-run, copy-output in the native UI. Blocked on WS-A —
+      there is no chrome layer or `ChromeHitMap` to hit-test against yet.
 
 > The strongest reason this project owns its grid rather than depending on
 > `alacritty_terminal`: blocks need new row fields, a side index surviving

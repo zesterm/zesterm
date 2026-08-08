@@ -173,6 +173,43 @@ impl BlockIndex {
         }
     }
 
+    /// Re-anchor every block after a width change renumbered the lines.
+    ///
+    /// Reflow renumbers because rewrapping changes how many rows a logical line
+    /// occupies, so a block's `prompt_line` names different text afterwards
+    /// unless it is mapped. The selection is *cleared* in the same situation and
+    /// this is not, deliberately: losing the block for a build because the
+    /// window was widened while it ran is exactly the case blocks exist for, and
+    /// a block names only a line where a selection names a column too.
+    ///
+    /// See [`crate::grid::Reindex`] for what the mapping can and cannot answer.
+    pub fn reanchor(&mut self, reindex: &crate::grid::Reindex) {
+        let Some(oldest) = reindex.oldest() else {
+            // Nothing survived the rewrap, so neither does any block.
+            self.blocks.clear();
+            return;
+        };
+        self.blocks.retain_mut(|b| {
+            // A block whose *end* did not survive was dropped by the scrollback
+            // bound during the rewrap — the same fate as [`Self::evict_before`],
+            // and the same rule, so the two cannot disagree about what a live
+            // block is.
+            if let Some(end) = b.end_line {
+                match reindex.lookup(end) {
+                    Some(new) => b.end_line = Some(new),
+                    None => return false,
+                }
+            }
+            // A block whose *start* did not survive is merely partly in history,
+            // which is ordinary: you can no longer scroll to its top, and it is
+            // still the block that produced the output below. Clamping to the
+            // oldest surviving line is what eviction already leaves behind.
+            b.prompt_line = reindex.lookup(b.prompt_line).unwrap_or(oldest);
+            b.output_line = b.output_line.map(|l| reindex.lookup(l).unwrap_or(oldest));
+            true
+        });
+    }
+
     /// Drop blocks whose lines have all fallen out of scrollback.
     ///
     /// Called with the oldest line still held. Without this the index grows
@@ -251,6 +288,52 @@ mod tests {
         assert_eq!(idx.block_at(25).map(|b| b.command.as_str()), Some("cargo build"));
         assert_eq!(idx.block_at(43).map(|b| b.command.as_str()), Some("ls"));
         assert!(idx.block_at(100).is_none());
+    }
+
+    #[test]
+    fn a_block_whose_start_was_evicted_by_a_rewrap_is_kept_and_clamped() {
+        // Partly in history is the ordinary case, not a broken one: you can no
+        // longer scroll to the block's top, and it is still the block that
+        // produced the output below it. Dropping it would make widening a
+        // window delete history that widening a window just made *more*
+        // readable.
+        let mut idx = BlockIndex::new();
+        idx.begin_prompt(2, "/x".into());
+        idx.begin_output(3, "cargo build".into());
+        idx.finish(9, Some(0));
+
+        // Lines 0-2 did not survive the rewrap; 3 onwards did, renumbered down.
+        let reindex = crate::grid::Reindex::from_pairs(&[(3, 0), (9, 6)]);
+        idx.reanchor(&reindex);
+
+        let b = idx.last().expect("the block survived");
+        assert_eq!(b.prompt_line, 0, "clamped to the oldest line that still exists");
+        assert_eq!(b.output_line, Some(0));
+        assert_eq!(b.end_line, Some(6));
+    }
+
+    #[test]
+    fn a_block_whose_end_did_not_survive_a_rewrap_is_dropped() {
+        // The same rule as `evict_before`, so the two cannot disagree about
+        // what a live block is.
+        let mut idx = index_with_one_finished_block();
+        idx.begin_prompt(41, "/home".into());
+        idx.begin_output(42, "ls".into());
+        idx.finish(45, Some(0));
+
+        // Only the newer block's lines came through the rewrap.
+        let reindex = crate::grid::Reindex::from_pairs(&[(41, 0), (42, 1), (45, 4)]);
+        idx.reanchor(&reindex);
+
+        assert_eq!(idx.blocks().len(), 1, "the older block's end line is gone");
+        assert_eq!(idx.last().expect("one block").command, "ls");
+    }
+
+    #[test]
+    fn a_rewrap_that_kept_nothing_leaves_no_blocks() {
+        let mut idx = index_with_one_finished_block();
+        idx.reanchor(&crate::grid::Reindex::default());
+        assert!(idx.blocks().is_empty(), "no surviving line means no surviving block");
     }
 
     #[test]

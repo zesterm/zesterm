@@ -21,6 +21,55 @@ pub struct Cursor {
     pub pending_wrap: bool,
 }
 
+/// Where each line went when a width change renumbered them.
+///
+/// Returned by [`Grid::resize`], and empty for a height-only change — heights
+/// do not rewrap, so nothing is renumbered. See [`Grid::reflow`] for why no
+/// one-to-one mapping exists: every old row of a logical line maps to the
+/// *first* new row of that line, because a line that was three rows and is now
+/// one has nowhere else for the other two to point.
+///
+/// A lookup that returns `None` means the line was dropped by the scrollback
+/// bound during the rewrap — which is eviction, and callers should treat it as
+/// such rather than clamping to a neighbour.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Reindex {
+    /// `(old, new)`, ascending by `old` — the order `reflow` walks storage in.
+    map: Vec<(LineId, LineId)>,
+}
+
+impl Reindex {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    /// Build a mapping directly, for tests that need one without a rewrap.
+    ///
+    /// Not public: a real one only ever comes out of [`Grid::reflow`], and a
+    /// caller able to invent one could hand [`crate::BlockIndex::reanchor`] a
+    /// mapping no grid would ever produce.
+    #[cfg(test)]
+    pub(crate) fn from_pairs(pairs: &[(LineId, LineId)]) -> Self {
+        Self { map: pairs.to_vec() }
+    }
+
+    /// The oldest id that still exists after the rewrap.
+    #[must_use]
+    pub fn oldest(&self) -> Option<LineId> {
+        self.map.first().map(|&(_, new)| new)
+    }
+
+    /// Where a line went, or `None` if it did not survive.
+    #[must_use]
+    pub fn lookup(&self, old: LineId) -> Option<LineId> {
+        self.map
+            .binary_search_by_key(&old, |&(o, _)| o)
+            .ok()
+            .map(|i| self.map[i].1)
+    }
+}
+
 /// Saved cursor state for DECSC/DECRC.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SavedCursor {
@@ -287,18 +336,18 @@ impl Grid {
 
     /// Resize the viewport.
     ///
-    /// **M1 does not reflow.** Growing pads with blanks, shrinking truncates,
-    /// and scrollback is preserved as-is. Reflow is a multi-week problem that
-    /// Alacritty took years to stabilize, and attempting it here would eat the
-    /// milestone. The `wrapped` flag is recorded so it can be added later
-    /// without a data migration.
-    pub fn resize(&mut self, cols: usize, rows: usize, template: &Cell) {
+    /// A width change rewraps ([`Grid::reflow`]) and therefore renumbers line
+    /// ids, so this returns a [`Reindex`] saying where each one went. Anything
+    /// anchored to an absolute id — command blocks — must be re-anchored
+    /// through it or it names different text afterwards.
+    pub fn resize(&mut self, cols: usize, rows: usize, template: &Cell) -> Reindex {
         let cols = cols.max(1);
         let rows = rows.max(1);
         if cols == self.cols && rows == self.rows {
-            return;
+            return Reindex::default();
         }
 
+        let mut reindex = Reindex::default();
         if cols != self.cols {
             if self.scrollback_limit == 0 {
                 // The alternate screen. **Never reflow it.** A full-screen
@@ -308,7 +357,7 @@ impl Grid {
                 // exactly how the alt grid is built.
                 self.storage.resize_cols(cols, template);
             } else {
-                self.reflow(cols, template);
+                reindex = self.reflow(cols, template);
             }
             self.cols = cols;
         }
@@ -369,6 +418,7 @@ impl Grid {
         self.cursor.col = self.cursor.col.min(self.cols - 1);
         self.cursor.pending_wrap = false;
         self.display_offset = self.display_offset.min(self.scrollback_len);
+        reindex
     }
 
     /// Rewrap every logical line to a new width.
@@ -387,18 +437,21 @@ impl Grid {
     /// oldest line keeps its id and the rest follow consecutively, so ids stay
     /// monotonic top to bottom — which is what scroll detection and
     /// `lines_by_id` actually depend on. Anything holding an id across a column
-    /// change must re-anchor; the selection is cleared for exactly that reason,
-    /// and command blocks (WS-E) will need to reindex here.
+    /// change must re-anchor, and the returned [`Reindex`] is how: it maps every
+    /// old id to the new id of the logical line it belonged to. The selection
+    /// is *cleared* rather than re-anchored because a selection names a column
+    /// as well as a line and rewrapping moves both; a command block names only
+    /// the line it began on, which survives.
     ///
     /// # A wide character is never split
     ///
     /// If one would land in the last column with its spacer past the edge, the
     /// column is left blank and the character starts the next row. Splitting it
     /// would produce a spacer with nothing to be the second half of.
-    fn reflow(&mut self, new_cols: usize, template: &Cell) {
+    fn reflow(&mut self, new_cols: usize, template: &Cell) -> Reindex {
         let old_rows = self.storage.take_all();
         if old_rows.is_empty() {
-            return;
+            return Reindex::default();
         }
 
         // Where the cursor is, as an offset into its logical line -- the only
@@ -411,14 +464,21 @@ impl Grid {
         let mut next_id = first_id;
         let mut out: Vec<Row> = Vec::with_capacity(old_rows.len());
         let mut cursor_target: Option<(usize, usize)> = None;
+        let mut reindex = Reindex { map: Vec::with_capacity(old_rows.len()) };
 
         let mut i = 0;
         while i < old_rows.len() {
             // Collect one logical line.
             let mut cells: Vec<(Cell, Option<CellExtra>)> = Vec::new();
             let mut cursor_offset: Option<usize> = None;
+            // Every old row of this logical line re-anchors to the *first* new
+            // row of it. That is the only answer that survives: a logical line
+            // that was three rows and is now one has nowhere else for rows two
+            // and three to point.
+            let line_start_id = next_id;
             loop {
                 let row = &old_rows[i];
+                reindex.map.push((row.id, line_start_id));
                 // A wrapped row is full by definition; only the last row of a
                 // logical line has trailing blanks worth dropping.
                 //
@@ -496,6 +556,14 @@ impl Grid {
             scrollback = self.scrollback_limit;
         }
 
+        // Rows the scrollback bound just dropped no longer exist, so pointing
+        // at them would be worse than admitting they are gone: a caller that
+        // re-anchors to a surviving id gets a wrong location, where one that
+        // finds nothing knows to discard.
+        if let Some(oldest) = out.first().map(|r| r.id) {
+            reindex.map.retain(|&(_, new)| new >= oldest);
+        }
+
         self.cols = new_cols;
         self.scrollback_len = scrollback;
         self.storage.set_next_id(next_id);
@@ -512,6 +580,7 @@ impl Grid {
         }
         self.cursor.pending_wrap = false;
         self.display_offset = self.display_offset.min(self.scrollback_len);
+        reindex
     }
 
     /// Storage index of the row the cursor is on.

@@ -8,9 +8,10 @@ use alloc::vec::Vec;
 
 use unicode_width::UnicodeWidthChar;
 
+use crate::blocks::BlockIndex;
 use crate::cell::{Cell, CellFlags};
 use crate::color::Color;
-use crate::grid::{Cursor, Grid, SavedCursor};
+use crate::grid::{Cursor, Grid, LineId, SavedCursor};
 use crate::modes::{CursorStyle, Modes};
 use crate::palette::{Palette, PaletteSnapshot, Rgb};
 
@@ -96,6 +97,31 @@ pub struct TermState {
     /// The active OSC 8 hyperlink, if any.
     pub(crate) current_hyperlink: Option<u16>,
     pub(crate) next_hyperlink_id: u16,
+    /// Command blocks, as the shell has reported them (OSC 133).
+    ///
+    /// A side table rather than cell data, for the reasons in
+    /// [`crate::blocks`]. It lives here rather than on the app because a block
+    /// is a fact about the session, and the daemon has to put it on the wire.
+    pub(crate) blocks: BlockIndex,
+    /// Working directory, from OSC 7. Stamped onto the next block.
+    ///
+    /// Held rather than pushed as an event because OSC 7 arrives *before* the
+    /// prompt marker that consumes it, and because the daemon reports it in
+    /// `SessionInfo` for a session nobody is attached to.
+    pub(crate) cwd: String,
+    /// Where the typed command starts, recorded at OSC 133;B.
+    ///
+    /// Transient parser state, not part of the index: `B` says "the prompt ends
+    /// here", and only `C` knows whether anything was actually submitted. The
+    /// column matters because a prompt does not end at column zero.
+    pub(crate) prompt_end: Option<(LineId, usize)>,
+    /// The command line as OSC 633;E stated it, awaiting the `C` that runs it.
+    ///
+    /// Preferred over reading the grid back, because it is what the shell will
+    /// actually execute rather than what the screen happens to show — they
+    /// differ whenever the prompt redraws, which `zsh`'s autosuggestions and
+    /// syntax highlighting both do on every keystroke.
+    pub(crate) pending_command: Option<String>,
 }
 
 impl Terminal {
@@ -183,6 +209,32 @@ impl Terminal {
     pub fn scroll_to_bottom(&mut self) {
         self.state.grid_mut().scroll_to_bottom();
         self.state.damage.mark_full();
+    }
+
+    /// The command blocks the shell has reported.
+    ///
+    /// Empty unless the shell emits OSC 133 — which is what shell integration
+    /// installs. A terminal without it is not degraded, it simply has no
+    /// semantic view of its own scrollback.
+    ///
+    /// Reachable identically for a local session and one running on another
+    /// machine: a remote `Terminal` has these applied into it from the wire, so
+    /// `SessionSource::terminal().lock().blocks()` answers at both ends of the
+    /// mesh.
+    #[must_use]
+    pub fn blocks(&self) -> &BlockIndex {
+        &self.state.blocks
+    }
+
+    /// The shell's working directory, from OSC 7.
+    ///
+    /// Empty until a shell reports one. Guessing from the child's `/proc` entry
+    /// or `lsof` would be answering a different question — where the *process*
+    /// is, not where the next command will run, which differ the moment a
+    /// subshell is involved.
+    #[must_use]
+    pub fn cwd(&self) -> &str {
+        &self.state.cwd
     }
 
     #[must_use]
@@ -276,6 +328,10 @@ impl TermState {
             selection: None,
             current_hyperlink: None,
             next_hyperlink_id: 0,
+            blocks: BlockIndex::new(),
+            cwd: String::new(),
+            prompt_end: None,
+            pending_command: None,
         }
     }
 
@@ -306,9 +362,20 @@ impl TermState {
             self.selection = None;
         }
         let template = self.template;
-        self.grid.resize(cols, rows, &template);
+        let reindex = self.grid.resize(cols, rows, &template);
         if let Some(alt) = self.alt_grid.as_mut() {
-            alt.resize(cols, rows, &template);
+            // The alternate screen never reflows and carries no blocks, so its
+            // reindex is always empty. Dropped rather than merged.
+            let _ = alt.resize(cols, rows, &template);
+        }
+        // Blocks are re-anchored rather than cleared, unlike the selection
+        // above. Losing the block for a build because the window was widened
+        // while it ran is exactly the case blocks exist for -- and a block
+        // names only the line it began on, which the rewrap can still answer
+        // for, where a selection names a column too.
+        if !reindex.is_empty() {
+            self.blocks.reanchor(&reindex);
+            self.prompt_end = None;
         }
         self.tabs = default_tabs(cols);
         self.touch_full();
@@ -391,11 +458,44 @@ impl TermState {
         self.touch();
     }
 
+    /// The oldest line still held, scrollback included.
+    ///
+    /// The same expression as [`crate::ChangeSource::oldest_line`], but read
+    /// off the *primary* grid deliberately: blocks are numbered there, and
+    /// while a full-screen program is up `grid()` answers for the alternate
+    /// screen, whose ids restart at zero.
+    fn oldest_retained_line(&self) -> LineId {
+        self.grid.row(0).id.saturating_sub(self.grid.scrollback_len() as LineId)
+    }
+
+    /// Drop blocks whose lines have all fallen out of scrollback.
+    ///
+    /// Lives here rather than in `Grid` because the grid cannot see the index —
+    /// eviction inside the ring is silent by design, and nothing else needs to
+    /// be told about it.
+    ///
+    /// **The early return is the point.** This runs once per scrolled line, and
+    /// a `Vec::retain` for every row a `cargo build` prints would be a linear
+    /// scan of the index per line of output. Only the *oldest* block can be the
+    /// first to become evictable, so the common case is one comparison.
+    pub(crate) fn evict_blocks(&mut self) {
+        let oldest = self.oldest_retained_line();
+        let evictable = self
+            .blocks
+            .blocks()
+            .first()
+            .is_some_and(|b| b.end_line.is_some_and(|end| end < oldest));
+        if evictable {
+            self.blocks.evict_before(oldest);
+        }
+    }
+
     pub(crate) fn linefeed(&mut self) {
         let bottom = self.grid().region.bottom;
         if self.grid().cursor.row == bottom {
             let template = self.template;
             self.grid_mut().scroll_up(1, &template);
+            self.evict_blocks();
             self.touch_full();
         } else if self.grid().cursor.row + 1 < self.grid().rows() {
             self.grid_mut().cursor.row += 1;

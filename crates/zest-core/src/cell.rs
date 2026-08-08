@@ -61,8 +61,16 @@ pub struct Cell {
     pub fg: Color,
     pub bg: Color,
     pub flags: CellFlags,
-    /// Side-table index for combining marks, OSC 8 hyperlink ids, and (from M2)
-    /// OSC 133 block ids. [`NO_EXTRA`] for the overwhelming majority of cells.
+    /// Side-table index for combining marks and OSC 8 hyperlink ids.
+    /// [`NO_EXTRA`] for the overwhelming majority of cells.
+    ///
+    /// **Command block ids are deliberately not here**, though an earlier note
+    /// said they would be. A block spans thousands of lines, so a per-cell id
+    /// would be both enormous and wrong the moment a line is evicted while the
+    /// block is still running — see [`crate::blocks`]. It would also be
+    /// invisible to every remote client: `extra` was an excluded field in the
+    /// protocol conformance comparator until combining marks were given their
+    /// own wire representation, precisely because the encoder does not read it.
     pub extra: ExtraId,
 }
 
