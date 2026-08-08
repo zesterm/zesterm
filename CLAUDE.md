@@ -242,6 +242,15 @@ Each of these cost real time and is documented where it bites:
   first cannot. `export ZESTERM_SIGN_IDENTITY="$(security find-identity -v -p
   codesigning | head -1 | sed 's/.*"\(.*\)"/\1/')"` and `zesterm-dev` signs both
   binaries for you.
+
+  **Windows has no equivalent problem, measured the same way:** a freshly
+  rebuilt `zesterm.exe` re-read the stored client key and attached to a remote
+  daemon in 48ms with no prompt of any kind. Credential Manager keys generic
+  credentials by *target name*, not by binary, so no rebuild can lose the
+  grant — and the flip side is worth knowing too: there is no per-binary ACL
+  at all, so any process in the user's session can read the key. The signing
+  discipline above is macOS-only work; the Windows exposure is the session,
+  not the build.
 - **On macOS the daemon blocks on a Keychain prompt after every rebuild**, and
   the app gives up waiting after 2s and silently falls back to an in-process
   pty. The window works perfectly and is not daemon-backed, so anything being
