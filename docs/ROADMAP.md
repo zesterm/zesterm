@@ -519,6 +519,12 @@ M2. Owns `zest-core/src/blocks.rs` and the OSC 133 path. Hot spot: coordinate
       nothing. Input typed while disconnected is dropped and only the newest
       resize is kept, because replaying thirty seconds of queued keystrokes is
       how a reconnect runs a command the user abandoned.
+- [x] **The attach example dials TCP** (`--addr <host:port>`), one generic loop
+      over both transports — found missing at the exact moment the two-machine
+      bring-up (#20) needed its step 2: pairing was done and no tool existed
+      between "trusted" and "a window". Throwaway identity, so an unpaired host
+      prompts and the code ritual applies; proven end to end over TCP against a
+      live daemon before first use on the real LAN.
 - [ ] SQLite scrollback. Scrollback is in memory and bounded; a session that
       outlives its window does not yet outlive the daemon.
 

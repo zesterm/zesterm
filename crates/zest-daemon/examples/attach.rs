@@ -10,6 +10,13 @@
 //! cargo run -p zest-daemon --example attach -- --socket \\.\pipe\zesterm-demo --cmd "pwsh -NoLogo -c ls"
 //! ```
 //!
+//! `--addr <host:port>` does the same over TCP, against another machine's
+//! daemon — the two-machine bring-up's step between "paired" and "a window":
+//! it proves a remote session end to end with no GPU, font or renderer in the
+//! picture, exactly as the local form does for the local path. The identity is
+//! throwaway, so an unpaired host will prompt and print a code; compare it with
+//! the one this prints, the same ritual as `pair`.
+//!
 //! `--close` ends the session on the way out instead of merely detaching. It is
 //! the only way to see the difference from outside the daemon: detaching leaves
 //! the child running by design, so "did closing actually end it" is a question
@@ -28,23 +35,49 @@ fn main() {
         args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
     };
 
-    let socket = opt("--socket").unwrap_or_else(default_socket_path);
     let cmd = opt("--cmd").unwrap_or_default();
     let seconds: u64 = opt("--seconds").and_then(|s| s.parse().ok()).unwrap_or(5);
     // `Detach` and `CloseSession` differ in exactly one observable — whether the
     // child is still running afterwards — and nothing else here can show it.
     let close = args.iter().any(|a| a == "--close");
 
-    let mut stream = match connect(&socket) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("[attach] no daemon at {socket}: {e}");
-            eprintln!("[attach] start one with: zest-daemon --socket {socket}");
-            std::process::exit(1);
-        }
-    };
-    eprintln!("[attach] connected to {socket}");
+    // Two transports, one loop: the protocol is transport-blind and this
+    // example should prove that, not re-litigate it.
+    if let Some(addr) = opt("--addr") {
+        let stream = match std::net::TcpStream::connect(&addr) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[attach] could not reach {addr}: {e}");
+                eprintln!("[attach] the far daemon needs --listen-lan, and a route");
+                std::process::exit(1);
+            }
+        };
+        let closer = stream.try_clone().expect("clone the stream for the deadline thread");
+        eprintln!("[attach] connected to {addr} (tcp)");
+        run(stream, closer, cmd, seconds, close);
+    } else {
+        let socket = opt("--socket").unwrap_or_else(default_socket_path);
+        let stream = match connect(&socket) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[attach] no daemon at {socket}: {e}");
+                eprintln!("[attach] start one with: zest-daemon --socket {socket}");
+                std::process::exit(1);
+            }
+        };
+        let closer = stream.try_clone().expect("clone the stream for the deadline thread");
+        eprintln!("[attach] connected to {socket}");
+        run(stream, closer, cmd, seconds, close);
+    }
+}
 
+fn run<S: Read + Write + Send + 'static>(
+    mut stream: S,
+    mut closer: S,
+    cmd: String,
+    seconds: u64,
+    close: bool,
+) {
     let send = |stream: &mut _, msg: &ClientMessage| {
         let bytes = frame::encode(msg).expect("encode");
         Write::write_all(stream, &bytes).expect("write");
@@ -85,7 +118,6 @@ fn main() {
 
     {
         let opened = Arc::clone(&opened);
-        let mut closer = stream.try_clone().expect("clone the stream for the deadline thread");
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(seconds));
             if close {
