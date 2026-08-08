@@ -1,0 +1,9 @@
+# Generated files are written byte-for-byte by their generators (ts-rs, xtask
+# fixtures), always with LF. Without this, a Windows checkout under
+# core.autocrlf=true materialises them as CRLF, and the moment a gate
+# regenerates them all 35 show as phantom-modified with an empty diff --
+# inviting either a pointless commit or a reflex `checkout --` that one day
+# discards a real regeneration.
+crates/zest-proto/bindings/** text eol=lf
+crates/zest-proto/fixtures/** text eol=lf
+schemas/** text eol=lf
