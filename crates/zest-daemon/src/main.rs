@@ -305,7 +305,34 @@ fn start_approver(queue: &Arc<PairingQueue>, auth: &Arc<Authenticator>) {
     std::thread::Builder::new()
         .name("zest-daemon-approver".into())
         .spawn(move || {
-            use std::io::BufRead as _;
+            // Lines, with the moment each arrived.
+            //
+            // The timestamp is the whole fix. `Stdin` is globally buffered, so a
+            // surplus line outlives the prompt it was meant for and is handed to
+            // the next `read_line` — which is how a device nobody looked at was
+            // approved 81 microseconds after connecting, by a `y` typed four
+            // minutes earlier for a different device on another machine (#21).
+            //
+            // Checking that the request is still pending does not catch it: the
+            // request *is* pending, that is why it is being asked about. The
+            // thing that is wrong is the order — the answer predates the
+            // question. **Consent cannot precede the prompt**, because you
+            // cannot compare a code you have not been shown.
+            let (lines_tx, lines) = std::sync::mpsc::channel::<(std::time::Instant, String)>();
+            std::thread::Builder::new()
+                .name("zest-daemon-stdin".into())
+                .spawn(move || {
+                    use std::io::BufRead as _;
+                    let stdin = std::io::stdin();
+                    for line in stdin.lock().lines() {
+                        let Ok(line) = line else { break };
+                        if lines_tx.send((std::time::Instant::now(), line)).is_err() {
+                            break;
+                        }
+                    }
+                })
+                .ok();
+
             while rx.recv().is_ok() {
                 let waiting = queue_for_hook.pending();
                 // A notification with nothing pending means the request was
@@ -327,6 +354,7 @@ fn start_approver(queue: &Arc<PairingQueue>, auth: &Arc<Authenticator>) {
                         request.remote,
                         spaced(&request.code),
                     );
+                    let asked_at = std::time::Instant::now();
                     let mut line = String::new();
                     // `Ok(0)` *is* EOF -- `read_line` never reports it as an
                     // error. Testing only `is_err()` meant a daemon whose stdin
@@ -335,8 +363,23 @@ fn start_approver(queue: &Arc<PairingQueue>, auth: &Arc<Authenticator>) {
                     // empty line and denied every request instantly. The user
                     // saw "the request was declined" the moment they tried to
                     // pair, and the comment here claimed the opposite.
-                    match std::io::stdin().lock().read_line(&mut line) {
-                        Ok(0) | Err(_) => {
+                    // Anything already waiting was typed before this prompt
+                    // existed, so it is not an answer to it.
+                    let answer = loop {
+                        match lines.recv() {
+                            Ok((at, text)) if at >= asked_at => break Some(text),
+                            Ok((_, stale)) => tracing::warn!(
+                                client = %request.client.short(),
+                                discarded = %stale.trim().escape_debug().to_string(),
+                                "input that predates this prompt is not an answer to it; \
+                                 discarding rather than letting it approve a device \
+                                 nobody was shown"
+                            ),
+                            Err(_) => break None,
+                        }
+                    };
+                    match answer.map(|a| { line = a; 1usize }).ok_or(()) {
+                        Err(()) | Ok(0) => {
                             tracing::warn!(
                                 "no stdin to prompt on; pairing requests will time out. \
                                  Use --trust <id> to pair without a prompt, or \
@@ -345,6 +388,23 @@ fn start_approver(queue: &Arc<PairingQueue>, auth: &Arc<Authenticator>) {
                             return;
                         }
                         Ok(_) => {}
+                    }
+                    // The answer is for *this* request, or it is for nothing.
+                    //
+                    // An answer that arrives after its request has gone is not a
+                    // decision about whatever came next -- it is a decision about
+                    // something that no longer exists, and carrying it forward is
+                    // what made a stale `y` grant a shell. Re-checking here costs
+                    // one lookup and closes that door even if a line is somehow
+                    // still buffered.
+                    if !queue_for_hook.pending().iter().any(|r| r.client == request.client) {
+                        tracing::warn!(
+                            client = %request.client.short(),
+                            answer = %line.trim().escape_debug().to_string(),
+                            "an answer arrived for a request that is no longer pending; \
+                             discarding it rather than applying it to another device"
+                        );
+                        continue;
                     }
                     let approve = matches!(line.trim(), "y" | "Y" | "yes");
                     // Instrumented because answers have gone missing (#21): a
