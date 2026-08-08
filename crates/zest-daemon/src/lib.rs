@@ -39,6 +39,8 @@ pub mod session;
 pub use auth::{Auth, Authenticator};
 pub use lan::LanListener;
 pub use local::{connect, default_socket_path, listen};
+#[cfg(windows)]
+pub use local::PipeStream;
 pub use server::{serve, Connection, Registry};
 pub use session::{Session, Update};
 

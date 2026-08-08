@@ -493,6 +493,12 @@ mod imp {
 pub use imp::{connect, listen};
 #[cfg(unix)]
 pub use imp::claim;
+// `connect` returns this, so leaving it unexported made its own return type
+// unnameable: `zest-app` could hold the stream but not write a signature taking
+// one. The unix side never noticed, because there `connect` returns a
+// `std::os::unix::net::UnixStream` that every caller can already name.
+#[cfg(windows)]
+pub use imp::PipeStream;
 
 #[cfg(test)]
 mod tests {
