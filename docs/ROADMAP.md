@@ -45,7 +45,7 @@ move.
 
 ## Status
 
-**596 tests, six gates green**, measured on macOS rather than remembered.
+**600 tests, six gates green**, measured on macOS rather than remembered.
 First paint 35ms **on Windows**; the Mac paints against a different compositor
 and its number (48ms) is reported rather than gated.
 
@@ -694,6 +694,31 @@ didn't want to switch back."* Not feature parity with WezTerm.
 
 **Win condition:** *"My Mac's shell, in a window on my Windows box, at desk
 latency."*
+
+**Closed, 2026-08-08.** Both lanes concur; the bring-up is logged
+blow-by-blow on [#20](https://github.com/zesterm/zesterm/issues/20).
+
+Everything the milestone asked for is not merely built but *observed on two
+machines*: pairing in both directions with the six digits compared by two people,
+stored device identities on both platforms, trust that survives a daemon restart,
+a live window riding through that restart unprompted, and a number for desk
+latency. What the second machine cost, and repaid, is the honest headline —
+**six bugs, none of them findable from one box, and every in-process test had
+agreed each was fine:**
+
+| | |
+|---|---|
+| the handshake watchdog cut connections that were **waiting for a person**, so approval-based pairing had never once worked | mine |
+| a stale line on the approver's stdin **approved a device nobody looked at** | mine |
+| the sweep collected a session **before the client that made it could attach** | mine |
+| `zesterm` and `attach` had **no TCP transport at all** — the win condition had no path | shared |
+| a client that lost its link **could never come back** | mine |
+| a killed daemon **kept advertising**, so a peer saw a host it could not dial | shared |
+
+The pattern in the four that were mine is worth more than the count: each had a
+passing test that proved the *easy half*. The watchdog test used a device that was
+already trusted — the one case that never goes through approval. That is what a
+second machine buys, and no amount of care on one buys it.
 
 **Met, 2026-08-08.** `zesterm --attach <mac>:7717` on the Windows box, pairing
 approved with the six-digit code compared on both machines, and
