@@ -551,6 +551,36 @@ mod tests {
     }
 
     #[test]
+    fn a_requested_keyframe_names_the_sequence_it_describes() {
+        // `Connection` used to send `Seq(0)` here while `keyframe_for` set
+        // `sub.sent` to the real value. The client's baseline went to 0, every
+        // following update was refused as stale, and each refusal asked for
+        // another keyframe that again said 0 -- so a session that had resized
+        // once did a full repaint round trip for every byte the shell printed,
+        // forever. The screen still updated, which is why it was not obvious.
+        let s = session("kf");
+        let (handle, attach_seq, _) = s.attach();
+        wait_for(|| s.poll(handle).is_some());
+
+        let (seq, _k) = s.keyframe_for(handle).expect("attached");
+        assert!(
+            seq >= attach_seq,
+            "a requested keyframe named {seq}, behind the attach at {attach_seq}"
+        );
+
+        // And the chain continues from it rather than from zero.
+        let subs_sent = {
+            let subs = s.subscribers.lock().expect("subscriber lock");
+            subs.get(&handle).expect("attached").sent
+        };
+        assert_eq!(
+            seq, subs_sent,
+            "the keyframe told the client {seq} while the daemon recorded {subs_sent}; \
+             every later update would be refused as stale"
+        );
+    }
+
+    #[test]
     fn a_sequence_that_was_never_sent_is_refused_with_a_keyframe() {
         // A client acknowledging something it cannot have been sent is talking
         // about a different session -- a daemon that restarted under it. There

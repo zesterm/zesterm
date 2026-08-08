@@ -316,14 +316,23 @@ fn start_approver(queue: &Arc<PairingQueue>, auth: &Arc<Authenticator>) {
                         spaced(&request.code),
                     );
                     let mut line = String::new();
-                    if std::io::stdin().lock().read_line(&mut line).is_err() {
-                        // No stdin -- launchd, systemd, a detached spawn. Leave
-                        // the request to time out rather than spinning on EOF,
-                        // and say so once.
-                        tracing::warn!(
-                            "no stdin to prompt on; use --trust or --no-prompt"
-                        );
-                        return;
+                    // `Ok(0)` *is* EOF -- `read_line` never reports it as an
+                    // error. Testing only `is_err()` meant a daemon whose stdin
+                    // is /dev/null, which is exactly how the app spawns it and
+                    // how launchd and systemd start it, fell through with an
+                    // empty line and denied every request instantly. The user
+                    // saw "the request was declined" the moment they tried to
+                    // pair, and the comment here claimed the opposite.
+                    match std::io::stdin().lock().read_line(&mut line) {
+                        Ok(0) | Err(_) => {
+                            tracing::warn!(
+                                "no stdin to prompt on; pairing requests will time out. \
+                                 Use --trust <id> to pair without a prompt, or \
+                                 --no-prompt to refuse immediately."
+                            );
+                            return;
+                        }
+                        Ok(_) => {}
                     }
                     let approve = matches!(line.trim(), "y" | "Y" | "yes");
                     auth.decide(

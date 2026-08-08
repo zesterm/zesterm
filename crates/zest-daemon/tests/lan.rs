@@ -17,6 +17,9 @@ use zest_mesh::pairing::{auth_transcript, PairingQueue, Transcript};
 use zest_mesh::trust::{MemoryTrustStore, TrustRecord, TrustStore};
 use zest_proto::{frame, ClientMessage, FrameReader, HostMessage, PROTOCOL_VERSION};
 
+/// The handshake deadline these tests run with.
+const HANDSHAKE_TEST_TIMEOUT: Duration = Duration::from_millis(300);
+
 struct Host {
     addr: std::net::SocketAddr,
     trust: Arc<MemoryTrustStore>,
@@ -34,7 +37,11 @@ fn host() -> Host {
         "lan-test",
     ));
 
-    let listener = LanListener::bind("127.0.0.1", 0).expect("bind");
+    // Short enough that a test can afford to outlive it, which is the only way
+    // the watchdog's behaviour can be observed at all.
+    let listener = LanListener::bind("127.0.0.1", 0)
+        .expect("bind")
+        .with_handshake_timeout(HANDSHAKE_TEST_TIMEOUT);
     let addr = listener.local_addr();
     let config = DaemonConfig {
         host: host_id,
@@ -244,6 +251,60 @@ fn a_captured_proof_cannot_be_replayed_onto_a_second_connection() {
         ),
         "a replayed proof was accepted: {answer:?}"
     );
+}
+
+/// Longer than the test-mode handshake timeout, so a connection that survives
+/// this really did outlive the watchdog.
+const PAST_THE_WATCHDOG: Duration = Duration::from_millis(900);
+
+#[test]
+fn an_authenticated_connection_outlives_the_handshake_watchdog() {
+    // The bug this exists for: the watchdog's flag was only set after `serve`
+    // returned -- i.e. once the connection had already ended -- so it cut every
+    // connection, healthy or not, a fixed time after accept. A paired phone was
+    // disconnected on that cycle forever.
+    //
+    // Every previous LAN test finished in milliseconds, which is exactly why
+    // none of them noticed. This one deliberately waits.
+    let h = host();
+    let client = ClientIdentity::generate().expect("client key");
+    trust(&h, &client);
+
+    let mut stream = TcpStream::connect(h.addr).expect("connect");
+    let mut frames = FrameReader::new();
+    handshake(&mut stream, &mut frames, &client);
+    wait_for(&mut stream, &mut frames, |m| matches!(m, HostMessage::Welcome { .. }))
+        .expect("no welcome");
+
+    std::thread::sleep(PAST_THE_WATCHDOG);
+
+    // Still usable: the watchdog must not have touched an authenticated
+    // connection.
+    send(&mut stream, &ClientMessage::ListSessions);
+    let answer = wait_for(&mut stream, &mut frames, |m| {
+        matches!(m, HostMessage::Sessions { .. })
+    });
+    assert!(
+        answer.is_some(),
+        "the connection was cut after the handshake timeout despite being authenticated"
+    );
+}
+
+#[test]
+fn a_connection_that_never_speaks_is_cut() {
+    // The other half: the watchdog must still do its job. Without this, the
+    // fix above could be "never arm it" and both tests would pass.
+    let h = host();
+    let mut silent = TcpStream::connect(h.addr).expect("connect");
+
+    std::thread::sleep(PAST_THE_WATCHDOG);
+
+    // The daemon shut the socket down, so a read returns EOF rather than
+    // blocking forever.
+    silent.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+    let mut buf = [0u8; 16];
+    let n = silent.read(&mut buf).unwrap_or(0);
+    assert_eq!(n, 0, "a connection that never spoke was left open");
 }
 
 #[test]

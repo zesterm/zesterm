@@ -207,6 +207,13 @@ pub struct Connection {
     /// Written by the approval callback on whichever thread resolved it, read
     /// by the writer loop after it is woken.
     decided: Arc<Mutex<Option<zest_mesh::pairing::Decision>>>,
+    /// Called once, when the handshake completes.
+    ///
+    /// The LAN listener uses it to disarm its watchdog and release its
+    /// mid-handshake slot. Without a signal at exactly this moment, "still
+    /// handshaking" and "connection still open" are the same question, and both
+    /// the watchdog and the connection cap answered the wrong one.
+    on_ready: Option<Box<dyn FnOnce() + Send>>,
     /// Handed to each session on attach, so output wakes the writer.
     waker: Option<Arc<dyn Fn() + Send + Sync>>,
 }
@@ -235,6 +242,7 @@ impl Connection {
             auth,
             remote: remote.into(),
             decided: Arc::new(Mutex::new(None)),
+            on_ready: None,
             waker: None,
         }
     }
@@ -257,6 +265,11 @@ impl Connection {
             Gate::Handshaking(h) => Some(h),
             _ => None,
         }
+    }
+
+    /// Be told when this connection finishes its handshake.
+    pub fn set_on_ready(&mut self, f: Box<dyn FnOnce() + Send>) {
+        self.on_ready = Some(f);
     }
 
     /// Set what an attached session calls when it has output.
@@ -341,12 +354,15 @@ impl Connection {
                     message: "this connection was refused".into(),
                 }]
             }
+            // Only the handshake's own two messages. `PairingDecision` used to
+            // be exempt here, which let a loopback process approve a pending
+            // device without completing a handshake at all -- not a remote
+            // hole, since the socket is the authorization there, but a wider
+            // surface than the design describes and not what this arm implies.
             Gate::Handshaking(_)
                 if !matches!(
                     msg,
-                    ClientMessage::Hello { .. }
-                        | ClientMessage::Auth { .. }
-                        | ClientMessage::PairingDecision { .. }
+                    ClientMessage::Hello { .. } | ClientMessage::Auth { .. }
                 ) =>
             {
                 return vec![HostMessage::Error {
@@ -554,9 +570,16 @@ impl Connection {
                     }];
                 };
                 match s.keyframe_for(handle) {
-                    Some((_seq, k)) => vec![HostMessage::Keyframe {
+                    Some((seq, k)) => vec![HostMessage::Keyframe {
                         session,
-                        seq: Seq(0),
+                        // The *real* sequence. Sending 0 here set the client's
+                        // baseline to 0 while the daemon set `sub.sent` to the
+                        // true value, so the next update's `base` never matched
+                        // and the client asked for another keyframe -- which
+                        // came back as 0 again. A resize sends RequestKeyframe,
+                        // so resizing a daemon-backed window froze the terminal
+                        // in that loop for every byte the shell printed.
+                        seq: Seq(seq),
                         cols: k.cols,
                         rows: k.rows,
                         rows_data: k.rows_data,
@@ -653,6 +676,11 @@ impl Connection {
         }
         self.gate = Gate::Served;
         self.pending = None;
+        // Exactly here, and only once: the gate has opened. The LAN listener
+        // disarms its watchdog and gives back its mid-handshake slot.
+        if let Some(f) = self.on_ready.take() {
+            f();
+        }
         vec![HostMessage::Welcome {
             version: PROTOCOL_VERSION,
             host: self.config.host,
@@ -787,12 +815,28 @@ impl Connection {
 /// daemon that wakes ten times a second to find nothing is a laptop that does
 /// not sleep.
 pub fn serve<R, W>(
+    reader: R,
+    writer: W,
+    config: DaemonConfig,
+    registry: Arc<Registry>,
+    auth: crate::auth::Auth,
+    remote: impl Into<String>,
+) -> Result<(), DaemonError>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+{
+    serve_with(reader, writer, config, registry, auth, remote, None)
+}
+
+fn serve_with<R, W>(
     mut reader: R,
     mut writer: W,
     config: DaemonConfig,
     registry: Arc<Registry>,
     auth: crate::auth::Auth,
     remote: impl Into<String>,
+    on_ready: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<(), DaemonError>
 where
     R: Read + Send + 'static,
@@ -804,6 +848,9 @@ where
         auth,
         remote,
     )));
+    if let Some(f) = on_ready {
+        conn.lock().expect("connection lock").set_on_ready(f);
+    }
     let (tx, rx) = std::sync::mpsc::channel::<Wake>();
 
     {
@@ -885,6 +932,31 @@ where
         }
     }
     Ok(())
+}
+
+/// Serve a LAN connection, telling the listener when the handshake completes.
+///
+/// A thin wrapper rather than more parameters on `serve`, so the loopback path
+/// -- which has no watchdog and no connection cap -- stays exactly as it was.
+#[allow(clippy::too_many_arguments, reason = "one call site, in lan.rs")]
+pub fn serve_lan<R, W>(
+    reader: R,
+    writer: W,
+    config: DaemonConfig,
+    registry: Arc<Registry>,
+    auth: crate::auth::Auth,
+    remote: String,
+    watchdog: crate::lan::WatchdogHandle,
+    mut slot: crate::lan::Countdown,
+) -> Result<(), DaemonError>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+{
+    serve_with(reader, writer, config, registry, auth, remote, Some(Box::new(move || {
+        watchdog.completed();
+        slot.release();
+    })))
 }
 
 /// Why the writer woke.
@@ -1055,6 +1127,37 @@ mod tests {
         // And it stays refused rather than being served the next message.
         let out = send(&mut c, &ClientMessage::ListSessions);
         assert!(matches!(&out[..], [HostMessage::Error { .. }]), "{out:?}");
+    }
+
+    #[test]
+    fn a_requested_keyframe_carries_a_real_sequence() {
+        // This is where the bug was: the session returned the right sequence
+        // and the wire message threw it away for `Seq(0)`. The client's
+        // baseline went to zero, every later update was refused as stale, and
+        // each refusal asked for another keyframe that again said zero -- so a
+        // window that had been resized once did a full repaint round trip for
+        // every byte the shell printed. It still *updated*, which is exactly
+        // why nothing noticed.
+        let (mut c, _) = conn();
+        authenticate(&mut c);
+        send(&mut c, &ClientMessage::CreateSession {
+            command: echo_cmd(),
+            cwd: String::new(),
+            cols: 80,
+            rows: 24,
+        });
+        let addr = SessionAddr::new(config().host, SessionId(1));
+        send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+
+        let out = send(&mut c, &ClientMessage::RequestKeyframe { session: addr });
+        let [HostMessage::Keyframe { seq, .. }] = &out[..] else {
+            panic!("expected a keyframe, got {out:?}");
+        };
+        assert_ne!(
+            seq.0, 0,
+            "the keyframe named sequence 0, so the client's baseline and the \
+             daemon's would disagree from that moment on"
+        );
     }
 
     #[test]

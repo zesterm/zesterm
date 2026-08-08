@@ -198,8 +198,8 @@ enum State {
     Challenged(Box<Transcript>),
     /// Proved, waiting for a person.
     Pending(Box<Transcript>),
-    /// Served.
-    Ready,
+    /// Served. Keeps the transcript so the caller can say who this is.
+    Ready(Box<Transcript>),
     /// Finished, badly.
     Refused,
 }
@@ -212,15 +212,22 @@ impl HostHandshake {
     /// Whether this connection may be served.
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        matches!(self.state, State::Ready)
+        matches!(self.state, State::Ready(_))
     }
 
     /// The transcript under negotiation, for a prompt.
+    ///
+    /// **Also available once the connection is `Ready`**, and that matters: the
+    /// caller logs which device authenticated and stamps `last_seen` *after*
+    /// `on_auth` returns `Welcome`, by which point the state has already
+    /// advanced. When `Ready` was excluded here, that whole branch silently
+    /// never ran -- no audit line, and `last_seen` stayed `None` on every
+    /// paired device forever.
     #[must_use]
     pub fn transcript(&self) -> Option<&Transcript> {
         match &self.state {
-            State::Challenged(t) | State::Pending(t) => Some(t),
-            _ => None,
+            State::Challenged(t) | State::Pending(t) | State::Ready(t) => Some(t),
+            State::Greeting | State::Refused => None,
         }
     }
 
@@ -299,7 +306,7 @@ impl HostHandshake {
 
         match trust.get(transcript.client) {
             Ok(Some(_)) => {
-                self.state = State::Ready;
+                self.state = State::Ready(transcript);
                 HostStep::Welcome
             }
             Ok(None) => {
@@ -333,12 +340,13 @@ impl HostHandshake {
             paired_at: std::time::SystemTime::now(),
             last_seen: None,
         };
+        let transcript = transcript.clone();
         if let Err(e) = trust.insert(record) {
             tracing::error!(error = %e, "could not record the pairing; refusing");
             self.state = State::Refused;
             return HostStep::Refused(Refusal::UnknownClient);
         }
-        self.state = State::Ready;
+        self.state = State::Ready(transcript);
         HostStep::Welcome
     }
 
@@ -681,6 +689,35 @@ mod tests {
         let sig = run_to_auth(&mut h, &client, "phone");
         assert_eq!(h.on_auth(&sig, &trust), HostStep::Welcome);
         assert!(h.is_ready());
+    }
+
+    #[test]
+    fn a_served_connection_still_says_who_it_is() {
+        // The caller logs the authenticated device and stamps `last_seen`
+        // *after* on_auth returns Welcome, by which point the state has already
+        // advanced. When `Ready` did not keep the transcript, that whole branch
+        // silently never ran: no audit line, and `last_seen` stayed None on
+        // every paired device forever -- so `--trusted` showed devices that
+        // had apparently never connected.
+        let identity = Arc::new(HostIdentity::generate().expect("host key"));
+        let client = ClientIdentity::generate().expect("client key");
+        let trust = MemoryTrustStore::new();
+        trust
+            .insert(TrustRecord {
+                client: client.client_id(),
+                label: "phone".into(),
+                paired_at: std::time::SystemTime::now(),
+                last_seen: None,
+            })
+            .expect("insert");
+
+        let mut h = host(&identity);
+        let sig = run_to_auth(&mut h, &client, "phone");
+        assert_eq!(h.on_auth(&sig, &trust), HostStep::Welcome);
+
+        let t = h.transcript().expect("a served connection must still name its client");
+        assert_eq!(t.client, client.client_id());
+        assert_eq!(t.client_label, "phone");
     }
 
     #[test]

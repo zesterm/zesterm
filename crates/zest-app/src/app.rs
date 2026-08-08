@@ -142,6 +142,8 @@ pub struct App {
     no_daemon: bool,
     /// Report the cost of finding and attaching to the daemon, then exit.
     attach_probe: bool,
+    /// Start a fresh session rather than picking up an idle one.
+    new_session: bool,
 }
 
 impl App {
@@ -189,6 +191,7 @@ impl App {
             startup_probe: false,
             no_daemon: false,
             attach_probe: false,
+            new_session: false,
         }
     }
 
@@ -207,6 +210,13 @@ impl App {
     /// Keep the pty in this process rather than attaching to a daemon.
     pub fn with_no_daemon(mut self) -> Self {
         self.no_daemon = true;
+        self
+    }
+
+    /// Always start a new session, never adopt an idle one.
+    #[must_use]
+    pub fn with_new_session(mut self) -> Self {
+        self.new_session = true;
         self
     }
 
@@ -235,6 +245,10 @@ impl App {
         proxy: &EventLoopProxy<Wakeup>,
     ) -> Option<Box<dyn SessionSource>> {
         if self.no_daemon {
+            if self.attach_probe {
+                eprintln!("FAIL: --attach-probe measures the daemon path, which --no-daemon disables");
+                std::process::exit(2);
+            }
             return None;
         }
 
@@ -243,6 +257,13 @@ impl App {
             Ok(a) => a,
             Err(e) => {
                 tracing::warn!(error = %e, "no daemon; keeping this session in-process");
+                // A probe that silently turns into a terminal is worse than one
+                // that fails: it hangs, having measured nothing, and the window
+                // it leaves behind looks like success.
+                if self.attach_probe {
+                    eprintln!("FAIL: could not reach a daemon: {e}");
+                    std::process::exit(1);
+                }
                 return None;
             }
         };
@@ -276,9 +297,11 @@ impl App {
                 cols,
                 rows,
                 scrollback: self.config.scrollback,
-                // The probe adopts so that measuring the number repeatedly does
-                // not leave one more idle shell on the machine each time.
-                adopt: self.attach_probe,
+                // Adopt an unattached session if there is one. Creating every
+                // time meant a session could never be picked up again -- the
+                // whole point of the daemon owning it -- and leaked one shell
+                // per launch, because closing a window only detaches.
+                adopt: !self.new_session,
                 local: true,
                 // Loopback: the socket already answered "is this my machine",
                 // and there is no advertisement to have been misled by.
@@ -323,6 +346,10 @@ impl App {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "could not attach; keeping this session in-process");
+                if self.attach_probe {
+                    eprintln!("FAIL: could not attach: {e}");
+                    std::process::exit(1);
+                }
                 None
             }
         }

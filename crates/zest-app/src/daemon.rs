@@ -44,6 +44,11 @@ pub enum DaemonStartError {
     Spawn(String),
     #[error("zest-daemon did not start listening within {0:?}")]
     Timeout(Duration),
+    /// It started and gave up. Its own stderr says why; this only reports that
+    /// it happened, so the app can fall back at once rather than polling a
+    /// socket that will never appear.
+    #[error("zest-daemon exited during startup: {0}")]
+    Exited(String),
 }
 
 /// Connect to this machine's daemon, starting one if there is none.
@@ -64,7 +69,7 @@ pub fn find_or_spawn(socket: &str, deadline: Duration) -> Result<Attached, Daemo
     })
     .ok_or_else(|| DaemonStartError::NotFound { exe: exe_dir.display().to_string() })?;
 
-    spawn_detached(&binary, socket)?;
+    let mut child = spawn_detached(&binary, socket)?;
 
     // Poll rather than sleeping a fixed time: a fixed sleep is either flaky on
     // a loaded machine or wasted on an idle one, and this sits on the startup
@@ -73,6 +78,15 @@ pub fn find_or_spawn(socket: &str, deadline: Duration) -> Result<Attached, Daemo
     while Instant::now() < give_up {
         if let Ok(stream) = zest_daemon::connect(socket) {
             return Ok(attached(stream, true, started.elapsed()));
+        }
+        // And stop the moment the daemon gives up, rather than polling a socket
+        // that will never appear. A daemon with no credential store or an
+        // unreadable trust file exits at once, and waiting out the full
+        // deadline left the window up with no shell for two seconds -- on
+        // exactly the machines where something is already wrong.
+        // Still running, or we cannot tell: keep waiting. Exited: stop now.
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(DaemonStartError::Exited(status.to_string()));
         }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -137,7 +151,7 @@ fn which(name: &str) -> Option<PathBuf> {
 /// The detaching is the point. A daemon that dies with the window that started
 /// it cannot host a session that outlives its window, which is the property
 /// ADR-007 exists for.
-fn spawn_detached(binary: &Path, socket: &str) -> Result<(), DaemonStartError> {
+fn spawn_detached(binary: &Path, socket: &str) -> Result<std::process::Child, DaemonStartError> {
     let mut cmd = std::process::Command::new(binary);
     cmd.arg("--socket")
         .arg(socket)
@@ -170,9 +184,11 @@ fn spawn_detached(binary: &Path, socket: &str) -> Result<(), DaemonStartError> {
         cmd.creation_flags(0x0000_0008 | 0x0800_0000);
     }
 
-    // The child is deliberately not waited on: it is a daemon, and reaping it
-    // is not this process's job. On unix `setsid` reparents it away from us.
-    cmd.spawn().map(|_| ()).map_err(|e| DaemonStartError::Spawn(e.to_string()))
+    // The handle is kept only long enough to notice an immediate failure --
+    // see `find_or_spawn`. A daemon that starts successfully is never waited
+    // on: reaping it is not this process's job, and on unix `setsid` has
+    // already reparented it away.
+    cmd.spawn().map_err(|e| DaemonStartError::Spawn(e.to_string()))
 }
 
 #[cfg(test)]

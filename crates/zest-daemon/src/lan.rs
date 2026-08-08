@@ -28,12 +28,12 @@
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::auth::{Auth, Authenticator};
-use crate::server::{serve, Registry};
+use crate::server::{serve_lan, Registry};
 use crate::{DaemonConfig, DaemonError};
 
 /// The port a host advertises when nothing else is asked for.
@@ -49,7 +49,7 @@ pub const DEFAULT_PORT: u16 = 7717;
 /// *pairing* case — and that case is not waiting here, it is waiting inside an
 /// authenticated connection. This bound is for a peer that connects and says
 /// nothing at all.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How many connections may be mid-handshake at once.
 const MAX_UNAUTHENTICATED: usize = 32;
@@ -64,6 +64,15 @@ const COOLDOWN: Duration = Duration::from_secs(60);
 pub struct LanListener {
     listener: TcpListener,
     addr: SocketAddr,
+    /// How long a connection may take to prove itself.
+    ///
+    /// A real field rather than a constant, so a test can reach it. The first
+    /// version of this watchdog cut *every* connection ten seconds after
+    /// accept and every LAN test passed, because every one of them finished in
+    /// milliseconds. A timeout no test can afford to wait for is a timeout no
+    /// test checks — and `cfg!(test)` does not help, because it is false when
+    /// the library is compiled for an integration test.
+    handshake_timeout: Duration,
 }
 
 impl LanListener {
@@ -89,7 +98,14 @@ impl LanListener {
             Err(e) => return Err(DaemonError::Transport(e.to_string())),
         };
         let addr = listener.local_addr().map_err(|e| DaemonError::Transport(e.to_string()))?;
-        Ok(Self { listener, addr })
+        Ok(Self { listener, addr, handshake_timeout: HANDSHAKE_TIMEOUT })
+    }
+
+    /// Shorten the handshake deadline. For tests.
+    #[must_use]
+    pub const fn with_handshake_timeout(mut self, timeout: Duration) -> Self {
+        self.handshake_timeout = timeout;
+        self
     }
 
     /// What was actually bound. **Advertise this, never the requested port.**
@@ -112,6 +128,7 @@ impl LanListener {
         tracing::info!(addr = %self.addr, "serving the LAN");
         let limiter = Arc::new(RateLimiter::default());
         let unauthenticated = Arc::new(AtomicUsize::new(0));
+        let handshake_timeout = self.handshake_timeout;
 
         for stream in self.listener.incoming() {
             let Ok(stream) = stream else { continue };
@@ -142,26 +159,31 @@ impl LanListener {
 
             unauthenticated.fetch_add(1, Ordering::AcqRel);
             std::thread::spawn(move || {
-                let guard = Countdown(unauthenticated);
-                let watchdog = Watchdog::start(&stream);
+                let watchdog = Watchdog::start(&stream, handshake_timeout);
+                // Dropped when the handshake completes, not when the
+                // connection ends -- the cap is on connections *mid-handshake*,
+                // and holding it for the session made it a hard limit of 32
+                // concurrent clients.
+                let guard = Countdown(Some(unauthenticated));
 
                 // `Auth::Proof`: the trust store decides, and this connection
                 // may not approve other devices.
-                let result = serve(
+                let result = serve_lan(
                     stream,
                     write_half,
                     config,
                     registry,
                     Auth::Proof(auth),
                     peer.clone(),
+                    watchdog.handle(),
+                    guard,
                 );
-                let authenticated = watchdog.finish();
-                if authenticated {
+
+                if watchdog.authenticated() {
                     limiter.succeeded(&peer);
                 } else {
                     limiter.failed(&peer);
                 }
-                drop(guard);
                 if let Err(e) = result {
                     tracing::warn!(%peer, error = %e, "connection ended");
                 }
@@ -171,16 +193,29 @@ impl LanListener {
     }
 }
 
-/// Decrements the in-flight count however the thread ends.
-struct Countdown(Arc<AtomicUsize>);
+/// Decrements the mid-handshake count once, however it is released.
+///
+/// `Option` so that completing the handshake can release it early: the cap is
+/// on connections that have not proved themselves, and a guard held for the
+/// life of the session turns it into a hard limit on *total* clients.
+pub struct Countdown(Option<Arc<AtomicUsize>>);
 
-impl Drop for Countdown {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+impl Countdown {
+    /// Release now rather than on drop.
+    pub fn release(&mut self) {
+        if let Some(counter) = self.0.take() {
+            counter.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 }
 
-/// Cuts a connection that never finishes its handshake.
+impl Drop for Countdown {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// Cuts a connection that never finishes **its handshake**.
 ///
 /// `shutdown(Both)` rather than a read timeout, and that is the whole trick:
 /// `serve`'s reader treats *any* `Err` as fatal, so setting a timeout on the
@@ -188,32 +223,71 @@ impl Drop for Countdown {
 /// which is most of the time. Shutting the socket down unblocks the read once,
 /// and `serve` unwinds through its ordinary "the client went away" path with no
 /// change to its loop.
+///
+/// # It has to watch the handshake, not the connection
+///
+/// The first version set its flag in `finish()`, which runs *after* `serve`
+/// returns — that is, once the connection has already ended. So the flag was
+/// never set while it mattered and the watchdog cut every connection ten
+/// seconds after accept, healthy or not: a paired phone was disconnected on a
+/// ten-second cycle forever, and a device waiting for approval was dropped
+/// long before the 120-second window the host had just promised it.
+///
+/// The signal it needs is "the handshake completed", which only the
+/// `Connection` knows. `armed` is shared with the watching thread and cleared
+/// by [`Handshake::completed`] the moment the gate opens.
 struct Watchdog {
-    done: Arc<Mutex<bool>>,
+    /// Cleared when the handshake completes. Read by the watching thread.
+    armed: Arc<AtomicBool>,
+    /// Whether the watchdog ever fired, so the caller can tell a refused
+    /// connection from one that simply ended.
+    fired: Arc<AtomicBool>,
 }
 
 impl Watchdog {
-    fn start(stream: &TcpStream) -> Self {
-        let done = Arc::new(Mutex::new(false));
+    fn start(stream: &TcpStream, timeout: Duration) -> Self {
+        let armed = Arc::new(AtomicBool::new(true));
+        let fired = Arc::new(AtomicBool::new(false));
         if let Ok(cut) = stream.try_clone() {
-            let done = Arc::clone(&done);
+            let armed = Arc::clone(&armed);
+            let fired = Arc::clone(&fired);
             std::thread::spawn(move || {
-                std::thread::sleep(HANDSHAKE_TIMEOUT);
-                if !*done.lock().expect("watchdog lock") {
+                std::thread::sleep(timeout);
+                if armed.load(Ordering::Acquire) {
                     tracing::warn!("a connection never finished its handshake; closing");
+                    fired.store(true, Ordering::Release);
                     let _ = cut.shutdown(std::net::Shutdown::Both);
                 }
             });
         }
-        Self { done }
+        Self { armed, fired }
     }
 
-    /// Stop the watchdog. Returns whether the connection lived past it.
-    fn finish(self) -> bool {
-        let mut done = self.done.lock().expect("watchdog lock");
-        let already = *done;
-        *done = true;
-        !already
+    /// A handle the connection disarms when its handshake completes.
+    fn handle(&self) -> WatchdogHandle {
+        WatchdogHandle { armed: Arc::clone(&self.armed) }
+    }
+
+    /// Whether this connection ever got past the handshake.
+    ///
+    /// The rate limiter depends on this being a real answer: when it was
+    /// always `true`, `RateLimiter::failed` was unreachable and the per-address
+    /// limit that makes a six-digit pairing code defensible did not exist.
+    fn authenticated(&self) -> bool {
+        !self.armed.load(Ordering::Acquire) && !self.fired.load(Ordering::Acquire)
+    }
+}
+
+/// Disarms the handshake watchdog. Held by the connection.
+#[derive(Clone)]
+pub struct WatchdogHandle {
+    armed: Arc<AtomicBool>,
+}
+
+impl WatchdogHandle {
+    /// The handshake completed; stop watching.
+    pub fn completed(&self) {
+        self.armed.store(false, Ordering::Release);
     }
 }
 
@@ -312,6 +386,41 @@ mod tests {
         assert!(limiter.blocked("10.0.0.5:9999").is_some());
         limiter.succeeded("10.0.0.5:1234");
         assert!(limiter.blocked("10.0.0.5:9999").is_none());
+    }
+
+    #[test]
+    fn a_completed_handshake_disarms_the_watchdog() {
+        // The bug: `done` was only set after `serve` returned, so the watchdog
+        // fired on every connection ten seconds after accept -- a paired phone
+        // was disconnected on a ten-second cycle forever.
+        let w = Watchdog { armed: Arc::new(AtomicBool::new(true)), fired: Arc::new(AtomicBool::new(false)) };
+        assert!(!w.authenticated(), "an armed watchdog means the handshake is unfinished");
+
+        w.handle().completed();
+        assert!(w.authenticated(), "completing the handshake must disarm it");
+    }
+
+    #[test]
+    fn a_watchdog_that_fired_is_not_reported_as_authenticated() {
+        // This is what feeds the rate limiter. When `finish()` could only
+        // return true, `RateLimiter::failed` was unreachable and the
+        // per-address limit that makes a six-digit code defensible did not
+        // exist at all.
+        let w = Watchdog { armed: Arc::new(AtomicBool::new(true)), fired: Arc::new(AtomicBool::new(true)) };
+        assert!(!w.authenticated());
+    }
+
+    #[test]
+    fn the_mid_handshake_slot_is_released_once_and_early() {
+        // Held for the life of the connection, the cap became a hard limit of
+        // 32 concurrent clients rather than 32 mid-handshake.
+        let count = Arc::new(AtomicUsize::new(1));
+        let mut guard = Countdown(Some(Arc::clone(&count)));
+        guard.release();
+        assert_eq!(count.load(Ordering::Acquire), 0, "the slot was not released");
+        guard.release();
+        drop(guard);
+        assert_eq!(count.load(Ordering::Acquire), 0, "the slot was released more than once");
     }
 
     #[test]

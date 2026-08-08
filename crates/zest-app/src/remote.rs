@@ -69,13 +69,17 @@ pub struct AttachOptions<'a> {
     pub cols: u16,
     pub rows: u16,
     pub scrollback: usize,
-    /// Attach to an existing session instead of starting a new one.
+    /// Attach to an existing unattached session instead of starting a new one.
     ///
-    /// Off for an ordinary window: silently adopting whatever happened to be
-    /// running makes opening a terminal nondeterministic, and "why is my
-    /// terminal showing yesterday's build output" a support question. On for
-    /// `--attach-probe`, which measures the cost of attaching and must not
-    /// leave a shell behind every time the number is taken.
+    /// **On by default**, and the reasoning reversed once the consequence was
+    /// measured. Creating every time makes opening a terminal deterministic,
+    /// which reads well -- and it means a session can never be picked up again,
+    /// which is the entire promise of ADR-007, *and* it leaks: closing a window
+    /// only detaches, so every launch left a shell running forever with no way
+    /// to reach it.
+    ///
+    /// Adopting the newest unattached session is what "close the lid, pick it
+    /// up later" actually means. `--new-session` forces a fresh one.
     pub adopt: bool,
     /// Whether this connection is the loopback socket.
     ///
@@ -653,6 +657,15 @@ mod tests {
         }
 
         fn attach(&self, command: &str, wake: impl Fn(Wakeup) + Send + 'static) -> RemoteSession {
+            self.attach_with(command, false, wake)
+        }
+
+        fn attach_with(
+            &self,
+            command: &str,
+            adopt: bool,
+            wake: impl Fn(Wakeup) + Send + 'static,
+        ) -> RemoteSession {
             let stream = zest_daemon::connect(&self.path).expect("connect");
             let write = stream.try_clone().expect("clone");
             let identity = ClientIdentity::generate().expect("client key");
@@ -666,7 +679,7 @@ mod tests {
                     cols: 40,
                     rows: 6,
                     scrollback: 100,
-                    adopt: false,
+                    adopt,
                     local: true,
                     expect_host: None,
                 },
@@ -775,6 +788,63 @@ mod tests {
             "the client kept a {}x{} grid after asking for 20x3",
             s.terminal().lock().grid().cols(),
             s.terminal().lock().grid().rows()
+        );
+    }
+
+    #[test]
+    fn reopening_picks_up_the_session_instead_of_leaking_it() {
+        // Closing a window only detaches -- the shell keeps running, which is
+        // the point. But creating a *new* session on every launch meant the
+        // old one could never be reached again: one orphaned shell and one
+        // orphaned pty per launch, growing until reboot, with nothing in the
+        // UI or the CLI able to list or close them.
+        let h = Harness::start("adopt");
+
+        let first = h.attach_with("/bin/sh", true, |_| {});
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(h.registry.len(), 1);
+        drop(first);
+        std::thread::sleep(Duration::from_millis(200));
+
+        // The session survived, and reopening finds it rather than adding one.
+        let _second = h.attach_with("/bin/sh", true, |_| {});
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            h.registry.len(),
+            1,
+            "reopening created a second session; the first is now unreachable"
+        );
+    }
+
+    #[test]
+    fn a_session_still_updates_after_a_resize() {
+        // The bug this exists for: `RequestKeyframe` replied with `Seq(0)`, so
+        // the client's baseline went to 0 while the daemon's stayed at the real
+        // sequence. Every following update was then refused as stale and
+        // triggered another keyframe that again said 0 -- and because a resize
+        // is what sends RequestKeyframe, resizing froze the terminal.
+        //
+        // Asserting that output arrives *after* a resize is what catches it;
+        // asserting the resize itself does not.
+        let h = Harness::start("afterresize");
+        let s = h.attach("/bin/sh", |_| {});
+        std::thread::sleep(Duration::from_millis(300));
+
+        s.resize(30, 5);
+        assert!(
+            wait_for(|| {
+                let t = s.terminal().lock();
+                t.grid().rows() == 5 && t.grid().cols() == 30
+            }),
+            "the resize never took"
+        );
+
+        // The session must still be live afterwards.
+        s.write(b"echo after-resize-works\n".to_vec());
+        assert!(
+            wait_for(|| s.terminal().lock().screen_text().contains("after-resize-works")),
+            "nothing arrived after a resize.\ngrid:\n{}",
+            s.terminal().lock().screen_text()
         );
     }
 

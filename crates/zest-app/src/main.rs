@@ -114,6 +114,7 @@ fn main() {
     let mut startup_probe = false;
     let mut no_daemon = false;
     let mut attach_probe = false;
+    let mut new_session = false;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -161,6 +162,10 @@ fn main() {
             }
             "--attach-probe" => {
                 attach_probe = true;
+                i += 1;
+            }
+            "--new-session" => {
+                new_session = true;
                 i += 1;
             }
             "--scroll-on-output" => {
@@ -219,6 +224,7 @@ fn main() {
                      --startup-probe   report time to first paint, then exit\n\
                      --attach-probe    report what attaching to the daemon cost, then exit\n\
                      --no-daemon       own the pty in this process, do not attach\n\
+                     --new-session     start a fresh shell, do not pick up an idle one\n\
                      --schema          print the settings JSON Schema\n\n\
                      Flags are the strongest layer of the settings cascade;\n\
                      everything else lives in the config file."
@@ -270,6 +276,9 @@ fn main() {
     }
     if attach_probe {
         app = app.with_attach_probe();
+    }
+    if new_session {
+        app = app.with_new_session();
     }
     event_loop.run_app(&mut app).expect("run");
 }

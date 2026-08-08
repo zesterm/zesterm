@@ -625,8 +625,14 @@ impl Grid {
     /// Lines from the top of scrollback, for the remote protocol's paged fetch.
     #[must_use]
     pub fn lines_by_id(&self, from: LineId, count: usize) -> Vec<&Row> {
+        // Scrollback only. `Storage` holds history *and* the viewport, so
+        // iterating all of it handed a client rows that are still on screen --
+        // which it then prepended to its own history, showing the current
+        // screen duplicated above itself and growing its scrollback with rows
+        // the host was about to send again as ordinary updates.
         self.storage
             .iter()
+            .take(self.scrollback_len)
             .filter(|r| r.id >= from)
             .take(count)
             .collect()
@@ -798,6 +804,32 @@ mod tests {
         assert_eq!(g.rows(), 4);
         assert_eq!(g.row(3).text().trim_end(), "row 9", "the cursor's row must stay visible");
         assert_eq!(g.cursor.row, 3, "the cursor must land on the last row");
+    }
+
+    #[test]
+    fn lines_by_id_returns_history_not_the_live_screen() {
+        // `Storage` holds scrollback *and* the viewport. Iterating all of it
+        // handed a remote client rows still on screen as "history", which it
+        // prepended to its own scrollback -- so scrolling up showed the current
+        // screen duplicated above itself.
+        let mut g = Grid::new(20, 3, 100);
+        for row in 0..3 {
+            write_text(&mut g, row, &format!("visible {row}"));
+        }
+        g.cursor.row = 2;
+        // Push two rows into history.
+        g.scroll_up(2, &Cell::default());
+        assert_eq!(g.scrollback_len(), 2);
+
+        let history = g.lines_by_id(0, 100);
+        assert_eq!(history.len(), 2, "returned {} rows for 2 of history", history.len());
+        for row in &history {
+            assert!(
+                !row.text().contains("visible 2"),
+                "a row still on screen was returned as history: {:?}",
+                row.text()
+            );
+        }
     }
 
     #[test]
