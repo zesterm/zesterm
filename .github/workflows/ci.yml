@@ -46,11 +46,21 @@ jobs:
       # Linux needs the windowing and font libraries winit and fontique link
       # against; without these the failure is a linker error that reads like a
       # code problem.
+      #
+      # And it needs actual *fonts*. `zest-font`'s fallback tests ask the system
+      # for a glyph and assert one comes back, because the alternative — tofu on
+      # someone's screen — is not something a mock can catch. A bare runner has
+      # no CJK face at all, so `fallback_covers_other_scripts` failed on `世` and
+      # read as a fallback bug rather than a missing font. Emoji and the Latin
+      # scripts happen to be on the image today; naming them here means a change
+      # to that image is a decision rather than a surprise red build.
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libfontconfig1-dev
+          sudo apt-get install -y fonts-dejavu-core fonts-noto-cjk fonts-noto-color-emoji
+          fc-cache -f
 
       - run: cargo build --workspace
       - run: cargo test --workspace

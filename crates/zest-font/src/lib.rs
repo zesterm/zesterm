@@ -892,7 +892,11 @@ mod tests {
             for ch in ['世', 'α', 'б', '─', '█'] {
                 assert!(
                     f.glyph_for(ch, Style::default()).is_some(),
-                    "no glyph found anywhere for {ch:?} -- this renders as tofu"
+                    "no glyph found anywhere for {ch:?} -- this renders as tofu. \
+                     Two different causes: the fallback path is broken, or this \
+                     machine has no face covering that script at all. A bare \
+                     Linux container is the second -- it needs fonts-noto-cjk, \
+                     which is why CI installs it explicitly"
                 );
             }
         }
