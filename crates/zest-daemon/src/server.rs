@@ -582,6 +582,12 @@ impl Connection {
                 if !cwd.is_empty() {
                     spec.cwd = Some(cwd.into());
                 }
+                // After `command_line` is settled, because which shell this is
+                // decides what gets injected -- and a client may have asked for
+                // something that is not a shell at all.
+                if self.config.shell_integration {
+                    spec.enable_shell_integration(&shell_integration_dir());
+                }
                 match self.registry.create(&spec, PtySize::new(cols, rows), 10_000) {
                     Ok(_) => {
                         vec![HostMessage::Sessions {
@@ -1042,6 +1048,22 @@ enum Wake {
     Closed,
 }
 
+/// Where the shell-integration shim is written.
+///
+/// A `shell-integration/` subdirectory of the config directory, for the reason
+/// `fleet/` is one: `zest-config` watches the config root non-recursively, so
+/// writing here cannot produce an event the settings watcher has to filter out
+/// — and this is written on every spawn.
+///
+/// Falls back to the current directory when there is no config directory at
+/// all, which is a machine with no home. A shim written somewhere odd still
+/// works; refusing to spawn a shell would not.
+fn shell_integration_dir() -> std::path::PathBuf {
+    directories::ProjectDirs::from("dev", "zesterm", "zesterm").map_or_else(
+        || std::path::PathBuf::from("zesterm-shell-integration"),
+        |dirs| dirs.config_dir().join("shell-integration"),
+    )
+}
 
 #[cfg(test)]
 mod tests {
@@ -1110,6 +1132,7 @@ mod tests {
             listen_lan: false,
             lan_bind: "127.0.0.1".into(),
             lan_port: 0,
+            shell_integration: true,
         }
     }
 

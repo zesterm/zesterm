@@ -976,6 +976,12 @@ impl ApplicationHandler<Wakeup> for App {
         if let Some(shell) = &self.config.shell {
             spec.command_line = shell.clone();
         }
+        // The in-process path gets the same hook as the daemon's, or
+        // `--no-daemon` would silently be a terminal without command blocks --
+        // and the two paths drifting is exactly what ADR-007 is about.
+        if let Some(dir) = zest_config::paths::config_dir() {
+            spec.enable_shell_integration(&dir.join("shell-integration"));
+        }
         // TERM, COLORTERM and the TERM_PROGRAM pair come from
         // `zest_pty::terminal_env`, which `default_shell` already applied --
         // deliberately in one place, because a child that learns the wrong

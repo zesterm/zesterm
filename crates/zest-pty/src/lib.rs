@@ -11,6 +11,8 @@
 
 use std::io::{Read, Write};
 
+pub mod shell_integration;
+
 #[cfg(windows)]
 pub mod windows;
 
@@ -75,6 +77,37 @@ impl CommandSpec {
         let command_line = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
 
         Self { command_line, cwd: None, env: terminal_env() }
+    }
+
+    /// Load zesterm's OSC 133 hook into this shell, if we know how.
+    ///
+    /// **Call after `command_line` is final**, since which shell it is decides
+    /// what to inject. `dir` is where the shim may be written — see
+    /// [`shell_integration::install`] for why the caller supplies it.
+    ///
+    /// A shell we cannot hook, or a shim that will not write, is not an error
+    /// worth failing a spawn over: the result is a working shell with no
+    /// command blocks, which is what every terminal did until now. It is logged
+    /// rather than silent, because "why do I have no blocks" needs an answer
+    /// somewhere.
+    pub fn enable_shell_integration(&mut self, dir: &std::path::Path) {
+        let Some(shell) = shell_integration::Shell::detect(&self.command_line) else {
+            tracing::debug!(command = %self.command_line, "no shell integration for this shell");
+            return;
+        };
+        match shell_integration::install(shell, dir) {
+            Ok(env) => {
+                self.env.extend(env);
+                tracing::debug!(shell = shell.name(), "shell integration injected");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    shell = shell.name(),
+                    error = %e,
+                    "could not write the shell integration shim; continuing without command blocks"
+                );
+            }
+        }
     }
 }
 

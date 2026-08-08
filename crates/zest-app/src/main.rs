@@ -207,6 +207,24 @@ fn main() {
                 }
                 return;
             }
+            // The escape hatch for everything injection cannot reach: ssh,
+            // tmux, a container, a shell started inside another shell. Prints
+            // the same script the injected shim loads, so the two cannot drift.
+            "--shell-integration" => {
+                let name = args.get(i + 1).cloned().unwrap_or_default();
+                match zest_pty::shell_integration::Shell::detect(&name) {
+                    Some(shell) => print!("{}", zest_pty::shell_integration::hook(shell)),
+                    None => {
+                        eprintln!(
+                            "no shell integration for {name:?}.\n\
+                             zsh is supported; bash, fish and PowerShell are not yet — \
+                             see docs/ROADMAP.md, WS-E."
+                        );
+                        std::process::exit(2);
+                    }
+                }
+                return;
+            }
             "--help" | "-h" => {
                 println!(
                     "zesterm\n\n\
@@ -220,6 +238,9 @@ fn main() {
                      -e <command>...   run a command instead of the shell\n\
                      \x20                 (must come last; takes all remaining args)\n\
                      --themes          list built-in themes\n\
+                     --shell-integration <shell>\n\
+                     \x20                 print the command-block hook, to eval by hand\n\
+                     \x20                 (ssh, tmux and subshells; injection covers the rest)\n\
                      --config          print the config file path\n\
                      --startup-probe   report time to first paint, then exit\n\
                      --attach-probe    report what attaching to the daemon cost, then exit\n\

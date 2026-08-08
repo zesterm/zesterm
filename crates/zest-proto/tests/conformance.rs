@@ -26,7 +26,7 @@ use zest_proto::delta::{BlockPayload, CursorState};
 use zest_proto::encode::Encoder;
 
 const CORPUS: &[&str] =
-    &["basic-echo", "dir-colors", "git-log", "unicode-wide", "vim-macos"];
+    &["basic-echo", "dir-colors", "git-log", "unicode-wide", "vim-macos", "blocks-zsh"];
 
 fn corpus_path(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -223,11 +223,12 @@ fn replay(name: &str, cols: usize, rows: usize) {
 
 /// All three participants must hold the same command blocks.
 ///
-/// **Vacuous against the current corpus, deliberately.** None of the five
-/// recordings contains OSC 133, because nothing emitted it when they were
-/// captured — so what this catches today is a *regression to non-empty*, and it
-/// becomes real the moment a session recorded through shell integration is
-/// added. `blocks_survive_the_wire` below is the non-vacuous half.
+/// `blocks-zsh` is what makes this bite: a real interactive `zsh` recorded
+/// through a real pty with zesterm's shell integration injected, so the markers
+/// are the ones a shell actually emits rather than ones a test author chose.
+/// The other five predate shell integration and hold no blocks at all, which is
+/// worth keeping — they assert that a session *without* markers produces an
+/// empty index on both sides rather than a spurious one.
 fn assert_blocks_agree(
     host: &Terminal,
     client: &Terminal,
@@ -513,6 +514,16 @@ fn git_log() {
 #[test]
 fn unicode_wide() {
     replay("unicode-wide", 80, 24);
+}
+
+/// A real `zsh` with shell integration, so the block comparison is not vacuous.
+///
+/// The other recordings predate shell integration and carry no markers, which
+/// makes them a useful negative — but only this one asserts that blocks a shell
+/// actually emitted survive encode, wire and apply, frame by frame.
+#[test]
+fn blocks_zsh() {
+    replay("blocks-zsh", 120, 30);
 }
 
 /// The same recordings at a size that forces heavy scrolling.

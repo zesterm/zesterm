@@ -74,6 +74,20 @@ pub struct DaemonConfig {
     /// A preference, not a promise: if it is taken the listener falls back and
     /// advertises what it actually bound.
     pub lan_port: u16,
+    /// Load zesterm's OSC 133 hook into shells this daemon spawns.
+    ///
+    /// On by default: it writes no file of the user's, and without it there are
+    /// no command blocks, which is a whole milestone's worth of the terminal
+    /// missing.
+    ///
+    /// **A daemon flag rather than a settings key**, which is not where anyone
+    /// will look for it. The shell runs on the *host*, so whether to hook it is
+    /// the host's decision — and `zest-daemon` has no settings reader, because
+    /// it does not depend on `zest-config`. Making this a config key means
+    /// either that dependency or a new field on the frozen `CreateSession`, and
+    /// neither is worth doing before someone needs the switch. Recorded in
+    /// `docs/ROADMAP.md` under WS-E rather than left to be rediscovered.
+    pub shell_integration: bool,
 }
 
 /// A session's lifecycle, as clients see it.

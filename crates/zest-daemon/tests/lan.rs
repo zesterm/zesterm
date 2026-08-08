@@ -50,6 +50,7 @@ fn host() -> Host {
         listen_lan: true,
         lan_bind: "127.0.0.1".into(),
         lan_port: addr.port(),
+        shell_integration: true,
     };
     let registry = Arc::new(Registry::new());
     std::thread::spawn(move || {

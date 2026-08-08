@@ -33,6 +33,25 @@ VTREC1\n
 <micros:u64le><len:u32le><bytes>   (repeated)
 ```
 
+### Record neutrally
+
+`blocks-zsh.vtrec` is a real interactive `zsh` with zesterm's shell integration
+injected — the recording that makes the command-block assertions mean something,
+since the other five predate shell integration and carry no OSC 133 at all.
+
+It was captured with `HOME`, `HOST` and the working directory pointed at
+throwaway values, and **that is the rule for anything committed here**: a
+recording carries whatever the prompt printed, which is a username, a hostname
+and a path. Every file in this directory is clean of all three, and a recording
+that identifies whoever made it is one nobody else can re-record.
+
+```
+mkdir -p /tmp/zestdemo/home && echo 'PS1="%~ %# "' > /tmp/zestdemo/home/.zshrc
+cd /tmp/zestdemo && HOST=zesterm-demo HOME=/tmp/zestdemo/home \
+  ZDOTDIR=<config>/shell-integration/zsh ZESTERM_USER_ZDOTDIR=/tmp/zestdemo/home \
+  pty_dump --cmd "/bin/zsh -i" --record blocks-zsh.vtrec --idle-exit-ms 2500 < commands.txt
+```
+
 ### Recording more
 
 Worth adding as they become relevant: `vim`, `htop`/`btm`, `tmux`, a `cargo build`,

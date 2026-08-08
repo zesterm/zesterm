@@ -76,7 +76,7 @@ and its number (48ms) is reported rather than gated.
   client attaching and receiving live output as deltas
   (`cargo run -p zest-daemon --example attach`).
 - A client `Terminal` reconstructed from those deltas that is **cell-for-cell
-  identical to the host's** at every frame of five recorded sessions, and that
+  identical to the host's** at every frame of six recorded sessions, and that
   converges again after a dropped frame at any of 10,000 points.
 - Two machines minting verifiable identities and finding each other by mDNS
   (`cargo run -p zest-mesh --example mesh_probe`).
@@ -88,9 +88,12 @@ and its number (48ms) is reported rather than gated.
   into command blocks — what ran, where it ran, what it printed, how it ended —
   and they cross the wire to an attached client. Verified over a real socket
   with a real `zsh`: a success, a failure with `exit 1`, and a command still
-  running with no end line, each with its cwd from OSC 7. Nothing installs the
-  shell hook yet, so this is on for anyone who already has VS Code's
-  integration (OSC 633) or emits the markers themselves.
+  running with no end line, each with its cwd from OSC 7.
+- **The shell says so itself, with nothing to install.** `zsh` gets zesterm's
+  OSC 133 hook through a `ZDOTDIR` shim that sources the user's own dotfiles
+  and writes none of them, so blocks appear against whatever prompt they
+  already had. VS Code's OSC 633 is understood too, for anyone who has its
+  integration.
 
 ### Reflow
 
@@ -342,29 +345,47 @@ M2. Owns `zest-core/src/blocks.rs` and the OSC 133 path. Hot spot: coordinate
       Verified over a real socket with a real `zsh`: `exit 0`, `exit 1` and a
       running command with no end line all arrive intact, along with the cwd
       from OSC 7 (`cargo run -p zest-daemon --example attach`).
-- [ ] Shell integration. **Env-only injection**, as kitty, Ghostty and VS Code
-      all do it — `ZDOTDIR` shim, bash `--posix` + `ENV`, fish `XDG_DATA_DIRS`,
-      pwsh `-NoExit -Command`. No file is ever written, so there is nothing to
-      consent to. Not "consented auto-install", which is what this said before
-      and is iTerm2's older model; kitty states the difference outright — *"No
-      files are added or modified."*
+- [x] **Shell integration for `zsh`.** Env-only injection, as kitty, Ghostty
+      and VS Code all do it: `ZDOTDIR` points at a generated shim that hands
+      control straight back to the user's own dotfiles, then loads the hook
+      *after* their `.zshrc` — after, because `add-zsh-hook` appends and a
+      prompt framework rebuilds `PS1` in its own `precmd`. **No file of the
+      user's is written.** Not "consented auto-install", which is what this
+      said before and is iTerm2's older model; kitty states the difference
+      outright — *"No files are added or modified."*
 
-      **`zsh` first and alone**, because it is the only one of the four that can
-      be *seen working* on the machine this is being built on: it is the macOS
-      default, and this Mac has no fish, no pwsh, and `/bin/bash` 3.2.57 —
-      Apple's patched build, where the `ENV` startup path is disabled and
-      Ghostty therefore excludes `/bin/bash` on Darwin outright. Writing the
-      other three blind is how the attach path nearly shipped compiled and
-      unseen.
+      `A`/`B` live inside `PS1` wrapped in `%{...%}`, not in `precmd`: printed
+      from `precmd`, `A` lands on the line before the prompt and `B` cannot be
+      placed at all — and unwrapped, zsh miscounts the prompt width and
+      mispositions the cursor on every redraw, which looks like a rendering bug.
 
-      `zesterm --shell-integration <shell>` prints the hook as text for all
-      four, which *is* testable here, and is the documented path for ssh, tmux
-      and subshells — which injection structurally cannot reach.
+      Verified against a real interactive `zsh` with the author's own `.zshrc`:
+      `echo hello` → `D;0`, `false` → `D;1`, cwd from OSC 7. The recording is in
+      the corpus as `blocks-zsh.vtrec`, which is what makes the conformance
+      block assertions non-vacuous.
 
-      The trap that kills injection silently is a system `/etc/zshenv` that
-      re-sets `ZDOTDIR` after us; Ghostty has no fix for it and kitty tracks it
-      as #6330. This Mac has no such override, so it must be *tested* for rather
-      than assumed away.
+      `zesterm --shell-integration zsh` prints the same hook to `eval` by hand —
+      the documented path for ssh, tmux and subshells, which injection
+      structurally cannot reach. `zest-daemon --no-shell-integration` turns it
+      off.
+- [ ] **bash, fish and PowerShell.** Deliberately not written yet: none can be
+      *seen working* on the machine this is built on. There is no fish and no
+      pwsh here, and `/bin/bash` is 3.2.57 — Apple's patched build, where the
+      `ENV` startup path injection depends on is disabled, and which Ghostty
+      excludes on Darwin outright for that reason. Writing them blind is how the
+      attach path nearly shipped compiled and unseen.
+- [ ] **A settings key for shell integration.** Today it is a daemon flag, which
+      is not where anyone will look. The shell runs on the *host*, so the host
+      decides — but `zest-daemon` has no settings reader, since it does not
+      depend on `zest-config`. Closing that means either the dependency or a new
+      field on the frozen `CreateSession`, and neither is worth doing before
+      someone wants the switch.
+- [ ] **The `/etc/zshenv` hole.** A system `zshenv` that re-sets `ZDOTDIR` runs
+      *after* our environment and silently undoes the injection — Ghostty
+      documents having no fix, kitty tracks it as #6330. This Mac has no such
+      override, so the failure is currently untested rather than handled; it
+      wants detecting and reporting rather than looking like a shell that
+      emits no markers.
 - [ ] Block folding, re-run, copy-output in the native UI. **Not blocked on
       WS-A**, which is worth stating because it looks as though it should be.
       The renderer already has the rect pipeline, `Chrome { rects, glyphs }` and

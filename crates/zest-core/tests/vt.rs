@@ -648,6 +648,45 @@ fn osc_633_indexes_the_same_blocks_as_133() {
 }
 
 #[test]
+fn a_real_zsh_session_produces_real_blocks() {
+    // Recorded through a real pty from a real interactive `zsh` with zesterm's
+    // shell integration injected -- not a hand-written sequence. It is the
+    // difference between "the parser handles this escape" and "the thing a
+    // shell actually emits produces the blocks we claim".
+    //
+    // Recorded neutrally on purpose (see tests/README.md): no username, no
+    // hostname, a default prompt. The corpus is committed, and a recording that
+    // carries whoever made it is a recording nobody can replace.
+    let bytes =
+        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/corpus/blocks-zsh.vtrec"))
+            .expect("blocks fixture");
+    let mut t = Terminal::new(120, 30, 200);
+    for chunk in parse_vtrec(&bytes) {
+        t.advance(&chunk);
+    }
+
+    let blocks = t.blocks().blocks();
+    assert!(blocks.len() >= 3, "expected a block per prompt, got {}", blocks.len());
+
+    let finished: Vec<_> = blocks.iter().filter(|b| b.end_line.is_some()).collect();
+    assert!(finished.len() >= 2, "two commands ran to completion");
+
+    // The two that matter, and they must be distinguishable: a shell that
+    // reports every command as succeeding is worse than one that reports none.
+    assert!(!finished[0].failed(), "`echo hello` succeeded");
+    assert!(finished[1].failed(), "`false` did not, and the status says so");
+
+    assert_eq!(
+        finished[0].command, "echo hello",
+        "the command is read back from the cells between B and C"
+    );
+    assert_eq!(finished[1].command, "false");
+
+    // OSC 7 rode along with the same hook.
+    assert_eq!(finished[0].cwd, "/tmp/zestdemo");
+}
+
+#[test]
 fn truecolor_fixture_produces_distinct_colors() {
     let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/ansi/truecolor.ans"))
         .expect("truecolor fixture");

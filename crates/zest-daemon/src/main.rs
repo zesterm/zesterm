@@ -42,6 +42,9 @@ fn main() {
              --trust-file <path> where pairings are recorded\n\
              --no-prompt         never ask on stdin; refuse unknown clients\n\
              --listen-lan        serve other machines (off by default)\n\
+             --no-shell-integration\n\
+             \x20                   do not load the command-block hook into spawned\n\
+             \x20                   shells (no file of yours is written either way)\n\
              --lan-bind <addr>   which interface (default 0.0.0.0)\n\
              --lan-port <port>   preferred port (default 7717)\n\n\
              Sessions outlive the clients attached to them. Closing a window\n\
@@ -193,6 +196,7 @@ fn main() {
         lan_port: opt("--lan-port")
             .and_then(|p| p.parse().ok())
             .unwrap_or(zest_daemon::lan::DEFAULT_PORT),
+        shell_integration: !flag("--no-shell-integration"),
     };
 
     tracing::info!(
