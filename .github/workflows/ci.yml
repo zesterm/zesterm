@@ -93,3 +93,32 @@ jobs:
       # clients, so they must build without std and without a platform.
       - name: zest-core builds for wasm32
         run: cargo build -p zest-core --no-default-features --target wasm32-unknown-unknown
+
+  # Separate from `test`, which is a three-OS Rust matrix. The decoder has no
+  # platform surface -- no DOM, no filesystem beyond reading the fixtures -- so
+  # running it three times would buy nothing, and it needs no Rust toolchain.
+  web:
+    name: web client
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/web
+    steps:
+      - uses: actions/checkout@v4
+      # Before setup-node, which needs pnpm present to resolve its cache key.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: clients/web/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      # Where a binding that no longer matches the hand-written wire types
+      # fails: `bindings-match.test.ts` is a type-level test, so `tsc` is what
+      # evaluates it and `node --test` cannot.
+      - run: pnpm -r typecheck
+
+      # The corpus, replayed against the host terminal's own cells.
+      - run: pnpm -r test

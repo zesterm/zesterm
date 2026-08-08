@@ -51,8 +51,8 @@ const FIXTURE_SCHEMA: u32 = 1;
 
 /// Where one fixture's input comes from.
 enum Source {
-    /// A recording in `zest-core/tests/corpus`.
-    Vtrec,
+    /// A recording in `zest-core/tests/corpus`, by name.
+    Vtrec(&'static str),
     /// Literal VT input, for a path no recording reaches.
     Synthetic(&'static [&'static str]),
 }
@@ -70,11 +70,24 @@ enum Source {
 /// into the row rather than into its run would pass every recorded fixture. The
 /// synthetic session below is the smallest thing that catches it.
 const CORPUS: &[(&str, usize, usize, Source)] = &[
-    ("basic-echo", 80, 24, Source::Vtrec),
-    ("dir-colors", 80, 24, Source::Vtrec),
-    ("git-log", 100, 30, Source::Vtrec),
-    ("unicode-wide", 80, 24, Source::Vtrec),
-    ("vim-macos", 80, 24, Source::Vtrec),
+    ("basic-echo", 80, 24, Source::Vtrec("basic-echo")),
+    ("dir-colors", 80, 24, Source::Vtrec("dir-colors")),
+    ("git-log", 100, 30, Source::Vtrec("git-log")),
+    ("unicode-wide", 80, 24, Source::Vtrec("unicode-wide")),
+    ("vim-macos", 80, 24, Source::Vtrec("vim-macos")),
+    // The same recordings at a viewport short enough to force heavy scrolling,
+    // mirroring `conformance.rs::every_recording_survives_a_short_viewport`.
+    //
+    // Not redundant, and measurably so: at the natural sizes only `vim-macos`
+    // scrolls enough that reordering `scroll` after `row` changes the result, so
+    // the ordering invariant — which is the one thing `Delta::scrolls_come_first`
+    // exists to protect — had a single fixture standing behind it. A tall
+    // viewport hides the bug by never scrolling at all.
+    ("basic-echo-short", 80, 5, Source::Vtrec("basic-echo")),
+    ("dir-colors-short", 80, 5, Source::Vtrec("dir-colors")),
+    ("git-log-short", 80, 5, Source::Vtrec("git-log")),
+    ("unicode-wide-short", 80, 5, Source::Vtrec("unicode-wide")),
+    ("vim-macos-short", 80, 5, Source::Vtrec("vim-macos")),
     (
         "combining-marks",
         40,
@@ -95,6 +108,28 @@ const CORPUS: &[(&str, usize, usize, Source)] = &[
             // A mark on a double-width character: the one place the width rule
             // and the mark offset interact.
             "\u{1b}[32m\u{4e16}\u{301}\u{754c}\u{1b}[0m\r\n",
+        ]),
+    ),
+    (
+        "astral",
+        40,
+        6,
+        // **Nothing in the corpus reaches past the BMP** — every wide character
+        // in `unicode-wide` and `vim-macos` is CJK, which is three UTF-8 bytes
+        // and one UTF-16 code unit. That hides the single most JavaScript-
+        // specific bug a client can have: `text.length` counts UTF-16 code
+        // units, so one emoji counts as two and every cell after it shifts left.
+        // On CJK that mistake is invisible, because there the count happens to
+        // be right.
+        //
+        // With an astral character the two wrong readings even fail
+        // differently, which is what makes this worth a fixture rather than a
+        // comment: `text.length` over-counts the WIDE run, and the character
+        // count under-counts the spacer run that carries no text at all.
+        Source::Synthetic(&[
+            "\u{1F600}\u{1F680} tail\r\n",
+            "\u{1b}[33m\u{1F31F}\u{1b}[0m mixed \u{4e16}\u{754c} ascii\r\n",
+            "a\u{1F4A9}b\u{1F4A9}c\r\n",
         ]),
     ),
 ];
@@ -260,7 +295,7 @@ fn replay(
 ) -> Fixture {
     let addr = SessionAddr { host: FIXTURE_HOST, session: SessionId(1) };
     let input: Vec<Vec<u8>> = match source {
-        Source::Vtrec => chunks(name),
+        Source::Vtrec(recording) => chunks(recording),
         Source::Synthetic(s) => s.iter().map(|c| c.as_bytes().to_vec()).collect(),
     };
 
@@ -340,7 +375,7 @@ fn replay(
         protocol: PROTOCOL_VERSION,
         recording: name.to_string(),
         source: match source {
-            Source::Vtrec => "vtrec",
+            Source::Vtrec(_) => "vtrec",
             Source::Synthetic(_) => "synthetic",
         },
         cols: u16::try_from(cols).unwrap_or(u16::MAX),
@@ -498,6 +533,7 @@ struct Coverage {
     titles: usize,
     coloured: usize,
     wide: usize,
+    astral: usize,
     marks: usize,
     ops: BTreeSet<&'static str>,
 }
@@ -540,6 +576,10 @@ impl Coverage {
                         if usize::from(run.cells) > run.text.chars().count() {
                             self.wide += 1;
                         }
+                        // Anything past the BMP is a surrogate pair in
+                        // JavaScript, which is where `text.length` and a code
+                        // point count stop agreeing.
+                        self.astral += run.text.chars().filter(|c| *c as u32 > 0xFFFF).count();
                         self.marks += run.marks.len();
                     }
                 }
@@ -581,6 +621,12 @@ impl Coverage {
             self.wide > 0,
             "no run has more cells than characters -- the width rule is untested, \
              which is the one rule a client is most likely to get wrong"
+        );
+        assert!(
+            self.astral > 0,
+            "nothing past the BMP -- a JavaScript client counting UTF-16 code units \
+             instead of code points would pass every fixture, and that is the one \
+             bug this corpus exists to make impossible"
         );
         assert!(
             self.marks > 0,

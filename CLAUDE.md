@@ -190,6 +190,19 @@ Each of these cost real time and is documented where it bites:
   Applying it to every cell makes TUI panels see-through.
 - **A failing pty test that prints raw VT clears your terminal** and scrambles
   its own failure message. Escape test output.
+- **`rmp-serde` writes the narrowest integer that fits**, so a `u64` that `ts-rs`
+  types as `bigint` reaches a JavaScript decoder as a plain `number` for every
+  realistic value. A client that believes the binding and compares `seq === 1n`,
+  or calls a `BigInt` method on it, is wrong for every real session and correct
+  only for absurd ones. Normalized at one boundary in
+  `clients/web/packages/proto/src/wire.ts`; the real fix is in the Rust
+  attributes.
+- **A JavaScript client must iterate code points, never `text.length`.** That
+  counts UTF-16 code units, so one astral-plane emoji counts as two and every
+  cell after it shifts left. **CJK does not catch this** — it is BMP, where the
+  two counts agree — so the entire recorded corpus was blind to it until a
+  synthetic `astral` fixture was added. The corpus now refuses to generate
+  without something past U+FFFF in it.
 - **`cargo run` costs ~500ms** of workspace resolution and freshness checking
   before the process starts, which is comparable to zesterm's whole startup.
   Measure and demo with the built binary, or startup numbers are meaningless.
@@ -215,7 +228,16 @@ Each of these cost real time and is documented where it bites:
 
 ## Related work on this machine
 
-`C:\Dev\sigx` is the user's own framework (github.com/signalxjs), consumed by the
-web and mobile clients later. Layout is git-worktree-per-branch, so the real
-checkout is `<repo>\main\`. Note `@sigx/terminal` renders TSX *to* a TTY — it is
-not a terminal emulator and cannot be the web client's grid renderer.
+`~/dev/sigx` (`C:\Dev\sigx` on the Windows box) is the user's own framework
+(github.com/signalxjs), consumed by the web and mobile clients later. Layout is
+git-worktree-per-branch, so the real checkout is `<repo>/main/`. Note
+`@sigx/terminal` renders TSX *to* a TTY — it is not a terminal emulator and
+cannot be the web client's grid renderer. Its `terminal-zero` token contract
+*is* reused: `zest-theme`'s `UiTokens` is that record field-for-field, so
+`{...theme.ui, name, mode}` is a valid argument to sigx's `registerTheme()`.
+
+`clients/web/` is a pnpm workspace, Node 24, `node --test`, and no runtime
+dependencies at all — the decoder will run in a worker and the framing,
+MessagePack and delta application are hand-written. sigx arrives with the app
+shell, not before. The packages are published to npm; the local checkouts lag by
+a minor, so install from npm rather than linking.

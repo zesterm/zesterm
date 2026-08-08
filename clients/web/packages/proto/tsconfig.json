@@ -1,0 +1,20 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    // The generated bindings are consumed where they are committed, not copied.
+    // They are pure types, so every import of them is `import type` and nothing
+    // survives to runtime -- which is what makes an alias work with no bundler.
+    // A copy step would mean a second artifact and a second staleness gate; a
+    // symlink would be hostile on Windows, which this project calls primary.
+    "paths": {
+      "@zest/bindings/*": ["../../../../crates/zest-proto/bindings/*"]
+    },
+    "types": ["node"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "../../../../crates/zest-proto/bindings/**/*.ts"
+  ]
+}

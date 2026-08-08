@@ -1,0 +1,34 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    // `preserve` + bundler resolution, not `nodenext`, for one reason: the
+    // generated bindings import each other extensionlessly (`./AttrId`), which
+    // `nodenext` rejects. They are ts-rs's output and not ours to reformat, and
+    // consuming them where they are committed is the point — see the path alias.
+    "module": "preserve",
+    "moduleResolution": "bundler",
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+
+    // The suite runs under Node's type stripping rather than a bundler, so
+    // anything that needs a transform -- enums, parameter properties,
+    // namespaces -- has to fail at compile time instead of at `node --test`.
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+
+    // Node resolves the path it is given, so imports name the `.ts` file that
+    // actually exists. There is no build step to rewrite them into `.js`, and a
+    // specifier that points at a file which was never emitted is the usual way
+    // this setup fails.
+    "allowImportingTsExtensions": true,
+
+    "noEmit": true,
+    "skipLibCheck": true
+  }
+}

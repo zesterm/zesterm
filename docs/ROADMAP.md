@@ -367,11 +367,14 @@ M2. Owns `zest-core/src/blocks.rs` and the OSC 133 path. Hot spot: coordinate
       viewport deliberately is not one — so the host pushes history the client is
       never told about. Nothing checks this, which is why the fixtures carry no
       scrollback expectation: it would pin a divergence rather than catch it.
-- [ ] **No recording contains a combining mark.** `Run::marks` landed in
-      `4b3152e` and `conformance.rs` dropped its exclusion, but all five `.vtrec`
-      files are mark-free, so the replay proves nothing about the side table —
-      the real coverage is `apply.rs`'s unit tests. The fixtures add a synthetic
-      session for it; a recorded one would be better.
+- [ ] **The corpus has three holes**, found by exporting it. No recording
+      contains a combining mark, so `conformance.rs` dropping its marks exclusion
+      after `4b3152e` proved less than it looks — the real coverage is
+      `apply.rs`'s unit tests. Nothing reaches past the BMP, so every wide
+      character in it is CJK. And at the natural sizes only `vim-macos` scrolls
+      enough to exercise `SCROLL` ordering. The fixtures cover all three
+      synthetically and guard against regressing; **recorded sessions would be
+      better**, and `conformance.rs` would benefit from the same three.
 - [ ] SQLite scrollback. Scrollback is in memory and bounded; a session that
       outlives its window does not yet outlive the daemon.
 
@@ -391,6 +394,23 @@ implements it. Everything below the first item waits on that.
       `crates/zest-proto/fixtures/`; `check-fixtures` gates it; the TypeScript
       compares against the **host `Terminal`'s** own cells rather than against
       `GridView`, or two implementations wrong in the same way would agree.
+
+      41 tests over 13 fixtures — 82k cells. No runtime dependencies: framing,
+      MessagePack and the decoder are hand-written, which is affordable because
+      44 recorded frames prove them on the first run. Two gates that catch
+      different things: `pnpm -r typecheck` catches a wire *shape* that moved
+      (`bindings-match.test.ts` is a type-level test, so `tsc` is what evaluates
+      it), and `pnpm -r test` catches applying the right shapes wrongly. Each
+      was verified by breaking it.
+
+      Three coverage holes the corpus turned out to have, each now closed by a
+      synthetic fixture and a guard that refuses to regenerate without it: no
+      recording contains a combining mark; **nothing anywhere reaches past the
+      BMP**, so the UTF-16-versus-code-point trap — the single most
+      JavaScript-specific bug available here — was invisible; and at the natural
+      viewport sizes only `vim-macos` scrolled enough for `scroll`-before-`row`
+      to matter, so the ordering invariant had one fixture behind it and now has
+      three.
 - [ ] Grid renderer. **`@sigx/terminal` cannot be reused** — it paints TSX *to* a
       TTY, which is the inverse of what a web client needs.
 

@@ -7,6 +7,9 @@
 /captures
 *.vtrec.tmp
 
+node_modules/
+*.tsbuildinfo
+
 # Generated
 /bindings
 /dist
