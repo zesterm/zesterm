@@ -47,6 +47,12 @@ pub enum Wakeup {
     /// conflating the two would close the window on every Wi-Fi hiccup. The
     /// grid stays on screen showing the last state that was true.
     Detached,
+    /// The link came back and the session is live again.
+    ///
+    /// Exists now that something emits it: the supervisor in `remote.rs`. It is
+    /// the counterpart of `Detached`, and what lets anything watching tell "the
+    /// grid is stale" from "the grid is current again".
+    Reattached,
     /// The config file settled after a write.
     ///
     /// Carries nothing: the watcher runs on its own thread and must not read

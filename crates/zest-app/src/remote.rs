@@ -43,14 +43,25 @@ use crate::source::{Origin, SessionSource};
 const ACK_INTERVAL: Duration = Duration::from_millis(16);
 
 /// What the writer thread does next.
-///
-/// No `Stream` variant, deliberately. Reconnecting would need one, and nothing
-/// reconnects yet — a variant that exists for a path that does not is how an
-/// enum accumulates arms nobody can explain.
 enum Outbound {
     Msg(ClientMessage),
+    /// The link came back. Write to this from now on.
+    Stream(Box<dyn Write + Send>),
     Shutdown,
 }
+
+/// How to open a fresh connection to the daemon.
+///
+/// A reconnect needs to *dial*, not merely to be handed two halves — so this
+/// replaces the halves the first attach used to take. The first connection is
+/// then simply the first dial, which is why there is one code path rather than a
+/// connect path and a reconnect path that drift apart.
+pub type Dialer =
+    Box<dyn Fn() -> Result<(Box<dyn Read + Send>, Box<dyn Write + Send>), RemoteError> + Send>;
+
+/// How long to wait before redialling, and the ceiling it grows to.
+const REDIAL_MIN: Duration = Duration::from_millis(200);
+const REDIAL_MAX: Duration = Duration::from_secs(5);
 
 /// What to attach to, and how to describe this client while doing it.
 #[derive(Debug, Clone, Copy)]
@@ -61,7 +72,9 @@ pub struct AttachOptions<'a> {
     /// can answer. On loopback the answer authorizes nothing -- the socket's
     /// permissions already did -- which is why an ephemeral key is enough there
     /// and the OS keychain stays off the startup path.
-    pub identity: &'a ClientIdentity,
+    /// Behind an `Arc` so the supervisor thread can keep proving it: every
+    /// reconnect is a fresh handshake, and the host challenges each time.
+    pub identity: &'a Arc<ClientIdentity>,
     /// Shown in the host's log and its approval prompt.
     pub label: &'a str,
     /// Empty means the host's default shell.
@@ -138,8 +151,7 @@ impl RemoteSession {
     /// `read`/`write` are the two halves of the connection; the handshake has
     /// not happened yet.
     pub fn attach(
-        read: Box<dyn Read + Send>,
-        write: Box<dyn Write + Send>,
+        dial: Dialer,
         opts: &AttachOptions<'_>,
         wake: impl Fn(Wakeup) + Send + 'static,
     ) -> Result<Self, RemoteError> {
@@ -159,6 +171,7 @@ impl RemoteSession {
         // The handshake runs inline, before any thread starts, so a failure is
         // an error the caller can fall back from rather than a window that
         // opens and then reports it has nothing to show.
+        let (read, write) = dial()?;
         let mut conn = Handshake::new(read, write);
         let (host_label, addr, keyframe_seq, keyframe) =
             conn.run(identity, label, command, cols, rows, adopt, expect_host)?;
@@ -179,19 +192,46 @@ impl RemoteSession {
 
         // --- writer thread ---
         let writer_thread = {
-            let mut sink = writer;
+            let mut sink: Option<Box<dyn Write + Send>> = Some(writer);
+            // The newest resize seen while disconnected, replayed on reconnect.
+            //
+            // Only the newest, and only resizes. Replaying queued *keystrokes*
+            // into a shell after a reconnect is how a link that dropped for
+            // thirty seconds runs a command the user typed, thought better of,
+            // and watched go nowhere. A stale size, by contrast, is worse than
+            // useless: the shell would redraw for a window that has since
+            // changed again.
+            let mut pending_resize: Option<ClientMessage> = None;
             std::thread::Builder::new()
                 .name("zest-remote-writer".into())
                 .spawn(move || {
                     while let Ok(item) = rx.recv() {
                         match item {
+                            Outbound::Stream(new_sink) => {
+                                sink = Some(new_sink);
+                                if let Some(msg) = pending_resize.take() {
+                                    write_msg(&mut sink, &msg);
+                                }
+                            }
                             Outbound::Msg(msg) => {
-                                let Ok(bytes) = frame::encode(&msg) else { continue };
-                                if sink.write_all(&bytes).is_err() || sink.flush().is_err() {
-                                    // The reader is the supervisor and will
-                                    // notice the same break; nothing to do here
-                                    // but stop trying.
+                                let Some(s) = sink.as_mut() else {
+                                    // Disconnected. Hold the size, drop the rest.
+                                    if matches!(msg, ClientMessage::Resize { .. }) {
+                                        pending_resize = Some(msg);
+                                    }
                                     continue;
+                                };
+                                let Ok(bytes) = frame::encode(&msg) else { continue };
+                                if s.write_all(&bytes).is_err() || s.flush().is_err() {
+                                    // The reader is the supervisor and will
+                                    // notice the same break. Dropping the sink
+                                    // here is what makes the *next* message take
+                                    // the branch above rather than writing into
+                                    // a socket that is gone.
+                                    sink = None;
+                                    if matches!(msg, ClientMessage::Resize { .. }) {
+                                        pending_resize = Some(msg);
+                                    }
                                 }
                             }
                             Outbound::Shutdown => break,
@@ -201,11 +241,14 @@ impl RemoteSession {
                 .map_err(|e| RemoteError::Thread(e.to_string()))?
         };
 
-        // --- reader thread ---
+        // --- reader thread, which is also the supervisor ---
         {
             let terminal = Arc::clone(&terminal);
             let needs_redraw = Arc::clone(&needs_redraw);
             let tx = tx.clone();
+            let identity = Arc::clone(identity);
+            let label = label.to_string();
+            let command = command.to_string();
             std::thread::Builder::new()
                 .name("zest-remote-reader".into())
                 .spawn(move || {
@@ -213,7 +256,13 @@ impl RemoteSession {
                     let mut buf = vec![0u8; 64 * 1024];
                     let mut last_ack = Instant::now();
                     let mut pending_ack: Option<u64> = None;
+                    // Where to resume from if the link comes back. Kept across
+                    // reconnects on purpose: the whole point of reattaching in
+                    // place is that this client's `Terminal`, and the scrollback
+                    // it has accumulated, survive.
+                    let mut addr = addr;
 
+                    'supervise: loop {
                     loop {
                         let n = match reader.read(&mut buf) {
                             Ok(0) | Err(_) => break,
@@ -319,7 +368,53 @@ impl RemoteSession {
                         std::thread::yield_now();
                     }
 
-                    finish(&wake);
+                    // The link died with the shell still running. Tell the
+                    // window -- it keeps showing the last state that was true --
+                    // and start dialling.
+                    wake(Wakeup::Detached);
+
+                    let mut wait = REDIAL_MIN;
+                    loop {
+                        std::thread::sleep(wait);
+                        wait = (wait * 2).min(REDIAL_MAX);
+
+                        let Ok((r, w)) = dial() else { continue };
+                        let mut conn = Handshake::new(r, w);
+                        if conn.authenticate(&identity, &label, expect_host).is_err() {
+                            continue;
+                        }
+                        // The session we lost first. Its shell is still running
+                        // and our subscriber was released when the connection
+                        // dropped, so it is sitting there unattached.
+                        let attached = conn.attach_to(addr, cols, rows).or_else(|_| {
+                            // Gone -- the daemon itself was restarted, so the
+                            // shells went with it. A new one is the honest
+                            // outcome: a window that can be typed into again,
+                            // rather than one that never recovers.
+                            let fresh = conn.open_session(&command, cols, rows, true)?;
+                            addr = fresh;
+                            conn.attach_to(fresh, cols, rows)
+                        });
+                        let Ok((seq, keyframe)) = attached else { continue };
+
+                        let (r, w) = conn.into_halves();
+                        if tx.send(Outbound::Stream(w)).is_err() {
+                            return;
+                        }
+                        {
+                            let mut term = terminal.lock_unfair();
+                            applier.apply_keyframe(&mut term, &keyframe, seq);
+                        }
+                        pending_ack = Some(seq);
+                        frames = FrameReader::new();
+                        reader = r;
+                        tracing::info!(%addr, "reattached");
+                        needs_redraw.store(true, Ordering::Release);
+                        wake(Wakeup::Reattached);
+                        wake(Wakeup::Redraw);
+                        continue 'supervise;
+                    }
+                    }
                 })
                 .map_err(|e| RemoteError::Thread(e.to_string()))?;
         }
@@ -335,6 +430,15 @@ impl RemoteSession {
     }
 
 
+}
+
+/// Write one message to the current sink, dropping it if the link is gone.
+fn write_msg(sink: &mut Option<Box<dyn Write + Send>>, msg: &ClientMessage) {
+    let Some(s) = sink.as_mut() else { return };
+    let Ok(bytes) = frame::encode(msg) else { return };
+    if s.write_all(&bytes).is_err() || s.flush().is_err() {
+        *sink = None;
+    }
 }
 
 fn mark(needs_redraw: &Arc<AtomicBool>, wake: &impl Fn(Wakeup)) {
@@ -461,6 +565,8 @@ impl Handshake {
         }
     }
 
+    /// The whole of a first connection: prove who we are, find or make a
+    /// session, and attach to it.
     #[allow(clippy::too_many_arguments, reason = "one handshake, one call site")]
     fn run(
         &mut self,
@@ -472,6 +578,22 @@ impl Handshake {
         adopt: bool,
         expect_host: Option<zest_proto::HostId>,
     ) -> Result<(String, SessionAddr, u64, zest_proto::Keyframe), RemoteError> {
+        let host_label = self.authenticate(identity, label, expect_host)?;
+        let addr = self.open_session(command, cols, rows, adopt)?;
+        let (seq, keyframe) = self.attach_to(addr, cols, rows)?;
+        Ok((host_label, addr, seq, keyframe))
+    }
+
+    /// Hello → Challenge → Auth → Welcome. Returns the host's label.
+    ///
+    /// Separate from the rest because a reconnect has to do exactly this and
+    /// then *not* create anything — the session it wants already exists.
+    fn authenticate(
+        &mut self,
+        identity: &ClientIdentity,
+        label: &str,
+        expect_host: Option<zest_proto::HostId>,
+    ) -> Result<String, RemoteError> {
         let client_nonce = Nonce::random().map_err(|e| RemoteError::Io(e.to_string()))?;
         self.send(&ClientMessage::Hello {
             version: PROTOCOL_VERSION,
@@ -535,6 +657,17 @@ impl Handshake {
             }
         };
 
+        Ok(host_label)
+    }
+
+    /// Find a session to use, or make one.
+    fn open_session(
+        &mut self,
+        command: &str,
+        cols: u16,
+        rows: u16,
+        adopt: bool,
+    ) -> Result<SessionAddr, RemoteError> {
         // Ask what is running first. The listing costs one round trip inside
         // the window GPU initialization is already occupying, and it is what
         // makes adopting possible at all.
@@ -577,14 +710,26 @@ impl Handshake {
             }
         };
 
+        Ok(addr)
+    }
+
+    /// Attach to a session that already exists, and take its keyframe.
+    ///
+    /// Every attach starts with a keyframe, including a reattach: the host has
+    /// no idea what this client still holds, and after a link drop neither does
+    /// the client with any confidence.
+    fn attach_to(
+        &mut self,
+        addr: SessionAddr,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(u64, zest_proto::Keyframe), RemoteError> {
         self.send(&ClientMessage::Attach { session: addr, cols, rows })?;
 
         loop {
             match self.recv()? {
                 HostMessage::Keyframe { seq, cols, rows, rows_data, attrs, cursor, modes, blocks, .. } => {
                     return Ok((
-                        host_label,
-                        addr,
                         seq.0,
                         zest_proto::Keyframe {
                             cols,
@@ -617,6 +762,73 @@ mod tests {
     struct Harness {
         path: String,
         registry: Arc<zest_daemon::Registry>,
+    }
+
+    /// A cuttable link between the client and the daemon.
+    ///
+    /// Reconnect cannot be tested without a way to break a connection, and there
+    /// is none: the daemon's listener runs forever and `RemoteSession` keeps its
+    /// halves to itself. So the client dials this instead, it forwards bytes to
+    /// the real socket, and `cut` shuts every live pair down — which is what a
+    /// dropped Wi-Fi link looks like from both ends.
+    struct Link {
+        path: String,
+        live: Arc<std::sync::Mutex<Vec<std::os::unix::net::UnixStream>>>,
+    }
+
+    impl Link {
+        fn new(target: &str, name: &str) -> Self {
+            let path = format!("/tmp/zl-{}-{}.sock", name, std::process::id());
+            let _ = std::fs::remove_file(&path);
+            let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind link");
+            let live: Arc<std::sync::Mutex<Vec<std::os::unix::net::UnixStream>>> =
+                Arc::new(std::sync::Mutex::new(Vec::new()));
+
+            let target = target.to_string();
+            let live_for_thread = Arc::clone(&live);
+            std::thread::spawn(move || {
+                for incoming in listener.incoming() {
+                    let Ok(client) = incoming else { break };
+                    let Ok(server) = std::os::unix::net::UnixStream::connect(&target) else {
+                        break;
+                    };
+                    // Both ends are remembered so `cut` can shut them, which is
+                    // what unblocks the two pumps parked in `read`.
+                    {
+                        let mut live = live_for_thread.lock().expect("live lock");
+                        live.push(client.try_clone().expect("clone"));
+                        live.push(server.try_clone().expect("clone"));
+                    }
+                    for (mut from, mut to) in [
+                        (client.try_clone().expect("c"), server.try_clone().expect("s")),
+                        (server, client),
+                    ] {
+                        std::thread::spawn(move || {
+                            let _ = std::io::copy(&mut from, &mut to);
+                            let _ = to.shutdown(std::net::Shutdown::Both);
+                        });
+                    }
+                }
+            });
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !std::path::Path::new(&path).exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Self { path, live }
+        }
+
+        fn cut(&self) {
+            for s in self.live.lock().expect("live lock").drain(..) {
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            }
+        }
+    }
+
+    impl Drop for Link {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 
     impl Harness {
@@ -663,18 +875,45 @@ mod tests {
             self.attach_with(command, false, wake)
         }
 
+        /// Attach over a link the test can cut, rather than straight to the
+        /// daemon socket.
+        fn attach_through(
+            &self,
+            link: &Link,
+            command: &str,
+            wake: impl Fn(Wakeup) + Send + 'static,
+        ) -> RemoteSession {
+            self.attach_dialling(&link.path, command, false, wake)
+        }
+
         fn attach_with(
             &self,
             command: &str,
             adopt: bool,
             wake: impl Fn(Wakeup) + Send + 'static,
         ) -> RemoteSession {
-            let stream = zest_daemon::connect(&self.path).expect("connect");
-            let write = stream.try_clone().expect("clone");
-            let identity = ClientIdentity::generate().expect("client key");
+            self.attach_dialling(&self.path.clone(), command, adopt, wake)
+        }
+
+        fn attach_dialling(
+            &self,
+            socket: &str,
+            command: &str,
+            adopt: bool,
+            wake: impl Fn(Wakeup) + Send + 'static,
+        ) -> RemoteSession {
+            let identity = Arc::new(ClientIdentity::generate().expect("client key"));
+            // A real dialer, so the reconnect path is the one under test rather
+            // than a mock of it.
+            let path = socket.to_string();
+            let dial: Dialer = Box::new(move || {
+                let stream = zest_daemon::connect(&path)
+                    .map_err(|e| RemoteError::Io(e.to_string()))?;
+                let write = stream.try_clone().map_err(|e| RemoteError::Io(e.to_string()))?;
+                Ok((Box::new(stream) as Box<dyn Read + Send>, Box::new(write) as Box<dyn Write + Send>))
+            });
             RemoteSession::attach(
-                Box::new(stream),
-                Box::new(write),
+                dial,
                 &AttachOptions {
                     identity: &identity,
                     label: "test",
@@ -868,6 +1107,67 @@ mod tests {
             h.registry.len(),
             1,
             "closing a client ended the session -- a shell must outlive the window"
+        );
+    }
+
+    /// The point of reconnecting *in place*: the same session, and the same
+    /// client-side `Terminal`.
+    ///
+    /// The earlier version of this rebuilt the session from scratch on a
+    /// dropped link, which worked and threw away everything the client had
+    /// accumulated. A browser tab reconnects as a matter of course rather than
+    /// as an exception, so "it works but you lose your scrollback" is not good
+    /// enough there — and it was never good enough here either.
+    #[test]
+    fn a_cut_link_reattaches_to_the_same_session() {
+        let h = Harness::start("recut");
+        let link = Link::new(&h.path, "recut");
+        let back = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&back);
+        let s = h.attach_through(&link, "/bin/sh", move |w| {
+            if w == Wakeup::Reattached {
+                seen.fetch_add(1, Ordering::Release);
+            }
+        });
+
+        // Something on screen that a fresh session would not have.
+        s.write(b"echo before-the-cut\n".to_vec());
+        assert!(
+            wait_for(|| s.terminal().lock().screen_text().contains("before-the-cut")),
+            "the shell never echoed; grid:\n{}",
+            s.terminal().lock().screen_text()
+        );
+        let sessions_before = h.registry.len();
+
+        link.cut();
+
+        // Waited for rather than assumed: input typed while the link is down is
+        // deliberately dropped, so writing before the reattach would prove
+        // nothing except that the drop works.
+        assert!(
+            wait_for(|| back.load(Ordering::Acquire) > 0),
+            "never reattached; the window is dead to the user"
+        );
+
+        // The same shell, reached again: no new session, and the text that was
+        // on screen before the cut is still there afterwards.
+        s.write(b"echo after-the-cut\n".to_vec());
+        assert!(
+            wait_for(|| s.terminal().lock().screen_text().contains("after-the-cut")),
+            "never reattached; the window is dead to the user. Grid:\n{}",
+            s.terminal().lock().screen_text()
+        );
+        assert!(
+            s.terminal().lock().screen_text().contains("before-the-cut"),
+            "reattached, but rebuilt the terminal from scratch -- everything the \
+             client had accumulated is gone, which is the whole thing this is \
+             meant to avoid"
+        );
+        assert_eq!(
+            h.registry.len(),
+            sessions_before,
+            "a reconnect created a second session instead of picking up the one \
+             whose shell is still running"
         );
     }
 

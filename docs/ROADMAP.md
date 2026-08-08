@@ -512,9 +512,13 @@ M2. Owns `zest-core/src/blocks.rs` and the OSC 133 path. Hot spot: coordinate
       blame for the first hung CI run, but the two runs after its backout hung
       the same way. `wait_for` now sets a read timeout, so this class of bug is
       red in ten seconds instead of cancelled after an hour.
-- [ ] Reconnect in place, keeping the client's own `Terminal` and scrollback
-      rather than rebuilding from a keyframe. Needed by the browser, where a
-      reconnect is the normal case rather than the exception. → #16.
+- [x] **Reconnect happens in place.** `RemoteSession` supervises its own link:
+      it redials, re-proves its key, and reattaches to *the same session*,
+      applying the keyframe into the `Terminal` already on screen — so the
+      client's scrollback survives a dropped link rather than being rebuilt from
+      nothing. Input typed while disconnected is dropped and only the newest
+      resize is kept, because replaying thirty seconds of queued keystrokes is
+      how a reconnect runs a command the user abandoned.
 - [ ] SQLite scrollback. Scrollback is in memory and bounded; a session that
       outlives its window does not yet outlive the daemon.
 

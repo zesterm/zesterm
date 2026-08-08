@@ -1,7 +1,6 @@
 //! The winit application: window, surface, and the frame loop.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -148,43 +147,8 @@ pub struct App {
     attach_probe: bool,
     /// Start a fresh session rather than picking up an idle one.
     new_session: bool,
-    /// When to try reaching the daemon again after the link dropped.
-    ///
-    /// `None` means connected, or not daemon-backed at all. Driven from the
-    /// event loop rather than a thread because `SessionSource` is frozen and not
-    /// `Send`, and a warm reconnect is a fraction of a millisecond — far less
-    /// than the frame it would otherwise be scheduled around.
-    reconnect_at: Option<std::time::Instant>,
-    /// How long to wait before the next attempt. Doubles, capped.
-    reconnect_backoff: Duration,
-    /// What to reattach to, kept because the shell spec is otherwise consumed
-    /// during startup and a reconnect needs it again.
-    reattach: Option<(CommandSpec, u16, u16)>,
 }
 
-/// First retry delay after the link drops.
-///
-/// Short, because the overwhelmingly common cause is the daemon being restarted
-/// under a rebuild, and it is back within a second.
-const RECONNECT_MIN: Duration = Duration::from_millis(250);
-
-/// How long to wait after a failed attempt, given how long we waited last time.
-///
-/// Doubling with a ceiling: quick enough that a daemon restarted under a rebuild
-/// is picked up almost at once, and bounded so a machine whose daemon is gone for
-/// an hour is not attempting a connection sixty times a second.
-fn next_backoff(current: Duration) -> Duration {
-    (current * 2).min(RECONNECT_MAX)
-}
-
-/// Longest gap between attempts.
-///
-/// It keeps retrying indefinitely rather than giving up: a window whose daemon
-/// is briefly gone is not a window the user wants closed, and one connect
-/// attempt every few seconds is cheap. It does cost the 0%-idle guarantee while
-/// disconnected, which is the right trade for an exceptional state and would not
-/// be for a normal one.
-const RECONNECT_MAX: Duration = Duration::from_secs(5);
 
 impl App {
     pub fn new(
@@ -233,9 +197,6 @@ impl App {
             no_daemon: false,
             attach_probe: false,
             new_session: false,
-            reconnect_at: None,
-            reconnect_backoff: RECONNECT_MIN,
-            reattach: None,
         }
     }
 
@@ -281,52 +242,6 @@ impl App {
     /// has to handle**: a terminal that refuses to open because a helper binary
     /// is missing has failed at the only job it has, and both paths already
     /// exist behind `SessionSource`.
-    /// One attempt to reach the daemon again after the link dropped.
-    ///
-    /// **Adopts, never creates.** The session is still running in a daemon that
-    /// does not care we went away, and my subscriber was released the moment the
-    /// connection dropped — so the shell we lost is exactly the unattached one
-    /// waiting to be picked up. Creating instead would leave the original
-    /// orphaned and hand the user a fresh prompt where their work had been.
-    ///
-    /// If the daemon itself died the shells died with it, there is nothing to
-    /// adopt, and this creates — which is the honest outcome: a working window
-    /// rather than one that can never be typed into again.
-    fn try_reconnect(&mut self) {
-        let Some((spec, cols, rows)) = self.reattach.clone() else {
-            self.reconnect_at = None;
-            return;
-        };
-        let proxy = self.proxy.clone();
-
-        match self.attach_to_daemon(&spec, cols, rows, &proxy) {
-            Some(session) => {
-                tracing::info!("reattached to the daemon");
-                self.reconnect_at = None;
-                self.reconnect_backoff = RECONNECT_MIN;
-                // Replacing the whole session, so the size has to be reasserted:
-                // the window may well have been resized while disconnected, and
-                // the keyframe just applied describes the size we asked for.
-                session.resize(cols, rows);
-                self.session = Some(session);
-                if let Some(s) = self.session.as_ref() {
-                    s.mark_dirty();
-                }
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
-                }
-            }
-            None => {
-                self.reconnect_backoff = next_backoff(self.reconnect_backoff);
-                tracing::debug!(
-                    retry_in_ms = self.reconnect_backoff.as_millis(),
-                    "still no daemon; will try again"
-                );
-                self.reconnect_at = Some(std::time::Instant::now() + self.reconnect_backoff);
-            }
-        }
-    }
-
     fn attach_to_daemon(
         &self,
         spec: &CommandSpec,
@@ -369,7 +284,7 @@ impl App {
         // daemon anyway -- so proving a *stored* key would buy nothing and
         // would put the OS keychain, and its prompt, on the startup path. The
         // handshake still runs, because the wire is uniform.
-        let identity = match zest_mesh::identity::ClientIdentity::generate() {
+        let identity = match zest_mesh::identity::ClientIdentity::generate().map(Arc::new) {
             Ok(i) => i,
             Err(e) => {
                 tracing::warn!(error = %e, "no randomness for a client key; staying in-process");
@@ -379,9 +294,24 @@ impl App {
 
         let started = std::time::Instant::now();
         let proxy = proxy.clone();
+        // The first connection is already open — it was made above so that its
+        // cost could be measured and so a failure is a fallback rather than a
+        // window that opens onto nothing. So the dialer hands those halves over
+        // once and dials for itself every time after, which is exactly the
+        // reconnect path. One code path, not two that drift.
+        let first = std::sync::Mutex::new(Some((attached.read, attached.write)));
+        let redial_socket = socket.clone();
+        let dial: crate::remote::Dialer = Box::new(move || {
+            if let Some(halves) = first.lock().expect("dial lock").take() {
+                return Ok(halves);
+            }
+            let a = crate::daemon::find_or_spawn(&redial_socket, DAEMON_START_TIMEOUT)
+                .map_err(|e| crate::remote::RemoteError::Io(e.to_string()))?;
+            Ok((a.read, a.write))
+        });
+
         let session = crate::remote::RemoteSession::attach(
-            attached.read,
-            attached.write,
+            dial,
             &crate::remote::AttachOptions {
                 identity: &identity,
                 label: "zesterm",
@@ -1146,17 +1076,8 @@ impl ApplicationHandler<Wakeup> for App {
         // an in-process pty. This slot -- after the window is visible and the
         // first paint is measured, before GPU init -- is the one ADR-007 names,
         // and nothing above line 649 may move below it.
-        // Kept for reconnecting. Only meaningful for a daemon-backed session --
-        // an in-process pty dies with this process, so there is nothing to
-        // reattach to and `try_reconnect` returns immediately.
-        let daemon_backed = !self.no_daemon;
         let session: Box<dyn SessionSource> = self
             .attach_to_daemon(&spec, cols, rows, &proxy)
-            .inspect(|_| {
-                if daemon_backed {
-                    self.reattach = Some((spec.clone(), cols, rows));
-                }
-            })
             .unwrap_or_else(|| {
                 let session = Session::spawn(
                     &spec,
@@ -1248,13 +1169,21 @@ impl ApplicationHandler<Wakeup> for App {
             // away, which is the property ADR-007 exists to provide.
             Wakeup::Detached => {
                 tracing::warn!("the daemon connection dropped; the session is still running");
-                // Schedule the first retry. The window keeps showing the last
-                // state that was true -- it is a session that still exists, not
-                // a dead one, and repainting it as empty would be a lie.
-                if self.reattach.is_some() && self.reconnect_at.is_none() {
-                    self.reconnect_backoff = RECONNECT_MIN;
-                    self.reconnect_at = Some(std::time::Instant::now() + self.reconnect_backoff);
+                // Nothing to schedule here: `RemoteSession` supervises its own
+                // link and is already dialling. The window goes on showing the
+                // last state that was true, because the session still exists.
+                if let Some(s) = self.session.as_ref() {
+                    s.mark_dirty();
                 }
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            // The in-place reconnect in `remote.rs` succeeded: same session, same
+            // grid, and everything this window had accumulated is still there.
+            // Nothing to rebuild — just repaint.
+            Wakeup::Reattached => {
+                tracing::info!("the daemon connection is back");
                 if let Some(s) = self.session.as_ref() {
                     s.mark_dirty();
                 }
@@ -1593,18 +1522,11 @@ impl ApplicationHandler<Wakeup> for App {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
-        if let Some(at) = self.reconnect_at {
-            if std::time::Instant::now() >= at {
-                self.try_reconnect();
-            }
-        }
         // Wait for something to happen rather than polling. With no animations
         // yet there is nothing to schedule; the cursor blink will add a
-        // `WaitUntil` here -- and a pending reconnect already does.
-        match self.reconnect_at {
-            Some(at) => el.set_control_flow(ControlFlow::WaitUntil(at)),
-            None => el.set_control_flow(ControlFlow::Wait),
-        }
+        // `WaitUntil` here. Reconnecting does not: `RemoteSession` supervises
+        // its own link on its own thread and wakes this loop when it is back.
+        el.set_control_flow(ControlFlow::Wait);
     }
 }
 
@@ -1836,35 +1758,3 @@ fn to_core_palette(r: &zest_theme::ResolvedPalette) -> zest_core::PaletteSnapsho
     }
 }
 
-#[cfg(test)]
-mod reconnect_tests {
-    use super::*;
-
-    #[test]
-    fn the_backoff_doubles_and_then_stops_growing() {
-        // The ceiling is the load-bearing half. Without it a window left open
-        // overnight against a daemon that is not coming back would still be
-        // doubling into hours, and the first thing the user does in the morning
-        // is wait for a retry that was scheduled while they slept.
-        let mut d = RECONNECT_MIN;
-        for _ in 0..20 {
-            d = next_backoff(d);
-        }
-        assert_eq!(d, RECONNECT_MAX, "the backoff must settle at its ceiling");
-    }
-
-    #[test]
-    fn the_first_retry_is_soon_enough_to_be_invisible() {
-        // The overwhelmingly common cause is the daemon being restarted under a
-        // rebuild, and it is back within a second. A first retry measured in
-        // seconds would turn that into a visible stall.
-        assert!(
-            RECONNECT_MIN <= Duration::from_millis(500),
-            "the first retry must be quick; a rebuilt daemon is back almost at once"
-        );
-        assert!(
-            next_backoff(RECONNECT_MIN) <= RECONNECT_MAX,
-            "growth must never overshoot the ceiling, even on the first step"
-        );
-    }
-}
