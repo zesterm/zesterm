@@ -443,6 +443,25 @@ impl Fonts {
                     return Some(id);
                 }
             }
+            // Generic monospace is not enough, and this is the part that only a
+            // machine with no Nerd Font installed can show. On macOS the generic
+            // resolves to Courier, which has no box drawing; Menlo does, and
+            // ships with every macOS. Any developer machine has a Nerd Font, so
+            // the first loop answered and this gap stayed invisible until a bare
+            // CI runner drew a TUI border as tofu.
+            //
+            // Named rather than discovered because there is no coverage query to
+            // discover with: fontique's fallback is per-script, and these are
+            // script Common. The alternative is sweeping every installed family
+            // and loading each face's charmap, which is a real scan on the
+            // render path. These are the stock faces that carry the ranges.
+            for family in STOCK_SYMBOL_FAMILIES {
+                if let Some(id) = self.resolve(&[(*family).to_string()], style) {
+                    if self.face_has_glyph(id, ch) {
+                        return Some(id);
+                    }
+                }
+            }
         }
 
         None
@@ -671,6 +690,31 @@ fn discover_symbol_families(collection: &mut fontique::Collection) -> Vec<String
 /// is expected to carry at exactly one cell wide, so borrowing them from
 /// another monospace font keeps the grid aligned. Widening this to all of
 /// Miscellaneous Symbols would start pulling proportional glyphs into cells.
+/// Stock faces that carry box drawing, block elements and arrows.
+///
+/// Every one ships with its platform, so this is a list of things that are
+/// *there*, not a wish list. All three platforms' entries are tried on all three
+/// platforms: a name that does not resolve costs one lookup, and hard-coding the
+/// `cfg` would mean a machine with a font from another platform installed —
+/// which is most developer machines — is denied it for no reason.
+///
+/// Verified rather than assumed. On macOS with the symbol path disabled: Menlo,
+/// Andale Mono, PT Mono and Courier **New** all carry U+2500, U+2588 and U+2190;
+/// generic monospace, SF Mono and plain Courier carry none of them.
+const STOCK_SYMBOL_FAMILIES: &[&str] = &[
+    // macOS. Menlo first: it is on every install and covers all three ranges.
+    "Menlo",
+    "Andale Mono",
+    // Windows.
+    "Cascadia Mono",
+    "Consolas",
+    "Lucida Console",
+    // Linux.
+    "DejaVu Sans Mono",
+    "Noto Sans Mono",
+    "Liberation Mono",
+];
+
 fn is_box_drawing(ch: char) -> bool {
     matches!(ch as u32,
         0x2190..=0x21FF   // arrows
@@ -897,6 +941,33 @@ mod tests {
                      machine has no face covering that script at all. A bare \
                      Linux container is the second -- it needs fonts-noto-cjk, \
                      which is why CI installs it explicitly"
+                );
+            }
+        }
+
+        /// Box drawing, on a machine with no Nerd Font — which is every CI
+        /// runner and no developer machine.
+        ///
+        /// `fallback_covers_other_scripts` above cannot see this. It asks for
+        /// `─` and gets it from whatever Nerd Font happens to be installed, so
+        /// it passes everywhere a human works and failed the first time it ran
+        /// somewhere nobody works. Clearing the symbol families reproduces the
+        /// bare machine exactly, and is the difference between testing the
+        /// fallback and testing the developer's font collection.
+        ///
+        /// Not skippable when the list is empty: a machine with no Nerd Font is
+        /// precisely the case under test.
+        #[test]
+        fn box_drawing_resolves_without_any_nerd_font() {
+            let Some(mut f) = fonts() else { return };
+            f.set_symbol_families(Vec::new());
+            for ch in ['─', '│', '█', '←'] {
+                assert!(
+                    f.glyph_for(ch, Style::default()).is_some(),
+                    "no glyph for {ch:?} once the Nerd Font path is taken away. \
+                     Every TUI border on a machine without one renders as tofu, \
+                     and generic monospace does not cover it -- on macOS that is \
+                     Courier, which has none of these"
                 );
             }
         }

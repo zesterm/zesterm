@@ -116,7 +116,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # Before setup-node, which needs pnpm present to resolve its cache key.
+      #
+      # `package_json_file` is not optional here. The action reads its version
+      # from `packageManager`, and it looks in the *repository root* by default —
+      # `defaults.run.working-directory` applies to `run:` steps, not to an
+      # action's inputs. There is no root package.json, so it failed with "No
+      # pnpm version is specified", which reads like a missing field in a file
+      # where the field is in fact present.
       - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: clients/web/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 24
