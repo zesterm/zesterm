@@ -696,7 +696,20 @@ waiting for a person, swallowed approver answers (#21), and the attach example
 having no TCP transport at all), is logged blow-by-blow on
 [#20](https://github.com/zesterm/zesterm/issues/20). Remaining before M3 is
 *closed*: stored identities so a window does not need re-approval per launch,
-and latency instrumentation to put a number on "desk latency".
+and the LAN half of the latency number.
+
+**ADR-007's 50–100µs is measured, and it holds.** `attach --ping 300` on
+loopback, keystroke bytes on the wire to the delta carrying their echo:
+
+| | warm | first run |
+|---|---|---|
+| p50 | **11µs** | 25µs |
+| p99 | **20µs** | 77µs |
+| max | 35µs | 132µs |
+
+Comfortably inside the claim, and the first run is slower for the ordinary
+reason — nothing is warm yet. This is a **floor** for input-to-paint, not the
+number a person feels: it stops at the delta and never touches the renderer.
 
 Two things the bring-up established that no test could have, both recorded so
 they are not re-litigated:

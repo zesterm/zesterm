@@ -40,6 +40,11 @@ fn main() {
     // `Detach` and `CloseSession` differ in exactly one observable — whether the
     // child is still running afterwards — and nothing else here can show it.
     let close = args.iter().any(|a| a == "--close");
+    // How many keystroke -> delta round trips to measure. ADR-007 claims
+    // 50-100us on loopback and nobody had ever checked; the LAN number did not
+    // exist at all. Milliseconds, which is all this example printed before, are
+    // useless against a microsecond claim.
+    let ping: usize = opt("--ping").and_then(|s| s.parse().ok()).unwrap_or(0);
 
     // Two transports, one loop: the protocol is transport-blind and this
     // example should prove that, not re-litigate it.
@@ -54,7 +59,7 @@ fn main() {
         };
         let closer = stream.try_clone().expect("clone the stream for the deadline thread");
         eprintln!("[attach] connected to {addr} (tcp)");
-        run(stream, closer, cmd, seconds, close);
+        run(stream, closer, cmd, seconds, close, ping);
     } else {
         let socket = opt("--socket").unwrap_or_else(default_socket_path);
         let stream = match connect(&socket) {
@@ -67,7 +72,7 @@ fn main() {
         };
         let closer = stream.try_clone().expect("clone the stream for the deadline thread");
         eprintln!("[attach] connected to {socket}");
-        run(stream, closer, cmd, seconds, close);
+        run(stream, closer, cmd, seconds, close, ping);
     }
 }
 
@@ -77,6 +82,7 @@ fn run<S: Read + Write + Send + 'static>(
     cmd: String,
     seconds: u64,
     close: bool,
+    ping: usize,
 ) {
     let send = |stream: &mut _, msg: &ClientMessage| {
         let bytes = frame::encode(msg).expect("encode");
@@ -137,6 +143,12 @@ fn run<S: Read + Write + Send + 'static>(
         });
     }
 
+    // Ping state. `pinged` is set once the keyframe names the session, because
+    // input has to be addressed to it and the address is not known before then.
+    let mut samples: Vec<Duration> = Vec::new();
+    let mut sent_at: Option<Instant> = None;
+    let mut pinged: Option<zest_proto::SessionAddr> = None;
+
     let mut reader = FrameReader::new();
     let mut buf = vec![0u8; 64 * 1024];
     let mut attached = false;
@@ -177,7 +189,7 @@ fn run<S: Read + Write + Send + 'static>(
                         }
                     }
                 }
-                HostMessage::Keyframe { rows_data, attrs, modes, seq, blocks, .. } => {
+                HostMessage::Keyframe { rows_data, attrs, modes, seq, blocks, session, .. } => {
                     eprintln!(
                         "[attach] keyframe @seq {}: {} rows, {} attrs, {} blocks, modes {:?}",
                         seq.0,
@@ -186,10 +198,35 @@ fn run<S: Read + Write + Send + 'static>(
                         blocks.len(),
                         zest_core::Modes::from_bits_truncate(modes)
                     );
+                    if ping > 0 {
+                        pinged = Some(session);
+                        send(&mut stream, &ClientMessage::Input { session, bytes: vec![b'.'] });
+                        sent_at = Some(Instant::now());
+                        continue;
+                    }
                     print_rows(&rows_data);
                     print_blocks(&blocks);
                 }
                 HostMessage::Update { delta, base, seq, .. } => {
+                    // One round trip closed. The pty's line discipline echoes
+                    // input regardless of what is running, so any long-lived
+                    // command works and nothing on the far side has to
+                    // cooperate -- which is what makes this a measurement of
+                    // the transport rather than of a shell.
+                    if ping > 0 {
+                        if let Some(t) = sent_at.take() {
+                            samples.push(t.elapsed());
+                        }
+                        if samples.len() >= ping {
+                            report(&samples);
+                            std::process::exit(0);
+                        }
+                        if let Some(session) = pinged {
+                            send(&mut stream, &ClientMessage::Input { session, bytes: vec![b'.'] });
+                            sent_at = Some(Instant::now());
+                        }
+                        continue;
+                    }
                     eprintln!(
                         "[attach] +{}ms delta {}->{}: {} ops, {} new attrs, {} blocks",
                         start.elapsed().as_millis(),
@@ -323,4 +360,21 @@ fn print_rows(rows: &[zest_proto::RowPayload]) {
         println!("│{line}{}│", " ".repeat(100usize.saturating_sub(line.chars().count())));
     }
     println!("└{}┘", "─".repeat(100));
+}
+
+/// Percentiles from the round trips, and the arithmetic said out loud.
+///
+/// p99 rather than a mean: a mean hides the tail, and the tail is what a typist
+/// feels. A round trip here is keystroke bytes on the wire to the delta carrying
+/// their echo -- it does not include the renderer, so it is a floor for
+/// input-to-paint rather than the number a person experiences.
+fn report(samples: &[Duration]) {
+    let mut sorted: Vec<u128> = samples.iter().map(Duration::as_micros).collect();
+    sorted.sort_unstable();
+    let at = |q: f64| sorted[((sorted.len() as f64 - 1.0) * q).round() as usize];
+    println!("samples={}", sorted.len());
+    println!("min_us={}", sorted[0]);
+    println!("p50_us={}", at(0.50));
+    println!("p99_us={}", at(0.99));
+    println!("max_us={}", sorted[sorted.len() - 1]);
 }
