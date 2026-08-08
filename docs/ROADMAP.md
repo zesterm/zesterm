@@ -618,6 +618,14 @@ implements it. Everything below the first item waits on that.
       modal is not built — the daemon prompts on stdin and `--trust` covers a
       headless host — but it is a front-end swap over the same queue, and the
       wire messages for it already exist.
+- [x] **A killed daemon says goodbye** (#22, polite half). A signal runs no
+      destructors, so pkill and Ctrl+C used to leave the host on every fleet
+      listing for the PTR record's 75-minute TTL — four stale rows in one
+      afternoon of #20. A `ctrlc` handler withdraws the advertisement on the
+      way down; verified live on Windows, listing flipped online→away in one
+      probe tick. SIGKILL/`Stop-Process`/crashes still leak the record —
+      mdns-sd exposes no TTL control — so #22 stays open for
+      reachability-as-presence in the fleet listing.
 - [ ] Cloudflare Tunnel + Access per host. **Origin-side JWT validation is
       mandatory** — the origin never trusts the tunnel.
 - [ ] The directory Worker: host ids, labels, last-seen endpoints. **No session
