@@ -26,6 +26,14 @@
 //! own advertisement is not coming back through multicast loopback — a
 //! firewall, or an interface with no multicast — which looks exactly like "the
 //! other machine is not running" if you only look at the peer list.
+//!
+//! **A state transition needs an observer that was already there.** Verifying
+//! either half of #22 — the goodbye on a polite death, the UNREACHABLE flip on
+//! a `kill -9` — with a probe started *after* the kill proves nothing: this
+//! probe never learns the host existed, and `dns-sd -B` reports its own cache.
+//! Both fixes were nearly reported broken by a careful person doing the
+//! obvious thing, on the same afternoon, by both machines. Start the watcher,
+//! then kill.
 
 use std::time::{Duration, Instant};
 
