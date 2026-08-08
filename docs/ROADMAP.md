@@ -495,6 +495,16 @@ M2. Owns `zest-core/src/blocks.rs` and the OSC 133 path. Hot spot: coordinate
       enough to exercise `SCROLL` ordering. The fixtures cover all three
       synthetically and guard against regressing; **recorded sessions would be
       better**, and `conformance.rs` would benefit from the same three.
+- [x] **The window reconnects.** A dropped link used to be terminal: the
+      session kept running in the daemon exactly as ADR-007 promises, and the
+      window could never reach it again. It now retries with a bounded backoff
+      and **adopts** rather than creates, so the shell that was lost is the one
+      picked up — which works because a dropped connection releases its
+      subscriber, leaving that session unattached. Verified by killing the
+      daemon under a live window and restarting it.
+- [ ] Reconnect in place, keeping the client's own `Terminal` and scrollback
+      rather than rebuilding from a keyframe. Needed by the browser, where a
+      reconnect is the normal case rather than the exception. → #16.
 - [ ] SQLite scrollback. Scrollback is in memory and bounded; a session that
       outlives its window does not yet outlive the daemon.
 

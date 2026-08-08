@@ -226,6 +226,13 @@ Each of these cost real time and is documented where it bites:
   alongside the terminal-identity ones — but the general hazard remains, so
   anything context-specific in a shell's environment is worth suspecting there
   first. (`zest-pty/src/lib.rs`.)
+- **On macOS the daemon blocks on a Keychain prompt after every rebuild**, and
+  the app gives up waiting after 2s and silently falls back to an in-process
+  pty. The window works perfectly and is not daemon-backed, so anything being
+  tested through the daemon is not being tested at all — `origin=InProcess` in
+  the startup line is the only sign. Keychain keys access to the *binary*, so a
+  fresh build is a fresh prompt. Start the daemon yourself with `--ephemeral`
+  for the edit-run loop.
 - **The agent shell sets `NO_COLOR=1`**, and a pty child inherits it. PowerShell
   honours it by forcing `$PSStyle.OutputRendering = 'PlainText'`, which strips
   every escape *before* it reaches the pty — so a colour test launched from here
