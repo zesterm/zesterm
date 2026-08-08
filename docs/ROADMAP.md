@@ -525,6 +525,14 @@ M2. Owns `zest-core/src/blocks.rs` and the OSC 133 path. Hot spot: coordinate
       between "trusted" and "a window". Throwaway identity, so an unpaired host
       prompts and the code ritual applies; proven end to end over TCP against a
       live daemon before first use on the real LAN.
+- [x] **The window can attach to another machine's daemon**: `zesterm --attach
+      <host:port>`. A TCP dialer into the same `RemoteSession` the loopback
+      path uses — the whole point of that abstraction, cashed in. Remote
+      attach **fails loudly instead of falling back** to an in-process pty: a
+      user who asked for a specific machine and silently got a local shell has
+      a window that looks right and lies. Identity is still ephemeral per
+      launch, so the far host prompts each time; a stored identity (and the
+      keychain prompt it drags onto this path) is deliberately future work.
 - [ ] SQLite scrollback. Scrollback is in memory and bounded; a session that
       outlives its window does not yet outlive the daemon.
 

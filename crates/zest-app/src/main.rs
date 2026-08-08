@@ -116,6 +116,7 @@ fn main() {
     let mut no_daemon = false;
     let mut attach_probe = false;
     let mut new_session = false;
+    let mut attach_addr: Option<String> = None;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -168,6 +169,14 @@ fn main() {
             "--new-session" => {
                 new_session = true;
                 i += 1;
+            }
+            "--attach" => {
+                attach_addr = args.get(i + 1).cloned();
+                if attach_addr.is_none() {
+                    eprintln!("--attach needs <host:port> (see zest-daemon --listen-lan)");
+                    std::process::exit(2);
+                }
+                i += 2;
             }
             "--scroll-on-output" => {
                 cli.set_bool("scrolling.scroll_on_output", true);
@@ -247,6 +256,9 @@ fn main() {
                      --attach-probe    report what attaching to the daemon cost, then exit\n\
                      --no-daemon       own the pty in this process, do not attach\n\
                      --new-session     start a fresh shell, do not pick up an idle one\n\
+                     --attach <host:port>\n\
+                     \x20                 another machine's daemon; its shell in this window\n\
+                     \x20                 (the host approves this device on first contact)\n\
                      --schema          print the settings JSON Schema\n\n\
                      Flags are the strongest layer of the settings cascade;\n\
                      everything else lives in the config file."
@@ -301,6 +313,16 @@ fn main() {
     }
     if new_session {
         app = app.with_new_session();
+    }
+    if let Some(addr) = attach_addr {
+        // Contradiction, not precedence: one flag says "no daemon anywhere",
+        // the other names one to attach to. Guessing which the user meant
+        // produces a window whose shell is on the wrong machine.
+        if no_daemon {
+            eprintln!("--attach and --no-daemon contradict each other");
+            std::process::exit(2);
+        }
+        app = app.with_attach_addr(addr);
     }
     event_loop.run_app(&mut app).expect("run");
 }

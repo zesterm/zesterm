@@ -147,6 +147,10 @@ pub struct App {
     attach_probe: bool,
     /// Start a fresh session rather than picking up an idle one.
     new_session: bool,
+    /// Attach to another machine's daemon at `host:port` instead of this
+    /// machine's socket. The M3 win condition's last mile: the same window,
+    /// the same protocol, a different machine's shell.
+    attach_addr: Option<String>,
 }
 
 
@@ -197,6 +201,7 @@ impl App {
             no_daemon: false,
             attach_probe: false,
             new_session: false,
+            attach_addr: None,
         }
     }
 
@@ -236,6 +241,13 @@ impl App {
         self
     }
 
+    /// Attach to another machine's daemon instead of this machine's.
+    #[must_use]
+    pub fn with_attach_addr(mut self, addr: String) -> Self {
+        self.attach_addr = Some(addr);
+        self
+    }
+
     /// Find or start this machine's daemon and attach a session to it.
     ///
     /// `None` means fall back to an in-process pty. **Never an error the caller
@@ -255,6 +267,10 @@ impl App {
                 std::process::exit(2);
             }
             return None;
+        }
+
+        if let Some(addr) = self.attach_addr.clone() {
+            return self.attach_remote(&addr, cols, rows, proxy);
         }
 
         let socket = zest_daemon::default_socket_path();
@@ -373,6 +389,91 @@ impl App {
                     std::process::exit(1);
                 }
                 None
+            }
+        }
+    }
+
+    /// Attach this window to another machine's daemon.
+    ///
+    /// Unlike the loopback path this **fails loudly instead of falling back**:
+    /// a user who asked for a specific machine and silently got a local shell
+    /// has a window that looks right and lies. The in-process pty is a fallback
+    /// for "my own daemon is broken", not for "the network said no".
+    fn attach_remote(
+        &self,
+        addr: &str,
+        cols: u16,
+        rows: u16,
+        proxy: &EventLoopProxy<Wakeup>,
+    ) -> Option<Box<dyn SessionSource>> {
+        // Ephemeral per launch, like loopback -- which on a remote host means
+        // the far daemon prompts for approval once per launch. Wrong for daily
+        // use (a stored identity is the fix, and puts the keychain on this
+        // path), right for the bring-up: the prompt *is* the security model
+        // until then, and silently persisting keys before deciding where is
+        // how two machines end up with three trust stores.
+        let identity = match zest_mesh::identity::ClientIdentity::generate().map(Arc::new) {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("no randomness for a client key: {e}");
+                std::process::exit(1);
+            }
+        };
+
+        let started = std::time::Instant::now();
+        let dial_addr = addr.to_string();
+        let dial: crate::remote::Dialer = Box::new(move || {
+            let stream = std::net::TcpStream::connect(&dial_addr)
+                .map_err(|e| crate::remote::RemoteError::Io(e.to_string()))?;
+            // A terminal's writes are keystrokes: small, latency-bound, and
+            // never worth coalescing.
+            let _ = stream.set_nodelay(true);
+            let read = stream
+                .try_clone()
+                .map_err(|e| crate::remote::RemoteError::Io(e.to_string()))?;
+            Ok((Box::new(read), Box::new(stream)))
+        });
+
+        let proxy = proxy.clone();
+        let session = crate::remote::RemoteSession::attach(
+            dial,
+            &crate::remote::AttachOptions {
+                identity: &identity,
+                label: "zesterm",
+                // Empty means the *host's* default shell. The local command
+                // line would ask a Mac to run this machine's PowerShell.
+                command: "",
+                cols,
+                rows,
+                scrollback: self.config.scrollback,
+                adopt: !self.new_session,
+                local: false,
+                // The address was typed by a person, not learned from an
+                // advertisement; pinning a HostId here is future work along
+                // with the stored identity.
+                expect_host: None,
+            },
+            move |w| {
+                let _ = proxy.send_event(w);
+            },
+        );
+
+        match session {
+            Ok(session) => {
+                let attach_ms = started.elapsed().as_secs_f64() * 1000.0;
+                tracing::info!(addr, attach_ms = format!("{attach_ms:.2}"), "remote attached");
+                if self.attach_probe {
+                    println!("remote_attach_ms={attach_ms:.2}");
+                    drop(session);
+                    // No budget: this number includes the network and, on a
+                    // first contact, a human reading a six-digit code.
+                    std::process::exit(0);
+                }
+                Some(Box::new(session))
+            }
+            Err(e) => {
+                eprintln!("could not attach to {addr}: {e}");
+                std::process::exit(1);
             }
         }
     }
