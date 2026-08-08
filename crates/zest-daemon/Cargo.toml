@@ -13,6 +13,11 @@ name = "zest-daemon"
 path = "src/main.rs"
 
 [dependencies]
+# Bundled, not the system library. Three operating systems and a CI matrix mean
+# "whatever sqlite the host happens to have" is three different versions and one
+# of them missing; the build cost is paid once per toolchain and buys the same
+# database everywhere.
+rusqlite = { version = "0.32", features = ["bundled"] }
 zest-core.workspace = true
 zest-pty.workspace = true
 zest-proto.workspace = true
