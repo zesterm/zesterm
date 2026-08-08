@@ -172,6 +172,40 @@ pub fn terminal_env() -> Vec<(String, String)> {
         "GHOSTTY_RESOURCES_DIR",
         // VTE-based terminals on Linux (GNOME Terminal, Tilix, Terminator).
         "VTE_VERSION",
+        // Editors and agents that mark the shells *they* start.
+        //
+        // Not terminal identity, but the same failure with a worse blast radius:
+        // a program reads one of these, concludes it is running inside a session
+        // that owns it, and changes behaviour. Claude Code disables transcript
+        // saving on `CLAUDE_CODE_CHILD_SESSION` and says so in a banner, which is
+        // how this was noticed; anything keying off `CLAUDECODE` or
+        // `VSCODE_INJECTION` does it silently.
+        //
+        // The blast radius is the daemon. A terminal that spawns its own shell
+        // leaks only its own launch context, but zesterm's shells come from a
+        // long-lived daemon (ADR-007) whose environment is frozen at first
+        // spawn — so a daemon that happened to start from inside an agent
+        // session hands these to every shell on the machine, for hours, in
+        // windows opened long afterwards from somewhere else entirely.
+        "CLAUDECODE",
+        "CLAUDE_CODE_CHILD_SESSION",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_EXECPATH",
+        "CLAUDE_CODE_MESSAGING_SOCKET",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_VERSION",
+        "CLAUDE_EFFORT",
+        "CLAUDE_PID",
+        // VS Code's integrated terminal, and the shell-integration hook it
+        // injects. `TERM_PROGRAM` is already overridden above, which makes these
+        // look handled; they are read independently.
+        "VSCODE_INJECTION",
+        "VSCODE_SHELL_INTEGRATION",
+        "VSCODE_GIT_ASKPASS_MAIN",
+        "VSCODE_GIT_IPC_HANDLE",
+        // JetBrains IDEs.
+        "TERMINAL_EMULATOR",
+        "JEDITERM_SOURCE",
     ];
     for stale in STALE_IDENTITY {
         if std::env::var_os(stale).is_some() {
@@ -263,5 +297,68 @@ pub trait PtyTransport: Send {
     /// guarantee.
     fn watch_exit(&self, on_exit: Box<dyn FnOnce() + Send>) {
         drop(on_exit);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An inherited agent-session marker must not reach the child.
+    ///
+    /// Found by running `claude` inside zesterm: it reported transcript saving
+    /// off, because `CLAUDE_CODE_CHILD_SESSION` had been inherited and it
+    /// concluded it was a child of the session that started the *terminal*.
+    ///
+    /// The reason this matters more here than in other terminals is the daemon.
+    /// A terminal that spawns its own shell leaks only its own launch context;
+    /// zesterm's shells come from a long-lived daemon whose environment is fixed
+    /// at first spawn, so one daemon started from inside an agent session hands
+    /// the marker to every shell on the machine until it is restarted.
+    #[test]
+    fn an_inherited_session_marker_is_cleared() {
+        // SAFETY: single-threaded test; nothing else reads the environment here.
+        unsafe { std::env::set_var("CLAUDE_CODE_CHILD_SESSION", "1") };
+        let env = terminal_env();
+        unsafe { std::env::remove_var("CLAUDE_CODE_CHILD_SESSION") };
+
+        let entry = env.iter().find(|(k, _)| k == "CLAUDE_CODE_CHILD_SESSION");
+        let (_, value) = entry.expect(
+            "the marker was in scope and must be listed for clearing, or every \
+             shell this daemon starts inherits it",
+        );
+        assert!(
+            value.is_empty(),
+            "an empty value is what both backends read as *unset*; anything else \
+             sets it again"
+        );
+    }
+
+    /// Only what is actually inherited is mentioned.
+    ///
+    /// Pushing every name unconditionally would work, but it makes the child's
+    /// environment a list of variables to unset that were never set, and hides
+    /// what a session really inherited when debugging one.
+    #[test]
+    fn a_marker_that_was_never_set_is_not_mentioned() {
+        unsafe { std::env::remove_var("JEDITERM_SOURCE") };
+        let env = terminal_env();
+        assert!(
+            !env.iter().any(|(k, _)| k == "JEDITERM_SOURCE"),
+            "nothing to clear, so nothing to say"
+        );
+    }
+
+    #[test]
+    fn the_terminal_still_identifies_itself() {
+        // The clearing list sits next to these, and an over-eager edit to it
+        // would take the identity with it -- which reads as a broken renderer,
+        // since a child with no TERM assumes a dumb terminal and stops emitting
+        // colour at all.
+        let env = terminal_env();
+        for (key, want) in [("TERM", "xterm-256color"), ("COLORTERM", "truecolor")] {
+            let (_, got) = env.iter().find(|(k, _)| k == key).expect("must be set");
+            assert_eq!(got, want, "{key} is what tells the child what it is talking to");
+        }
     }
 }

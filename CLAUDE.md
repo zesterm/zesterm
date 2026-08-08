@@ -216,6 +216,16 @@ Each of these cost real time and is documented where it bites:
   `zesterm --themes` returns the prompt before printing. That is normal for a
   GUI app; use `Start-Process -Wait` when scripting against it. Debug builds
   keep the console subsystem so the dev loop is unaffected.
+- **The daemon's environment is frozen at first spawn, and every shell in the
+  fleet inherits it.** A terminal that spawns its own shell leaks only its own
+  launch context; zesterm's shells come from a long-lived daemon, so a daemon
+  that happened to start from inside an agent session or an IDE hands those
+  markers to every window opened afterwards, for hours, from anywhere. Found
+  when `claude` inside zesterm reported transcript saving off, having inherited
+  `CLAUDE_CODE_CHILD_SESSION`. The markers are cleared in `terminal_env()`
+  alongside the terminal-identity ones — but the general hazard remains, so
+  anything context-specific in a shell's environment is worth suspecting there
+  first. (`zest-pty/src/lib.rs`.)
 - **The agent shell sets `NO_COLOR=1`**, and a pty child inherits it. PowerShell
   honours it by forcing `$PSStyle.OutputRendering = 'PlainText'`, which strips
   every escape *before* it reaches the pty — so a colour test launched from here
