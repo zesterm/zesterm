@@ -506,6 +506,20 @@ pub use imp::claim;
 #[cfg(windows)]
 pub use imp::PipeStream;
 
+// Shared by both test modules below, so it cannot live inside either, and
+// clippy's `items_after_test_module` insists it come before them.
+#[cfg(test)]
+fn test_authenticator() -> std::sync::Arc<crate::auth::Authenticator> {
+    std::sync::Arc::new(crate::auth::Authenticator::new(
+        std::sync::Arc::new(
+            zest_mesh::identity::HostIdentity::generate().expect("host key"),
+        ),
+        std::sync::Arc::new(zest_mesh::trust::MemoryTrustStore::new()),
+        zest_mesh::pairing::PairingQueue::new(),
+        "test-host",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -764,16 +778,4 @@ mod unix_tests {
         let _ = std::fs::remove_file(&p);
         let _ = std::fs::remove_file(format!("{p}.lock"));
     }
-}
-
-#[cfg(test)]
-fn test_authenticator() -> std::sync::Arc<crate::auth::Authenticator> {
-    std::sync::Arc::new(crate::auth::Authenticator::new(
-        std::sync::Arc::new(
-            zest_mesh::identity::HostIdentity::generate().expect("host key"),
-        ),
-        std::sync::Arc::new(zest_mesh::trust::MemoryTrustStore::new()),
-        zest_mesh::pairing::PairingQueue::new(),
-        "test-host",
-    ))
 }

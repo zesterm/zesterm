@@ -502,6 +502,16 @@ M2. Owns `zest-core/src/blocks.rs` and the OSC 133 path. Hot spot: coordinate
       picked up — which works because a dropped connection releases its
       subscriber, leaving that session unattached. Verified by killing the
       daemon under a live window and restarting it.
+- [x] **The whole workspace passes on a real Windows machine** — issue #18's
+      baseline, and a first. What stood in the way was a hang, not a failure:
+      `tests/lan.rs` asked for `/bin/echo`, the Windows spawn failure came back
+      as an `Error` frame its `wait_for` filter ignored, and a blocking read
+      with no timeout made the 10s deadline decorative — so the suite parked
+      forever. Masked until `5bfff82`, because the lib tests failing stopped
+      `cargo test` before the lan binary ever ran; the process watcher took the
+      blame for the first hung CI run, but the two runs after its backout hung
+      the same way. `wait_for` now sets a read timeout, so this class of bug is
+      red in ten seconds instead of cancelled after an hour.
 - [ ] Reconnect in place, keeping the client's own `Terminal` and scrollback
       rather than rebuilding from a keyframe. Needed by the browser, where a
       reconnect is the normal case rather than the exception. → #16.

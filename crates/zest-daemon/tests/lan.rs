@@ -84,6 +84,11 @@ fn wait_for(
 ) -> Option<HostMessage> {
     let mut buf = vec![0u8; 64 * 1024];
     let deadline = Instant::now() + Duration::from_secs(10);
+    // Without a read timeout the deadline below is decorative: a host that
+    // keeps the connection open but never sends the awaited frame parks the
+    // read forever, and the whole suite hangs instead of going red. Windows CI
+    // sat like that for over an hour, twice, with nothing to read out of it.
+    stream.set_read_timeout(Some(Duration::from_millis(200))).expect("set read timeout");
     loop {
         while let Ok(Some(body)) = frames.next_frame() {
             let msg = frame::decode::<HostMessage>(&body).expect("decode");
@@ -94,11 +99,18 @@ fn wait_for(
         if Instant::now() > deadline {
             return None;
         }
-        let n = stream.read(&mut buf).ok()?;
-        if n == 0 {
-            return None;
+        match stream.read(&mut buf) {
+            Ok(0) => return None,
+            Ok(n) => frames.feed(&buf[..n]),
+            // Unix reports an expired read timeout as WouldBlock, Windows as
+            // TimedOut; both mean "nothing yet", not "nothing ever".
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => return None,
         }
-        frames.feed(&buf[..n]);
     }
 }
 
@@ -189,18 +201,31 @@ fn a_paired_device_drives_a_session_over_tcp() {
     let HostMessage::Welcome { host, .. } = welcome else { unreachable!() };
     assert_eq!(host, h.host_id, "the host announced an identity that is not its own");
 
+    // Platform-aware like every other daemon test: this file is the one place
+    // that forgot, and on Windows the failed spawn came back as an `Error`
+    // frame the old `wait_for` filter ignored -- a silent hang, not a red test.
+    let cmd = if cfg!(windows) {
+        "cmd.exe /c echo over-the-lan"
+    } else {
+        "/bin/echo over-the-lan"
+    };
     send(
         &mut stream,
         &ClientMessage::CreateSession {
-            command: "/bin/echo over-the-lan".into(),
+            command: cmd.into(),
             cwd: String::new(),
             cols: 80,
             rows: 24,
         },
     );
-    let listing = wait_for(&mut stream, &mut frames, |m| matches!(m, HostMessage::Sessions { .. }))
-        .expect("no listing");
-    let HostMessage::Sessions { sessions } = listing else { unreachable!() };
+    // Accept `Error` too, so a spawn failure names itself instead of timing out.
+    let listing = wait_for(&mut stream, &mut frames, |m| {
+        matches!(m, HostMessage::Sessions { .. } | HostMessage::Error { .. })
+    })
+    .expect("no listing");
+    let HostMessage::Sessions { sessions } = listing else {
+        panic!("the session was refused: {listing:?}");
+    };
     assert_eq!(sessions.len(), 1, "the session was not created");
 }
 
