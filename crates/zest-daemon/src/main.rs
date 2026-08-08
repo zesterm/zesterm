@@ -211,7 +211,13 @@ fn main() {
     // waits two minutes and is denied -- correct, and useless if there is
     // nobody to ask.
     if !flag("--no-prompt") {
-        start_approver(&queue, &auth);
+        // Recorded beside the trust store, not on stdout: an authorization
+        // decision whose evidence an operator can erase with a `>` is not
+        // evidence. → audit.rs.
+        let audit = Arc::new(zest_daemon::audit::Audit::beside(
+            &opt("--trust-file").map_or_else(default_trust_path, std::path::PathBuf::from),
+        ));
+        start_approver(&queue, &auth, audit);
     }
 
     let registry = Arc::new(Registry::new());
@@ -319,7 +325,11 @@ fn start_lan(
 /// One of three front ends over the same queue — this, `--trust`, and later the
 /// desktop modal — which is what lets the modal land as a front-end swap rather
 /// than a second mechanism.
-fn start_approver(queue: &Arc<PairingQueue>, auth: &Arc<Authenticator>) {
+fn start_approver(
+    queue: &Arc<PairingQueue>,
+    auth: &Arc<Authenticator>,
+    audit: Arc<zest_daemon::audit::Audit>,
+) {
     let queue_for_hook = Arc::clone(queue);
     let auth = Arc::clone(auth);
 
@@ -396,13 +406,26 @@ fn start_approver(queue: &Arc<PairingQueue>, auth: &Arc<Authenticator>) {
                     let answer = loop {
                         match lines.recv() {
                             Ok((at, text)) if at >= asked_at => break Some(text),
-                            Ok((_, stale)) => tracing::warn!(
+                            Ok((_, stale)) => {
+                                audit.record(
+                                    std::time::SystemTime::now(),
+                                    &zest_daemon::audit::Entry {
+                                        client: &request.client.short(),
+                                        label: &request.label,
+                                        remote: &request.remote,
+                                        code: &request.code,
+                                        outcome: zest_daemon::audit::Outcome::Discarded,
+                                        by_person: false,
+                                    },
+                                );
+                                tracing::warn!(
                                 client = %request.client.short(),
                                 discarded = %stale.trim().escape_debug().to_string(),
                                 "input that predates this prompt is not an answer to it; \
                                  discarding rather than letting it approve a device \
                                  nobody was shown"
-                            ),
+                                );
+                            }
                             Err(_) => break None,
                         }
                     };
@@ -449,6 +472,24 @@ fn start_approver(queue: &Arc<PairingQueue>, auth: &Arc<Authenticator>) {
                         bytes = line.len(),
                         approve,
                         "pairing answer read"
+                    );
+                    // `by_person` is true because the line reached here only by
+                    // arriving after the prompt was printed -- which is the
+                    // whole distinction #21 was about.
+                    audit.record(
+                        std::time::SystemTime::now(),
+                        &zest_daemon::audit::Entry {
+                            client: &request.client.short(),
+                            label: &request.label,
+                            remote: &request.remote,
+                            code: &request.code,
+                            outcome: if approve {
+                                zest_daemon::audit::Outcome::Approved
+                            } else {
+                                zest_daemon::audit::Outcome::Refused
+                            },
+                            by_person: true,
+                        },
                     );
                     auth.decide(
                         request.client,

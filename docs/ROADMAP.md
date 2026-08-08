@@ -722,6 +722,12 @@ host half cannot yet: a daemon with a *persistent* identity and a file trust sto
 needs an answer to the detached-prompt problem first. Until then `--ephemeral`
 means every daemon restart re-pairs every device.
 
+**Desk latency has a number.** Windows → Mac over Wi-Fi, keystroke to the delta
+carrying its echo, 200 round trips: **p50 6.8ms, p99 12.6ms**, min 5.6ms. Under
+half a 60Hz frame, so type-to-paint on the far machine lands within one frame of
+the local case. That is a property of the link, not the protocol — the protocol's
+share is below.
+
 **ADR-007's 50–100µs is measured, and it holds.** `attach --ping 300` on
 loopback, keystroke bytes on the wire to the delta carrying their echo:
 

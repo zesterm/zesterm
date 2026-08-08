@@ -30,6 +30,7 @@
 //! it is a pipe open costing microseconds. There is a regression test on first
 //! paint so this has a number to break rather than a memory to argue with.
 
+pub mod audit;
 pub mod auth;
 pub mod lan;
 pub mod local;

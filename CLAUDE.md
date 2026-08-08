@@ -226,6 +226,19 @@ Each of these cost real time and is documented where it bites:
   alongside the terminal-identity ones — but the general hazard remains, so
   anything context-specific in a shell's environment is worth suspecting there
   first. (`zest-pty/src/lib.rs`.)
+- **"Always Allow" on the Keychain does not survive `cargo build`.** macOS binds
+  the grant to the *binary* that asked, and dev builds are ad-hoc signed
+  (`codesign -dv` says `Signature=adhoc`), so every rebuild is a different
+  executable and a stranger to the ACL. You did not approve `zest-daemon`; you
+  approved that build of it. Signing dev builds with a stable self-signed
+  identity would fix it properly; `--ephemeral` sidesteps the keychain entirely
+  and is why host ids churn during a bring-up.
+- **A Windows client passing unix paths through a POSIX-emulating shell corrupts
+  them before they cross the wire.** Git Bash's MSYS conversion rewrote
+  `/bin/cat` to `C:/Program Files/Git/usr/bin/cat` in the *arguments*, so the
+  macOS daemon faithfully tried to spawn a Windows path and failed for a reason
+  that looks like the far host is broken. PowerShell passes them through clean.
+  (Found by the Windows lane during the two-machine bring-up, #20.)
 - **On macOS the daemon blocks on a Keychain prompt after every rebuild**, and
   the app gives up waiting after 2s and silently falls back to an in-process
   pty. The window works perfectly and is not daemon-backed, so anything being
