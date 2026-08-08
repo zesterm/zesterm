@@ -82,6 +82,13 @@ jobs:
         # regeneration nobody reviews.
         run: cargo run -p xtask -- check-bindings
 
+      - name: Conformance fixtures match the corpus
+        # The bindings say what the wire looks like; these say what it means, and
+        # they are what the TypeScript decoder is replayed against. A client that
+        # decodes into the right shapes and applies them wrongly passes
+        # check-bindings and fails here.
+        run: cargo run -p xtask -- check-fixtures
+
       # The invariant that broke. `zest-core` and `zest-proto` cross to the
       # clients, so they must build without std and without a platform.
       - name: zest-core builds for wasm32

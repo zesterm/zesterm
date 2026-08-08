@@ -36,9 +36,29 @@ paragraph of justification attached.
 | `HostIdentity`, `ClientIdentity`, `Signature`, `Nonce`, `Purpose` | `zest-mesh/src/identity.rs` | draft — WS-H may change freely | WS-H only |
 | `KeyStore` | `zest-mesh/src/keystore.rs` | draft — WS-H may change freely | WS-H only |
 | `DaemonConfig`, `SessionHandle`, `SessionState` | `zest-daemon/src/lib.rs` | draft — WS-F may change freely | WS-F only |
+| TypeScript bindings | `crates/zest-proto/bindings/` | **generated** — `cargo xtask check-bindings` | WS-G, WS-H |
+| Conformance fixtures | `crates/zest-proto/fixtures/` | **generated** — `cargo xtask check-fixtures` | WS-G, WS-H |
 
 "Draft" means one stream owns it and nobody else has built on it yet. It freezes when a second
 stream starts consuming it.
+
+### Generated artifacts are contracts too
+
+The last two rows are not hand-written and are still seams: they are what a client outside this
+repository is *checked against*, which is exactly the property the rest of this table protects.
+Both carry a `protocol` version, so a `PROTOCOL_VERSION` bump rewrites every fixture and the
+change is impossible to miss in review rather than something to remember.
+
+They are also where this file stops being aspirational about the web client. The rule above —
+land a contract change with every consumer in one commit — now has an in-repo consumer that will
+fail loudly: `clients/web/` decodes these fixtures frame by frame. A wire change that regenerates
+them without updating the TypeScript no longer merges green.
+
+The division of labour between them is worth stating, because it is why both exist. The bindings
+say what the wire **looks like**, and catch a shape that moved. The fixtures say what it
+**means**, and catch a client that decodes the right shapes and applies them wrongly — a scroll
+in the wrong order, a run's cell count recomputed instead of read. No type check can reach the
+second kind.
 
 ---
 

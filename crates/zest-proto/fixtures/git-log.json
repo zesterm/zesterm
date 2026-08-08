@@ -1,0 +1,2703 @@
+{
+  "schema": 1,
+  "protocol": 2,
+  "recording": "git-log",
+  "source": "vtrec",
+  "cols": 100,
+  "rows": 30,
+  "frames": [
+    {
+      "kind": "keyframe",
+      "seq": 0,
+      "wire": "4703000089a174a86b65796672616d65a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a373657100a4636f6c7364a4726f77731ea9726f77735f64617461dc001e83a46c696e6500a472756e7390a777726170706564c283a46c696e6501a472756e7390a777726170706564c283a46c696e6502a472756e7390a777726170706564c283a46c696e6503a472756e7390a777726170706564c283a46c696e6504a472756e7390a777726170706564c283a46c696e6505a472756e7390a777726170706564c283a46c696e6506a472756e7390a777726170706564c283a46c696e6507a472756e7390a777726170706564c283a46c696e6508a472756e7390a777726170706564c283a46c696e6509a472756e7390a777726170706564c283a46c696e650aa472756e7390a777726170706564c283a46c696e650ba472756e7390a777726170706564c283a46c696e650ca472756e7390a777726170706564c283a46c696e650da472756e7390a777726170706564c283a46c696e650ea472756e7390a777726170706564c283a46c696e650fa472756e7390a777726170706564c283a46c696e6510a472756e7390a777726170706564c283a46c696e6511a472756e7390a777726170706564c283a46c696e6512a472756e7390a777726170706564c283a46c696e6513a472756e7390a777726170706564c283a46c696e6514a472756e7390a777726170706564c283a46c696e6515a472756e7390a777726170706564c283a46c696e6516a472756e7390a777726170706564c283a46c696e6517a472756e7390a777726170706564c283a46c696e6518a472756e7390a777726170706564c283a46c696e6519a472756e7390a777726170706564c283a46c696e651aa472756e7390a777726170706564c283a46c696e651ba472756e7390a777726170706564c283a46c696e651ca472756e7390a777726170706564c283a46c696e651da472756e7390a777726170706564c2a5617474727390a6637572736f7284a3726f7700a3636f6c00a776697369626c65c3a5736861706500a56d6f64657311",
+      "expect": {
+        "cursor": {
+          "row": 0,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 17,
+        "alt_screen": false,
+        "title": "",
+        "rows": [
+          {
+            "line": 0,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 5,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 6,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 7,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 8,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 9,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 10,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 11,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 12,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 13,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 14,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 15,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 16,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 17,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 18,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 19,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 20,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 21,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 22,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 23,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 24,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 25,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 26,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 27,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 28,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 29,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 0,
+      "seq": 2,
+      "wire": "9300000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a46261736500a373657102a564656c746182a5617474727390a36f70739182a26f70a56d6f646573a462697473cda011",
+      "expect": {
+        "cursor": {
+          "row": 0,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 40977,
+        "alt_screen": false,
+        "title": "",
+        "rows": [
+          {
+            "line": 0,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 5,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 6,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 7,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 8,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 9,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 10,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 11,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 12,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 13,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 14,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 15,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 16,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 17,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 18,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 19,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 20,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 21,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 22,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 23,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 24,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 25,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 26,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 27,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 28,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 29,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 2,
+      "seq": 7,
+      "wire": "b300000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a46261736502a373657107a564656c746182a5617474727390a36f70739182a26f70a57469746c65a57469746c65d920433a5c50726f6772616d2046696c65735c4769745c636d645c6769742e657865",
+      "expect": {
+        "cursor": {
+          "row": 0,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 40977,
+        "alt_screen": false,
+        "title": "C:\\Program Files\\Git\\cmd\\git.exe",
+        "rows": [
+          {
+            "line": 0,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 5,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 6,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 7,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 8,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 9,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 10,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 11,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 12,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 13,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 14,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 15,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 16,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 17,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 18,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 19,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 20,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 21,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 22,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 23,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 24,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 25,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 26,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 27,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 28,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 29,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 7,
+      "seq": 279,
+      "wire": "1404000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a46261736507a3736571cd0117a564656c746182a561747472739484a2696400a26667a744656661756c74a26267a744656661756c74a5666c6167730084a2696401a2666781a7496e646578656403a26267a744656661756c74a5666c6167730084a2696402a2666781a7496e646578656406a26267a744656661756c74a5666c6167730184a2696403a2666781a7496e646578656402a26267a744656661756c74a5666c61677301a36f70739583a26f70a3726f77a3726f7700a77061796c6f616483a46c696e6500a472756e739683a46174747200a563656c6c7302a474657874a22a2083a46174747201a563656c6c7309a474657874a931623234386137202883a46174747202a563656c6c7308a474657874a848454144202d3e2083a46174747203a563656c6c7304a474657874a46d61696e83a46174747201a563656c6c7302a474657874a2292083a46174747200a563656c6c733ba474657874d93b496d706c656d656e74207a6573742d707479206f6e20436f6e5054592c20616e6420666978207468652073696c656e742d61747461636820627567a777726170706564c283a26f70a3726f77a3726f7701a77061796c6f616483a46c696e6501a472756e739383a46174747200a563656c6c7302a474657874a22a2083a46174747201a563656c6c7308a474657874a8666635373665302083a46174747200a563656c6c7339a474657874d939536574746c6520746865207072656d756c7469706c6965642d616c706861207175657374696f6e20776974682061207265616c2070726f6265a777726170706564c283a26f70a3726f77a3726f7702a77061796c6f616483a46c696e6502a472756e739383a46174747200a563656c6c7302a474657874a22a2083a46174747201a563656c6c7308a474657874a8633330633637612083a46174747200a563656c6c7332a474657874d93246697820787465726d206375626520617373657274696f6e20616e6420636c65617220636c69707079207761726e696e6773a777726170706564c283a26f70a3726f77a3726f7703a77061796c6f616483a46c696e6503a472756e739383a46174747200a563656c6c7302a474657874a22a2083a46174747201a563656c6c7308a474657874a8613933396538342083a46174747200a563656c6c731ea474657874be53636166666f6c6420746865207a65737465726d20776f726b7370616365a777726170706564c282a26f70a6637572736f72a6637572736f7284a3726f7704a3636f6c00a776697369626c65c3a5736861706500",
+      "expect": {
+        "cursor": {
+          "row": 4,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 40977,
+        "alt_screen": false,
+        "title": "C:\\Program Files\\Git\\cmd\\git.exe",
+        "rows": [
+          {
+            "line": 0,
+            "wrapped": false,
+            "text": "* 1b248a7 (HEAD -> main) Implement zest-pty on ConPTY, and fix the silent-attach bug                ",
+            "styles": [
+              [
+                2,
+                "Default",
+                "Default",
+                0
+              ],
+              [
+                9,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                8,
+                {
+                  "Indexed": 6
+                },
+                "Default",
+                1
+              ],
+              [
+                4,
+                {
+                  "Indexed": 2
+                },
+                "Default",
+                1
+              ],
+              [
+                2,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                75,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": "* ff576e0 Settle the premultiplied-alpha question with a real probe                                 ",
+            "styles": [
+              [
+                2,
+                "Default",
+                "Default",
+                0
+              ],
+              [
+                8,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                90,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "* c30c67a Fix xterm cube assertion and clear clippy warnings                                        ",
+            "styles": [
+              [
+                2,
+                "Default",
+                "Default",
+                0
+              ],
+              [
+                8,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                90,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "* a939e84 Scaffold the zesterm workspace                                                            ",
+            "styles": [
+              [
+                2,
+                "Default",
+                "Default",
+                0
+              ],
+              [
+                8,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                90,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 5,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 6,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 7,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 8,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 9,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 10,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 11,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 12,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 13,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 14,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 15,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 16,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 17,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 18,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 19,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 20,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 21,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 22,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 23,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 24,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 25,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 26,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 27,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 28,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 29,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 279,
+      "seq": 280,
+      "wire": "8500000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a462617365cd0117a3736571cd0118a564656c746182a5617474727390a36f707390",
+      "expect": {
+        "cursor": {
+          "row": 4,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 40977,
+        "alt_screen": false,
+        "title": "C:\\Program Files\\Git\\cmd\\git.exe",
+        "rows": [
+          {
+            "line": 0,
+            "wrapped": false,
+            "text": "* 1b248a7 (HEAD -> main) Implement zest-pty on ConPTY, and fix the silent-attach bug                ",
+            "styles": [
+              [
+                2,
+                "Default",
+                "Default",
+                0
+              ],
+              [
+                9,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                8,
+                {
+                  "Indexed": 6
+                },
+                "Default",
+                1
+              ],
+              [
+                4,
+                {
+                  "Indexed": 2
+                },
+                "Default",
+                1
+              ],
+              [
+                2,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                75,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": "* ff576e0 Settle the premultiplied-alpha question with a real probe                                 ",
+            "styles": [
+              [
+                2,
+                "Default",
+                "Default",
+                0
+              ],
+              [
+                8,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                90,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "* c30c67a Fix xterm cube assertion and clear clippy warnings                                        ",
+            "styles": [
+              [
+                2,
+                "Default",
+                "Default",
+                0
+              ],
+              [
+                8,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                90,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "* a939e84 Scaffold the zesterm workspace                                                            ",
+            "styles": [
+              [
+                2,
+                "Default",
+                "Default",
+                0
+              ],
+              [
+                8,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                90,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 5,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 6,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 7,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 8,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 9,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 10,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 11,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 12,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 13,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 14,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 15,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 16,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 17,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 18,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 19,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 20,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 21,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 22,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 23,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 24,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 25,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 26,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 27,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 28,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 29,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 280,
+      "seq": 282,
+      "wire": "9500000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a462617365cd0118a3736571cd011aa564656c746182a5617474727390a36f70739182a26f70a56d6f646573a46269747311",
+      "expect": {
+        "cursor": {
+          "row": 4,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 17,
+        "alt_screen": false,
+        "title": "C:\\Program Files\\Git\\cmd\\git.exe",
+        "rows": [
+          {
+            "line": 0,
+            "wrapped": false,
+            "text": "* 1b248a7 (HEAD -> main) Implement zest-pty on ConPTY, and fix the silent-attach bug                ",
+            "styles": [
+              [
+                2,
+                "Default",
+                "Default",
+                0
+              ],
+              [
+                9,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                8,
+                {
+                  "Indexed": 6
+                },
+                "Default",
+                1
+              ],
+              [
+                4,
+                {
+                  "Indexed": 2
+                },
+                "Default",
+                1
+              ],
+              [
+                2,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                75,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": "* ff576e0 Settle the premultiplied-alpha question with a real probe                                 ",
+            "styles": [
+              [
+                2,
+                "Default",
+                "Default",
+                0
+              ],
+              [
+                8,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                90,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "* c30c67a Fix xterm cube assertion and clear clippy warnings                                        ",
+            "styles": [
+              [
+                2,
+                "Default",
+                "Default",
+                0
+              ],
+              [
+                8,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                90,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "* a939e84 Scaffold the zesterm workspace                                                            ",
+            "styles": [
+              [
+                2,
+                "Default",
+                "Default",
+                0
+              ],
+              [
+                8,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                90,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 5,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 6,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 7,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 8,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 9,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 10,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 11,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 12,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 13,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 14,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 15,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 16,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 17,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 18,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 19,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 20,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 21,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 22,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 23,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 24,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 25,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 26,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 27,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 28,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 29,
+            "wrapped": false,
+            "text": "                                                                                                    ",
+            "styles": [
+              [
+                100,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

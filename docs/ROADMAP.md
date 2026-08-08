@@ -45,7 +45,7 @@ move.
 
 ## Status
 
-**548 tests, five gates green**, measured on macOS rather than remembered.
+**548 tests, six gates green**, measured on macOS rather than remembered.
 First paint 35ms **on Windows**; the Mac paints against a different compositor
 and its number (48ms) is reported rather than gated.
 
@@ -160,7 +160,7 @@ below means "do not touch this file".
 | **D** | [Linux host](#ws-d) | Linux platform + packaging | Open — C1 landed `unix.rs` | [#9](https://github.com/zesterm/zesterm/issues/9) |
 | **E** | [Command blocks](#ws-e) | `zest-core/src/blocks.rs`, OSC 133, shell integration | Open | [#6](https://github.com/zesterm/zesterm/issues/6) |
 | **F** | [`zest-proto` + `zest-daemon`](#ws-f) | `crates/zest-proto/`, `crates/zest-daemon/` | Protocol + daemon ✅ · **applier, app attach, LAN listener next** | [#4](https://github.com/zesterm/zesterm/issues/4) |
-| **G** | [Web client](#ws-g) | `clients/web/` | Open (decoder) | [#8](https://github.com/zesterm/zesterm/issues/8) |
+| **G** | [Web client](#ws-g) | `clients/web/`, `zest-proto/fixtures/` | Decoder + fixtures ✅ · renderer next, transport blocked | [#8](https://github.com/zesterm/zesterm/issues/8) |
 | **H** | [Mesh identity, discovery, transports](#ws-h) | `crates/zest-mesh/`, `cloud/` | Identity + discovery ✅ · **pairing next** | [#7](https://github.com/zesterm/zesterm/issues/7) |
 
 **Ordering that mattered, and is now settled.** B landed before A, so `zest-app`
@@ -341,14 +341,18 @@ M2. Owns `zest-core/src/blocks.rs` and the OSC 133 path. Hot spot: coordinate
 - [x] **Conformance corpus**: the `.vtrec` replay now has three participants —
       the host `Terminal`, `GridView`, and a client `Terminal` fed by the
       applier — and asserts **two real `Terminal`s are cell-for-cell equal at
-      every frame**, with exactly two exclusions, both named in the failure
-      message so nobody widens them quietly. This is the spine.
+      every frame**, with exactly one exclusion, named in the failure message so
+      nobody widens it quietly. This is the spine.
 - [x] Chaos-resync 10,000 times at random disconnect points, from three seeds,
       in under a second — so it runs on every `cargo test` rather than behind
       `--ignored`, where CI would never see it. The stale-`base` path is
       exercised on every iteration, not once in a fixture.
-- [x] `ts-rs` codegen, committed and gated in CI, so the web client's view of
-      the protocol cannot silently drift from Rust's.
+- [x] `ts-rs` codegen and golden-fixture contract tests in CI. The bindings are
+      committed under `crates/zest-proto/bindings/` and gated by
+      `check-bindings`; the corpus is exported to `crates/zest-proto/fixtures/`
+      and gated by `check-fixtures`. The two catch different things — a shape
+      that moved, and a client that decodes the right shapes and applies them
+      wrongly — and only the second needs real recordings.
 - [x] **Sessions end when they should, and only then.** `CloseSession` now ends
       its child — it used to remove the registry entry and drop the transport,
       which on unix cannot hang up a pty whose reader is parked, and on Windows
@@ -358,17 +362,46 @@ M2. Owns `zest-core/src/blocks.rs` and the OSC 133 path. Hot spot: coordinate
       that vanishes releases its subscriptions, which a polite `Detach` did but
       a closed lid did not. → `PtyTransport::hangup`, a deliberate contract
       change; see CONTRACTS.md.
+- [ ] **Assert client scrollback equals the host's.** `SbPush` is emitted only
+      when the encoder calls a viewport move a scroll, and a jump larger than the
+      viewport deliberately is not one — so the host pushes history the client is
+      never told about. Nothing checks this, which is why the fixtures carry no
+      scrollback expectation: it would pin a divergence rather than catch it.
+- [ ] **No recording contains a combining mark.** `Run::marks` landed in
+      `4b3152e` and `conformance.rs` dropped its exclusion, but all five `.vtrec`
+      files are mark-free, so the replay proves nothing about the side table —
+      the real coverage is `apply.rs`'s unit tests. The fixtures add a synthetic
+      session for it; a recorded one would be better.
 - [ ] SQLite scrollback. Scrollback is in memory and bounded; a session that
       outlives its window does not yet outlive the daemon.
 
 ### WS-G — Web client
 
-Owns `clients/web/`. The decoder can be built against golden fixtures before the
-daemon exists.
+`clients/web/`, plus the Rust that generates what it is checked against — the
+exporter cannot live in TypeScript, and "no path ownership" is the rule now
+anyway.
 
-- [ ] TypeScript delta decoder against the `ts-rs` bindings.
+The decoder was built before the daemon can be reached at all, which was the
+point: **a browser cannot open a unix socket or raw TCP, and the daemon speaks
+nothing else.** ADR-005 names the data plane as a binary WebSocket; nothing
+implements it. Everything below the first item waits on that.
+
+- [x] TypeScript delta decoder against the `ts-rs` bindings, replaying the
+      conformance corpus frame by frame. `cargo xtask fixtures` exports
+      `crates/zest-proto/fixtures/`; `check-fixtures` gates it; the TypeScript
+      compares against the **host `Terminal`'s** own cells rather than against
+      `GridView`, or two implementations wrong in the same way would agree.
 - [ ] Grid renderer. **`@sigx/terminal` cannot be reused** — it paints TSX *to* a
       TTY, which is the inverse of what a web client needs.
+
+      **Canvas 2D**, behind a "given a grid and its dirty rows, paint" seam.
+      Deltas already name the rows that changed, so repaints are row-scoped and
+      the usual reason to reach for WebGL never arises; `fillText` inherits the
+      browser's font fallback, colour emoji and PUA icons, which is the `Zyyy`
+      trap this project has already paid for once; and WebGL would share no code
+      with `zest-render-wgpu` without a wasm crate. Swap in an atlas backend on
+      measurement — a large grid repainting most rows below 60fps — not on
+      instinct.
 - [ ] SignalX app: session list, attach, input.
 - [ ] Local echo prediction for high-latency links (mosh's other trick): predict
       printable-char echo when not in alt-screen, render dim, reconcile on delta
