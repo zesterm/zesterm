@@ -45,7 +45,7 @@ move.
 
 ## Status
 
-**548 tests, six gates green**, measured on macOS rather than remembered.
+**554 tests, six gates green**, measured on macOS rather than remembered.
 First paint 35ms **on Windows**; the Mac paints against a different compositor
 and its number (48ms) is reported rather than gated.
 
@@ -57,7 +57,7 @@ and its number (48ms) is reported rather than gated.
 | `zest-theme` | ✅ tokens, OKLCH derivation, 5 built-ins, 4 importers |
 | `zest-render-wgpu` | ✅ pipelines, atlas, offscreen resolve, selection — ⬜ gamma validation |
 | `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema |
-| `zest-input` | ✅ extracted; keys + SGR mouse + selection — ⬜ IME, Kitty protocol |
+| `zest-input` | ✅ extracted; keys + SGR mouse + selection + IME — ⬜ Kitty protocol |
 | `zest-app` | ✅ window, sessions behind `SessionSource`, **attached to its own daemon** — runs on Windows *and* macOS (Metal) — ⬜ macOS chrome |
 | `zest-proto` | ✅ protocol 2, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, cell-for-cell conformance, chaos-resync |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store — ⬜ Cloudflare transport (M4) |
@@ -155,7 +155,7 @@ below means "do not touch this file".
 | | Stream | About | Status | Issue |
 |---|---|---|---|---|
 | **A** | [Windows chrome, motion, polish](#ws-a) | `zest-app/src/{chrome,motion,platform}*`, `zest-render-wgpu/` | Open — closes M1 | [#5](https://github.com/zesterm/zesterm/issues/5) |
-| **B** | [`zest-input`](#ws-b) | `crates/zest-input/` | Extracted ✅ · IME + Kitty open | [#2](https://github.com/zesterm/zesterm/issues/2) |
+| **B** | [`zest-input`](#ws-b) | `crates/zest-input/` | Extracted ✅ · IME ✅ · Kitty open | [#2](https://github.com/zesterm/zesterm/issues/2) |
 | **C** | [Unix PTY + macOS host](#ws-c) | `zest-pty/src/unix.rs`, macOS platform | C1 ✅ · **C2 in progress** — the app must run on the Mac to verify M3 there | [#3](https://github.com/zesterm/zesterm/issues/3) |
 | **D** | [Linux host](#ws-d) | Linux platform + packaging | Open — C1 landed `unix.rs` | [#9](https://github.com/zesterm/zesterm/issues/9) |
 | **E** | [Command blocks](#ws-e) | `zest-core/src/blocks.rs`, OSC 133, shell integration | Open | [#6](https://github.com/zesterm/zesterm/issues/6) |
@@ -224,7 +224,15 @@ Extraction from `zest-app` collides with WS-A, so it landed early and small.
 - [x] Super/Command belongs to the desktop, never the terminal, and copy/paste
       accepts both the `Ctrl+Shift` and Command conventions. Without this every
       Cmd chord on macOS typed its own letter — `Cmd+V` inserted a `v`.
-- [ ] IME and dead keys via winit `Ime`.
+- [x] IME and dead keys via winit `Ime`. `set_ime_allowed(true)` is what
+      delivers the events at all, and on macOS it is also what makes dead-key
+      sequences combine — without it `Option+e` `e` produces `e`, not `é`. The
+      **preedit is drawn over the cursor and never enters the grid**: a
+      composition belongs to the keyboard in front of one person, while the grid
+      is shared with the daemon and with every other device attached to the same
+      session, so writing provisional text into it would put half-typed
+      characters into someone else's scrollback. Only the commit reaches the pty,
+      as plain UTF-8 — not bracketed, because this is typing, not a paste.
 - [ ] Kitty keyboard protocol (CSI u) behind a mode flag.
 
 ### WS-C — Unix PTY + macOS host

@@ -10,11 +10,16 @@
 //!
 //! ```text
 //! cargo run -p zest-render-wgpu --example render_dump
+//! cargo run -p zest-render-wgpu --example render_dump -- --preedit にほんご
 //! ```
+//!
+//! `--preedit` draws composing text over the cursor, which is otherwise only
+//! reachable by holding down an input method in a live window — the one part of
+//! IME that is a rendering question rather than an event-plumbing one.
 
 use zest_core::Terminal;
 use zest_font::{Fonts, Typography};
-use zest_render_wgpu::{Chrome, Renderer, Scene, Viewport};
+use zest_render_wgpu::{Chrome, Preedit, Renderer, Scene, Viewport};
 
 /// Non-sRGB on purpose: the resolve pass performs the sRGB encode itself, so an
 /// sRGB target would encode twice and wash everything out.
@@ -38,6 +43,13 @@ fn main() {
 }
 
 async fn run() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let preedit = args
+        .iter()
+        .position(|a| a == "--preedit")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -139,6 +151,12 @@ async fn run() {
                 zest_core::Selection { anchor: a, head: b, mode: zest_core::SelectionMode::Simple }
             }),
             selection_bg: to_core_palette(&resolved).colors[8],
+            preedit: preedit.as_deref().map(|text| Preedit {
+                // Mid-string, so the caret is drawn between characters rather
+                // than only at an end -- the case that is easy to get wrong.
+                cursor: Some((text.len() / 2, text.len() / 2)),
+                text,
+            }),
         }],
         &Chrome::default(),
     );

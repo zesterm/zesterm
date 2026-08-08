@@ -12,6 +12,7 @@ authors.workspace = true
 zest-core.workspace = true
 zest-theme.workspace = true
 zest-font.workspace = true
+unicode-width.workspace = true
 rustc-hash.workspace = true
 wgpu.workspace = true
 raw-window-handle.workspace = true

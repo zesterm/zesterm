@@ -14,10 +14,12 @@
 //! that reads as the terminal randomly ignoring the keyboard, which sends people
 //! looking at the wrong layer entirely.
 
+pub mod ime;
 pub mod key;
 pub mod mouse;
 pub mod select;
 
+pub use ime::{Ime, Preedit};
 pub use key::encode;
 pub use mouse::{encode_mouse, MouseAction, MouseButton};
 pub use select::MouseState;

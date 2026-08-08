@@ -32,6 +32,22 @@ pub struct Viewport<'a> {
     pub selection: Option<zest_core::Selection>,
     /// Colour of the selection highlight.
     pub selection_bg: zest_core::Rgb,
+    /// Text an input method is still composing, drawn over the cursor.
+    ///
+    /// **Not in the grid, deliberately.** A composition is provisional and
+    /// belongs to the keyboard in front of this person, while the grid is shared
+    /// with the daemon and with every other device attached to the session.
+    /// Drawing it here rather than writing it into cells is what keeps
+    /// half-typed characters out of someone else's scrollback.
+    pub preedit: Option<Preedit<'a>>,
+}
+
+/// Composing text and the input method's own caret within it.
+#[derive(Debug, Clone, Copy)]
+pub struct Preedit<'a> {
+    pub text: &'a str,
+    /// Byte range the input method has highlighted, as winit reports it.
+    pub cursor: Option<(usize, usize)>,
 }
 
 /// Pre-built chrome instances.
@@ -124,7 +140,109 @@ impl Scene {
             self.emit_row_glyphs(device, queue, atlas, fonts, metrics, grid, row, vp, ox, y, clip);
         }
 
-        self.emit_cursor(grid, vp, metrics, ox, oy, clip);
+        // The preedit covers the cursor cell and the ones after it, so the block
+        // cursor is skipped while composing: the input method draws its own
+        // caret inside the composing text, and two caret-like blocks in the same
+        // place is worse than either alone.
+        if let Some(pre) = vp.preedit {
+            self.emit_preedit(device, queue, atlas, fonts, metrics, grid, vp, &pre, ox, oy, clip);
+        } else {
+            self.emit_cursor(grid, vp, metrics, ox, oy, clip);
+        }
+    }
+
+    /// Composing text, drawn over the grid starting at the cursor.
+    ///
+    /// Underlined and on the default background, which is what every terminal
+    /// and text field does — the underline is the signal that this text is not
+    /// committed yet. It is clipped to the viewport rather than wrapped: a long
+    /// composition running off the right edge is momentary, and wrapping it
+    /// would need a line of grid state that does not exist.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_preedit(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        atlas: &mut Atlas,
+        fonts: &mut Fonts,
+        metrics: CellMetrics,
+        grid: &Grid,
+        vp: &Viewport<'_>,
+        pre: &Preedit<'_>,
+        ox: f32,
+        oy: f32,
+        clip: [f32; 4],
+    ) {
+        // Scrolled back, the cursor position refers to somewhere off screen, so
+        // there is nowhere honest to put this.
+        if grid.display_offset() != 0 {
+            return;
+        }
+
+        let (cw, ch) = (metrics.cell_w as f32, metrics.cell_h as f32);
+        let start_col = grid.cursor.col;
+        let y = oy + grid.cursor.row as f32 * ch;
+        let baseline = y + metrics.baseline as f32;
+
+        let fg = LinearRgba::opaque(
+            vp.palette.foreground.r,
+            vp.palette.foreground.g,
+            vp.palette.foreground.b,
+        );
+        let bg = LinearRgba::opaque(
+            vp.palette.background.r,
+            vp.palette.background.g,
+            vp.palette.background.b,
+        );
+
+        let cells: usize = pre.text.chars().map(char_cells).sum();
+        let avail = grid.cols().saturating_sub(start_col);
+        let drawn = cells.min(avail);
+        if drawn == 0 {
+            return;
+        }
+
+        let x0 = ox + start_col as f32 * cw;
+        let width = drawn as f32 * cw;
+
+        // Opaque, so whatever the composition covers does not show through it.
+        self.rects.push(RectInstance::filled([x0, y, width, ch], bg, clip));
+
+        let mut col = start_col;
+        for (offset, c) in pre.text.char_indices() {
+            let w = char_cells(c);
+            if col + w.max(1) > grid.cols() {
+                break;
+            }
+            let pen_x = ox + col as f32 * cw;
+            if let Some(inst) = self.glyph_instance(
+                device, queue, atlas, fonts, c, Style::new(false, false), pen_x, baseline, fg, clip,
+            ) {
+                self.glyphs.push(inst);
+            }
+            // The input method's caret: a thin bar rather than a block, so the
+            // composing text under it stays readable.
+            if pre.cursor.is_some_and(|(s, _)| s == offset) {
+                let t = 1.0f32.max(metrics.underline_thickness as f32);
+                self.rects.push(RectInstance::filled([pen_x, y, t, ch], fg, clip));
+            }
+            col += w;
+        }
+
+        // A caret at the very end has no character to anchor to.
+        if pre.cursor.is_some_and(|(s, _)| s == pre.text.len()) {
+            let t = 1.0f32.max(metrics.underline_thickness as f32);
+            let x = ox + (col.min(grid.cols().saturating_sub(1))) as f32 * cw;
+            self.rects.push(RectInstance::filled([x, y, t, ch], fg, clip));
+        }
+
+        self.decors.push(DecorInstance {
+            rect: [x0, y + metrics.underline_y as f32, width, metrics.underline_thickness as f32],
+            color: fg,
+            clip,
+            kind: DecorKind::Underline as u32,
+            _pad: [0; 3],
+        });
     }
 
     /// Background runs, collapsed by colour.
@@ -470,6 +588,16 @@ fn cell_fg(cell: &Cell, palette: &PaletteSnapshot) -> LinearRgba {
 fn window_bg(palette: &PaletteSnapshot, opacity: f32) -> LinearRgba {
     let c = palette.background;
     LinearRgba::from_srgb(c.r, c.g, c.b, opacity)
+}
+
+/// Cells a character occupies, by the same rule the grid uses.
+///
+/// Kept local rather than reaching for `zest-input`: the renderer draws, it does
+/// not encode, and a dependency the other way round would make the layering a
+/// cycle waiting to happen.
+fn char_cells(c: char) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    c.width().unwrap_or(0)
 }
 
 #[cfg(test)]

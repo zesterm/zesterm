@@ -119,6 +119,8 @@ pub struct App {
     /// Pointer position in cells, updated on every move.
     pointer_cell: (usize, usize),
     clipboard: Option<arboard::Clipboard>,
+    /// Composition state for the input method. See `zest_input::ime`.
+    ime: zest_input::Ime,
     selection_bg: zest_core::Rgb,
     /// Accumulated fractional wheel lines, so trackpads do not lose precision.
     scroll_accum: f32,
@@ -182,6 +184,7 @@ impl App {
             clipboard: arboard::Clipboard::new()
                 .map_err(|e| tracing::warn!(error = %e, "clipboard unavailable"))
                 .ok(),
+            ime: zest_input::Ime::new(),
             selection_bg,
             scroll_accum: 0.0,
             settings,
@@ -411,6 +414,79 @@ impl App {
         }
     }
 
+    /// Composition from an input method: dead keys, and every script that needs
+    /// more keys than a keyboard has.
+    ///
+    /// Only [`Ime::Commit`] reaches the shell. The preedit is drawn over the
+    /// cursor and never enters the grid — see `zest_input::ime` for why that
+    /// matters more here than in an ordinary text field.
+    fn on_ime(&mut self, ime: winit::event::Ime) {
+        use winit::event::Ime;
+
+        match ime {
+            Ime::Enabled => {
+                self.ime.enable();
+                // Placed on enable as well as on every preedit: winit's own docs
+                // say to start issuing area requests here, and some backends ask
+                // for the area before they send any composing text.
+                self.place_candidate_window();
+            }
+            Ime::Disabled => self.ime.disable(),
+            Ime::Preedit(text, cursor) => {
+                self.ime.set_preedit(text, cursor);
+                // Where the candidate list should appear. Sent on every preedit
+                // change because the composing text grows, and a candidate
+                // window anchored to where the composition *started* ends up
+                // covering what is being typed.
+                self.place_candidate_window();
+            }
+            Ime::Commit(text) => {
+                self.ime.commit();
+                if let Some(session) = self.session.as_ref() {
+                    if !text.is_empty() {
+                        // Straight through as UTF-8, exactly as a physical
+                        // keyboard would have delivered it. Not `encode_paste`:
+                        // this is typing, and bracketing it would make a program
+                        // that reads paste-mode treat a composed word as pasted.
+                        session.write(text.into_bytes());
+                        let mut term = session.terminal().lock();
+                        term.scroll_to_bottom();
+                        term.set_selection(None);
+                    }
+                }
+            }
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Tell the platform where the composing text is, so the candidate list
+    /// appears under it rather than at the window's corner.
+    fn place_candidate_window(&self) {
+        let (Some(window), Some(fonts), Some(session)) =
+            (self.window.as_ref(), self.fonts.as_ref(), self.session.as_ref())
+        else {
+            return;
+        };
+        let m = fonts.cell_metrics();
+        let (row, col) = {
+            let term = session.terminal().lock();
+            let c = term.grid().cursor;
+            (c.row, c.col)
+        };
+        let x = f64::from(PADDING) + f64::from(m.cell_w) * col as f64;
+        let y = f64::from(PADDING) + f64::from(m.cell_h) * row as f64;
+        // The *area* the composition occupies, not a point: macOS places the
+        // candidate window below it, and a zero-width area puts the list over
+        // the text it is meant to be helping with.
+        let w = f64::from(m.cell_w) * self.ime.width_cells().max(1) as f64;
+        window.set_ime_cursor_area(
+            winit::dpi::PhysicalPosition::new(x, y),
+            winit::dpi::PhysicalSize::new(w, f64::from(m.cell_h)),
+        );
+    }
+
     /// Send a mouse event to the program, if it wants one.
     ///
     /// Returns true when the event was consumed, so the caller skips selection.
@@ -617,6 +693,9 @@ impl App {
                     opacity: self.config.opacity,
                     selection: term.selection(),
                     selection_bg: self.selection_bg,
+                    preedit: self.ime.preedit().map(|p| {
+                        zest_render_wgpu::Preedit { text: &p.text, cursor: p.cursor }
+                    }),
                 }],
                 &Chrome::default(),
             );
@@ -838,6 +917,14 @@ impl ApplicationHandler<Wakeup> for App {
         platform::set_background_color(&window, bg.r, bg.g, bg.b);
         window.set_visible(true);
         let first_paint = t0.elapsed();
+
+        // After the paint, deliberately. Without this no `Ime` event is ever
+        // delivered -- and on macOS it is also what makes dead-key sequences
+        // combine, so `Option+e` `e` produces `e` rather than `é`. It is off by
+        // default in winit because a game does not want it; a terminal always
+        // does. Nobody can type before the window exists, so it costs nothing to
+        // keep it out of the measured path.
+        window.set_ime_allowed(true);
         tracing::debug!(elapsed_ms = first_paint.as_millis(), "window shown");
 
         // The number the daemon work must not quietly ruin.
@@ -1052,8 +1139,20 @@ impl ApplicationHandler<Wakeup> for App {
 
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
 
+            WindowEvent::Ime(ime) => self.on_ime(ime),
+
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
                 if event.state != ElementState::Pressed {
+                    return;
+                }
+                // While an input method is composing, the keys are its own:
+                // `Enter` picks a candidate rather than running a command, and
+                // the arrows move through the candidate list. winit documents
+                // that it withholds these events during a preedit, but that is a
+                // promise made by four backends rather than a property of this
+                // code, and the failure mode -- a half-composed word running as
+                // a command -- is bad enough to check twice.
+                if self.ime.composing() {
                     return;
                 }
                 let Some(session) = self.session.as_ref() else { return };

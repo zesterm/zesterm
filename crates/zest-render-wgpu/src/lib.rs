@@ -37,7 +37,7 @@ pub use instance::{
     glyph_flags, DecorInstance, DecorKind, GlyphInstance, Globals, LinearRgba, RectInstance,
     RectShape,
 };
-pub use scene::{Chrome, Scene, Viewport};
+pub use scene::{Chrome, Preedit, Scene, Viewport};
 
 /// The offscreen format.
 ///

@@ -22,3 +22,4 @@ authors.workspace = true
 [dependencies]
 zest-core.workspace = true
 winit.workspace = true
+unicode-width.workspace = true
