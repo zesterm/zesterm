@@ -233,6 +233,15 @@ Each of these cost real time and is documented where it bites:
   approved that build of it. Signing dev builds with a stable self-signed
   identity would fix it properly; `--ephemeral` sidesteps the keychain entirely
   and is why host ids churn during a bring-up.
+
+  **Measured, so it is not folklore:** an ad-hoc binary designates
+  `cdhash H"..."` and two consecutive builds differ; signed with a real identity
+  it designates `identifier "..." and anchor apple generic and certificate
+  leaf[subject.CN] = "..."`, which is byte-identical after every rebuild. The
+  Keychain matches on the designated requirement, so the second survives and the
+  first cannot. `export ZESTERM_SIGN_IDENTITY="$(security find-identity -v -p
+  codesigning | head -1 | sed 's/.*"\(.*\)"/\1/')"` and `zesterm-dev` signs both
+  binaries for you.
 - **On macOS the daemon blocks on a Keychain prompt after every rebuild**, and
   the app gives up waiting after 2s and silently falls back to an in-process
   pty. The window works perfectly and is not daemon-backed, so anything being

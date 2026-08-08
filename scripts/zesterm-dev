@@ -80,6 +80,34 @@ if [ "$build" -eq 1 ]; then
     fi
 fi
 
+# Sign with a *stable* identity, if one is configured.
+#
+# Without this the Keychain asks for a password on every single run, and
+# "Always Allow" does not help: macOS matches the grant against the binary's
+# designated requirement, and an ad-hoc signature designates a `cdhash` — the
+# exact bytes. Every rebuild is therefore a different program as far as the
+# Keychain is concerned, and the grant belongs to one that no longer exists.
+#
+# Signed with a real identity, the designated requirement becomes
+# `identifier "..." and anchor apple generic and certificate leaf[...]`, which is
+# the same string after every rebuild. Verified: two consecutive builds produce
+# different cdhashes and identical requirements.
+#
+# Opt-in via ZESTERM_SIGN_IDENTITY, because not every machine has an identity and
+# a build that fails for want of a certificate would be worse than a prompt.
+#   security find-identity -v -p codesigning     # to find one
+if [ -n "${ZESTERM_SIGN_IDENTITY:-}" ] && command -v codesign >/dev/null 2>&1; then
+    for b in "$REPO/target/$dir/zest-daemon" "$bin"; do
+        [ -x "$b" ] || continue
+        # A fixed --identifier is half the point: the requirement names it, so it
+        # must not be derived from the binary's path or contents.
+        if ! codesign -s "$ZESTERM_SIGN_IDENTITY" --force \
+             --identifier "dev.zesterm.$(basename "$b")" "$b" 2>/dev/null; then
+            echo "zesterm-dev: could not sign $(basename "$b"); the keychain will keep asking" >&2
+        fi
+    done
+fi
+
 if [ ! -x "$bin" ]; then
     echo "zesterm-dev: nothing built at $bin" >&2
     echo "zesterm-dev: run without --no-build, or check ZESTERM_REPO" >&2
