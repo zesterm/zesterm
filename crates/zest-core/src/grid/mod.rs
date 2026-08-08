@@ -105,12 +105,39 @@ pub struct Grid {
     rows: usize,
     /// Maximum retained scrollback lines (not counting the viewport).
     scrollback_limit: usize,
+    /// Rows that fell off the top, kept only if someone asked for them.
+    ///
+    /// **Off by default, and that is not a default worth changing.** Capturing
+    /// means building a `String` per evicted line on the scroll path, which is
+    /// otherwise allocation-free by construction — `rotate_up` recycles the
+    /// oldest row rather than dropping and pushing one, which is what makes a
+    /// 100MB `cat` cost nothing per line. A daemon that wants durable history
+    /// opts in and pays for it; a window that does not, does not.
+    ///
+    /// (That property is structural rather than test-asserted. I wrote the
+    /// opposite here first and checked: there is no allocation-counting test in
+    /// this crate, only the recycling that makes one unnecessary.)
+    evicted: Vec<Evicted>,
+    capture_evicted: bool,
     /// How many scrollback lines currently exist above the viewport.
     scrollback_len: usize,
     /// Viewport offset from the bottom, in lines. 0 means "at the bottom".
     display_offset: usize,
     pub cursor: Cursor,
     pub region: ScrollRegion,
+}
+
+/// A row on its way out of the ring.
+///
+/// Text rather than cells, deliberately: what survives a restart is what was
+/// printed, and keeping 16-byte cells for history that may never be read again
+/// trades a lot of disk for attributes nothing currently renders from storage.
+/// When history does need colour, this grows a field rather than changing shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Evicted {
+    pub id: LineId,
+    pub text: alloc::string::String,
+    pub wrapped: bool,
 }
 
 impl Grid {
@@ -123,6 +150,8 @@ impl Grid {
             cols,
             rows,
             scrollback_limit,
+            evicted: Vec::new(),
+            capture_evicted: false,
             scrollback_len: 0,
             display_offset: 0,
             cursor: Cursor::default(),
@@ -138,6 +167,22 @@ impl Grid {
     #[must_use]
     pub fn rows(&self) -> usize {
         self.rows
+    }
+
+    /// Start keeping rows that fall off the top. See the `evicted` field.
+    pub fn capture_evicted(&mut self, on: bool) {
+        self.capture_evicted = on;
+        if !on {
+            self.evicted = Vec::new();
+        }
+    }
+
+    /// Take what has been evicted since the last call, oldest first.
+    ///
+    /// Drained rather than borrowed: the caller is writing them somewhere
+    /// durable, and a buffer that only grows is a leak with a nicer name.
+    pub fn take_evicted(&mut self) -> Vec<Evicted> {
+        core::mem::take(&mut self.evicted)
     }
 
     #[must_use]
@@ -258,6 +303,21 @@ impl Grid {
                 self.storage.resize_rows(len + 1, self.cols, template);
                 self.scrollback_len += 1;
             } else {
+                // The oldest line is about to be recycled into the newest, so
+                // this is the last moment its content exists anywhere.
+                if self.capture_evicted {
+                    if let Some(row) = self.storage.iter().next() {
+                        let text: alloc::string::String =
+                            row.cells().iter().map(|c| c.ch).collect();
+                        self.evicted.push(Evicted {
+                            id: row.id,
+                            // Trailing blanks are padding, not content: storing
+                            // them would triple a history of short lines.
+                            text: text.trim_end().into(),
+                            wrapped: row.wrapped,
+                        });
+                    }
+                }
                 // At the limit: rotate, recycling the oldest line as the newest.
                 self.storage.rotate_up(1);
                 let last = self.storage.len() - 1;
@@ -705,6 +765,72 @@ impl Grid {
             .filter(|r| r.id >= from)
             .take(count)
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod eviction_tests {
+    use super::*;
+
+    fn feed(g: &mut Grid, lines: usize) {
+        for i in 0..lines {
+            let text = alloc::format!("line {i}");
+            for (col, ch) in text.chars().enumerate() {
+                let cell = Cell { ch, ..Cell::default() };
+                if let Some(c) = g.cell_mut(g.rows() - 1, col) {
+                    *c = cell;
+                }
+            }
+            g.scroll_up(1, &Cell::default());
+        }
+    }
+
+    #[test]
+    fn nothing_is_captured_unless_asked() {
+        // The default has to stay free: capturing allocates a String per line on
+        // the scroll path, and a 100MB `cat` scrolls a great many lines.
+        let mut g = Grid::new(20, 3, 2);
+        feed(&mut g, 12);
+        assert!(g.take_evicted().is_empty(), "captured without being asked to");
+    }
+
+    #[test]
+    fn rows_that_fall_off_the_top_come_back_in_order() {
+        // The whole point: past the ring's limit the oldest row is recycled into
+        // the newest, so this is the last moment its content exists anywhere.
+        let mut g = Grid::new(20, 3, 2);
+        g.capture_evicted(true);
+        feed(&mut g, 12);
+
+        let got = g.take_evicted();
+        assert!(!got.is_empty(), "rows were evicted and none were captured");
+        let ids: Vec<LineId> = got.iter().map(|e| e.id).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted, "oldest first, or a client prepends history backwards");
+    }
+
+    #[test]
+    fn taking_drains_rather_than_repeating() {
+        // The caller is writing these somewhere durable. A buffer that only
+        // grows is a leak, and one that repeats duplicates a session's history.
+        let mut g = Grid::new(20, 3, 2);
+        g.capture_evicted(true);
+        feed(&mut g, 12);
+        assert!(!g.take_evicted().is_empty());
+        assert!(g.take_evicted().is_empty(), "the same rows came back twice");
+    }
+
+    #[test]
+    fn trailing_blanks_are_not_stored() {
+        // A row is `cols` cells wide whatever was printed into it. Storing the
+        // padding would make a history of short lines cost a full-width row each.
+        let mut g = Grid::new(80, 3, 1);
+        g.capture_evicted(true);
+        feed(&mut g, 8);
+        for e in g.take_evicted() {
+            assert!(e.text.len() < 80, "padding was stored: {:?}", e.text);
+        }
     }
 }
 
