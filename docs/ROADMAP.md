@@ -671,6 +671,17 @@ didn't want to switch back."* Not feature parity with WezTerm.
 **Win condition:** *"My Mac's shell, in a window on my Windows box, at desk
 latency."*
 
+**Met, 2026-08-08.** `zesterm --attach <mac>:7717` on the Windows box, pairing
+approved with the six-digit code compared on both machines, and
+`andii@Andreass-MacBook-Air main %` in a GPU-rendered window — `uname -a`
+typed on one machine and answered by the other's kernel. The whole bring-up,
+including the three bugs it found (a watchdog cutting connections that were
+waiting for a person, swallowed approver answers (#21), and the attach example
+having no TCP transport at all), is logged blow-by-blow on
+[#20](https://github.com/zesterm/zesterm/issues/20). Remaining before M3 is
+*closed*: stored identities so a window does not need re-approval per launch,
+and latency instrumentation to put a number on "desk latency".
+
 No Cloudflare, no identity infrastructure — which is what makes this reachable
 much sooner than the old "phone over the internet" framing. → WS-C1, WS-F,
 WS-H (discovery only).
