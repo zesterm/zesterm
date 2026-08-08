@@ -28,9 +28,11 @@
 
 use std::collections::HashMap;
 
-use zest_core::{Cell, CellFlags, Color, Grid, Modes};
+use zest_core::{BlockIndex, Cell, CellFlags, Color, Grid, Modes};
 
-use crate::delta::{AttrDef, AttrId, CellMarks, CursorState, Delta, DeltaOp, Run, RowPayload};
+use crate::delta::{
+    AttrDef, AttrId, BlockPayload, CellMarks, CursorState, Delta, DeltaOp, Run, RowPayload,
+};
 
 /// What makes two cells share a run.
 type AttrKey = (Color, Color, CellFlags);
@@ -46,6 +48,12 @@ pub struct Encoder {
     pending_attrs: Vec<AttrDef>,
     /// Rows as the subscriber last saw them.
     seen: Vec<RowPayload>,
+    /// Blocks as the subscriber last saw them, ascending by id.
+    ///
+    /// A shadow for the same reason `seen` is one: a "block changed" flag set
+    /// at each of the four marker handlers is a flag somebody forgets, and the
+    /// symptom is a phone showing a command as still running forever.
+    seen_blocks: Vec<BlockPayload>,
     cursor: CursorState,
     /// The whole mode set, not just the alternate-screen bit.
     ///
@@ -69,6 +77,7 @@ impl Encoder {
             attrs: HashMap::new(),
             pending_attrs: Vec::new(),
             seen: Vec::new(),
+            seen_blocks: Vec::new(),
             cursor: CursorState { row: 0, col: 0, visible: true, shape: 0 },
             modes: Modes::empty(),
             title: String::new(),
@@ -162,6 +171,7 @@ impl Encoder {
         cursor: CursorState,
         modes: Modes,
         title: &str,
+        blocks: &BlockIndex,
     ) -> Keyframe {
         // Interning is *not* reset. A keyframe re-sends every attribute it uses
         // because the client may be new, but reusing the same ids keeps a later
@@ -173,6 +183,11 @@ impl Encoder {
         self.cursor = cursor;
         self.modes = modes;
         self.title = title.to_string();
+        // A keyframe is a complete state, so it carries every block rather than
+        // the ones that changed — the client may be new, and a block it never
+        // received is a command that vanished from its history.
+        self.seen_blocks =
+            blocks.blocks().iter().map(BlockPayload::from_block).collect();
 
         Keyframe {
             cols: u16::try_from(grid.cols()).unwrap_or(u16::MAX),
@@ -181,6 +196,7 @@ impl Encoder {
             attrs,
             cursor,
             modes,
+            blocks: self.seen_blocks.clone(),
         }
     }
 
@@ -212,8 +228,51 @@ impl Encoder {
         v
     }
 
+    /// Blocks that changed since the subscriber last saw them.
+    ///
+    /// A merge rather than a search: both lists are ascending by id — the index
+    /// appends and evicts from the front — so this is linear where a `contains`
+    /// per block would be quadratic in the number of commands a long-lived
+    /// session has run.
+    ///
+    /// A block the host has *evicted* is simply absent, and nothing says so.
+    /// That is deliberate: the client evicts on its own scrollback bound
+    /// through the same code, and a client configured to keep more history than
+    /// the host should keep more, not be told to forget.
+    fn diff_blocks(&mut self, blocks: &BlockIndex) -> Vec<BlockPayload> {
+        let fresh: Vec<BlockPayload> =
+            blocks.blocks().iter().map(BlockPayload::from_block).collect();
+
+        let mut changed = Vec::new();
+        let mut old = self.seen_blocks.iter().peekable();
+        for b in &fresh {
+            while old.peek().is_some_and(|o| o.id < b.id) {
+                old.next();
+            }
+            match old.peek() {
+                Some(o) if o.id == b.id => {
+                    if *o != b {
+                        changed.push(b.clone());
+                    }
+                    old.next();
+                }
+                _ => changed.push(b.clone()),
+            }
+        }
+
+        self.seen_blocks = fresh;
+        changed
+    }
+
     /// What changed since the last `keyframe` or `delta`.
-    pub fn delta(&mut self, grid: &Grid, cursor: CursorState, modes: Modes, title: &str) -> Delta {
+    pub fn delta(
+        &mut self,
+        grid: &Grid,
+        cursor: CursorState,
+        modes: Modes,
+        title: &str,
+        blocks: &BlockIndex,
+    ) -> Delta {
         let mut ops = Vec::new();
 
         // A screen switch comes before everything, including the scroll.
@@ -291,7 +350,11 @@ impl Encoder {
             self.title = title.to_string();
         }
 
-        Delta { attrs: std::mem::take(&mut self.pending_attrs), ops }
+        Delta {
+            attrs: std::mem::take(&mut self.pending_attrs),
+            ops,
+            blocks: self.diff_blocks(blocks),
+        }
     }
 }
 
@@ -309,6 +372,13 @@ pub struct Keyframe {
     /// keystrokes, so leaving modes out would mean a freshly attached session
     /// has broken arrow keys until the host next happens to change a mode.
     pub modes: Modes,
+    /// Every block the host holds, not just the ones that changed.
+    ///
+    /// A client attaching to a session that has been running for a week is the
+    /// case this exists for: its command history is exactly this list, and it
+    /// has no other way to learn about a command that finished before it
+    /// arrived.
+    pub blocks: Vec<BlockPayload>,
 }
 
 #[cfg(test)]
@@ -332,9 +402,9 @@ mod tests {
         // must not generate traffic any more than it generates frames.
         let t = term(20, 5, "hello");
         let mut e = Encoder::new();
-        e.keyframe(t.grid(), cursor(), Modes::empty(), "");
+        e.keyframe(t.grid(), cursor(), Modes::empty(), "", t.blocks());
 
-        let d = e.delta(t.grid(), cursor(), Modes::empty(), "");
+        let d = e.delta(t.grid(), cursor(), Modes::empty(), "", t.blocks());
         assert!(d.ops.is_empty(), "an idle terminal produced {:?}", d.ops);
         assert!(d.attrs.is_empty());
     }
@@ -343,10 +413,10 @@ mod tests {
     fn only_the_changed_row_is_sent() {
         let mut t = term(20, 5, "one\r\ntwo\r\n");
         let mut e = Encoder::new();
-        e.keyframe(t.grid(), cursor(), Modes::empty(), "");
+        e.keyframe(t.grid(), cursor(), Modes::empty(), "", t.blocks());
 
         t.advance(b"three");
-        let d = e.delta(t.grid(), cursor(), Modes::empty(), "");
+        let d = e.delta(t.grid(), cursor(), Modes::empty(), "", t.blocks());
         let rows: Vec<u16> = d
             .ops
             .iter()
@@ -365,11 +435,11 @@ mod tests {
         // times per row.
         let mut t = term(40, 5, "\x1b[31mred\x1b[0m plain\r\n");
         let mut e = Encoder::new();
-        e.keyframe(t.grid(), cursor(), Modes::empty(), "");
+        e.keyframe(t.grid(), cursor(), Modes::empty(), "", t.blocks());
         let defined = e.attrs.len();
 
         t.advance(b"\x1b[31mred again\x1b[0m\r\n");
-        let d = e.delta(t.grid(), cursor(), Modes::empty(), "");
+        let d = e.delta(t.grid(), cursor(), Modes::empty(), "", t.blocks());
         assert!(
             d.attrs.is_empty(),
             "redefined an attribute that was already sent: {:?}",
@@ -382,14 +452,14 @@ mod tests {
     fn a_new_colour_is_defined_exactly_once() {
         let mut t = term(40, 5, "plain\r\n");
         let mut e = Encoder::new();
-        e.keyframe(t.grid(), cursor(), Modes::empty(), "");
+        e.keyframe(t.grid(), cursor(), Modes::empty(), "", t.blocks());
 
         t.advance(b"\x1b[38;2;1;2;3mtruecolor\x1b[0m\r\n");
-        let first = e.delta(t.grid(), cursor(), Modes::empty(), "");
+        let first = e.delta(t.grid(), cursor(), Modes::empty(), "", t.blocks());
         assert_eq!(first.attrs.len(), 1, "expected one new attribute: {:?}", first.attrs);
 
         t.advance(b"\x1b[38;2;1;2;3magain\x1b[0m\r\n");
-        let second = e.delta(t.grid(), cursor(), Modes::empty(), "");
+        let second = e.delta(t.grid(), cursor(), Modes::empty(), "", t.blocks());
         assert!(second.attrs.is_empty(), "redefined it: {:?}", second.attrs);
     }
 
@@ -400,10 +470,10 @@ mod tests {
         // moves it lands in a position the scroll is about to overwrite.
         let mut t = term(20, 3, "a\r\nb\r\nc");
         let mut e = Encoder::new();
-        e.keyframe(t.grid(), cursor(), Modes::empty(), "");
+        e.keyframe(t.grid(), cursor(), Modes::empty(), "", t.blocks());
 
         t.advance(b"\r\nd");
-        let d = e.delta(t.grid(), cursor(), Modes::empty(), "");
+        let d = e.delta(t.grid(), cursor(), Modes::empty(), "", t.blocks());
 
         assert!(d.scrolls_come_first(), "row before scroll: {:?}", d.ops);
         let scrolls: Vec<&DeltaOp> =
@@ -422,10 +492,10 @@ mod tests {
         // so a line leaving the viewport has to be handed over as it goes.
         let mut t = term(20, 3, "first\r\nb\r\nc");
         let mut e = Encoder::new();
-        e.keyframe(t.grid(), cursor(), Modes::empty(), "");
+        e.keyframe(t.grid(), cursor(), Modes::empty(), "", t.blocks());
 
         t.advance(b"\r\nd");
-        let d = e.delta(t.grid(), cursor(), Modes::empty(), "");
+        let d = e.delta(t.grid(), cursor(), Modes::empty(), "", t.blocks());
         let pushed: Vec<&RowPayload> = d
             .ops
             .iter()
@@ -444,12 +514,12 @@ mod tests {
         // emit a scroll the client cannot use, followed by every row anyway.
         let mut t = term(20, 3, "a\r\nb\r\nc");
         let mut e = Encoder::new();
-        e.keyframe(t.grid(), cursor(), Modes::empty(), "");
+        e.keyframe(t.grid(), cursor(), Modes::empty(), "", t.blocks());
 
         for _ in 0..10 {
             t.advance(b"\r\nx");
         }
-        let d = e.delta(t.grid(), cursor(), Modes::empty(), "");
+        let d = e.delta(t.grid(), cursor(), Modes::empty(), "", t.blocks());
         assert!(
             !d.ops.iter().any(|o| matches!(o, DeltaOp::Scroll { .. })),
             "a full-screen replacement was reported as a scroll: {:?}",
@@ -463,7 +533,7 @@ mod tests {
         // would draw everything after this in the wrong column.
         let t = term(20, 2, "世");
         let mut e = Encoder::new();
-        let k = e.keyframe(t.grid(), cursor(), Modes::empty(), "");
+        let k = e.keyframe(t.grid(), cursor(), Modes::empty(), "", t.blocks());
         let row = &k.rows_data[0];
         let total: u16 = row.runs.iter().map(|r| r.cells).sum();
         let text: String = row.runs.iter().map(|r| r.text.as_str()).collect();
@@ -477,7 +547,7 @@ mod tests {
         // every time anything on it changes.
         let t = term(200, 2, "hi");
         let mut e = Encoder::new();
-        let k = e.keyframe(t.grid(), cursor(), Modes::empty(), "");
+        let k = e.keyframe(t.grid(), cursor(), Modes::empty(), "", t.blocks());
         let total: u16 = k.rows_data[0].runs.iter().map(|r| r.cells).sum();
         assert_eq!(total, 2, "trailing blanks were encoded");
     }
@@ -486,14 +556,14 @@ mod tests {
     fn a_cursor_move_is_reported_once() {
         let mut t = term(20, 3, "ab");
         let mut e = Encoder::new();
-        e.keyframe(t.grid(), CursorState { row: 0, col: 2, ..cursor() }, Modes::empty(), "");
+        e.keyframe(t.grid(), CursorState { row: 0, col: 2, ..cursor() }, Modes::empty(), "", t.blocks());
 
         let moved = CursorState { row: 1, col: 0, visible: true, shape: 0 };
-        let d = e.delta(t.grid(), moved, Modes::empty(), "");
+        let d = e.delta(t.grid(), moved, Modes::empty(), "", t.blocks());
         assert_eq!(d.ops.iter().filter(|o| matches!(o, DeltaOp::Cursor { .. })).count(), 1);
 
         t.advance(b"");
-        let again = e.delta(t.grid(), moved, Modes::empty(), "");
+        let again = e.delta(t.grid(), moved, Modes::empty(), "", t.blocks());
         assert!(
             !again.ops.iter().any(|o| matches!(o, DeltaOp::Cursor { .. })),
             "reported a cursor that did not move"
@@ -506,7 +576,7 @@ mod tests {
         // this signal, so it must arrive as an event rather than being inferred.
         let mut t = term(20, 3, "shell");
         let mut e = Encoder::new();
-        e.keyframe(t.grid(), cursor(), Modes::empty(), "");
+        e.keyframe(t.grid(), cursor(), Modes::empty(), "", t.blocks());
 
         t.advance(b"\x1b[?1049h");
         assert!(
@@ -514,7 +584,7 @@ mod tests {
             "the fixture did not enter the alt screen"
         );
 
-        let d = e.delta(t.grid(), cursor(), t.modes(), "");
+        let d = e.delta(t.grid(), cursor(), t.modes(), "", t.blocks());
         assert!(
             d.ops.iter().any(|o| matches!(o, DeltaOp::AltScreen { active: true })),
             "{:?}",
@@ -540,10 +610,10 @@ mod tests {
         // that was wrong.
         let mut t = term(20, 3, "shell prompt here");
         let mut e = Encoder::new();
-        e.keyframe(t.grid(), cursor(), Modes::empty(), "");
+        e.keyframe(t.grid(), cursor(), Modes::empty(), "", t.blocks());
 
         t.advance(b"\x1b[?1049h\x1b[HVIM IS RUNNING");
-        let d = e.delta(t.grid(), cursor(), t.modes(), "");
+        let d = e.delta(t.grid(), cursor(), t.modes(), "", t.blocks());
 
         assert!(
             d.ops.iter().any(|o| matches!(o, DeltaOp::Row { .. })),
@@ -560,10 +630,10 @@ mod tests {
         // alone decides whether an arrow key is `ESC [ A` or `ESC O A`.
         let mut t = term(20, 3, "");
         let mut e = Encoder::new();
-        e.keyframe(t.grid(), cursor(), Modes::empty(), "");
+        e.keyframe(t.grid(), cursor(), Modes::empty(), "", t.blocks());
 
         t.advance(b"\x1b[?1h\x1b[?2004h"); // DECCKM, bracketed paste
-        let d = e.delta(t.grid(), cursor(), t.modes(), "");
+        let d = e.delta(t.grid(), cursor(), t.modes(), "", t.blocks());
 
         let bits = d
             .ops
@@ -585,14 +655,14 @@ mod tests {
         // uses to stay at 0% idle.
         let mut t = term(20, 3, "");
         let mut e = Encoder::new();
-        e.keyframe(t.grid(), cursor(), Modes::empty(), "");
+        e.keyframe(t.grid(), cursor(), Modes::empty(), "", t.blocks());
 
         t.advance(b"\x1b[?1h");
-        let first = e.delta(t.grid(), cursor(), t.modes(), "");
+        let first = e.delta(t.grid(), cursor(), t.modes(), "", t.blocks());
         assert!(first.ops.iter().any(|o| matches!(o, DeltaOp::Modes { .. })));
 
         t.advance(b"x");
-        let second = e.delta(t.grid(), cursor(), t.modes(), "");
+        let second = e.delta(t.grid(), cursor(), t.modes(), "", t.blocks());
         assert!(
             !second.ops.iter().any(|o| matches!(o, DeltaOp::Modes { .. })),
             "modes were re-sent unchanged: {:?}",
@@ -607,7 +677,7 @@ mod tests {
         // colours until every style happened to change.
         let t = term(40, 3, "\x1b[31mred\x1b[0m \x1b[32mgreen\x1b[0m");
         let mut e = Encoder::new();
-        let k = e.keyframe(t.grid(), cursor(), Modes::empty(), "");
+        let k = e.keyframe(t.grid(), cursor(), Modes::empty(), "", t.blocks());
 
         let used: std::collections::HashSet<AttrId> =
             k.rows_data.iter().flat_map(|r| r.runs.iter().map(|run| run.attr)).collect();
@@ -628,11 +698,11 @@ mod tests {
         let t = term(40, 3, "\x1b[31ma\x1b[32mb\x1b[34mc\x1b[0m");
         let first = {
             let mut e = Encoder::new();
-            e.keyframe(t.grid(), cursor(), Modes::empty(), "").attrs
+            e.keyframe(t.grid(), cursor(), Modes::empty(), "", t.blocks()).attrs
         };
         let second = {
             let mut e = Encoder::new();
-            e.keyframe(t.grid(), cursor(), Modes::empty(), "").attrs
+            e.keyframe(t.grid(), cursor(), Modes::empty(), "", t.blocks()).attrs
         };
         assert_eq!(first, second);
     }

@@ -189,7 +189,7 @@ impl Session {
         let mut encoder = Encoder::new();
         let (keyframe, seq) = {
             let term = self.terminal.lock().expect("terminal lock");
-            let k = encoder.keyframe(term.grid(), cursor_of(&term), term.modes(), &self.title());
+            let k = encoder.keyframe(term.grid(), cursor_of(&term), term.modes(), &self.title(), term.blocks());
             (k, ChangeSource::seq(&*term))
         };
 
@@ -219,7 +219,7 @@ impl Session {
         let term = self.terminal.lock().expect("terminal lock");
         let seq = ChangeSource::seq(&*term);
         let title = self.title.lock().expect("title lock").clone();
-        let k = sub.encoder.keyframe(term.grid(), cursor_of(&term), term.modes(), &title);
+        let k = sub.encoder.keyframe(term.grid(), cursor_of(&term), term.modes(), &title, term.blocks());
         // A keyframe *is* the new baseline: the encoder's shadow now holds
         // exactly what was sent, so the next delta is a difference from it.
         sub.sent = seq;
@@ -281,21 +281,26 @@ impl Session {
         // threshold and turn every frame into a full repaint.
         let out = if sub.needs_keyframe {
             sub.needs_keyframe = false;
-            Update::Keyframe(sub.encoder.keyframe(term.grid(), cursor, modes, &title))
+            Update::Keyframe(sub.encoder.keyframe(term.grid(), cursor, modes, &title, term.blocks()))
         } else {
             match ChangeSource::update_for(&*term, sub.sent) {
                 zest_core::Update::Idle => return None,
                 // Far enough behind that the delta chain would exceed the state
                 // it describes. Normal after a sleep, not an error.
                 zest_core::Update::Keyframe { .. } => {
-                    Update::Keyframe(sub.encoder.keyframe(term.grid(), cursor, modes, &title))
+                    Update::Keyframe(sub.encoder.keyframe(term.grid(), cursor, modes, &title, term.blocks()))
                 }
                 zest_core::Update::Delta { .. } => {
-                    let d = sub.encoder.delta(term.grid(), cursor, modes, &title);
-                    if d.ops.is_empty() && d.attrs.is_empty() {
+                    let d = sub.encoder.delta(term.grid(), cursor, modes, &title, term.blocks());
+                    if d.ops.is_empty() && d.attrs.is_empty() && d.blocks.is_empty() {
                         // The sequence moved but nothing observable changed -- a
                         // cursor save, a mode the client already has. Advance
                         // the baseline and send nothing.
+                        //
+                        // `blocks` belongs in this test, not outside it: a
+                        // command that finished having printed nothing new
+                        // changes only its block, and dropping that batch would
+                        // leave the client showing it as running forever.
                         sub.sent = seq;
                         return None;
                     }
@@ -398,6 +403,17 @@ impl Session {
             u16::try_from(term.grid().cols()).unwrap_or(u16::MAX),
             u16::try_from(term.grid().rows()).unwrap_or(u16::MAX),
         )
+    }
+
+    /// Where the shell says it is, from OSC 7.
+    ///
+    /// Empty until a shell reports one, which is what shell integration
+    /// installs. Not guessed from the child's process state: that answers where
+    /// the *process* is, which stops being where the next command runs the
+    /// moment a subshell is involved.
+    #[must_use]
+    pub fn cwd(&self) -> String {
+        self.terminal.lock().map(|t| t.cwd().to_string()).unwrap_or_default()
     }
 
     #[must_use]

@@ -96,6 +96,12 @@ impl Applier {
         self.sync_lines(term, max_line);
         self.apply_cursor(term, k.cursor);
 
+        // Blocks after the rows, always: they name absolute line ids, and
+        // `sync_lines` above is what makes this grid's numbering the host's.
+        for b in &k.blocks {
+            term.remote().upsert_block(b.to_block());
+        }
+
         term.remote().mark_full();
         term.remote().set_seq(seq);
         self.applied = seq;
@@ -187,6 +193,15 @@ impl Applier {
         }
 
         self.sync_lines(term, max_line);
+
+        // Blocks are applied after every op, not interleaved with them, because
+        // they name absolute line ids that the rows in this same batch have just
+        // established. Order among themselves does not matter — they are keyed
+        // upserts, which is why they are a field rather than a `DeltaOp`.
+        for b in &d.blocks {
+            term.remote().upsert_block(b.to_block());
+        }
+
         term.remote().set_seq(seq);
         // Only advance on a clean apply. A partially applied batch is a state
         // the host cannot compute a delta against, so the next one must be
@@ -324,7 +339,7 @@ mod tests {
                 app: Applier::new(),
                 seq: 0,
             };
-            let k = p.enc.keyframe(p.host.grid(), cursor(), p.host.modes(), "");
+            let k = p.enc.keyframe(p.host.grid(), cursor(), p.host.modes(), "", p.host.blocks());
             p.app.apply_keyframe(&mut p.client, &k, 0);
             p
         }
@@ -340,7 +355,7 @@ mod tests {
             self.host.advance(bytes);
             self.seq += 1;
             let base = self.app.applied();
-            let d = self.enc.delta(self.host.grid(), cursor(), self.host.modes(), "");
+            let d = self.enc.delta(self.host.grid(), cursor(), self.host.modes(), "", self.host.blocks());
             assert_eq!(
                 self.app.apply_delta(&mut self.client, &d, base, self.seq),
                 Applied::Ok,
@@ -477,6 +492,7 @@ mod tests {
         // host resizes and the next delta describes a taller grid.
         let mut p = Pair::new(20, 3);
         let d = Delta {
+            blocks: Vec::new(),
             attrs: vec![AttrDef {
                 id: AttrId(0),
                 fg: zest_core::Color::Default,
@@ -501,6 +517,7 @@ mod tests {
     fn a_run_naming_an_undefined_attribute_asks_for_a_keyframe() {
         let mut p = Pair::new(20, 3);
         let d = Delta {
+            blocks: Vec::new(),
             attrs: Vec::new(),
             ops: vec![DeltaOp::Row {
                 row: 0,
@@ -537,6 +554,7 @@ mod tests {
         p.feed(b"\x1b[41m          \x1b[0m");
         let bg = zest_core::Color::Indexed(1);
         let d = Delta {
+            blocks: Vec::new(),
             attrs: vec![AttrDef {
                 id: AttrId(200),
                 fg: zest_core::Color::Default,

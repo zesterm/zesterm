@@ -217,6 +217,20 @@ impl RemoteWriter<'_> {
         self.state.resize(cols, rows);
     }
 
+    /// Insert or replace a command block the host computed.
+    ///
+    /// Blocks arrive whole rather than as markers to replay: the shell talked to
+    /// the machine it runs on, and that machine's parser already decided where
+    /// the command began. A client re-deriving them from the grid would be the
+    /// second VT interpretation ADR-004 exists to avoid.
+    ///
+    /// The lines it names are meaningful here only because
+    /// [`Self::sync_next_line_id`] keeps this grid's numbering the host's.
+    pub fn upsert_block(&mut self, block: crate::Block) {
+        self.state.blocks.upsert(block);
+        self.state.touch();
+    }
+
     // --- bookkeeping -----------------------------------------------------
 
     /// Adopt the host's sequence number. **Assigned, never incremented.**

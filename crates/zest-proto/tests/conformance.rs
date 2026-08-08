@@ -22,7 +22,7 @@
 use zest_core::{Modes, Terminal};
 use zest_proto::apply::{Applied, Applier};
 use zest_proto::decode::GridView;
-use zest_proto::delta::CursorState;
+use zest_proto::delta::{BlockPayload, CursorState};
 use zest_proto::encode::Encoder;
 
 const CORPUS: &[&str] =
@@ -127,13 +127,13 @@ fn replay(name: &str, cols: usize, rows: usize) {
     let mut client = Terminal::new(cols, rows, 2000);
     let mut applier = Applier::new();
 
-    let k = enc.keyframe(term.grid(), cursor(&term), term.modes(), "");
+    let k = enc.keyframe(term.grid(), cursor(&term), term.modes(), "", term.blocks());
     view.apply_keyframe(&k);
     applier.apply_keyframe(&mut client, &k, 0);
 
     for (step, chunk) in chunks(name).iter().enumerate() {
         term.advance(chunk);
-        let d = enc.delta(term.grid(), cursor(&term), term.modes(), "");
+        let d = enc.delta(term.grid(), cursor(&term), term.modes(), "", term.blocks());
 
         // Both ordering invariants, on every real delta the encoder produces.
         // These are producer bugs, so asserting here catches them against five
@@ -153,7 +153,7 @@ fn replay(name: &str, cols: usize, rows: usize) {
 
         // Reference 1: the incremental path must match the full one.
         let mut probe = Encoder::new();
-        let truth = probe.keyframe(term.grid(), cursor(&term), term.modes(), "");
+        let truth = probe.keyframe(term.grid(), cursor(&term), term.modes(), "", term.blocks());
         assert_eq!(
             view.rows().len(),
             truth.rows_data.len(),
@@ -217,13 +217,162 @@ fn replay(name: &str, cols: usize, rows: usize) {
             term.seq(),
             "{name} step {step}: the client would acknowledge the wrong sequence"
         );
+        assert_blocks_agree(&term, &client, &view, name, step);
     }
+}
+
+/// All three participants must hold the same command blocks.
+///
+/// **Vacuous against the current corpus, deliberately.** None of the five
+/// recordings contains OSC 133, because nothing emitted it when they were
+/// captured — so what this catches today is a *regression to non-empty*, and it
+/// becomes real the moment a session recorded through shell integration is
+/// added. `blocks_survive_the_wire` below is the non-vacuous half.
+fn assert_blocks_agree(
+    host: &Terminal,
+    client: &Terminal,
+    view: &GridView,
+    name: &str,
+    step: usize,
+) {
+    assert_eq!(
+        client.blocks().blocks(),
+        host.blocks().blocks(),
+        "{name} step {step}: the client's command blocks diverged from the host's"
+    );
+
+    // The TypeScript reference has to agree too, and it holds the wire form
+    // rather than the core one -- so compare through the conversion, which is
+    // also the thing a client author gets wrong.
+    let host_wire: Vec<_> = host.blocks().blocks().iter().map(BlockPayload::from_block).collect();
+    assert_eq!(
+        view.blocks, host_wire,
+        "{name} step {step}: GridView and the host disagree about the block list"
+    );
 }
 
 /// The two references must agree about an op neither has ever received.
 ///
 /// `DeltaOp::Erase` is not emitted by the current encoder, so nothing in the
 /// corpus exercises it and the replay above cannot reach it. Both `GridView`
+/// A session with real command blocks, driven all the way through the wire.
+///
+/// The corpus cannot cover this: none of the five recordings contains OSC 133,
+/// because nothing emitted it when they were captured. So this is the test that
+/// makes `assert_blocks_agree` mean something, in the same shape as
+/// `both_references_read_erase_the_same_way` below — a hand-built session for
+/// something the recordings cannot reach.
+///
+/// It drives a *running* command as well as a finished one, because those are
+/// two different wire states and only one of them has an end line.
+#[test]
+fn blocks_survive_the_wire() {
+    let mut host = Terminal::new(40, 6, 200);
+    let mut client = Terminal::new(40, 6, 200);
+    let mut enc = Encoder::new();
+    let mut view = GridView::new();
+    let mut applier = Applier::new();
+
+    let k = enc.keyframe(host.grid(), cursor(&host), host.modes(), "", host.blocks());
+    view.apply_keyframe(&k);
+    applier.apply_keyframe(&mut client, &k, host.seq());
+
+    // Each chunk is one step a shell would actually produce, applied on its own
+    // so a block is compared while half-formed rather than only once complete.
+    let script: &[&[u8]] = &[
+        b"\x1b]7;file:///tmp/build\x07\x1b]133;A\x07$ ",
+        b"\x1b]133;B\x07cargo build\x1b]133;C\x07\r\n",
+        b"   Compiling zest-core\r\n",
+        b"\x1b]133;D;0\x07\x1b]133;A\x07$ ",
+        b"\x1b]133;B\x07tail -f log\x1b]133;C\x07\r\n",
+        b"waiting\r\n",
+    ];
+
+    for (step, chunk) in script.iter().enumerate() {
+        host.advance(chunk);
+        let d = enc.delta(host.grid(), cursor(&host), host.modes(), "", host.blocks());
+        view.apply_delta(&d);
+        let base = applier.applied();
+        assert_eq!(
+            applier.apply_delta(&mut client, &d, base, host.seq()),
+            Applied::Ok,
+            "step {step}"
+        );
+        assert_blocks_agree(&host, &client, &view, "blocks", step);
+    }
+
+    // And the host actually produced what the test claims to be checking —
+    // without this, an index that stayed empty would satisfy every assertion
+    // above.
+    let blocks = client.blocks().blocks();
+    assert_eq!(blocks.len(), 2, "two prompts, two blocks");
+    assert_eq!(blocks[0].command, "cargo build");
+    assert_eq!(blocks[0].cwd, "/tmp/build");
+    assert!(!blocks[0].failed());
+    assert_eq!(blocks[1].command, "tail -f log");
+    assert!(blocks[1].is_running(), "the second command has not ended");
+    assert_eq!(blocks[1].end_line, None, "so it has no end line to send");
+}
+
+/// An unchanged block is not re-sent.
+///
+/// The 0%-idle guarantee extended to blocks. Sending the whole index whenever
+/// anything at all changed would pass every correctness test above while
+/// putting a week of command history on the wire on each keystroke — and the
+/// daemon's empty-delta check would stop suppressing anything, because no delta
+/// would ever be empty again.
+#[test]
+fn blocks_are_sent_once_and_not_repeated() {
+    let mut host = Terminal::new(40, 6, 200);
+    let mut enc = Encoder::new();
+    enc.keyframe(host.grid(), cursor(&host), host.modes(), "", host.blocks());
+
+    host.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\n");
+    let first = enc.delta(host.grid(), cursor(&host), host.modes(), "", host.blocks());
+    assert_eq!(first.blocks.len(), 1, "the new block is sent");
+
+    // Output that does not touch the block: it is still running, still the same
+    // command, still open-ended.
+    host.advance(b"a\r\n");
+    let second = enc.delta(host.grid(), cursor(&host), host.modes(), "", host.blocks());
+    assert!(
+        second.blocks.is_empty(),
+        "an unchanged block was re-sent: {:?}",
+        second.blocks
+    );
+
+    // And when it does change, it is sent again -- so the emptiness above is
+    // suppression, not a shadow that stopped updating.
+    host.advance(b"\x1b]133;D;0\x07");
+    let third = enc.delta(host.grid(), cursor(&host), host.modes(), "", host.blocks());
+    assert_eq!(third.blocks.len(), 1, "the finished block is sent");
+    assert!(third.blocks[0].end_line.is_some());
+}
+
+/// A client that attaches to a session already running carries its history.
+///
+/// The delta path above only ever sends what *changed*, so a client joining
+/// late learns nothing from it. A week-old session's command history is exactly
+/// the keyframe's block list, and there is no other way to obtain it.
+#[test]
+fn a_keyframe_carries_every_block_a_late_client_missed() {
+    let mut host = Terminal::new(40, 6, 200);
+    host.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07make\x1b]133;C\x07\r\nout\r\n\x1b]133;D;2\x07");
+
+    // A brand-new subscriber, as `Session::attach_with` builds one.
+    let mut enc = Encoder::new();
+    let mut client = Terminal::new(40, 6, 200);
+    let mut applier = Applier::new();
+    let k = enc.keyframe(host.grid(), cursor(&host), host.modes(), "", host.blocks());
+
+    assert_eq!(k.blocks.len(), 1, "the keyframe carries the history, not just changes");
+    applier.apply_keyframe(&mut client, &k, host.seq());
+
+    let b = client.blocks().last().expect("the client learned about it");
+    assert_eq!(b.command, "make");
+    assert!(b.failed(), "exit 2 crossed the wire as a failure");
+}
+
 /// and `Applier` implement it, and if their readings differ, the first person
 /// to find out is whoever writes the encoder that starts sending it — or worse,
 /// a client author whose grid quietly disagrees with the desktop's.
@@ -237,13 +386,14 @@ fn both_references_read_erase_the_same_way() {
     let mut client = Terminal::new(20, 3, 100);
     let mut applier = Applier::new();
 
-    let k = enc.keyframe(term.grid(), cursor(&term), term.modes(), "");
+    let k = enc.keyframe(term.grid(), cursor(&term), term.modes(), "", term.blocks());
     view.apply_keyframe(&k);
     applier.apply_keyframe(&mut client, &k, term.seq());
 
     let bg = zest_core::Color::Indexed(4);
     let attr = zest_proto::AttrId(9_000);
     let d = zest_proto::Delta {
+        blocks: Vec::new(),
         attrs: vec![zest_proto::AttrDef {
             id: attr,
             fg: zest_core::Color::Default,
@@ -390,18 +540,18 @@ fn resyncing_at_every_point_lands_in_the_same_place() {
             let mut enc = Encoder::new();
             let mut view = GridView::new();
         
-            view.apply_keyframe(&enc.keyframe(term.grid(), cursor(&term), term.modes(), ""));
+            view.apply_keyframe(&enc.keyframe(term.grid(), cursor(&term), term.modes(), "", term.blocks()));
 
             for (i, chunk) in all.iter().enumerate() {
                 term.advance(chunk);
                 if i == drop_at {
                     // The connection dropped: the client missed this delta
                     // entirely and is resynced with a keyframe instead.
-                    let _lost = enc.delta(term.grid(), cursor(&term), term.modes(), "");
-                    let k = enc.keyframe(term.grid(), cursor(&term), term.modes(), "");
+                    let _lost = enc.delta(term.grid(), cursor(&term), term.modes(), "", term.blocks());
+                    let k = enc.keyframe(term.grid(), cursor(&term), term.modes(), "", term.blocks());
                     view.apply_keyframe(&k);
                 } else {
-                    view.apply_delta(&enc.delta(term.grid(), cursor(&term), term.modes(), ""));
+                    view.apply_delta(&enc.delta(term.grid(), cursor(&term), term.modes(), "", term.blocks()));
                 }
             }
 

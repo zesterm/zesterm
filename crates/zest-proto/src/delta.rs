@@ -187,6 +187,99 @@ pub enum DeltaOp {
     Modes { bits: u32 },
 }
 
+/// How a command ended.
+///
+/// Mirrors `zest_core::BlockState` rather than reusing it, for the same reason
+/// [`RowPayload`] mirrors a `Row`: the wire type carries a `ts_rs` derive, and
+/// `zest-core` has to keep building for `wasm32` with no such dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum BlockState {
+    /// The prompt is showing; nothing has been submitted.
+    Prompt,
+    /// Submitted, still producing output.
+    Running,
+    /// Finished, with the shell's exit status if it reported one.
+    ///
+    /// `None` is not zero. A shell that emits OSC 133 D without the status
+    /// parameter is common, and a client that renders a green tick for a
+    /// command that actually failed is worse than one that renders nothing.
+    Finished { exit_code: Option<i32> },
+}
+
+/// One command and its output, as the host has it.
+///
+/// Line ids are `i64` to match [`RowPayload::line`] — a client compares the two
+/// to decide which rows a block covers, and two integer types that must agree
+/// is a conversion bug waiting for a session long enough to matter.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct BlockPayload {
+    /// Stable for the life of the session; the key an upsert replaces on.
+    pub id: u32,
+    /// First line of the prompt (OSC 133;A).
+    pub prompt_line: i64,
+    /// First line of command output (OSC 133;C), once it starts.
+    pub output_line: Option<i64>,
+    /// Last line, once the command has finished (OSC 133;D).
+    ///
+    /// `None` while it runs, and a client must render such a block to the
+    /// bottom rather than waiting — that is what makes a long build readable
+    /// while it happens instead of only afterwards.
+    pub end_line: Option<i64>,
+    pub state: BlockState,
+    pub command: String,
+    pub cwd: String,
+}
+
+impl BlockPayload {
+    /// The wire form of a block the host parsed.
+    #[must_use]
+    pub fn from_block(b: &zest_core::Block) -> Self {
+        // Saturating rather than wrapping, matching `RowPayload::line`. A
+        // session would have to print 9.2 quintillion lines to reach it, and a
+        // block clamped to the end of time is at least ordered correctly.
+        let line = |l: zest_core::LineId| i64::try_from(l).unwrap_or(i64::MAX);
+        Self {
+            id: b.id.0,
+            prompt_line: line(b.prompt_line),
+            output_line: b.output_line.map(line),
+            end_line: b.end_line.map(line),
+            state: match b.state {
+                zest_core::BlockState::Prompt => BlockState::Prompt,
+                zest_core::BlockState::Running => BlockState::Running,
+                zest_core::BlockState::Finished { exit_code } => {
+                    BlockState::Finished { exit_code }
+                }
+            },
+            command: b.command.clone(),
+            cwd: b.cwd.clone(),
+        }
+    }
+
+    /// Back into the shape a `Terminal` holds.
+    #[must_use]
+    pub fn to_block(&self) -> zest_core::Block {
+        let line = |l: i64| zest_core::LineId::try_from(l).unwrap_or(0);
+        zest_core::Block {
+            id: zest_core::BlockId(self.id),
+            prompt_line: line(self.prompt_line),
+            output_line: self.output_line.map(line),
+            end_line: self.end_line.map(line),
+            state: match self.state {
+                BlockState::Prompt => zest_core::BlockState::Prompt,
+                BlockState::Running => zest_core::BlockState::Running,
+                BlockState::Finished { exit_code } => {
+                    zest_core::BlockState::Finished { exit_code }
+                }
+            },
+            command: self.command.clone(),
+            cwd: self.cwd.clone(),
+        }
+    }
+}
+
 /// A batch applied atomically.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -194,6 +287,23 @@ pub struct Delta {
     /// Attributes first used in this batch. Cumulative for the session.
     pub attrs: Vec<AttrDef>,
     pub ops: Vec<DeltaOp>,
+    /// Blocks that changed in this batch, to be inserted or replaced by `id`.
+    ///
+    /// # Why a field and not a `DeltaOp`
+    ///
+    /// `DeltaOp` is `#[serde(tag = "op")]`, so a new variant is **not**
+    /// additive: a peer that predates it fails to decode the whole [`Delta`],
+    /// not just the op it does not know. A field with `serde(default)` is what
+    /// `Run::marks` and `Keyframe::modes` already are, and it decodes
+    /// everywhere.
+    ///
+    /// It is also the honest shape. The ops are an ordered sequence with two
+    /// asserted orderings ([`Delta::scrolls_come_first`],
+    /// [`Delta::screen_switch_comes_first`]); block upserts are keyed and
+    /// order-independent. They are applied *after* the ops because they name
+    /// absolute line ids that the rows in the same batch establish.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<BlockPayload>,
 }
 
 impl Delta {
@@ -270,6 +380,7 @@ mod tests {
     #[test]
     fn scroll_before_row_is_detectable() {
         let good = Delta {
+            blocks: Vec::new(),
             attrs: vec![],
             ops: vec![
                 DeltaOp::Scroll { top: 0, bottom: 23, lines: 1 },
@@ -279,6 +390,7 @@ mod tests {
         assert!(good.scrolls_come_first());
 
         let bad = Delta {
+            blocks: Vec::new(),
             attrs: vec![],
             ops: vec![
                 DeltaOp::Row { row: 23, payload: row(100) },
@@ -290,7 +402,7 @@ mod tests {
 
     #[test]
     fn a_delta_with_no_scroll_is_trivially_ordered() {
-        let d = Delta { attrs: vec![], ops: vec![DeltaOp::Row { row: 0, payload: row(1) }] };
+        let d = Delta { blocks: Vec::new(), attrs: vec![], ops: vec![DeltaOp::Row { row: 0, payload: row(1) }] };
         assert!(d.scrolls_come_first());
     }
 

@@ -52,14 +52,14 @@ and its number (48ms) is reported rather than gated.
 | Crate | State |
 |---|---|
 | `zest-pty` | ✅ ConPTY *and* unix (`openpt`), resize, shutdown, explicit `hangup`, `.vtrec` recorder |
-| `zest-core` | ✅ grid, scrollback, VT, modes, OSC, palette, `ChangeSource`, `RemoteWriter`, command blocks from OSC 133/7/633 — ⬜ blocks not yet on the wire |
+| `zest-core` | ✅ grid, scrollback, VT, modes, OSC, palette, `ChangeSource`, `RemoteWriter`, command blocks from OSC 133/7/633 |
 | `zest-font` | ✅ metrics, shaping, fallback, colour glyphs, Nerd Font PUA |
 | `zest-theme` | ✅ tokens, OKLCH derivation, 5 built-ins, 4 importers |
 | `zest-render-wgpu` | ✅ pipelines, atlas, offscreen resolve, selection — ⬜ gamma validation |
 | `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema |
 | `zest-input` | ✅ extracted; keys + SGR mouse + selection + IME — ⬜ Kitty protocol |
 | `zest-app` | ✅ window, sessions behind `SessionSource`, **attached to its own daemon** — runs on Windows *and* macOS (Metal) — ⬜ macOS chrome |
-| `zest-proto` | ✅ protocol 2, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, cell-for-cell conformance, chaos-resync |
+| `zest-proto` | ✅ protocol 2, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, cell-for-cell conformance, chaos-resync, command blocks |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store — ⬜ Cloudflare transport (M4) |
 | `zest-daemon` | ✅ session ownership *and* lifecycle, protocol loop, loopback *and* LAN transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing |
 
@@ -84,6 +84,13 @@ and its number (48ms) is reported rather than gated.
   advertises what it bound, and serves only devices that prove a key and are
   trusted. An unknown device makes the host print a matching code and wait for
   a person (`cargo run -p zest-daemon --example pair`).
+- **Scrollback as a list of commands.** A shell emitting OSC 133 turns the grid
+  into command blocks — what ran, where it ran, what it printed, how it ended —
+  and they cross the wire to an attached client. Verified over a real socket
+  with a real `zsh`: a success, a failure with `exit 1`, and a command still
+  running with no end line, each with its cwd from OSC 7. Nothing installs the
+  shell hook yet, so this is on for anyone who already has VS Code's
+  integration (OSC 633) or emits the markers themselves.
 
 ### Reflow
 
@@ -327,9 +334,14 @@ M2. Owns `zest-core/src/blocks.rs` and the OSC 133 path. Hot spot: coordinate
       The command text is read back from the grid between `B` and `C` — the
       markers carry positions, not text — except under OSC 633, whose `E`
       states it outright and is preferred.
-- [ ] Blocks on the wire, so a client sees them. **Required, not optional:** the
-      window is a client of its own daemon, so a block parsed host-side is
-      invisible until `zest-proto` carries it.
+- [x] **Blocks on the wire.** Not optional: the window is a client of its own
+      daemon, so a block parsed host-side was invisible until `zest-proto`
+      carried it. Additive — `Delta.blocks` and `Keyframe.blocks`, both
+      `serde(default)` — so no protocol bump. A *field* rather than a `DeltaOp`
+      variant, because a tagged enum's unknown variant fails the whole `Delta`.
+      Verified over a real socket with a real `zsh`: `exit 0`, `exit 1` and a
+      running command with no end line all arrive intact, along with the cwd
+      from OSC 7 (`cargo run -p zest-daemon --example attach`).
 - [ ] Shell integration for PowerShell/bash/zsh/fish. **Env-only injection**,
       as kitty, Ghostty and VS Code all do it — `ZDOTDIR` shim, bash `--posix` +
       `ENV`, fish `XDG_DATA_DIRS`, pwsh `-NoExit -Command`. No file is ever

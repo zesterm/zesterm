@@ -127,7 +127,7 @@ fn run_one(name: &str, chunks: &[Vec<u8>], drop_at: usize) -> Result<(), String>
     let mut enc = Encoder::new();
     let mut app = Applier::new();
 
-    let k = enc.keyframe(host.grid(), cursor(&host), host.modes(), "");
+    let k = enc.keyframe(host.grid(), cursor(&host), host.modes(), "", host.blocks());
     app.apply_keyframe(&mut client, &k, 0);
 
     // What the *host* believes the client holds, and therefore what it names as
@@ -140,7 +140,7 @@ fn run_one(name: &str, chunks: &[Vec<u8>], drop_at: usize) -> Result<(), String>
     for (step, chunk) in chunks.iter().enumerate() {
         host.advance(chunk);
         let seq = host.seq();
-        let delta = enc.delta(host.grid(), cursor(&host), host.modes(), "");
+        let delta = enc.delta(host.grid(), cursor(&host), host.modes(), "", host.blocks());
 
         if step == drop_at {
             // The frame never arrives. The encoder's shadow has already moved
@@ -173,7 +173,7 @@ fn run_one(name: &str, chunks: &[Vec<u8>], drop_at: usize) -> Result<(), String>
 
         if outcome == Applied::NeedsKeyframe {
             // Recovery: a full state, which is what `RequestKeyframe` fetches.
-            let k = enc.keyframe(host.grid(), cursor(&host), host.modes(), "");
+            let k = enc.keyframe(host.grid(), cursor(&host), host.modes(), "", host.blocks());
             app.apply_keyframe(&mut client, &k, seq);
         }
         host_base = seq;
@@ -248,7 +248,7 @@ fn a_stale_update_is_never_applied() {
     let mut app = Applier::new();
 
     host.advance(b"REAL CONTENT");
-    let k = enc.keyframe(host.grid(), cursor(&host), host.modes(), "");
+    let k = enc.keyframe(host.grid(), cursor(&host), host.modes(), "", host.blocks());
     app.apply_keyframe(&mut client, &k, host.seq());
 
     let before = client.screen_text();
@@ -256,6 +256,7 @@ fn a_stale_update_is_never_applied() {
 
     // An update naming a base the client does not hold.
     let stale = zest_proto::Delta {
+        blocks: Vec::new(),
         attrs: vec![zest_proto::AttrDef {
             id: zest_proto::AttrId(0),
             fg: zest_core::Color::Default,

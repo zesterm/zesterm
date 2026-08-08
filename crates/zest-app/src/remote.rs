@@ -242,7 +242,7 @@ impl RemoteSession {
                             };
 
                             match msg {
-                                HostMessage::Keyframe { seq, rows_data, attrs, cursor, cols, rows, modes, .. } => {
+                                HostMessage::Keyframe { seq, rows_data, attrs, cursor, cols, rows, modes, blocks, .. } => {
                                     let k = zest_proto::Keyframe {
                                         cols,
                                         rows,
@@ -250,6 +250,7 @@ impl RemoteSession {
                                         attrs,
                                         cursor,
                                         modes: zest_core::Modes::from_bits_truncate(modes),
+                                        blocks,
                                     };
                                     {
                                         let mut term = terminal.lock_unfair();
@@ -580,7 +581,7 @@ impl Handshake {
 
         loop {
             match self.recv()? {
-                HostMessage::Keyframe { seq, cols, rows, rows_data, attrs, cursor, modes, .. } => {
+                HostMessage::Keyframe { seq, cols, rows, rows_data, attrs, cursor, modes, blocks, .. } => {
                     return Ok((
                         host_label,
                         addr,
@@ -592,6 +593,7 @@ impl Handshake {
                             attrs,
                             cursor,
                             modes: zest_core::Modes::from_bits_truncate(modes),
+                            blocks,
                         },
                     ));
                 }

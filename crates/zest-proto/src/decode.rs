@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 
-use crate::delta::{AttrDef, AttrId, CursorState, Delta, DeltaOp, RowPayload};
+use crate::delta::{AttrDef, AttrId, BlockPayload, CursorState, Delta, DeltaOp, RowPayload};
 use crate::encode::Keyframe;
 
 /// A client's reconstruction of a session.
@@ -44,6 +44,14 @@ pub struct GridView {
     /// a phone that was asleep for an hour cannot rely on the desktop still
     /// holding what scrolled past.
     pub scrollback: Vec<RowPayload>,
+    /// Command blocks, ascending by id.
+    ///
+    /// The phone's list view is this and nothing else, which is why it is kept
+    /// here rather than derived: a client that re-parsed the grid to find its
+    /// own prompts would be the second VT interpretation ADR-004 exists to
+    /// avoid, and it would disagree with the desktop about where a command
+    /// started.
+    pub blocks: Vec<BlockPayload>,
 }
 
 impl Default for CursorState {
@@ -68,6 +76,23 @@ impl GridView {
         self.cursor = k.cursor;
         self.modes = k.modes.bits();
         self.alt_screen = k.modes.contains(zest_core::Modes::ALT_SCREEN);
+        // Replaced wholesale, not merged: a keyframe is the complete state, and
+        // a block this client holds that the keyframe does not mention is one
+        // the host has evicted.
+        self.blocks = k.blocks.clone();
+    }
+
+    /// Insert or replace a block, keeping the list ascending by id.
+    ///
+    /// The same rule as `zest_core::BlockIndex::upsert`, and it has to be: the
+    /// conformance suite asserts the two references agree, and a list that
+    /// drifted out of order would still *contain* the right blocks while
+    /// answering "which block is this line in" differently.
+    fn upsert_block(&mut self, b: &BlockPayload) {
+        match self.blocks.binary_search_by_key(&b.id, |x| x.id) {
+            Ok(i) => self.blocks[i] = b.clone(),
+            Err(i) => self.blocks.insert(i, b.clone()),
+        }
     }
 
     /// Apply a change.
@@ -137,6 +162,12 @@ impl GridView {
                 DeltaOp::Title { title } => self.title.clone_from(title),
                 DeltaOp::Modes { bits } => self.modes = *bits,
             }
+        }
+
+        // After the ops, matching `Applier`: a block names absolute line ids
+        // that the rows in this same batch have just established.
+        for b in &d.blocks {
+            self.upsert_block(b);
         }
     }
 
@@ -217,17 +248,17 @@ mod tests {
         let mut enc = Encoder::new();
         let mut view = GridView::new();
 
-        let k = enc.keyframe(term.grid(), cursor(), Modes::empty(), "");
+        let k = enc.keyframe(term.grid(), cursor(), Modes::empty(), "", term.blocks());
         view.apply_keyframe(&k);
 
         for (i, chunk) in chunks.iter().enumerate() {
             term.advance(chunk.as_bytes());
-            let d = enc.delta(term.grid(), cursor(), term.modes(), "");
+            let d = enc.delta(term.grid(), cursor(), term.modes(), "", term.blocks());
             view.apply_delta(&d);
 
             // The host's own encoding of the same grid is the reference.
             let mut probe = Encoder::new();
-            let truth = probe.keyframe(term.grid(), cursor(), term.modes(), "");
+            let truth = probe.keyframe(term.grid(), cursor(), term.modes(), "", term.blocks());
 
             assert_eq!(
                 view.rows().len(),
@@ -308,6 +339,7 @@ mod tests {
         let mut v = GridView::new();
         v.rows = vec![row(0, "a"), row(1, "b"), row(2, "c")];
         v.apply_delta(&Delta {
+            blocks: Vec::new(),
             attrs: vec![],
             ops: vec![DeltaOp::Scroll { top: 0, bottom: 2, lines: 1 }],
         });
@@ -323,6 +355,7 @@ mod tests {
         let mut v = GridView::new();
         v.rows = vec![row(0, "x")];
         v.apply_delta(&Delta {
+            blocks: Vec::new(),
             attrs: vec![AttrDef {
                 id: AttrId(7),
                 fg: zest_core::Color::Indexed(1),
@@ -349,11 +382,11 @@ mod tests {
         let mut term = Terminal::new(20, 2, 100);
         let mut enc = Encoder::new();
         let mut view = GridView::new();
-        view.apply_keyframe(&enc.keyframe(term.grid(), cursor(), Modes::empty(), ""));
+        view.apply_keyframe(&enc.keyframe(term.grid(), cursor(), Modes::empty(), "", term.blocks()));
 
         for i in 0..5 {
             term.advance(format!("line{i}\r\n").as_bytes());
-            view.apply_delta(&enc.delta(term.grid(), cursor(), Modes::empty(), ""));
+            view.apply_delta(&enc.delta(term.grid(), cursor(), Modes::empty(), "", term.blocks()));
         }
         assert!(!view.scrollback.is_empty(), "nothing was pushed to scrollback");
     }

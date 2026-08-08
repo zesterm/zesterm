@@ -29,7 +29,8 @@ paragraph of justification attached.
 | `ClientMessage`, `HostMessage`, `SessionInfo` | `zest-proto/src/lib.rs` | **frozen** at v2 — see below | WS-F, WS-G |
 | `Delta`, `DeltaOp`, `Run`, `RowPayload`, `AttrDef` | `zest-proto/src/delta.rs` | **frozen** at v2 — see below | WS-F, WS-G |
 | `Nonce32`, `Sig64`, `AuthFailure` | `zest-proto/src/auth.rs` | **frozen** — arrived with v2 | WS-F, WS-G, WS-H |
-| `Block`, `BlockIndex`, `BlockState` | `zest-core/src/blocks.rs` | **frozen** | WS-E, WS-F, WS-G |
+| `Block`, `BlockIndex`, `BlockState` | `zest-core/src/blocks.rs` | **frozen** — gained `upsert` and `reanchor`, see below | WS-E, WS-F, WS-G |
+| `BlockPayload`, `BlockState` (wire) | `zest-proto/src/delta.rs` | **frozen** — arrived beside `Delta` | WS-E, WS-F, WS-G |
 | `ChangeSource`, `Update`, `update_for` | `zest-core/src/subscribe.rs` | **frozen** — `release_before` removed, see below | WS-F |
 | `SessionSource`, `Origin` | `zest-app/src/source.rs` | **frozen** | WS-A, WS-B, WS-F |
 | `Peer`, `Endpoint`, `Reachability`, `Discovery` | `zest-mesh/` | **frozen** | WS-F, WS-H |
@@ -118,6 +119,38 @@ subscriber.
    consumer is worse than either shape.
 4. Update the table in the same commit. A row that no longer describes the code is worse than no
    row, because it is believed.
+
+### Additive, and therefore not a bump: command blocks
+
+`Delta` gained `blocks`, `HostMessage::Keyframe` gained `blocks`, and
+`BlockPayload`/`BlockState` arrived beside them. All `#[serde(default)]`, so a
+peer that predates them decodes exactly as before — it simply has no semantic
+view of the session, which is what every peer had until now. `PROTOCOL_VERSION`
+stays at 2.
+
+**A field rather than a `DeltaOp` variant, and that is the whole design.**
+`DeltaOp` is `#[serde(tag = "op")]`: an unknown tag fails the *whole* `Delta`,
+not just the op, so a new variant is not additive and would have forced a
+version bump on its own. It would also have needed a third ordering invariant
+beside `scrolls_come_first` and `screen_switch_comes_first`. Block upserts are
+keyed and order-independent — they are applied after the ops because they name
+line ids the rows in the same batch establish, and that is a rule about the
+batch, not about the ops within it.
+
+`BlockPayload` mirrors `zest_core::Block` rather than re-exporting it, for the
+same reason `RowPayload` mirrors a `Row`: the wire type carries a `ts_rs` derive
+and `zest-core` must keep building for `wasm32`. Line ids are `i64` to match
+`RowPayload::line`, because a client compares the two.
+
+**Two additions to the frozen `BlockIndex`**, neither of which changes an
+existing signature: `upsert`, which is the client half — a remote session's
+blocks are parsed on the machine the shell runs on and arrive whole, so there
+are no markers to replay — and `reanchor`, which maps blocks through the
+`Reindex` a width change produces.
+
+**Eviction deliberately has no wire message.** A client evicts on its own
+scrollback bound through the same code the host uses, so a client configured to
+keep more history than the host keeps more, rather than being told to forget.
 
 ### Done once, deliberately: protocol 2
 

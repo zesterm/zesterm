@@ -173,6 +173,29 @@ impl BlockIndex {
         }
     }
 
+    /// Insert or replace a block a host computed.
+    ///
+    /// The client half of the index. A remote session's blocks are parsed on the
+    /// machine the shell runs on and arrive whole, so there are no markers to
+    /// replay — see [`crate::RemoteWriter`], which is the only thing that should
+    /// call this.
+    ///
+    /// Ordering is maintained rather than assumed: [`Self::block_at`] searches
+    /// from the newest end and [`Self::evict_before`] trims from the oldest, and
+    /// both are wrong if a late-arriving block lands out of order.
+    pub fn upsert(&mut self, block: Block) {
+        match self.blocks.binary_search_by_key(&block.id, |b| b.id) {
+            Ok(i) => self.blocks[i] = block,
+            Err(i) => {
+                // Keep the counter ahead of anything received, so a client that
+                // later becomes a host — which is what a detach and a local
+                // reattach amount to — cannot reissue an id.
+                self.next_id = self.next_id.max(block.id.0 + 1);
+                self.blocks.insert(i, block);
+            }
+        }
+    }
+
     /// Re-anchor every block after a width change renumbered the lines.
     ///
     /// Reflow renumbers because rewrapping changes how many rows a logical line

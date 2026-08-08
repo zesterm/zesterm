@@ -41,7 +41,10 @@ pub mod ids;
 
 pub use apply::{Applied, Applier};
 pub use auth::{AuthFailure, Nonce32, Sig64};
-pub use delta::{AttrDef, AttrId, CursorState, Delta, DeltaOp, Run, RowPayload};
+pub use delta::{
+    AttrDef, AttrId, BlockPayload, BlockState, CellMarks, CursorState, Delta, DeltaOp, Run,
+    RowPayload,
+};
 pub use decode::GridView;
 pub use encode::{Encoder, Keyframe};
 pub use frame::{FrameError, FrameReader};
@@ -217,6 +220,13 @@ pub enum HostMessage {
         /// arrow keys until the host next happens to change a mode.
         #[serde(default)]
         modes: u32,
+        /// Every command block the host holds.
+        ///
+        /// Additive, so a peer that predates it still decodes — it simply has
+        /// no semantic view of the session, which is what every peer had
+        /// before this existed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        blocks: Vec<BlockPayload>,
     },
     /// A change from `base` to `seq`.
     ///

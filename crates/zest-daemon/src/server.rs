@@ -152,7 +152,7 @@ impl Registry {
                 SessionInfo {
                     addr: SessionAddr::new(host, s.id),
                     title: s.title(),
-                    cwd: String::new(),
+                    cwd: s.cwd(),
                     cols,
                     rows,
                     alt_screen: s.alt_screen(),
@@ -395,6 +395,7 @@ impl Connection {
                     attrs: k.attrs,
                     cursor: k.cursor,
                     modes: k.modes.bits(),
+                    blocks: k.blocks,
                 }),
                 None => {}
             }
@@ -623,6 +624,7 @@ impl Connection {
                     attrs: keyframe.attrs,
                     cursor: keyframe.cursor,
                     modes: keyframe.modes.bits(),
+                    blocks: keyframe.blocks,
                 }]
             }
 
@@ -656,6 +658,7 @@ impl Connection {
                         attrs: k.attrs,
                         cursor: k.cursor,
                         modes: k.modes.bits(),
+                        blocks: k.blocks,
                     }],
                     None => vec![HostMessage::Error {
                         session: Some(session),
