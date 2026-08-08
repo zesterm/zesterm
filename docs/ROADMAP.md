@@ -694,9 +694,25 @@ typed on one machine and answered by the other's kernel. The whole bring-up,
 including the three bugs it found (a watchdog cutting connections that were
 waiting for a person, swallowed approver answers (#21), and the attach example
 having no TCP transport at all), is logged blow-by-blow on
-[#20](https://github.com/zesterm/zesterm/issues/20). Remaining before M3 is
-*closed*: stored identities so a window does not need re-approval per launch,
-and the LAN half of the latency number.
+[#20](https://github.com/zesterm/zesterm/issues/20). Remaining before M3 is *closed*: the **host** half of stored identities, and
+the LAN half of the latency number.
+
+**The client half is done.** A window attaching to a remote host now uses a
+*stored* client key rather than a throwaway one, so a person approves it once
+instead of once per launch:
+
+```
+launch 1   remote_attach_ms=2871.06   (approved by a human)
+launch 2   remote_attach_ms=1.47      (no prompt)
+launch 3   remote_attach_ms=2.03      (no prompt)
+```
+
+The keychain is answerable here in a way it is not for the daemon — this is a GUI
+process with a user in front of it, while the daemon is detached and blocks on a
+prompt nobody can see. That asymmetry is why the client half could land and the
+host half cannot yet: a daemon with a *persistent* identity and a file trust store
+needs an answer to the detached-prompt problem first. Until then `--ephemeral`
+means every daemon restart re-pairs every device.
 
 **ADR-007's 50–100µs is measured, and it holds.** `attach --ping 300` on
 loopback, keystroke bytes on the wire to the delta carrying their echo:

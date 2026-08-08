@@ -406,17 +406,38 @@ impl App {
         rows: u16,
         proxy: &EventLoopProxy<Wakeup>,
     ) -> Option<Box<dyn SessionSource>> {
-        // Ephemeral per launch, like loopback -- which on a remote host means
-        // the far daemon prompts for approval once per launch. Wrong for daily
-        // use (a stored identity is the fix, and puts the keychain on this
-        // path), right for the bring-up: the prompt *is* the security model
-        // until then, and silently persisting keys before deciding where is
-        // how two machines end up with three trust stores.
-        let identity = match zest_mesh::identity::ClientIdentity::generate().map(Arc::new) {
-            Ok(i) => i,
+        // Stored, unlike the loopback path, and the difference is the whole
+        // point: a remote host has no socket permissions to lean on, so it asks
+        // a *person*. An ephemeral key means it asks again on every launch, and
+        // a prompt that appears every single time is one people learn to click
+        // through without reading -- which costs more security than the stored
+        // key does.
+        //
+        // The keychain is answerable here in a way it is not for the daemon.
+        // This is a GUI process with a user in front of it; the daemon is
+        // detached and blocks on a prompt nobody can see. That asymmetry is why
+        // the fix belongs on this side.
+        //
+        // Falls back to ephemeral rather than refusing: a machine with no
+        // credential store should still be able to reach its fleet, at the cost
+        // of approving each time. Saying so out loud, because a silent downgrade
+        // to "you will be asked forever" is a mystery rather than a trade-off.
+        let store = zest_mesh::keystore::OsKeyStore;
+        let identity = match zest_mesh::identity::ClientIdentity::load_or_create(&store) {
+            Ok(i) => Arc::new(i),
             Err(e) => {
-                eprintln!("no randomness for a client key: {e}");
-                std::process::exit(1);
+                tracing::warn!(
+                    error = %e,
+                    "no credential store for this device's key; using a throwaway \
+                     one, so the far host will ask for approval on every launch"
+                );
+                match zest_mesh::identity::ClientIdentity::generate().map(Arc::new) {
+                    Ok(i) => i,
+                    Err(e) => {
+                        eprintln!("no randomness for a client key: {e}");
+                        std::process::exit(1);
+                    }
+                }
             }
         };
 
