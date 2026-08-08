@@ -286,11 +286,22 @@ pub trait PtyTransport: Send {
     /// same mutex [`hangup`](Self::hangup) needs — a deadlock in exchange for
     /// nothing.
     ///
-    /// Windows must override it. ConPTY keeps its own copy of the output pipe's
-    /// write end for as long as the `HPCON` lives, so a blocked `ReadFile` stays
-    /// blocked after the shell is gone (gotcha 2b) and EOF cannot be the signal.
-    /// Without this a shell that exits on its own is never noticed at all: no
-    /// `Exited` reaches any client, and the session is kept forever.
+    /// **Windows needs to override it and does not — that gap is open, and this
+    /// method is the seam for closing it. → #18.** ConPTY keeps its own copy of
+    /// the output pipe's write end for as long as the `HPCON` lives, so a
+    /// blocked `ReadFile` stays blocked after the shell is gone (gotcha 2b) and
+    /// EOF cannot be the signal. The consequence today is that a shell exiting
+    /// on its own is never noticed there: no `Exited` reaches any client, and
+    /// the session is kept forever.
+    ///
+    /// A first attempt waited on the process handle and called back from there.
+    /// It deadlocked Windows CI outright — `cargo test` ran for over an hour
+    /// against a normal nine minutes — and was backed out rather than iterated
+    /// on blind, since `ClosePseudoConsole` has a documented deadlock (gotcha 1)
+    /// and no machine here can run it. Whoever picks this up: the signal has to
+    /// arrive *and* the reader has to still be draining when the pseudoconsole
+    /// closes, and gotcha 2c says closing on process exit alone truncates the
+    /// tail. All three at once, on a real Windows box.
     ///
     /// Implementations must block on the OS's own wait rather than polling — a
     /// per-session timer is exactly the sort of thing that costs the 0%-idle

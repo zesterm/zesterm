@@ -345,31 +345,6 @@ impl PtyTransport for ConPty {
         Ok(())
     }
 
-    fn watch_exit(&self, on_exit: Box<dyn FnOnce() + Send>) {
-        // Gotcha 2b in the one place it costs something other than a shutdown
-        // ordering: the reader cannot observe the child exiting, because ConPTY
-        // holds the pipe's write end until the HPCON closes. So the process
-        // handle is what gets waited on, and it is the only honest signal here.
-        //
-        // `WaitForSingleObject(INFINITE)` rather than a poll: this thread costs
-        // nothing until the child actually goes.
-        let Ok(process) = self.process.try_clone() else {
-            tracing::error!("could not duplicate the process handle; child exit will go unnoticed");
-            return;
-        };
-        let spawned = std::thread::Builder::new()
-            .name("zest-pty-child-wait".into())
-            .spawn(move || {
-                use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
-                // SAFETY: `process` owns a live handle for the whole wait.
-                unsafe { WaitForSingleObject(process.raw(), INFINITE) };
-                on_exit();
-            });
-        if let Err(e) = spawned {
-            tracing::error!(error = %e, "could not start the child watcher; child exit will go unnoticed");
-        }
-    }
-
     fn hangup(&self) {
         // This *is* the shutdown protocol of gotcha 2b, run deliberately rather
         // than as a side effect of drop timing, and both of its preconditions

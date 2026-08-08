@@ -75,6 +75,15 @@ pub struct Session {
     subscribers: Arc<Mutex<HashMap<u64, Subscriber>>>,
     next_subscriber: Mutex<u64>,
     exited: Arc<AtomicBool>,
+    /// Whether anyone has ever attached.
+    ///
+    /// Sweeping keys on this and not only on "nobody is attached now", because
+    /// creating a session and attaching to it are two round trips. A short
+    /// command exits in between, and a session collected in that window leaves
+    /// the client that just created it holding an address the host has already
+    /// forgotten -- it gets "no session" for a shell it asked for and that ran
+    /// perfectly.
+    ever_attached: Arc<AtomicBool>,
     title: Arc<Mutex<String>>,
 }
 
@@ -191,6 +200,7 @@ impl Session {
             subscribers,
             next_subscriber: Mutex::new(0),
             exited,
+            ever_attached: Arc::new(AtomicBool::new(false)),
             title,
         })
     }
@@ -217,6 +227,7 @@ impl Session {
             (k, ChangeSource::seq(&*term))
         };
 
+        self.ever_attached.store(true, Ordering::Release);
         let mut next = self.next_subscriber.lock().expect("counter lock");
         let handle = *next;
         *next += 1;
@@ -407,6 +418,15 @@ impl Session {
         if let Ok(mut term) = self.terminal.lock() {
             term.resize(cols as usize, rows as usize);
         }
+    }
+
+    /// Whether any client has ever attached to this session.
+    ///
+    /// See the field: this is what keeps a session alive across the gap between
+    /// `CreateSession` and `Attach`.
+    #[must_use]
+    pub fn ever_attached(&self) -> bool {
+        self.ever_attached.load(Ordering::Acquire)
     }
 
     #[must_use]

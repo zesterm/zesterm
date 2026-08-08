@@ -189,9 +189,21 @@ impl Registry {
     /// it, and appearing in every listing as though it were alive. `close` only
     /// covers the case where a client asks.
     ///
-    /// **Both conditions are required.** Sweeping on exit alone would drop the
+    /// **Three conditions, and the middle one is the subtle one.** A session is
+    /// only collectable once somebody has actually attached to it, because
+    /// creating a session and attaching to it are two round trips: a short
+    /// command like `echo` exits in between, and sweeping there hands the client
+    /// that just created the session a "no session" error for a shell that ran
+    /// perfectly. It cost a CI failure that read as a test race.
+    ///
+    /// The residual case is a client that creates a session and never attaches
+    /// -- it dies between the two round trips. That session is kept, which is
+    /// the right way round: keeping something nobody asked to be rid of is a
+    /// leak, and dropping something a client is about to ask for is data loss.
+    ///
+    /// **Sweeping on exit alone would drop the
     /// session before an attached client had been told, and a client that never
-    /// learns its shell exited waits for output that will never come. A
+    /// learns its shell exited waits for output that will never come.** A
     /// subscriber is released when its client detaches or its connection drops,
     /// so this becomes true shortly afterwards either way.
     pub fn sweep(&self) {
@@ -199,7 +211,7 @@ impl Registry {
             let sessions = self.sessions.lock().expect("registry lock");
             sessions
                 .iter()
-                .filter(|(_, s)| s.has_exited() && !s.attached())
+                .filter(|(_, s)| s.has_exited() && s.ever_attached() && !s.attached())
                 .map(|(&id, _)| id)
                 .collect()
         };
@@ -1458,11 +1470,25 @@ mod tests {
 
     /// A shell that exits on its own must not be kept forever.
     ///
+    /// **Unix only, and that is a known gap rather than a platform quirk.**
+    /// `has_exited` is driven by the reader thread ending, which on Windows
+    /// cannot happen: ConPTY holds the output pipe's write end until the
+    /// pseudoconsole is closed, so a blocked `ReadFile` stays blocked after the
+    /// shell is gone (windows.rs gotcha 2b). No `Exited` is sent there and
+    /// nothing is swept. → #18.
+    ///
+    /// An attempt to close that gap by waiting on the process handle and
+    /// flagging exit from there deadlocked Windows CI outright — `cargo test`
+    /// ran for over an hour against a normal nine minutes. Backed out rather
+    /// than iterated on blind, because the API involved has a documented
+    /// deadlock and this machine cannot run it.
+    ///
     /// It was: `Exited` was reported to whoever was attached and the session
     /// stayed in the registry with its whole terminal and scrollback, listed as
     /// though it were alive. Both halves are asserted, because sweeping too
     /// eagerly is its own bug — a client that never learns its shell exited
     /// waits for output that is not coming.
+    #[cfg(unix)]
     #[test]
     fn an_exited_session_is_kept_until_nobody_is_watching() {
         let (mut c, registry) = conn();
@@ -1500,6 +1526,47 @@ mod tests {
             0,
             "an exited session nobody is watching is dead, and keeping it holds \
              its terminal and scrollback for the life of the daemon"
+        );
+    }
+
+    /// A session must survive the gap between creating it and attaching to it.
+    ///
+    /// The two are separate round trips, and a short command exits inside the
+    /// gap. Sweeping there hands the client that just created the session a "no
+    /// session" error for a shell that ran perfectly — which is exactly what
+    /// happened on CI, and read at first like a flaky test rather than a lost
+    /// session.
+    #[cfg(unix)]
+    #[test]
+    fn a_session_is_not_swept_before_anyone_has_attached() {
+        let (mut c, registry) = conn();
+        authenticate(&mut c);
+        send(
+            &mut c,
+            &ClientMessage::CreateSession {
+                command: echo_cmd(),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+            },
+        );
+        let addr = registry.list(config().host)[0].addr;
+        let session = registry.get(addr.session).expect("just created");
+
+        // The child is gone well before a real client's next round trip.
+        assert!(wait_for(|| session.has_exited()), "echo should exit at once");
+        c.poll();
+
+        assert_eq!(
+            registry.len(),
+            1,
+            "swept before the client that created it could attach; that client \
+             now gets \"no session\" for a shell it asked for and that ran"
+        );
+        let out = send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+        assert!(
+            matches!(&out[..], [HostMessage::Keyframe { .. }]),
+            "attach must still succeed, and carry what the command printed: {out:?}"
         );
     }
 
