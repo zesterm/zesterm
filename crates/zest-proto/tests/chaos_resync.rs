@@ -270,6 +270,7 @@ fn a_stale_update_is_never_applied() {
                     attr: zest_proto::AttrId(0),
                     cells: 5,
                     text: "STALE".into(),
+                    marks: Vec::new(),
                 }],
                 wrapped: false,
             },

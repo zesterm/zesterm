@@ -82,6 +82,21 @@ impl RemoteWriter<'_> {
         self.state.touch();
     }
 
+    /// Attach combining marks to a cell that has already been written.
+    ///
+    /// Separate from [`Self::write_row`] because the marks travel beside the
+    /// text on the wire rather than inside it — see `Run::marks`. Call after
+    /// the row, since the row write resets the cell.
+    pub fn push_marks(&mut self, row: usize, col: usize, marks: &str) {
+        if marks.is_empty() || row >= self.state.grid().rows() {
+            return;
+        }
+        let target = self.state.grid_mut().row_mut(row);
+        for mark in marks.chars() {
+            target.push_zerowidth(col, mark);
+        }
+    }
+
     /// Move rows within a region.
     ///
     /// Positive `lines` moves content up, which is what ordinary output does. A

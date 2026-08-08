@@ -177,7 +177,12 @@ fn erase_span(row: &RowPayload, left: usize, right: usize, attr: AttrId) -> RowP
                 last.cells += 1;
                 last.text.push(ch);
             }
-            _ => runs.push(crate::delta::Run { attr: a, cells: 1, text: ch.to_string() }),
+            _ => runs.push(crate::delta::Run {
+                attr: a,
+                cells: 1,
+                text: ch.to_string(),
+                marks: Vec::new(),
+            }),
         }
     }
     RowPayload { line: row.line, runs, wrapped: row.wrapped }
@@ -197,7 +202,7 @@ mod tests {
     fn row(line: i64, text: &str) -> RowPayload {
         RowPayload {
             line,
-            runs: vec![Run { attr: AttrId(0), cells: text.len() as u16, text: text.into() }],
+            runs: vec![Run { attr: AttrId(0), cells: text.len() as u16, text: text.into(), marks: Vec::new() }],
             wrapped: false,
         }
     }
@@ -328,7 +333,7 @@ mod tests {
                 row: 0,
                 payload: RowPayload {
                     line: 0,
-                    runs: vec![Run { attr: AttrId(7), cells: 3, text: "red".into() }],
+                    runs: vec![Run { attr: AttrId(7), cells: 3, text: "red".into(), marks: Vec::new() }],
                     wrapped: false,
                 },
             }],

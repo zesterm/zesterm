@@ -223,6 +223,15 @@ impl Applier {
         let cells = std::mem::take(&mut self.scratch);
         term.remote().write_row(row, line_id(payload.line), &cells, payload.wrapped);
         self.scratch = cells;
+
+        // Marks go on after the row, because writing the row resets the cells.
+        let mut base = 0usize;
+        for run in &payload.runs {
+            for m in &run.marks {
+                term.remote().push_marks(row, base + usize::from(m.at), &m.marks);
+            }
+            base += usize::from(run.cells);
+        }
         known
     }
 
@@ -414,6 +423,45 @@ mod tests {
     }
 
     #[test]
+    fn combining_marks_reach_the_client() {
+        // They did not, until `Run::marks` existed: the encoder wrote
+        // `Cell::ch` and never touched the side table, so `e` + U+0301 arrived
+        // as a bare `e`. Silent text corruption for anyone whose input method
+        // produces decomposed Unicode, which on macOS is not rare.
+        let mut p = Pair::new(20, 3);
+        p.feed("naïve café".as_bytes());
+        p.assert_same("precomposed");
+
+        // And the decomposed form, which is the case that was broken.
+        let mut p = Pair::new(20, 3);
+        p.feed("cafe\u{0301}".as_bytes());
+        assert_eq!(
+            p.client.screen_text().trim_end(),
+            p.host.screen_text().trim_end(),
+            "a combining mark did not survive the wire"
+        );
+        assert!(
+            p.client.screen_text().contains('\u{0301}'),
+            "the mark is missing from the client: {:?}",
+            p.client.screen_text()
+        );
+    }
+
+    #[test]
+    fn marks_land_on_the_right_cell_after_several_runs() {
+        // `CellMarks::at` is an offset *within its run*, and runs split on
+        // attribute changes -- so an accent after a colour change lands on the
+        // wrong character if the run base is not added back.
+        let mut p = Pair::new(30, 3);
+        p.feed("\x1b[31mred\x1b[0m cafe\u{0301}!".as_bytes());
+        assert_eq!(
+            p.client.screen_text().trim_end(),
+            p.host.screen_text().trim_end(),
+            "a mark landed on the wrong cell across a run boundary"
+        );
+    }
+
+    #[test]
     fn modes_reach_the_client() {
         // Without this the client cannot encode its own keystrokes.
         let mut p = Pair::new(20, 3);
@@ -439,7 +487,7 @@ mod tests {
                 row: 99,
                 payload: RowPayload {
                     line: 99,
-                    runs: vec![Run { attr: AttrId(0), cells: 1, text: "x".into() }],
+                    runs: vec![Run { attr: AttrId(0), cells: 1, text: "x".into(), marks: Vec::new() }],
                     wrapped: false,
                 },
             }],
@@ -458,7 +506,7 @@ mod tests {
                 row: 0,
                 payload: RowPayload {
                     line: 0,
-                    runs: vec![Run { attr: AttrId(777), cells: 1, text: "x".into() }],
+                    runs: vec![Run { attr: AttrId(777), cells: 1, text: "x".into(), marks: Vec::new() }],
                     wrapped: false,
                 },
             }],

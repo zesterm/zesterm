@@ -30,7 +30,7 @@ use std::collections::HashMap;
 
 use zest_core::{Cell, CellFlags, Color, Grid, Modes};
 
-use crate::delta::{AttrDef, AttrId, CursorState, Delta, DeltaOp, Run, RowPayload};
+use crate::delta::{AttrDef, AttrId, CellMarks, CursorState, Delta, DeltaOp, Run, RowPayload};
 
 /// What makes two cells share a run.
 type AttrKey = (Color, Color, CellFlags);
@@ -108,6 +108,7 @@ impl Encoder {
             let attr = self.attr(&cell);
 
             let mut text = String::new();
+            let mut marks: Vec<CellMarks> = Vec::new();
             let mut count: u16 = 0;
             while col < end {
                 let c = cells[col];
@@ -121,11 +122,23 @@ impl Encoder {
                 if !c.flags.contains(CellFlags::WIDE_SPACER) {
                     text.push(c.ch);
                 }
+                // Combining marks travel beside the text, not inside it, so a
+                // client never has to know which codepoints combine. Without
+                // this they never crossed the wire at all: `e` + U+0301 arrived
+                // as a bare `e`.
+                if let Some(extra) = row.extra(&c) {
+                    if !extra.zerowidth.is_empty() {
+                        marks.push(CellMarks {
+                            at: count,
+                            marks: extra.zerowidth.iter().collect(),
+                        });
+                    }
+                }
                 count = count.saturating_add(1);
                 col += 1;
             }
 
-            runs.push(Run { attr, cells: count, text });
+            runs.push(Run { attr, cells: count, text, marks });
         }
 
         RowPayload {

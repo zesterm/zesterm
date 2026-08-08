@@ -286,10 +286,10 @@ fn both_references_read_erase_the_same_way() {
 
 /// Compare every cell of the host's grid against the client's.
 ///
-/// **Exactly two fields are excluded, and both are named in the failure
-/// message** so that a later failure cannot be "fixed" by quietly widening the
-/// exclusion list. Neither is an applier bug; both are pre-existing gaps in the
-/// *encoder* that this comparison is what finally documents.
+/// **One field is excluded, and it is named in the failure message** so that a
+/// later failure cannot be "fixed" by quietly widening the exclusion list. It
+/// is not an applier bug: it is a pre-existing gap in the *encoder* that this
+/// comparison is what finally documents.
 fn assert_cells_agree(host: &Terminal, client: &Terminal, name: &str, step: usize) {
     let (hg, cg) = (host.grid(), client.grid());
     assert_eq!(cg.rows(), hg.rows(), "{name} step {step}: grid height diverged");
@@ -332,12 +332,17 @@ fn assert_cells_agree(host: &Terminal, client: &Terminal, name: &str, step: usiz
         }
     }
 
-    // Excluded: `Cell::extra`, the combining-mark side table.
-    //
-    // `Encoder::encode_row` writes `Cell::ch` and never touches it, so `e` +
-    // U+0301 arrives as a bare `e`. That is a real gap in the wire format, not
-    // an applier bug -- tracked separately, and deliberately not papered over
-    // here by comparing only what survives.
+    // Combining marks used to be excluded here, because the encoder wrote
+    // `Cell::ch` and never touched the side table -- `e` + U+0301 arrived as a
+    // bare `e`. `Run::marks` carries them now, so the exclusion is gone and
+    // what remains is compared rather than described.
+    for r in 0..hg.rows() {
+        assert_eq!(
+            cg.row(r).text(),
+            hg.row(r).text(),
+            "{name} step {step}: row {r} differs once combining marks are included"
+        );
+    }
 }
 
 #[test]

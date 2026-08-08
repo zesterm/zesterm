@@ -82,6 +82,29 @@ pub struct Run {
     /// clients must not recompute. See the module docs.
     pub cells: u16,
     pub text: String,
+    /// Combining marks, for the cells in this run that have any.
+    ///
+    /// A separate field rather than more characters in `text`, and that is the
+    /// whole point: `text` stays exactly one `char` per cell, so a client never
+    /// has to know which codepoints combine. Appending marks inline would make
+    /// every decoder carry a Unicode table and get the grouping right, which is
+    /// the same class of mistake `Run::cells` exists to prevent for widths.
+    ///
+    /// Additive, so a peer that predates it decodes fine and simply renders
+    /// `e` where `é` was intended — which is what every peer did before this
+    /// existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub marks: Vec<CellMarks>,
+}
+
+/// Combining marks for one cell of a [`Run`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct CellMarks {
+    /// Offset of the cell within its run, in cells.
+    pub at: u16,
+    /// The marks themselves, in the order they were applied.
+    pub marks: String,
 }
 
 /// One row, as runs.
@@ -229,7 +252,7 @@ mod tests {
     fn row(line: i64) -> RowPayload {
         RowPayload {
             line,
-            runs: vec![Run { attr: AttrId(0), cells: 5, text: "hello".to_string() }],
+            runs: vec![Run { attr: AttrId(0), cells: 5, text: "hello".to_string(), marks: Vec::new() }],
             wrapped: false,
         }
     }
@@ -239,7 +262,7 @@ mod tests {
         // The property that keeps three renderers agreeing. Two CJK characters
         // are two chars and four cells; a client that counted chars would draw
         // everything after them in the wrong column.
-        let run = Run { attr: AttrId(0), cells: 4, text: "世界".to_string() };
+        let run = Run { attr: AttrId(0), cells: 4, text: "世界".to_string(), marks: Vec::new() };
         assert_eq!(run.text.chars().count(), 2);
         assert_eq!(run.cells, 4, "the host's cell count is the truth");
     }
