@@ -233,12 +233,6 @@ Each of these cost real time and is documented where it bites:
   approved that build of it. Signing dev builds with a stable self-signed
   identity would fix it properly; `--ephemeral` sidesteps the keychain entirely
   and is why host ids churn during a bring-up.
-- **A Windows client passing unix paths through a POSIX-emulating shell corrupts
-  them before they cross the wire.** Git Bash's MSYS conversion rewrote
-  `/bin/cat` to `C:/Program Files/Git/usr/bin/cat` in the *arguments*, so the
-  macOS daemon faithfully tried to spawn a Windows path and failed for a reason
-  that looks like the far host is broken. PowerShell passes them through clean.
-  (Found by the Windows lane during the two-machine bring-up, #20.)
 - **On macOS the daemon blocks on a Keychain prompt after every rebuild**, and
   the app gives up waiting after 2s and silently falls back to an in-process
   pty. The window works perfectly and is not daemon-backed, so anything being
@@ -261,11 +255,11 @@ Each of these cost real time and is documented where it bites:
   (MSYS path conversion). `--socket '\\.\pipe\x'` arrives with a backslash
   eaten and the daemon exits on os error 123; worse, `--cmd /bin/cat` sent to a
   *remote* daemon becomes `C:/Program Files/Git/usr/bin/cat` on the wire, and
-  the far host tries to spawn a Windows path on macOS. Quoting does not help —
-  the conversion runs after the shell. Use PowerShell for anything carrying
-  pipe paths or paths destined for another machine, or set
-  `MSYS_NO_PATHCONV=1`. Both halves of this bit on the same day, over the same
-  feature. (#20.)
+  the macOS host faithfully tries to spawn a Windows path — a failure that
+  reads as the far host being broken. Quoting does not help — the conversion
+  runs after the shell. Use PowerShell for anything carrying pipe paths or
+  paths destined for another machine, or set `MSYS_NO_PATHCONV=1`. Both halves
+  of this bit on the same day, over the same feature. (#20.)
 
 ## Related work on this machine
 
