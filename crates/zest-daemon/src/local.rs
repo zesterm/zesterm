@@ -106,7 +106,13 @@ mod imp {
     pub struct Umask(rustix::fs::Mode);
 
     impl Umask {
-        pub fn restrict(mask: u16) -> Self {
+        /// `mask` is a `RawMode`, not a `u16`.
+        ///
+        /// It was a `u16`, which is `mode_t` on macOS and compiled there
+        /// happily. On Linux `mode_t` is 32 bits, so the whole workspace failed
+        /// to build — a type error in permission handling, from a literal that
+        /// is `0o177` on both.
+        pub fn restrict(mask: rustix::fs::RawMode) -> Self {
             let mode = rustix::fs::Mode::from_bits_truncate(mask);
             Self(rustix::process::umask(mode))
         }

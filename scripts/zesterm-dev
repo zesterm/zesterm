@@ -1,0 +1,107 @@
+#!/bin/sh
+#
+# Open the latest dev build, from anywhere.
+#
+#   zesterm-dev                 build and open, in the current directory
+#   zesterm-dev --no-build      open what is already built
+#   zesterm-dev --release       the shipping build instead of the fast one
+#   zesterm-dev --startup-probe anything else is passed straight through
+#
+# Two things this exists to get right, both of which have cost time already:
+#
+# 1. **It builds the daemon too.** The window is a client of `zest-daemon`
+#    (ADR-007) and finds it as a sibling of its own binary, so building only
+#    `zest-app` leaves a new window talking to yesterday's daemon. That failure
+#    is invisible -- everything connects and works, just not the code you
+#    changed. It cost an hour once, diagnosing a fix that was never running.
+#
+# 2. **A failed build never opens a window.** Launching the previous binary
+#    after a compile error is how you spend ten minutes testing a change that
+#    did not compile.
+#
+# `--profile fast` by default: ~3.6s to rebuild against ~51s for release (thin
+# LTO, one codegen unit), and within a few percent at runtime, so startup and
+# frame numbers measured on it still mean something.
+
+set -eu
+
+# Where the repo is. The script lives in it, so resolve through however many
+# symlinks lie between here and there -- `readlink -f` is not portable to every
+# macOS this might run on, and getting this wrong means the command works from
+# the repo and nowhere else, which is the one place it does not need to work.
+target=$0
+while [ -L "$target" ]; do
+    link=$(readlink "$target")
+    case $link in
+        /*) target=$link ;;
+        *)  target=$(dirname "$target")/$link ;;
+    esac
+done
+REPO=${ZESTERM_REPO:-$(cd "$(dirname "$target")/.." && pwd -P)}
+
+profile=fast
+build=1
+args=""
+# Some flags make zesterm print something and exit rather than open a window.
+# Those must stay in the foreground with stdout attached, or the answer goes to
+# /dev/null along with the window that was never opened.
+foreground=0
+
+for arg in "$@"; do
+    case $arg in
+        --no-build) build=0 ;;
+        --release)  profile=release ;;
+        --debug)    profile=dev ;;
+        -h|--help)
+            sed -n '3,8p' "$target" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        --startup-probe|--attach-probe|--themes|--schema|--shell-integration)
+            foreground=1
+            args="$args $arg"
+            ;;
+        *) args="$args $arg" ;;
+    esac
+done
+
+# `dev` is the one profile whose directory is not its name.
+case $profile in
+    dev) dir=debug ;;
+    *)   dir=$profile ;;
+esac
+bin=$REPO/target/$dir/zesterm
+
+if [ "$build" -eq 1 ]; then
+    # Both binaries, and quietly: the point is a window, not a build log. A
+    # failure still prints, because cargo writes errors to stderr.
+    if ! ( cd "$REPO" && cargo build -q --profile "$profile" -p zest-app -p zest-daemon ); then
+        echo "zesterm-dev: build failed; not opening a stale binary" >&2
+        exit 1
+    fi
+fi
+
+if [ ! -x "$bin" ]; then
+    echo "zesterm-dev: nothing built at $bin" >&2
+    echo "zesterm-dev: run without --no-build, or check ZESTERM_REPO" >&2
+    exit 1
+fi
+
+# Say which binary and how old, so "latest" is checkable rather than assumed.
+# The daemon may well be older than the window and that is usually fine -- it is
+# reused across launches by design -- but when it is not, this is where you see
+# it.
+if command -v stat >/dev/null 2>&1; then
+    built=$(stat -f '%Sm' -t '%H:%M:%S' "$bin" 2>/dev/null || stat -c '%y' "$bin" 2>/dev/null | cut -d. -f1)
+    echo "zesterm-dev: $dir build from $built"
+fi
+
+if [ "$foreground" -eq 1 ]; then
+    # shellcheck disable=SC2086
+    exec "$bin" $args
+fi
+
+# Detached, so the shell comes straight back and closing this terminal does not
+# take the window with it. The working directory is deliberately *not* the repo:
+# the shell inside should start wherever you ran this.
+# shellcheck disable=SC2086
+nohup "$bin" $args >/dev/null 2>&1 &

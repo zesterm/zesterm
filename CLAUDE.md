@@ -88,6 +88,8 @@ cargo xtask fixtures                           # regenerate the conformance fixt
 cargo run -p zest-proto --example fixture_dump -- --only vim-macos --print 7
                                                # one fixture frame, decoded, to stdout
 
+zesterm-dev                                    # build both binaries and open a window
+zesterm-dev --no-build --attach-probe          # probe flags stay in the foreground
 cargo run --profile fast -p zest-app           # the terminal, quick rebuild
 ./target/fast/zesterm --startup-probe          # time to first paint; fails over 100ms
 cargo build --release && ./target/release/zesterm   # the shipping build
