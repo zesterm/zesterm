@@ -1,0 +1,205 @@
+/**
+ * A client's reconstruction of a session.
+ *
+ * A port of `crates/zest-proto/src/decode.rs`, whose module doc names this file
+ * before it existed: *"The reference decoder. The web and phone clients
+ * reimplement this in TypeScript, and this is what they are checked against."*
+ * Every deviation from it is a bug, so the shape follows it op for op even where
+ * something else would read better in TypeScript.
+ *
+ * Two rules that look like details and are not:
+ *
+ * - **Never recompute cell widths.** See `cells.ts`.
+ * - **Apply `scroll` before `row`** within a delta. The encoder emits them in
+ *   that order and asserts it (`Delta::scrolls_come_first`); a decoder that
+ *   sorts or reorders writes rows into positions the scroll is about to
+ *   overwrite. So: iterate `ops` as given, and never sort.
+ *
+ * This holds a flat list of rows rather than a real terminal. The Rust side has
+ * a second, stricter reading — `Applier`, which writes into a `zest_core::Terminal`
+ * and refuses a delta whose `base` it does not hold. Where the two differ, this
+ * follows `GridView`, and the differences are marked below.
+ */
+
+import type { AttrDef, CursorState, Delta, RowPayload } from './wire.ts';
+import { Modes } from './flags.ts';
+
+/** `i64::MIN`, the line id `decode.rs` gives a row that has no content yet. */
+export const NO_LINE = -(2n ** 63n);
+
+const BLANK_ROW: RowPayload = { line: NO_LINE, runs: [], wrapped: false };
+
+export interface KeyframeState {
+  readonly cols: number;
+  readonly rows_data: readonly RowPayload[];
+  readonly attrs: readonly AttrDef[];
+  readonly cursor: CursorState;
+  readonly modes: number;
+}
+
+export class GridView {
+  cols = 0;
+  rows: RowPayload[] = [];
+
+  /** Cumulative for the session, exactly as the encoder's interning table is. */
+  attrs = new Map<number, AttrDef>();
+
+  cursor: CursorState = { row: 0, col: 0, visible: true, shape: 0 };
+  altScreen = false;
+
+  /**
+   * The host's mode bits, raw.
+   *
+   * Kept as an integer rather than widened into a flag set, which is what
+   * `decode.rs` says this field is for: the TypeScript clients have no bitflags
+   * type, and what they need is exactly the number.
+   */
+  modes = 0;
+
+  title = '';
+
+  /**
+   * Lines that left the viewport, oldest first.
+   *
+   * Kept client-side because the host may evict them before this client asks: a
+   * phone that was asleep for an hour cannot rely on the desktop still holding
+   * what scrolled past.
+   */
+  scrollback: RowPayload[] = [];
+
+  /** Replace everything with a complete state. */
+  applyKeyframe(k: KeyframeState): void {
+    this.cols = k.cols;
+    this.rows = [...k.rows_data];
+    // Merged, not replaced. A keyframe re-sends every attribute it uses, but the
+    // ids stay meaningful to a client that has been attached throughout, so
+    // dropping the table would discard definitions later deltas still name.
+    for (const a of k.attrs) this.attrs.set(a.id, a);
+    this.cursor = k.cursor;
+    this.modes = k.modes;
+    this.altScreen = (k.modes & Modes.ALT_SCREEN) !== 0;
+    // `title` and `scrollback` are deliberately not cleared: neither is part of
+    // the state a keyframe describes.
+  }
+
+  /**
+   * Apply a change.
+   *
+   * Attributes are merged before the ops that reference them, or a run would
+   * name a style this client has never been told about.
+   */
+  applyDelta(d: Delta): void {
+    for (const a of d.attrs) this.attrs.set(a.id, a);
+
+    for (const op of d.ops) {
+      switch (op.op) {
+        case 'scroll': {
+          // `usize::try_from(lines).unwrap_or(0)` on the Rust side, so a
+          // negative `lines` is a silent no-op rather than an upward scroll.
+          // Matching that exactly matters more than it being the nicer rule.
+          const n = op.lines > 0 ? op.lines : 0;
+          if (n === 0 || op.top > op.bottom || op.bottom >= this.rows.length) continue;
+
+          const end = Math.min(op.bottom, this.rows.length - 1);
+          for (let i = op.top; i <= end; i++) {
+            const src = i + n;
+            this.rows[i] = src <= end ? (this.rows[src] as RowPayload) : BLANK_ROW;
+          }
+          continue;
+        }
+
+        case 'row': {
+          if (op.row < this.rows.length) {
+            this.rows[op.row] = op.payload;
+          } else {
+            // A row past the end means a resize this client has not been told
+            // about. Growing is the forgiving answer; dropping it would leave a
+            // permanently stale line. (`Applier` asks for a keyframe here
+            // instead — it is writing into a real grid, which cannot grow a row
+            // without also being wrong about its size.)
+            while (this.rows.length < op.row) this.rows.push(BLANK_ROW);
+            this.rows[op.row] = op.payload;
+          }
+          continue;
+        }
+
+        case 'erase': {
+          // Not emitted by the current encoder, and implemented anyway, because
+          // the other reference implements it — two readings of one wire format
+          // that disagree about an op is how a client author finds out the
+          // format is ambiguous.
+          if (op.top > op.bottom || op.left > op.right) continue;
+          const end = Math.min(op.bottom, this.rows.length - 1);
+          for (let r = op.top; r <= end; r++) {
+            const row = this.rows[r];
+            if (row === undefined) continue;
+            this.rows[r] = eraseSpan(row, op.left, op.right, op.attr);
+          }
+          continue;
+        }
+
+        case 'cursor':
+          this.cursor = op.cursor;
+          continue;
+
+        case 'sb_push':
+          // Unconditional. `Applier` skips this when the same delta scrolled,
+          // because `Terminal::scroll` has already moved rows into real history
+          // and pushing again would double-count. A flat row list has no history
+          // to double-count, so it takes what it is given.
+          this.scrollback.push(op.payload);
+          continue;
+
+        case 'alt_screen':
+          // Sets the flag only. `modes` is a separate op; the encoder derives
+          // both from one value, so they cannot disagree in practice.
+          this.altScreen = op.active;
+          continue;
+
+        case 'title':
+          this.title = op.title;
+          continue;
+
+        case 'modes':
+          this.modes = op.bits;
+          continue;
+      }
+    }
+  }
+}
+
+/**
+ * Rebuild one row with `[left, right]` replaced by blanks in `attr`.
+ *
+ * Runs are re-split cell by cell and then coalesced, which is not the fastest
+ * possible thing and is the clearest: `erase` is rare, and a clever in-place
+ * splice across run boundaries is exactly where an off-by-one lives.
+ *
+ * Marks are dropped on the rebuilt row, matching `decode.rs`. That is fidelity
+ * to the reference rather than an oversight — the two must agree.
+ */
+function eraseSpan(row: RowPayload, left: number, right: number, attr: number): RowPayload {
+  const flat: Array<{ attr: number; ch: string }> = [];
+  for (const run of row.runs) {
+    const chars = [...run.text];
+    for (let i = 0; i < run.cells; i++) {
+      flat.push({ attr: run.attr, ch: chars[i] ?? ' ' });
+    }
+  }
+
+  while (flat.length <= right) flat.push({ attr, ch: ' ' });
+  for (let i = left; i <= right; i++) flat[i] = { attr, ch: ' ' };
+
+  const runs: Array<{ attr: number; cells: number; text: string; marks: [] }> = [];
+  for (const cell of flat) {
+    const last = runs[runs.length - 1];
+    if (last !== undefined && last.attr === cell.attr) {
+      last.cells += 1;
+      last.text += cell.ch;
+    } else {
+      runs.push({ attr: cell.attr, cells: 1, text: cell.ch, marks: [] });
+    }
+  }
+
+  return { line: row.line, runs, wrapped: row.wrapped };
+}

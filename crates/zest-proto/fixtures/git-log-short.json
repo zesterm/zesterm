@@ -1,0 +1,639 @@
+{
+  "schema": 1,
+  "protocol": 2,
+  "recording": "git-log-short",
+  "source": "vtrec",
+  "cols": 80,
+  "rows": 5,
+  "frames": [
+    {
+      "kind": "keyframe",
+      "seq": 0,
+      "wire": "1f01000089a174a86b65796672616d65a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a373657100a4636f6c7350a4726f777305a9726f77735f646174619583a46c696e6500a472756e7390a777726170706564c283a46c696e6501a472756e7390a777726170706564c283a46c696e6502a472756e7390a777726170706564c283a46c696e6503a472756e7390a777726170706564c283a46c696e6504a472756e7390a777726170706564c2a5617474727390a6637572736f7284a3726f7700a3636f6c00a776697369626c65c3a5736861706500a56d6f64657311",
+      "expect": {
+        "cursor": {
+          "row": 0,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 17,
+        "alt_screen": false,
+        "title": "",
+        "rows": [
+          {
+            "line": 0,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 0,
+      "seq": 2,
+      "wire": "9300000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a46261736500a373657102a564656c746182a5617474727390a36f70739182a26f70a56d6f646573a462697473cda011",
+      "expect": {
+        "cursor": {
+          "row": 0,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 40977,
+        "alt_screen": false,
+        "title": "",
+        "rows": [
+          {
+            "line": 0,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 2,
+      "seq": 7,
+      "wire": "b300000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a46261736502a373657107a564656c746182a5617474727390a36f70739182a26f70a57469746c65a57469746c65d920433a5c50726f6772616d2046696c65735c4769745c636d645c6769742e657865",
+      "expect": {
+        "cursor": {
+          "row": 0,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 40977,
+        "alt_screen": false,
+        "title": "C:\\Program Files\\Git\\cmd\\git.exe",
+        "rows": [
+          {
+            "line": 0,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 7,
+      "seq": 280,
+      "wire": "8b03000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a46261736507a3736571cd0118a564656c746182a561747472739284a2696400a26667a744656661756c74a26267a744656661756c74a5666c6167730084a2696401a2666781a7496e646578656403a26267a744656661756c74a5666c61677300a36f70739884a26f70a67363726f6c6ca3746f7000a6626f74746f6d04a56c696e65730182a26f70a773625f70757368a77061796c6f616483a46c696e6500a472756e7390a777726170706564c283a26f70a3726f77a3726f7700a77061796c6f616483a46c696e6501a472756e739183a46174747200a563656c6c7304a474657874a420627567a777726170706564c283a26f70a3726f77a3726f7701a77061796c6f616483a46c696e6502a472756e739383a46174747200a563656c6c7302a474657874a22a2083a46174747201a563656c6c7308a474657874a8666635373665302083a46174747200a563656c6c7339a474657874d939536574746c6520746865207072656d756c7469706c6965642d616c706861207175657374696f6e20776974682061207265616c2070726f6265a777726170706564c283a26f70a3726f77a3726f7702a77061796c6f616483a46c696e6503a472756e739383a46174747200a563656c6c7302a474657874a22a2083a46174747201a563656c6c7308a474657874a8633330633637612083a46174747200a563656c6c7332a474657874d93246697820787465726d206375626520617373657274696f6e20616e6420636c65617220636c69707079207761726e696e6773a777726170706564c283a26f70a3726f77a3726f7703a77061796c6f616483a46c696e6504a472756e739383a46174747200a563656c6c7302a474657874a22a2083a46174747201a563656c6c7308a474657874a8613933396538342083a46174747200a563656c6c731ea474657874be53636166666f6c6420746865207a65737465726d20776f726b7370616365a777726170706564c283a26f70a3726f77a3726f7704a77061796c6f616483a46c696e6505a472756e7390a777726170706564c282a26f70a6637572736f72a6637572736f7284a3726f7704a3636f6c00a776697369626c65c3a5736861706500",
+      "expect": {
+        "cursor": {
+          "row": 4,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 40977,
+        "alt_screen": false,
+        "title": "C:\\Program Files\\Git\\cmd\\git.exe",
+        "rows": [
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": " bug                                                                            ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "* ff576e0 Settle the premultiplied-alpha question with a real probe             ",
+            "styles": [
+              [
+                2,
+                "Default",
+                "Default",
+                0
+              ],
+              [
+                8,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                70,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "* c30c67a Fix xterm cube assertion and clear clippy warnings                    ",
+            "styles": [
+              [
+                2,
+                "Default",
+                "Default",
+                0
+              ],
+              [
+                8,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                70,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "* a939e84 Scaffold the zesterm workspace                                        ",
+            "styles": [
+              [
+                2,
+                "Default",
+                "Default",
+                0
+              ],
+              [
+                8,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                70,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 5,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 280,
+      "seq": 281,
+      "wire": "8500000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a462617365cd0118a3736571cd0119a564656c746182a5617474727390a36f707390",
+      "expect": {
+        "cursor": {
+          "row": 4,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 40977,
+        "alt_screen": false,
+        "title": "C:\\Program Files\\Git\\cmd\\git.exe",
+        "rows": [
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": " bug                                                                            ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "* ff576e0 Settle the premultiplied-alpha question with a real probe             ",
+            "styles": [
+              [
+                2,
+                "Default",
+                "Default",
+                0
+              ],
+              [
+                8,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                70,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "* c30c67a Fix xterm cube assertion and clear clippy warnings                    ",
+            "styles": [
+              [
+                2,
+                "Default",
+                "Default",
+                0
+              ],
+              [
+                8,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                70,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "* a939e84 Scaffold the zesterm workspace                                        ",
+            "styles": [
+              [
+                2,
+                "Default",
+                "Default",
+                0
+              ],
+              [
+                8,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                70,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 5,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 281,
+      "seq": 283,
+      "wire": "9500000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a462617365cd0119a3736571cd011ba564656c746182a5617474727390a36f70739182a26f70a56d6f646573a46269747311",
+      "expect": {
+        "cursor": {
+          "row": 4,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 17,
+        "alt_screen": false,
+        "title": "C:\\Program Files\\Git\\cmd\\git.exe",
+        "rows": [
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": " bug                                                                            ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "* ff576e0 Settle the premultiplied-alpha question with a real probe             ",
+            "styles": [
+              [
+                2,
+                "Default",
+                "Default",
+                0
+              ],
+              [
+                8,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                70,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "* c30c67a Fix xterm cube assertion and clear clippy warnings                    ",
+            "styles": [
+              [
+                2,
+                "Default",
+                "Default",
+                0
+              ],
+              [
+                8,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                70,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "* a939e84 Scaffold the zesterm workspace                                        ",
+            "styles": [
+              [
+                2,
+                "Default",
+                "Default",
+                0
+              ],
+              [
+                8,
+                {
+                  "Indexed": 3
+                },
+                "Default",
+                0
+              ],
+              [
+                70,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 5,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

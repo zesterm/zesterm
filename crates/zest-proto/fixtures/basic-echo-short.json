@@ -1,0 +1,429 @@
+{
+  "schema": 1,
+  "protocol": 2,
+  "recording": "basic-echo-short",
+  "source": "vtrec",
+  "cols": 80,
+  "rows": 5,
+  "frames": [
+    {
+      "kind": "keyframe",
+      "seq": 0,
+      "wire": "1f01000089a174a86b65796672616d65a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a373657100a4636f6c7350a4726f777305a9726f77735f646174619583a46c696e6500a472756e7390a777726170706564c283a46c696e6501a472756e7390a777726170706564c283a46c696e6502a472756e7390a777726170706564c283a46c696e6503a472756e7390a777726170706564c283a46c696e6504a472756e7390a777726170706564c2a5617474727390a6637572736f7284a3726f7700a3636f6c00a776697369626c65c3a5736861706500a56d6f64657311",
+      "expect": {
+        "cursor": {
+          "row": 0,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 17,
+        "alt_screen": false,
+        "title": "",
+        "rows": [
+          {
+            "line": 0,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 0,
+      "seq": 2,
+      "wire": "9300000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a46261736500a373657102a564656c746182a5617474727390a36f70739182a26f70a56d6f646573a462697473cda011",
+      "expect": {
+        "cursor": {
+          "row": 0,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 40977,
+        "alt_screen": false,
+        "title": "",
+        "rows": [
+          {
+            "line": 0,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 2,
+      "seq": 20,
+      "wire": "4601000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a46261736502a373657114a564656c746182a561747472739184a2696400a26667a744656661756c74a26267a744656661756c74a5666c61677300a36f70739383a26f70a3726f77a3726f7700a77061796c6f616483a46c696e6500a472756e739183a46174747200a563656c6c730ba474657874ab68656c6c6f20776f726c64a777726170706564c282a26f70a6637572736f72a6637572736f7284a3726f7701a3636f6c00a776697369626c65c3a573686170650082a26f70a57469746c65a57469746c65bb433a5c57494e444f57535c53595354454d33325c636d642e657865",
+      "expect": {
+        "cursor": {
+          "row": 1,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 40977,
+        "alt_screen": false,
+        "title": "C:\\WINDOWS\\SYSTEM32\\cmd.exe",
+        "rows": [
+          {
+            "line": 0,
+            "wrapped": false,
+            "text": "hello world                                                                     ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 20,
+      "seq": 33,
+      "wire": "f800000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a46261736514a373657121a564656c746182a5617474727390a36f70739283a26f70a3726f77a3726f7701a77061796c6f616483a46c696e6501a472756e739183a46174747200a563656c6c730ba474657874ab7365636f6e64206c696e65a777726170706564c282a26f70a6637572736f72a6637572736f7284a3726f7702a3636f6c00a776697369626c65c3a5736861706500",
+      "expect": {
+        "cursor": {
+          "row": 2,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 40977,
+        "alt_screen": false,
+        "title": "C:\\WINDOWS\\SYSTEM32\\cmd.exe",
+        "rows": [
+          {
+            "line": 0,
+            "wrapped": false,
+            "text": "hello world                                                                     ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": "second line                                                                     ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 33,
+      "seq": 35,
+      "wire": "9100000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a46261736521a373657123a564656c746182a5617474727390a36f70739182a26f70a56d6f646573a46269747311",
+      "expect": {
+        "cursor": {
+          "row": 2,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 17,
+        "alt_screen": false,
+        "title": "C:\\WINDOWS\\SYSTEM32\\cmd.exe",
+        "rows": [
+          {
+            "line": 0,
+            "wrapped": false,
+            "text": "hello world                                                                     ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": "second line                                                                     ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "                                                                                ",
+            "styles": [
+              [
+                80,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
