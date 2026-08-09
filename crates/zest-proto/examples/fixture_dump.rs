@@ -38,8 +38,8 @@ use serde::Serialize;
 use zest_core::{CellFlags, Color, Modes, Terminal};
 use zest_proto::apply::{Applied, Applier};
 use zest_proto::{
-    CursorState, Delta, DeltaOp, Encoder, GridView, HostId, HostMessage, PROTOCOL_VERSION, Seq,
-    SessionAddr, SessionId,
+    BlockPayload, ClientId, ClientMessage, CursorState, Delta, DeltaOp, Encoder, GridView, HostId,
+    HostMessage, Nonce32, PROTOCOL_VERSION, Seq, SessionAddr, SessionId, Sig64,
 };
 
 /// The fixture format's own version, independent of the protocol's.
@@ -202,7 +202,8 @@ fn main() -> std::process::ExitCode {
     if only.is_none() {
         coverage.assert_the_corpus_is_worth_replaying();
         write_bits(&fixtures_dir().join("bits.json"));
-        written += 1;
+        write_client_messages(&fixtures_dir().join("client-messages.json"));
+        written += 2;
     }
 
     println!("wrote {written} files to {}", fixtures_dir().display());
@@ -358,6 +359,7 @@ fn replay(
         );
 
         let e = expect(&term);
+        cov.blocks_expected += usize::from(!e.blocks.is_empty());
         // Refuse to write a fixture the Rust reference does not already satisfy.
         // A golden file generated from a broken encoder is worse than none: it
         // pins the bug and then fails the client that decoded it correctly.
@@ -446,6 +448,10 @@ fn expect(term: &Terminal) -> Expect {
         alt_screen: term.modes().contains(Modes::ALT_SCREEN),
         title: term.title().to_string(),
         rows,
+        // Read off the terminal's own block index, like everything else here.
+        // `from_block` is a plain projection, not the encoder's diffing — so
+        // this is still "Reference 2", not the encoder grading its own work.
+        blocks: term.blocks().blocks().iter().map(BlockPayload::from_block).collect(),
     }
 }
 
@@ -480,6 +486,10 @@ fn agrees(view: &GridView, e: &Expect, name: &str, step: usize) {
             "{name} step {step} row {r}: line ids diverged"
         );
     }
+    assert_eq!(
+        view.blocks, e.blocks,
+        "{name} step {step}: the reference decoder's blocks disagree with the terminal's"
+    );
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -544,6 +554,10 @@ struct Coverage {
     astral: usize,
     marks: usize,
     blocks: usize,
+    /// Frames whose *expectation* carries blocks — distinct from `blocks`,
+    /// which counts wire payloads: the wire proves decode, the expectation
+    /// proves application.
+    blocks_expected: usize,
     ops: BTreeSet<&'static str>,
 }
 
@@ -650,7 +664,105 @@ impl Coverage {
             "no command blocks -- `Delta::blocks` is a field rather than an op, so a \
              client that ignored it entirely would pass every fixture here"
         );
+        assert!(
+            self.blocks_expected > 0,
+            "no frame *expects* blocks -- the wire carried them but the expectations \
+             would hold no client to applying them, which is the half that matters"
+        );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The client-message goldens
+// ---------------------------------------------------------------------------
+
+/// One canonical encoding of every `ClientMessage` variant, framed, as hex.
+///
+/// The TypeScript encoder asserts **byte equality** against these — not
+/// round-trip acceptance, which any two self-consistent encoders pass. The
+/// values are chosen to pin the choices that could silently drift: a `cols`
+/// that needs the u16 form, a `seq` past u32, a negative `from_line`, input
+/// bytes past the fixint range, and the `t` tag leading every map.
+fn write_client_messages(path: &Path) {
+    #[derive(Serialize)]
+    struct Golden {
+        schema: u32,
+        protocol: u16,
+        messages: Vec<Entry>,
+    }
+    #[derive(Serialize)]
+    struct Entry {
+        name: &'static str,
+        wire: String,
+    }
+
+    let addr = SessionAddr { host: FIXTURE_HOST, session: SessionId(7) };
+    let messages: Vec<(&'static str, ClientMessage)> = vec![
+        (
+            "hello",
+            ClientMessage::Hello {
+                version: PROTOCOL_VERSION,
+                client: ClientId::from_bytes([0xab; 32]),
+                label: "golden".into(),
+                nonce: Nonce32::from_bytes([0x5c; 32]),
+                watch_sessions: true,
+            },
+        ),
+        ("auth", ClientMessage::Auth { signature: Sig64::from_bytes([0xef; 64]) }),
+        (
+            "pairing_decision",
+            ClientMessage::PairingDecision {
+                client: ClientId::from_bytes([0xab; 32]),
+                approve: false,
+            },
+        ),
+        ("request_keyframe", ClientMessage::RequestKeyframe { session: addr }),
+        ("list_sessions", ClientMessage::ListSessions),
+        (
+            "create_session",
+            ClientMessage::CreateSession {
+                command: "htop".into(),
+                cwd: "/tmp".into(),
+                // Past u8, so the u16 encoding is pinned.
+                cols: 300,
+                rows: 80,
+            },
+        ),
+        ("attach", ClientMessage::Attach { session: addr, cols: 120, rows: 40 }),
+        ("detach", ClientMessage::Detach { session: addr }),
+        (
+            "input",
+            ClientMessage::Input {
+                session: addr,
+                // Arrow-up, then bytes past the fixint range: the seq-of-uints
+                // form (never `bin`) is the exact thing this pins.
+                bytes: vec![0x1b, 0x5b, 0x41, 0x80, 0xff],
+            },
+        ),
+        ("resize", ClientMessage::Resize { session: addr, cols: 80, rows: 24 }),
+        // Past u32, so the eight-byte form is pinned.
+        ("ack", ClientMessage::Ack { session: addr, seq: Seq(4_294_967_296) }),
+        (
+            "request_scrollback",
+            ClientMessage::RequestScrollback { session: addr, from_line: -1200, count: 500 },
+        ),
+        ("close_session", ClientMessage::CloseSession { session: addr }),
+    ];
+
+    write(
+        path,
+        &Golden {
+            schema: FIXTURE_SCHEMA,
+            protocol: PROTOCOL_VERSION,
+            messages: messages
+                .into_iter()
+                .map(|(name, m)| Entry {
+                    name,
+                    wire: hex(&zest_proto::frame::encode(&m).expect("a client message frames")),
+                })
+                .collect(),
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -693,6 +805,11 @@ struct Expect {
     alt_screen: bool,
     title: String,
     rows: Vec<RowExpect>,
+    /// The host's block index after this frame, in the wire shape — so a
+    /// client compares its applied blocks against the terminal's truth, not
+    /// against what happened to ride this frame.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    blocks: Vec<BlockPayload>,
 }
 
 #[derive(Serialize)]
