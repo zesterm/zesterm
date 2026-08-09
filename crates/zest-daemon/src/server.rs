@@ -1352,7 +1352,7 @@ mod tests {
         let out = send(
             &mut creator,
             &ClientMessage::CreateSession {
-                command: "/bin/cat".into(),
+                command: sleep_cmd(),
                 cwd: String::new(),
                 cols: 20,
                 rows: 5,
@@ -1394,7 +1394,7 @@ mod tests {
         let out = send(
             &mut c,
             &ClientMessage::CreateSession {
-                command: "/bin/cat".into(),
+                command: sleep_cmd(),
                 cwd: String::new(),
                 cols: 20,
                 rows: 5,
