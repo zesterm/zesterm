@@ -44,6 +44,24 @@ tracing-subscriber.workspace = true
 # `setsid` for the spawned daemon, so it outlives the window that started it.
 rustix = { workspace = true, features = ["process"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Reaching NSWindow for the traffic-light inset. The cluster's extent is not a
+# constant -- it moves with localization and OS version -- so the tab strip
+# asks AppKit rather than guessing (ROADMAP, WS-C2).
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSWindow",
+    "NSView",
+    "NSButton",
+    "NSControl",
+    "NSResponder",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSGeometry",
+] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",

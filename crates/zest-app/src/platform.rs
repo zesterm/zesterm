@@ -1,4 +1,4 @@
-//! Windows-specific window setup.
+//! Platform-specific window setup.
 
 /// Give the window a solid background in the theme colour, painted by the OS.
 ///
@@ -54,4 +54,43 @@ pub fn set_background_color(_window: &winit::window::Window, _r: u8, _g: u8, _b:
     // X11 and Wayland have no equivalent that is worth the complexity: the
     // compositor does not paint an unmapped surface, so there is no white flash
     // to fix in the first place.
+}
+
+/// The traffic-light cluster's extent, in *logical* points: `(max_x, titlebar_height)`.
+///
+/// Asked of AppKit every time the chrome lays out, because the answer is not a
+/// constant: the cluster moves with OS version and localization, and the
+/// titlebar height changes with `fullsize_content_view`. Callers must treat
+/// `None` as "no cluster to avoid" — which is also the fullscreen answer,
+/// where the buttons auto-hide (the caller checks fullscreen; here `None`
+/// just means the question could not be answered).
+#[cfg(target_os = "macos")]
+pub fn traffic_light_inset(window: &winit::window::Window) -> Option<(f64, f64)> {
+    use objc2_app_kit::{NSView, NSWindow, NSWindowButton};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let handle = window.window_handle().ok()?;
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else { return None };
+
+    // SAFETY: winit hands out the NSView it owns, and we are on the main
+    // thread — every caller is a window-event handler, and AppKit delivers
+    // those on the main thread by construction.
+    let view = unsafe { appkit.ns_view.cast::<NSView>().as_ref() };
+    let ns_window: objc2::rc::Retained<NSWindow> = view.window()?;
+
+    let zoom = ns_window.standardWindowButton(NSWindowButton::ZoomButton)?;
+    let frame = zoom.frame();
+    // SAFETY: the retained superview is read once, synchronously, on the main
+    // thread; nothing deallocates the titlebar view while its window is alive
+    // and being asked about.
+    let bar =
+        unsafe { zoom.superview() }.map_or(frame.size.height, |sv| sv.frame().size.height);
+
+    // The rightmost button's right edge is where tabs may begin.
+    Some((frame.origin.x + frame.size.width, bar))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn traffic_light_inset(_window: &winit::window::Window) -> Option<(f64, f64)> {
+    None
 }

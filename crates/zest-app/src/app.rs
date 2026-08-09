@@ -15,6 +15,10 @@ use zest_render_wgpu::{Chrome, Renderer, Scene, Viewport};
 use zest_input::{key, mouse, select, MouseState};
 use crate::block_actions;
 use crate::pipeline_cache;
+use crate::chrome::hit::HitRegion;
+use crate::chrome::layout::ChromeLayout;
+use crate::chrome::model::{ChromeMetrics, ChromeModel, TabModel, TabOrigin, TabPresence};
+use crate::chrome::theme::ChromeColors;
 use crate::chrome::Insets;
 use crate::platform;
 use crate::session::{Session, Wakeup};
@@ -43,6 +47,10 @@ pub struct Config {
     pub opacity: f32,
     /// Space between the window edge and the grid, in logical pixels.
     pub padding: u32,
+    /// The strip's own alpha, independent of the grid's (ADR-003).
+    pub chrome_opacity: f32,
+    /// The tab strip's knobs, taken whole — the chrome reads all of them.
+    pub tabs: zest_config::settings::Tabs,
     pub shell: Option<String>,
     /// Jump back to the bottom whenever the program writes something.
     ///
@@ -75,6 +83,8 @@ impl From<&zest_config::Settings> for Config {
             scrollback: s.scrolling.scrollback,
             opacity: s.window.opacity.clamp(0.0, 1.0),
             padding: s.window.padding.min(64),
+            chrome_opacity: s.window.chrome_opacity.clamp(0.0, 1.0),
+            tabs: s.tabs.clone(),
             shell: (!s.shell.command.is_empty()).then(|| s.shell.command.clone()),
             scroll_on_output: s.scrolling.scroll_on_output,
         }
@@ -114,6 +124,25 @@ pub struct App {
     session: Option<Box<dyn SessionSource>>,
     fonts: Option<Fonts>,
     palette: zest_core::PaletteSnapshot,
+
+    /// The chrome's resolved palette; rebuilt with the theme.
+    chrome_colors: ChromeColors,
+    /// Last laid-out chrome, shared by redraw and the input path so a click
+    /// is tested against exactly what is on screen.
+    chrome_layout: Option<ChromeLayout>,
+    /// The chrome's own damage latch, beside the session's. Set only by
+    /// discrete events (hover, focus, title, config), so 0%-idle holds.
+    chrome_dirty: bool,
+    /// What the pointer was last over, for hover fills.
+    chrome_hover: Option<HitRegion>,
+    /// Tab strip scroll offset, physical pixels; layout clamps it.
+    strip_scroll: f32,
+    /// Pointer position in physical pixels, for chrome hit tests.
+    pointer_pos: (f64, f64),
+    /// Debounce for double-clicking the drag area to zoom.
+    last_drag_click: Option<std::time::Instant>,
+    /// What the OS titlebar currently says, to skip redundant `set_title`s.
+    window_title: String,
 
     scene: Scene,
     modifiers: ModifiersState,
@@ -168,6 +197,7 @@ impl App {
             .unwrap_or_else(zest_theme::builtin::obsidian);
         let resolved = zest_theme::resolve(&theme);
         let palette = to_core_palette(&resolved);
+        let chrome_colors = ChromeColors::new(&theme.ui, &theme.effects, config.chrome_opacity);
         let selection_bg = zest_core::Rgb::new(
             resolved.selection_bg.r,
             resolved.selection_bg.g,
@@ -182,6 +212,14 @@ impl App {
             session: None,
             fonts: None,
             palette,
+            chrome_colors,
+            chrome_layout: None,
+            chrome_dirty: true,
+            chrome_hover: None,
+            strip_scroll: 0.0,
+            pointer_pos: (0.0, 0.0),
+            last_drag_click: None,
+            window_title: String::new(),
             scene: Scene::default(),
             modifiers: ModifiersState::empty(),
             focused: true,
@@ -815,7 +853,175 @@ impl App {
     /// and the scale factor after a reload or a monitor change.
     fn insets(&self) -> Insets {
         let scale = self.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
-        Insets::padding_only(self.config.padding, scale)
+        self.insets_at(scale)
+    }
+
+    /// [`Self::insets`] for callers that know the scale before the window is
+    /// stored — the shell-spawn path in `resumed` sizes the grid this way.
+    fn insets_at(&self, scale: f32) -> Insets {
+        let mut insets = Insets::padding_only(self.config.padding, scale);
+        if self.strip_shown() {
+            match self.config.tabs.position {
+                zest_config::settings::TabsPosition::Top => {
+                    insets.top += self.config.tabs.strip_height as f32 * scale;
+                }
+                zest_config::settings::TabsPosition::Left => {
+                    insets.left += self.config.tabs.sidebar_width as f32 * scale;
+                }
+            }
+        }
+        insets
+    }
+
+    /// Whether the strip is drawn at all.
+    ///
+    /// One session today, so this is the `show_single_tab` setting; once tabs
+    /// are plural the count joins the condition.
+    fn strip_shown(&self) -> bool {
+        self.config.tabs.show_single_tab
+    }
+
+    fn mark_chrome_dirty(&mut self) {
+        self.chrome_dirty = true;
+        self.chrome_layout = None;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Re-run the chrome layout if anything invalidated it.
+    ///
+    /// Called from both the input path and the redraw, so a click is always
+    /// tested against the same rectangles the frame drew — the "no drift"
+    /// property the layout tests pin, extended to runtime.
+    fn refresh_chrome(&mut self) {
+        if !self.strip_shown() {
+            self.chrome_layout = None;
+            return;
+        }
+        // The layout cache and the frame-pending latch are separate on
+        // purpose: the input path refreshes the layout between frames, and
+        // must not eat the redraw the change asked for.
+        if self.chrome_layout.is_some() {
+            return;
+        }
+        let Some(window) = self.window.as_ref() else { return };
+        let Some(fonts) = self.fonts.as_mut() else { return };
+
+        let scale = window.scale_factor() as f32;
+        let size = window.inner_size();
+        let cm = fonts.cell_metrics();
+        let metrics = ChromeMetrics {
+            width: size.width as f32,
+            height: size.height as f32,
+            scale,
+            strip_height: self.config.tabs.strip_height as f32,
+            sidebar_width: self.config.tabs.sidebar_width as f32,
+            line_height: cm.cell_h as f32,
+            baseline: cm.baseline as f32,
+        };
+        // In fullscreen the traffic lights auto-hide, so the strip reclaims
+        // their reserve; everywhere else the answer comes from AppKit fresh,
+        // because the inset is not a constant.
+        let traffic = if window.fullscreen().is_some() {
+            None
+        } else {
+            platform::traffic_light_inset(window)
+                .map(|(x, y)| [x as f32 * scale, y as f32 * scale])
+        };
+
+        let title = {
+            let title = self
+                .session
+                .as_ref()
+                .map(|s| s.terminal().lock().title().trim().to_string())
+                .unwrap_or_default();
+            if title.is_empty() { "shell".to_string() } else { title }
+        };
+        let origin = match self.session.as_ref().map(|s| s.origin()) {
+            Some(Origin::Daemon { host, local: false }) => TabOrigin::Remote { host_label: host },
+            _ => TabOrigin::Local,
+        };
+
+        let model = ChromeModel {
+            tabs: vec![TabModel {
+                // One session and no fleet yet: a placeholder address until
+                // tabs are keyed by real `SessionAddr`s.
+                addr: zest_proto::SessionAddr::new(
+                    zest_proto::HostId::from_bytes([0; 32]),
+                    zest_proto::SessionId(0),
+                ),
+                title,
+                origin,
+                presence: TabPresence::Online,
+                connecting: false,
+            }],
+            active: 0,
+            position: self.config.tabs.position,
+            strip_scroll: self.strip_scroll,
+            hover: self.chrome_hover,
+            traffic_inset: traffic,
+            focused: self.focused,
+        };
+
+        let colors = self.chrome_colors;
+        let mut measure =
+            |s: &str| zest_render_wgpu::measure_ui_run(fonts, s, zest_font::Style::default());
+        let laid = crate::chrome::layout::layout(&model, &colors, &metrics, &mut measure);
+        self.strip_scroll = laid.strip_scroll;
+        self.chrome_layout = Some(laid);
+    }
+
+    /// What the pointer is over in the chrome, using the current layout.
+    fn chrome_hit(&mut self, x: f64, y: f64) -> Option<HitRegion> {
+        self.refresh_chrome();
+        self.chrome_layout.as_ref().and_then(|l| l.hit.hit(x as f32, y as f32))
+    }
+
+    /// A pointer action that landed in the chrome.
+    fn on_chrome_click(
+        &mut self,
+        region: HitRegion,
+        button: MouseButton,
+        state: ElementState,
+        el: &ActiveEventLoop,
+    ) {
+        if state != ElementState::Pressed {
+            return;
+        }
+        match (region, button) {
+            (HitRegion::Tab(_), MouseButton::Left) => {
+                // One tab today: activating it changes nothing yet. The region
+                // exists now so the routing is real before the strip is plural.
+            }
+            (HitRegion::TabClose(_), MouseButton::Left)
+            | (HitRegion::Tab(_), MouseButton::Middle) => {
+                // Closing the only tab closes the window. Dropping the session
+                // sends the Detach, exactly as `CloseRequested` does.
+                self.session = None;
+                el.exit();
+            }
+            (HitRegion::NewTab, MouseButton::Left) => {
+                tracing::info!("new tab arrives with the multi-tab step of #23");
+            }
+            (HitRegion::Drag, MouseButton::Left) => {
+                let now = std::time::Instant::now();
+                let double = self
+                    .last_drag_click
+                    .is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(400));
+                self.last_drag_click = Some(now);
+                if let Some(w) = self.window.as_ref() {
+                    if double {
+                        // Double-click on empty chrome is zoom, matching what
+                        // every native macOS titlebar does.
+                        w.set_maximized(!w.is_maximized());
+                    } else if let Err(e) = w.drag_window() {
+                        tracing::debug!(error = %e, "window drag unavailable");
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Pointer pixels to a grid cell, clamped into the viewport.
@@ -874,6 +1080,7 @@ impl App {
 
     fn redraw(&mut self) {
         let insets = self.insets();
+        self.refresh_chrome();
         let (Some(gpu), Some(fonts), Some(session), Some(window)) = (
             self.gpu.as_mut(),
             self.fonts.as_mut(),
@@ -884,6 +1091,28 @@ impl App {
         };
 
         let metrics = fonts.cell_metrics();
+
+        // Chrome instances: rectangles come finished from the layout pass;
+        // text runs resolve against the atlas here, where the GPU lives.
+        let mut chrome = Chrome::default();
+        if let Some(layout) = self.chrome_layout.as_ref() {
+            chrome.rects.extend_from_slice(&layout.rects);
+            for run in &layout.texts {
+                zest_render_wgpu::emit_ui_run(
+                    &gpu.device,
+                    &gpu.queue,
+                    &mut gpu.renderer.atlas,
+                    fonts,
+                    &run.text,
+                    zest_font::Style::default(),
+                    run.pos,
+                    run.color,
+                    run.clip,
+                    run.max_width,
+                    &mut chrome.glyphs,
+                );
+            }
+        }
 
         // Build the frame FIRST, and only then acquire the swapchain texture.
         //
@@ -913,7 +1142,7 @@ impl App {
                         zest_render_wgpu::Preedit { text: &p.text, cursor: p.cursor }
                     }),
                 }],
-                &Chrome::default(),
+                &chrome,
             );
         } // lock released before any GPU work
 
@@ -926,7 +1155,14 @@ impl App {
                 return;
             }
             other => {
+                // The damage latch was already consumed for this frame, and a
+                // skipped frame presents nothing — so put the damage back, or
+                // a window that starts occluded shows its last (empty) frame
+                // until the shell happens to print again. `Occluded(false)`
+                // below is what asks for the redraw when the window returns.
                 tracing::debug!(?other, "skipping frame");
+                session.mark_dirty();
+                self.chrome_dirty = true;
                 return;
             }
         };
@@ -937,6 +1173,9 @@ impl App {
             .render(&gpu.device, &gpu.queue, &mut encoder, &view, &self.scene);
         gpu.queue.submit([encoder.finish()]);
         gpu.queue.present(frame);
+        // Only a presented frame satisfies the chrome's damage; clearing the
+        // latch on a skipped one is how a blank window gets stuck blank.
+        self.chrome_dirty = false;
     }
 
     /// Re-read the config and apply whatever changed, at its own cost.
@@ -1011,6 +1250,8 @@ impl App {
         let theme = zest_theme::builtin::get(&self.config.theme)
             .unwrap_or_else(zest_theme::builtin::obsidian);
         let resolved = zest_theme::resolve(&theme);
+        self.chrome_colors = ChromeColors::new(&theme.ui, &theme.effects, self.config.chrome_opacity);
+        self.mark_chrome_dirty();
         self.palette = to_core_palette(&resolved);
         self.selection_bg = zest_core::Rgb::new(
             resolved.selection_bg.r,
@@ -1075,6 +1316,12 @@ impl App {
         gpu.surface.configure(&gpu.device, &gpu.config);
         gpu.renderer.resize(&gpu.device, width, height);
 
+        // Every rectangle in the chrome depends on the window size — and on
+        // macOS a fullscreen transition arrives as a resize, which is also
+        // when the traffic-light inset changes.
+        self.chrome_layout = None;
+        self.chrome_dirty = true;
+
         if let Some(fonts) = self.fonts.as_ref() {
             let (cols, rows) = insets.grid_dims(fonts.cell_metrics(), width, height);
             session.resize(cols, rows);
@@ -1120,6 +1367,19 @@ impl ApplicationHandler<Wakeup> for App {
             .with_transparent(self.config.opacity < 1.0)
             .with_visible(false)
             .with_inner_size(winit::dpi::LogicalSize::new(960.0, 600.0));
+        // Not borderless (ROADMAP, WS-C2: borderless costs traffic lights,
+        // native fullscreen, Sequoia tiling and accessibility). A transparent
+        // full-size titlebar keeps all of that, and the tab strip is what
+        // fills the space — these are attribute flags, so the startup budget
+        // pays nothing.
+        #[cfg(target_os = "macos")]
+        let attrs = {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+            attrs
+                .with_titlebar_transparent(true)
+                .with_title_hidden(true)
+                .with_fullsize_content_view(true)
+        };
         let window = Arc::new(el.create_window(attrs).expect("create window"));
 
         // Show it NOW, painted by the OS in the theme colour.
@@ -1186,7 +1446,7 @@ impl ApplicationHandler<Wakeup> for App {
         // The grid size comes from the window and the font metrics, both of
         // which are known now -- it never needed the GPU.
         let size = window.inner_size();
-        let insets = Insets::padding_only(self.config.padding, scale);
+        let insets = self.insets_at(scale);
         let (cols, rows) = insets.grid_dims(metrics, size.width.max(1), size.height.max(1));
 
         let proxy = self.proxy.clone();
@@ -1370,6 +1630,14 @@ impl ApplicationHandler<Wakeup> for App {
                 if let Some(s) = self.session.as_ref() {
                     s.mark_dirty();
                 }
+                // The active tab's label dims with the window, like any
+                // native titlebar.
+                self.mark_chrome_dirty();
+            }
+
+            WindowEvent::Occluded(false) => {
+                // Frames attempted while occluded were skipped with their
+                // damage re-armed; this is the moment they were waiting for.
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }
@@ -1473,6 +1741,22 @@ impl ApplicationHandler<Wakeup> for App {
             }
 
             WindowEvent::CursorMoved { position, .. } => {
+                self.pointer_pos = (position.x, position.y);
+
+                // The chrome sees the pointer first — unless a grid drag is in
+                // progress, which keeps the grid: a selection that wanders
+                // into the strip must not die there.
+                if !self.mouse.is_dragging() {
+                    let over = self.chrome_hit(position.x, position.y);
+                    if over != self.chrome_hover {
+                        self.chrome_hover = over;
+                        self.mark_chrome_dirty();
+                    }
+                    if over.is_some() {
+                        return;
+                    }
+                }
+
                 let cell = self.cell_at(position.x, position.y);
                 let moved = cell != self.pointer_cell;
                 self.pointer_cell = cell;
@@ -1510,6 +1794,15 @@ impl ApplicationHandler<Wakeup> for App {
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
+                // Chrome clicks never reach the grid. A drag in progress keeps
+                // the grid for symmetry with CursorMoved.
+                if !self.mouse.is_dragging() {
+                    if let Some(region) = self.chrome_hit(self.pointer_pos.0, self.pointer_pos.1) {
+                        self.on_chrome_click(region, button, state, el);
+                        return;
+                    }
+                }
+
                 let Some(session) = self.session.as_ref() else { return };
                 let (row, col) = self.pointer_cell;
 
@@ -1586,6 +1879,26 @@ impl ApplicationHandler<Wakeup> for App {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
+                // Over the strip, the wheel scrolls the strip.
+                if self.chrome_hit(self.pointer_pos.0, self.pointer_pos.1).is_some() {
+                    let px = match delta {
+                        MouseScrollDelta::LineDelta(x, y) => {
+                            let step = if x.abs() > y.abs() { x } else { y };
+                            step * 40.0
+                        }
+                        MouseScrollDelta::PixelDelta(p) => {
+                            (if p.x.abs() > p.y.abs() { p.x } else { p.y }) as f32
+                        }
+                    };
+                    if px != 0.0 {
+                        // Layout clamps; storing the raw value would let the
+                        // scroll wander past the content and take clicks with it.
+                        self.strip_scroll -= px;
+                        self.mark_chrome_dirty();
+                    }
+                    return;
+                }
+
                 let Some(session) = self.session.as_ref() else { return };
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
@@ -1634,18 +1947,39 @@ impl ApplicationHandler<Wakeup> for App {
             WindowEvent::RedrawRequested => {
                 // Damage gates the frame entirely. An idle terminal must use 0%
                 // GPU -- that is a hard requirement, and it is what separates a
-                // real terminal from a demo.
-                let dirty = self.session.as_ref().is_some_and(|s| s.take_dirty());
-                if dirty {
+                // real terminal from a demo. The chrome has its own latch,
+                // set only by discrete events, so the guarantee survives it.
+                let grid_dirty = self.session.as_ref().is_some_and(|s| s.take_dirty());
+                if grid_dirty {
+                    // Title changes arrive as ordinary output damage; noticing
+                    // them here keeps the tab label and the OS titlebar honest
+                    // without inventing a new event for it.
+                    let title = self
+                        .session
+                        .as_ref()
+                        .map(|s| s.terminal().lock().title().trim().to_string())
+                        .unwrap_or_default();
+                    if title != self.window_title {
+                        if let Some(w) = self.window.as_ref() {
+                            w.set_title(if title.is_empty() { "zesterm" } else { &title });
+                        }
+                        self.window_title = title;
+                        self.chrome_dirty = true;
+                        self.chrome_layout = None;
+                    }
+                }
+                if grid_dirty || self.chrome_dirty {
                     // Applied here rather than in the parser thread: the policy
                     // is about what the user is looking at, and the parser has
                     // no business knowing that. It also means a flood costs one
                     // snap per frame, not one per line.
-                    if self.config.scroll_on_output {
+                    if grid_dirty && self.config.scroll_on_output {
                         if let Some(session) = self.session.as_ref() {
                             session.terminal().lock().scroll_to_bottom();
                         }
                     }
+                    // `redraw` clears the chrome latch only when a frame is
+                    // actually presented.
                     self.redraw();
                 }
             }

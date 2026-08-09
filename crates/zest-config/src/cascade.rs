@@ -157,7 +157,14 @@ fn merge_into(
 fn is_mergeable(path: &str) -> bool {
     matches!(
         path,
-        "typography" | "appearance" | "window" | "shell" | "scrolling" | "cursor" | "motion"
+        "typography"
+            | "appearance"
+            | "window"
+            | "tabs"
+            | "shell"
+            | "scrolling"
+            | "cursor"
+            | "motion"
     )
 }
 
@@ -271,6 +278,35 @@ mod tests {
             crate::settings::Typography::default().line_height
         );
         assert!(!r.provenance.contains_key("typography.line_height"));
+    }
+
+    #[test]
+    fn every_settings_group_merges_key_by_key() {
+        // `is_mergeable` is the cascade's copy of the group list, beside
+        // `invalidate::KEYS` and `invalidate::is_group`. A group present in
+        // KEYS but missing here has its settings warned about as unknown and
+        // ignored — found live the day `tabs.*` landed in the other two lists
+        // but not this one. Deriving the expectation from KEYS makes the next
+        // new group fail here instead of in a running window.
+        let mut groups: Vec<&str> = crate::invalidate::KEYS
+            .iter()
+            .filter_map(|(k, _)| k.split_once('.').map(|(g, _)| g))
+            .collect();
+        groups.sort_unstable();
+        groups.dedup();
+        for g in groups {
+            assert!(
+                is_mergeable(g),
+                "settings group `{g}` must merge key-by-key, or its keys are ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tabs_setting_survives_the_cascade() {
+        let r = resolve(&[layer(Source::User, "[tabs]\nposition = \"left\"\n")]);
+        assert_eq!(r.settings.tabs.position, crate::settings::TabsPosition::Left);
+        assert!(r.unknown_keys.is_empty(), "tabs.* are known settings");
     }
 
     #[test]

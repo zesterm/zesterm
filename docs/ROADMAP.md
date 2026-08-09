@@ -323,13 +323,16 @@ not *polished*; the rest of C2 can still trail.
       than on Windows — different compositor, and none of the class-background
       brush that bought the 35ms — so **the 100ms budget stays a Windows
       assertion** and this number is reported, not gated.
-- [ ] **Do not go borderless on macOS.** It costs traffic lights, native
+- [x] **Do not go borderless on macOS.** It costs traffic lights, native
       full-screen, Sequoia tiling and accessibility, and gains nothing over
       `titlebar_transparent` + `title_hidden` + `fullsize_content_view`. The
       traffic-light inset is not a constant — recompute on full-screen changes.
-      **Deliberately not done yet:** a transparent full-size titlebar with
-      nothing drawn into it is an empty strip, not an improvement. It wants to
-      land with WS-A's chrome, which is what fills it.
+      **Landed with WS-A's chrome, exactly as planned**: the attributes are
+      flags (startup probe unchanged at 46ms), and `platform::
+      traffic_light_inset` asks AppKit for the cluster's extent per chrome
+      layout — `None` in fullscreen, where the buttons auto-hide. The
+      horizontal strip reserves that width as a drag zone; the sidebar gives
+      the cluster a drag header band and runs the grid full-height beside it.
 - [ ] `NSVisualEffectView`, and the rest of the polish — still trailing.
 
 ### WS-D — Linux host
