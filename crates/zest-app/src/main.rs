@@ -260,7 +260,7 @@ fn main() {
                      --startup-probe   report time to first paint, then exit\n\
                      --attach-probe    report what attaching to the daemon cost, then exit\n\
                      --no-daemon       own the pty in this process, do not attach\n\
-                     --new-session     start a fresh shell, do not pick up an idle one\n\
+                     --new-session     start a fresh shell instead of restoring your tabs\n\
                      --attach <host:port>\n\
                      \x20                 another machine's daemon; its shell in this window\n\
                      \x20                 (the host approves this device on first contact)\n\

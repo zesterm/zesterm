@@ -45,7 +45,7 @@ move.
 
 ## Status
 
-**600 tests, six gates green**, measured on macOS rather than remembered.
+**657 tests, six gates green**, measured on macOS rather than remembered.
 First paint 35ms **on Windows**; the Mac paints against a different compositor
 and its number (48ms) is reported rather than gated.
 
@@ -58,7 +58,7 @@ and its number (48ms) is reported rather than gated.
 | `zest-render-wgpu` | ✅ pipelines, atlas, offscreen resolve, selection — ⬜ gamma validation |
 | `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema |
 | `zest-input` | ✅ extracted; keys + SGR mouse + selection + IME — ⬜ Kitty protocol |
-| `zest-app` | ✅ window, sessions behind `SessionSource`, **attached to its own daemon** — runs on Windows *and* macOS (Metal) — ⬜ macOS chrome |
+| `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), restore-on-launch — runs on Windows *and* macOS (Metal, transparent titlebar) — ⬜ Windows chrome, motion |
 | `zest-proto` | ✅ protocol 2, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, cell-for-cell conformance, chaos-resync, command blocks |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store — ⬜ Cloudflare transport (M4) |
 | `zest-daemon` | ✅ session ownership *and* lifecycle, protocol loop, loopback *and* LAN transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing |
@@ -206,7 +206,7 @@ the attach path ships compiled and unseen.
 M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
 `zest-render-wgpu/`. Consumes `SessionSource`.
 
-- [ ] **The fleet has no face on the desktop.** → [#23](https://github.com/zesterm/zesterm/issues/23).
+- [x] **The fleet has no face on the desktop.** → [#23](https://github.com/zesterm/zesterm/issues/23) — **closed**; the sequence below is its record.
       The phone and the web client are both planned to list sessions and attach
       to a chosen one; the app most people will use can only take a `--attach
       <host:port>` on the command line and then guess. The tab strip below is
@@ -309,8 +309,11 @@ M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
       bar hangs off the monitor. `HTMAXBUTTON` over the maximize rect is what
       enables Snap Layouts, and it suppresses ordinary mouse messages over that
       rect, so hover comes from `WM_NCMOUSEMOVE`.
-- [ ] `ChromeHitMap` produced by the layout pass and consumed by **both** the
+- [x] `ChromeHitMap` produced by the layout pass and consumed by **both** the
       renderer and the input path, so visuals and hit regions cannot drift.
+      Landed with #23's chrome: `chrome::layout` is the pure pass issue #5
+      sketched, and the tests pin the property (tab centres answer as their
+      tab, close outranks its tab, a modal picker lets nothing through).
 - [ ] Animation clock. Springs `(response, damping)`, not easing curves —
       terminal motion is interruption-dominated and a spring absorbs a changed
       target with continuous velocity for free. Substep the integrator
