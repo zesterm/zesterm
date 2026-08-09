@@ -48,6 +48,9 @@ pub enum Action {
     /// `tabs.position` through the settings path, so the file stays the one
     /// source of truth.
     ToggleTabLayout,
+    /// Split the active tab right (⌘D); on an already-split tab, moves the
+    /// keyboard to the other pane.
+    SplitRight,
 }
 
 /// The modifier half of a chord, as *policy* rather than bitmask.
@@ -230,6 +233,7 @@ pub static BINDINGS: &[Binding] = &[
     // ⌘⇧E arrives as "E" (shift pre-applies, like { above); the keycap shows
     // the physical chord.
     b(Mods::Desktop, ChordKey::Char("E"), Action::ToggleTabLayout, "⇧E", "Toggle vertical tabs", Category::Tabs),
+    b(Mods::Desktop, ChordKey::Char("d"), Action::SplitRight, "D", "Split right", Category::Tabs),
 ];
 
 /// The platform-spelled chord of `action`'s first binding — what the title

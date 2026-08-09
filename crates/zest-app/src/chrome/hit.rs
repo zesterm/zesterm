@@ -45,6 +45,10 @@ pub enum HitRegion {
     /// A full-pane screen's ground (fleet, themes) — swallows what its
     /// cards do not claim; Esc is the way back.
     ScreenPanel,
+    /// One pane of a split tab (`true` = right); clicking moves the keyboard
+    /// there. Pushed only over the *unfocused* pane's frame and both
+    /// headers — clicks inside the focused pane's body stay the grid's.
+    Pane(bool),
     /// One theme card of the gallery; clicking applies that theme.
     ThemeCard(usize),
     /// One row of the open picker, by index into its row list.

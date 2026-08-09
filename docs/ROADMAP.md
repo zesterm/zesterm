@@ -467,6 +467,20 @@ theme screens. Colours, sizes and spacing come from there, not from this file.
       via the same synchronous reload the overlay uses. Entered from the
       sidebar's fleet footer and from ⌘K's Actions group (chordless rows, the
       palette contract's first use of one).
+- [x] **Screen 5: split panes.** ⌘D gives the active tab a second pane on the
+      same host (and thereafter moves the keyboard between panes); the
+      renderer's day-one `&[Viewport]` slice finally gets its second element.
+      The whole refactor hinged on one function: `TabStrip::active_source`
+      now returns the *focused pane's* source, so all twenty input, selection,
+      IME, status and block call sites reroute without being touched.
+      `focused_view_rect` is the one pixel↔cell truth (cell_at, block headers
+      and fold maps all read it); pane frames and headers are drawn by the
+      chrome from the same `pane_frames` math the viewports use, so the
+      border cannot miss the grid it frames. Clicking the unfocused pane —
+      anywhere — moves focus; the focused body stays the terminal's (tested).
+      ⌘W closes the focused pane first (closing the left promotes the right,
+      so the tab keeps its identity); a pane's shell ending collapses the
+      pane, never the tab. Splits deliberately do not persist yet.
 - [ ] Animation clock. Springs `(response, damping)`, not easing curves —
       terminal motion is interruption-dominated and a spring absorbs a changed
       target with continuous velocity for free. Substep the integrator

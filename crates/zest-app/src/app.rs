@@ -931,6 +931,13 @@ impl App {
         match action {
             Action::NewTab => self.new_tab(),
             Action::CloseTab => {
+                // A split tab closes its focused pane first; the tab itself
+                // goes on the next ⌘W.
+                if self.tabs.active_mut().is_some_and(Tab::close_focused_pane) {
+                    self.relayout_grid();
+                    self.mark_chrome_dirty();
+                    return;
+                }
                 if let Some(tab) = self.tabs.active() {
                     let addr = tab.addr;
                     self.close_tab(addr, false, el);
@@ -972,6 +979,162 @@ impl App {
             Action::TogglePalette => self.toggle_palette(),
             Action::ToggleSettings => self.toggle_settings(),
             Action::ToggleTabLayout => self.toggle_tab_layout(),
+            Action::SplitRight => self.split_right(),
+        }
+    }
+
+    /// ⌘D: give the active tab a second pane on the same host; on a tab that
+    /// already has one, move the keyboard to the other pane instead — the
+    /// chord stays useful after the split.
+    fn split_right(&mut self) {
+        if self.tabs.active().is_none() {
+            return;
+        }
+        if self.tabs.active().is_some_and(|t| t.split.is_some()) {
+            if let Some(tab) = self.tabs.active_mut() {
+                tab.focus_right = !tab.focus_right;
+            }
+            self.mark_chrome_dirty();
+            return;
+        }
+
+        // Sized for the pane it will occupy, not the whole grid: the shell's
+        // first prompt should wrap where the pane edge is.
+        let (cols, rows) = self.split_pane_dims();
+
+        let pane = match (&self.route, &self.client_identity) {
+            (Some(route), Some(identity)) => {
+                self.next_placeholder += 1;
+                let cell = Arc::new(parking_lot::Mutex::new(crate::tabs::placeholder_addr(
+                    self.next_placeholder,
+                )));
+                let wake = wake_for(&self.proxy, Arc::clone(&cell), Arc::clone(&self.activity));
+                let command = match route {
+                    HostRoute::LocalSocket(_) => self.config.shell.clone().unwrap_or_default(),
+                    HostRoute::Tcp(_) => String::new(),
+                };
+                let session = crate::remote::RemoteSession::create_and_attach(
+                    route.dialer(),
+                    &crate::remote::AttachOptions {
+                        identity,
+                        label: "zesterm",
+                        command: &command,
+                        cols,
+                        rows,
+                        scrollback: self.config.scrollback,
+                        adopt: false,
+                        local: route.is_local(),
+                        expect_host: None,
+                    },
+                    wake,
+                );
+                match session {
+                    Ok(session) => {
+                        *cell.lock() = session.addr();
+                        session.terminal().lock().set_palette(self.palette.clone());
+                        let local = route.is_local();
+                        crate::tabs::SplitPane::daemon(session, local, (cols, rows))
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not open a split pane");
+                        return;
+                    }
+                }
+            }
+            _ => {
+                self.next_placeholder += 1;
+                let addr = crate::tabs::placeholder_addr(self.next_placeholder);
+                let cell = Arc::new(parking_lot::Mutex::new(addr));
+                match Session::spawn(
+                    &self.build_spec(),
+                    PtySize::new(cols, rows),
+                    self.config.scrollback,
+                    wake_for(&self.proxy, cell, Arc::clone(&self.activity)),
+                ) {
+                    Ok(session) => {
+                        session.terminal().lock().set_palette(self.palette.clone());
+                        crate::tabs::SplitPane::in_process(session, addr, (cols, rows))
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not spawn a split pane");
+                        return;
+                    }
+                }
+            }
+        };
+
+        if let Some(tab) = self.tabs.active_mut() {
+            tab.split = Some(Box::new(pane));
+            tab.focus_right = true;
+        }
+        self.resize_split_panes();
+        self.mark_chrome_dirty();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Cols/rows that fit one pane of a split, from the current window.
+    fn split_pane_dims(&self) -> (u16, u16) {
+        let geometry = self.window.as_ref().zip(self.fonts.as_ref());
+        let Some((window, fonts)) = geometry else { return (80, 24) };
+        let scale = window.scale_factor() as f32;
+        let size = window.inner_size();
+        let area = self.insets_at(scale).grid_rect(size.width, size.height);
+        let (_, right) = crate::chrome::layout::pane_frames(area, scale);
+        let body = crate::chrome::layout::pane_body(right, scale);
+        let cm = fonts.cell_metrics();
+        let cols = ((body[2] / cm.cell_w as f32) as u16).max(2);
+        let rows = ((body[3] / cm.cell_h as f32) as u16).max(2);
+        (cols, rows)
+    }
+
+    /// The rectangle the focused terminal is drawn in: the grid area, or the
+    /// focused pane's body when the active tab is split. Everything that
+    /// maps pixels to cells reads this — one rectangle, one truth.
+    fn focused_view_rect(&self) -> Option<[f32; 4]> {
+        let window = self.window.as_ref()?;
+        let scale = window.scale_factor() as f32;
+        let size = window.inner_size();
+        let area = self.insets_at(scale).grid_rect(size.width, size.height);
+        let tab = self.tabs.active()?;
+        if tab.split.is_some() {
+            let (l, r) = crate::chrome::layout::pane_frames(area, scale);
+            let frame = if tab.focus_right { r } else { l };
+            Some(crate::chrome::layout::pane_body(frame, scale))
+        } else {
+            Some(area)
+        }
+    }
+
+    /// Resize both panes of a split tab to their body rectangles.
+    fn resize_split_panes(&mut self) {
+        let geometry = self.window.as_ref().zip(self.fonts.as_ref());
+        let Some((window, fonts)) = geometry else { return };
+        let scale = window.scale_factor() as f32;
+        let size = window.inner_size();
+        let area = self.insets_at(scale).grid_rect(size.width, size.height);
+        let (left, right) = crate::chrome::layout::pane_frames(area, scale);
+        let cm = fonts.cell_metrics();
+        let dims = |body: [f32; 4]| {
+            (
+                ((body[2] / cm.cell_w as f32) as u16).max(2),
+                ((body[3] / cm.cell_h as f32) as u16).max(2),
+            )
+        };
+        let (ld, rd) = (
+            dims(crate::chrome::layout::pane_body(left, scale)),
+            dims(crate::chrome::layout::pane_body(right, scale)),
+        );
+        if let Some(tab) = self.tabs.active_mut() {
+            if tab.split.is_some() {
+                tab.source().resize(ld.0, ld.1);
+                tab.sized = ld;
+                if let Some(split) = tab.split.as_mut() {
+                    split.source().resize(rd.0, rd.1);
+                    split.sized = rd;
+                }
+            }
         }
     }
 
@@ -1105,6 +1268,64 @@ impl App {
                 Some(ScreenModel::Themes { cards })
             }
         }
+    }
+
+    /// The split tab's pane headers, when the active tab has a split.
+    fn build_panes_model(
+        &self,
+        fleet_hosts: &[crate::fleet::FleetHost],
+    ) -> Option<[crate::chrome::model::PaneModel; 2]> {
+        use crate::chrome::model::PaneModel;
+        let tab = self.tabs.active()?;
+        let split = tab.split.as_ref()?;
+        let describe = |source: &dyn crate::source::SessionSource| {
+            let (host, accent, remote) = match source.origin() {
+                Origin::Daemon { host, local: false } => (host, 1, true),
+                _ => (
+                    fleet_hosts
+                        .iter()
+                        .find(|h| h.local)
+                        .map_or_else(|| "local".to_string(), |h| h.label.clone()),
+                    0,
+                    false,
+                ),
+            };
+            let cwd = {
+                let term = source.terminal();
+                let term = term.lock();
+                if term.cwd().is_empty() {
+                    term.blocks().last().map(|b| b.cwd.clone()).unwrap_or_default()
+                } else {
+                    term.cwd().to_string()
+                }
+            };
+            let cwd = if remote { cwd } else { crate::status::shorten_home(&cwd) };
+            let path = fleet_hosts
+                .iter()
+                .find(|h| h.label == host)
+                .and_then(|h| match h.reachability {
+                    Some(zest_mesh::Reachability::Cloud) => Some(match h.rtt_ms {
+                        Some(ms) => {
+                            format!("tunnel {}", crate::chrome::layout::format_ms(ms))
+                        }
+                        None => "tunnel".to_string(),
+                    }),
+                    _ => None,
+                });
+            let sub = match (cwd.is_empty(), path) {
+                (false, Some(p)) => format!("{cwd} · {p}"),
+                (false, None) => cwd,
+                (true, Some(p)) => p,
+                (true, None) => String::new(),
+            };
+            (host, sub, accent)
+        };
+        let (lh, ls, la) = describe(tab.source());
+        let (rh, rs, ra) = describe(split.source());
+        Some([
+            PaneModel { host: lh, sub: ls, focused: !tab.focus_right, accent: la },
+            PaneModel { host: rh, sub: rs, focused: tab.focus_right, accent: ra },
+        ])
     }
 
     /// Open or close a full-pane screen; closing always lands on the grid.
@@ -1544,6 +1765,7 @@ impl App {
         // paint over the last row.
         let status = if self.strip_shown() { self.build_status(&fleet_hosts) } else { None };
         let screen_model = self.build_screen_model(&fleet_hosts);
+        let panes = self.build_panes_model(&fleet_hosts);
         let grid_area = early_geometry.map_or([0.0; 4], |(scale, size)| {
             self.insets_at(scale).grid_rect(size.width, size.height)
         });
@@ -1707,6 +1929,7 @@ impl App {
             status,
             sidebar,
             screen: screen_model,
+            panes,
             grid_area,
             toggle_chord: keymap::chord_for(keymap::Action::ToggleTabLayout),
             palette_chord: keymap::chord_for(keymap::Action::ToggleFleetPicker),
@@ -1787,6 +2010,14 @@ impl App {
             }
             // The screen's ground swallows; its cards claim their own.
             (HitRegion::ScreenPanel, _) => {}
+            (HitRegion::Pane(right), MouseButton::Left) => {
+                if let Some(tab) = self.tabs.active_mut() {
+                    if tab.split.is_some() && tab.focus_right != right {
+                        tab.focus_right = right;
+                        self.mark_chrome_dirty();
+                    }
+                }
+            }
             (HitRegion::ThemeCard(i), MouseButton::Left) => {
                 let id = zest_theme::builtin::IDS.get(i).copied();
                 if let Some(id) = id {
@@ -1798,7 +2029,7 @@ impl App {
             (HitRegion::Status, _) => {}
             (HitRegion::BlockFold(id), MouseButton::Left) => {
                 if let Some(tab) = self.tabs.active() {
-                    let set = self.folded_blocks.entry(tab.addr).or_default();
+                    let set = self.folded_blocks.entry(tab.focused_addr()).or_default();
                     if !set.remove(&id) {
                         set.insert(id);
                     }
@@ -2686,7 +2917,7 @@ impl App {
     /// The folded set for the active session, when it has one.
     fn active_folds(&self) -> Option<&std::collections::BTreeSet<u32>> {
         let tab = self.tabs.active()?;
-        self.folded_blocks.get(&tab.addr).filter(|s| !s.is_empty())
+        self.folded_blocks.get(&tab.focused_addr()).filter(|s| !s.is_empty())
     }
 
     /// A visual (clicked) row to the line it shows, through the fold view
@@ -2722,7 +2953,7 @@ impl App {
     /// labels. One short terminal lock; plain data out.
     fn build_block_views(&self) -> Vec<crate::chrome::blocks::BlockView> {
         let Some(tab) = self.tabs.active() else { return Vec::new() };
-        let term = tab.source().terminal();
+        let term = tab.focused_source().terminal();
         let term = term.lock();
         // The alt screen is a separate grid whose ids restart at zero; a
         // primary-grid block would overlay whatever rows happen to collide.
@@ -2730,7 +2961,7 @@ impl App {
             return Vec::new();
         }
         let grid = term.grid();
-        let folded = self.folded_blocks.get(&tab.addr);
+        let folded = self.folded_blocks.get(&tab.focused_addr());
         // Through the fold view when one is active, so a header sits on the
         // rows the renderer actually draws, not the ones it hid.
         let fold_map = folded.and_then(|f| block_actions::fold_row_map(&term, f));
@@ -2810,13 +3041,17 @@ impl App {
             .collect()
     }
 
-    /// Pointer pixels to a grid cell, clamped into the viewport.
+    /// Pointer pixels to a grid cell, clamped into the viewport — through
+    /// the focused pane's rectangle when the tab is split.
     fn cell_at(&self, x: f64, y: f64) -> (usize, usize) {
         let Some(fonts) = self.fonts.as_ref() else { return (0, 0) };
         let m = fonts.cell_metrics();
-        let insets = self.insets();
-        let col = ((x - f64::from(insets.left)).max(0.0) / f64::from(m.cell_w)) as usize;
-        let row = ((y - f64::from(insets.top)).max(0.0) / f64::from(m.cell_h)) as usize;
+        let rect = self.focused_view_rect().unwrap_or_else(|| {
+            let insets = self.insets();
+            [insets.left, insets.top, 0.0, 0.0]
+        });
+        let col = ((x - f64::from(rect[0])).max(0.0) / f64::from(m.cell_w)) as usize;
+        let row = ((y - f64::from(rect[1])).max(0.0) / f64::from(m.cell_h)) as usize;
 
         let Some(session) = self.tabs.active_source() else { return (row, col) };
         let term = session.terminal().lock();
@@ -2871,9 +3106,11 @@ impl App {
         // views are plain data, and holding the terminal across atlas work
         // would stall the reader thread.
         let block_views = self.build_block_views();
+        // Where the headers draw: the focused pane's body when split.
+        let block_area = self.focused_view_rect();
         let fold_map: Option<Vec<usize>> = self.tabs.active().and_then(|t| {
-            let folds = self.folded_blocks.get(&t.addr).filter(|s| !s.is_empty())?;
-            let term = t.source().terminal();
+            let folds = self.folded_blocks.get(&t.focused_addr()).filter(|s| !s.is_empty())?;
+            let term = t.focused_source().terminal();
             let term = term.lock();
             block_actions::fold_row_map(&term, folds)
         });
@@ -2915,7 +3152,8 @@ impl App {
         // Block headers ride the scrollback, so unlike the cached layout they
         // are rebuilt per frame — pure arithmetic over the views above.
         {
-            let area = insets.grid_rect(gpu.config.width, gpu.config.height);
+            let area = block_area
+                .unwrap_or_else(|| insets.grid_rect(gpu.config.width, gpu.config.height));
             let scale = window.scale_factor() as f32;
             let block_chrome = {
                 let mut measure = |t: &str, px: f32, bold: bool, tr: f32| {
@@ -2966,30 +3204,96 @@ impl App {
         // ordering overlaps the CPU work with the wait and is the single
         // highest-leverage latency trick in the renderer.
         {
-            let term = session.terminal().lock();
-            self.scene.build(
-                &gpu.device,
-                &gpu.queue,
-                &mut gpu.renderer.atlas,
-                fonts,
-                metrics,
-                &[Viewport {
-                    rect: insets.grid_rect(gpu.config.width, gpu.config.height),
-                    grid: term.grid(),
-                    palette: term.palette(),
-                    scroll_px: 0.0,
-                    focused: self.focused,
-                    opacity: self.config.opacity,
-                    selection: term.selection(),
-                    selection_bg: self.selection_bg,
-                    preedit: self.ime.preedit().map(|p| {
+            let area = insets.grid_rect(gpu.config.width, gpu.config.height);
+            let split = self.tabs.active().and_then(|t| {
+                t.split.as_ref().map(|p| (p.source(), t.focus_right))
+            });
+            match split {
+                Some((right_source, focus_right)) => {
+                    // Two panes, two grids, one build — the slice the
+                    // renderer took from day one finally gets its second
+                    // element (CONTRACTS, "cheap now" #3).
+                    let scale =
+                        self.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
+                    let (lf, rf) = crate::chrome::layout::pane_frames(area, scale);
+                    let (lb, rb) = (
+                        crate::chrome::layout::pane_body(lf, scale),
+                        crate::chrome::layout::pane_body(rf, scale),
+                    );
+                    let left_source = self
+                        .tabs
+                        .active()
+                        .expect("split implies an active tab")
+                        .source();
+                    let term_l = left_source.terminal().lock();
+                    let term_r = right_source.terminal().lock();
+                    let preedit = self.ime.preedit().map(|p| {
                         zest_render_wgpu::Preedit { text: &p.text, cursor: p.cursor }
-                    }),
-                    row_map: fold_map.as_deref(),
-                }],
-                &chrome,
-            );
-        } // lock released before any GPU work
+                    });
+                    let left_focused = !focus_right;
+                    let viewports = [
+                        Viewport {
+                            rect: lb,
+                            grid: term_l.grid(),
+                            palette: term_l.palette(),
+                            scroll_px: 0.0,
+                            focused: self.focused && left_focused,
+                            opacity: self.config.opacity,
+                            selection: term_l.selection(),
+                            selection_bg: self.selection_bg,
+                            preedit: if left_focused { preedit } else { None },
+                            row_map: if left_focused { fold_map.as_deref() } else { None },
+                        },
+                        Viewport {
+                            rect: rb,
+                            grid: term_r.grid(),
+                            palette: term_r.palette(),
+                            scroll_px: 0.0,
+                            focused: self.focused && focus_right,
+                            opacity: self.config.opacity,
+                            selection: term_r.selection(),
+                            selection_bg: self.selection_bg,
+                            preedit: if focus_right { preedit } else { None },
+                            row_map: if focus_right { fold_map.as_deref() } else { None },
+                        },
+                    ];
+                    self.scene.build(
+                        &gpu.device,
+                        &gpu.queue,
+                        &mut gpu.renderer.atlas,
+                        fonts,
+                        metrics,
+                        &viewports,
+                        &chrome,
+                    );
+                }
+                None => {
+                    let term = session.terminal().lock();
+                    self.scene.build(
+                        &gpu.device,
+                        &gpu.queue,
+                        &mut gpu.renderer.atlas,
+                        fonts,
+                        metrics,
+                        &[Viewport {
+                            rect: area,
+                            grid: term.grid(),
+                            palette: term.palette(),
+                            scroll_px: 0.0,
+                            focused: self.focused,
+                            opacity: self.config.opacity,
+                            selection: term.selection(),
+                            selection_bg: self.selection_bg,
+                            preedit: self.ime.preedit().map(|p| {
+                                zest_render_wgpu::Preedit { text: &p.text, cursor: p.cursor }
+                            }),
+                            row_map: fold_map.as_deref(),
+                        }],
+                        &chrome,
+                    );
+                }
+            }
+        } // locks released before any GPU work
 
         let frame = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
@@ -3176,8 +3480,10 @@ impl App {
             let dims = insets.grid_dims(fonts.cell_metrics(), width, height);
             // Only the visible grid follows a drag live; background tabs
             // catch up on activation, so a resize costs one message rather
-            // than one per tab per frame.
-            if let Some(tab) = self.tabs.active_mut() {
+            // than one per tab per frame. A split tab resizes both panes.
+            if self.tabs.active().is_some_and(|t| t.split.is_some()) {
+                self.resize_split_panes();
+            } else if let Some(tab) = self.tabs.active_mut() {
                 tab.source().resize(dims.0, dims.1);
                 tab.sized = dims;
             }
@@ -3527,6 +3833,15 @@ impl ApplicationHandler<Wakeup> for App {
             // child is already gone — and the last tab closing closes the
             // window, which is exactly the old single-session behavior.
             Wakeup::TabExited(addr) => {
+                // A split pane's shell ending collapses the pane, never the
+                // tab it lived in.
+                if let Some(tab) = self.tabs.find_split_owner(addr) {
+                    tab.focus_right = false;
+                    tab.split = None;
+                    self.relayout_grid();
+                    self.mark_chrome_dirty();
+                    return;
+                }
                 self.close_tab(addr, true, el);
             }
             // A pinned tab's host answered and its session no longer exists.
@@ -3537,6 +3852,12 @@ impl ApplicationHandler<Wakeup> for App {
                 tracing::warn!(%addr, "the session ended on its host");
                 if let Some(tab) = self.tabs.find_mut(addr) {
                     tab.dead = true;
+                } else if let Some(tab) = self.tabs.find_split_owner(addr) {
+                    // The pane stays put showing its last state, like a dead
+                    // tab does — vanishing mid-glance is worse.
+                    if let Some(split) = tab.split.as_mut() {
+                        split.dead = true;
+                    }
                 }
                 self.mark_chrome_dirty();
             }

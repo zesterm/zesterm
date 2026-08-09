@@ -103,6 +103,37 @@ const SLIM_PAD: f32 = 14.0;
 /// The status bar's height, logical pixels. Public because `insets_at` must
 /// subtract it from the grid.
 pub const STATUS_H: f32 = 28.0;
+
+// Split panes (design screen 5). Public because the app's viewport math and
+// the chrome's frame drawing must be the same numbers or the border misses
+// the grid it frames.
+pub const PANE_MARGIN: f32 = 8.0;
+pub const PANE_HEADER: f32 = 28.0;
+pub const PANE_RADIUS: f32 = 10.0;
+
+/// The two pane frames of a split tab, inside the grid area.
+#[must_use]
+pub fn pane_frames(area: [f32; 4], s: f32) -> ([f32; 4], [f32; 4]) {
+    let m = PANE_MARGIN * s;
+    let w = ((area[2] - 4.0 * m) / 2.0).max(0.0);
+    let h = (area[3] - 2.0 * m).max(0.0);
+    (
+        [area[0] + m, area[1] + m, w, h],
+        [area[0] + 3.0 * m + w, area[1] + m, w, h],
+    )
+}
+
+/// Where a pane's grid actually lives: inside the frame, below the header.
+#[must_use]
+pub fn pane_body(frame: [f32; 4], s: f32) -> [f32; 4] {
+    let b = HAIRLINE * s;
+    [
+        frame[0] + b,
+        frame[1] + PANE_HEADER * s,
+        (frame[2] - 2.0 * b).max(0.0),
+        (frame[3] - PANE_HEADER * s - b).max(0.0),
+    ]
+}
 const STATUS_HPAD: f32 = 14.0;
 
 // The design's type scale, logical px.
@@ -144,6 +175,9 @@ pub fn layout(
         TabsPosition::Top => horizontal(model, colors, m, measure),
         TabsPosition::Left => vertical(model, colors, m, measure),
     };
+    if let Some(panes) = &model.panes {
+        panes_overlay(panes, model.grid_area, colors, m, measure, &mut out);
+    }
     if let Some(screen) = &model.screen {
         // Over the grid, under the modals: a screen is window content, not
         // an overlay, so the picker can still open above it.
@@ -161,6 +195,104 @@ pub fn layout(
         settings_overlay(settings, colors, m, measure, &mut out);
     }
     out
+}
+
+/// The split tab's frames and headers (design screen 5): focused pane gets
+/// the accent border and the word "focused"; the other, hairline and dim.
+fn panes_overlay(
+    panes: &[super::model::PaneModel; 2],
+    area: [f32; 4],
+    colors: &ChromeColors,
+    m: &ChromeMetrics,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+    out: &mut ChromeLayout,
+) {
+    let s = m.scale;
+    let frames = pane_frames(area, s);
+    for (right, (pane, frame)) in [(false, (&panes[0], frames.0)), (true, (&panes[1], frames.1))]
+    {
+        let header_h = PANE_HEADER * s;
+        // Header band first, then the frame's border over everything, so the
+        // rounded corners stay crisp where the band meets them.
+        let header = [frame[0], frame[1], frame[2], header_h];
+        out.rects.push(RectInstance {
+            radii: [PANE_RADIUS * s, PANE_RADIUS * s, 0.0, 0.0],
+            ..RectInstance::filled(
+                header,
+                if pane.focused { colors.panel_bg } else { colors.block_header_bg },
+                area,
+            )
+        });
+        out.rects.push(RectInstance::filled(
+            [frame[0], frame[1] + header_h - HAIRLINE * s, frame[2], HAIRLINE * s],
+            colors.line,
+            area,
+        ));
+        out.rects.push(RectInstance {
+            radii: [PANE_RADIUS * s; 4],
+            border: if pane.focused { colors.accent } else { colors.line },
+            border_width: HAIRLINE * s,
+            ..RectInstance::filled(frame, LinearRgba::TRANSPARENT, area)
+        });
+
+        // The unfocused pane is one click from the keyboard, anywhere on it;
+        // the focused pane's body stays the grid's, so only its header
+        // answers as chrome.
+        if pane.focused {
+            out.hit.push(header, HitRegion::Pane(right));
+        } else {
+            out.hit.push(frame, HitRegion::Pane(right));
+        }
+
+        let mut x = frame[0] + 10.0 * s;
+        dot(
+            &mut out.rects,
+            x + 2.5 * s,
+            frame[1] + header_h / 2.0,
+            5.0 * s,
+            host_accent(colors, pane.accent),
+            area,
+        );
+        x += 13.0 * s;
+        let name_px = UI_SMALL * s;
+        let nw = measure(&pane.host, name_px, false, 0.0);
+        out.texts.push(TextRun {
+            text: pane.host.clone(),
+            pos: [x, baseline_in(frame[1], header_h, name_px)],
+            max_width: nw + 2.0,
+            color: if pane.focused { colors.text_active } else { colors.text_inactive },
+            clip: area,
+            px: name_px,
+            bold: false,
+            tracking: 0.0,
+        });
+        x += nw + 8.0 * s;
+        let mut right_edge = frame[0] + frame[2] - 10.0 * s;
+        if pane.focused {
+            let fw = measure("focused", UI_CHORD * s, false, 0.0);
+            out.texts.push(TextRun {
+                text: "focused".into(),
+                pos: [right_edge - fw, baseline_in(frame[1], header_h, UI_CHORD * s)],
+                max_width: fw + 2.0,
+                color: colors.accent,
+                clip: area,
+                px: UI_CHORD * s,
+                bold: false,
+                tracking: 0.0,
+            });
+            right_edge -= fw + 8.0 * s;
+        }
+        out.texts.push(TextRun {
+            text: pane.sub.clone(),
+            pos: [x, baseline_in(frame[1], header_h, UI_STATUS * s)],
+            max_width: (right_edge - x).max(0.0),
+            color: colors.text_faint,
+            clip: area,
+            px: UI_STATUS * s,
+            bold: false,
+            tracking: 0.0,
+        });
+    }
 }
 
 // ⌘K palette geometry (design screen 6), logical px.
@@ -2031,6 +2163,7 @@ mod tests {
             }),
             sidebar: None,
             screen: None,
+            panes: None,
             grid_area: [0.0, 46.0, 1200.0, 726.0],
             toggle_chord: "⌘⇧E".into(),
             palette_chord: "⌘K".into(),
@@ -2251,6 +2384,48 @@ mod tests {
             });
             assert!(found.is_some(), "no way to open a tab in {position:?}");
         }
+    }
+
+    #[test]
+    fn a_split_tab_offers_the_other_pane_and_keeps_the_focused_grid() {
+        // Design screen 5: clicking anywhere on the unfocused pane moves the
+        // keyboard; the focused pane's body must stay the grid's — only its
+        // header answers as chrome.
+        use crate::chrome::model::PaneModel;
+        let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut mo = model(tabs, TabsPosition::Top);
+        mo.panes = Some([
+            PaneModel { host: "studio".into(), sub: "~/dev".into(), focused: true, accent: 0 },
+            PaneModel { host: "forge".into(), sub: "C:\\src".into(), focused: false, accent: 2 },
+        ]);
+        let l = layout(&mo, &colors(), &m, &mut measure);
+
+        let area = mo.grid_area;
+        let (lf, rf) = pane_frames(area, 1.0);
+        let lb = pane_body(lf, 1.0);
+        // Middle of the unfocused (right) pane: chrome, and it says which.
+        assert_eq!(
+            l.hit.hit(rf[0] + rf[2] / 2.0, rf[1] + rf[3] / 2.0),
+            Some(HitRegion::Pane(true)),
+            "the unfocused pane is one click from the keyboard"
+        );
+        // Middle of the focused pane's body: nobody's chrome — the grid's.
+        assert_eq!(
+            l.hit.hit(lb[0] + lb[2] / 2.0, lb[1] + lb[3] / 2.0),
+            None,
+            "the focused pane's body belongs to the terminal"
+        );
+        // Its header still answers, so focus can bounce back by header too.
+        assert_eq!(
+            l.hit.hit(lf[0] + lf[2] / 2.0, lf[1] + 14.0),
+            Some(HitRegion::Pane(false)),
+            "the focused header is still chrome"
+        );
+        assert!(
+            l.texts.iter().any(|t| t.text == "focused"),
+            "the focused pane says so in words"
+        );
     }
 
     #[test]

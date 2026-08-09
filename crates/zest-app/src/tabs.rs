@@ -31,6 +31,12 @@ pub enum TabSession {
 pub struct Tab {
     pub addr: SessionAddr,
     session: TabSession,
+    /// A second pane, split right (design screen 5). Two panes is the
+    /// design's shape; a tree is a later one, and boxed so an unsplit tab —
+    /// every tab, most of the time — pays a pointer.
+    pub split: Option<Box<SplitPane>>,
+    /// Which pane owns the keyboard: `false` = left/primary, `true` = right.
+    pub focus_right: bool,
     /// The session runs on this machine (loopback daemon or in-process).
     /// Decides close semantics: closing a local tab kills; a remote one
     /// detaches.
@@ -49,11 +55,49 @@ pub struct Tab {
     pub dial_hint: Option<String>,
 }
 
+/// The right-hand pane of a split tab: a session with the little state a
+/// pane needs, and none of a tab's (a pane is not a hit target in the strip,
+/// does not persist, and cannot be dragged).
+pub struct SplitPane {
+    pub addr: SessionAddr,
+    session: TabSession,
+    pub local: bool,
+    pub dead: bool,
+    pub sized: (u16, u16),
+}
+
+impl SplitPane {
+    pub fn daemon(remote: RemoteSession, local: bool, sized: (u16, u16)) -> Self {
+        Self { addr: remote.addr(), session: TabSession::Daemon(remote), local, dead: false, sized }
+    }
+
+    pub fn in_process(session: Session, addr: SessionAddr, sized: (u16, u16)) -> Self {
+        Self { addr, session: TabSession::InProcess(session), local: true, dead: false, sized }
+    }
+
+    pub fn source(&self) -> &dyn SessionSource {
+        match &self.session {
+            TabSession::Daemon(r) => r,
+            TabSession::InProcess(s) => s,
+        }
+    }
+
+    /// End the pane's session for good (local close); dropping detaches.
+    pub fn kill(self) {
+        match self.session {
+            TabSession::Daemon(r) => r.kill(),
+            TabSession::InProcess(s) => drop(s),
+        }
+    }
+}
+
 impl Tab {
     pub fn daemon(remote: RemoteSession, local: bool, sized: (u16, u16)) -> Self {
         Self {
             addr: remote.addr(),
             session: TabSession::Daemon(remote),
+            split: None,
+            focus_right: false,
             local,
             dead: false,
             sized,
@@ -71,6 +115,8 @@ impl Tab {
         Self {
             addr,
             session: TabSession::InProcess(session),
+            split: None,
+            focus_right: false,
             local: true,
             dead: false,
             sized,
@@ -85,11 +131,69 @@ impl Tab {
         }
     }
 
+    /// The pane the keyboard belongs to — what input, selection, IME and the
+    /// status bar all act on. The primary pane unless a split holds focus.
+    pub fn focused_source(&self) -> &dyn SessionSource {
+        match (&self.split, self.focus_right) {
+            (Some(split), true) => split.source(),
+            _ => self.source(),
+        }
+    }
+
+    /// The focused pane's session address.
+    #[must_use]
+    pub fn focused_addr(&self) -> SessionAddr {
+        match (&self.split, self.focus_right) {
+            (Some(split), true) => split.addr,
+            _ => self.addr,
+        }
+    }
+
+    /// Close the focused pane of a split tab; `false` when there is no
+    /// split, in which case closing means the whole tab.
+    ///
+    /// Closing the *left* pane promotes the right one into the tab, so the
+    /// tab keeps its identity in the strip while the surviving shell keeps
+    /// running — the alternative (the tab vanishing while a pane lives) is
+    /// how sessions get orphaned.
+    pub fn close_focused_pane(&mut self) -> bool {
+        let Some(split) = self.split.take() else { return false };
+        if self.focus_right {
+            self.focus_right = false;
+            if split.local {
+                split.kill();
+            }
+            // A remote pane's drop detaches, exactly like a remote tab.
+        } else {
+            let old_addr = self.addr;
+            let was_local = self.local;
+            let old = core::mem::replace(&mut self.session, split.session);
+            self.addr = split.addr;
+            self.local = split.local;
+            self.dead = split.dead;
+            self.sized = split.sized;
+            let _ = old_addr;
+            if was_local {
+                match old {
+                    TabSession::Daemon(r) => r.kill(),
+                    TabSession::InProcess(s) => drop(s),
+                }
+            }
+        }
+        true
+    }
+
     /// End this tab's session for good.
     ///
     /// Only meaningful for daemon sessions — an in-process pty dies with its
-    /// `Session` drop regardless, which is also what a dead tab needs.
+    /// `Session` drop regardless, which is also what a dead tab needs. A
+    /// split pane follows its tab's fate: local panes die, remote detach.
     pub fn kill(self) {
+        if let Some(split) = self.split {
+            if split.local {
+                split.kill();
+            }
+        }
         match self.session {
             TabSession::Daemon(r) => r.kill(),
             TabSession::InProcess(s) => drop(s),
@@ -146,11 +250,18 @@ impl TabStrip {
         self.tabs.get_mut(self.active)
     }
 
-    /// The active tab's terminal, which is what nearly every caller wants:
-    /// input, rendering, selection and IME all act on what is visible.
+    /// The active tab's *focused* terminal, which is what nearly every
+    /// caller wants: input, rendering, selection and IME all act on the pane
+    /// the keyboard is in — which is what makes a split tab route by
+    /// changing one function instead of twenty call sites.
     #[must_use]
     pub fn active_source(&self) -> Option<&dyn SessionSource> {
-        self.active().map(Tab::source)
+        self.active().map(Tab::focused_source)
+    }
+
+    /// The tab holding `addr` as its *split* pane, if any.
+    pub fn find_split_owner(&mut self, addr: SessionAddr) -> Option<&mut Tab> {
+        self.tabs.iter_mut().find(|t| t.split.as_ref().is_some_and(|s| s.addr == addr))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Tab> {

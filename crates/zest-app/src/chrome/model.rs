@@ -178,6 +178,17 @@ pub struct ThemeCard {
     pub active: bool,
 }
 
+/// One pane's header facts (design screen 5).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaneModel {
+    pub host: String,
+    /// Mono sub-label: cwd, and the path cost for a remote pane.
+    pub sub: String,
+    pub focused: bool,
+    /// Host-accent slot for the header dot.
+    pub accent: usize,
+}
+
 /// A full-pane screen replacing the grid (fleet directory, theme gallery).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScreenModel {
@@ -340,6 +351,8 @@ pub struct ChromeModel {
     pub sidebar: Option<SidebarModel>,
     /// A full-pane screen over the grid area (fleet, themes); Esc returns.
     pub screen: Option<ScreenModel>,
+    /// The split tab's two pane headers, left then right; `None` unsplit.
+    pub panes: Option<[PaneModel; 2]>,
     /// Where the grid area is, physical pixels — the rectangle a screen
     /// covers. Computed by the app from its insets.
     pub grid_area: [f32; 4],
