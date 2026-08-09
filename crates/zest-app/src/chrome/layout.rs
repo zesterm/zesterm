@@ -33,6 +33,9 @@ pub struct TextRun {
     /// Semibold, for section labels and headings. Maps to the font stack's
     /// bold face (or synthesis) — the chrome has no in-between weights.
     pub bold: bool,
+    /// Extra advance per cluster, physical px — the design's `.09em`
+    /// uppercase section labels; 0.0 everywhere else.
+    pub tracking: f32,
 }
 
 /// The finished chrome for one frame.
@@ -85,10 +88,17 @@ const HAIRLINE: f32 = 1.0;
 const EDGE_PAD: f32 = 8.0;
 const BAR_PAD: f32 = 12.0;
 const TRAFFIC_PAD: f32 = 14.0;
-const ROW_H: f32 = 44.0;
-const ROW_HPAD: f32 = 6.0;
-const HEADER_MIN: f32 = 28.0;
-const LINE_GAP: f32 = 2.0;
+const ROW_HPAD: f32 = 8.0;
+// Sidebar (design screen 2).
+const SIDEBAR_HEADER: f32 = 44.0;
+const SEARCH_PAD: f32 = 10.0;
+const SEARCH_H: f32 = 30.0;
+const GROUP_HEADER_H: f32 = 26.0;
+const GROUP_GAP: f32 = 14.0;
+const SIDE_ROW_H: f32 = 44.0;
+const FOOTER_H: f32 = 42.0;
+const SLIM_BAR_H: f32 = 44.0;
+const SLIM_PAD: f32 = 14.0;
 
 /// The status bar's height, logical pixels. Public because `insets_at` must
 /// subtract it from the grid.
@@ -128,7 +138,7 @@ pub fn layout(
     model: &ChromeModel,
     colors: &ChromeColors,
     m: &ChromeMetrics,
-    measure: &mut dyn FnMut(&str, f32, bool) -> f32,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
 ) -> ChromeLayout {
     let mut out = match model.position {
         TabsPosition::Top => horizontal(model, colors, m, measure),
@@ -161,7 +171,7 @@ fn picker_overlay(
     picker: &super::model::PickerModel,
     colors: &ChromeColors,
     m: &ChromeMetrics,
-    measure: &mut dyn FnMut(&str, f32, bool) -> f32,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
     out: &mut ChromeLayout,
 ) {
     use super::model::PickerRow;
@@ -193,6 +203,7 @@ fn picker_overlay(
     out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
         text: filter_text,
         pos: [panel[0] + PICKER_PAD * s, text_baseline(m, panel[1], filter_h)],
         max_width: w - 2.0 * PICKER_PAD * s,
@@ -251,6 +262,7 @@ fn picker_overlay(
                 out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
                     text,
                     pos: [panel[0] + PICKER_PAD * s, baseline],
                     max_width: w - 2.0 * PICKER_PAD * s,
@@ -263,6 +275,7 @@ fn picker_overlay(
                 out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
                     text: title.clone(),
                     pos: [x, baseline],
                     max_width: w * 0.55,
@@ -285,10 +298,11 @@ fn picker_overlay(
                 } else {
                     format!("{detail} · {tag}")
                 };
-                let dw = measure(&detail, m.font_px, false).min(w * 0.4);
+                let dw = measure(&detail, m.font_px, false, 0.0).min(w * 0.4);
                 out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
                     text: detail,
                     pos: [panel[0] + w - PICKER_PAD * s - dw, baseline],
                     max_width: w * 0.4,
@@ -300,6 +314,7 @@ fn picker_overlay(
                 out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
                     text: format!("+ new session on {label}"),
                     pos: [panel[0] + (PICKER_PAD + PICKER_INDENT) * s, baseline],
                     max_width: w - 2.0 * PICKER_PAD * s,
@@ -324,7 +339,7 @@ fn palette_overlay(
     palette: &super::model::PaletteModel,
     colors: &ChromeColors,
     m: &ChromeMetrics,
-    measure: &mut dyn FnMut(&str, f32, bool) -> f32,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
     out: &mut ChromeLayout,
 ) {
     use super::model::PaletteRow;
@@ -357,6 +372,7 @@ fn palette_overlay(
     out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
         text: filter_text,
         pos: [panel[0] + PICKER_PAD * s, text_baseline(m, panel[1], filter_h)],
         max_width: w - 2.0 * PICKER_PAD * s,
@@ -378,6 +394,7 @@ fn palette_overlay(
         out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
             text: format!("nothing matches \u{201c}{}\u{201d}", palette.filter),
             pos: [panel[0] + PICKER_PAD * s, text_baseline(m, rows_clip[1], PALETTE_ROW_H * s)],
             max_width: w - 2.0 * PICKER_PAD * s,
@@ -427,6 +444,7 @@ fn palette_overlay(
                 out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
                     text: title.clone(),
                     // Bottom-aligned in its band so the title sits close to
                     // its rows rather than the previous group's.
@@ -457,6 +475,7 @@ fn palette_overlay(
                 out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
                     text: name.clone(),
                     pos: [left, baseline],
                     max_width: w * 0.6,
@@ -467,7 +486,7 @@ fn palette_overlay(
                 });
                 if !chord.is_empty() {
                     // The chord, right-aligned in a keycap-look chip.
-                    let chord_w = measure(chord, m.font_px, false).min(w * 0.35);
+                    let chord_w = measure(chord, m.font_px, false, 0.0).min(w * 0.35);
                     let chip = [
                         right - chord_w - 2.0 * CHIP_HPAD * s,
                         y + CHIP_VPAD * s,
@@ -483,6 +502,7 @@ fn palette_overlay(
                     out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
                         text: chord.clone(),
                         pos: [right - chord_w - CHIP_HPAD * s, baseline],
                         max_width: w * 0.35,
@@ -511,7 +531,7 @@ fn settings_overlay(
     settings: &super::model::SettingsModel,
     colors: &ChromeColors,
     m: &ChromeMetrics,
-    measure: &mut dyn FnMut(&str, f32, bool) -> f32,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
     out: &mut ChromeLayout,
 ) {
     use super::model::{SettingsRowModel, SettingsValueCell};
@@ -542,6 +562,7 @@ fn settings_overlay(
     out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
         text: filter_text,
         pos: [panel[0] + PICKER_PAD * s, text_baseline(m, panel[1], filter_h)],
         max_width: w - 2.0 * PICKER_PAD * s,
@@ -593,6 +614,7 @@ fn settings_overlay(
         out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
             text: format!("nothing matches \u{201c}{}\u{201d}", settings.filter),
             pos: [panel[0] + PICKER_PAD * s, text_baseline(m, rows_clip[1], SETTINGS_ROW_H * s)],
             max_width: w - 2.0 * PICKER_PAD * s,
@@ -621,6 +643,7 @@ fn settings_overlay(
                 out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
                     text: text.clone(),
                     pos: [left, text_baseline(m, y, band[3])],
                     max_width: w - 2.0 * PICKER_PAD * s,
@@ -632,6 +655,7 @@ fn settings_overlay(
                 out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
                     text: title.clone(),
                     pos: [
                         left,
@@ -683,6 +707,7 @@ fn settings_overlay(
                 out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
                     text: label.clone(),
                     pos: [label_x, baseline1],
                     max_width: w * 0.4,
@@ -695,11 +720,12 @@ fn settings_overlay(
                 // never be overwritten by a long doc comment.
                 let mut tag_x = right;
                 let mut push_tag = |text: String, color, tag_x: &mut f32| {
-                    let tw = measure(&text, m.font_px, false).min(w * 0.35);
+                    let tw = measure(&text, m.font_px, false, 0.0).min(w * 0.35);
                     *tag_x -= tw;
                     out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
                         text,
                         pos: [*tag_x, baseline2],
                         max_width: w * 0.35,
@@ -729,6 +755,7 @@ fn settings_overlay(
                 out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
                     text: desc,
                     pos: [label_x, baseline2],
                     max_width: (tag_x - label_x - 12.0 * s).max(0.0),
@@ -771,10 +798,11 @@ fn settings_overlay(
                         }
                     }
                     SettingsValueCell::Select { value } => {
-                        let vw = measure(value, m.font_px, false).min(w * 0.3);
+                        let vw = measure(value, m.font_px, false, 0.0).min(w * 0.3);
                         out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
                             text: value.clone(),
                             pos: [right - vw, baseline1],
                             max_width: w * 0.3,
@@ -808,10 +836,11 @@ fn settings_overlay(
                             colors.accent,
                             rows_clip,
                         ));
-                        let tw = measure(text, m.font_px, false).min(w * 0.15);
+                        let tw = measure(text, m.font_px, false, 0.0).min(w * 0.15);
                         out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
                             text: text.clone(),
                             pos: [track[0] - tw - 8.0 * s, baseline1],
                             max_width: w * 0.15,
@@ -820,10 +849,11 @@ fn settings_overlay(
                         });
                     }
                     SettingsValueCell::Text { text } => {
-                        let vw = measure(text, m.font_px, false).min(w * 0.35);
+                        let vw = measure(text, m.font_px, false, 0.0).min(w * 0.35);
                         out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
                             text: text.clone(),
                             pos: [right - vw, baseline1],
                             max_width: w * 0.35,
@@ -832,10 +862,11 @@ fn settings_overlay(
                         });
                     }
                     SettingsValueCell::ReadOnly { text } => {
-                        let vw = measure(text, m.font_px, false).min(w * 0.35);
+                        let vw = measure(text, m.font_px, false, 0.0).min(w * 0.35);
                         out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
                             text: text.clone(),
                             pos: [right - vw, baseline1],
                             max_width: w * 0.35,
@@ -848,12 +879,13 @@ fn settings_overlay(
                         // the text clip and colour for free, and this is not
                         // a text editor — there is no selection to draw.
                         let text = format!("{buffer}▏");
-                        let vw = measure(&text, m.font_px, false).min(w * 0.35);
+                        let vw = measure(&text, m.font_px, false, 0.0).min(w * 0.35);
                         let color =
                             if *error { colors.pill_warn_text } else { colors.text_active };
                         out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
+            tracking: 0.0,
                             text,
                             pos: [right - vw, baseline1],
                             max_width: w * 0.35,
@@ -897,7 +929,7 @@ fn horizontal(
     model: &ChromeModel,
     colors: &ChromeColors,
     m: &ChromeMetrics,
-    measure: &mut dyn FnMut(&str, f32, bool) -> f32,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
 ) -> ChromeLayout {
     let s = m.scale;
     let mut out = ChromeLayout::default();
@@ -926,7 +958,7 @@ fn horizontal(
     let pill_y = (sh - PILL_H * s) / 2.0;
     let mut right = m.width - BAR_PAD * s;
     {
-        let w = measure(&model.palette_chord, UI_CHORD * s, false) + 2.0 * PILL_PAD * s;
+        let w = measure(&model.palette_chord, UI_CHORD * s, false, 0.0) + 2.0 * PILL_PAD * s;
         let rect = [right - w, pill_y, w, PILL_H * s];
         let hovered = model.hover == Some(HitRegion::PalettePill);
         pill_button(&mut out.rects, colors, rect, PILL_RADIUS * s, hovered, no_clip);
@@ -939,13 +971,14 @@ fn horizontal(
             clip: no_clip,
             px: UI_CHORD * s,
             bold: false,
+            tracking: 0.0,
         });
         right = rect[0] - PILL_GAP * s;
     }
     {
         let label = if model.position == TabsPosition::Top { "Vertical" } else { "Horizontal" };
-        let chord_w = measure(&model.toggle_chord, UI_CHORD * s, false);
-        let label_w = measure(label, UI_SMALL * s, false);
+        let chord_w = measure(&model.toggle_chord, UI_CHORD * s, false, 0.0);
+        let label_w = measure(label, UI_SMALL * s, false, 0.0);
         let w = chord_w + PILL_GAP * s + label_w + 2.0 * PILL_PAD * s;
         let rect = [right - w, pill_y, w, PILL_H * s];
         let hovered = model.hover == Some(HitRegion::LayoutPill);
@@ -960,6 +993,7 @@ fn horizontal(
             clip: no_clip,
             px: UI_CHORD * s,
             bold: false,
+            tracking: 0.0,
         });
         out.texts.push(TextRun {
             text: label.into(),
@@ -972,6 +1006,7 @@ fn horizontal(
             clip: no_clip,
             px: UI_SMALL * s,
             bold: false,
+            tracking: 0.0,
         });
         right = rect[0] - BAR_PAD * s;
     }
@@ -1055,7 +1090,7 @@ fn horizontal(
             if let Some(hit) = intersect(close, clip) {
                 out.hit.push(hit, HitRegion::TabClose(tab.addr));
             }
-            let glyph_w = measure("\u{d7}", UI_BODY * s, false);
+            let glyph_w = measure("\u{d7}", UI_BODY * s, false, 0.0);
             out.texts.push(TextRun {
                 text: "\u{d7}".into(),
                 pos: [
@@ -1067,6 +1102,7 @@ fn horizontal(
                 clip,
             px: UI_BODY * s,
             bold: false,
+            tracking: 0.0,
             });
             text_right = close[0] - TAB_INNER_GAP * s;
         }
@@ -1086,13 +1122,14 @@ fn horizontal(
             clip,
             px: UI_BODY * s,
             bold: false,
+            tracking: 0.0,
         });
         // Unreachability is words, not colour alone (#23): the sub-line says
         // it, in warn, where the host's name already lives.
         let (sub, sub_color) = if tab.presence == TabPresence::Unreachable {
-            (format!("{} · unreachable", tab.detail), colors.pill_warn_text)
+            (format!("{} · unreachable", tab.detail()), colors.pill_warn_text)
         } else {
-            (tab.detail.clone(), colors.text_faint)
+            (tab.detail(), colors.text_faint)
         };
         out.texts.push(TextRun {
             text: sub,
@@ -1102,6 +1139,7 @@ fn horizontal(
             clip,
             px: UI_TAB_SUB * s,
             bold: false,
+            tracking: 0.0,
         });
     }
 
@@ -1114,7 +1152,7 @@ fn horizontal(
     if let Some(hit) = intersect(nt, clip) {
         out.hit.push(hit, HitRegion::NewTab);
     }
-    let plus_w = measure("+", 16.0 * s, false);
+    let plus_w = measure("+", 16.0 * s, false, 0.0);
     out.texts.push(TextRun {
         text: "+".into(),
         pos: [nt[0] + (nt[2] - plus_w) / 2.0, baseline_in(nt[1], nt[3], 16.0 * s)],
@@ -1123,6 +1161,7 @@ fn horizontal(
         clip,
         px: 16.0 * s,
         bold: false,
+            tracking: 0.0,
     });
 
     // Whatever the content does not cover is a drag handle, like any titlebar.
@@ -1159,7 +1198,7 @@ fn status_bar(
     model: &ChromeModel,
     colors: &ChromeColors,
     m: &ChromeMetrics,
-    measure: &mut dyn FnMut(&str, f32, bool) -> f32,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
     x0: f32,
     out: &mut ChromeLayout,
 ) {
@@ -1195,11 +1234,11 @@ fn status_bar(
     if let Some(ms) = latency {
         right_runs.push((format!(" {ms}"), colors.text_faint));
     }
-    let right_w: f32 = right_runs.iter().map(|(t, _)| measure(t, px, false)).sum();
+    let right_w: f32 = right_runs.iter().map(|(t, _)| measure(t, px, false, 0.0)).sum();
     let mut x = m.width - STATUS_HPAD * s - right_w;
     let right_start = x;
     for (text, color) in right_runs {
-        let w = measure(&text, px, false);
+        let w = measure(&text, px, false, 0.0);
         out.texts.push(TextRun {
             text,
             pos: [x, base],
@@ -1208,6 +1247,7 @@ fn status_bar(
             clip: no_clip,
             px,
             bold: false,
+            tracking: 0.0,
         });
         x += w;
     }
@@ -1228,7 +1268,7 @@ fn status_bar(
         if x >= stop {
             break;
         }
-        let w = measure(&text, px, false).min(stop - x);
+        let w = measure(&text, px, false, 0.0).min(stop - x);
         out.texts.push(TextRun {
             text,
             pos: [x, base],
@@ -1237,6 +1277,7 @@ fn status_bar(
             clip: no_clip,
             px,
             bold: false,
+            tracking: 0.0,
         });
         x += w;
     }
@@ -1244,7 +1285,7 @@ fn status_bar(
 
 /// "0.08 ms", "0.3 ms", "41 ms" — the design's precision: enough digits to
 /// be honest, never trailing noise.
-fn format_ms(ms: f32) -> String {
+pub fn format_ms(ms: f32) -> String {
     if ms < 0.1 {
         format!("{ms:.2} ms")
     } else if ms < 10.0 {
@@ -1258,7 +1299,7 @@ fn vertical(
     model: &ChromeModel,
     colors: &ChromeColors,
     m: &ChromeMetrics,
-    measure: &mut dyn FnMut(&str, f32, bool) -> f32,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
 ) -> ChromeLayout {
     let s = m.scale;
     let mut out = ChromeLayout::default();
@@ -1277,116 +1318,356 @@ fn vertical(
     // The header band exists so the traffic lights have chrome under them
     // and the window keeps a place to grab; the sidebar being wider than the
     // button cluster is what lets the grid run full height beside it.
-    let header_h = model.traffic_inset.map_or(HEADER_MIN * s, |t| t[1].max(HEADER_MIN * s));
+    let header_h = model.traffic_inset.map_or(SIDEBAR_HEADER * s, |t| t[1].max(SIDEBAR_HEADER * s));
     out.hit.push([0.0, 0.0, sw, header_h], HitRegion::Drag);
 
-    let rows_clip = [0.0, header_h, sw, (m.height - header_h).max(0.0)];
-    let row_h = ROW_H * s;
-    let n = model.tabs.len();
-    let content_h = (n as f32 + 1.0) * row_h; // + the new-tab row
+    // The search affordance: looks like an input, acts like a button.
+    let search = [
+        SEARCH_PAD * s,
+        header_h + 0.0,
+        sw - 2.0 * SEARCH_PAD * s,
+        SEARCH_H * s,
+    ];
+    {
+        let hovered = model.hover == Some(HitRegion::SidebarSearch);
+        out.rects.push(RectInstance {
+            radii: [PILL_RADIUS * s; 4],
+            border: if hovered { colors.accent } else { colors.line },
+            border_width: HAIRLINE * s,
+            ..RectInstance::filled(search, colors.panel_bg, no_clip)
+        });
+        out.hit.push(search, HitRegion::SidebarSearch);
+        let mut x = search[0] + SEARCH_PAD * s;
+        let chord_w = measure(&model.palette_chord, UI_SMALL * s, false, 0.0);
+        out.texts.push(TextRun {
+            text: model.palette_chord.clone(),
+            pos: [x, baseline_in(search[1], search[3], UI_SMALL * s)],
+            max_width: chord_w + 2.0,
+            color: colors.text_faint,
+            clip: no_clip,
+            px: UI_SMALL * s,
+            bold: false,
+            tracking: 0.0,
+        });
+        x += chord_w + TEXT_PAD * s;
+        out.texts.push(TextRun {
+            text: "Search sessions, blocks, hosts".into(),
+            pos: [x, baseline_in(search[1], search[3], 12.0 * s)],
+            max_width: (search[0] + search[2] - SEARCH_PAD * s - x).max(0.0),
+            color: colors.text_faint,
+            clip: no_clip,
+            px: 12.0 * s,
+            bold: false,
+            tracking: 0.0,
+        });
+    }
+
+    let footer_h = FOOTER_H * s;
+    let rows_top = search[1] + search[3] + SEARCH_PAD * s;
+    let rows_clip = [0.0, rows_top, sw, (m.height - rows_top - footer_h).max(0.0)];
+
+    // Geometry per group: a header line, then its session rows.
+    let group_header_h = GROUP_HEADER_H * s;
+    let row_h = SIDE_ROW_H * s;
+
+    // With no sidebar model (an early frame), group by the tabs' own host
+    // fields — the machine's name must appear in words whatever arrives
+    // first (#23).
+    let fallback: Vec<super::model::HostGroup> = {
+        let mut gs: Vec<super::model::HostGroup> = Vec::new();
+        for (i, t) in model.tabs.iter().enumerate() {
+            if let Some(g) = gs.iter_mut().find(|g| g.label == t.host) {
+                g.tabs.push(i);
+            } else {
+                gs.push(super::model::HostGroup {
+                    label: t.host.clone(),
+                    accent: t.accent,
+                    sub: String::new(),
+                    online: t.presence == TabPresence::Online,
+                    tabs: vec![i],
+                });
+            }
+        }
+        gs
+    };
+    let groups: &[super::model::HostGroup] =
+        model.sidebar.as_ref().map_or(&fallback[..], |sb| &sb.groups[..]);
+
+    let content_h: f32 = groups
+        .iter()
+        .map(|g| group_header_h + g.tabs.len() as f32 * row_h + GROUP_GAP * s)
+        .sum::<f32>()
+        + row_h; // the trailing new-tab row
     let max_scroll = (content_h - rows_clip[3]).max(0.0);
     out.strip_scroll = model.strip_scroll.clamp(0.0, max_scroll);
 
-    for (i, tab) in model.tabs.iter().enumerate() {
-        let y = header_h + i as f32 * row_h - out.strip_scroll;
-        let row = [0.0, y, sw, row_h];
-        let chip = [ROW_HPAD * s, y + 2.0 * s, sw - 2.0 * ROW_HPAD * s, row_h - 4.0 * s];
-
-        let active = i == model.active;
-        let hovered = model.hover == Some(HitRegion::Tab(tab.addr));
-        if active {
-            out.rects.push(RectInstance::rounded(chip, RADIUS * s, colors.tab_active_bg, rows_clip));
-        } else if hovered {
-            out.rects.push(RectInstance::rounded(chip, RADIUS * s, colors.tab_hover_bg, rows_clip));
-        }
-        if let Some(hit) = intersect(row, rows_clip) {
-            out.hit.push(hit, HitRegion::Tab(tab.addr));
-        }
-
-        let mut right = sw - (ROW_HPAD + TEXT_PAD) * s;
-        if active || hovered {
-            let close = [right - CLOSE * s, y + (row_h - CLOSE * s) / 2.0, CLOSE * s, CLOSE * s];
-            if let Some(hit) = intersect(close, rows_clip) {
-                out.hit.push(hit, HitRegion::TabClose(tab.addr));
-            }
-            let glyph_w = measure("×", m.font_px, false);
+    let mut y = rows_top - out.strip_scroll;
+    for group in groups {
+        if !group.label.is_empty() {
+            // Group header: accent dot, uppercase tracked label, mono sub.
+            let cy = y + group_header_h / 2.0;
+            let dot_color = if group.online {
+                host_accent(colors, group.accent)
+            } else {
+                colors.text_faint
+            };
+            dot(&mut out.rects, ROW_HPAD * s + 3.0 * s + DOT * s / 2.0, cy, DOT * s, dot_color, rows_clip);
+            let label = group.label.to_uppercase();
+            let label_px = UI_STATUS * s;
+            let tracking = 0.09 * label_px;
+            let label_w = measure(&label, label_px, true, tracking);
+            let label_x = ROW_HPAD * s + 3.0 * s + DOT * s + 7.0 * s;
             out.texts.push(TextRun {
-        px: m.font_px,
-        bold: false,
-                text: "×".into(),
-                pos: [
-                    close[0] + (close[2] - glyph_w) / 2.0,
-                    text_baseline(m, y, row_h),
-                ],
-                max_width: close[2],
+                text: label,
+                pos: [label_x, baseline_in(y, group_header_h, label_px)],
+                max_width: label_w + 2.0,
                 color: colors.text_inactive,
                 clip: rows_clip,
+                px: label_px,
+                bold: true,
+                tracking,
             });
-            right = close[0] - TEXT_PAD * s / 2.0;
+            if !group.sub.is_empty() {
+                let sub_px = UI_CHORD * s;
+                out.texts.push(TextRun {
+                    text: group.sub.clone(),
+                    pos: [label_x + label_w + 7.0 * s, baseline_in(y, group_header_h, sub_px)],
+                    max_width: (sw - label_x - label_w - 14.0 * s).max(0.0),
+                    color: colors.text_faint,
+                    clip: rows_clip,
+                    px: sub_px,
+                    bold: false,
+                    tracking: 0.0,
+                });
+            }
         }
+        y += if group.label.is_empty() { 0.0 } else { group_header_h };
 
-        let text_x = (ROW_HPAD + TEXT_PAD) * s;
-        let title_color = match (active, model.focused, tab.connecting) {
-            (_, _, true) => colors.text_faint,
-            (true, true, _) => colors.text_active,
-            _ => colors.text_inactive,
-        };
+        for &ti in &group.tabs {
+            let Some(tab) = model.tabs.get(ti) else { continue };
+            let row = [ROW_HPAD * s, y, sw - 2.0 * ROW_HPAD * s, row_h];
 
-        // The sidebar is the loud fleet view: every remote tab gets a second
-        // line naming its machine, in words.
-        if let Some((label, warn)) = pill_label(tab) {
-            let block = 2.0 * m.line_height + LINE_GAP * s;
-            let top = y + (row_h - block).max(0.0) / 2.0;
+            let active = ti == model.active;
+            let hovered = model.hover == Some(HitRegion::Tab(tab.addr));
+            if active {
+                out.rects.push(RectInstance::rounded(row, 8.0 * s, colors.accent_soft, rows_clip));
+            } else if hovered {
+                out.rects.push(RectInstance::rounded(row, 8.0 * s, colors.tab_hover_bg, rows_clip));
+            }
+            if let Some(hit) = intersect(row, rows_clip) {
+                out.hit.push(hit, HitRegion::Tab(tab.addr));
+            }
+
+            // 5px state dot: running pulses warn, the live (active) session
+            // is success, an idle one faint.
+            let dot_d = 5.0 * s;
+            let dot_color = if tab.running {
+                colors.warn
+            } else if active {
+                colors.success
+            } else {
+                colors.text_faint
+            };
+            dot(&mut out.rects, row[0] + 8.0 * s + dot_d / 2.0, y + row_h / 2.0, dot_d, dot_color, rows_clip);
+
+            let text_x = row[0] + 8.0 * s + dot_d + TAB_INNER_GAP * s;
+            let mut text_right = row[0] + row[2] - 8.0 * s;
+
+            if !tab.age.is_empty() {
+                let age_px = UI_CHORD * s;
+                let age_w = measure(&tab.age, age_px, false, 0.0);
+                out.texts.push(TextRun {
+                    text: tab.age.clone(),
+                    pos: [text_right - age_w, baseline_in(y, row_h, age_px)],
+                    max_width: age_w + 2.0,
+                    color: colors.text_faint,
+                    clip: rows_clip,
+                    px: age_px,
+                    bold: false,
+                    tracking: 0.0,
+                });
+                text_right -= age_w + TEXT_PAD * s;
+            }
+
+            // Unreachability in words, here as everywhere (#23).
+            let title = if tab.presence == TabPresence::Unreachable {
+                format!("{} · unreachable", tab.title)
+            } else {
+                tab.title.clone()
+            };
+            let title_color = match (active, tab.connecting) {
+                (_, true) => colors.text_faint,
+                (true, false) => colors.text_active,
+                _ => colors.text_inactive,
+            };
             out.texts.push(TextRun {
-        px: m.font_px,
-        bold: false,
-                text: tab.title.clone(),
-                pos: [text_x, top + m.baseline],
-                max_width: (right - text_x).max(0.0),
+                text: title,
+                pos: [text_x, y + 17.0 * s],
+                max_width: (text_right - text_x).max(0.0),
                 color: title_color,
                 clip: rows_clip,
+                px: UI_BODY * s,
+                bold: false,
+                tracking: 0.0,
             });
             out.texts.push(TextRun {
-        px: m.font_px,
-        bold: false,
-                text: label,
-                pos: [text_x, top + m.line_height + LINE_GAP * s + m.baseline],
-                max_width: (right - text_x).max(0.0),
-                color: if warn { colors.pill_warn_text } else { colors.text_faint },
+                text: tab.cwd.clone(),
+                pos: [text_x, y + 31.0 * s],
+                max_width: (text_right - text_x).max(0.0),
+                color: colors.text_faint,
                 clip: rows_clip,
+                px: UI_STATUS * s,
+                bold: false,
+                tracking: 0.0,
             });
-        } else {
-            out.texts.push(TextRun {
-        px: m.font_px,
-        bold: false,
-                text: tab.title.clone(),
-                pos: [text_x, text_baseline(m, y, row_h)],
-                max_width: (right - text_x).max(0.0),
-                color: title_color,
-                clip: rows_clip,
-            });
+            y += row_h;
         }
+        y += GROUP_GAP * s;
     }
 
-    // New-tab row.
-    let y = header_h + n as f32 * row_h - out.strip_scroll;
-    let row = [0.0, y, sw, row_h];
+    // New-tab row, trailing the last group.
+    let row = [ROW_HPAD * s, y, sw - 2.0 * ROW_HPAD * s, row_h];
     if model.hover == Some(HitRegion::NewTab) {
-        let chip = [ROW_HPAD * s, y + 2.0 * s, sw - 2.0 * ROW_HPAD * s, row_h - 4.0 * s];
-        out.rects.push(RectInstance::rounded(chip, RADIUS * s, colors.tab_hover_bg, rows_clip));
+        out.rects.push(RectInstance::rounded(row, 8.0 * s, colors.tab_hover_bg, rows_clip));
     }
     if let Some(hit) = intersect(row, rows_clip) {
         out.hit.push(hit, HitRegion::NewTab);
     }
     out.texts.push(TextRun {
-        px: m.font_px,
-        bold: false,
-        text: "+".into(),
-        pos: [(ROW_HPAD + TEXT_PAD) * s, text_baseline(m, y, row_h)],
-        max_width: sw,
+        text: "+ new session".into(),
+        pos: [row[0] + 8.0 * s, baseline_in(y, row_h, UI_BODY * s)],
+        max_width: row[2] - 16.0 * s,
         color: colors.text_inactive,
         clip: rows_clip,
+        px: UI_BODY * s,
+        bold: false,
+        tracking: 0.0,
     });
+
+    // Footer: fleet counts, and the door to the fleet view.
+    {
+        let fy = m.height - footer_h;
+        let footer = [0.0, fy, sw, footer_h];
+        let hovered = model.hover == Some(HitRegion::FleetFooter);
+        if hovered {
+            out.rects.push(RectInstance::filled(footer, colors.tab_hover_bg, no_clip));
+        }
+        out.rects.push(RectInstance::filled(
+            [0.0, fy, sw, HAIRLINE * s],
+            colors.hairline_soft,
+            no_clip,
+        ));
+        out.hit.push(footer, HitRegion::FleetFooter);
+        let (online, asleep) = model
+            .sidebar
+            .as_ref()
+            .map_or((1, 0), |sb| (sb.hosts_online, sb.hosts_asleep));
+        let text = if asleep > 0 {
+            format!("{online} hosts online · {asleep} asleep")
+        } else if online == 1 {
+            "1 host online".to_string()
+        } else {
+            format!("{online} hosts online")
+        };
+        dot(&mut out.rects, BAR_PAD * s + 3.0 * s, fy + footer_h / 2.0, DOT * s, colors.success, no_clip);
+        out.texts.push(TextRun {
+            text,
+            pos: [BAR_PAD * s + DOT * s + TEXT_PAD * s, baseline_in(fy, footer_h, 11.5 * s)],
+            max_width: sw - 30.0 * s,
+            color: colors.text_inactive,
+            clip: no_clip,
+            px: 11.5 * s,
+            bold: false,
+            tracking: 0.0,
+        });
+    }
+
+    // The slim title bar over the main column: session name, cwd, host chip,
+    // and the way back to horizontal tabs.
+    {
+        let bar = [sw, 0.0, m.width - sw, SLIM_BAR_H * s];
+        out.rects.push(RectInstance::filled(bar, colors.strip_bg, no_clip));
+        out.rects.push(RectInstance::filled(
+            [sw, SLIM_BAR_H * s - HAIRLINE * s, m.width - sw, HAIRLINE * s],
+            colors.line,
+            no_clip,
+        ));
+        out.hit.push(bar, HitRegion::Drag);
+
+        if let Some(tab) = model.tabs.get(model.active) {
+            let mut x = sw + SLIM_PAD * s;
+            let name_px = 13.0 * s;
+            let name_w = measure(&tab.title, name_px, false, 0.0).min(bar[2] * 0.4);
+            out.texts.push(TextRun {
+                text: tab.title.clone(),
+                pos: [x, baseline_in(0.0, bar[3], name_px)],
+                max_width: name_w,
+                color: colors.text_active,
+                clip: no_clip,
+                px: name_px,
+                bold: false,
+                tracking: 0.0,
+            });
+            x += name_w + 10.0 * s;
+            if !tab.cwd.is_empty() {
+                let cwd_w = measure(&tab.cwd, UI_SMALL * s, false, 0.0).min(bar[2] * 0.3);
+                out.texts.push(TextRun {
+                    text: tab.cwd.clone(),
+                    pos: [x, baseline_in(0.0, bar[3], UI_SMALL * s)],
+                    max_width: cwd_w,
+                    color: colors.text_inactive,
+                    clip: no_clip,
+                    px: UI_SMALL * s,
+                    bold: false,
+                    tracking: 0.0,
+                });
+                x += cwd_w + 10.0 * s;
+            }
+            // The host chip: where this shell runs, said in a pill.
+            let chip_px = UI_STATUS * s;
+            let chip_text_w = measure(&tab.host, chip_px, false, 0.0);
+            let chip_h = 20.0 * s;
+            let chip = [x, (bar[3] - chip_h) / 2.0, 5.0 * s + 6.0 * s + chip_text_w + 16.0 * s, chip_h];
+            out.rects.push(RectInstance::rounded(chip, 6.0 * s, colors.accent_soft, no_clip));
+            dot(
+                &mut out.rects,
+                chip[0] + 8.0 * s + 2.5 * s,
+                chip[1] + chip_h / 2.0,
+                5.0 * s,
+                colors.success,
+                no_clip,
+            );
+            out.texts.push(TextRun {
+                text: tab.host.clone(),
+                pos: [chip[0] + 8.0 * s + 5.0 * s + 6.0 * s, baseline_in(chip[1], chip_h, chip_px)],
+                max_width: chip_text_w + 2.0,
+                color: colors.accent,
+                clip: no_clip,
+                px: chip_px,
+                bold: false,
+                tracking: 0.0,
+            });
+        }
+
+        // The way back: same pill, same region, other word.
+        let label = "Horizontal tabs";
+        let label_w = measure(label, UI_SMALL * s, false, 0.0);
+        let w = label_w + 2.0 * PILL_PAD * s;
+        let rect = [m.width - BAR_PAD * s - w, (bar[3] - PILL_H * s) / 2.0, w, PILL_H * s];
+        let hovered = model.hover == Some(HitRegion::LayoutPill);
+        pill_button(&mut out.rects, colors, rect, PILL_RADIUS * s, hovered, no_clip);
+        out.hit.push(rect, HitRegion::LayoutPill);
+        out.texts.push(TextRun {
+            text: label.into(),
+            pos: [rect[0] + PILL_PAD * s, baseline_in(rect[1], rect[3], UI_SMALL * s)],
+            max_width: label_w + 2.0,
+            color: if hovered { colors.text_active } else { colors.text_inactive },
+            clip: no_clip,
+            px: UI_SMALL * s,
+            bold: false,
+            tracking: 0.0,
+        });
+    }
 
     // The status bar spans the main column only; the sidebar keeps its full
     // height (design screen 2).
@@ -1419,10 +1700,13 @@ mod tests {
         TabModel {
             addr: addr(n),
             title: format!("tab {n}"),
-            detail: format!("{host} · ~/dir{n}"),
+            host,
+            cwd: format!("~/dir{n}"),
             origin,
             presence,
             accent: usize::from(n),
+            running: false,
+            age: "2m".into(),
             connecting: false,
         }
     }
@@ -1462,6 +1746,7 @@ mod tests {
                 link: super::super::model::LinkKind::Lan,
                 latency_ms: Some(0.3),
             }),
+            sidebar: None,
             toggle_chord: "⌘⇧E".into(),
             palette_chord: "⌘K".into(),
             picker: None,
@@ -1473,8 +1758,8 @@ mod tests {
     /// Eight pixels a character at the grid size, scaled linearly for other
     /// sizes: enough for the tests to reason about truncation and the type
     /// scale without a font.
-    fn measure(s: &str, px: f32, _bold: bool) -> f32 {
-        s.chars().count() as f32 * 8.0 * (px / GRID_PX)
+    fn measure(s: &str, px: f32, _bold: bool, tracking: f32) -> f32 {
+        s.chars().count() as f32 * (8.0 * (px / GRID_PX) + tracking)
     }
 
     /// The grid font size the test metrics report.
@@ -1588,11 +1873,26 @@ mod tests {
         mo.traffic_inset = Some([70.0, 40.0]);
         let l = layout(&mo, &colors(), &m, &mut measure);
         assert_eq!(l.hit.hit(30.0, 20.0), Some(HitRegion::Drag), "header band drags");
-        assert_eq!(
-            l.hit.hit(30.0, 40.0 + 22.0),
-            Some(HitRegion::Tab(addr(1))),
-            "the first row sits directly below the header"
-        );
+        // Below the header: the search affordance, then the first session
+        // row — both reachable (design screen 2).
+        let search_found = (0..262).step_by(2).any(|x| {
+            (0..200).step_by(2).any(|y| {
+                l.hit.hit(x as f32, y as f32) == Some(HitRegion::SidebarSearch)
+            })
+        });
+        assert!(search_found, "the search affordance must be clickable");
+        let row_found = (0..262).step_by(2).any(|x| {
+            (0..400).step_by(2).any(|y| {
+                l.hit.hit(x as f32, y as f32) == Some(HitRegion::Tab(addr(1)))
+            })
+        });
+        assert!(row_found, "the first session row sits below the search box");
+        let footer_found = (0..262).step_by(2).any(|x| {
+            (600..800).step_by(2).any(|y| {
+                l.hit.hit(x as f32, y as f32) == Some(HitRegion::FleetFooter)
+            })
+        });
+        assert!(footer_found, "the fleet footer owns the sidebar's bottom");
     }
 
     #[test]
@@ -1607,8 +1907,14 @@ mod tests {
             )];
             let m = metrics(1200.0, 800.0, 1.0);
             let l = layout(&model(tabs, position), &colors(), &m, &mut measure);
+            // The host may be spelled on the chip's sub-line (Top) or as an
+            // uppercase group label (Left); either way it is *text*, and the
+            // unreachability is said in words somewhere.
+            let says_host =
+                l.texts.iter().any(|t| t.text.to_lowercase().contains("alien"));
+            let says_unreachable = l.texts.iter().any(|t| t.text.contains("unreachable"));
             assert!(
-                l.texts.iter().any(|t| t.text.contains("alien") && t.text.contains("unreachable")),
+                says_host && says_unreachable,
                 "{position:?} must spell out host and unreachability"
             );
         }

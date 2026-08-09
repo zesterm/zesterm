@@ -213,6 +213,7 @@ enum PickerAction {
 fn wake_for(
     proxy: &EventLoopProxy<Wakeup>,
     addr: Arc<parking_lot::Mutex<zest_proto::SessionAddr>>,
+    activity: ActivityMap,
 ) -> impl Fn(Wakeup) + Send + 'static {
     let proxy = proxy.clone();
     move |w| {
@@ -220,9 +221,19 @@ fn wake_for(
             Wakeup::Exited => Wakeup::TabExited(*addr.lock()),
             other => other,
         };
+        if matches!(w, Wakeup::Redraw) {
+            // The sidebar's age column: last time this session produced
+            // anything. Stamped here because this callback is the one place
+            // every kind of session already reports output through.
+            activity.lock().insert(*addr.lock(), std::time::Instant::now());
+        }
         let _ = proxy.send_event(w);
     }
 }
+
+/// Last-output instants by session, shared with every tab's wake callback.
+type ActivityMap =
+    Arc<parking_lot::Mutex<std::collections::HashMap<zest_proto::SessionAddr, std::time::Instant>>>;
 
 /// The live GPU state, created once the window exists.
 struct Gpu {
@@ -245,6 +256,10 @@ pub struct App {
     /// this machine showing a shell on the Mac is the point of the whole
     /// project — the renderer cannot tell and must not care.
     tabs: TabStrip,
+    /// When each session last produced output, stamped by the wake callbacks.
+    /// Feeds the sidebar's age column; never pruned aggressively — a closed
+    /// tab's entry is a few bytes and the map is per-window.
+    activity: ActivityMap,
     /// How to reach the daemon this window's tabs live on, for ⌘T and the
     /// redials it implies. One daemon today; the fleet model generalizes it.
     route: Option<HostRoute>,
@@ -370,6 +385,7 @@ impl App {
             window: None,
             gpu: None,
             tabs: TabStrip::default(),
+            activity: ActivityMap::default(),
             route: None,
             client_identity: None,
             next_placeholder: 0,
@@ -527,7 +543,7 @@ impl App {
         let addr_cell = Arc::new(parking_lot::Mutex::new(crate::tabs::placeholder_addr(
             self.next_placeholder,
         )));
-        let wake = wake_for(proxy, Arc::clone(&addr_cell));
+        let wake = wake_for(proxy, Arc::clone(&addr_cell), Arc::clone(&self.activity));
         // The first connection is already open — it was made above so that its
         // cost could be measured and so a failure is a fallback rather than a
         // window that opens onto nothing. So the dialer hands those halves over
@@ -563,7 +579,7 @@ impl App {
         };
         let session = match restore {
             Some(addr) => {
-                let retry_wake = wake_for(proxy, Arc::clone(&addr_cell));
+                let retry_wake = wake_for(proxy, Arc::clone(&addr_cell), Arc::clone(&self.activity));
                 crate::remote::RemoteSession::attach_existing(dial, addr, &opts, wake).or_else(
                     |e| {
                         // The remembered session ended while the window was
@@ -698,7 +714,7 @@ impl App {
         let addr_cell = Arc::new(parking_lot::Mutex::new(crate::tabs::placeholder_addr(
             self.next_placeholder,
         )));
-        let wake = wake_for(proxy, Arc::clone(&addr_cell));
+        let wake = wake_for(proxy, Arc::clone(&addr_cell), Arc::clone(&self.activity));
         let session = crate::remote::RemoteSession::attach(
             dial,
             &crate::remote::AttachOptions {
@@ -1380,7 +1396,7 @@ impl App {
             .map(|tab| {
                 // A brief lock per tab per chrome rebuild — rebuilds are
                 // event-driven, so this is microseconds, not a frame cost.
-                let (title, cwd) = {
+                let (title, cwd, running) = {
                     let term = tab.source().terminal();
                     let term = term.lock();
                     let title = term.title().trim().to_string();
@@ -1391,7 +1407,8 @@ impl App {
                     } else {
                         term.cwd().to_string()
                     };
-                    (title, cwd)
+                    let running = term.blocks().last().is_some_and(|b| b.is_running());
+                    (title, cwd, running)
                 };
                 let title = if title.is_empty() { "shell".to_string() } else { title };
                 let origin = match tab.source().origin() {
@@ -1415,26 +1432,75 @@ impl App {
                         (local_label.clone(), 0, crate::status::shorten_home(&cwd))
                     }
                 };
-                let detail = if cwd.is_empty() {
-                    host_label
-                } else {
-                    format!("{host_label} · {cwd}")
-                };
+                let age = self
+                    .activity
+                    .lock()
+                    .get(&tab.addr)
+                    .map(|t| crate::status::age_label(t.elapsed()))
+                    .unwrap_or_default();
                 TabModel {
                     addr: tab.addr,
                     title: if tab.dead { format!("{title} · ended") } else { title },
-                    detail,
+                    host: host_label,
+                    cwd,
                     origin,
                     // Presence joins in with the fleet model; until then a
                     // reachable tab is simply online.
                     presence: TabPresence::Online,
                     accent,
+                    running,
+                    age,
                     // Dead tabs borrow the connecting style (faint text): not
                     // live, not interactive, still present.
                     connecting: tab.dead,
                 }
             })
             .collect();
+
+        // The sidebar's host grouping, built from the same tab models the
+        // strip draws — one pass, one truth.
+        let sidebar = (self.config.tabs.position == zest_config::settings::TabsPosition::Left)
+            .then(|| {
+                use zest_mesh::discovery::Presence;
+                let mut groups: Vec<crate::chrome::model::HostGroup> = Vec::new();
+                for (i, tm) in tab_models.iter().enumerate() {
+                    if let Some(g) = groups.iter_mut().find(|g| g.label == tm.host) {
+                        g.tabs.push(i);
+                        continue;
+                    }
+                    let fleet = fleet_hosts.iter().find(|h| h.label == tm.host);
+                    let sub = match fleet.and_then(|h| h.reachability) {
+                        Some(zest_mesh::Reachability::Loopback) => "loopback".to_string(),
+                        Some(zest_mesh::Reachability::Lan) => match fleet.and_then(|h| h.rtt_ms) {
+                            Some(ms) => format!("LAN {}", crate::chrome::layout::format_ms(ms)),
+                            None => "LAN".to_string(),
+                        },
+                        Some(zest_mesh::Reachability::Cloud) => match fleet.and_then(|h| h.rtt_ms) {
+                            Some(ms) => format!("tunnel {}", crate::chrome::layout::format_ms(ms)),
+                            None => "tunnel".to_string(),
+                        },
+                        None => String::new(),
+                    };
+                    groups.push(crate::chrome::model::HostGroup {
+                        label: tm.host.clone(),
+                        accent: tm.accent,
+                        sub,
+                        online: fleet.is_none_or(|h| h.local || h.presence == Presence::Online),
+                        tabs: vec![i],
+                    });
+                }
+                let online = fleet_hosts
+                    .iter()
+                    .filter(|h| h.local || h.presence == Presence::Online)
+                    .count()
+                    .max(1);
+                let asleep = fleet_hosts.len().saturating_sub(online);
+                crate::chrome::model::SidebarModel {
+                    groups,
+                    hosts_online: online,
+                    hosts_asleep: asleep,
+                }
+            });
 
         let model = ChromeModel {
             tabs: tab_models,
@@ -1445,6 +1511,7 @@ impl App {
             traffic_inset: traffic,
             focused: self.focused,
             status,
+            sidebar,
             toggle_chord: keymap::chord_for(keymap::Action::ToggleTabLayout),
             palette_chord: keymap::chord_for(keymap::Action::ToggleFleetPicker),
             picker: picker_model,
@@ -1453,8 +1520,8 @@ impl App {
         };
 
         let colors = self.chrome_colors;
-        let mut measure = |s: &str, px: f32, bold: bool| {
-            zest_render_wgpu::measure_ui_run(fonts, s, zest_font::Style::new(bold, false), px)
+        let mut measure = |s: &str, px: f32, bold: bool, tracking: f32| {
+            zest_render_wgpu::measure_ui_run(fonts, s, zest_font::Style::new(bold, false), px, tracking)
         };
         let laid = crate::chrome::layout::layout(&model, &colors, &metrics, &mut measure);
         self.strip_scroll = laid.strip_scroll;
@@ -1507,7 +1574,13 @@ impl App {
             (HitRegion::LayoutPill, MouseButton::Left) => {
                 self.perform(keymap::Action::ToggleTabLayout, el);
             }
-            (HitRegion::PalettePill, MouseButton::Left) => {
+            (HitRegion::PalettePill, MouseButton::Left)
+            | (HitRegion::SidebarSearch, MouseButton::Left) => {
+                self.perform(keymap::Action::ToggleFleetPicker, el);
+            }
+            // The fleet view (design screen 7) will own this; until it
+            // exists, the picker is the closest door to the fleet.
+            (HitRegion::FleetFooter, MouseButton::Left) => {
                 self.perform(keymap::Action::ToggleFleetPicker, el);
             }
             // The status bar swallows clicks like the strip does; nothing on
@@ -2013,7 +2086,7 @@ impl App {
         let cell = Arc::new(parking_lot::Mutex::new(crate::tabs::placeholder_addr(
             self.next_placeholder,
         )));
-        let wake = wake_for(&self.proxy, Arc::clone(&cell));
+        let wake = wake_for(&self.proxy, Arc::clone(&cell), Arc::clone(&self.activity));
         let pending = Arc::clone(&self.pending_tabs);
         let proxy = self.proxy.clone();
         let palette = self.palette.clone();
@@ -2099,7 +2172,7 @@ impl App {
                 let cell = Arc::new(parking_lot::Mutex::new(crate::tabs::placeholder_addr(
                     self.next_placeholder,
                 )));
-                let wake = wake_for(&self.proxy, Arc::clone(&cell));
+                let wake = wake_for(&self.proxy, Arc::clone(&cell), Arc::clone(&self.activity));
                 // Empty means the host's default shell — for a remote host,
                 // its shell, never this machine's command line.
                 let command = match route {
@@ -2145,7 +2218,7 @@ impl App {
                     &self.build_spec(),
                     PtySize::new(cols, rows),
                     self.config.scrollback,
-                    wake_for(&self.proxy, cell),
+                    wake_for(&self.proxy, cell, Arc::clone(&self.activity)),
                 ) {
                     Ok(session) => {
                         session.terminal().lock().set_palette(self.palette.clone());
@@ -2301,6 +2374,7 @@ impl App {
                     &run.text,
                     zest_font::Style::new(run.bold, false),
                     run.px,
+                    run.tracking,
                     run.pos,
                     run.color,
                     run.clip,
@@ -2712,7 +2786,7 @@ impl ApplicationHandler<Wakeup> for App {
                     &spec,
                     PtySize::new(cols, rows),
                     self.config.scrollback,
-                    wake_for(&proxy, cell),
+                    wake_for(&proxy, cell, Arc::clone(&self.activity)),
                 )
                 .expect("spawn shell");
                 tracing::debug!(

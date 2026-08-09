@@ -434,6 +434,14 @@ theme screens. Colours, sizes and spacing come from there, not from this file.
       read, never a subprocess) · blocks | theme · link path · latency — the
       fleet prober now keeps the RTT it was already paying for, and
       `FleetHost` carries `Reachability` instead of discarding it.
+- [x] **Screen 2: the sidebar is the fleet-scale layout.** Host-grouped
+      session rows (uppercase tracked group labels — `ui_text` grew per-cluster
+      tracking for exactly this — with accent dots and path/latency sub-labels
+      from the fleet), a search affordance that opens the picker, state dots
+      (running/live/idle), an age column stamped by the wake callbacks
+      (`ActivityMap` — the one place every session kind already reports output
+      through), the 42px fleet footer, and the slim 44px title bar with the
+      session name, cwd, host chip and the way back to horizontal.
 - [ ] Animation clock. Springs `(response, damping)`, not easing curves —
       terminal motion is interruption-dominated and a spring absorbs a changed
       target with continuous velocity for free. Substep the integrator

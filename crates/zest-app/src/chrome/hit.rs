@@ -28,6 +28,11 @@ pub enum HitRegion {
     PalettePill,
     /// The status bar — swallows clicks like the strip does.
     Status,
+    /// The sidebar's search affordance; clicking opens the palette.
+    SidebarSearch,
+    /// The sidebar's footer ("4 hosts online · 1 asleep"); clicking opens
+    /// the fleet view.
+    FleetFooter,
     /// One row of the open picker, by index into its row list.
     PickerRow(usize),
     /// The dimmed backdrop behind the picker; clicking it dismisses.

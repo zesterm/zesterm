@@ -40,17 +40,61 @@ pub struct TabModel {
     pub addr: SessionAddr,
     /// Already derived: OSC title, else cwd basename, else "shell".
     pub title: String,
-    /// The mono second line: `host · cwd`, already composed and shortened.
-    pub detail: String,
+    /// The machine's display name ("studio"). Layout composes the chip's
+    /// `host · cwd` line and the sidebar's grouping from this.
+    pub host: String,
+    /// Working directory, home-shortened for local sessions only.
+    pub cwd: String,
     pub origin: TabOrigin,
     pub presence: TabPresence,
     /// Which slot of the host-accent cycle this tab's machine draws in.
     /// Slot 0 is always the local machine; remotes take the next slots in
     /// first-seen order, so a host keeps its colour while the window lives.
     pub accent: usize,
+    /// A command is currently running in this session — the sidebar's
+    /// pulsing dot.
+    pub running: bool,
+    /// How long since this session last produced output, pre-formatted
+    /// ("2m", "12h"); empty when unknown.
+    pub age: String,
     /// An attach or restore is in flight; the tab shows itself but cannot be
     /// typed into yet.
     pub connecting: bool,
+}
+
+impl TabModel {
+    /// The chip's mono sub-line: `host · cwd`, or just the host when the cwd
+    /// is unknown.
+    #[must_use]
+    pub fn detail(&self) -> String {
+        if self.cwd.is_empty() {
+            self.host.clone()
+        } else {
+            format!("{} · {}", self.host, self.cwd)
+        }
+    }
+}
+
+/// One host group of the sidebar (design screen 2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostGroup {
+    pub label: String,
+    /// Host-accent slot, matching the tabs it groups.
+    pub accent: usize,
+    /// Mono sub-label — path and latency ("LAN 0.4 ms"); empty when unknown.
+    pub sub: String,
+    pub online: bool,
+    /// Indices into `ChromeModel::tabs`, in strip order.
+    pub tabs: Vec<usize>,
+}
+
+/// What the vertical sidebar shows beyond the tabs themselves.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SidebarModel {
+    pub groups: Vec<HostGroup>,
+    /// Fleet-wide counts for the footer — every known host, tabbed or not.
+    pub hosts_online: usize,
+    pub hosts_asleep: usize,
 }
 
 /// One row of the fleet picker, ready to draw.
@@ -231,6 +275,8 @@ pub struct ChromeModel {
     pub focused: bool,
     /// The status bar; `None` only when the window is too small to spare it.
     pub status: Option<StatusModel>,
+    /// Sidebar grouping and footer counts; `None` in the horizontal layout.
+    pub sidebar: Option<SidebarModel>,
     /// The layout-toggle pill's chord, platform-spelled ("⌘⇧E" or
     /// "Ctrl+Shift+E") — composed by the app because the chrome does not know
     /// what a modifier is.

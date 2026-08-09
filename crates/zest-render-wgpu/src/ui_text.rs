@@ -64,7 +64,7 @@ fn truncate(cluster_widths: &[f32], max_width: f32, ellipsis_width: f32) -> Trun
     Truncation::Clusters(keep)
 }
 
-fn place_run(fonts: &mut Fonts, text: &str, style: Style) -> PlacedRun {
+fn place_run(fonts: &mut Fonts, text: &str, style: Style, tracking: f32) -> PlacedRun {
     let shaped = fonts.shape_run(text, style, &[]);
     let mut glyphs = Vec::new();
     let mut clusters = Vec::new();
@@ -75,7 +75,7 @@ fn place_run(fonts: &mut Fonts, text: &str, style: Style) -> PlacedRun {
     if shaped.is_empty() {
         for ch in text.chars() {
             if let Some((f, g)) = fonts.glyph_for(ch, style) {
-                let adv = fonts.advance_of(f, g);
+                let adv = fonts.advance_of(f, g) + tracking;
                 glyphs.push(Placed { key: fonts.key(f, g), x: pen });
                 clusters.push((1, adv));
                 pen += adv;
@@ -102,7 +102,7 @@ fn place_run(fonts: &mut Fonts, text: &str, style: Style) -> PlacedRun {
             let mut w = 0.0;
             for ch in text[start as usize..end].chars() {
                 if let Some((f, g)) = fonts.glyph_for(ch, style) {
-                    let adv = fonts.advance_of(f, g);
+                    let adv = fonts.advance_of(f, g) + tracking;
                     glyphs.push(Placed { key: fonts.key(f, g), x: pen + w });
                     w += adv;
                     count += 1;
@@ -118,6 +118,9 @@ fn place_run(fonts: &mut Fonts, text: &str, style: Style) -> PlacedRun {
                 w += g.advance;
                 count += 1;
             }
+            // Tracking is per cluster, not per glyph: a ligature spreads no
+            // wider internally, exactly as letter-spacing works in CSS.
+            w += tracking;
             clusters.push((count, w));
             pen += w;
         }
@@ -158,10 +161,12 @@ fn ellipsis_glyphs(fonts: &mut Fonts, style: Style) -> (Vec<(GlyphKey, f32)>, f3
 /// `px` is set on `fonts` for the duration of the call and always cleared
 /// after — the UI type scale must never leak into the grid path, where it
 /// would resize every glyph on screen.
+/// `tracking` is extra advance per cluster in physical pixels — the design's
+/// `.09em` section labels; 0.0 for everything else.
 #[must_use]
-pub fn measure_ui_run(fonts: &mut Fonts, text: &str, style: Style, px: f32) -> f32 {
+pub fn measure_ui_run(fonts: &mut Fonts, text: &str, style: Style, px: f32, tracking: f32) -> f32 {
     fonts.set_ui_px(Some(px));
-    let width = place_run(fonts, text, style).width;
+    let width = place_run(fonts, text, style, tracking).width;
     fonts.set_ui_px(None);
     width
 }
@@ -184,6 +189,7 @@ pub fn emit_ui_run(
     text: &str,
     style: Style,
     px: f32,
+    tracking: f32,
     pos: [f32; 2],
     color: LinearRgba,
     clip: [f32; 4],
@@ -191,7 +197,8 @@ pub fn emit_ui_run(
     out: &mut Vec<GlyphInstance>,
 ) -> f32 {
     fonts.set_ui_px(Some(px));
-    let width = emit_sized(device, queue, atlas, fonts, text, style, pos, color, clip, max_width, out);
+    let width =
+        emit_sized(device, queue, atlas, fonts, text, style, tracking, pos, color, clip, max_width, out);
     fonts.set_ui_px(None);
     width
 }
@@ -204,13 +211,14 @@ fn emit_sized(
     fonts: &mut Fonts,
     text: &str,
     style: Style,
+    tracking: f32,
     pos: [f32; 2],
     color: LinearRgba,
     clip: [f32; 4],
     max_width: f32,
     out: &mut Vec<GlyphInstance>,
 ) -> f32 {
-    let run = place_run(fonts, text, style);
+    let run = place_run(fonts, text, style, tracking);
 
     if run.width <= max_width {
         for p in &run.glyphs {
@@ -316,14 +324,14 @@ mod tests {
         let mut fonts = Fonts::new(&["monospace".to_string()], Typography::default())
             .expect("the CSS generic `monospace` must resolve");
 
-        let plain = measure_ui_run(&mut fonts, "hello", Style::default(), 13.0);
+        let plain = measure_ui_run(&mut fonts, "hello", Style::default(), 13.0, 0.0);
         assert!(plain > 0.0, "a shaped ASCII run must have width");
 
         // A char no monospace primary face carries: measured through system
         // fallback it should still come out wider than nothing on any machine
         // that can draw it at all — and never panic on one that cannot.
-        let cjk = measure_ui_run(&mut fonts, "終", Style::default(), 13.0);
-        let empty = measure_ui_run(&mut fonts, "", Style::default(), 13.0);
+        let cjk = measure_ui_run(&mut fonts, "終", Style::default(), 13.0, 0.0);
+        let empty = measure_ui_run(&mut fonts, "", Style::default(), 13.0, 0.0);
         assert_eq!(empty, 0.0, "empty text is zero wide");
         assert!(cjk >= 0.0);
     }
@@ -337,8 +345,8 @@ mod tests {
             .expect("the CSS generic `monospace` must resolve");
         let grid_px = fonts.shaping_px();
 
-        let small = measure_ui_run(&mut fonts, "metadata", Style::default(), 10.5);
-        let large = measure_ui_run(&mut fonts, "metadata", Style::default(), 19.0);
+        let small = measure_ui_run(&mut fonts, "metadata", Style::default(), 10.5, 0.0);
+        let large = measure_ui_run(&mut fonts, "metadata", Style::default(), 19.0, 0.0);
         assert!(small > 0.0 && large > small, "sizes must actually size");
 
         assert_eq!(
