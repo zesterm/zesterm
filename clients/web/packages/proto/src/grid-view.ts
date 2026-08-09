@@ -21,7 +21,7 @@
  * follows `GridView`, and the differences are marked below.
  */
 
-import type { AttrDef, CursorState, Delta, RowPayload } from './wire.ts';
+import type { AttrDef, BlockPayload, CursorState, Delta, RowPayload } from './wire.ts';
 import { Modes } from './flags.ts';
 
 /** `i64::MIN`, the line id `decode.rs` gives a row that has no content yet. */
@@ -35,6 +35,8 @@ export interface KeyframeState {
   readonly attrs: readonly AttrDef[];
   readonly cursor: CursorState;
   readonly modes: number;
+  /** Absent from callers that predate blocks; `[]` and absent mean the same. */
+  readonly blocks?: readonly BlockPayload[];
 }
 
 export class GridView {
@@ -67,6 +69,16 @@ export class GridView {
    */
   scrollback: RowPayload[] = [];
 
+  /**
+   * Command blocks, ascending by id — the same shape as `decode.rs`.
+   *
+   * The phone's list view is this and nothing else, which is why it is kept
+   * here rather than derived: a client that re-parsed the grid to find its own
+   * prompts would be the second VT interpretation ADR-004 exists to avoid, and
+   * it would disagree with the desktop about where a command started.
+   */
+  blocks: BlockPayload[] = [];
+
   /** Replace everything with a complete state. */
   applyKeyframe(k: KeyframeState): void {
     this.cols = k.cols;
@@ -78,8 +90,30 @@ export class GridView {
     this.cursor = k.cursor;
     this.modes = k.modes;
     this.altScreen = (k.modes & Modes.ALT_SCREEN) !== 0;
+    // Replaced, not merged, unlike the attrs: a keyframe carries every block
+    // the host holds, and a block this client holds that the keyframe does not
+    // mention is one the host has forgotten.
+    this.blocks = [...(k.blocks ?? [])];
     // `title` and `scrollback` are deliberately not cleared: neither is part of
     // the state a keyframe describes.
+  }
+
+  /**
+   * Insert or replace a block, keeping the list ascending by id — `decode.rs`'s
+   * `upsert_block`, binary search and all. A list that drifted out of order
+   * would still *contain* the right blocks while answering "which block is
+   * this line in" differently.
+   */
+  #upsertBlock(b: BlockPayload): void {
+    let lo = 0;
+    let hi = this.blocks.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if ((this.blocks[mid] as BlockPayload).id < b.id) lo = mid + 1;
+      else hi = mid;
+    }
+    if (this.blocks[lo]?.id === b.id) this.blocks[lo] = b;
+    else this.blocks.splice(lo, 0, b);
   }
 
   /**
@@ -165,6 +199,10 @@ export class GridView {
           continue;
       }
     }
+
+    // After the ops, matching `Applier` and `decode.rs`: a block names
+    // absolute line ids that the rows in this same batch establish.
+    for (const b of d.blocks) this.#upsertBlock(b);
   }
 }
 

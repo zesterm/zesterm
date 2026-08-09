@@ -28,7 +28,7 @@ const NO_ATTRS = new Map<number, AttrDef>();
 test('a scroll moves rows up and blanks the bottom', () => {
   const v = new GridView();
   v.rows = [row(0, 'a'), row(1, 'b'), row(2, 'c')];
-  v.applyDelta({ attrs: [], ops: [{ op: 'scroll', top: 0, bottom: 2, lines: 1 }] });
+  v.applyDelta({ blocks: [], attrs: [], ops: [{ op: 'scroll', top: 0, bottom: 2, lines: 1 }] });
 
   assert.equal(v.rows[0]?.runs[0]?.text, 'b');
   assert.equal(v.rows[1]?.runs[0]?.text, 'c');
@@ -50,7 +50,7 @@ test('a scroll outside the grid is a no-op rather than an error', () => {
     // more than it being the nicer rule.
     { op: 'scroll', top: 0, bottom: 1, lines: -1 } as const,
   ]) {
-    v.applyDelta({ attrs: [], ops: [op] });
+    v.applyDelta({ blocks: [], attrs: [], ops: [op] });
     assert.deepEqual(v.rows, before, `${JSON.stringify(op)} changed the grid`);
   }
 });
@@ -61,6 +61,7 @@ test('attributes arrive before the runs that use them', () => {
   const v = new GridView();
   v.rows = [row(0, 'x')];
   v.applyDelta({
+    blocks: [],
     attrs: [{ id: 7, fg: { Indexed: 1 }, bg: 'Default', flags: 0 }],
     ops: [
       {
@@ -104,7 +105,7 @@ test('a row past the end grows the grid rather than being dropped', () => {
   // row without also being wrong about its size.
   const v = new GridView();
   v.rows = [row(0, 'a')];
-  v.applyDelta({ attrs: [], ops: [{ op: 'row', row: 3, payload: row(3, 'd') }] });
+  v.applyDelta({ blocks: [], attrs: [], ops: [{ op: 'row', row: 3, payload: row(3, 'd') }] });
 
   assert.equal(v.rows.length, 4);
   assert.equal(v.rows[1]?.runs.length, 0, 'the gap was not blanked');
@@ -117,6 +118,7 @@ test('a run states its cell count independently of its text', () => {
   // recompute either from the text.
   const v = new GridView();
   v.applyDelta({
+    blocks: [],
     attrs: [],
     ops: [
       {
@@ -145,6 +147,7 @@ test('marks land on the right cell after several runs', () => {
   // offset puts the accent on the wrong letter, and only once runs have split.
   const v = new GridView();
   v.applyDelta({
+    blocks: [],
     attrs: [],
     ops: [
       {
@@ -175,6 +178,7 @@ test('scrollback accumulates client side', () => {
   const v = new GridView();
   v.rows = [row(0, 'a'), row(1, 'b')];
   v.applyDelta({
+    blocks: [],
     attrs: [],
     ops: [
       { op: 'scroll', top: 0, bottom: 1, lines: 1 },
@@ -202,11 +206,11 @@ test('alt_screen and modes do not touch each other', () => {
   // in practice -- but each op writes only its own field, and a decoder that
   // derives one from the other would drift the moment they arrive separately.
   const v = new GridView();
-  v.applyDelta({ attrs: [], ops: [{ op: 'alt_screen', active: true }] });
+  v.applyDelta({ blocks: [], attrs: [], ops: [{ op: 'alt_screen', active: true }] });
   assert.equal(v.altScreen, true);
   assert.equal(v.modes, 0, 'alt_screen must not write mode bits');
 
-  v.applyDelta({ attrs: [], ops: [{ op: 'modes', bits: 0b101 }] });
+  v.applyDelta({ blocks: [], attrs: [], ops: [{ op: 'modes', bits: 0b101 }] });
   assert.equal(v.modes, 0b101);
   assert.equal(v.altScreen, true, 'modes must not clear the screen flag');
 });
@@ -222,6 +226,7 @@ test('both references read erase the same way', () => {
   v.rows = [row(0, 'abcdefghij'), row(1, 'klmnopqrst')];
 
   const d: Delta = {
+    blocks: [],
     attrs: [],
     ops: [{ op: 'erase', top: 0, left: 2, bottom: 1, right: 5, attr: 9000 }],
   };
@@ -254,6 +259,7 @@ test('an erase outside the row is a no-op', () => {
   v.rows = [row(0, 'abc')];
   const before = [...v.rows];
   v.applyDelta({
+    blocks: [],
     attrs: [],
     ops: [{ op: 'erase', top: 1, left: 0, bottom: 0, right: 1, attr: 0 }],
   });

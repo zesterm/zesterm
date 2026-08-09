@@ -129,9 +129,57 @@ export type DeltaOp =
   | { readonly op: 'title'; readonly title: string }
   | { readonly op: 'modes'; readonly bits: number };
 
+/**
+ * How a command ended. Internally tagged on `state`.
+ *
+ * `exit_code: null` is **not zero**: a shell that emits OSC 133 D without the
+ * status parameter is common, and rendering a green tick for a command that
+ * actually failed is worse than rendering nothing. The mockup's rule — "the UI
+ * must never compute or cache a block's outcome locally" — starts here.
+ */
+export type BlockState =
+  | { readonly state: 'prompt' }
+  | { readonly state: 'running' }
+  | { readonly state: 'finished'; readonly exit_code: number | null };
+
+/**
+ * One command and its output, as the host has it.
+ *
+ * Line ids are `bigint` to match `RowPayload.line` — a client compares the two
+ * to decide which rows a block covers, and two integer types that must agree
+ * is a conversion bug waiting for a session long enough to matter.
+ * `end_line: null` means the command is still producing output and must render
+ * to the bottom rather than waiting.
+ */
+export interface BlockPayload {
+  /** Stable for the life of the session; the key an upsert replaces on. */
+  readonly id: number;
+  readonly prompt_line: bigint;
+  readonly output_line: bigint | null;
+  readonly end_line: bigint | null;
+  readonly state: BlockState;
+  readonly command: string;
+  readonly cwd: string;
+  /**
+   * Wall clock at OSC 133;C / D, epoch milliseconds. Plain `number`, safely:
+   * epoch millis stay under 2^53 for the next 285,000 years. Absent from a
+   * host that predates them.
+   */
+  readonly started_ms?: number;
+  readonly ended_ms?: number;
+}
+
 export interface Delta {
   readonly attrs: readonly AttrDef[];
   readonly ops: readonly DeltaOp[];
+  /**
+   * Keyed and order-independent, unlike `ops` — and applied **after** them,
+   * because a block names absolute line ids the rows in the same batch
+   * establish. A field rather than a `DeltaOp` variant on purpose: `DeltaOp`
+   * is tagged, an unknown tag fails the whole message on an older peer, and a
+   * defaulted field degrades to "no blocks" instead.
+   */
+  readonly blocks: readonly BlockPayload[];
 }
 
 export function parseAttrDef(v: unknown): AttrDef {
@@ -222,11 +270,58 @@ export function parseDeltaOp(v: unknown): DeltaOp {
   }
 }
 
+function parseBlockState(v: unknown): BlockState {
+  const o = obj(v, 'BlockState');
+  const state = str(o['state'], 'BlockState.state');
+  switch (state) {
+    case 'prompt':
+    case 'running':
+      return { state };
+    case 'finished': {
+      const code = o['exit_code'];
+      return { state, exit_code: code === null ? null : num(code, 'finished.exit_code') };
+    }
+    default:
+      // Like a delta op and unlike a message: a state this client cannot read
+      // is one it would render wrongly, and "wrongly" here means lying about
+      // whether a command succeeded.
+      throw new WireError(`unknown block state ${JSON.stringify(state)}`);
+  }
+}
+
+export function parseBlockPayload(v: unknown): BlockPayload {
+  const o = obj(v, 'BlockPayload');
+  const optLine = (key: string): bigint | null =>
+    o[key] === null || o[key] === undefined ? null : big(o[key], `BlockPayload.${key}`);
+  const optMs = (key: string): number | undefined =>
+    o[key] === null || o[key] === undefined ? undefined : num(o[key], `BlockPayload.${key}`);
+  const payload: BlockPayload = {
+    id: num(o['id'], 'BlockPayload.id'),
+    prompt_line: big(o['prompt_line'], 'BlockPayload.prompt_line'),
+    output_line: optLine('output_line'),
+    end_line: optLine('end_line'),
+    state: parseBlockState(o['state']),
+    command: str(o['command'], 'BlockPayload.command'),
+    cwd: str(o['cwd'], 'BlockPayload.cwd'),
+  };
+  // `exactOptionalPropertyTypes`: absent means absent, not `undefined`-valued.
+  const started = optMs('started_ms');
+  const ended = optMs('ended_ms');
+  return {
+    ...payload,
+    ...(started === undefined ? {} : { started_ms: started }),
+    ...(ended === undefined ? {} : { ended_ms: ended }),
+  };
+}
+
 export function parseDelta(v: unknown): Delta {
   const o = obj(v, 'Delta');
   return {
     attrs: arr(o['attrs'], 'Delta.attrs').map(parseAttrDef),
     ops: arr(o['ops'], 'Delta.ops').map(parseDeltaOp),
+    // `skip_serializing_if = "Vec::is_empty"`: no blocks means no key.
+    blocks:
+      o['blocks'] === undefined ? [] : arr(o['blocks'], 'Delta.blocks').map(parseBlockPayload),
   };
 }
 
@@ -249,6 +344,8 @@ export interface Keyframe {
   readonly attrs: readonly AttrDef[];
   readonly cursor: CursorState;
   readonly modes: number;
+  /** Every block the host holds — a keyframe replaces, a delta upserts. */
+  readonly blocks: readonly BlockPayload[];
   /** The session's title at this instant; `''` from a host that predates it. */
   readonly title: string;
 }
@@ -259,6 +356,85 @@ export interface Update {
   readonly base: bigint;
   readonly seq: bigint;
   readonly delta: Delta;
+}
+
+export interface Welcome {
+  readonly t: 'welcome';
+  readonly version: number;
+  /** 64 lowercase hex characters — the host's public key. */
+  readonly host: string;
+  readonly label: string;
+}
+
+export interface Challenge {
+  readonly t: 'challenge';
+  readonly version: number;
+  readonly host: string;
+  readonly label: string;
+  /** 64 hex characters; all zeroes reads as absent and must be refused. */
+  readonly nonce: string;
+  /** 128 hex characters — the host signing first is what lets a client pin. */
+  readonly signature: string;
+}
+
+export interface AuthPending {
+  readonly t: 'auth_pending';
+  /** The six digits to show beside the host's approval prompt. */
+  readonly code: string;
+  readonly expires_in_secs: number;
+}
+
+export interface AuthFailed {
+  readonly t: 'auth_failed';
+  /** A snake_case name from `AuthFailure`; `'denied'` must never be retried. */
+  readonly reason: string;
+  readonly message: string;
+}
+
+export interface PairingRequested {
+  readonly t: 'pairing_requested';
+  readonly client: string;
+  readonly label: string;
+  readonly code: string;
+  readonly remote: string;
+}
+
+export interface SessionInfo {
+  readonly addr: SessionAddr;
+  readonly title: string;
+  readonly cwd: string;
+  readonly cols: number;
+  readonly rows: number;
+  /** What the phone's blocks-first view switches on. */
+  readonly alt_screen: boolean;
+  readonly attached: boolean;
+}
+
+export interface Sessions {
+  readonly t: 'sessions';
+  readonly sessions: readonly SessionInfo[];
+  /** Set when this listing answers this connection's own `create_session`. */
+  readonly created: bigint | null;
+}
+
+export interface Scrollback {
+  readonly t: 'scrollback';
+  readonly session: SessionAddr;
+  readonly from_line: bigint;
+  readonly rows_data: readonly RowPayload[];
+  readonly attrs: readonly AttrDef[];
+}
+
+export interface Exited {
+  readonly t: 'exited';
+  readonly session: SessionAddr;
+  readonly code: number | null;
+}
+
+export interface ErrorMessage {
+  readonly t: 'error';
+  readonly session: SessionAddr | null;
+  readonly message: string;
 }
 
 /**
@@ -274,7 +450,19 @@ export interface UnknownMessage {
   readonly raw: Record<string, unknown>;
 }
 
-export type HostMessage = Keyframe | Update | UnknownMessage;
+export type HostMessage =
+  | Keyframe
+  | Update
+  | Welcome
+  | Challenge
+  | AuthPending
+  | AuthFailed
+  | PairingRequested
+  | Sessions
+  | Scrollback
+  | Exited
+  | ErrorMessage
+  | UnknownMessage;
 
 /**
  * Narrowing helpers.
@@ -284,13 +472,21 @@ export type HostMessage = Keyframe | Update | UnknownMessage;
  * Testing for the `raw` field is what actually separates a message this client
  * models from one it merely carried.
  */
-export function isKeyframe(m: HostMessage): m is Keyframe {
-  return m.t === 'keyframe' && !('raw' in m);
+function modeled<T extends HostMessage & { t: string }>(tag: T['t']) {
+  return (m: HostMessage): m is T => m.t === tag && !('raw' in m);
 }
 
-export function isUpdate(m: HostMessage): m is Update {
-  return m.t === 'update' && !('raw' in m);
-}
+export const isKeyframe = modeled<Keyframe>('keyframe');
+export const isUpdate = modeled<Update>('update');
+export const isWelcome = modeled<Welcome>('welcome');
+export const isChallenge = modeled<Challenge>('challenge');
+export const isAuthPending = modeled<AuthPending>('auth_pending');
+export const isAuthFailed = modeled<AuthFailed>('auth_failed');
+export const isPairingRequested = modeled<PairingRequested>('pairing_requested');
+export const isSessions = modeled<Sessions>('sessions');
+export const isScrollback = modeled<Scrollback>('scrollback');
+export const isExited = modeled<Exited>('exited');
+export const isErrorMessage = modeled<ErrorMessage>('error');
 
 export function parseSessionAddr(v: unknown): SessionAddr {
   const o = obj(v, 'SessionAddr');
@@ -316,6 +512,10 @@ export function parseHostMessage(v: unknown): HostMessage {
         // `#[serde(default)]`, so a host that predates it sends no key.
         modes: o['modes'] === undefined ? 0 : num(o['modes'], 'keyframe.modes'),
         // Likewise additive; empty travels as absent.
+        blocks:
+          o['blocks'] === undefined
+            ? []
+            : arr(o['blocks'], 'keyframe.blocks').map(parseBlockPayload),
         title: o['title'] === undefined ? '' : str(o['title'], 'keyframe.title'),
       };
     case 'update':
@@ -326,7 +526,89 @@ export function parseHostMessage(v: unknown): HostMessage {
         seq: big(o['seq'], 'update.seq'),
         delta: parseDelta(o['delta']),
       };
+    case 'welcome':
+      return {
+        t,
+        version: num(o['version'], 'welcome.version'),
+        host: str(o['host'], 'welcome.host'),
+        label: str(o['label'], 'welcome.label'),
+      };
+    case 'challenge':
+      return {
+        t,
+        version: num(o['version'], 'challenge.version'),
+        host: str(o['host'], 'challenge.host'),
+        label: str(o['label'], 'challenge.label'),
+        nonce: str(o['nonce'], 'challenge.nonce'),
+        signature: str(o['signature'], 'challenge.signature'),
+      };
+    case 'auth_pending':
+      return {
+        t,
+        code: str(o['code'], 'auth_pending.code'),
+        expires_in_secs: num(o['expires_in_secs'], 'auth_pending.expires_in_secs'),
+      };
+    case 'auth_failed':
+      return {
+        t,
+        reason: str(o['reason'], 'auth_failed.reason'),
+        message: str(o['message'], 'auth_failed.message'),
+      };
+    case 'pairing_requested':
+      return {
+        t,
+        client: str(o['client'], 'pairing_requested.client'),
+        label: str(o['label'], 'pairing_requested.label'),
+        code: str(o['code'], 'pairing_requested.code'),
+        remote: str(o['remote'], 'pairing_requested.remote'),
+      };
+    case 'sessions':
+      return {
+        t,
+        sessions: arr(o['sessions'], 'sessions.sessions').map(parseSessionInfo),
+        // `skip_serializing_if = "Option::is_none"`: absent unless this
+        // listing answers the receiver's own create.
+        created: o['created'] === undefined || o['created'] === null
+          ? null
+          : big(o['created'], 'sessions.created'),
+      };
+    case 'scrollback':
+      return {
+        t,
+        session: parseSessionAddr(o['session']),
+        from_line: big(o['from_line'], 'scrollback.from_line'),
+        rows_data: arr(o['rows_data'], 'scrollback.rows_data').map(parseRowPayload),
+        attrs: o['attrs'] === undefined ? [] : arr(o['attrs'], 'scrollback.attrs').map(parseAttrDef),
+      };
+    case 'exited':
+      return {
+        t,
+        session: parseSessionAddr(o['session']),
+        code: o['code'] === null || o['code'] === undefined ? null : num(o['code'], 'exited.code'),
+      };
+    case 'error':
+      return {
+        t,
+        session:
+          o['session'] === null || o['session'] === undefined
+            ? null
+            : parseSessionAddr(o['session']),
+        message: str(o['message'], 'error.message'),
+      };
     default:
       return { t, raw: o };
   }
+}
+
+export function parseSessionInfo(v: unknown): SessionInfo {
+  const o = obj(v, 'SessionInfo');
+  return {
+    addr: parseSessionAddr(o['addr']),
+    title: str(o['title'], 'SessionInfo.title'),
+    cwd: str(o['cwd'], 'SessionInfo.cwd'),
+    cols: num(o['cols'], 'SessionInfo.cols'),
+    rows: num(o['rows'], 'SessionInfo.rows'),
+    alt_screen: bool(o['alt_screen'], 'SessionInfo.alt_screen'),
+    attached: bool(o['attached'], 'SessionInfo.attached'),
+  };
 }
