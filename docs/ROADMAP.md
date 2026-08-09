@@ -206,6 +206,16 @@ the attach path ships compiled and unseen.
 M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
 `zest-render-wgpu/`. Consumes `SessionSource`.
 
+- [ ] **The fleet has no face on the desktop.** → [#23](https://github.com/zesterm/zesterm/issues/23).
+      The phone and the web client are both planned to list sessions and attach
+      to a chosen one; the app most people will use can only take a `--attach
+      <host:port>` on the command line and then guess. The tab strip below is
+      *window chrome* and answers none of it: what a tab is when sessions live on
+      four machines, how loudly a remote one announces which machine it is, what
+      a tab does when its host sleeps, and what opening a window should do at
+      all. That last question already produced a bug — opening zesterm adopted a
+      shell another machine was driving, because a default was standing in for a
+      feature that does not exist.
 - [ ] Borderless window, GPU-drawn titlebar and tab strip through the SDF rect
       pipeline. `WM_NCCALCSIZE` returning 0 with `top` untouched removes the
       caption while keeping frame, shadow and snap — **but when maximized you
