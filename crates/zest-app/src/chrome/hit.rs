@@ -44,6 +44,10 @@ pub enum HitRegion {
     BlockRerun(u32),
     /// One row of the open picker, by index into its row list.
     PickerRow(usize),
+    /// The picker's panel between rows (query line, group labels, footer) —
+    /// swallows clicks so they cannot fall through to the grid, and so a
+    /// miss beside a row does not dismiss like the scrim would.
+    PickerPanel,
     /// The dimmed backdrop behind the picker; clicking it dismisses.
     PickerScrim,
     /// One runnable row of the command palette, by index; clicking runs it.

@@ -158,6 +158,8 @@ struct PickerState {
     selected: usize,
     filter: String,
     scroll: f32,
+    /// Bring the selection into view on the next layout — keyboard only.
+    scroll_to_selected: bool,
     actions: Vec<PickerAction>,
 }
 
@@ -194,7 +196,7 @@ struct SettingsUiState {
 
 #[derive(Clone)]
 enum PickerAction {
-    /// A host header; Enter does nothing.
+    /// A group label or an empty-state row; Enter does nothing.
     None,
     /// Focus the tab that already shows this session.
     Activate(zest_proto::SessionAddr),
@@ -202,6 +204,12 @@ enum PickerAction {
     Attach { addr: zest_proto::SessionAddr, route: HostRoute },
     /// Create a fresh session on the host.
     Create { host: zest_proto::HostId, route: HostRoute },
+    /// Re-run a command from the fleet's history. Enter types it into the
+    /// *current* session ("run here"); ⇧⏎ into the session it came from —
+    /// the closest honest reading of "run on host…" until a chooser exists.
+    RunBlock { origin: zest_proto::SessionAddr, command: String },
+    /// A keymap command, dispatched through the same `perform` its chord is.
+    Perform(keymap::Action),
 }
 
 /// A tab's wake callback: forward to the event loop, translating the
@@ -1295,16 +1303,30 @@ impl App {
         }
         // Built before the font borrow below: row construction reads the
         // fleet and the tabs, never the fonts.
+        let hosts_searched = self.fleet.as_ref().map_or(0, |f| f.snapshot().len());
         let picker_rows = self.picker.is_some().then(|| self.build_picker());
         let picker_model = picker_rows.map(|(rows, actions)| {
             let state = self.picker.as_mut().expect("is_some gated the build");
             state.actions = actions;
             state.selected = state.selected.min(rows.len().saturating_sub(1));
+            // A filter edit can strand the selection on a group label; land
+            // it on the nearest row Enter can actually run.
+            if matches!(state.actions.get(state.selected), Some(PickerAction::None) | None) {
+                if let Some(first) = state
+                    .actions
+                    .iter()
+                    .position(|a| !matches!(a, PickerAction::None))
+                {
+                    state.selected = first;
+                }
+            }
             crate::chrome::model::PickerModel {
                 rows,
                 selected: state.selected,
                 filter: state.filter.clone(),
                 scroll: state.scroll,
+                ensure_visible: state.scroll_to_selected,
+                hosts_searched,
             }
         });
 
@@ -1541,6 +1563,8 @@ impl App {
         self.strip_scroll = laid.strip_scroll;
         if let Some(state) = self.picker.as_mut() {
             state.scroll = laid.picker_scroll;
+            // One layout consumed the request; the wheel is free again.
+            state.scroll_to_selected = false;
         }
         if let Some(state) = self.palette_ui.as_mut() {
             state.scroll = laid.palette_scroll;
@@ -1634,11 +1658,14 @@ impl App {
                 }
                 let action = self.picker.as_ref().and_then(|p| p.actions.get(i).cloned());
                 if let Some(action) = action {
-                    self.run_picker_action(action);
+                    self.run_picker_action(action, el, false);
                 } else {
                     self.mark_chrome_dirty();
                 }
             }
+            // A click on the panel beside a row chose nothing; swallowing it
+            // is what makes a near-miss not a dismissal.
+            (HitRegion::PickerPanel, _) => {}
             (HitRegion::PickerScrim, MouseButton::Left) => {
                 self.picker = None;
                 self.mark_chrome_dirty();
@@ -1742,6 +1769,7 @@ impl App {
                     selected: 0,
                     filter: String::new(),
                     scroll: 0.0,
+                    scroll_to_selected: false,
                     actions: Vec::new(),
                 })
             }
@@ -1964,14 +1992,81 @@ impl App {
 
         let mut rows = Vec::new();
         let mut actions = Vec::new();
-        let Some(fleet) = &self.fleet else { return (rows, actions) };
         let filter = self
             .picker
             .as_ref()
             .map(|p| p.filter.to_lowercase())
             .unwrap_or_default();
+        let matches = |text: &str| filter.is_empty() || text.to_lowercase().contains(&filter);
 
-        for host in fleet.snapshot() {
+        // Blocks first — the palette is primarily a history of what ran
+        // anywhere in the fleet (design screen 6). Gathered from every
+        // attached tab; unattached sessions' history has not crossed the
+        // wire and pretending otherwise would be a lie with a scrollbar.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        let mut history: Vec<(u64, PickerRow, PickerAction)> = Vec::new();
+        for tab in self.tabs.iter() {
+            let host = match tab.source().origin() {
+                Origin::Daemon { host, local: false } => host,
+                _ => String::new(),
+            };
+            let term = tab.source().terminal();
+            let term = term.lock();
+            for b in term.blocks().blocks() {
+                let command = b.command.trim();
+                if command.is_empty() || b.output_line.is_none() || !matches(command) {
+                    continue;
+                }
+                let when = b.ended_ms.or(b.started_ms).unwrap_or(0);
+                let ago = match b.ended_ms {
+                    _ if b.is_running() => "running".to_string(),
+                    Some(e) => {
+                        crate::status::age_label(std::time::Duration::from_millis(
+                            now_ms.saturating_sub(e),
+                        )) + " ago"
+                    }
+                    None => String::new(),
+                };
+                let outcome = match b.state {
+                    zest_core::BlockState::Finished { exit_code: Some(c) } => format!("exit {c}"),
+                    zest_core::BlockState::Finished { exit_code: None } => "done".to_string(),
+                    _ => String::new(),
+                };
+                let provenance = [host.as_str(), ago.as_str(), outcome.as_str()]
+                    .iter()
+                    .filter(|p| !p.is_empty())
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(" \u{b7} ");
+                history.push((
+                    when,
+                    PickerRow::Block {
+                        command: command.to_string(),
+                        provenance,
+                        ok: !b.failed(),
+                    },
+                    PickerAction::RunBlock { origin: tab.addr, command: command.to_string() },
+                ));
+            }
+        }
+        history.sort_by(|a, b| b.0.cmp(&a.0));
+        let cap = if filter.is_empty() { 4 } else { 8 };
+        if !history.is_empty() {
+            rows.push(PickerRow::Group { title: "Blocks".into() });
+            actions.push(PickerAction::None);
+            for (_, row, action) in history.into_iter().take(cap) {
+                rows.push(row);
+                actions.push(action);
+            }
+        }
+
+        // Sessions and hosts, from the fleet.
+        let fleet_hosts = self.fleet.as_ref().map(|f| f.snapshot()).unwrap_or_default();
+        let mut session_rows = Vec::new();
+        let mut host_rows = Vec::new();
+        for host in &fleet_hosts {
             let presence = match host.presence {
                 zest_mesh::discovery::Presence::Online => TabPresence::Online,
                 zest_mesh::discovery::Presence::Away => TabPresence::Away,
@@ -1986,17 +2081,12 @@ impl App {
                 host.address.clone().map(HostRoute::Tcp)
             };
 
-            let host_matches = filter.is_empty() || host.label.to_lowercase().contains(&filter);
-            let mut session_rows = Vec::new();
             if let SessionsState::Fresh(sessions) = &host.sessions {
                 for info in sessions {
                     let title = info.title.trim();
                     let title =
                         if title.is_empty() { "shell".to_string() } else { title.to_string() };
-                    let matches = host_matches
-                        || title.to_lowercase().contains(&filter)
-                        || info.cwd.to_lowercase().contains(&filter);
-                    if !matches {
+                    if !(matches(&host.label) || matches(&title) || matches(&info.cwd)) {
                         continue;
                     }
                     let attached_here = self.tabs.iter().any(|t| t.addr == info.addr);
@@ -2011,6 +2101,7 @@ impl App {
                         PickerRow::Session {
                             title,
                             detail: info.cwd.clone(),
+                            host: host.label.clone(),
                             attached: info.attached,
                             attached_here,
                         },
@@ -2019,34 +2110,110 @@ impl App {
                 }
             }
 
-            // A host appears when it matches the filter or something on it
-            // does; a fleet of quiet machines is still a fleet.
-            if !host_matches && session_rows.is_empty() {
-                continue;
+            if matches(&host.label) {
+                let detail = match host.reachability {
+                    Some(zest_mesh::Reachability::Loopback) => "loopback".to_string(),
+                    Some(zest_mesh::Reachability::Lan) => match host.rtt_ms {
+                        Some(ms) => {
+                            format!("LAN \u{b7} {}", crate::chrome::layout::format_ms(ms))
+                        }
+                        None => "LAN".to_string(),
+                    },
+                    Some(zest_mesh::Reachability::Cloud) => match host.rtt_ms {
+                        Some(ms) => {
+                            format!("tunnel \u{b7} {}", crate::chrome::layout::format_ms(ms))
+                        }
+                        None => "tunnel".to_string(),
+                    },
+                    None => String::new(),
+                };
+                // No create action on a host that cannot be dialled: offering
+                // an action that must fail is worse than saying so.
+                let action = match route {
+                    Some(route) if !matches!(presence, TabPresence::Unreachable) => {
+                        PickerAction::Create { host: host.host, route }
+                    }
+                    _ => PickerAction::None,
+                };
+                host_rows.push((
+                    PickerRow::Host { label: host.label.clone(), presence, detail },
+                    action,
+                ));
             }
-            rows.push(PickerRow::Host { label: host.label.clone(), presence });
+        }
+        if !session_rows.is_empty() {
+            rows.push(PickerRow::Group { title: "Sessions".into() });
             actions.push(PickerAction::None);
             for (row, action) in session_rows {
                 rows.push(row);
                 actions.push(action);
             }
-            // No create row on a host that cannot be dialled: offering an
-            // action that must fail is worse than the row's absence.
-            if let Some(route) = route {
-                if !matches!(presence, TabPresence::Unreachable) {
-                    rows.push(PickerRow::CreateOn { label: host.label.clone() });
-                    actions.push(PickerAction::Create { host: host.host, route });
-                }
+        }
+        if !host_rows.is_empty() {
+            rows.push(PickerRow::Group { title: "Hosts".into() });
+            actions.push(PickerAction::None);
+            for (row, action) in host_rows {
+                rows.push(row);
+                actions.push(action);
             }
+        }
+
+        // Actions last: the keymap's visible commands, through the same
+        // dispatch their chords use.
+        let action_cap = if filter.is_empty() { 4 } else { 8 };
+        let mut action_rows = Vec::new();
+        for b in keymap::BINDINGS.iter().filter(|b| b.show && matches(b.name)) {
+            if action_rows.len() >= action_cap {
+                break;
+            }
+            action_rows.push((
+                PickerRow::Action {
+                    name: b.name.to_string(),
+                    chord: keymap::chord_label(b),
+                },
+                PickerAction::Perform(b.action),
+            ));
+        }
+        if !action_rows.is_empty() {
+            rows.push(PickerRow::Group { title: "Actions".into() });
+            actions.push(PickerAction::None);
+            for (row, action) in action_rows {
+                rows.push(row);
+                actions.push(action);
+            }
+        }
+
+        if rows.is_empty() {
+            rows.push(PickerRow::Nothing);
+            actions.push(PickerAction::None);
         }
 
         (rows, actions)
     }
 
     /// Act on a picker row. Every action closes the picker: the user chose.
-    fn run_picker_action(&mut self, action: PickerAction) {
+    fn run_picker_action(&mut self, action: PickerAction, el: &ActiveEventLoop, shift: bool) {
         match action {
             PickerAction::None => return,
+            PickerAction::RunBlock { origin, command } => {
+                self.picker = None;
+                // ⏎ runs here; ⇧⏎ runs where the command came from — the
+                // honest half of "run on host…" until a chooser exists.
+                if shift && self.tabs.activate_addr(origin) {
+                    self.after_activation();
+                }
+                if let Some(session) = self.tabs.active_source() {
+                    let mut bytes = command.into_bytes();
+                    bytes.push(b'\r');
+                    session.write(bytes);
+                }
+            }
+            PickerAction::Perform(action) => {
+                self.picker = None;
+                self.mark_chrome_dirty();
+                self.perform(action, el);
+                return;
+            }
             PickerAction::Activate(addr) => {
                 self.picker = None;
                 if self.tabs.activate_addr(addr) {
@@ -3292,13 +3459,31 @@ impl ApplicationHandler<Wakeup> for App {
                         }
                         Key::Named(NamedKey::ArrowDown) => {
                             if let Some(p) = self.picker.as_mut() {
-                                p.selected = p.selected.saturating_add(1);
+                                // Skip group labels: the selection lands on
+                                // things Enter can do, never on a heading.
+                                let mut next = p.selected;
+                                while next + 1 < p.actions.len() {
+                                    next += 1;
+                                    if !matches!(p.actions[next], PickerAction::None) {
+                                        p.selected = next;
+                                        break;
+                                    }
+                                }
+                                p.scroll_to_selected = true;
                             }
                             self.mark_chrome_dirty();
                         }
                         Key::Named(NamedKey::ArrowUp) => {
                             if let Some(p) = self.picker.as_mut() {
-                                p.selected = p.selected.saturating_sub(1);
+                                let mut next = p.selected;
+                                while next > 0 {
+                                    next -= 1;
+                                    if !matches!(p.actions[next], PickerAction::None) {
+                                        p.selected = next;
+                                        break;
+                                    }
+                                }
+                                p.scroll_to_selected = true;
                             }
                             self.mark_chrome_dirty();
                         }
@@ -3308,7 +3493,8 @@ impl ApplicationHandler<Wakeup> for App {
                                 .as_ref()
                                 .and_then(|p| p.actions.get(p.selected).cloned());
                             if let Some(action) = action {
-                                self.run_picker_action(action);
+                                let shift = self.modifiers.shift_key();
+                                self.run_picker_action(action, el, shift);
                             }
                         }
                         Key::Named(NamedKey::Backspace) => {

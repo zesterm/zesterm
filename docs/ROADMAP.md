@@ -442,6 +442,18 @@ theme screens. Colours, sizes and spacing come from there, not from this file.
       (`ActivityMap` — the one place every session kind already reports output
       through), the 42px fleet footer, and the slim 44px title bar with the
       session name, cwd, host chip and the way back to horizontal.
+- [x] **Screen 6: ⌘K becomes the fleet's search.** The picker grew into the
+      design's palette: one 620px panel, 88px down, with a ❯-query row
+      ("N hosts searched" on the right), grouped results — **Blocks first**,
+      the history of what ran anywhere, gathered from every attached tab with
+      provenance (`host · 2m ago · exit 0`) from the block timestamps; then
+      Sessions, Hosts (Enter opens a shell there), and Actions from the
+      keymap through the same `perform` their chords use — and the keycap
+      footer. ⏎ runs a block here; ⇧⏎ runs it in the session it came from,
+      the honest half of "run on host…" until a chooser exists. Selection
+      skips group labels, ensure-visible scrolling without wheel snap-back,
+      "nothing matches" instead of a blank panel, and the modal sweep test
+      now also proves group labels are *not* clickable.
 - [ ] Animation clock. Springs `(response, damping)`, not easing curves —
       terminal motion is interruption-dominated and a spring absorbs a changed
       target with continuous velocity for free. Substep the integrator

@@ -97,22 +97,39 @@ pub struct SidebarModel {
     pub hosts_asleep: usize,
 }
 
-/// One row of the fleet picker, ready to draw.
+/// One row of the ⌘K palette (design screen 6), ready to draw.
 ///
 /// Display-only: the app keeps a parallel list of *actions* built in the
 /// same pass, so row index `n` here and there mean the same thing by
 /// construction — the drift the hit map exists to prevent, applied to rows.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PickerRow {
-    /// A machine, with its presence spelled out.
-    Host { label: String, presence: TabPresence },
-    /// A session on the host above.
-    Session { title: String, detail: String, attached: bool, attached_here: bool },
-    /// "New session on <label>".
-    CreateOn { label: String },
+    /// A group label: Blocks, Sessions, Hosts, Actions — in that order,
+    /// blocks first, because the palette is primarily a history of what ran
+    /// anywhere in the fleet.
+    Group { title: String },
+    /// A command from that history. `ok` colours the ↺ glyph.
+    Block { command: String, provenance: String, ok: bool },
+    /// A session somewhere in the fleet. `host` is the right-aligned
+    /// provenance.
+    Session {
+        title: String,
+        detail: String,
+        host: String,
+        attached: bool,
+        attached_here: bool,
+    },
+    /// A machine; Enter opens a fresh shell on it. `detail` says how it is
+    /// reached.
+    Host { label: String, presence: TabPresence, detail: String },
+    /// A command from the keymap, chord already platform-spelled.
+    Action { name: String, chord: String },
+    /// Nothing matched the filter; drawn so an empty panel never reads as
+    /// broken.
+    Nothing,
 }
 
-/// The fleet picker, when open.
+/// The ⌘K palette, when open.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PickerModel {
     pub rows: Vec<PickerRow>,
@@ -122,6 +139,11 @@ pub struct PickerModel {
     pub filter: String,
     /// Scroll offset of the row list, physical pixels; layout clamps it.
     pub scroll: f32,
+    /// Bring the selection into view this pass — keyboard only, so wheel
+    /// scrolling never snaps back.
+    pub ensure_visible: bool,
+    /// How many hosts the query ran over — the query row's right-hand fact.
+    pub hosts_searched: usize,
 }
 
 /// One row of the command palette, ready to draw.
