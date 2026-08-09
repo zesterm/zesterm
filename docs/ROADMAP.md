@@ -344,6 +344,16 @@ M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
       "nothing matches" instead of a blank panel. A command with no chord
       becomes representable the day one exists — `keymap::palette`, not
       `BINDINGS`, is the palette's contract.
+- [x] **Chrome actually draws above the grid now.** The renderer's doc always
+      promised `grid glyphs → chrome rects → chrome text`, but the
+      implementation drew each pipeline once over its whole buffer — so
+      every grid glyph painted *after* the chrome's panels, and any overlay
+      floating over text showed the shell's prompt through its panel (the
+      picker shipped with this; a busy screen behind the palette made it
+      unmissable). `Scene` now records where chrome begins in the shared
+      buffers and the pass draws split instance ranges in the documented
+      order; a test pins the boundary bookkeeping, and clearing a scene
+      resets it so no frame inherits the last one's split.
 - [x] **The schema walk a settings UI renders from.** `zest_config::ui` turns
       the JSON Schema into `UiField`s — dotted key, `x_zest_group`, parsed
       `x_zest_widget`, doc-comment description, min/max range, int-vs-float,

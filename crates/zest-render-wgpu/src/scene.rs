@@ -68,6 +68,15 @@ pub struct Scene {
     pub decors: Vec<DecorInstance>,
     /// Sub-pixel grid translation, applied in the vertex shader.
     pub grid_origin: [f32; 2],
+    /// Index in `rects` where the chrome's instances begin.
+    ///
+    /// The buffers are shared but the draw order is not: the renderer draws
+    /// grid instances, then chrome, in split ranges. Without the split every
+    /// grid glyph paints *after* — and therefore over — the chrome's panels,
+    /// which is exactly the picker-behind-the-prompt bug this retired.
+    pub chrome_rects_at: usize,
+    /// Index in `glyphs` where the chrome's instances begin.
+    pub chrome_glyphs_at: usize,
 }
 
 impl Scene {
@@ -78,6 +87,8 @@ impl Scene {
         self.glyphs.clear();
         self.decors.clear();
         self.grid_origin = [0.0, 0.0];
+        self.chrome_rects_at = 0;
+        self.chrome_glyphs_at = 0;
     }
 
     /// Build a frame.
@@ -101,7 +112,15 @@ impl Scene {
             self.build_viewport(device, queue, atlas, fonts, metrics, vp);
         }
 
-        // Chrome last, so it sits above the grid.
+        self.append_chrome(chrome);
+    }
+
+    /// Chrome last, so it sits above the grid — and the boundary recorded, so
+    /// the renderer can actually draw it above rather than merely after it in
+    /// the same buffer.
+    fn append_chrome(&mut self, chrome: &Chrome) {
+        self.chrome_rects_at = self.rects.len();
+        self.chrome_glyphs_at = self.glyphs.len();
         self.rects.extend_from_slice(&chrome.rects);
         self.glyphs.extend_from_slice(&chrome.glyphs);
     }
@@ -615,6 +634,44 @@ mod tests {
         p.fill_standard_extended();
         p.colors[1] = Rgb::new(0xe0, 0x60, 0x6a);
         p
+    }
+
+    #[test]
+    fn the_chrome_boundary_splits_the_buffers_where_chrome_begins() {
+        // The renderer draws grid and chrome as split instance ranges out of
+        // the same buffers. If the recorded boundary drifts from where the
+        // chrome was actually appended, grid glyphs draw after the chrome's
+        // panels again — the fleet picker with the shell's prompt shining
+        // through it, which is the bug that forced the split.
+        let glyph = || GlyphInstance {
+            pos: [0.0; 2],
+            uv: [0.0; 2],
+            size: [1.0; 2],
+            color: LinearRgba([0.0; 4]),
+            clip: [1.0; 4],
+            layer: 0,
+            flags: 0,
+        };
+        let mut scene = Scene::default();
+        scene.rects.push(RectInstance::filled([0.0; 4], LinearRgba([0.0; 4]), [0.0; 4]));
+        scene.rects.push(RectInstance::filled([1.0; 4], LinearRgba([0.0; 4]), [1.0; 4]));
+        scene.glyphs.push(glyph());
+        let chrome = Chrome {
+            rects: vec![RectInstance::filled([2.0; 4], LinearRgba([0.0; 4]), [2.0; 4])],
+            glyphs: vec![glyph(), glyph()],
+        };
+        scene.append_chrome(&chrome);
+        assert_eq!(scene.chrome_rects_at, 2, "chrome rects start after the grid's");
+        assert_eq!(scene.chrome_glyphs_at, 1, "chrome glyphs start after the grid's");
+        assert_eq!(scene.rects.len(), 3);
+        assert_eq!(scene.glyphs.len(), 3);
+
+        scene.clear();
+        assert_eq!(
+            (scene.chrome_rects_at, scene.chrome_glyphs_at),
+            (0, 0),
+            "a cleared scene must not carry last frame's boundary into this one"
+        );
     }
 
     #[test]

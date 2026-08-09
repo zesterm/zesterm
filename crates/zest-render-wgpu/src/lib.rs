@@ -419,18 +419,27 @@ impl Renderer {
             });
             pass.set_bind_group(0, &self.globals_bind_group, &[]);
 
-            if !scene.rects.is_empty() {
+            // The documented order, honoured with split instance ranges: the
+            // buffers hold grid and chrome together, but a single whole-buffer
+            // draw per pipeline puts every grid glyph *after* the chrome's
+            // rects — which is a fleet picker with the shell's prompt shining
+            // through its panel. Grid first, decorations, then the chrome
+            // ranges on top.
+            let chrome_rects = scene.chrome_rects_at as u32..scene.rects.len() as u32;
+            let chrome_glyphs = scene.chrome_glyphs_at as u32..scene.glyphs.len() as u32;
+
+            if scene.chrome_rects_at > 0 {
                 pass.set_pipeline(&self.rect_pipeline);
                 pass.set_vertex_buffer(0, self.rects.slice());
-                pass.draw(0..4, 0..scene.rects.len() as u32);
+                pass.draw(0..4, 0..scene.chrome_rects_at as u32);
             }
 
-            if !scene.glyphs.is_empty() {
+            if scene.chrome_glyphs_at > 0 {
                 if let Some(bg) = self.atlas_bind_group.as_ref() {
                     pass.set_pipeline(&self.glyph_pipeline);
                     pass.set_bind_group(1, bg, &[]);
                     pass.set_vertex_buffer(0, self.glyphs.slice());
-                    pass.draw(0..4, 0..scene.glyphs.len() as u32);
+                    pass.draw(0..4, 0..scene.chrome_glyphs_at as u32);
                 }
             }
 
@@ -438,6 +447,21 @@ impl Renderer {
                 pass.set_pipeline(&self.decor_pipeline);
                 pass.set_vertex_buffer(0, self.decors.slice());
                 pass.draw(0..4, 0..scene.decors.len() as u32);
+            }
+
+            if !chrome_rects.is_empty() {
+                pass.set_pipeline(&self.rect_pipeline);
+                pass.set_vertex_buffer(0, self.rects.slice());
+                pass.draw(0..4, chrome_rects);
+            }
+
+            if !chrome_glyphs.is_empty() {
+                if let Some(bg) = self.atlas_bind_group.as_ref() {
+                    pass.set_pipeline(&self.glyph_pipeline);
+                    pass.set_bind_group(1, bg, &[]);
+                    pass.set_vertex_buffer(0, self.glyphs.slice());
+                    pass.draw(0..4, chrome_glyphs);
+                }
             }
         }
 
