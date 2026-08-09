@@ -1,0 +1,31 @@
+{
+  "name": "@zesterm/sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The control-plane host: a Node process bridging the daemon's session list to browsers over sigx actors.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "start": "node src/main.ts"
+  },
+  "dependencies": {
+    "@sigx/actors": "^0.7.0",
+    "@sigx/actors-ws": "^0.7.0",
+    "@zesterm/auth": "workspace:*",
+    "@zesterm/client": "workspace:*",
+    "@zesterm/control": "workspace:*",
+    "@zesterm/proto": "workspace:*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@noble/ed25519": "^3.0.0",
+    "@noble/hashes": "^2.0.0",
+    "@types/node": "^24.10.1",
+    "@types/ws": "^8.18.0",
+    "typescript": "^5.9.3"
+  }
+}
