@@ -41,6 +41,8 @@ pub struct ChromeLayout {
     pub strip_scroll: f32,
     /// The picker's scroll, clamped likewise.
     pub picker_scroll: f32,
+    /// The shortcuts sheet's scroll, clamped likewise.
+    pub shortcuts_scroll: f32,
 }
 
 // Logical-pixel constants, scaled at use. Named because the tests reason
@@ -75,6 +77,9 @@ pub fn layout(
         // Appended last on purpose: last drawn is topmost, and last pushed
         // wins the hit lookup — the same fact, stated once.
         picker_overlay(picker, colors, m, measure, &mut out);
+    }
+    if let Some(shortcuts) = &model.shortcuts {
+        shortcuts_overlay(shortcuts, colors, m, measure, &mut out);
     }
     out
 }
@@ -229,6 +234,145 @@ fn picker_overlay(
                 });
             }
         }
+    }
+}
+
+// Shortcuts sheet geometry, logical px. Taller and wider than the picker:
+// it is a reference card, not a jump list.
+const SHEET_W: f32 = 640.0;
+const SHEET_H: f32 = 500.0;
+const SHEET_ROW_H: f32 = 28.0;
+const SHEET_HEADER_H: f32 = 36.0;
+const SHEET_NOTE_H: f32 = 24.0;
+const SHEET_GAP: f32 = 8.0;
+const CHIP_HPAD: f32 = 8.0;
+const CHIP_VPAD: f32 = 3.0;
+
+fn shortcuts_overlay(
+    sheet: &super::model::ShortcutsModel,
+    colors: &ChromeColors,
+    m: &ChromeMetrics,
+    measure: &mut dyn FnMut(&str) -> f32,
+    out: &mut ChromeLayout,
+) {
+    let s = m.scale;
+    let no_clip = [0.0, 0.0, m.width, m.height];
+
+    // Same modality recipe as the picker: the scrim swallows what the panel
+    // does not, so the grid hears nothing while the sheet is up.
+    out.rects.push(RectInstance::filled(no_clip, colors.scrim, no_clip));
+    out.hit.push(no_clip, HitRegion::ShortcutsScrim);
+
+    let w = (SHEET_W * s).min(m.width - PICKER_MARGIN * s);
+    let h = (SHEET_H * s).min(m.height - PICKER_MARGIN * s);
+    let panel = [(m.width - w) / 2.0, (m.height - h) / 2.5, w, h];
+    let mut panel_rect = RectInstance::rounded(panel, PICKER_RADIUS * s, colors.panel_bg, no_clip);
+    panel_rect.shadow_blur = 24.0 * s;
+    panel_rect.shadow_alpha = colors.shadow_alpha;
+    out.rects.push(panel_rect);
+    // Nothing on the sheet is clickable, but a click on it must not fall
+    // through to the scrim and dismiss what the user is reading.
+    out.hit.push(panel, HitRegion::ShortcutsPanel);
+
+    let filter_h = m.line_height + 2.0 * PICKER_PAD * s;
+    let (filter_text, filter_color) = if sheet.filter.is_empty() {
+        ("type to filter shortcuts".to_string(), colors.text_faint)
+    } else {
+        (sheet.filter.clone(), colors.text_active)
+    };
+    out.texts.push(TextRun {
+        text: filter_text,
+        pos: [panel[0] + PICKER_PAD * s, text_baseline(m, panel[1], filter_h)],
+        max_width: w - 2.0 * PICKER_PAD * s,
+        color: filter_color,
+        clip: panel,
+    });
+    out.rects.push(RectInstance::filled(
+        [panel[0], panel[1] + filter_h, w, HAIRLINE * s],
+        colors.line,
+        no_clip,
+    ));
+
+    let rows_clip =
+        [panel[0], panel[1] + filter_h + HAIRLINE * s, w, h - filter_h - HAIRLINE * s];
+
+    let section_h = |section: &super::model::ShortcutSection| {
+        SHEET_HEADER_H
+            + section.rows.len() as f32 * SHEET_ROW_H
+            + if section.note.is_some() { SHEET_NOTE_H } else { 0.0 }
+            + SHEET_GAP
+    };
+    let content_h: f32 = sheet.sections.iter().map(|sec| section_h(sec) * s).sum();
+    let max_scroll = (content_h - rows_clip[3]).max(0.0);
+    let scroll = sheet.scroll.clamp(0.0, max_scroll);
+    out.shortcuts_scroll = scroll;
+
+    let left = panel[0] + PICKER_PAD * s;
+    let right = panel[0] + w - PICKER_PAD * s;
+    let mut y = rows_clip[1] - scroll;
+    for section in &sheet.sections {
+        let header = [panel[0], y, w, SHEET_HEADER_H * s];
+        if intersect(header, rows_clip).is_some() {
+            out.texts.push(TextRun {
+                text: section.title.clone(),
+                // Bottom-aligned in its band so the title sits close to its
+                // rows rather than the previous section's.
+                pos: [left, text_baseline(m, y + (SHEET_HEADER_H - SHEET_ROW_H) * s, SHEET_ROW_H * s)],
+                max_width: w - 2.0 * PICKER_PAD * s,
+                color: colors.text_faint,
+                clip: rows_clip,
+            });
+        }
+        y += SHEET_HEADER_H * s;
+        for row in &section.rows {
+            let band = [panel[0], y, w, SHEET_ROW_H * s];
+            if intersect(band, rows_clip).is_some() {
+                let baseline = text_baseline(m, y, SHEET_ROW_H * s);
+                out.texts.push(TextRun {
+                    text: row.name.clone(),
+                    pos: [left, baseline],
+                    max_width: w * 0.6,
+                    color: colors.text_inactive,
+                    clip: rows_clip,
+                });
+                // The chord, right-aligned in a keycap-look chip.
+                let chord_w = measure(&row.chord).min(w * 0.35);
+                let chip = [
+                    right - chord_w - 2.0 * CHIP_HPAD * s,
+                    y + CHIP_VPAD * s,
+                    chord_w + 2.0 * CHIP_HPAD * s,
+                    SHEET_ROW_H * s - 2.0 * CHIP_VPAD * s,
+                ];
+                out.rects.push(RectInstance::rounded(
+                    chip,
+                    RADIUS * s,
+                    colors.accent_soft,
+                    rows_clip,
+                ));
+                out.texts.push(TextRun {
+                    text: row.chord.clone(),
+                    pos: [right - chord_w - CHIP_HPAD * s, baseline],
+                    max_width: w * 0.35,
+                    color: colors.text_active,
+                    clip: rows_clip,
+                });
+            }
+            y += SHEET_ROW_H * s;
+        }
+        if let Some(note) = &section.note {
+            let band = [panel[0], y, w, SHEET_NOTE_H * s];
+            if intersect(band, rows_clip).is_some() {
+                out.texts.push(TextRun {
+                    text: note.clone(),
+                    pos: [left, text_baseline(m, y, SHEET_NOTE_H * s)],
+                    max_width: w - 2.0 * PICKER_PAD * s,
+                    color: colors.text_faint,
+                    clip: rows_clip,
+                });
+            }
+            y += SHEET_NOTE_H * s;
+        }
+        y += SHEET_GAP * s;
     }
 }
 
@@ -578,6 +722,7 @@ mod tests {
             traffic_inset: None,
             focused: true,
             picker: None,
+            shortcuts: None,
         }
     }
 
@@ -779,6 +924,69 @@ mod tests {
         }
         assert_eq!(seen_rows, [0usize, 1, 2].into(), "every row must be clickable");
         assert!(scrim_hits > 0, "the scrim must be reachable around the panel");
+    }
+
+    #[test]
+    fn the_shortcuts_sheet_is_modal_like_the_picker() {
+        // Same definition of modal as the picker test above: every point in
+        // the window answers as the sheet's panel or its scrim, and a click
+        // can never reach a tab or fall through to the grid while it is up.
+        use crate::chrome::model::{ShortcutRow, ShortcutSection, ShortcutsModel};
+        let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut mo = model(tabs, TabsPosition::Top);
+        mo.shortcuts = Some(ShortcutsModel {
+            sections: vec![ShortcutSection {
+                title: "Tabs".into(),
+                rows: vec![
+                    ShortcutRow { name: "New tab".into(), chord: "⌘T".into() },
+                    ShortcutRow { name: "Close tab".into(), chord: "⌘W".into() },
+                ],
+                note: Some("a note".into()),
+            }],
+            filter: String::new(),
+            scroll: 0.0,
+        });
+        let l = layout(&mo, &colors(), &m, &mut measure);
+
+        let mut panel_hits = 0u32;
+        let mut scrim_hits = 0u32;
+        for x in (0..1200).step_by(4) {
+            for y in (0..800).step_by(4) {
+                match l.hit.hit(x as f32, y as f32) {
+                    Some(HitRegion::ShortcutsPanel) => panel_hits += 1,
+                    Some(HitRegion::ShortcutsScrim) => scrim_hits += 1,
+                    Some(other) => panic!("a click at ({x},{y}) escaped the sheet: {other:?}"),
+                    None => panic!("({x},{y}) hit nothing; the scrim must cover the window"),
+                }
+            }
+        }
+        assert!(panel_hits > 0, "the panel must swallow clicks on itself");
+        assert!(scrim_hits > 0, "the scrim must be reachable around the panel");
+    }
+
+    #[test]
+    fn a_long_sheet_clamps_its_scroll_to_the_content() {
+        // Forty rows overflow a 500-logical-px panel; a wild scroll value
+        // must clamp to the content or the list scrolls into blank space
+        // and appears empty.
+        use crate::chrome::model::{ShortcutRow, ShortcutSection, ShortcutsModel};
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut mo = model(Vec::new(), TabsPosition::Top);
+        mo.shortcuts = Some(ShortcutsModel {
+            sections: vec![ShortcutSection {
+                title: "Everything".into(),
+                rows: (0..40)
+                    .map(|i| ShortcutRow { name: format!("row {i}"), chord: "⌘X".into() })
+                    .collect(),
+                note: None,
+            }],
+            filter: String::new(),
+            scroll: 1e9,
+        });
+        let l = layout(&mo, &colors(), &m, &mut measure);
+        assert!(l.shortcuts_scroll > 0.0, "an overflowing sheet scrolls");
+        assert!(l.shortcuts_scroll < 1e9, "and the scroll is clamped to the content");
     }
 
     #[test]

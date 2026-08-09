@@ -16,6 +16,8 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 use zest_input::key;
 
+use crate::chrome::model::{ShortcutRow, ShortcutSection};
+
 /// What the user asked the *app* to do — never the shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -35,6 +37,9 @@ pub enum Action {
     RerunLastCommand,
     ScrollPageUp,
     ScrollPageDown,
+    /// The shortcuts sheet itself — rendered from this table, so it can
+    /// never list a chord that does not exist.
+    ToggleShortcuts,
 }
 
 /// The modifier half of a chord, as *policy* rather than bitmask.
@@ -82,19 +87,58 @@ pub enum When {
     NotAltScreen,
 }
 
+/// Where a binding appears on the shortcuts sheet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Category {
+    Tabs,
+    Fleet,
+    Clipboard,
+    Blocks,
+    Scrollback,
+    Help,
+}
+
 pub struct Binding {
     pub mods: Mods,
     pub key: ChordKey,
     pub action: Action,
     pub when: When,
+    /// The human keycap for display, decoupled from the match form: the `{`
+    /// binding shows as `⇧[`, `Named(Tab)` as `Tab`.
+    pub keycap: &'static str,
+    pub name: &'static str,
+    pub category: Category,
+    /// Collapsed rows (⌘2..⌘8, the `?` alias of `/`) get no line of their
+    /// own on the sheet; the representative row shows the range.
+    pub show: bool,
 }
 
-const fn b(mods: Mods, key: ChordKey, action: Action) -> Binding {
-    Binding { mods, key, action, when: When::Always }
+const fn b(
+    mods: Mods,
+    key: ChordKey,
+    action: Action,
+    keycap: &'static str,
+    name: &'static str,
+    category: Category,
+) -> Binding {
+    Binding { mods, key, action, when: When::Always, keycap, name, category, show: true }
 }
 
-const fn when(mods: Mods, key: ChordKey, action: Action, when: When) -> Binding {
-    Binding { mods, key, action, when }
+const fn hidden(mods: Mods, key: ChordKey, action: Action, category: Category) -> Binding {
+    Binding { mods, key, action, when: When::Always, keycap: "", name: "", category, show: false }
+}
+
+const fn scroll(key: ChordKey, action: Action, keycap: &'static str, name: &'static str) -> Binding {
+    Binding {
+        mods: Mods::Shift,
+        key,
+        action,
+        when: When::NotAltScreen,
+        keycap,
+        name,
+        category: Category::Scrollback,
+        show: true,
+    }
 }
 
 /// Order matters: first match wins, which is the precedence the old if-cascade
@@ -105,40 +149,74 @@ const fn when(mods: Mods, key: ChordKey, action: Action, when: When) -> Binding 
 pub static BINDINGS: &[Binding] = &[
     // Desktop chords. Lowercase-exact on purpose: shift produces the
     // uppercase, and ⌘⇧T stays reserved (reopen-closed, one day).
-    b(Mods::Desktop, ChordKey::Char("t"), Action::NewTab),
-    b(Mods::Desktop, ChordKey::Char("k"), Action::ToggleFleetPicker),
-    b(Mods::Desktop, ChordKey::Char("w"), Action::CloseTab),
-    b(Mods::Desktop, ChordKey::Char("1"), Action::ActivateTab(0)),
-    b(Mods::Desktop, ChordKey::Char("2"), Action::ActivateTab(1)),
-    b(Mods::Desktop, ChordKey::Char("3"), Action::ActivateTab(2)),
-    b(Mods::Desktop, ChordKey::Char("4"), Action::ActivateTab(3)),
-    b(Mods::Desktop, ChordKey::Char("5"), Action::ActivateTab(4)),
-    b(Mods::Desktop, ChordKey::Char("6"), Action::ActivateTab(5)),
-    b(Mods::Desktop, ChordKey::Char("7"), Action::ActivateTab(6)),
-    b(Mods::Desktop, ChordKey::Char("8"), Action::ActivateTab(7)),
-    b(Mods::Desktop, ChordKey::Char("9"), Action::ActivateLastTab),
-    // ⌘⇧[ and ⌘⇧] arrive as { and }.
-    b(Mods::Desktop, ChordKey::Char("{"), Action::PrevTab),
-    b(Mods::Desktop, ChordKey::Char("}"), Action::NextTab),
+    b(Mods::Desktop, ChordKey::Char("t"), Action::NewTab, "T", "New tab", Category::Tabs),
+    b(
+        Mods::Desktop,
+        ChordKey::Char("k"),
+        Action::ToggleFleetPicker,
+        "K",
+        "Fleet picker",
+        Category::Fleet,
+    ),
+    b(Mods::Desktop, ChordKey::Char("w"), Action::CloseTab, "W", "Close tab", Category::Tabs),
+    b(Mods::Desktop, ChordKey::Char("1"), Action::ActivateTab(0), "1…8", "Go to tab 1–8", Category::Tabs),
+    hidden(Mods::Desktop, ChordKey::Char("2"), Action::ActivateTab(1), Category::Tabs),
+    hidden(Mods::Desktop, ChordKey::Char("3"), Action::ActivateTab(2), Category::Tabs),
+    hidden(Mods::Desktop, ChordKey::Char("4"), Action::ActivateTab(3), Category::Tabs),
+    hidden(Mods::Desktop, ChordKey::Char("5"), Action::ActivateTab(4), Category::Tabs),
+    hidden(Mods::Desktop, ChordKey::Char("6"), Action::ActivateTab(5), Category::Tabs),
+    hidden(Mods::Desktop, ChordKey::Char("7"), Action::ActivateTab(6), Category::Tabs),
+    hidden(Mods::Desktop, ChordKey::Char("8"), Action::ActivateTab(7), Category::Tabs),
+    b(Mods::Desktop, ChordKey::Char("9"), Action::ActivateLastTab, "9", "Go to last tab", Category::Tabs),
+    // ⌘⇧[ and ⌘⇧] arrive as { and }; the keycap shows the physical key.
+    b(Mods::Desktop, ChordKey::Char("{"), Action::PrevTab, "⇧[", "Previous tab", Category::Tabs),
+    b(Mods::Desktop, ChordKey::Char("}"), Action::NextTab, "⇧]", "Next tab", Category::Tabs),
     // Ctrl+Tab / Ctrl+Shift+Tab cycle, as in every tabbed app.
-    b(Mods::Ctrl, ChordKey::Named(NamedKey::Tab), Action::NextTab),
-    b(Mods::CtrlShift, ChordKey::Named(NamedKey::Tab), Action::PrevTab),
+    b(Mods::Ctrl, ChordKey::Named(NamedKey::Tab), Action::NextTab, "Tab", "Next tab", Category::Tabs),
+    b(
+        Mods::CtrlShift,
+        ChordKey::Named(NamedKey::Tab),
+        Action::PrevTab,
+        "Tab",
+        "Previous tab",
+        Category::Tabs,
+    ),
     // The clipboard family. Blocks (o/r) share the chord because they are the
     // same kind of thing — the desktop acting on the terminal — and because
     // it is the chord the encoder already refuses to pass to the shell.
-    b(Mods::Clipboard, ChordKey::Char("c"), Action::Copy),
-    b(Mods::Clipboard, ChordKey::Char("v"), Action::Paste),
-    b(Mods::Clipboard, ChordKey::Char("o"), Action::CopyBlockOutput),
-    b(Mods::Clipboard, ChordKey::Char("r"), Action::RerunLastCommand),
+    b(Mods::Clipboard, ChordKey::Char("c"), Action::Copy, "C", "Copy", Category::Clipboard),
+    b(Mods::Clipboard, ChordKey::Char("v"), Action::Paste, "V", "Paste", Category::Clipboard),
+    b(
+        Mods::Clipboard,
+        ChordKey::Char("o"),
+        Action::CopyBlockOutput,
+        "O",
+        "Copy last command's output",
+        Category::Blocks,
+    ),
+    b(
+        Mods::Clipboard,
+        ChordKey::Char("r"),
+        Action::RerunLastCommand,
+        "R",
+        "Re-run last command",
+        Category::Blocks,
+    ),
     // Scrollback paging. The shift is what makes it unambiguous: bare PgUp
     // still belongs to the program.
-    when(Mods::Shift, ChordKey::Named(NamedKey::PageUp), Action::ScrollPageUp, When::NotAltScreen),
-    when(
-        Mods::Shift,
-        ChordKey::Named(NamedKey::PageDown),
-        Action::ScrollPageDown,
-        When::NotAltScreen,
+    scroll(ChordKey::Named(NamedKey::PageUp), Action::ScrollPageUp, "PgUp", "Page up"),
+    scroll(ChordKey::Named(NamedKey::PageDown), Action::ScrollPageDown, "PgDn", "Page down"),
+    // The sheet itself. Two rows because ⌘/ arrives as "/" while ⌘? and
+    // Ctrl+Shift+/ arrive as "?" — one visible row covers both.
+    b(
+        Mods::Clipboard,
+        ChordKey::Char("/"),
+        Action::ToggleShortcuts,
+        "/",
+        "Keyboard shortcuts",
+        Category::Help,
     ),
+    hidden(Mods::Clipboard, ChordKey::Char("?"), Action::ToggleShortcuts, Category::Help),
 ];
 
 fn mods_match(m: Mods, s: ModifiersState) -> bool {
@@ -169,6 +247,140 @@ fn key_match(binding: &Binding, logical: &Key) -> bool {
 #[must_use]
 pub fn lookup(logical: &Key, mods: ModifiersState) -> Option<&'static Binding> {
     BINDINGS.iter().find(|binding| mods_match(binding.mods, mods) && key_match(binding, logical))
+}
+
+const MAC: bool = cfg!(target_os = "macos");
+
+/// The platform-primary spelling of a chord.
+///
+/// The clipboard policy is *both* chords everywhere; the sheet shows the
+/// local convention and one section note says the other is accepted too —
+/// that fact lives in one place, next to `key::is_clipboard_chord`.
+/// `Mods::Desktop` renders honestly as Super off macOS, because
+/// `belongs_to_desktop` is super-only on every platform; if the tab chords
+/// grow a Ctrl+Shift form later, that is a policy change and this label
+/// updates itself.
+#[must_use]
+pub fn chord_label(binding: &Binding) -> String {
+    let prefix = match binding.mods {
+        Mods::Desktop => {
+            if MAC {
+                "⌘"
+            } else {
+                "Super+"
+            }
+        }
+        Mods::Clipboard => {
+            if MAC {
+                "⌘"
+            } else {
+                "Ctrl+Shift+"
+            }
+        }
+        Mods::Ctrl => {
+            if MAC {
+                "⌃"
+            } else {
+                "Ctrl+"
+            }
+        }
+        Mods::CtrlShift => {
+            if MAC {
+                "⌃⇧"
+            } else {
+                "Ctrl+Shift+"
+            }
+        }
+        Mods::Shift => {
+            if MAC {
+                "⇧"
+            } else {
+                "Shift+"
+            }
+        }
+    };
+    format!("{prefix}{}", binding.keycap)
+}
+
+/// A pointer chord, listed beside the keyboard ones.
+///
+/// These cannot live in [`BINDINGS`] — there is no `Key` to match — but the
+/// file that names every chord should name all of them; the handlers live in
+/// `app.rs`'s mouse arms and this list is their public face.
+pub struct MouseShortcut {
+    pub gesture: &'static str,
+    pub name: &'static str,
+}
+
+pub static MOUSE_SHORTCUTS: &[MouseShortcut] = &[
+    MouseShortcut {
+        gesture: if MAC { "⌘ Click" } else { "Ctrl+Shift+Click" },
+        name: "Copy that command's output",
+    },
+    MouseShortcut {
+        gesture: "Shift+Click / Drag",
+        name: "Select even when the program owns the mouse",
+    },
+    MouseShortcut { gesture: if MAC { "⌥ Drag" } else { "Alt+Drag" }, name: "Rectangular selection" },
+    MouseShortcut { gesture: "Middle-click", name: "Paste" },
+    MouseShortcut { gesture: "Right-click", name: "Copy the selection, else paste" },
+    MouseShortcut { gesture: "Double-click title bar", name: "Zoom the window" },
+];
+
+const SECTION_ORDER: &[(Category, &str)] = &[
+    (Category::Tabs, "Tabs"),
+    (Category::Fleet, "Fleet"),
+    (Category::Clipboard, "Copy & paste"),
+    (Category::Blocks, "Command blocks"),
+    (Category::Scrollback, "Scrollback"),
+    (Category::Help, "Help"),
+];
+
+fn row_matches(filter: &str, row: &ShortcutRow) -> bool {
+    filter.is_empty()
+        || row.name.to_lowercase().contains(filter)
+        || row.chord.to_lowercase().contains(filter)
+}
+
+/// The shortcuts sheet's content, straight from the table.
+///
+/// Pure so it is testable without a window; the app calls it from
+/// `refresh_chrome` with the live filter.
+#[must_use]
+pub fn sections(filter: &str) -> Vec<ShortcutSection> {
+    let filter = filter.to_lowercase();
+    let mut out = Vec::new();
+    for (category, title) in SECTION_ORDER {
+        let rows: Vec<ShortcutRow> = BINDINGS
+            .iter()
+            .filter(|binding| binding.show && binding.category == *category)
+            .map(|binding| ShortcutRow {
+                name: binding.name.to_string(),
+                chord: chord_label(binding),
+            })
+            .filter(|row| row_matches(&filter, row))
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        // The one place the both-conventions fact is displayed; see
+        // `key::is_clipboard_chord` for why both are accepted.
+        let note = (*category == Category::Clipboard)
+            .then(|| "⌘ and Ctrl+Shift both work, on every platform".to_string());
+        out.push(ShortcutSection { title: (*title).to_string(), rows, note });
+    }
+    let mouse: Vec<ShortcutRow> = MOUSE_SHORTCUTS
+        .iter()
+        .map(|shortcut| ShortcutRow {
+            name: shortcut.name.to_string(),
+            chord: shortcut.gesture.to_string(),
+        })
+        .filter(|row| row_matches(&filter, row))
+        .collect();
+    if !mouse.is_empty() {
+        out.push(ShortcutSection { title: "Mouse".to_string(), rows: mouse, note: None });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -259,6 +471,79 @@ mod tests {
             action_for(&Key::Named(NamedKey::PageUp), ModifiersState::empty()),
             None,
             "bare PgUp still belongs to the program"
+        );
+    }
+
+    #[test]
+    fn the_sheet_chord_and_its_aliases_all_resolve() {
+        assert_eq!(action_for(&char_key("/"), SUPER), Some(Action::ToggleShortcuts));
+        assert_eq!(
+            action_for(&char_key("?"), SUPER),
+            Some(Action::ToggleShortcuts),
+            "⌘? arrives pre-shifted as ?"
+        );
+        assert_eq!(
+            action_for(&char_key("?"), CTRL.union(SHIFT)),
+            Some(Action::ToggleShortcuts),
+            "Ctrl+Shift+/ arrives as ?, and case-folding cannot map ? to / for it"
+        );
+    }
+
+    #[test]
+    fn every_visible_binding_reaches_the_cheat_sheet() {
+        let secs = sections("");
+        let rows: Vec<&ShortcutRow> = secs.iter().flat_map(|s| s.rows.iter()).collect();
+        for binding in BINDINGS.iter().filter(|b| b.show) {
+            assert!(
+                rows.iter()
+                    .any(|r| r.name == binding.name && r.chord == chord_label(binding)),
+                "'{}' works but is not on the sheet — the drift this table exists to kill",
+                binding.name
+            );
+        }
+        // Hidden rows are collapsed, not secret: a visible row must perform
+        // the same kind of action, or a chord became undiscoverable.
+        for hidden in BINDINGS.iter().filter(|b| !b.show) {
+            assert!(
+                BINDINGS.iter().any(|v| v.show
+                    && std::mem::discriminant(&v.action) == std::mem::discriminant(&hidden.action)),
+                "a hidden binding for {:?} has no visible representative",
+                hidden.action
+            );
+        }
+        assert!(
+            secs.iter().any(|s| s.title == "Mouse" && !s.rows.is_empty()),
+            "the pointer chords must be listed too — they exist nowhere else"
+        );
+    }
+
+    #[test]
+    fn filtering_never_leaves_an_empty_section() {
+        for filter in ["tab", "copy", "PASTE", "no-such-shortcut-anywhere"] {
+            for section in sections(filter) {
+                assert!(
+                    !section.rows.is_empty(),
+                    "'{filter}' left section '{}' as an empty header",
+                    section.title
+                );
+            }
+        }
+        assert!(
+            sections("PASTE").iter().any(|s| s.rows.iter().any(|r| r.name == "Paste")),
+            "the filter must be case-insensitive"
+        );
+    }
+
+    #[test]
+    fn chord_labels_use_the_platform_convention() {
+        let brace = BINDINGS
+            .iter()
+            .find(|b| matches!(b.key, ChordKey::Char("{")))
+            .expect("the previous-tab binding exists");
+        let label = chord_label(brace);
+        assert!(
+            label.contains('[') && !label.contains('{'),
+            "the sheet shows the physical keycap, not winit's shifted delivery: {label}"
         );
     }
 }

@@ -25,6 +25,11 @@ pub enum HitRegion {
     PickerRow(usize),
     /// The dimmed backdrop behind the picker; clicking it dismisses.
     PickerScrim,
+    /// The shortcuts sheet's panel — swallows clicks so they cannot fall
+    /// through to a tab or the grid; nothing on it is clickable.
+    ShortcutsPanel,
+    /// The dimmed backdrop behind the sheet; clicking it dismisses.
+    ShortcutsScrim,
 }
 
 /// Rectangles to meanings, in draw order.

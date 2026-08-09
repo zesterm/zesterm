@@ -324,8 +324,20 @@ M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
       commands. Behavior-preserving; the tricky arrivals are pinned by test
       (⌘⇧[ arrives as `{`, Ctrl+Shift+C arrives uppercase, Shift+PgUp falls
       through to the encoder in the alt screen). This is the rail for the
-      shortcuts sheet (next) and, one day, user-configurable keybindings — a
+      shortcuts sheet (below) and, one day, user-configurable keybindings — a
       config section would layer over `BINDINGS` as data, not a rewrite.
+- [x] **The shortcuts sheet (⌘/, also ⌘? and Ctrl+Shift+/).** A modal overlay
+      on the picker's exact recipe — scrim, opaque panel, type-to-filter,
+      wheel/arrow scrolling with layout-clamped offset — whose rows are
+      *rendered from `BINDINGS`* via `keymap::sections`: name + platform-
+      spelled chord (`chord_label`: ⌘ on macOS, Ctrl+Shift/Super elsewhere,
+      keycaps shown physically — `⇧[`, not `{`). Mouse chords live beside the
+      table in `MOUSE_SHORTCUTS` so the file that names every chord names all
+      of them; the copy/paste section carries the one both-conventions
+      footnote. Tests pin that every visible binding reaches the sheet, every
+      hidden alias has a visible representative, filtering never leaves an
+      empty header, and the sheet is modal by the same window-sweep the
+      picker answers to.
 - [ ] Animation clock. Springs `(response, damping)`, not easing curves —
       terminal motion is interruption-dominated and a spring absorbs a changed
       target with continuous velocity for free. Substep the integrator

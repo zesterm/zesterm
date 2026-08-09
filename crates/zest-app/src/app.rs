@@ -161,6 +161,14 @@ struct PickerState {
     actions: Vec<PickerAction>,
 }
 
+/// The shortcuts sheet's transient state while it is open. No action list:
+/// nothing on the sheet is clickable, its rows come straight from
+/// `keymap::sections`.
+struct ShortcutsState {
+    filter: String,
+    scroll: f32,
+}
+
 #[derive(Clone)]
 enum PickerAction {
     /// A host header; Enter does nothing.
@@ -226,6 +234,7 @@ pub struct App {
     fleet: Option<crate::fleet::FleetModel>,
     /// The fleet picker's transient state, while open.
     picker: Option<PickerState>,
+    shortcuts: Option<ShortcutsState>,
     /// Tabs opened by worker threads, waiting for the event loop to adopt
     /// them (`Wakeup::TabsChanged`). The flag says whether the tab takes the
     /// keyboard: picked tabs do, restored ones arrive in the background.
@@ -327,6 +336,7 @@ impl App {
             next_placeholder: 0,
             fleet: None,
             picker: None,
+            shortcuts: None,
             pending_tabs: Arc::new(parking_lot::Mutex::new(Vec::new())),
             remote_identity: None,
             fonts: None,
@@ -858,6 +868,7 @@ impl App {
             Action::RerunLastCommand => self.rerun_last_command(),
             Action::ScrollPageUp => self.scroll_page(1),
             Action::ScrollPageDown => self.scroll_page(-1),
+            Action::ToggleShortcuts => self.toggle_shortcuts(),
         }
     }
 
@@ -1107,7 +1118,7 @@ impl App {
     /// tested against the same rectangles the frame drew — the "no drift"
     /// property the layout tests pin, extended to runtime.
     fn refresh_chrome(&mut self) {
-        if !self.strip_shown() && self.picker.is_none() {
+        if !self.strip_shown() && self.picker.is_none() && self.shortcuts.is_none() {
             self.chrome_layout = None;
             return;
         }
@@ -1129,6 +1140,14 @@ impl App {
                 selected: state.selected,
                 filter: state.filter.clone(),
                 scroll: state.scroll,
+            }
+        });
+
+        let shortcuts_model = self.shortcuts.as_ref().map(|sheet| {
+            crate::chrome::model::ShortcutsModel {
+                sections: keymap::sections(&sheet.filter),
+                filter: sheet.filter.clone(),
+                scroll: sheet.scroll,
             }
         });
 
@@ -1194,6 +1213,7 @@ impl App {
             traffic_inset: traffic,
             focused: self.focused,
             picker: picker_model,
+            shortcuts: shortcuts_model,
         };
 
         let colors = self.chrome_colors;
@@ -1203,6 +1223,9 @@ impl App {
         self.strip_scroll = laid.strip_scroll;
         if let Some(state) = self.picker.as_mut() {
             state.scroll = laid.picker_scroll;
+        }
+        if let Some(state) = self.shortcuts.as_mut() {
+            state.scroll = laid.shortcuts_scroll;
         }
         self.chrome_layout = Some(laid);
     }
@@ -1252,6 +1275,12 @@ impl App {
                 self.picker = None;
                 self.mark_chrome_dirty();
             }
+            (HitRegion::ShortcutsScrim, MouseButton::Left) => {
+                self.shortcuts = None;
+                self.mark_chrome_dirty();
+            }
+            // ShortcutsPanel deliberately has no arm: the panel exists in the
+            // hit map to swallow clicks, not to act on them.
             (HitRegion::Drag, MouseButton::Left) => {
                 let now = std::time::Instant::now();
                 let double = self
@@ -1304,12 +1333,30 @@ impl App {
     fn toggle_picker(&mut self) {
         self.picker = match self.picker {
             Some(_) => None,
-            None => Some(PickerState {
-                selected: 0,
-                filter: String::new(),
-                scroll: 0.0,
-                actions: Vec::new(),
-            }),
+            None => {
+                // One modal at a time: opening either overlay closes the
+                // other, which is what keeps the modal input blocks
+                // order-independent.
+                self.shortcuts = None;
+                Some(PickerState {
+                    selected: 0,
+                    filter: String::new(),
+                    scroll: 0.0,
+                    actions: Vec::new(),
+                })
+            }
+        };
+        self.mark_chrome_dirty();
+    }
+
+    /// Toggle the shortcuts sheet (⌘/).
+    fn toggle_shortcuts(&mut self) {
+        self.shortcuts = match self.shortcuts {
+            Some(_) => None,
+            None => {
+                self.picker = None;
+                Some(ShortcutsState { filter: String::new(), scroll: 0.0 })
+            }
         };
         self.mark_chrome_dirty();
     }
@@ -2506,6 +2553,61 @@ impl ApplicationHandler<Wakeup> for App {
                     return;
                 }
 
+                // The open shortcuts sheet likewise owns the keyboard. It and
+                // the picker are mutually exclusive (the toggles enforce it),
+                // so the order of these two blocks carries no meaning.
+                if self.shortcuts.is_some() {
+                    use winit::keyboard::{Key, NamedKey};
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            self.shortcuts = None;
+                        }
+                        Key::Named(NamedKey::ArrowDown) => {
+                            if let Some(sheet) = self.shortcuts.as_mut() {
+                                sheet.scroll += 40.0;
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowUp) => {
+                            if let Some(sheet) = self.shortcuts.as_mut() {
+                                sheet.scroll -= 40.0;
+                            }
+                        }
+                        Key::Named(NamedKey::PageDown) => {
+                            if let Some(sheet) = self.shortcuts.as_mut() {
+                                sheet.scroll += 300.0;
+                            }
+                        }
+                        Key::Named(NamedKey::PageUp) => {
+                            if let Some(sheet) = self.shortcuts.as_mut() {
+                                sheet.scroll -= 300.0;
+                            }
+                        }
+                        Key::Named(NamedKey::Backspace) => {
+                            if let Some(sheet) = self.shortcuts.as_mut() {
+                                sheet.filter.pop();
+                            }
+                        }
+                        Key::Character(c) => {
+                            // The opening chord closes too, aliases included —
+                            // resolved through the table so ⌘/ and ⌘? agree.
+                            let toggles = keymap::lookup(&event.logical_key, self.modifiers)
+                                .is_some_and(|b| b.action == keymap::Action::ToggleShortcuts);
+                            if toggles {
+                                self.shortcuts = None;
+                            } else if !self.modifiers.control_key()
+                                && !key::belongs_to_desktop(self.modifiers)
+                            {
+                                if let Some(sheet) = self.shortcuts.as_mut() {
+                                    sheet.filter.push_str(c.as_str());
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    self.mark_chrome_dirty();
+                    return;
+                }
+
                 // Every global chord resolves through the one binding table.
                 // Adding a chord as an if-block here instead of a BINDINGS row
                 // is the bug the shortcuts sheet exists to prevent: the sheet
@@ -2683,8 +2785,8 @@ impl ApplicationHandler<Wakeup> for App {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
-                // An open picker takes the wheel wholesale — it is modal.
-                if self.picker.is_some() {
+                // An open modal overlay takes the wheel wholesale.
+                if self.picker.is_some() || self.shortcuts.is_some() {
                     let px = match delta {
                         MouseScrollDelta::LineDelta(_, y) => y * 40.0,
                         MouseScrollDelta::PixelDelta(p) => p.y as f32,
@@ -2692,6 +2794,9 @@ impl ApplicationHandler<Wakeup> for App {
                     if px != 0.0 {
                         if let Some(p) = self.picker.as_mut() {
                             p.scroll -= px;
+                        }
+                        if let Some(sheet) = self.shortcuts.as_mut() {
+                            sheet.scroll -= px;
                         }
                         self.mark_chrome_dirty();
                     }

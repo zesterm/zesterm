@@ -74,6 +74,34 @@ pub struct PickerModel {
     pub scroll: f32,
 }
 
+/// One line of the shortcuts sheet: a name and the chord that does it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShortcutRow {
+    pub name: String,
+    /// Already platform-spelled by `keymap::chord_label` — the chrome draws
+    /// strings, it does not know what a modifier is.
+    pub chord: String,
+}
+
+/// A titled group of shortcut rows, with an optional footnote.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShortcutSection {
+    pub title: String,
+    pub rows: Vec<ShortcutRow>,
+    /// A faint line under the section — the "both chords work" fact.
+    pub note: Option<String>,
+}
+
+/// The shortcuts sheet, when open.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShortcutsModel {
+    /// Pre-filtered by the app; empty sections never arrive here.
+    pub sections: Vec<ShortcutSection>,
+    pub filter: String,
+    /// Scroll offset, physical pixels; layout clamps it.
+    pub scroll: f32,
+}
+
 /// Everything `layout` needs to draw the chrome once.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChromeModel {
@@ -94,6 +122,9 @@ pub struct ChromeModel {
     pub focused: bool,
     /// The fleet picker, drawn over everything when open.
     pub picker: Option<PickerModel>,
+    /// The shortcuts sheet, likewise modal. The app enforces that at most
+    /// one overlay is open, so layout never has to rank them.
+    pub shortcuts: Option<ShortcutsModel>,
 }
 
 /// The knobs `layout` reads, resolved to physical pixels by the caller.
