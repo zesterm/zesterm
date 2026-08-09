@@ -22,6 +22,7 @@ pub mod invalidate;
 pub mod migrate;
 pub mod schema;
 pub mod settings;
+pub mod ui;
 
 // Everything that touches the filesystem. The wasm clients take the types and
 // the schema and nothing else -- see the `fs` feature.
@@ -36,6 +37,11 @@ pub use cascade::{Layer, Resolved, Source};
 pub use invalidate::{diff, Invalidation};
 #[cfg(feature = "fs")]
 pub use watch::Watcher;
+// Re-exported because `write_value`'s signature already names
+// `toml_edit::Value` — a caller cannot use the function without the type, and
+// should not need its own pinned copy of the dependency to get it.
+#[cfg(feature = "fs")]
+pub use toml_edit;
 pub use settings::{
     Appearance, Backdrop, Cursor, CursorShape, CursorTrail, Motion, Scrolling, Settings, Shell,
     Typography, Window, CURRENT_SCHEMA_VERSION,

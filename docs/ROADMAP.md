@@ -338,6 +338,17 @@ M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
       hidden alias has a visible representative, filtering never leaves an
       empty header, and the sheet is modal by the same window-sweep the
       picker answers to.
+- [x] **The schema walk a settings UI renders from.** `zest_config::ui` turns
+      the JSON Schema into `UiField`s — dotted key, `x_zest_group`, parsed
+      `x_zest_widget`, doc-comment description, min/max range, int-vs-float,
+      enum variants (from *both* shapes schemars emits: `oneOf`+`const` with
+      per-variant docs, and plain `enum` arrays — today's schema contains
+      both), schema default, `x_zest_restart`. Outside the `fs` feature so
+      the web client can reuse it. `UI_EXCLUDED` names the two keys skipped
+      on purpose (`schema_version`, `profiles`) and a test holds the walk to
+      exactly-once coverage of every other schema key. `toml_edit` is
+      re-exported (fs-gated): `write_value`'s signature names its `Value`, so
+      callers get the type from the same place as the function.
 - [ ] Animation clock. Springs `(response, damping)`, not easing curves —
       terminal motion is interruption-dominated and a spring absorbs a changed
       target with continuous velocity for free. Substep the integrator

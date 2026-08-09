@@ -76,7 +76,7 @@ fn walk(
 }
 
 /// Follow a `$ref` into `$defs`, or return the node unchanged.
-fn resolve_ref(root: &serde_json::Value, node: &serde_json::Value) -> serde_json::Value {
+pub(crate) fn resolve_ref(root: &serde_json::Value, node: &serde_json::Value) -> serde_json::Value {
     let Some(reference) = node.get("$ref").and_then(serde_json::Value::as_str) else {
         return node.clone();
     };
