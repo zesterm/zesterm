@@ -845,7 +845,10 @@ impl App {
     fn copy_block_output_at(&mut self, row: usize) {
         let text = self.tabs.active_source().and_then(|s| {
             let term = s.terminal().lock();
-            let block = block_actions::at_row(&term, row)?;
+            // Through the fold view: a click's row means whatever the
+            // renderer drew there, folded rows included.
+            let line = self.visual_line_at(&term, row)?;
+            let block = term.blocks().block_at(line).cloned()?;
             block_actions::output_text(&term, &block)
         });
         match text {
@@ -2331,6 +2334,40 @@ impl App {
         }
     }
 
+    /// The folded set for the active session, when it has one.
+    fn active_folds(&self) -> Option<&std::collections::BTreeSet<u32>> {
+        let tab = self.tabs.active()?;
+        self.folded_blocks.get(&tab.addr).filter(|s| !s.is_empty())
+    }
+
+    /// A visual (clicked) row to the line it shows, through the fold view
+    /// when one is active. What keeps selection, ⌘⇧-click and the renderer
+    /// reading the same row list.
+    fn visual_line_at(&self, term: &zest_core::Terminal, row: usize) -> Option<u64> {
+        match self.active_folds().and_then(|f| block_actions::fold_row_map(term, f)) {
+            Some(map) => {
+                let idx = *map.get(row.min(map.len().saturating_sub(1)))?;
+                (idx != usize::MAX).then(|| term.grid().line(idx).map(|r| r.id)).flatten()
+            }
+            None => {
+                let grid = term.grid();
+                grid.line_id_at(row.min(grid.rows().saturating_sub(1)))
+            }
+        }
+    }
+
+    /// [`zest_core::Terminal::abs_pos`], but through the fold view.
+    fn visual_abs_pos(
+        &self,
+        term: &zest_core::Terminal,
+        row: usize,
+        col: usize,
+    ) -> Option<zest_core::AbsPos> {
+        let line = self.visual_line_at(term, row)?;
+        let cols = term.grid().cols();
+        Some(zest_core::AbsPos::new(line, col.min(cols.saturating_sub(1))))
+    }
+
     /// The active session's blocks as the header pass wants them: which
     /// viewport rows each header covers, plus its state and pre-formatted
     /// labels. One short terminal lock; plain data out.
@@ -2344,8 +2381,17 @@ impl App {
             return Vec::new();
         }
         let grid = term.grid();
-        let row_lines: Vec<Option<u64>> = (0..grid.rows()).map(|r| grid.line_id_at(r)).collect();
         let folded = self.folded_blocks.get(&tab.addr);
+        // Through the fold view when one is active, so a header sits on the
+        // rows the renderer actually draws, not the ones it hid.
+        let fold_map = folded.and_then(|f| block_actions::fold_row_map(&term, f));
+        let row_lines: Vec<Option<u64>> = match &fold_map {
+            Some(map) => map
+                .iter()
+                .map(|&i| (i != usize::MAX).then(|| grid.line(i).map(|r| r.id)).flatten())
+                .collect(),
+            None => (0..grid.rows()).map(|r| grid.line_id_at(r)).collect(),
+        };
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64);
@@ -2388,7 +2434,9 @@ impl App {
                 } else {
                     String::new()
                 };
-                let no_output = !running && b.end_line.is_some_and(|e| e <= out_line);
+                // Inclusive ranges: a one-line output has end == out, so
+                // "printed nothing" is strictly-before.
+                let no_output = !running && b.end_line.is_some_and(|e| e < out_line);
                 let exit_label = match b.state {
                     zest_core::BlockState::Finished { exit_code: Some(c) } => format!("exit {c}"),
                     _ => String::new(),
@@ -2407,7 +2455,7 @@ impl App {
                     folded: is_folded,
                     folded_lines: b
                         .end_line
-                        .map_or(0, |e| e.saturating_sub(out_line) as usize),
+                        .map_or(0, |e| (e + 1).saturating_sub(out_line) as usize),
                 })
             })
             .collect()
@@ -2474,6 +2522,12 @@ impl App {
         // views are plain data, and holding the terminal across atlas work
         // would stall the reader thread.
         let block_views = self.build_block_views();
+        let fold_map: Option<Vec<usize>> = self.tabs.active().and_then(|t| {
+            let folds = self.folded_blocks.get(&t.addr).filter(|s| !s.is_empty())?;
+            let term = t.source().terminal();
+            let term = term.lock();
+            block_actions::fold_row_map(&term, folds)
+        });
         let (Some(gpu), Some(fonts), Some(session), Some(window)) = (
             self.gpu.as_mut(),
             self.fonts.as_mut(),
@@ -2582,6 +2636,7 @@ impl App {
                     preedit: self.ime.preedit().map(|p| {
                         zest_render_wgpu::Preedit { text: &p.text, cursor: p.cursor }
                     }),
+                    row_map: fold_map.as_deref(),
                 }],
                 &chrome,
             );
@@ -3620,7 +3675,7 @@ impl ApplicationHandler<Wakeup> for App {
                 let Some(session) = self.tabs.active_source() else { return };
                 let mut term = session.terminal().lock();
                 if let (Some(mut sel), Some(pos)) =
-                    (term.selection(), term.abs_pos(cell.0, cell.1))
+                    (term.selection(), self.visual_abs_pos(&term, cell.0, cell.1))
                 {
                     // Word mode extends by whole words, so dragging after a
                     // double-click grows the selection a word at a time rather
@@ -3685,7 +3740,7 @@ impl ApplicationHandler<Wakeup> for App {
                     (MouseButton::Left, ElementState::Pressed) => {
                         let mode = self.mouse.press(row, col);
                         let mut term = session.terminal().lock();
-                        if let Some(pos) = term.abs_pos(row, col) {
+                        if let Some(pos) = self.visual_abs_pos(&term, row, col) {
                             let sel = select::begin(&term, pos, mode, self.modifiers.alt_key());
                             term.set_selection(Some(sel));
                         }

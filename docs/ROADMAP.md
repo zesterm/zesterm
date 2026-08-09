@@ -638,11 +638,20 @@ and the palette's block rows are specified in
       of what it copied, and folding hides one line too many. Both are adjusted
       in the parser rather than in each consumer, so the wire and the phone get
       the corrected meaning too.
-- [ ] Block folding. The one part that needs a renderer change: `Viewport` would
-      carry the ranges to skip, and the row loop compact over them. Selection
-      coordinates, mouse row→line mapping and the scroll maths all read that
-      same row list, which is why it is its own step rather than a rider on the
-      actions above.
+- [x] **Block folding, and the headers to fold from** (design screen 3,
+      [docs/design/client-ui/](design/client-ui/README.md)). Headers are a
+      per-frame pure pass over the visible rows — state rail, recomposed
+      command, cwd/duration/exit metadata from the new block timestamps, hover
+      action chips — drawn over the block's prompt rows; the live prompt is
+      never overlaid and the alt screen is skipped. Folding is the planned
+      renderer change, landed: `Viewport.row_map` names the absolute rows to
+      draw (`fold_row_map` compacts over folded output, pulling scrollback
+      in), and the row loops, selection, the cursor, preedit and every mouse
+      row→line site read that same list — `visual_line_at` is the one
+      translation. Fold state is per-session, per-window, never on the wire:
+      two clients watching one session may disagree. Folded headers count
+      their hidden lines; ranges are inclusive because the parser already
+      pulled `D` back onto the last output row (a one-line output folds).
 
       Still **not blocked on WS-A**, which is worth stating because it looks as
       though it should be.

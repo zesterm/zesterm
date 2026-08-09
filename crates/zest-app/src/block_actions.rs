@@ -20,10 +20,69 @@
 
 use zest_core::{AbsPos, Block, LineId, Selection, SelectionMode, Terminal};
 
-/// The block a viewport row belongs to.
+/// The fold view: for each visual row, the absolute storage index the
+/// renderer should draw there (`usize::MAX` = blank filler at the top when
+/// history ran out), or `None` when nothing folded is in play — the everyday
+/// fast path, which must stay allocation-free.
+///
+/// Built by walking upward from the viewport's bottom row, skipping every row
+/// inside a folded block's output range, until the screen is full — which is
+/// exactly "the rows compact and more scrollback shows" (ROADMAP, WS-E).
+#[must_use]
+pub fn fold_row_map(
+    term: &Terminal,
+    folded: &std::collections::BTreeSet<u32>,
+) -> Option<Vec<usize>> {
+    if folded.is_empty() || term.in_alt_screen() {
+        return None;
+    }
+    let ranges: Vec<(u64, u64)> = term
+        .blocks()
+        .blocks()
+        .iter()
+        .filter(|b| folded.contains(&b.id.0))
+        .filter_map(|b| {
+            let o = b.output_line?;
+            let e = b.end_line?;
+            // Inclusive: the parser already adjusted `D` back onto the last
+            // output row, so a one-line output has `e == o` and still folds.
+            (e >= o).then_some((o, e + 1))
+        })
+        .collect();
+    if ranges.is_empty() {
+        return None;
+    }
+    let grid = term.grid();
+    let rows = grid.rows();
+    let mut picked = Vec::with_capacity(rows);
+    let mut i = grid.abs_index(rows.saturating_sub(1)) as i64;
+    while i >= 0 && picked.len() < rows {
+        #[allow(clippy::cast_sign_loss, reason = "guarded by the loop condition")]
+        let idx = i as usize;
+        if let Some(row) = grid.line(idx) {
+            if !ranges.iter().any(|&(o, e)| row.id >= o && row.id < e) {
+                picked.push(idx);
+            }
+        }
+        i -= 1;
+    }
+    while picked.len() < rows {
+        picked.push(usize::MAX);
+    }
+    picked.reverse();
+    Some(picked)
+}
+
+/// The block a viewport row belongs to, in the *plain* (unfolded) view.
 ///
 /// `None` above the first prompt of the session, which is ordinary: output that
 /// arrived before any shell integration was loaded is not part of a command.
+///
+/// The app's click path no longer calls this directly — a click's row means
+/// whatever the fold view drew there, so `App::visual_line_at` does the row
+/// half and `block_at` the rest. This stays as the documented plain mapping
+/// the tests below exercise.
+#[cfg(test)]
 #[must_use]
 pub fn at_row(term: &Terminal, row: usize) -> Option<Block> {
     let line = term.grid().line_id_at(row)?;
@@ -108,6 +167,37 @@ mod tests {
         t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07make\x1b]133;C\x07\r\n");
         t.advance(b"building\r\n");
         t
+    }
+
+    #[test]
+    fn folding_hides_exactly_the_output_rows_and_pulls_history_in() {
+        // The compaction rule: a folded block's output rows leave the view,
+        // everything else keeps its order, and the freed rows come from
+        // scrollback above (or blank filler when there is none).
+        let t = session();
+        let finished = t.blocks().blocks()[0].clone();
+        let folded = std::collections::BTreeSet::from([finished.id.0]);
+
+        let map = fold_row_map(&t, &folded).expect("a fold produces a map");
+        assert_eq!(map.len(), t.grid().rows(), "one entry per visual row");
+
+        let hidden: Vec<u64> =
+            (finished.output_line.unwrap()..=finished.end_line.unwrap()).collect();
+        for &idx in &map {
+            if idx == usize::MAX {
+                continue;
+            }
+            let id = t.grid().line(idx).expect("mapped rows exist").id;
+            assert!(
+                !hidden.contains(&id),
+                "line {id} is inside the folded output and must not be drawn"
+            );
+        }
+        let drawn: Vec<usize> = map.iter().copied().filter(|&i| i != usize::MAX).collect();
+        assert!(drawn.windows(2).all(|w| w[0] < w[1]), "visual order is grid order");
+
+        // And with nothing folded, no map at all: the fast path stays free.
+        assert!(fold_row_map(&t, &std::collections::BTreeSet::new()).is_none());
     }
 
     #[test]

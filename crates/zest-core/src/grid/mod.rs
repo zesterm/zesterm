@@ -254,6 +254,15 @@ impl Grid {
         self.storage.row_mut(base + row)
     }
 
+    /// The absolute storage index of a viewport row — the inverse of what
+    /// [`Self::line`] consumes. Public for the fold row-map: a compacted
+    /// view names rows absolutely, and the cursor's viewport row must be
+    /// findable inside it.
+    #[must_use]
+    pub fn abs_index(&self, row: usize) -> usize {
+        self.viewport_base() + row
+    }
+
     /// A row by absolute index across scrollback plus viewport.
     #[must_use]
     pub fn line(&self, index: usize) -> Option<&Row> {

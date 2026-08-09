@@ -4,6 +4,7 @@
 //! passes exactly one. Panes then cost a loop and a clip rect rather than a
 //! restructuring of the render loop. → ADR-003 / ROADMAP sequencing.
 
+use zest_core::grid::Row;
 use zest_core::{Cell, CellFlags, Color, Grid, PaletteSnapshot};
 use zest_font::{CellMetrics, Fonts, GlyphKey, Style};
 
@@ -40,6 +41,38 @@ pub struct Viewport<'a> {
     /// Drawing it here rather than writing it into cells is what keeps
     /// half-typed characters out of someone else's scrollback.
     pub preedit: Option<Preedit<'a>>,
+    /// Folded-view row map: for each visual row, the *absolute* storage index
+    /// of the grid row to draw there ([`Grid::line`]'s argument), or
+    /// `usize::MAX` for a blank filler when history ran out. `None` draws the
+    /// plain viewport — the everyday fast path, untouched.
+    ///
+    /// This is the fold seam the roadmap planned: the row loop compacts over
+    /// hidden ranges, and selection and the cursor read the same list, so a
+    /// folded build's rows cannot drift from where clicks land (WS-E).
+    pub row_map: Option<&'a [usize]>,
+}
+
+/// The row a visual row shows: mapped through the fold view when one is
+/// active, the viewport row otherwise. `None` is a blank filler row.
+fn resolved_row<'g>(grid: &'g Grid, vp: &Viewport<'_>, row: usize) -> Option<&'g Row> {
+    match vp.row_map {
+        Some(map) => match map.get(row) {
+            Some(&i) if i != usize::MAX => grid.line(i),
+            _ => None,
+        },
+        None => Some(grid.row(row)),
+    }
+}
+
+/// Where the cursor's grid position lands visually, if it is on screen.
+fn cursor_visual_row(grid: &Grid, vp: &Viewport<'_>) -> Option<usize> {
+    match vp.row_map {
+        Some(map) => {
+            let abs = grid.abs_index(grid.cursor.row);
+            map.iter().position(|&i| i == abs)
+        }
+        None => Some(grid.cursor.row),
+    }
 }
 
 /// Composing text and the input method's own caret within it.
@@ -200,7 +233,8 @@ impl Scene {
 
         let (cw, ch) = (metrics.cell_w as f32, metrics.cell_h as f32);
         let start_col = grid.cursor.col;
-        let y = oy + grid.cursor.row as f32 * ch;
+        let Some(visual_row) = cursor_visual_row(grid, vp) else { return };
+        let y = oy + visual_row as f32 * ch;
         let baseline = y + metrics.baseline as f32;
 
         let fg = LinearRgba::opaque(
@@ -281,7 +315,7 @@ impl Scene {
         ch: f32,
         clip: [f32; 4],
     ) {
-        let r = grid.row(row);
+        let Some(r) = resolved_row(grid, vp, row) else { return };
         let window = window_bg(vp.palette, vp.opacity);
         let mut run_start = 0usize;
         let mut run_color: Option<LinearRgba> = None;
@@ -339,7 +373,7 @@ impl Scene {
     ) {
         let cw = metrics.cell_w as f32;
         let baseline = y + metrics.baseline as f32;
-        let r = grid.row(row);
+        let Some(r) = resolved_row(grid, vp, row) else { return };
 
         for col in 0..grid.cols() {
             let cell = r.get(col).copied().unwrap_or_default();
@@ -486,7 +520,7 @@ impl Scene {
         let cols = grid.cols();
 
         for row in 0..grid.rows() {
-            let Some(line) = grid.line_id_at(row) else { continue };
+            let Some(line) = resolved_row(grid, vp, row).map(|r| r.id) else { continue };
             let Some((from, to)) = sel.span_on(line, cols) else { continue };
             if to <= from {
                 continue;
@@ -520,9 +554,12 @@ impl Scene {
         }
 
         let c = grid.cursor;
+        // In a folded view the cursor's row may sit elsewhere (or, if the
+        // fold hid it — which folds of *finished* output never do — nowhere).
+        let Some(visual_row) = cursor_visual_row(grid, vp) else { return };
         let (cw, ch) = (metrics.cell_w as f32, metrics.cell_h as f32);
         let x = ox + c.col as f32 * cw;
-        let y = oy + c.row as f32 * ch;
+        let y = oy + visual_row as f32 * ch;
         let color = LinearRgba::opaque(vp.palette.cursor.r, vp.palette.cursor.g, vp.palette.cursor.b);
 
         if vp.focused {
