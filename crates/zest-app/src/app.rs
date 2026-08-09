@@ -15,12 +15,11 @@ use zest_render_wgpu::{Chrome, Renderer, Scene, Viewport};
 use zest_input::{key, mouse, select, MouseState};
 use crate::block_actions;
 use crate::pipeline_cache;
+use crate::chrome::Insets;
 use crate::platform;
 use crate::session::{Session, Wakeup};
 use crate::source::{Origin, SessionSource};
 
-/// Padding between the window edge and the grid, in logical pixels.
-const PADDING: u32 = 8;
 
 /// How long the window may take to appear, in milliseconds.
 ///
@@ -42,6 +41,8 @@ pub struct Config {
     pub theme: String,
     pub scrollback: usize,
     pub opacity: f32,
+    /// Space between the window edge and the grid, in logical pixels.
+    pub padding: u32,
     pub shell: Option<String>,
     /// Jump back to the bottom whenever the program writes something.
     ///
@@ -73,6 +74,7 @@ impl From<&zest_config::Settings> for Config {
             theme: s.appearance.theme.clone(),
             scrollback: s.scrolling.scrollback,
             opacity: s.window.opacity.clamp(0.0, 1.0),
+            padding: s.window.padding.min(64),
             shell: (!s.shell.command.is_empty()).then(|| s.shell.command.clone()),
             scroll_on_output: s.scrolling.scroll_on_output,
         }
@@ -681,8 +683,9 @@ impl App {
             let c = term.grid().cursor;
             (c.row, c.col)
         };
-        let x = f64::from(PADDING) + f64::from(m.cell_w) * col as f64;
-        let y = f64::from(PADDING) + f64::from(m.cell_h) * row as f64;
+        let insets = self.insets();
+        let x = f64::from(insets.left) + f64::from(m.cell_w) * col as f64;
+        let y = f64::from(insets.top) + f64::from(m.cell_h) * row as f64;
         // The *area* the composition occupies, not a point: macOS places the
         // candidate window below it, and a zero-width area puts the list over
         // the text it is meant to be helping with.
@@ -805,12 +808,23 @@ impl App {
         true
     }
 
+    /// The chrome's current claim on the window edges.
+    ///
+    /// Recomputed on demand rather than cached: it is a handful of multiplies,
+    /// and a cached copy is one more thing that can disagree with the settings
+    /// and the scale factor after a reload or a monitor change.
+    fn insets(&self) -> Insets {
+        let scale = self.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
+        Insets::padding_only(self.config.padding, scale)
+    }
+
     /// Pointer pixels to a grid cell, clamped into the viewport.
     fn cell_at(&self, x: f64, y: f64) -> (usize, usize) {
         let Some(fonts) = self.fonts.as_ref() else { return (0, 0) };
         let m = fonts.cell_metrics();
-        let col = ((x - f64::from(PADDING)).max(0.0) / f64::from(m.cell_w)) as usize;
-        let row = ((y - f64::from(PADDING)).max(0.0) / f64::from(m.cell_h)) as usize;
+        let insets = self.insets();
+        let col = ((x - f64::from(insets.left)).max(0.0) / f64::from(m.cell_w)) as usize;
+        let row = ((y - f64::from(insets.top)).max(0.0) / f64::from(m.cell_h)) as usize;
 
         let Some(session) = self.session.as_ref() else { return (row, col) };
         let term = session.terminal().lock();
@@ -859,6 +873,7 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        let insets = self.insets();
         let (Some(gpu), Some(fonts), Some(session), Some(window)) = (
             self.gpu.as_mut(),
             self.fonts.as_mut(),
@@ -886,12 +901,7 @@ impl App {
                 fonts,
                 metrics,
                 &[Viewport {
-                    rect: [
-                        PADDING as f32,
-                        PADDING as f32,
-                        (gpu.config.width.saturating_sub(PADDING * 2)) as f32,
-                        (gpu.config.height.saturating_sub(PADDING * 2)) as f32,
-                    ],
+                    rect: insets.grid_rect(gpu.config.width, gpu.config.height),
                     grid: term.grid(),
                     palette: term.palette(),
                     scroll_px: 0.0,
@@ -1046,6 +1056,7 @@ impl App {
     }
 
     fn resize_surface(&mut self, width: u32, height: u32) {
+        let insets = self.insets();
         let (Some(gpu), Some(session)) = (self.gpu.as_mut(), self.session.as_ref()) else {
             return;
         };
@@ -1065,7 +1076,7 @@ impl App {
         gpu.renderer.resize(&gpu.device, width, height);
 
         if let Some(fonts) = self.fonts.as_ref() {
-            let (cols, rows) = fonts.cell_metrics().grid_size(width, height, PADDING);
+            let (cols, rows) = insets.grid_dims(fonts.cell_metrics(), width, height);
             session.resize(cols, rows);
         }
 
@@ -1175,7 +1186,8 @@ impl ApplicationHandler<Wakeup> for App {
         // The grid size comes from the window and the font metrics, both of
         // which are known now -- it never needed the GPU.
         let size = window.inner_size();
-        let (cols, rows) = metrics.grid_size(size.width.max(1), size.height.max(1), PADDING);
+        let insets = Insets::padding_only(self.config.padding, scale);
+        let (cols, rows) = insets.grid_dims(metrics, size.width.max(1), size.height.max(1));
 
         let proxy = self.proxy.clone();
         let mut spec = CommandSpec::default_shell();
@@ -1234,8 +1246,7 @@ impl ApplicationHandler<Wakeup> for App {
 
         // The surface may have landed on a slightly different size than the
         // window reported, so reconcile before the first frame.
-        let (gpu_cols, gpu_rows) =
-            metrics.grid_size(gpu.config.width, gpu.config.height, PADDING);
+        let (gpu_cols, gpu_rows) = insets.grid_dims(metrics, gpu.config.width, gpu.config.height);
         if (gpu_cols, gpu_rows) != (cols, rows) {
             session.resize(gpu_cols, gpu_rows);
         }

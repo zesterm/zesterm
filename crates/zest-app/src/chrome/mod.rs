@@ -1,0 +1,12 @@
+//! Window chrome: the geometry, layout and hit testing around the grid.
+//!
+//! Everything here is pure and GPU-free on purpose — `check-deps` keeps
+//! `zest-render-wgpu` from knowing about `winit`, so the layout half of the
+//! chrome lives on the app side and hands the renderer finished instances.
+//! The pure functions are what make the load-bearing tests possible: a hit
+//! region and the rectangle it was drawn as come from the same computation,
+//! so they cannot drift apart.
+
+pub mod insets;
+
+pub use insets::Insets;

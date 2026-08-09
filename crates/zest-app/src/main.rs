@@ -9,6 +9,7 @@
 
 mod app;
 mod block_actions;
+mod chrome;
 mod console;
 mod daemon;
 mod fair_mutex;
