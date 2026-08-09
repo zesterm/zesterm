@@ -17,6 +17,7 @@
 #![forbid(unsafe_code)]
 
 pub mod builtin;
+pub mod derived;
 pub mod import;
 pub mod oklch;
 pub mod resolve;

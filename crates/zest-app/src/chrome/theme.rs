@@ -16,19 +16,30 @@ use zest_theme::{Rgba8, ThemeEffects, UiTokens};
 /// Every colour the chrome layout needs, premultiplied linear.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChromeColors {
-    /// The strip / sidebar background.
+    /// The title bar / sidebar fill — `zest_theme::derived::titlebar_fill`,
+    /// one lightness step off the window background (design handoff,
+    /// "Design tokens").
     pub strip_bg: LinearRgba,
-    /// Hairline separators: strip edge, sidebar edge.
+    /// Hairline separators: strip edge, sidebar edge — `ui.line`.
     pub line: LinearRgba,
-    /// The active tab's fill.
+    /// The softer hairline for borders inside an already-bordered surface:
+    /// status bar top edge, sidebar footer, palette footer.
+    pub hairline_soft: LinearRgba,
+    /// The terminal surface — `ui.bg`. Also the active tab's fill, which is
+    /// what makes the active tab read as part of the pane below it.
+    pub bg: LinearRgba,
+    /// The active tab's fill (= `bg`; kept as its own name so a future
+    /// per-surface tweak has somewhere to land).
     pub tab_active_bg: LinearRgba,
-    /// A hovered inactive tab's fill.
+    /// Hover fill on rows and tabs — `ui.selSoft`.
     pub tab_hover_bg: LinearRgba,
+    /// A finished block header's fill — `zest_theme::derived::block_header_fill`.
+    pub block_header_bg: LinearRgba,
     /// The active tab's label.
     pub text_active: LinearRgba,
     /// Inactive tab labels.
     pub text_inactive: LinearRgba,
-    /// De-emphasised detail: second lines, attached tags.
+    /// De-emphasised detail: second lines, cwd lines, timestamps.
     pub text_faint: LinearRgba,
     /// The origin pill's fill on a healthy remote tab.
     pub pill_bg: LinearRgba,
@@ -38,13 +49,23 @@ pub struct ChromeColors {
     pub pill_warn_bg: LinearRgba,
     /// Text on the warn pill.
     pub pill_warn_text: LinearRgba,
-    /// Accent, for the selected picker row and "attached here" tags.
+    /// Accent, for the active tab's top rule, focus, links, selected-row hints.
     pub accent: LinearRgba,
-    /// Soft accent, for hover fills in the picker.
+    /// Soft accent, for the *selected* row and block-action chips.
     pub accent_soft: LinearRgba,
-    /// The picker's panel fill.
+    /// Exit 0, LAN-direct path, live host dot.
+    pub success: LinearRgba,
+    /// Running block, tunnel path, degraded link.
+    pub warn: LinearRgba,
+    /// Non-zero exit, reconnecting.
+    pub danger: LinearRgba,
+    /// Adapter/protocol notices, second host accent.
+    pub info: LinearRgba,
+    /// Prompt user segment, third host accent.
+    pub magenta: LinearRgba,
+    /// The panel fill for floating chrome (picker, palette, settings).
     pub panel_bg: LinearRgba,
-    /// The scrim behind the picker.
+    /// The scrim behind modal chrome.
     pub scrim: LinearRgba,
     /// Drop-shadow alpha for floating chrome (the picker panel).
     pub shadow_alpha: f32,
@@ -65,13 +86,13 @@ impl ChromeColors {
     pub fn new(ui: &UiTokens, effects: &ThemeEffects, chrome_opacity: f32) -> Self {
         let chrome_opacity = chrome_opacity.clamp(0.0, 1.0);
         Self {
-            strip_bg: fill(ui.chrome, chrome_opacity),
+            strip_bg: fill(zest_theme::derived::titlebar_fill(ui), chrome_opacity),
             line: fill(ui.line, chrome_opacity),
-            tab_active_bg: fill(ui.panel, chrome_opacity),
-            // The hover fill is the active fill at reduced strength, derived
-            // rather than a separate token so every theme gets a sane hover
-            // without authoring one.
-            tab_hover_bg: fill(ui.panel, chrome_opacity * 0.55),
+            hairline_soft: fill(zest_theme::derived::soft_hairline(ui), chrome_opacity),
+            bg: fill(ui.bg, chrome_opacity),
+            tab_active_bg: fill(ui.bg, chrome_opacity),
+            tab_hover_bg: fill(ui.sel_soft, chrome_opacity),
+            block_header_bg: fill(zest_theme::derived::block_header_fill(ui), chrome_opacity),
             text_active: text(ui.fg),
             text_inactive: text(ui.dim),
             text_faint: text(ui.faint),
@@ -81,11 +102,21 @@ impl ChromeColors {
             pill_warn_text: text(ui.warn),
             accent: fill(ui.accent, chrome_opacity),
             accent_soft: fill(ui.accent_soft, chrome_opacity),
+            // State colours are marks — dots, rails, exit codes — information
+            // rather than surface, so like text they never dim with the chrome.
+            success: text(ui.success),
+            warn: text(ui.warn),
+            danger: text(ui.danger),
+            info: text(ui.info),
+            magenta: text(ui.magenta),
             // The picker floats above translucent chrome, so its panel is
             // always opaque: a see-through session list over a busy grid is
             // unreadable at exactly the moment the user is trying to read.
             panel_bg: fill(ui.panel, 1.0),
-            scrim: fill(ui.shadow, 0.45),
+            // 0.66, per the design's palette scrim. The mock backs it with a
+            // 3px backdrop blur the rect pipeline cannot express; the heavier
+            // scrim alone carries the separation.
+            scrim: fill(ui.shadow, 0.66),
             shadow_alpha: effects.chrome_shadow_alpha.unwrap_or(0.35).clamp(0.0, 1.0),
         }
     }

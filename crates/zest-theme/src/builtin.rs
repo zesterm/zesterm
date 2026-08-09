@@ -11,9 +11,16 @@
 //! built-ins drift into looking better than anything importable, which is the
 //! classic failure mode: one gorgeous theme and a theming system that does not
 //! really work.
+//!
+//! **Obsidian is the one exception**, and for the opposite of taste: its `ui`
+//! record is `@sigx/terminal-zero`'s registered obsidian *verbatim* — the same
+//! record the vocabulary test in `tokens.rs` pins — and the client-UI design
+//! (docs/design/client-ui/) is specified against those exact values. Deriving
+//! them lands close but not equal, and "close" here means the app and a sigx
+//! TUI inside it disagree about the everyday theme.
 
 use crate::resolve::theme_from_scheme;
-use crate::tokens::{Rgba8, TerminalColors, Theme};
+use crate::tokens::{Rgba8, TerminalColors, Theme, UiTokens};
 
 /// Every built-in, by id.
 pub const IDS: &[&str] = &["obsidian", "nord", "gum", "classic", "paper"];
@@ -45,14 +52,42 @@ pub fn all() -> Vec<Theme> {
     IDS.iter().filter_map(|id| get(id)).collect()
 }
 
-/// sigx's default dark theme.
+/// sigx's default dark theme. The `ui` record is authored, not derived — see
+/// the module docs for why obsidian alone gets that treatment.
 #[must_use]
 pub fn obsidian() -> Theme {
     let normal = [
         c(0x0b0f1a), c(0xe0606a), c(0x5fd17f), c(0xe0b341),
         c(0x6ea8ff), c(0xb07cff), c(0x5fc4e0), c(0xd7dcea),
     ];
-    build("obsidian", "Obsidian", c(0x0b0f1a), c(0xd7dcea), normal)
+    let mut t = build("obsidian", "Obsidian", c(0x0b0f1a), c(0xd7dcea), normal);
+    t.ui = UiTokens {
+        bg: c(0x0b0f1a),
+        panel: c(0x121829),
+        chrome: c(0x0b0f1a),
+        line: c(0x2a3350),
+        shadow: c(0x000000),
+        fg: c(0xd7dcea),
+        dim: c(0x8b93a7),
+        faint: c(0x4a516a),
+        accent: c(0x6ea8ff),
+        accent_soft: c(0x16203a),
+        accent_text: c(0x0b0f1a),
+        sel_soft: c(0x161d33),
+        success: c(0x5fd17f),
+        warn: c(0xe0b341),
+        danger: c(0xe0606a),
+        info: c(0x5fc4e0),
+        black: c(0x0b0f1a),
+        red: c(0xe0606a),
+        green: c(0x5fd17f),
+        yellow: c(0xe0b341),
+        blue: c(0x6ea8ff),
+        magenta: c(0xb07cff),
+        cyan: c(0x5fc4e0),
+        white: c(0xd7dcea),
+    };
+    t
 }
 
 #[must_use]
@@ -177,14 +212,34 @@ mod tests {
     fn obsidian_matches_the_sigx_values() {
         // The contract with @sigx/terminal-zero. If sigx changes its obsidian,
         // this fails and the two stop agreeing on what the theme looks like.
+        // The whole record is asserted because the whole record is authored —
+        // and the client-UI design is specified against every one of these.
         let t = obsidian();
         assert_eq!(t.ui.bg, c(0x0b0f1a));
+        assert_eq!(t.ui.panel, c(0x121829));
+        assert_eq!(t.ui.chrome, c(0x0b0f1a));
+        assert_eq!(t.ui.line, c(0x2a3350));
+        assert_eq!(t.ui.shadow, c(0x000000));
         assert_eq!(t.ui.fg, c(0xd7dcea));
+        assert_eq!(t.ui.dim, c(0x8b93a7));
+        assert_eq!(t.ui.faint, c(0x4a516a));
         assert_eq!(t.ui.accent, c(0x6ea8ff));
-        assert_eq!(t.ui.danger, c(0xe0606a));
+        assert_eq!(t.ui.accent_soft, c(0x16203a));
+        assert_eq!(t.ui.accent_text, c(0x0b0f1a));
+        assert_eq!(t.ui.sel_soft, c(0x161d33));
         assert_eq!(t.ui.success, c(0x5fd17f));
         assert_eq!(t.ui.warn, c(0xe0b341));
+        assert_eq!(t.ui.danger, c(0xe0606a));
         assert_eq!(t.ui.info, c(0x5fc4e0));
+        assert_eq!(t.ui.magenta, c(0xb07cff));
+        // The ansi row doubles as the theme-gallery swatch strip, in index
+        // order; the design reads it from here rather than re-typing it.
+        assert_eq!(
+            [t.ui.black, t.ui.red, t.ui.green, t.ui.yellow,
+             t.ui.blue, t.ui.magenta, t.ui.cyan, t.ui.white],
+            [c(0x0b0f1a), c(0xe0606a), c(0x5fd17f), c(0xe0b341),
+             c(0x6ea8ff), c(0xb07cff), c(0x5fc4e0), c(0xd7dcea)]
+        );
     }
 
     #[test]
