@@ -222,6 +222,17 @@ M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
       current tab's host; closing a local tab kills, a remote one detaches;
       launch restores the previous tab set, which retires the adopt guess. Both
       orientations — top strip and left sidebar — behind `tabs.position`.
+- [x] **The app has a fleet model.** `FleetModel` aggregates what the picker
+      draws from: mDNS browse (started after first paint — none of it is
+      needed to show a prompt), the app-owned dial prober that feeds
+      `report_dial` every 10s so `Presence::Unreachable` can actually appear
+      (#22's impolite half — the roster is socket-free by design and someone
+      must own the dialing), and a watching connection to the window's daemon
+      holding its session list fresh through `Hello.watch_sessions` pushes.
+      The window's own daemon is synthesized into the listing from its signed
+      Welcome, because a default daemon is mDNS-invisible. Everything posts
+      one coalesced `Wakeup::FleetChanged` per burst; 0%-idle survives a
+      chatty network.
 - [x] **Tabs are plural.** `TabStrip` replaces the app's single session: each
       tab is `(SessionAddr, session, local, dead, sized)`, closing is
       policy-aware — local kills, remote detaches, the last one closes the

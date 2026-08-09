@@ -43,6 +43,7 @@ impl DaemonClient {
         identity: &Arc<ClientIdentity>,
         label: &str,
         expect_host: Option<zest_proto::HostId>,
+        watch_sessions: bool,
     ) -> Result<Self, RemoteError> {
         let mut client = Self {
             read,
@@ -58,7 +59,7 @@ impl DaemonClient {
             client: identity.client_id(),
             label: label.to_string(),
             nonce: zest_proto::Nonce32::from_bytes(*client_nonce.as_bytes()),
-            watch_sessions: false,
+            watch_sessions,
         })?;
 
         // Challenge -> Auth -> Welcome. Two round trips on connect, which on a
@@ -258,6 +259,14 @@ impl DaemonClient {
     #[allow(dead_code, reason = "the fleet model is the second consumer, later in the #23 sequence")]
     pub fn close(&mut self, addr: SessionAddr) -> Result<(), RemoteError> {
         self.send(&ClientMessage::CloseSession { session: addr })
+    }
+
+    /// The next message from the host, blocking.
+    ///
+    /// For watchers: after `Hello.watch_sessions`, `Sessions` pushes arrive
+    /// whenever the listing changes, and this is how they are read.
+    pub fn next_message(&mut self) -> Result<HostMessage, RemoteError> {
+        self.recv()
     }
 
     /// Surrender the transport, for a caller that now wants to stream.

@@ -59,6 +59,10 @@ pub enum Wakeup {
     /// settings, because deciding what a change costs means comparing against
     /// the live ones. The reload happens on the main thread.
     ConfigChanged,
+    /// Something in the fleet view changed — a host appeared, presence
+    /// moved, a session list refreshed. Coalesced by `FleetModel`'s latch,
+    /// so a chatty network posts one of these per burst, not per packet.
+    FleetChanged,
     /// One tab's child exited.
     ///
     /// [`Wakeup::Exited`] predates tabs and means "the window's only session

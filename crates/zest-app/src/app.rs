@@ -198,6 +198,8 @@ pub struct App {
     client_identity: Option<Arc<zest_mesh::identity::ClientIdentity>>,
     /// Distinct placeholder addresses for sessions with no real one.
     next_placeholder: u64,
+    /// Hosts, presence, and session lists — the picker's data source.
+    fleet: Option<crate::fleet::FleetModel>,
     fonts: Option<Fonts>,
     palette: zest_core::PaletteSnapshot,
 
@@ -289,6 +291,7 @@ impl App {
             route: None,
             client_identity: None,
             next_placeholder: 0,
+            fleet: None,
             fonts: None,
             palette,
             chrome_colors,
@@ -1795,6 +1798,32 @@ impl ApplicationHandler<Wakeup> for App {
         // inotify/ReadDirectoryChanges handle, and none of it is needed to show
         // the first frame.
         self.watch_config();
+
+        // The fleet view, also off the measured path. The window's own daemon
+        // is synthesized into the listing from its signed Welcome (`addr.host`
+        // of the tab it attached) — a default daemon is mDNS-invisible, so
+        // discovery alone would omit the one host that certainly exists.
+        let local = self.tabs.active().and_then(|tab| {
+            if crate::tabs::is_placeholder(tab.addr) {
+                return None;
+            }
+            let label = match tab.source().origin() {
+                Origin::Daemon { host, .. } => host,
+                Origin::InProcess => return None,
+            };
+            Some((tab.addr.host, label))
+        });
+        let fleet = crate::fleet::FleetModel::start(self.proxy.clone(), local);
+        if let Some(route) = &self.route {
+            // One watching connection to the window's daemon keeps its
+            // session list fresh through pushes.
+            let route = match route {
+                HostRoute::LocalSocket(p) => HostRoute::LocalSocket(p.clone()),
+                HostRoute::Tcp(a) => HostRoute::Tcp(a.clone()),
+            };
+            fleet.watch(move || route.dialer());
+        }
+        self.fleet = Some(fleet);
     }
 
     /// A wakeup from the parser thread.
@@ -1825,6 +1854,13 @@ impl ApplicationHandler<Wakeup> for App {
             // The in-place reconnect in `remote.rs` succeeded: same session, same
             // grid, and everything this window had accumulated is still there.
             // Nothing to rebuild — just repaint.
+            // The picker's data moved. Consume the latch; the chrome decides
+            // whether anything visible depends on it.
+            Wakeup::FleetChanged => {
+                if self.fleet.as_ref().is_some_and(|f| f.take_changed()) {
+                    self.mark_chrome_dirty();
+                }
+            }
             // One tab's child exited. Close that tab — killing is moot, the
             // child is already gone — and the last tab closing closes the
             // window, which is exactly the old single-session behavior.

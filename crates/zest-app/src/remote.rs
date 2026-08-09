@@ -265,7 +265,7 @@ impl RemoteSession {
         // an error the caller can fall back from rather than a window that
         // opens and then reports it has nothing to show.
         let (read, write) = dial()?;
-        let mut conn = DaemonClient::connect(read, write, identity, label, expect_host)?;
+        let mut conn = DaemonClient::connect(read, write, identity, label, expect_host, false)?;
         let addr = match target {
             Target::Open => conn.open_session(command, cols, rows, adopt)?,
             Target::Existing(a) => a,
@@ -481,7 +481,7 @@ impl RemoteSession {
 
                         let Ok((r, w)) = dial() else { continue };
                         let Ok(mut conn) =
-                            DaemonClient::connect(r, w, &identity, &label, expect_host)
+                            DaemonClient::connect(r, w, &identity, &label, expect_host, false)
                         else {
                             continue;
                         };
