@@ -69,6 +69,7 @@ fn main() {
         client: identity.client_id(),
         label: label.clone(),
         nonce: zest_proto::Nonce32::from_bytes(*client_nonce.as_bytes()),
+        watch_sessions: false,
     };
     write(&mut stream, &hello);
 

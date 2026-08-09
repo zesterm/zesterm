@@ -103,6 +103,7 @@ fn run<S: Read + Write + Send + 'static>(
             client: identity.client_id(),
             label: "attach".into(),
             nonce: zest_proto::Nonce32::from_bytes(*client_nonce.as_bytes()),
+            watch_sessions: false,
         },
     );
     // The session is created once the handshake completes, not before: a host
@@ -173,7 +174,7 @@ fn run<S: Read + Write + Send + 'static>(
                         send(&mut stream, &msg);
                     }
                 }
-                HostMessage::Sessions { sessions } => {
+                HostMessage::Sessions { sessions, .. } => {
                     for s in &sessions {
                         eprintln!("[attach] session {} {}x{}", s.addr, s.cols, s.rows);
                     }

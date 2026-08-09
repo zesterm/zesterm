@@ -102,6 +102,13 @@ impl Applier {
             term.remote().upsert_block(b.to_block());
         }
 
+        // Empty means "untitled on the wire" (it travels as absent), so an
+        // older host's keyframe leaves whatever title the client had rather
+        // than blanking it.
+        if !k.title.is_empty() {
+            term.remote().set_title(&k.title);
+        }
+
         term.remote().mark_full();
         term.remote().set_seq(seq);
         self.applied = seq;
@@ -484,6 +491,22 @@ mod tests {
         assert!(p.client.modes().contains(Modes::APP_CURSOR));
         assert!(p.client.modes().contains(Modes::BRACKETED_PASTE));
         assert_eq!(p.client.modes(), p.host.modes());
+    }
+
+    #[test]
+    fn a_keyframe_title_reaches_a_late_client() {
+        // A tab attaching to a session already titled shows that title
+        // immediately, not on the next retitle.
+        let mut p = Pair::new(20, 3);
+        let k = p.enc.keyframe(p.host.grid(), cursor(), p.host.modes(), "vim", p.host.blocks());
+        p.app.apply_keyframe(&mut p.client, &k, 1);
+        assert_eq!(p.client.title(), "vim");
+
+        // An older host's keyframe carries no title (empty travels as
+        // absent); it must leave the client's title alone, not blank it.
+        let k = p.enc.keyframe(p.host.grid(), cursor(), p.host.modes(), "", p.host.blocks());
+        p.app.apply_keyframe(&mut p.client, &k, 2);
+        assert_eq!(p.client.title(), "vim", "an absent title must not erase a known one");
     }
 
     #[test]

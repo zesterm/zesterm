@@ -28,7 +28,20 @@ label: string,
  * [`Nonce32::is_absent`] recognises and the host refuses explicitly —
  * so the version check runs first and says the useful thing.
  */
-nonce: Nonce32, } | { "t": "auth", signature: Sig64, } | { "t": "pairing_decision", client: ClientId, approve: boolean, } | { "t": "request_keyframe", session: SessionAddr, } | { "t": "list_sessions" } | { "t": "create_session", 
+nonce: Nonce32, 
+/**
+ * Ask to be told when this host's session list changes.
+ *
+ * A live tab picker needs to hear about sessions other clients
+ * create, close, or attach to; without asking, `Sessions` only ever
+ * answers this connection's own requests and a listing goes stale
+ * the moment someone else acts. A field rather than a new message:
+ * both enums are tagged, an unknown tag fails the *whole* message on
+ * an older peer, and a field an old daemon ignores degrades to
+ * exactly today's behavior — the client notices no pushes arrive and
+ * falls back to polling.
+ */
+watch_sessions: boolean, } | { "t": "auth", signature: Sig64, } | { "t": "pairing_decision", client: ClientId, approve: boolean, } | { "t": "request_keyframe", session: SessionAddr, } | { "t": "list_sessions" } | { "t": "create_session", 
 /**
  * Empty means the host's default shell.
  */

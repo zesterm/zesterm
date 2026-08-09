@@ -249,6 +249,8 @@ export interface Keyframe {
   readonly attrs: readonly AttrDef[];
   readonly cursor: CursorState;
   readonly modes: number;
+  /** The session's title at this instant; `''` from a host that predates it. */
+  readonly title: string;
 }
 
 export interface Update {
@@ -313,6 +315,8 @@ export function parseHostMessage(v: unknown): HostMessage {
         cursor: parseCursorState(o['cursor']),
         // `#[serde(default)]`, so a host that predates it sends no key.
         modes: o['modes'] === undefined ? 0 : num(o['modes'], 'keyframe.modes'),
+        // Likewise additive; empty travels as absent.
+        title: o['title'] === undefined ? '' : str(o['title'], 'keyframe.title'),
       };
     case 'update':
       return {

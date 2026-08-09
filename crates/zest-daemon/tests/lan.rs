@@ -129,6 +129,7 @@ fn handshake(
             client: identity.client_id(),
             label: "test-device".into(),
             nonce: zest_proto::Nonce32::from_bytes(*client_nonce.as_bytes()),
+            watch_sessions: false,
         },
     );
 
@@ -223,7 +224,7 @@ fn a_paired_device_drives_a_session_over_tcp() {
         matches!(m, HostMessage::Sessions { .. } | HostMessage::Error { .. })
     })
     .expect("no listing");
-    let HostMessage::Sessions { sessions } = listing else {
+    let HostMessage::Sessions { sessions, .. } = listing else {
         panic!("the session was refused: {listing:?}");
     };
     assert_eq!(sessions.len(), 1, "the session was not created");
@@ -256,6 +257,7 @@ fn a_captured_proof_cannot_be_replayed_onto_a_second_connection() {
             client: client.client_id(),
             label: "test-device".into(),
             nonce: zest_proto::Nonce32::from_bytes([0x5c; 32]),
+            watch_sessions: false,
         },
     );
     assert!(
@@ -439,6 +441,7 @@ fn a_client_that_dialled_another_host_notices() {
             client: client.client_id(),
             label: "test-device".into(),
             nonce: zest_proto::Nonce32::from_bytes(*client_nonce.as_bytes()),
+            watch_sessions: false,
         },
     );
     let challenge = wait_for(&mut stream, &mut frames, |m| {

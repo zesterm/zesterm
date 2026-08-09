@@ -613,6 +613,7 @@ mod tests {
             client: client.client_id(),
             label: "test-client".into(),
             nonce: zest_proto::Nonce32::from_bytes(client_nonce),
+            watch_sessions: false,
         };
         stream.write_all(&frame::encode(&hello).expect("encode")).expect("write");
         stream.flush().expect("flush");
@@ -681,7 +682,7 @@ mod tests {
                         assert_eq!(host, cfg.host, "the daemon reported another host's identity");
                         saw_welcome = true;
                     }
-                    HostMessage::Sessions { sessions: s } => sessions = s,
+                    HostMessage::Sessions { sessions: s, .. } => sessions = s,
                     _ => {}
                 }
             }

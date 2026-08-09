@@ -126,6 +126,7 @@ mod tests {
             client: ClientId::from_bytes([3; 32]),
             label: "phone".into(),
             nonce: crate::Nonce32::from_bytes([9; 32]),
+            watch_sessions: false,
         }
     }
 

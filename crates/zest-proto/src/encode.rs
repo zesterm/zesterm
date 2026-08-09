@@ -197,6 +197,7 @@ impl Encoder {
             cursor,
             modes,
             blocks: self.seen_blocks.clone(),
+            title: title.to_string(),
         }
     }
 
@@ -379,6 +380,11 @@ pub struct Keyframe {
     /// has no other way to learn about a command that finished before it
     /// arrived.
     pub blocks: Vec<BlockPayload>,
+    /// The title at this instant. The encoder always knew it (its shadow
+    /// tracked it for `DeltaOp::Title`) and simply never put it in the
+    /// keyframe — which left a freshly attached tab unlabeled until the host
+    /// next retitled.
+    pub title: String,
 }
 
 #[cfg(test)]
@@ -687,6 +693,26 @@ mod tests {
             "keyframe used undefined attributes: {:?} vs {:?}",
             used,
             defined
+        );
+    }
+
+    #[test]
+    fn a_keyframe_carries_the_title() {
+        // The title only ever travelled as a change (DeltaOp::Title), so a
+        // client attaching to a session already titled `vim` showed blank
+        // until the host next retitled. A keyframe is a complete state; now
+        // the title is part of it.
+        let t = term(20, 2, "x");
+        let mut e = Encoder::new();
+        let k = e.keyframe(t.grid(), cursor(), Modes::empty(), "vim - notes.md", t.blocks());
+        assert_eq!(k.title, "vim - notes.md");
+
+        // And having sent it in the keyframe, the encoder must not re-send it
+        // as a Title op on the next delta — its shadow already matches.
+        let d = e.delta(t.grid(), cursor(), Modes::empty(), "vim - notes.md", t.blocks());
+        assert!(
+            !d.ops.iter().any(|op| matches!(op, DeltaOp::Title { .. })),
+            "an unchanged title after a keyframe must not travel again"
         );
     }
 

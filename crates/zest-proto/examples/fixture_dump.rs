@@ -335,6 +335,7 @@ fn replay(
             cursor: k.cursor,
             modes: k.modes.bits(),
             blocks: k.blocks.clone(),
+            title: k.title.clone(),
         })
         .expect("a keyframe frames")),
         expect: expect(&term),

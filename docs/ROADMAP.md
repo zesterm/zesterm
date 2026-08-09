@@ -222,6 +222,18 @@ M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
       current tab's host; closing a local tab kills, a remote one detaches;
       launch restores the previous tab set, which retires the adopt guess. Both
       orientations — top strip and left sidebar — behind `tabs.position`.
+- [x] **Three additive wire fields, no version bump** (CONTRACTS.md has the
+      full reasoning): `Keyframe.title` — a complete state finally includes
+      the title, so a tab attaching to a running `vim` is labeled at once
+      instead of on the next retitle; `Sessions.created` — the daemon names
+      the session a create produced, retiring the `.last()` race between two
+      concurrent creators; `Hello.watch_sessions` — opt-in listing pushes,
+      driven by a registry generation counter bumped on create/close/collect/
+      attach/detach and coalesced per connection. Opt-in because an old client
+      would mistake an unsolicited `Sessions` for the reply to its own next
+      request; a watcher that hears nothing is talking to an older daemon and
+      polls. Bindings, fixtures and the web decoder updated in the same
+      commit.
 - [x] **The daemon conversation is a reusable object.** `DaemonClient`
       (extracted from `remote.rs`'s private handshake): connect/auth once,
       then `list`, `create`, `attach`, `close` — the picker's verbs, no longer

@@ -10,13 +10,22 @@ import type { Nonce32 } from "./Nonce32";
 import type { RowPayload } from "./RowPayload";
 import type { Seq } from "./Seq";
 import type { SessionAddr } from "./SessionAddr";
+import type { SessionId } from "./SessionId";
 import type { SessionInfo } from "./SessionInfo";
 import type { Sig64 } from "./Sig64";
 
 /**
  * What a host sends.
  */
-export type HostMessage = { "t": "welcome", version: number, host: HostId, label: string, } | { "t": "challenge", version: number, host: HostId, label: string, nonce: Nonce32, signature: Sig64, } | { "t": "auth_pending", code: string, expires_in_secs: number, } | { "t": "auth_failed", reason: AuthFailure, message: string, } | { "t": "pairing_requested", client: ClientId, label: string, code: string, remote: string, } | { "t": "sessions", sessions: Array<SessionInfo>, } | { "t": "keyframe", session: SessionAddr, seq: Seq, cols: number, rows: number, rows_data: Array<RowPayload>, attrs: Array<AttrDef>, cursor: CursorState, 
+export type HostMessage = { "t": "welcome", version: number, host: HostId, label: string, } | { "t": "challenge", version: number, host: HostId, label: string, nonce: Nonce32, signature: Sig64, } | { "t": "auth_pending", code: string, expires_in_secs: number, } | { "t": "auth_failed", reason: AuthFailure, message: string, } | { "t": "pairing_requested", client: ClientId, label: string, code: string, remote: string, } | { "t": "sessions", sessions: Array<SessionInfo>, 
+/**
+ * The session this reply's `CreateSession` produced, when it did.
+ *
+ * Before this existed the client picked `sessions.last()`, which is
+ * wrong the moment two clients create on one host concurrently —
+ * each may adopt the other's shell. Absent on listings and pushes.
+ */
+created: SessionId | null, } | { "t": "keyframe", session: SessionAddr, seq: Seq, cols: number, rows: number, rows_data: Array<RowPayload>, attrs: Array<AttrDef>, cursor: CursorState, 
 /**
  * `zest_core::Modes::bits()`. See [`DeltaOp::Modes`].
  *
@@ -32,7 +41,17 @@ modes: number,
  * no semantic view of the session, which is what every peer had
  * before this existed.
  */
-blocks: Array<BlockPayload>, } | { "t": "update", session: SessionAddr, base: Seq, seq: Seq, delta: Delta, } | { "t": "scrollback", session: SessionAddr, from_line: bigint, rows_data: Array<RowPayload>, 
+blocks: Array<BlockPayload>, 
+/**
+ * The session's title at this instant.
+ *
+ * A keyframe is a complete state, and the title was the one piece of
+ * it that only travelled as a *change* (`DeltaOp::Title`) — so a tab
+ * attaching to a session already titled `vim` showed blank until the
+ * host next happened to retitle. Empty means untitled and travels as
+ * absent.
+ */
+title: string, } | { "t": "update", session: SessionAddr, base: Seq, seq: Seq, delta: Delta, } | { "t": "scrollback", session: SessionAddr, from_line: bigint, rows_data: Array<RowPayload>, 
 /**
  * Every attribute these rows name.
  *

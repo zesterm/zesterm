@@ -115,6 +115,18 @@ pub enum ClientMessage {
         /// so the version check runs first and says the useful thing.
         #[serde(default)]
         nonce: Nonce32,
+        /// Ask to be told when this host's session list changes.
+        ///
+        /// A live tab picker needs to hear about sessions other clients
+        /// create, close, or attach to; without asking, `Sessions` only ever
+        /// answers this connection's own requests and a listing goes stale
+        /// the moment someone else acts. A field rather than a new message:
+        /// both enums are tagged, an unknown tag fails the *whole* message on
+        /// an older peer, and a field an old daemon ignores degrades to
+        /// exactly today's behavior — the client notices no pushes arrive and
+        /// falls back to polling.
+        #[serde(default)]
+        watch_sessions: bool,
     },
     /// The client's proof, answering [`HostMessage::Challenge`].
     ///
@@ -200,7 +212,16 @@ pub enum HostMessage {
     /// own daemon, so the approval modal is a front end over this rather than a
     /// second mechanism. `remote` is for the prompt: "from 192.168.1.42".
     PairingRequested { client: ClientId, label: String, code: String, remote: String },
-    Sessions { sessions: Vec<SessionInfo> },
+    Sessions {
+        sessions: Vec<SessionInfo>,
+        /// The session this reply's `CreateSession` produced, when it did.
+        ///
+        /// Before this existed the client picked `sessions.last()`, which is
+        /// wrong the moment two clients create on one host concurrently —
+        /// each may adopt the other's shell. Absent on listings and pushes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created: Option<SessionId>,
+    },
     /// A complete grid state.
     ///
     /// Sent on attach, and whenever the client's ack has fallen so far behind
@@ -227,6 +248,15 @@ pub enum HostMessage {
         /// before this existed.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         blocks: Vec<BlockPayload>,
+        /// The session's title at this instant.
+        ///
+        /// A keyframe is a complete state, and the title was the one piece of
+        /// it that only travelled as a *change* (`DeltaOp::Title`) — so a tab
+        /// attaching to a session already titled `vim` showed blank until the
+        /// host next happened to retitle. Empty means untitled and travels as
+        /// absent.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        title: String,
     },
     /// A change from `base` to `seq`.
     ///
@@ -304,6 +334,7 @@ mod tests {
             client: ClientId::from_bytes([1; 32]),
             label: "phone".to_string(),
             nonce: Nonce32::from_bytes([4; 32]),
+            watch_sessions: false,
         };
         let json = serde_json::to_string(&msg).expect("serialize");
         let back: ClientMessage = serde_json::from_str(&json).expect("deserialize");
@@ -337,6 +368,7 @@ mod tests {
             client: ClientId::from_bytes([2; 32]),
             label: "no-nonce".into(),
             nonce: Nonce32::default(),
+            watch_sessions: false,
         };
         let ClientMessage::Hello { nonce, .. } = msg else { panic!("expected Hello") };
         assert!(nonce.is_absent());

@@ -152,6 +152,30 @@ are no markers to replay — and `reanchor`, which maps blocks through the
 scrollback bound through the same code the host uses, so a client configured to
 keep more history than the host keeps more, rather than being told to forget.
 
+### Additive again, for the tab strip: titles, created, watch_sessions
+
+Three fields, all `#[serde(default)]`, `PROTOCOL_VERSION` still 2 (#23):
+
+- **`Keyframe.title`** (wire and `encode::Keyframe`). The title was the one
+  piece of a complete state that only travelled as a *change*
+  (`DeltaOp::Title`), so a client attaching to a session already titled `vim`
+  showed blank until the host next retitled. Empty means untitled and travels
+  as absent, so an older host's keyframe leaves the client's title alone
+  rather than blanking it.
+- **`HostMessage::Sessions.created`** — the session a `CreateSession` in this
+  reply produced. Retires the client's `sessions.last()` heuristic, which
+  hands one of two concurrent creators the other's shell. Absent on listings
+  and pushes; a client talking to an older daemon falls back to the
+  heuristic, racy exactly as it always was.
+- **`ClientMessage::Hello.watch_sessions`** — opt in to hearing `Sessions`
+  pushes whenever this host's listing changes (create, close, collection,
+  attach, detach — coalesced through a registry generation counter). A field
+  rather than a new message for the same reason blocks were a field: both
+  enums are tagged and an unknown tag fails the whole message. Opt-in rather
+  than broadcast because an old client would mistake an unsolicited
+  `Sessions` for the reply to a request it is about to make. A client that
+  asked and hears nothing is talking to an older daemon and polls instead.
+
 ### Done once, deliberately: protocol 2
 
 Two changes a peer cannot ignore, made as one bump because the coordinated moment is the

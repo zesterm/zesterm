@@ -58,6 +58,7 @@ impl DaemonClient {
             client: identity.client_id(),
             label: label.to_string(),
             nonce: zest_proto::Nonce32::from_bytes(*client_nonce.as_bytes()),
+            watch_sessions: false,
         })?;
 
         // Challenge -> Auth -> Welcome. Two round trips on connect, which on a
@@ -143,7 +144,7 @@ impl DaemonClient {
         self.send(&ClientMessage::ListSessions)?;
         loop {
             match self.recv()? {
-                HostMessage::Sessions { sessions } => return Ok(sessions),
+                HostMessage::Sessions { sessions, .. } => return Ok(sessions),
                 HostMessage::Error { message, .. } => return Err(RemoteError::Refused(message)),
                 _ => {}
             }
@@ -166,11 +167,14 @@ impl DaemonClient {
         })?;
         loop {
             match self.recv()? {
-                HostMessage::Sessions { sessions } => {
-                    // The reply is the whole list; the newest entry is ours.
-                    // Racy against a concurrent creator on the same host — the
-                    // additive `created` field in the next protocol step is
-                    // what retires this heuristic.
+                HostMessage::Sessions { sessions, created } => {
+                    // The daemon names the created session outright. The
+                    // `.last()` fallback survives only for an older daemon
+                    // that predates the field — where it is racy against a
+                    // concurrent creator, exactly as it always was.
+                    if let Some(id) = created {
+                        return Ok(SessionAddr::new(self.host, id));
+                    }
                     let Some(newest) = sessions.last() else { continue };
                     return Ok(newest.addr);
                 }
@@ -224,6 +228,7 @@ impl DaemonClient {
                     cursor,
                     modes,
                     blocks,
+                    title,
                     ..
                 } => {
                     return Ok((
@@ -236,6 +241,7 @@ impl DaemonClient {
                             cursor,
                             modes: zest_core::Modes::from_bits_truncate(modes),
                             blocks,
+                            title,
                         },
                     ));
                 }

@@ -111,6 +111,14 @@ const SCROLLBACK_PAGE: usize = 500;
 pub struct Registry {
     sessions: Mutex<HashMap<u64, Arc<Session>>>,
     next_id: Mutex<u64>,
+    /// Bumped whenever a listing would read differently: create, close,
+    /// collection, attach, detach. What lets a watching connection answer
+    /// "did anything change?" without diffing two listings.
+    generation: std::sync::atomic::AtomicU64,
+    /// Wakers for connections that asked to watch the session list
+    /// (`Hello.watch_sessions`), keyed by a token so `Drop` can unregister.
+    watchers: Mutex<HashMap<u64, Arc<dyn Fn() + Send + Sync>>>,
+    next_watcher: Mutex<u64>,
 }
 
 impl Registry {
@@ -133,7 +141,39 @@ impl Registry {
         };
         let session = Arc::new(Session::spawn(id, cmd, size, scrollback, |_| {})?);
         self.sessions.lock().expect("registry lock").insert(id.0, Arc::clone(&session));
+        self.touch();
         Ok(session)
+    }
+
+    /// The session list changed; tell everyone who asked to hear it.
+    ///
+    /// Called *after* the change is visible in `sessions`, so a woken
+    /// connection that lists immediately sees the new truth.
+    pub fn touch(&self) {
+        self.generation.fetch_add(1, std::sync::atomic::Ordering::Release);
+        for waker in self.watchers.lock().expect("watchers lock").values() {
+            waker();
+        }
+    }
+
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Register a waker to run whenever the listing changes.
+    pub fn watch(&self, waker: Arc<dyn Fn() + Send + Sync>) -> u64 {
+        let token = {
+            let mut next = self.next_watcher.lock().expect("watcher id lock");
+            *next += 1;
+            *next
+        };
+        self.watchers.lock().expect("watchers lock").insert(token, waker);
+        token
+    }
+
+    pub fn unwatch(&self, token: u64) {
+        self.watchers.lock().expect("watchers lock").remove(&token);
     }
 
     #[must_use]
@@ -179,6 +219,10 @@ impl Registry {
         let session = self.sessions.lock().expect("registry lock").remove(&id.0);
         if let Some(s) = session {
             s.hangup();
+            // Sweep funnels through here too, so a collected session bumps
+            // the generation exactly once — and a close of a session already
+            // gone bumps nothing.
+            self.touch();
         }
     }
 
@@ -276,6 +320,12 @@ pub struct Connection {
     on_pending: Option<Box<dyn FnOnce() + Send>>,
     /// Handed to each session on attach, so output wakes the writer.
     waker: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// This client asked (`Hello.watch_sessions`) to hear listing changes.
+    watch_sessions: bool,
+    /// Registration in [`Registry::watch`], for `Drop` to release.
+    watch_token: Option<u64>,
+    /// The registry generation this connection last told its client about.
+    seen_generation: u64,
 }
 
 impl Drop for Connection {
@@ -293,12 +343,21 @@ impl Drop for Connection {
     /// last client just vanished still collects, instead of waiting for a client
     /// that may not come back for hours.
     fn drop(&mut self) {
+        if let Some(token) = self.watch_token.take() {
+            self.registry.unwatch(token);
+        }
+        let had_subscriptions = !self.attached.is_empty();
         for (&id, &handle) in &self.attached {
             if let Some(s) = self.registry.get(SessionId(id)) {
                 s.detach(handle);
             }
         }
         self.registry.sweep();
+        // The detaches above changed `attached` in every listing row this
+        // connection held; sweep announces its own removals through `close`.
+        if had_subscriptions {
+            self.registry.touch();
+        }
     }
 }
 
@@ -329,6 +388,9 @@ impl Connection {
             on_ready: None,
             on_pending: None,
             waker: None,
+            watch_sessions: false,
+            watch_token: None,
+            seen_generation: 0,
         }
     }
 
@@ -400,6 +462,20 @@ impl Connection {
     /// Anything the attached sessions have produced since the last call.
     pub fn poll(&mut self) -> Vec<HostMessage> {
         let mut out = Vec::new();
+
+        // The listing push, first and coalesced: however many changes piled
+        // up since this connection last looked, one `Sessions` describes the
+        // current truth. Only for clients that asked (`Hello.watch_sessions`).
+        if self.watch_sessions && matches!(self.gate, Gate::Served) {
+            let generation = self.registry.generation();
+            if generation != self.seen_generation {
+                self.seen_generation = generation;
+                out.push(HostMessage::Sessions {
+                    sessions: self.registry.list(self.config.host),
+                    created: None,
+                });
+            }
+        }
         for (&id, &handle) in &self.attached {
             let Some(session) = self.registry.get(SessionId(id)) else { continue };
             let addr = SessionAddr::new(self.config.host, SessionId(id));
@@ -421,6 +497,7 @@ impl Connection {
                     cursor: k.cursor,
                     modes: k.modes.bits(),
                     blocks: k.blocks,
+                    title: k.title,
                 }),
                 None => {}
             }
@@ -470,7 +547,8 @@ impl Connection {
         }
 
         match msg {
-            ClientMessage::Hello { version, client, label, nonce } => {
+            ClientMessage::Hello { version, client, label, nonce, watch_sessions } => {
+                self.watch_sessions = watch_sessions;
                 let Some(h) = self.handshake_mut() else {
                     return vec![HostMessage::Error {
                         session: None,
@@ -596,7 +674,10 @@ impl Connection {
             }
 
             ClientMessage::ListSessions => {
-                vec![HostMessage::Sessions { sessions: self.registry.list(self.config.host) }]
+                vec![HostMessage::Sessions {
+                    sessions: self.registry.list(self.config.host),
+                    created: None,
+                }]
             }
 
             ClientMessage::CreateSession { command, cwd, cols, rows } => {
@@ -614,9 +695,13 @@ impl Connection {
                     spec.enable_shell_integration(&shell_integration_dir());
                 }
                 match self.registry.create(&spec, PtySize::new(cols, rows), 10_000) {
-                    Ok(_) => {
+                    Ok(created) => {
                         vec![HostMessage::Sessions {
                             sessions: self.registry.list(self.config.host),
+                            // Named explicitly: `sessions.last()` was the old
+                            // heuristic, and it hands one of two concurrent
+                            // creators the other one's shell.
+                            created: Some(created.id),
                         }]
                     }
                     Err(e) => vec![HostMessage::Error {
@@ -646,6 +731,8 @@ impl Connection {
                     }
                 }));
                 self.attached.insert(session.session.0, handle);
+                // Another watcher's listing shows this session as attached now.
+                self.registry.touch();
                 vec![HostMessage::Keyframe {
                     session,
                     seq: Seq(seq),
@@ -656,6 +743,7 @@ impl Connection {
                     cursor: keyframe.cursor,
                     modes: keyframe.modes.bits(),
                     blocks: keyframe.blocks,
+                    title: keyframe.title,
                 }]
             }
 
@@ -690,6 +778,7 @@ impl Connection {
                         cursor: k.cursor,
                         modes: k.modes.bits(),
                         blocks: k.blocks,
+                        title: k.title,
                     }],
                     None => vec![HostMessage::Error {
                         session: Some(session),
@@ -705,6 +794,8 @@ impl Connection {
                     // Removes the subscriber and nothing else. The shell keeps
                     // running -- that is the whole design. → ADR-007.
                     s.detach(handle);
+                    // `attached` changed in the listing.
+                    self.registry.touch();
                 }
                 Vec::new()
             }
@@ -784,6 +875,14 @@ impl Connection {
         // disarms its watchdog and gives back its mid-handshake slot.
         if let Some(f) = self.on_ready.take() {
             f();
+        }
+        // Registered only once served — an unauthenticated connection has no
+        // business being woken by listing changes it may never see.
+        if self.watch_sessions && self.watch_token.is_none() {
+            self.seen_generation = self.registry.generation();
+            if let Some(waker) = self.waker.clone() {
+                self.watch_token = Some(self.registry.watch(waker));
+            }
         }
         vec![HostMessage::Welcome {
             version: PROTOCOL_VERSION,
@@ -1158,6 +1257,10 @@ mod tests {
     /// needs a connection that has been through it -- which is itself the
     /// clearest statement that nothing is served before then.
     fn authenticate(c: &mut Connection) -> zest_proto::ClientId {
+        authenticate_with(c, false)
+    }
+
+    fn authenticate_with(c: &mut Connection, watch_sessions: bool) -> zest_proto::ClientId {
         let client = zest_mesh::identity::ClientIdentity::generate().expect("client key");
         let out = send(
             c,
@@ -1166,6 +1269,7 @@ mod tests {
                 client: client.client_id(),
                 label: "test".into(),
                 nonce: zest_proto::Nonce32::from_bytes([0x5c; 32]),
+                watch_sessions,
             },
         );
         let [HostMessage::Challenge { nonce, host, label, version, .. }] = &out[..] else {
@@ -1222,6 +1326,91 @@ mod tests {
         )
     }
 
+    #[test]
+    fn a_watcher_hears_about_sessions_it_did_not_touch() {
+        // The picker's liveness: a listing that only answers this
+        // connection's own requests goes stale the moment another client
+        // acts. `Hello.watch_sessions` opts in; the push is the whole current
+        // list, coalesced through the generation counter.
+        let (mut watcher, registry) = conn();
+        let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let woken = Arc::clone(&woken);
+            watcher.set_waker(Box::new(move || {
+                woken.store(true, std::sync::atomic::Ordering::Release);
+            }));
+        }
+        authenticate_with(&mut watcher, true);
+
+        let mut creator = Connection::new(
+            config(),
+            Arc::clone(&registry),
+            crate::auth::Auth::Transport(test_authenticator()),
+            "test2",
+        );
+        authenticate(&mut creator);
+        let out = send(
+            &mut creator,
+            &ClientMessage::CreateSession {
+                command: "/bin/cat".into(),
+                cwd: String::new(),
+                cols: 20,
+                rows: 5,
+            },
+        );
+
+        // The creator's reply names its session outright — the `.last()`
+        // heuristic hands one of two concurrent creators the other's shell.
+        let [HostMessage::Sessions { sessions, created: Some(id) }] = &out[..] else {
+            panic!("expected a Sessions reply naming the created session, got {out:?}");
+        };
+        assert_eq!(sessions.last().map(|s| s.addr.session), Some(*id));
+        let id = *id;
+
+        assert!(
+            woken.load(std::sync::atomic::Ordering::Acquire),
+            "creating a session must wake a watching connection"
+        );
+        let pushed = watcher.poll();
+        assert!(
+            matches!(&pushed[..], [HostMessage::Sessions { sessions, created: None }]
+                if sessions.len() == 1),
+            "the watcher's poll must carry the listing push, got {pushed:?}"
+        );
+        assert!(
+            watcher.poll().iter().all(|m| !matches!(m, HostMessage::Sessions { .. })),
+            "no change since the last poll means no push"
+        );
+
+        registry.close(id);
+    }
+
+    #[test]
+    fn a_client_that_did_not_ask_gets_no_push() {
+        // Push is opt-in: an old client would mistake an unsolicited
+        // Sessions for the reply to a request it is about to make.
+        let (mut c, registry) = conn();
+        authenticate(&mut c);
+        let out = send(
+            &mut c,
+            &ClientMessage::CreateSession {
+                command: "/bin/cat".into(),
+                cwd: String::new(),
+                cols: 20,
+                rows: 5,
+            },
+        );
+        let [HostMessage::Sessions { created: Some(id), .. }] = &out[..] else {
+            panic!("expected a Sessions reply, got {out:?}");
+        };
+        let id = *id;
+        assert!(
+            c.poll().iter().all(|m| !matches!(m, HostMessage::Sessions { .. })),
+            "a non-watcher must never receive an unsolicited Sessions"
+        );
+        registry.close(id);
+    }
+
     fn send(c: &mut Connection, msg: &ClientMessage) -> Vec<HostMessage> {
         let bytes = frame::encode(msg).expect("encode");
         c.on_bytes(&bytes).expect("handled")
@@ -1233,6 +1422,7 @@ mod tests {
             client: ClientId::from_bytes([1; 32]),
             label: "test".into(),
             nonce: zest_proto::Nonce32::from_bytes([6; 32]),
+            watch_sessions: false,
         }
     }
 
@@ -1373,6 +1563,7 @@ mod tests {
                 client: ClientId::from_bytes([1; 32]),
                 label: "future".into(),
                 nonce: zest_proto::Nonce32::from_bytes([7; 32]),
+                watch_sessions: false,
             },
         );
         assert!(
@@ -1423,7 +1614,7 @@ mod tests {
                 rows: 24,
             },
         );
-        assert!(matches!(&out[..], [HostMessage::Sessions { sessions }] if sessions.len() == 1));
+        assert!(matches!(&out[..], [HostMessage::Sessions { sessions, .. }] if sessions.len() == 1));
         assert_eq!(registry.len(), 1);
     }
 
