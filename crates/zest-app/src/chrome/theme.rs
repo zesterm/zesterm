@@ -89,13 +89,20 @@ impl ChromeColors {
     #[must_use]
     pub fn new(ui: &UiTokens, effects: &ThemeEffects, chrome_opacity: f32) -> Self {
         let chrome_opacity = chrome_opacity.clamp(0.0, 1.0);
+        // Which fills carry the chrome opacity is a design decision, not a
+        // blanket rule: translucency belongs to the big background surfaces
+        // — the title bar, the sidebar, the active tab's pane fill. The
+        // design's structure lives *on* those surfaces (borders, the accent
+        // rule, chips, selected rows), and multiplying 0.25 into a 2px rule
+        // does not make the window glassy, it deletes the rule. Structure
+        // stays full-strength, exactly as text always has (ADR-003).
         Self {
             strip_bg: fill(zest_theme::derived::titlebar_fill(ui), chrome_opacity),
-            line: fill(ui.line, chrome_opacity),
-            hairline_soft: fill(zest_theme::derived::soft_hairline(ui), chrome_opacity),
+            line: text(ui.line),
+            hairline_soft: text(zest_theme::derived::soft_hairline(ui)),
             bg: fill(ui.bg, chrome_opacity),
             tab_active_bg: fill(ui.bg, chrome_opacity),
-            tab_hover_bg: fill(ui.sel_soft, chrome_opacity),
+            tab_hover_bg: text(ui.sel_soft),
             // Always opaque, like the picker's panel: a block header
             // *replaces* the prompt rows it covers, and a translucent one
             // double-prints the very text it exists to reword.
@@ -103,12 +110,12 @@ impl ChromeColors {
             text_active: text(ui.fg),
             text_inactive: text(ui.dim),
             text_faint: text(ui.faint),
-            pill_bg: fill(ui.accent_soft, chrome_opacity),
+            pill_bg: text(ui.accent_soft),
             pill_text: text(ui.accent_text),
-            pill_warn_bg: fill(ui.warn, chrome_opacity * 0.35),
+            pill_warn_bg: fill(ui.warn, 0.35),
             pill_warn_text: text(ui.warn),
-            accent: fill(ui.accent, chrome_opacity),
-            accent_soft: fill(ui.accent_soft, chrome_opacity),
+            accent: text(ui.accent),
+            accent_soft: text(ui.accent_soft),
             // State colours are marks — dots, rails, exit codes — information
             // rather than surface, so like text they never dim with the chrome.
             success: text(ui.success),

@@ -3059,7 +3059,8 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64);
 
-        term.blocks()
+        let views = term
+            .blocks()
             .blocks()
             .iter()
             .filter_map(|b| {
@@ -3124,7 +3125,21 @@ impl App {
                         .map_or(0, |e| (e + 1).saturating_sub(out_line) as usize),
                 })
             })
-            .collect()
+            .collect::<Vec<_>>();
+
+        // Around a reflow, a stale wire upsert can briefly hand two blocks
+        // overlapping row ranges — and two headers double-printing on one
+        // row is worse than either alone. One row, one header: the newer
+        // block keeps it (ids only grow), the older one waits for the
+        // corrected upsert.
+        let mut kept: Vec<crate::chrome::blocks::BlockView> = Vec::with_capacity(views.len());
+        for v in views.into_iter().rev() {
+            if kept.iter().all(|k| v.rows.1 <= k.rows.0 || v.rows.0 >= k.rows.1) {
+                kept.push(v);
+            }
+        }
+        kept.reverse();
+        kept
     }
 
     /// Pointer pixels to a grid cell, clamped into the viewport — through
