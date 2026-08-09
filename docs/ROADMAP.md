@@ -216,6 +216,21 @@ M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
       all. That last question already produced a bug — opening zesterm adopted a
       shell another machine was driving, because a default was standing in for a
       feature that does not exist.
+      **Design settled, implementation under way**: tabs are the sessions this
+      window has attached, keyed `(HostId, SessionId)` from the first commit; a picker
+      overlay lists every host and session with presence; ⌘T creates on the
+      current tab's host; closing a local tab kills, a remote one detaches;
+      launch restores the previous tab set, which retires the adopt guess. Both
+      orientations — top strip and left sidebar — behind `tabs.position`.
+- [x] **Chrome text foundations.** `ui_text::emit_ui_run`/`measure_ui_run` in
+      `zest-render-wgpu`: shaped with kept advances (issue #5's rule), truncated
+      with an ellipsis at cluster boundaries, falling back per character where
+      the primary face has no glyph — a CJK cwd or an emoji in a title would
+      otherwise be notdef boxes, because `shape_run` shapes only the primary
+      face. Glyphs gain `FIXED` (scroll-exempt): `grid_origin` is a global
+      uniform, so without a per-instance bit tab titles would ride smooth
+      scrolling the day it ships. Shader constant held in sync by a test, like
+      `LAYER_SIZE`.
 - [ ] Borderless window, GPU-drawn titlebar and tab strip through the SDF rect
       pipeline. `WM_NCCALCSIZE` returning 0 with `top` untouched removes the
       caption while keeping frame, shadow and snap — **but when maximized you

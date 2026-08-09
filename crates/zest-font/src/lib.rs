@@ -588,6 +588,19 @@ impl Fonts {
         out
     }
 
+    /// The scaled advance of one glyph, in pixels.
+    ///
+    /// The grid never needs this — cells advance by cell width. UI text is
+    /// proportional, and this is how a fallback glyph (whose advance
+    /// `shape_run` cannot know, having shaped only the primary face) gets a
+    /// real width instead of a guessed one.
+    #[must_use]
+    pub fn advance_of(&self, font: FontId, glyph: GlyphId) -> f32 {
+        let Some(face) = self.faces.get(font.0 as usize) else { return 0.0 };
+        let Some(f) = face.font_ref() else { return 0.0 };
+        f.glyph_metrics(&[]).scale(self.typo.size_px()).advance_width(glyph)
+    }
+
     /// Direct `cmap` lookup with no shaping.
     ///
     /// Roughly 10x faster than shaping and correct for any run that has no

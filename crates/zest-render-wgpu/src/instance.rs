@@ -114,6 +114,11 @@ impl RectInstance {
 pub mod glyph_flags {
     /// Sample the colour texture rather than the coverage mask.
     pub const COLOR: u32 = 1 << 0;
+    /// Ignore `Globals::grid_origin`: this glyph belongs to the chrome and must
+    /// hold still while the grid smooth-scrolls beneath it. The origin is a
+    /// global uniform, not per-instance state, so without this bit tab titles
+    /// would ride the scroll offset the moment `scroll_px` becomes nonzero.
+    pub const FIXED: u32 = 1 << 1;
 }
 
 /// One instance for the glyph pipeline.

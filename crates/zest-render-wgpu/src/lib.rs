@@ -29,6 +29,7 @@
 pub mod atlas;
 pub mod instance;
 pub mod scene;
+pub mod ui_text;
 
 use wgpu::util::DeviceExt;
 
@@ -38,6 +39,7 @@ pub use instance::{
     RectShape,
 };
 pub use scene::{Chrome, Preedit, Scene, Viewport};
+pub use ui_text::{emit_ui_run, measure_ui_run};
 
 /// The offscreen format.
 ///
@@ -659,6 +661,19 @@ mod tests {
         assert!(
             src.contains(&expected),
             "glyph.wgsl LAYER_SIZE is out of sync with atlas::LAYER_SIZE; expected `{expected}`"
+        );
+    }
+
+    #[test]
+    fn shader_fixed_flag_matches_the_instance_flag() {
+        // The vertex shader decides scroll-exemption by this bit. If the Rust
+        // constant moves, chrome text silently starts scrolling with the grid
+        // -- a bug that only appears once smooth scrolling ships.
+        let src = include_str!("shaders/glyph.wgsl");
+        let expected = format!("const FLAG_FIXED: u32 = {}u;", super::glyph_flags::FIXED);
+        assert!(
+            src.contains(&expected),
+            "glyph.wgsl FLAG_FIXED is out of sync with glyph_flags::FIXED; expected `{expected}`"
         );
     }
 }
