@@ -481,11 +481,25 @@ theme screens. Colours, sizes and spacing come from there, not from this file.
       ⌘W closes the focused pane first (closing the left promotes the right,
       so the tab keeps its identity); a pane's shell ending collapses the
       pane, never the tab. Splits deliberately do not persist yet.
-- [ ] Animation clock. Springs `(response, damping)`, not easing curves —
-      terminal motion is interruption-dominated and a spring absorbs a changed
-      target with continuous velocity for free. Substep the integrator
-      (`h = dt/ceil(dt·240)`) or a spring tuned at 60Hz behaves differently at
-      144Hz. One clock, shared.
+- [x] **The design's four animations, on one shared clock.** Cursor blink
+      (finally consuming `cursor.blink`/`blink_interval_ms` — removed from
+      `NOT_YET_WIRED`), the palette caret on the same phase, the running
+      ring's orbiting gap (an SDF box cannot draw an arc; a fill-coloured
+      bite orbiting the ring reads the same), and the sidebar dot's 1.6s
+      pulse. Phases derive from one epoch — never stored, so a missed tick
+      cannot desynchronize — and `about_to_wait` schedules exactly one
+      `WaitUntil` when something on screen animates, `Wait` otherwise: a
+      resting window schedules nothing, which is the settle guarantee in one
+      place. Degraded states landed with it: a dropped daemon link turns the
+      status segment "reconnecting" in danger until `Reattached`, and a block
+      still "running" when its host went away shows a faint rail and says
+      "interrupted".
+- [ ] Animation clock, the *spring* half. Springs `(response, damping)`, not
+      easing curves — terminal motion is interruption-dominated and a spring
+      absorbs a changed target with continuous velocity for free. Substep the
+      integrator (`h = dt/ceil(dt·240)`) or a spring tuned at 60Hz behaves
+      differently at 144Hz. The periodic clock above is the rail it plugs
+      into; springs arrive with tab/window motion.
 - [ ] Smooth scroll as a fractional row offset, **suppressed in the alt screen**.
 - [ ] `reduce_motion`, honouring `SPI_GETCLIENTAREAANIMATION`.
 - [ ] Per-OS backdrop: Mica via `DWMWA_SYSTEMBACKDROP_TYPE`.

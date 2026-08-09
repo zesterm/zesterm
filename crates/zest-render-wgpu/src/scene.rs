@@ -41,6 +41,10 @@ pub struct Viewport<'a> {
     /// Drawing it here rather than writing it into cells is what keeps
     /// half-typed characters out of someone else's scrollback.
     pub preedit: Option<Preedit<'a>>,
+    /// Blink phase: `false` hides the focused block cursor (the off half of
+    /// the cycle). The hollow unfocused cursor never blinks — it marks where
+    /// focus would land, and a vanishing landmark is worse than none.
+    pub cursor_on: bool,
     /// Folded-view row map: for each visual row, the *absolute* storage index
     /// of the grid row to draw there ([`Grid::line`]'s argument), or
     /// `usize::MAX` for a blank filler when history ran out. `None` draws the
@@ -563,7 +567,9 @@ impl Scene {
         let color = LinearRgba::opaque(vp.palette.cursor.r, vp.palette.cursor.g, vp.palette.cursor.b);
 
         if vp.focused {
-            self.rects.push(RectInstance::filled([x, y, cw, ch], color, clip));
+            if vp.cursor_on {
+                self.rects.push(RectInstance::filled([x, y, cw, ch], color, clip));
+            }
         } else {
             // Unfocused: a hollow box, drawn as four thin rects.
             let t = 1.0f32.max(metrics.underline_thickness as f32);

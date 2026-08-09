@@ -157,6 +157,7 @@ async fn run() {
                 cursor: Some((text.len() / 2, text.len() / 2)),
                 text,
             }),
+            cursor_on: true,
             row_map: None,
         }],
         &Chrome::default(),

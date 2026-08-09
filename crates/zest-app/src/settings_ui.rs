@@ -46,8 +46,6 @@ pub const NOT_YET_WIRED: &[&str] = &[
     "appearance.light_theme",
     "appearance.text_contrast",
     "appearance.text_gamma",
-    "cursor.blink",
-    "cursor.blink_interval_ms",
     "cursor.shape",
     "cursor.trail",
     "motion.enabled",

@@ -144,6 +144,8 @@ pub struct PickerModel {
     pub ensure_visible: bool,
     /// How many hosts the query ran over — the query row's right-hand fact.
     pub hosts_searched: usize,
+    /// The blink cycle's on half, from the animation clock.
+    pub caret_on: bool,
 }
 
 /// One host card of the fleet view (design screen 7).
@@ -327,6 +329,25 @@ pub struct StatusModel {
     pub latency_ms: Option<f32>,
 }
 
+/// The animation clock's current phases, computed by the app per rebuild.
+/// The four design animations, minus hover (instant by spec): caret blink,
+/// spinner rotation, running-dot pulse.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AnimPhase {
+    /// The blink cycle's on half — the palette caret and the grid cursor.
+    pub caret_on: bool,
+    /// Spinner rotation, 0..1 of a 0.9s turn.
+    pub spin: f32,
+    /// Running-dot opacity, 0.35..1 on a 1.6s ease.
+    pub pulse: f32,
+}
+
+impl Default for AnimPhase {
+    fn default() -> Self {
+        Self { caret_on: true, spin: 0.0, pulse: 1.0 }
+    }
+}
+
 /// Everything `layout` needs to draw the chrome once.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChromeModel {
@@ -353,6 +374,8 @@ pub struct ChromeModel {
     pub screen: Option<ScreenModel>,
     /// The split tab's two pane headers, left then right; `None` unsplit.
     pub panes: Option<[PaneModel; 2]>,
+    /// Animation phases for this rebuild.
+    pub anim: AnimPhase,
     /// Where the grid area is, physical pixels — the rectangle a screen
     /// covers. Computed by the app from its insets.
     pub grid_area: [f32; 4],

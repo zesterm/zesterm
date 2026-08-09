@@ -39,6 +39,8 @@ pub struct BlockView {
     pub folded: bool,
     /// Output lines hidden by the fold, for the "N lines" tag.
     pub folded_lines: usize,
+    /// The host went away mid-run: rail faint, metadata says "interrupted".
+    pub interrupted: bool,
 }
 
 /// The per-frame output: instances to append after the cached chrome, and a
@@ -67,6 +69,8 @@ fn baseline_in(y: f32, h: f32, px: f32) -> f32 {
 }
 
 /// Lay the headers over the grid area `area`, rows of `cell_h` pixels.
+/// `spin` is the running ring's rotation phase, 0..1 of a turn.
+#[allow(clippy::too_many_arguments, reason = "one call site; a params struct would name nothing")]
 pub fn layout_blocks(
     views: &[BlockView],
     area: [f32; 4],
@@ -74,6 +78,7 @@ pub fn layout_blocks(
     s: f32,
     colors: &ChromeColors,
     hover: Option<HitRegion>,
+    spin: f32,
     measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
 ) -> BlockChrome {
     let mut out = BlockChrome::default();
@@ -99,7 +104,9 @@ pub fn layout_blocks(
         out.hit.push(band, HitRegion::BlockHeader(v.id));
 
         // The state rail. Radius 1: a 2px rect cannot honestly round more.
-        let rail_color = if v.running {
+        let rail_color = if v.interrupted {
+            colors.text_faint
+        } else if v.running {
             colors.warn
         } else if v.failed {
             colors.danger
@@ -187,9 +194,12 @@ pub fn layout_blocks(
             *right -= w + GAP * s;
         };
 
-        if v.running {
-            // The running indicator: for now a full thin ring beside the
-            // label; the animation clock will lend it a gap and a spin.
+        if v.interrupted {
+            meta("interrupted", colors.text_faint, &mut right, &mut out);
+        } else if v.running {
+            // The running indicator: a thin warn ring whose gap orbits on the
+            // clock's 0.9s turn — an SDF box cannot draw an arc, but a ring
+            // with a fill-coloured bite out of it reads exactly the same.
             meta(&v.running_label, colors.warn, &mut right, &mut out);
             let d = 8.0 * s;
             let ring = [right - d, band[1] + (band[3] - d) / 2.0, d, d];
@@ -199,6 +209,21 @@ pub fn layout_blocks(
                 border_width: 1.5 * s,
                 ..RectInstance::filled(ring, LinearRgba::TRANSPARENT, clip)
             });
+            let angle = spin * core::f32::consts::TAU;
+            let r = d / 2.0;
+            let (cx, cy) = (ring[0] + r, ring[1] + r);
+            let bite = 3.0 * s;
+            out.rects.push(RectInstance::rounded(
+                [
+                    cx + angle.cos() * r - bite / 2.0,
+                    cy + angle.sin() * r - bite / 2.0,
+                    bite,
+                    bite,
+                ],
+                bite / 2.0,
+                fill,
+                clip,
+            ));
             right -= d + GAP * s;
         } else {
             let color = if v.failed { colors.danger } else { colors.success };
@@ -213,7 +238,9 @@ pub fn layout_blocks(
 
         // The command, in the room that remains.
         let cmd_x = chev_x + 16.0 * s;
-        let cmd_color = if v.running {
+        let cmd_color = if v.interrupted {
+            colors.text_inactive
+        } else if v.running {
             colors.text_active
         } else if v.failed {
             colors.danger
@@ -279,6 +306,7 @@ mod tests {
             running_label: String::new(),
             folded: false,
             folded_lines: 0,
+            interrupted: false,
         }
     }
 
@@ -287,7 +315,7 @@ mod tests {
         // The hit-map discipline, applied to blocks: the band is one region,
         // the fold affordance another, and the fold is on top where drawn.
         let area = [0.0, 100.0, 800.0, 400.0];
-        let b = layout_blocks(&[view(7, (2, 3))], area, 20.0, 1.0, &colors(), None, &mut measure);
+        let b = layout_blocks(&[view(7, (2, 3))], area, 20.0, 1.0, &colors(), None, 0.0, &mut measure);
         let band_y = 100.0 + 2.0 * 20.0 + 10.0;
         assert_eq!(b.hit.hit(400.0, band_y), Some(HitRegion::BlockHeader(7)));
         assert_eq!(
@@ -301,7 +329,7 @@ mod tests {
     fn hover_grows_the_action_chips_and_they_answer() {
         let area = [0.0, 0.0, 800.0, 400.0];
         let quiet =
-            layout_blocks(&[view(3, (0, 1))], area, 20.0, 1.0, &colors(), None, &mut measure);
+            layout_blocks(&[view(3, (0, 1))], area, 20.0, 1.0, &colors(), None, 0.0, &mut measure);
         let hovered = layout_blocks(
             &[view(3, (0, 1))],
             area,
@@ -309,6 +337,7 @@ mod tests {
             1.0,
             &colors(),
             Some(HitRegion::BlockHeader(3)),
+            0.0,
             &mut measure,
         );
         assert!(

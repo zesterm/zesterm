@@ -392,13 +392,14 @@ fn picker_overlay(
         if !picker.filter.is_empty() {
             qx += qw;
         }
-        // The caret: an 8×16 accent block. Blinking arrives with the
-        // animation clock; a standing caret is honest until then.
-        out.rects.push(RectInstance::filled(
-            [qx + 2.0 * s, qy + (qh - 16.0 * s) / 2.0, 8.0 * s, 16.0 * s],
-            colors.accent,
-            no_clip,
-        ));
+        // The caret: an 8×16 accent block on the design's step-end blink.
+        if picker.caret_on {
+            out.rects.push(RectInstance::filled(
+                [qx + 2.0 * s, qy + (qh - 16.0 * s) / 2.0, 8.0 * s, 16.0 * s],
+                colors.accent,
+                no_clip,
+            ));
+        }
         let hosts = match picker.hosts_searched {
             1 => "1 host searched".to_string(),
             n => format!("{n} hosts searched"),
@@ -1873,11 +1874,17 @@ fn vertical(
                 out.hit.push(hit, HitRegion::Tab(tab.addr));
             }
 
-            // 5px state dot: running pulses warn, the live (active) session
-            // is success, an idle one faint.
+            // 5px state dot: running pulses warn (the clock's 1.6s ease),
+            // the live (active) session is success, an idle one faint.
             let dot_d = 5.0 * s;
             let dot_color = if tab.running {
-                colors.warn
+                let p = model.anim.pulse;
+                LinearRgba([
+                    colors.warn.0[0] * p,
+                    colors.warn.0[1] * p,
+                    colors.warn.0[2] * p,
+                    colors.warn.0[3] * p,
+                ])
             } else if active {
                 colors.success
             } else {
@@ -2164,6 +2171,7 @@ mod tests {
             sidebar: None,
             screen: None,
             panes: None,
+            anim: super::super::model::AnimPhase::default(),
             grid_area: [0.0, 46.0, 1200.0, 726.0],
             toggle_chord: "⌘⇧E".into(),
             palette_chord: "⌘K".into(),
@@ -2464,6 +2472,7 @@ mod tests {
             scroll: 0.0,
             ensure_visible: false,
             hosts_searched: 4,
+            caret_on: true,
         });
         let l = layout(&mo, &colors(), &m, &mut measure);
 

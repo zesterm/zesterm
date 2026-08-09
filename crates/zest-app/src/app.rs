@@ -54,6 +54,10 @@ pub struct Config {
     /// The tab strip's knobs, taken whole — the chrome reads all of them.
     pub tabs: zest_config::settings::Tabs,
     pub shell: Option<String>,
+    /// Blink the cursor (and the palette caret), on the shared clock.
+    pub cursor_blink: bool,
+    /// Half-cycle of the blink, milliseconds.
+    pub cursor_blink_interval_ms: u32,
     /// Jump back to the bottom whenever the program writes something.
     ///
     /// Off by default, and that is the interesting half: with it on, scrollback
@@ -88,6 +92,8 @@ impl From<&zest_config::Settings> for Config {
             chrome_opacity: s.window.chrome_opacity.clamp(0.0, 1.0),
             tabs: s.tabs.clone(),
             shell: (!s.shell.command.is_empty()).then(|| s.shell.command.clone()),
+            cursor_blink: s.cursor.blink,
+            cursor_blink_interval_ms: s.cursor.blink_interval_ms.clamp(100, 5000) as u32,
             scroll_on_output: s.scrolling.scroll_on_output,
         }
     }
@@ -276,6 +282,16 @@ pub struct App {
     tabs: TabStrip,
     /// The full-pane screen over the grid, when one is open; Esc returns.
     screen: AppScreen,
+    /// The animation clock's origin. Phases are derived, never stored, so a
+    /// missed tick cannot desynchronize anything.
+    anim_epoch: std::time::Instant,
+    /// A running spinner is on screen — set by the redraw that drew it.
+    anim_spin: bool,
+    /// A pulsing session dot is on screen — set by the chrome rebuild.
+    anim_pulse: bool,
+    /// The daemon link is down (`Wakeup::Detached` .. `Reattached`): the
+    /// status bar says "reconnecting" in danger until it heals.
+    link_down: bool,
     /// Hit regions of the per-frame block headers, consulted where the
     /// cached chrome layout says nothing. Rebuilt every redraw.
     block_hits: crate::chrome::hit::ChromeHitMap,
@@ -415,6 +431,10 @@ impl App {
             gpu: None,
             tabs: TabStrip::default(),
             screen: AppScreen::Terminal,
+            anim_epoch: std::time::Instant::now(),
+            anim_spin: false,
+            anim_pulse: false,
+            link_down: false,
             block_hits: crate::chrome::hit::ChromeHitMap::default(),
             folded_blocks: std::collections::HashMap::new(),
             activity: ActivityMap::default(),
@@ -1328,6 +1348,41 @@ impl App {
         ])
     }
 
+    /// The animation phases right now, from the shared clock. One clock, so
+    /// two spinners can never disagree about the time.
+    fn anim_phase(&self) -> crate::chrome::model::AnimPhase {
+        let ms = self.anim_epoch.elapsed().as_millis() as u64;
+        let blink = u64::from(self.config.cursor_blink_interval_ms.max(100));
+        let caret_on = !self.config.cursor_blink || (ms / blink).is_multiple_of(2);
+        let spin = (ms % 900) as f32 / 900.0;
+        // 1.6s ease-in-out between 1.0 and 0.35, as the design writes it.
+        let t = (ms % 1600) as f32 / 1600.0;
+        let pulse = 0.675 + 0.325 * (t * std::f32::consts::TAU).cos();
+        crate::chrome::model::AnimPhase { caret_on, spin, pulse }
+    }
+
+    /// The soonest the clock needs to wake the loop, or `None` when nothing
+    /// on screen is animating — which is what keeps 0%-idle true: a resting
+    /// window schedules nothing and draws nothing.
+    fn anim_deadline(&self) -> Option<std::time::Duration> {
+        let mut next: Option<u64> = None;
+        let mut consider = |ms: u64| next = Some(next.map_or(ms, |n: u64| n.min(ms)));
+        if self.anim_spin {
+            consider(80);
+        }
+        if self.anim_pulse {
+            consider(100);
+        }
+        let caret_active = self.focused
+            && self.config.cursor_blink
+            && self.screen == AppScreen::Terminal
+            && (!self.tabs.is_empty() || self.picker.is_some());
+        if caret_active {
+            consider(u64::from(self.config.cursor_blink_interval_ms.max(100)));
+        }
+        next.map(std::time::Duration::from_millis)
+    }
+
     /// Open or close a full-pane screen; closing always lands on the grid.
     fn show_screen(&mut self, screen: AppScreen) {
         self.screen = screen;
@@ -1394,6 +1449,8 @@ impl App {
             }
         };
 
+        // A dropped link outranks whatever path the host normally takes.
+        let link = if self.link_down { LinkKind::Reconnecting } else { link };
         Some(StatusModel {
             cwd,
             branch,
@@ -1675,6 +1732,8 @@ impl App {
         // Built before the font borrow below: row construction reads the
         // fleet and the tabs, never the fonts.
         let hosts_searched = self.fleet.as_ref().map_or(0, |f| f.snapshot().len());
+        let anim = self.anim_phase();
+        let caret_on = anim.caret_on;
         let early_geometry = self.window.as_ref().map(|w| {
             let scale = w.scale_factor() as f32;
             (scale, w.inner_size())
@@ -1702,6 +1761,7 @@ impl App {
                 scroll: state.scroll,
                 ensure_visible: state.scroll_to_selected,
                 hosts_searched,
+                caret_on,
             }
         });
 
@@ -1918,6 +1978,8 @@ impl App {
                 }
             });
 
+        self.anim_pulse = tab_models.iter().any(|t| t.running)
+            && self.config.tabs.position == zest_config::settings::TabsPosition::Left;
         let model = ChromeModel {
             tabs: tab_models,
             active: self.tabs.active_index(),
@@ -1931,6 +1993,7 @@ impl App {
             screen: screen_model,
             panes,
             grid_area,
+            anim,
             toggle_chord: keymap::chord_for(keymap::Action::ToggleTabLayout),
             palette_chord: keymap::chord_for(keymap::Action::ToggleFleetPicker),
             picker: picker_model,
@@ -2953,6 +3016,10 @@ impl App {
     /// labels. One short terminal lock; plain data out.
     fn build_block_views(&self) -> Vec<crate::chrome::blocks::BlockView> {
         let Some(tab) = self.tabs.active() else { return Vec::new() };
+        let pane_dead = match (&tab.split, tab.focus_right) {
+            (Some(split), true) => split.dead,
+            _ => tab.dead,
+        };
         let term = tab.focused_source().terminal();
         let term = term.lock();
         // The alt screen is a separate grid whose ids restart at zero; a
@@ -3024,7 +3091,10 @@ impl App {
                 Some(crate::chrome::blocks::BlockView {
                     id: b.id.0,
                     rows,
-                    running,
+                    // A block still "running" in a session whose host went
+                    // away is not running anywhere; the rail says so.
+                    interrupted: running && pane_dead,
+                    running: running && !pane_dead,
                     failed: b.failed(),
                     no_output,
                     command: b.command.clone(),
@@ -3106,6 +3176,9 @@ impl App {
         // views are plain data, and holding the terminal across atlas work
         // would stall the reader thread.
         let block_views = self.build_block_views();
+        self.anim_spin = block_views.iter().any(|v| v.running);
+        let anim = self.anim_phase();
+        let caret_on = anim.caret_on;
         // Where the headers draw: the focused pane's body when split.
         let block_area = self.focused_view_rect();
         let fold_map: Option<Vec<usize>> = self.tabs.active().and_then(|t| {
@@ -3172,6 +3245,7 @@ impl App {
                     scale,
                     &self.chrome_colors,
                     self.chrome_hover,
+                    anim.spin,
                     &mut measure,
                 )
             };
@@ -3242,6 +3316,7 @@ impl App {
                             selection: term_l.selection(),
                             selection_bg: self.selection_bg,
                             preedit: if left_focused { preedit } else { None },
+                            cursor_on: caret_on,
                             row_map: if left_focused { fold_map.as_deref() } else { None },
                         },
                         Viewport {
@@ -3254,6 +3329,7 @@ impl App {
                             selection: term_r.selection(),
                             selection_bg: self.selection_bg,
                             preedit: if focus_right { preedit } else { None },
+                            cursor_on: caret_on,
                             row_map: if focus_right { fold_map.as_deref() } else { None },
                         },
                     ];
@@ -3287,6 +3363,7 @@ impl App {
                             preedit: self.ime.preedit().map(|p| {
                                 zest_render_wgpu::Preedit { text: &p.text, cursor: p.cursor }
                             }),
+                            cursor_on: caret_on,
                             row_map: fold_map.as_deref(),
                         }],
                         &chrome,
@@ -3795,7 +3872,10 @@ impl ApplicationHandler<Wakeup> for App {
                 tracing::warn!("the daemon connection dropped; the session is still running");
                 // Nothing to schedule here: `RemoteSession` supervises its own
                 // link and is already dialling. The window goes on showing the
-                // last state that was true, because the session still exists.
+                // last state that was true, because the session still exists —
+                // and the status bar says "reconnecting" until it is.
+                self.link_down = true;
+                self.mark_chrome_dirty();
                 if let Some(s) = self.tabs.active_source() {
                     s.mark_dirty();
                 }
@@ -3863,6 +3943,8 @@ impl ApplicationHandler<Wakeup> for App {
             }
             Wakeup::Reattached => {
                 tracing::info!("the daemon connection is back");
+                self.link_down = false;
+                self.mark_chrome_dirty();
                 if let Some(s) = self.tabs.active_source() {
                     s.mark_dirty();
                 }
@@ -4619,12 +4701,33 @@ impl ApplicationHandler<Wakeup> for App {
         }
     }
 
+    fn new_events(&mut self, _el: &ActiveEventLoop, cause: winit::event::StartCause) {
+        // The animation clock fired: one repaint, then `about_to_wait`
+        // schedules the next tick — or nothing, if the animator's condition
+        // cleared in between. That is the settle guarantee in one place.
+        if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
+            self.chrome_dirty = true;
+            if let Some(session) = self.tabs.active_source() {
+                session.mark_dirty();
+            }
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        }
+    }
+
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
-        // Wait for something to happen rather than polling. With no animations
-        // yet there is nothing to schedule; the cursor blink will add a
-        // `WaitUntil` here. Reconnecting does not: `RemoteSession` supervises
-        // its own link on its own thread and wakes this loop when it is back.
-        el.set_control_flow(ControlFlow::Wait);
+        // Wait for something to happen rather than polling — unless something
+        // on screen is animating, in which case the clock names the *one*
+        // deadline it needs. A resting window schedules nothing (the 0%-idle
+        // guarantee); a blinking cursor costs exactly its two frames a
+        // second, which is the price of the setting being on.
+        match self.anim_deadline() {
+            Some(delay) => {
+                el.set_control_flow(ControlFlow::WaitUntil(std::time::Instant::now() + delay));
+            }
+            None => el.set_control_flow(ControlFlow::Wait),
+        }
     }
 }
 
