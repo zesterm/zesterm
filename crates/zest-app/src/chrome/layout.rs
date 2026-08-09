@@ -1464,28 +1464,63 @@ fn horizontal(
         let active = i == model.active;
         let hovered = model.hover == Some(HitRegion::Tab(tab.addr));
         if active {
-            // Fill + hairline border, rounded on top only. The bottom border
-            // and the strip hairline under the chip are then painted out with
-            // the fill, which is what "no bottom border" means to an SDF rect
-            // whose stroke is a ring.
+            // The mock's recipe, translated from CSS: `border: 1px line` with
+            // `border-bottom: none`, and `box-shadow: inset 0 2px 0 accent` —
+            // the accent hugs the rounded top edge and curves with the
+            // corners, it is not a straight bar. Three SDF rects:
+            //
+            // 1. The border ring, one hairline taller than the chip so its
+            //    bottom edge falls outside the strip clip — which is what
+            //    "no bottom border" means to a stroke that is a ring.
             out.rects.push(RectInstance {
                 radii: [TAB_RADIUS * s, TAB_RADIUS * s, 0.0, 0.0],
                 border: colors.line,
                 border_width: HAIRLINE * s,
-                ..RectInstance::filled(chip, colors.tab_active_bg, clip)
+                ..RectInstance::filled(
+                    [chip[0], chip[1], chip[2], chip[3] + HAIRLINE * s],
+                    LinearRgba::TRANSPARENT,
+                    clip,
+                )
             });
-            out.rects.push(RectInstance::filled(
-                [x + HAIRLINE * s, sh - HAIRLINE * s, tab_w - 2.0 * HAIRLINE * s, HAIRLINE * s],
-                colors.tab_active_bg,
-                clip,
-            ));
-            // The 2px accent rule along the top edge, inset past the corner
-            // radius so it never pokes out of the curve.
-            out.rects.push(RectInstance::filled(
-                [x + TAB_RADIUS * s, chip_y + HAIRLINE * s, tab_w - 2.0 * TAB_RADIUS * s, ACCENT_RULE * s],
-                colors.accent,
-                clip,
-            ));
+            // 2. The fill, inside the border, running to the strip's bottom
+            //    edge so the chip meets the pane with nothing drawn between.
+            out.rects.push(RectInstance {
+                radii: [(TAB_RADIUS - HAIRLINE) * s, (TAB_RADIUS - HAIRLINE) * s, 0.0, 0.0],
+                ..RectInstance::filled(
+                    [
+                        chip[0] + HAIRLINE * s,
+                        chip[1] + HAIRLINE * s,
+                        chip[2] - 2.0 * HAIRLINE * s,
+                        chip[3] - HAIRLINE * s,
+                    ],
+                    colors.tab_active_bg,
+                    clip,
+                )
+            });
+            // 3. The inset accent: a 2px inner ring on the fill's geometry,
+            //    clipped to the corner region, so it traces the top edge and
+            //    bends around both curves exactly as the inset shadow does.
+            let inset_clip = [
+                chip[0],
+                chip[1],
+                chip[2],
+                (TAB_RADIUS + ACCENT_RULE) * s,
+            ];
+            out.rects.push(RectInstance {
+                radii: [(TAB_RADIUS - HAIRLINE) * s, (TAB_RADIUS - HAIRLINE) * s, 0.0, 0.0],
+                border: colors.accent,
+                border_width: ACCENT_RULE * s,
+                ..RectInstance::filled(
+                    [
+                        chip[0] + HAIRLINE * s,
+                        chip[1] + HAIRLINE * s,
+                        chip[2] - 2.0 * HAIRLINE * s,
+                        chip[3],
+                    ],
+                    LinearRgba::TRANSPARENT,
+                    inset_clip,
+                )
+            });
         } else if hovered {
             out.rects.push(RectInstance {
                 radii: [TAB_RADIUS * s, TAB_RADIUS * s, 0.0, 0.0],
@@ -1508,7 +1543,9 @@ fn horizontal(
         );
 
         let mut text_right = x + tab_w - TAB_PAD * s;
-        if active || hovered {
+        // Every tab carries its close affordance, as the mock draws it; only
+        // its hover treatment is conditional.
+        {
             let close_hovered = model.hover == Some(HitRegion::TabClose(tab.addr));
             let close =
                 [x + tab_w - TAB_PAD * s - CLOSE * s, chip_y + (TAB_H * s - CLOSE * s) / 2.0, CLOSE * s, CLOSE * s];
@@ -2246,22 +2283,28 @@ mod tests {
     }
 
     #[test]
-    fn only_the_active_or_hovered_tab_offers_close() {
+    fn every_tab_offers_its_close_affordance() {
+        // The design draws the × on every chip (mock, screen 1), not only
+        // the active one — a mis-click on a background tab's × should close
+        // *that* tab, which the hit map already guarantees by construction.
         let tabs = vec![
             tab(1, TabOrigin::Local, TabPresence::Online),
             tab(2, TabOrigin::Local, TabPresence::Online),
         ];
         let m = metrics(1200.0, 800.0, 1.0);
         let l = layout(&model(tabs, TabsPosition::Top), &colors(), &m, &mut measure);
-        let closes: Vec<_> = (0..1200)
-            .flat_map(|x| (0..40).map(move |y| (x, y)))
+        let closes: std::collections::HashSet<_> = (0..1200)
+            .flat_map(|x| (0..46).map(move |y| (x, y)))
             .filter_map(|(x, y)| match l.hit.hit(x as f32, y as f32) {
                 Some(HitRegion::TabClose(a)) => Some(a),
                 _ => None,
             })
             .collect();
-        assert!(closes.iter().all(|a| *a == addr(1)), "only the active tab closes");
-        assert!(!closes.is_empty());
+        assert_eq!(
+            closes,
+            [addr(1), addr(2)].into(),
+            "each tab's × answers as that tab's close"
+        );
     }
 
     #[test]
