@@ -15,6 +15,14 @@ use crate::grid::{Cursor, Grid, LineId, SavedCursor};
 use crate::modes::{CursorStyle, Modes};
 use crate::palette::{Palette, PaletteSnapshot, Rgb};
 
+/// How deep a kitty keyboard flag stack goes before the oldest entry is evicted.
+///
+/// The protocol leaves this to the terminal and asks only that it be bounded,
+/// because an unbounded push is a denial of service one escape sequence long.
+/// Real programs push once on entry and pop once on exit; kitty itself uses the
+/// same order of magnitude.
+const KITTY_STACK_DEPTH: usize = 8;
+
 /// Things the terminal needs the host to do, which it cannot do itself.
 ///
 /// Returned rather than performed because `zest-core` has no I/O: the host owns
@@ -76,6 +84,17 @@ pub struct TermState {
     pub(crate) template: Cell,
     pub(crate) saved_cursor: SavedCursor,
     pub(crate) saved_cursor_alt: SavedCursor,
+    /// The kitty keyboard flag stack for the main screen.
+    ///
+    /// Two stacks, one per screen, because the protocol requires it: a
+    /// full-screen program pushes its flags on entry and pops them on exit, and
+    /// sharing one stack would leave the shell holding whatever `nvim` was
+    /// using after a crash. The same reason `saved_cursor_alt` exists.
+    ///
+    /// The stack is host state and never crosses the wire — only the top
+    /// matters to an encoder, and that rides in `modes`.
+    pub(crate) kitty_stack: Vec<u8>,
+    pub(crate) kitty_stack_alt: Vec<u8>,
     pub(crate) modes: Modes,
     pub(crate) palette: Palette,
     pub(crate) tabs: Vec<bool>,
@@ -342,6 +361,8 @@ impl TermState {
             template: Cell::default(),
             saved_cursor: SavedCursor::default(),
             saved_cursor_alt: SavedCursor::default(),
+            kitty_stack: Vec::new(),
+            kitty_stack_alt: Vec::new(),
             modes: Modes::initial(),
             palette: Palette::new(palette_seed),
             tabs: default_tabs(cols),
@@ -654,7 +675,105 @@ impl TermState {
             self.alt_grid = None;
             self.modes -= Modes::ALT_SCREEN;
         }
+        // The two screens keep separate keyboard flags, so switching screens
+        // switches which ones are live. Without this the shell inherits the
+        // flags of the program that just exited and every keystroke encodes
+        // wrongly until something resets them.
+        self.sync_kitty_modes();
         self.touch_full();
+    }
+
+    // --- the Kitty keyboard flag stack ------------------------------------
+
+    /// The flag stack belonging to the screen currently displayed.
+    fn kitty_stack_mut(&mut self) -> &mut Vec<u8> {
+        if self.alt_grid.is_some() {
+            &mut self.kitty_stack_alt
+        } else {
+            &mut self.kitty_stack
+        }
+    }
+
+    /// Copy the top of the active stack into the mode word.
+    ///
+    /// The stack is the truth; `modes` is the projection of it that reaches a
+    /// client. Every mutation ends here so the two cannot disagree.
+    ///
+    /// **The `touch` is load-bearing and its absence is invisible locally.**
+    /// Deltas are computed against `seq` (`subscribe::update_for`), so flags
+    /// that change without bumping it never reach an attached client, which
+    /// then keeps encoding every keystroke the legacy way at a program that has
+    /// stopped expecting it. A window driving a pty in this process reads
+    /// `modes` off the terminal directly and looks perfectly correct.
+    fn sync_kitty_modes(&mut self) {
+        let flags = if self.alt_grid.is_some() {
+            self.kitty_stack_alt.last().copied()
+        } else {
+            self.kitty_stack.last().copied()
+        }
+        .unwrap_or(0);
+        let next = self.modes.with_kitty_flags(flags);
+        // Conditional so a bare `CSI ? u` query -- which programs send on
+        // startup and change nothing -- does not wake every subscriber.
+        if next != self.modes {
+            self.modes = next;
+            self.touch();
+        }
+    }
+
+    /// The flags in force, as the protocol numbers them.
+    pub(crate) fn kitty_flags(&self) -> u8 {
+        self.modes.kitty_flags()
+    }
+
+    pub(crate) fn kitty_push(&mut self, flags: u8) {
+        let stack = self.kitty_stack_mut();
+        // A program that pushes and never pops is a program that leaks memory
+        // in someone else's process, so the depth is bounded and the oldest
+        // entry is evicted. The protocol asks for exactly this.
+        if stack.len() == KITTY_STACK_DEPTH {
+            stack.remove(0);
+        }
+        stack.push(flags & Modes::KITTY_SUPPORTED);
+        self.sync_kitty_modes();
+    }
+
+    pub(crate) fn kitty_pop(&mut self, count: usize) {
+        let stack = self.kitty_stack_mut();
+        for _ in 0..count {
+            if stack.pop().is_none() {
+                break;
+            }
+        }
+        self.sync_kitty_modes();
+    }
+
+    /// `CSI = flags ; mode u` — modify the flags in force without pushing.
+    pub(crate) fn kitty_set(&mut self, flags: u8, mode: u16) {
+        let flags = flags & Modes::KITTY_SUPPORTED;
+        let current = self.kitty_flags();
+        let next = match mode {
+            2 => current | flags,
+            3 => current & !flags,
+            // Mode 1 is the default, and so is anything unrecognized: the
+            // protocol defines 1..=3 and says nothing about the rest.
+            _ => flags,
+        };
+        let stack = self.kitty_stack_mut();
+        // Setting with an empty stack has to create the entry it modifies, or
+        // the flags a program asked for vanish the moment it asks for them.
+        match stack.last_mut() {
+            Some(top) => *top = next,
+            None => stack.push(next),
+        }
+        self.sync_kitty_modes();
+    }
+
+    /// Drop both stacks, for RIS.
+    pub(crate) fn kitty_reset(&mut self) {
+        self.kitty_stack.clear();
+        self.kitty_stack_alt.clear();
+        self.sync_kitty_modes();
     }
 
     // --- SGR --------------------------------------------------------------

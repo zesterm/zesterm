@@ -322,6 +322,162 @@ fn device_status_report_answers_with_the_cursor_position() {
     assert_eq!(replies, vec!["\x1b[3;7R".to_string()]);
 }
 
+// --- the Kitty keyboard protocol -----------------------------------------
+
+/// Every reply the terminal has queued, as strings.
+fn replies(t: &mut Terminal) -> Vec<String> {
+    t.take_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            TermEvent::Reply(b) => Some(String::from_utf8_lossy(&b).into_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Ask the terminal what keyboard flags it thinks are in force.
+fn kitty_query(t: &mut Terminal) -> String {
+    t.advance(b"\x1b[?u");
+    let r = replies(t);
+    assert_eq!(r.len(), 1, "a keyboard query is answered exactly once");
+    r.into_iter().next().unwrap()
+}
+
+#[test]
+fn a_bare_csi_u_still_restores_the_cursor() {
+    // The kitty arms sit above SCORC in the same match, and getting the order
+    // or the intermediates wrong silently breaks cursor save/restore for every
+    // program that has never heard of kitty.
+    let mut t = Terminal::new(20, 5, 0);
+    t.advance(b"\x1b[3;7H\x1b[s\x1b[1;1H\x1b[u");
+    assert_eq!((t.grid().cursor.row, t.grid().cursor.col), (2, 6), "SCORC still works");
+}
+
+#[test]
+fn the_keyboard_flags_start_empty_and_are_reported() {
+    let mut t = Terminal::new(20, 5, 0);
+    assert_eq!(kitty_query(&mut t), "\x1b[?0u", "nothing is enabled until asked for");
+    assert_eq!(t.modes().kitty_flags(), 0);
+}
+
+#[test]
+fn pushing_flags_makes_them_current() {
+    let mut t = Terminal::new(20, 5, 0);
+    t.advance(b"\x1b[>3u");
+    assert_eq!(kitty_query(&mut t), "\x1b[?3u");
+    assert!(t.modes().contains(Modes::KITTY_DISAMBIGUATE));
+    assert!(t.modes().contains(Modes::KITTY_EVENT_TYPES));
+}
+
+#[test]
+fn unimplemented_flags_are_never_reported_as_enabled() {
+    // Answering `31` would tell the program it will receive alternate keys and
+    // associated text. It will not, and having been told otherwise it has no
+    // reason to fall back.
+    let mut t = Terminal::new(20, 5, 0);
+    t.advance(b"\x1b[>31u");
+    assert_eq!(kitty_query(&mut t), "\x1b[?11u", "only flags 1, 2 and 8 are implemented");
+}
+
+#[test]
+fn popping_restores_what_was_pushed_before() {
+    let mut t = Terminal::new(20, 5, 0);
+    t.advance(b"\x1b[>1u\x1b[>9u");
+    assert_eq!(kitty_query(&mut t), "\x1b[?9u");
+    t.advance(b"\x1b[<u");
+    assert_eq!(kitty_query(&mut t), "\x1b[?1u", "a bare pop removes one entry");
+}
+
+#[test]
+fn popping_an_empty_stack_disables_everything() {
+    // The protocol says an emptied stack means all flags reset -- not "keep the
+    // last value", which is what a naive `pop().unwrap_or(current)` would do.
+    let mut t = Terminal::new(20, 5, 0);
+    t.advance(b"\x1b[>9u\x1b[<5u");
+    assert_eq!(kitty_query(&mut t), "\x1b[?0u");
+}
+
+#[test]
+fn set_replaces_adds_and_removes_by_mode() {
+    let mut t = Terminal::new(20, 5, 0);
+    t.advance(b"\x1b[=1;1u");
+    assert_eq!(kitty_query(&mut t), "\x1b[?1u", "mode 1 replaces");
+    t.advance(b"\x1b[=8;2u");
+    assert_eq!(kitty_query(&mut t), "\x1b[?9u", "mode 2 adds");
+    t.advance(b"\x1b[=1;3u");
+    assert_eq!(kitty_query(&mut t), "\x1b[?8u", "mode 3 removes");
+    t.advance(b"\x1b[=2u");
+    assert_eq!(kitty_query(&mut t), "\x1b[?2u", "the default mode replaces");
+}
+
+#[test]
+fn set_does_not_grow_the_stack() {
+    // `CSI = ` modifies the entry in force; a program that sets in a loop must
+    // not be able to push the terminal's own entry out from under it.
+    let mut t = Terminal::new(20, 5, 0);
+    t.advance(b"\x1b[>1u");
+    for _ in 0..20 {
+        t.advance(b"\x1b[=9;1u");
+    }
+    t.advance(b"\x1b[<u");
+    assert_eq!(kitty_query(&mut t), "\x1b[?0u", "one push means one pop empties it");
+}
+
+#[test]
+fn the_stack_is_bounded_and_evicts_the_oldest() {
+    // Unbounded, this is a denial of service one escape sequence long.
+    let mut t = Terminal::new(20, 5, 0);
+    t.advance(b"\x1b[>1u");
+    for _ in 0..64 {
+        t.advance(b"\x1b[>9u");
+    }
+    for _ in 0..64 {
+        t.advance(b"\x1b[<u");
+    }
+    assert_eq!(kitty_query(&mut t), "\x1b[?0u", "the first entry was evicted, not kept");
+}
+
+#[test]
+fn each_screen_keeps_its_own_flags() {
+    // A full-screen program pushes on entry and pops on exit. Sharing one stack
+    // leaves the shell encoding keys the way `nvim` wanted after `nvim` dies.
+    let mut t = Terminal::new(20, 5, 0);
+    t.advance(b"\x1b[>1u");
+    t.advance(b"\x1b[?1049h\x1b[>9u");
+    assert_eq!(kitty_query(&mut t), "\x1b[?9u", "the alternate screen has its own");
+    t.advance(b"\x1b[?1049l");
+    assert_eq!(kitty_query(&mut t), "\x1b[?1u", "leaving it restores the shell's");
+}
+
+#[test]
+fn changing_the_flags_bumps_the_sequence() {
+    // Deltas are computed against `seq`. Flags that change without bumping it
+    // never reach an attached client, which then keeps encoding the legacy way
+    // at a program that has stopped expecting it -- and the local window, which
+    // reads modes off this terminal directly, looks perfectly correct while it
+    // happens. The bug this pins was written and shipped before it was caught.
+    let mut t = Terminal::new(20, 5, 0);
+    let before = t.seq();
+    t.advance(b"\x1b[>1u");
+    assert!(t.seq() > before, "a client never told the flags changed cannot encode for them");
+
+    // A query changes nothing and must not wake every subscriber.
+    let quiet = t.seq();
+    t.advance(b"\x1b[?u");
+    assert_eq!(t.seq(), quiet, "asking is not changing");
+}
+
+#[test]
+fn a_full_reset_empties_both_stacks() {
+    let mut t = Terminal::new(20, 5, 0);
+    t.advance(b"\x1b[>9u\x1b[>1u");
+    t.advance(b"\x1bc");
+    assert_eq!(kitty_query(&mut t), "\x1b[?0u");
+    // Not just the flags: a surviving stack would put them back on the next pop.
+    t.advance(b"\x1b[<u");
+    assert_eq!(kitty_query(&mut t), "\x1b[?0u", "RIS drops the stack, not only the top");
+}
+
 // --- unicode -------------------------------------------------------------
 
 #[test]

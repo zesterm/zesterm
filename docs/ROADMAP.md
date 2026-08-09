@@ -57,7 +57,7 @@ and its number (48ms) is reported rather than gated.
 | `zest-theme` | ✅ tokens, OKLCH derivation, 5 built-ins, 4 importers |
 | `zest-render-wgpu` | ✅ pipelines, atlas, offscreen resolve, selection — ⬜ gamma validation |
 | `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema |
-| `zest-input` | ✅ extracted; keys + SGR mouse + selection + IME — ⬜ Kitty protocol |
+| `zest-input` | ✅ extracted; keys + SGR mouse + selection + IME + Kitty CSI u (flags 1, 2, 8) — ⬜ Kitty flags 4/16, keypad |
 | `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), restore-on-launch — runs on Windows *and* macOS (Metal, transparent titlebar) — ⬜ Windows chrome, motion |
 | `zest-proto` | ✅ protocol 2, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, cell-for-cell conformance, chaos-resync, command blocks |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store — ⬜ Cloudflare transport (M4) |
@@ -171,7 +171,7 @@ below means "do not touch this file".
 | | Stream | About | Status | Issue |
 |---|---|---|---|---|
 | **A** | [Windows chrome, motion, polish](#ws-a) | `zest-app/src/{chrome,motion,platform}*`, `zest-render-wgpu/` | Open — closes M1 | [#5](https://github.com/zesterm/zesterm/issues/5) |
-| **B** | [`zest-input`](#ws-b) | `crates/zest-input/` | Extracted ✅ · IME ✅ · Kitty open | [#2](https://github.com/zesterm/zesterm/issues/2) |
+| **B** | [`zest-input`](#ws-b) | `crates/zest-input/` | Extracted ✅ · IME ✅ · Kitty CSI u ✅ · flags 4/16 open | [#2](https://github.com/zesterm/zesterm/issues/2) |
 | **C** | [Unix PTY + macOS host](#ws-c) | `zest-pty/src/unix.rs`, macOS platform | C1 ✅ · **C2 in progress** — the app must run on the Mac to verify M3 there | [#3](https://github.com/zesterm/zesterm/issues/3) |
 | **D** | [Linux host](#ws-d) | Linux platform + packaging | Open — C1 landed `unix.rs` | [#9](https://github.com/zesterm/zesterm/issues/9) |
 | **E** | [Command blocks](#ws-e) | `zest-core/src/blocks.rs`, OSC 133, shell integration | Open | [#6](https://github.com/zesterm/zesterm/issues/6) |
@@ -529,7 +529,36 @@ Extraction from `zest-app` collides with WS-A, so it landed early and small.
       session, so writing provisional text into it would put half-typed
       characters into someone else's scrollback. Only the commit reaches the pty,
       as plain UTF-8 — not bracketed, because this is typing, not a paste.
-- [ ] Kitty keyboard protocol (CSI u) behind a mode flag.
+- [x] **Kitty keyboard protocol (CSI u), flags 1, 2 and 8.** Disambiguate
+      escape codes, report event types, report all keys as escape codes. The
+      terminal owns a per-screen flag stack — a crashed full-screen program
+      cannot leave the shell encoding keys its way — and the flags reach a
+      *remote* client as three new `Modes` bits, so encoding still happens at
+      the keyboard with no protocol change and no version bump.
+
+      Three things worth knowing before touching it. **`CSI u` with no
+      intermediate is still SCORC**, and the arm that used to match it with any
+      intermediate was executing every kitty sequence as a cursor restore.
+      **F1–F4 use the `~` form**, because `CSI 1;m R` is CPR. And the flags
+      only reach an attached client because `sync_kitty_modes` bumps `seq`;
+      without that the local window looks perfect and every remote session
+      encodes the legacy way at a program that has stopped expecting it.
+- [ ] Kitty flags 4 (alternate keys) and 16 (associated text). 4 needs the
+      base-layout key, which winit exposes through a trait that does not cover
+      Wayland — a platform-capability question, not a table to fill in. 16 is
+      what would let an IME commit reach a program running under flag 8.
+- [ ] Keypad keys as separate keys under flag 1 (`CSI 57399…57427 u`). Left out
+      of the first pass rather than guessed: the numbers want checking against
+      `kitty +kitten show_key -m kitty`, and wrong key numbers are worse than
+      absent ones.
+- [ ] `Ctrl+Tab` is swallowed by the binding table before the encoder sees it
+      (`keymap.rs`, `When::Always`), so it cannot reach a program as `CSI 9;5u`
+      — which is exactly what Helix and neovim configs bind now that kitty made
+      it expressible. The fix is a third `When` variant, not an if-block.
+- [ ] `CSI > c` (DA2) and `CSI = c` (DA3) are answered with DA1, from the same
+      wildcard-intermediate mistake as the `u` arm ten lines away. Harmless
+      today and on the kitty probe path, so worth fixing deliberately rather
+      than as a drive-by.
 
 ### WS-C — Unix PTY + macOS host
 

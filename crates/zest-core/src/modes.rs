@@ -54,6 +54,30 @@ bitflags::bitflags! {
         /// 9001 — win32 input mode, which ConPTY enables. Delivers key-up and
         /// modifier-only events to console programs.
         const WIN32_INPUT        = 1 << 15;
+
+        // --- the Kitty keyboard protocol ---------------------------------
+        //
+        // Not DEC modes: they are set by `CSI > flags u` and friends, and the
+        // authoritative value is the top of a per-screen stack held in
+        // `TermState`. They live here anyway because `Modes` is what already
+        // reaches a client, and a client that cannot see them encodes every
+        // keystroke the legacy way — which is the one thing this protocol
+        // exists to stop.
+        //
+        // Kitty flag `1 << k` maps to `1 << (16 + k)`, so the two holes below
+        // are the two flags this terminal does not implement yet rather than
+        // an arbitrary layout. `Modes::kitty_flags` depends on that.
+
+        /// Kitty flag 1 — disambiguate escape codes. `Ctrl+I` stops being
+        /// `Tab`, and `Shift+Enter` becomes expressible at all.
+        const KITTY_DISAMBIGUATE = 1 << 16;
+        /// Kitty flag 2 — report press, repeat and release as event types.
+        const KITTY_EVENT_TYPES  = 1 << 17;
+        // 1 << 18 is kitty flag 4, report alternate keys. Not implemented.
+        /// Kitty flag 8 — report all keys as escape codes, including the ones
+        /// that have legacy bytes: Enter, Tab, Backspace, Escape.
+        const KITTY_REPORT_ALL   = 1 << 19;
+        // 1 << 20 is kitty flag 16, report associated text. Not implemented.
     }
 }
 
@@ -69,6 +93,32 @@ impl Modes {
     pub fn mouse_enabled(self) -> bool {
         self.intersects(Modes::MOUSE_CLICK | Modes::MOUSE_DRAG | Modes::MOUSE_MOTION)
     }
+
+    /// The kitty keyboard flags this terminal implements, as the protocol
+    /// numbers them.
+    ///
+    /// Anything outside this set is dropped on the way in rather than stored,
+    /// so `CSI ? u` answers with what the terminal will actually do. A program
+    /// told it will receive alternate keys, and then never sent any, is worse
+    /// off than one told no — it has no reason to fall back.
+    pub const KITTY_SUPPORTED: u8 = 1 | 2 | 8;
+
+    /// The kitty flags as a protocol flag byte.
+    #[must_use]
+    pub fn kitty_flags(self) -> u8 {
+        ((self.bits() >> Modes::KITTY_SHIFT) as u8) & Modes::KITTY_SUPPORTED
+    }
+
+    /// This mode set with the kitty flags replaced by `flags`.
+    #[must_use]
+    pub fn with_kitty_flags(self, flags: u8) -> Self {
+        let kept = self.bits() & !(u32::from(Modes::KITTY_SUPPORTED) << Modes::KITTY_SHIFT);
+        let set = u32::from(flags & Modes::KITTY_SUPPORTED) << Modes::KITTY_SHIFT;
+        Modes::from_bits_truncate(kept | set)
+    }
+
+    /// Where the kitty flag byte sits inside the mode word.
+    const KITTY_SHIFT: u32 = 16;
 }
 
 /// Cursor shape, set by DECSCUSR (`CSI Ps SP q`).
@@ -150,6 +200,36 @@ mod tests {
         assert!(Modes::MOUSE_MOTION.mouse_enabled());
         // SGR is an encoding, not a reporting mode -- on its own it reports nothing.
         assert!(!Modes::MOUSE_SGR.mouse_enabled());
+    }
+
+    #[test]
+    fn kitty_flags_round_trip_through_the_mode_word() {
+        for flags in 0..=0b11111u8 {
+            let m = Modes::initial().with_kitty_flags(flags);
+            let want = flags & Modes::KITTY_SUPPORTED;
+            assert_eq!(m.kitty_flags(), want, "kitty flags {flags} did not survive");
+        }
+    }
+
+    #[test]
+    fn unsupported_kitty_flags_are_refused_rather_than_stored() {
+        // Storing flag 4 would make `CSI ? u` promise alternate keys that never
+        // arrive, and a program believing that has no reason to fall back.
+        let m = Modes::empty().with_kitty_flags(0b11111);
+        assert_eq!(m.kitty_flags(), Modes::KITTY_SUPPORTED);
+        // The reserved holes must stay empty; `contains` cannot say so, because
+        // an undefined bit truncates to `Modes::empty()` and is contained by
+        // everything.
+        assert_eq!(m.bits() & ((1 << 18) | (1 << 20)), 0, "flags 4 and 16 are not implemented");
+    }
+
+    #[test]
+    fn setting_kitty_flags_leaves_every_other_mode_alone() {
+        // They share one word, so a careless mask here silently turns off
+        // autowrap or the cursor.
+        let before = Modes::initial() | Modes::BRACKETED_PASTE;
+        let after = before.with_kitty_flags(Modes::KITTY_SUPPORTED).with_kitty_flags(0);
+        assert_eq!(after, before, "only the kitty bits may move");
     }
 
     #[test]

@@ -183,7 +183,30 @@ impl vte::Perform for TermState {
             },
 
             ('s', _) => self.save_cursor(),
-            ('u', _) => self.restore_cursor(),
+
+            // --- the Kitty keyboard protocol ---
+            //
+            // These must precede the SCORC arm below, which matches `u` with
+            // any intermediate. It used to match these too, so every query and
+            // every push moved the cursor instead -- silently, because SCORC
+            // restores a position that is usually where the cursor already is.
+            ('u', Some(b'?')) => {
+                let mut s = String::new();
+                core::fmt::Write::write_fmt(&mut s, format_args!("\x1b[?{}u", self.kitty_flags()))
+                    .ok();
+                self.reply(s.as_bytes());
+            }
+            // `arg` substitutes the default for an explicit zero, which is
+            // harmless here only because zero *is* the default for a push and
+            // for a set's flags. `CSI > 0 u` means "push no flags" and gets it.
+            ('u', Some(b'>')) => self.kitty_push(arg(0, 0) as u8),
+            ('u', Some(b'<')) => self.kitty_pop(arg(0, 1)),
+            ('u', Some(b'=')) => self.kitty_set(arg(0, 0) as u8, arg(1, 1) as u16),
+
+            // `None`, not `_`: answering SCORC for an intermediate this
+            // terminal does not know is how the kitty sequences above came to
+            // be executed as cursor restores in the first place.
+            ('u', None) => self.restore_cursor(),
             _ => {}
         }
     }
@@ -380,6 +403,13 @@ impl TermState {
         let t = Cell::default();
         self.template = t;
         self.modes = Modes::initial();
+        // Before `set_alt_screen`, which re-reads the main stack to decide what
+        // the flags become. Clearing after works only because the clear then
+        // overwrites it, which is a right answer by way of a wrong order.
+        //
+        // Both stacks, not just the flags: a surviving stack would put the old
+        // flags back on the next pop, after a reset that promised otherwise.
+        self.kitty_reset();
         self.set_alt_screen(false);
         self.grid_mut().clear_all(&t);
         self.palette.reset_indexed(None);

@@ -494,6 +494,39 @@ mod tests {
     }
 
     #[test]
+    fn the_kitty_keyboard_flags_reach_the_client() {
+        // The client is where keystrokes are encoded, so flags that stay on the
+        // host are flags nobody applies.
+        //
+        // This covers encode and apply, *not* the decision to send: `feed`
+        // encodes unconditionally, while the daemon asks `update_for(seq)`
+        // first. `changing_the_flags_bumps_the_sequence` in zest-core is what
+        // guards that half, and it is the one that catches the real bug --
+        // verified by removing the fix and watching only that test fail.
+        let mut p = Pair::new(20, 3);
+        p.feed(b"\x1b[>9u");
+        assert_eq!(p.client.modes().kitty_flags(), 9, "pushed flags did not cross the wire");
+        assert_eq!(p.client.modes(), p.host.modes());
+
+        p.feed(b"\x1b[<u");
+        assert_eq!(p.client.modes().kitty_flags(), 0, "the pop did not cross either");
+        assert_eq!(p.client.modes(), p.host.modes());
+    }
+
+    #[test]
+    fn a_late_client_is_told_the_keyboard_flags_in_its_keyframe() {
+        // Attaching to a session where `nvim` is already running must not mean
+        // encoding the legacy way until the next push.
+        let mut p = Pair::new(20, 3);
+        p.feed(b"\x1b[>9u");
+
+        let mut late = Terminal::new(20, 3, 100);
+        let k = p.enc.keyframe(p.host.grid(), cursor(), p.host.modes(), "", p.host.blocks());
+        p.app.apply_keyframe(&mut late, &k, 1);
+        assert_eq!(late.modes().kitty_flags(), 9);
+    }
+
+    #[test]
     fn a_keyframe_title_reaches_a_late_client() {
         // A tab attaching to a session already titled shows that title
         // immediately, not on the next retitle.

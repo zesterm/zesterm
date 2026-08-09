@@ -4,12 +4,20 @@
 //! which is not the same as sending nothing: a bare modifier press must not wake
 //! the pty at all.
 //!
-//! The Kitty keyboard protocol (CSI u) goes here, behind the mode flag the
-//! program requests. It is worth planning for rather than bolting on — its
-//! disambiguation model is not expressible as a tweak to the legacy scheme.
+//! The Kitty keyboard protocol (CSI u) lives here too, behind the flags the
+//! program pushed with `CSI > flags u`. Its disambiguation model is not
+//! expressible as a tweak to the legacy scheme, so the two paths are separate
+//! and the legacy one is untouched when no flags are set — which is the case
+//! for every program that has not asked.
+//!
+//! # Why the encoding happens on the client
+//!
+//! The flags are set by the program, which is on the host, and applied to a
+//! keystroke, which is on this machine. They reach here inside `Modes`, over
+//! the same wire as autowrap and the alternate screen. See `zest_core::modes`.
 
-use winit::event::KeyEvent;
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::event::{ElementState, KeyEvent};
+use winit::keyboard::{Key, KeyLocation, ModifiersState, NamedKey};
 use zest_core::Modes;
 
 /// Whether a chord belongs to the desktop rather than to the terminal.
@@ -38,20 +46,325 @@ pub fn is_clipboard_chord(mods: ModifiersState) -> bool {
     mods.super_key() || (mods.control_key() && mods.shift_key())
 }
 
-/// Encode a key press.
+/// Which of press, repeat and release this is.
+///
+/// The legacy scheme cannot express the distinction at all — it is the reason
+/// kitty flag 2 exists — so this is carried separately rather than folded into
+/// the modifiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventType {
+    Press,
+    Repeat,
+    Release,
+}
+
+impl EventType {
+    fn of(state: ElementState, repeat: bool) -> Self {
+        match (state, repeat) {
+            (ElementState::Released, _) => EventType::Release,
+            (ElementState::Pressed, true) => EventType::Repeat,
+            (ElementState::Pressed, false) => EventType::Press,
+        }
+    }
+
+    /// The protocol's sub-parameter. Press is 1 and is written as the default.
+    fn param(self) -> u8 {
+        match self {
+            EventType::Press => 1,
+            EventType::Repeat => 2,
+            EventType::Release => 3,
+        }
+    }
+}
+
+/// A keystroke, reduced to what the encoders actually need.
+///
+/// Everything below is written against this rather than `winit::KeyEvent`,
+/// which has no public constructor worth using and cannot be built in a test.
+/// The public [`encode`] is the only place the two meet.
+struct KeyPress<'a> {
+    key: &'a Key,
+    location: KeyLocation,
+    mods: ModifiersState,
+    event: EventType,
+}
+
+/// Encode a key event.
 ///
 /// Returns `None` for keys that produce nothing — bare modifiers, unhandled
 /// function keys, anything the desktop has claimed — so the caller can
 /// distinguish "nothing to send" from "sent empty".
+///
+/// Releases and repeats reach the pty only when the program asked for them with
+/// kitty flag 2; otherwise a release encodes to `None` exactly as before.
 pub fn encode(event: &KeyEvent, mods: ModifiersState, modes: Modes) -> Option<Vec<u8>> {
-    // Falling through with Super held would encode the *unmodified* key, so on
-    // macOS every Command shortcut types its own letter: Cmd+V pastes nothing
-    // and inserts a `v`. `None` leaves the chord to the caller, which is where
-    // the clipboard shortcuts live.
-    if belongs_to_desktop(mods) {
-        return None;
+    KeyPress {
+        key: &event.logical_key,
+        location: event.location,
+        mods,
+        event: EventType::of(event.state, event.repeat),
+    }
+    .encode(modes)
+}
+
+impl KeyPress<'_> {
+    fn encode(&self, modes: Modes) -> Option<Vec<u8>> {
+        // Falling through with Super held would encode the *unmodified* key, so
+        // on macOS every Command shortcut types its own letter: Cmd+V pastes
+        // nothing and inserts a `v`. `None` leaves the chord to the caller,
+        // which is where the clipboard shortcuts live.
+        if belongs_to_desktop(self.mods) {
+            return None;
+        }
+
+        let flags = modes.kitty_flags();
+        if flags != 0 {
+            return self.encode_kitty(flags);
+        }
+
+        // Nothing asked for event types, so a release is not encodable and a
+        // repeat is indistinguishable from a press -- which is what every
+        // program not speaking this protocol expects.
+        if self.event == EventType::Release {
+            return None;
+        }
+        encode_legacy(self.key, self.mods, modes)
     }
 
+    /// Encode under the Kitty keyboard protocol.
+    ///
+    /// `flags` is what the program pushed, already masked to what this terminal
+    /// implements — see `zest_core::Modes::kitty_flags`.
+    fn encode_kitty(&self, flags: u8) -> Option<Vec<u8>> {
+        let event_types = flags & 2 != 0;
+        let report_all = flags & 8 != 0;
+
+        // Nothing asked to hear about releases, so there is no form to send one
+        // in. A repeat still encodes, as a press -- which is what a program
+        // holding a key down has always seen.
+        if !event_types && self.event == EventType::Release {
+            return None;
+        }
+
+        match self.key {
+            Key::Named(named) => self.encode_kitty_named(*named, report_all, event_types),
+            Key::Character(text) => self.encode_kitty_text(text, report_all, event_types),
+            _ => None,
+        }
+    }
+
+    fn encode_kitty_named(
+        &self,
+        named: NamedKey,
+        report_all: bool,
+        event_types: bool,
+    ) -> Option<Vec<u8>> {
+        let (mods, ev) = (self.mods, self.event);
+
+        // Escape is always the escape form, modified or not. It is the reason
+        // to turn flag 1 on at all: a bare `0x1b` is indistinguishable from the
+        // first byte of every other sequence, so an application has to guess
+        // with a timer, and `CSI 27 u` is what removes the guess.
+        if named == NamedKey::Escape {
+            return Some(kitty_u(27, mods, ev, event_types));
+        }
+
+        // The other keys with a legacy byte keep it, because disambiguating
+        // `Ctrl+I` from `Tab` does not require changing what `Tab` itself
+        // sends -- and changing it would break every program that asked only to
+        // disambiguate. Flag 8 is the program asking for the escape code
+        // regardless.
+        if let Some((number, legacy)) = legacy_byte(named) {
+            let plain = modifier_param(mods) == 1 && !(event_types && ev.param() != 1);
+            // `plain` is false for anything with an event type to report, so a
+            // release always escalates to the escape form here rather than
+            // falling through to a legacy byte that cannot carry one. Unlike a
+            // text key, these have a protocol number to be reported under.
+            return Some(if report_all || !plain {
+                kitty_u(number, mods, ev, event_types)
+            } else {
+                legacy
+            });
+        }
+
+        // Cursor and F1-F4 keep their CSI letter, never SS3: SS3 has no
+        // parameter slot, and a program that asked to disambiguate is owed a
+        // form that can carry the modifiers. DECCKM is deliberately ignored
+        // here for the same reason, which is why `modes` is not a parameter.
+        if let Some(letter) = csi_letter(named) {
+            return Some(kitty_letter(letter, mods, ev, event_types));
+        }
+        if let Some(n) = tilde_number(named) {
+            return Some(kitty_tilde(n, mods, ev, event_types));
+        }
+
+        // The modifier keys themselves. Only flag 8 asks for these, and without
+        // it a bare modifier press must stay silent rather than wake the pty.
+        if report_all {
+            if let Some(n) = modifier_key_number(named, self.location) {
+                return Some(kitty_u(n, mods, ev, event_types));
+            }
+        }
+        None
+    }
+
+    fn encode_kitty_text(
+        &self,
+        text: &str,
+        report_all: bool,
+        event_types: bool,
+    ) -> Option<Vec<u8>> {
+        let ch = text.chars().next()?;
+        // The protocol keys on the *unshifted* character. Recovering it
+        // properly is kitty flag 4 (report alternate keys), which this terminal
+        // does not implement, so lowercasing is the closest honest answer and is
+        // exact for the letters that actually collide.
+        let number = ch.to_lowercase().next().unwrap_or(ch) as u32;
+
+        // Plain typing stays plain text even under this protocol -- the program
+        // wants the character, not a description of the key. It is Ctrl and Alt
+        // that collapse distinct keys onto one byte, and those are what the
+        // escape form exists to separate.
+        let ambiguous = self.mods.control_key() || self.mods.alt_key();
+        if report_all || ambiguous {
+            return Some(kitty_u(number, self.mods, self.event, event_types));
+        }
+
+        // No escape form for this key, so there is nowhere to put an event
+        // type: the release of a key whose press was the byte `a` is not
+        // expressible, and sending `a` again would type it twice. Flag 2
+        // without flag 8 therefore reports releases for modified and functional
+        // keys only, which is the protocol working as specified rather than a
+        // gap. A *repeat* still sends the text, because a held key has always
+        // typed.
+        if self.event == EventType::Release {
+            return None;
+        }
+        encode_text(text, false, false)
+    }
+}
+
+/// The keys that have a single legacy byte, with their protocol numbers.
+///
+/// Escape is handled before this and is deliberately absent: it never keeps its
+/// legacy byte under this protocol.
+fn legacy_byte(named: NamedKey) -> Option<(u32, Vec<u8>)> {
+    Some(match named {
+        NamedKey::Enter => (13, vec![b'\r']),
+        NamedKey::Tab => (9, vec![b'\t']),
+        NamedKey::Backspace => (127, vec![0x7f]),
+        NamedKey::Space => (32, vec![b' ']),
+        _ => return None,
+    })
+}
+
+/// The keys encoded as `CSI 1 ; mods letter`.
+fn csi_letter(named: NamedKey) -> Option<u8> {
+    Some(match named {
+        NamedKey::ArrowUp => b'A',
+        NamedKey::ArrowDown => b'B',
+        NamedKey::ArrowRight => b'C',
+        NamedKey::ArrowLeft => b'D',
+        NamedKey::Home => b'H',
+        NamedKey::End => b'F',
+        _ => return None,
+    })
+}
+
+/// The keys encoded as `CSI n ; mods ~`.
+///
+/// F1-F4 are here rather than in [`csi_letter`], where their `P`/`Q`/`R`/`S`
+/// finals would be shorter: `CSI 1 ; m R` is CPR, the cursor position report.
+/// The legacy encoder makes the same choice the moment F3 is modified, for the
+/// same reason -- see `ss3_or_tilde`.
+fn tilde_number(named: NamedKey) -> Option<u8> {
+    Some(match named {
+        NamedKey::Insert => 2,
+        NamedKey::Delete => 3,
+        NamedKey::PageUp => 5,
+        NamedKey::PageDown => 6,
+        NamedKey::F1 => 11,
+        NamedKey::F2 => 12,
+        NamedKey::F3 => 13,
+        NamedKey::F4 => 14,
+        NamedKey::F5 => 15,
+        NamedKey::F6 => 17,
+        NamedKey::F7 => 18,
+        NamedKey::F8 => 19,
+        NamedKey::F9 => 20,
+        NamedKey::F10 => 21,
+        NamedKey::F11 => 23,
+        NamedKey::F12 => 24,
+        _ => return None,
+    })
+}
+
+/// The protocol's numbers for the modifier keys themselves.
+///
+/// Super is absent on purpose: [`belongs_to_desktop`] refuses the chord before
+/// this is reached, so listing it would be a line that can never run.
+fn modifier_key_number(named: NamedKey, location: KeyLocation) -> Option<u32> {
+    let right = location == KeyLocation::Right;
+    Some(match named {
+        NamedKey::Shift if right => 57447,
+        NamedKey::Shift => 57441,
+        NamedKey::Control if right => 57448,
+        NamedKey::Control => 57442,
+        NamedKey::Alt if right => 57449,
+        NamedKey::Alt => 57443,
+        NamedKey::CapsLock => 57358,
+        NamedKey::NumLock => 57360,
+        _ => return None,
+    })
+}
+
+/// The `mods:event` parameter, or `None` when both are at their defaults.
+fn kitty_params(mods: ModifiersState, event: EventType, event_types: bool) -> Option<String> {
+    let m = modifier_param(mods);
+    let e = event.param();
+    if event_types && e != 1 {
+        Some(format!("{m}:{e}"))
+    } else if m != 1 {
+        Some(format!("{m}"))
+    } else {
+        None
+    }
+}
+
+/// `CSI number ; mods:event u`.
+///
+/// The number is never omitted: `CSI u` with no parameter is SCORC.
+fn kitty_u(number: u32, mods: ModifiersState, event: EventType, event_types: bool) -> Vec<u8> {
+    match kitty_params(mods, event, event_types) {
+        Some(p) => format!("\x1b[{number};{p}u").into_bytes(),
+        None => format!("\x1b[{number}u").into_bytes(),
+    }
+}
+
+/// `CSI 1 ; mods:event letter`, collapsing to `CSI letter` when it can.
+fn kitty_letter(
+    final_byte: u8,
+    mods: ModifiersState,
+    event: EventType,
+    event_types: bool,
+) -> Vec<u8> {
+    let f = final_byte as char;
+    match kitty_params(mods, event, event_types) {
+        Some(p) => format!("\x1b[1;{p}{f}").into_bytes(),
+        None => format!("\x1b[{f}").into_bytes(),
+    }
+}
+
+/// `CSI n ; mods:event ~`.
+fn kitty_tilde(n: u8, mods: ModifiersState, event: EventType, event_types: bool) -> Vec<u8> {
+    match kitty_params(mods, event, event_types) {
+        Some(p) => format!("\x1b[{n};{p}~").into_bytes(),
+        None => format!("\x1b[{n}~").into_bytes(),
+    }
+}
+
+/// Encode a key press the way terminals did before CSI u.
+fn encode_legacy(key: &Key, mods: ModifiersState, modes: Modes) -> Option<Vec<u8>> {
     let ctrl = mods.control_key();
     let alt = mods.alt_key();
     let shift = mods.shift_key();
@@ -60,7 +373,7 @@ pub fn encode(event: &KeyEvent, mods: ModifiersState, modes: Modes) -> Option<Ve
     // CSI to SS3, and applications set it expecting to be obeyed.
     let cursor = if modes.contains(Modes::APP_CURSOR) { b"\x1bO" } else { b"\x1b[" };
 
-    let bytes: Vec<u8> = match &event.logical_key {
+    let bytes: Vec<u8> = match key {
         Key::Named(named) => match named {
             NamedKey::Enter => vec![b'\r'],
             NamedKey::Tab => {
@@ -346,5 +659,172 @@ mod tests {
         // presses from waking the pty.
         assert_eq!(encode_text("", false, false), None);
         assert_eq!(encode_text("", false, true), None, "even with Alt");
+    }
+
+    // --- the Kitty keyboard protocol -------------------------------------
+
+    const CTRL: ModifiersState = ModifiersState::CONTROL;
+    const SHIFT: ModifiersState = ModifiersState::SHIFT;
+
+    /// The modes a program gets after pushing `flags`.
+    fn kitty(flags: u8) -> Modes {
+        Modes::initial().with_kitty_flags(flags)
+    }
+
+    /// Encode a named key. `KeyEvent` has a private platform tail and cannot be
+    /// built in a test, which is why every decision lives on `KeyPress`.
+    fn named(key: NamedKey, mods: ModifiersState, event: EventType, modes: Modes) -> Option<String> {
+        let key = Key::Named(key);
+        KeyPress { key: &key, location: KeyLocation::Standard, mods, event }
+            .encode(modes)
+            .map(|b| String::from_utf8(b).expect("an encoding is valid UTF-8"))
+    }
+
+    /// Encode a character key.
+    fn text(s: &str, mods: ModifiersState, event: EventType, modes: Modes) -> Option<String> {
+        let key = Key::Character(s.into());
+        KeyPress { key: &key, location: KeyLocation::Standard, mods, event }
+            .encode(modes)
+            .map(|b| String::from_utf8(b).expect("an encoding is valid UTF-8"))
+    }
+
+    #[test]
+    fn no_flags_means_the_legacy_encoding_exactly() {
+        // The whole protocol is opt-in. A program that never asked must see
+        // byte-for-byte what it saw before this existed.
+        let plain = Modes::initial();
+        assert_eq!(named(NamedKey::Tab, NONE, EventType::Press, plain).as_deref(), Some("\t"));
+        assert_eq!(named(NamedKey::Escape, NONE, EventType::Press, plain).as_deref(), Some("\x1b"));
+        assert_eq!(text("i", CTRL, EventType::Press, plain), Some("\u{9}".to_string()));
+    }
+
+    #[test]
+    fn ctrl_i_stops_being_tab_under_flag_1() {
+        // The headline of the whole protocol: both are 0x09 in the legacy
+        // scheme, so no program could ever bind them separately.
+        let m = kitty(1);
+        assert_eq!(text("i", CTRL, EventType::Press, m).as_deref(), Some("\x1b[105;5u"));
+        assert_eq!(named(NamedKey::Tab, NONE, EventType::Press, m).as_deref(), Some("\t"));
+    }
+
+    #[test]
+    fn escape_always_takes_the_escape_form_under_flag_1() {
+        // A bare 0x1b is indistinguishable from the first byte of every other
+        // sequence, so applications guess with a timer. This is what ends that.
+        let m = kitty(1);
+        assert_eq!(named(NamedKey::Escape, NONE, EventType::Press, m).as_deref(), Some("\x1b[27u"));
+    }
+
+    #[test]
+    fn enter_and_tab_keep_their_bytes_until_a_modifier_needs_saying() {
+        // Changing what unmodified Enter sends would break every program that
+        // asked only to disambiguate.
+        let m = kitty(1);
+        assert_eq!(named(NamedKey::Enter, NONE, EventType::Press, m).as_deref(), Some("\r"));
+        assert_eq!(
+            named(NamedKey::Enter, SHIFT, EventType::Press, m).as_deref(),
+            Some("\x1b[13;2u"),
+            "Shift+Enter has no legacy byte at all -- this is why the protocol exists"
+        );
+    }
+
+    #[test]
+    fn flag_8_reports_the_keys_that_have_bytes_as_escape_codes_too() {
+        let m = kitty(1 | 8);
+        assert_eq!(named(NamedKey::Enter, NONE, EventType::Press, m).as_deref(), Some("\x1b[13u"));
+        assert_eq!(named(NamedKey::Tab, NONE, EventType::Press, m).as_deref(), Some("\x1b[9u"));
+        assert_eq!(text("a", NONE, EventType::Press, m).as_deref(), Some("\x1b[97u"));
+    }
+
+    #[test]
+    fn the_reported_code_point_is_the_unshifted_key() {
+        // winit hands over "A" for Shift+a. A program keyed on 97 sees nothing
+        // if 65 is sent, and the failure is silent and total.
+        let m = kitty(1 | 8);
+        assert_eq!(text("A", SHIFT, EventType::Press, m).as_deref(), Some("\x1b[97;2u"));
+    }
+
+    #[test]
+    fn plain_typing_is_still_plain_text() {
+        // Under flags 1 and 2 a program wants the character, not a description
+        // of the key that produced it.
+        let m = kitty(1 | 2);
+        assert_eq!(text("a", NONE, EventType::Press, m).as_deref(), Some("a"));
+        assert_eq!(text("A", SHIFT, EventType::Press, m).as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn event_types_are_only_reported_when_asked_for() {
+        assert_eq!(
+            named(NamedKey::ArrowUp, NONE, EventType::Release, kitty(1)),
+            None,
+            "a release has no form until flag 2 provides one"
+        );
+        assert_eq!(
+            named(NamedKey::ArrowUp, NONE, EventType::Release, kitty(1 | 2)).as_deref(),
+            Some("\x1b[1;1:3A"),
+            "the modifier slot is still written, because the event type follows it"
+        );
+        assert_eq!(
+            named(NamedKey::ArrowUp, NONE, EventType::Repeat, kitty(1 | 2)).as_deref(),
+            Some("\x1b[1;1:2A")
+        );
+    }
+
+    #[test]
+    fn a_key_with_no_escape_form_reports_no_release() {
+        // There is no way to say "the key whose press was the byte `a` came
+        // back up", and sending `a` again would type it twice.
+        let m = kitty(1 | 2);
+        assert_eq!(text("a", NONE, EventType::Release, m), None);
+        // A repeat is not a release: a held key has always typed.
+        assert_eq!(text("a", NONE, EventType::Repeat, m).as_deref(), Some("a"));
+        // Enter is not a text key. It has a protocol number, so its release has
+        // somewhere to be reported and escalates out of the legacy byte.
+        assert_eq!(
+            named(NamedKey::Enter, NONE, EventType::Release, m).as_deref(),
+            Some("\x1b[13;1:3u")
+        );
+    }
+
+    #[test]
+    fn cursor_keys_never_use_ss3_under_the_protocol() {
+        // SS3 has no parameter slot, so it cannot carry a modifier or an event
+        // type -- and a program that asked to disambiguate is owed a form that
+        // can. DECCKM is deliberately ignored here.
+        let m = Modes::initial().union(Modes::APP_CURSOR).with_kitty_flags(1);
+        assert_eq!(named(NamedKey::ArrowUp, NONE, EventType::Press, m).as_deref(), Some("\x1b[A"));
+        assert_eq!(
+            named(NamedKey::ArrowUp, CTRL, EventType::Press, m).as_deref(),
+            Some("\x1b[1;5A")
+        );
+    }
+
+    #[test]
+    fn f3_uses_the_tilde_form_because_csi_r_is_cpr() {
+        // `CSI 1;m R` is the cursor position report. A terminal that sent it
+        // for F3 would have programs answering their own keystrokes.
+        let m = kitty(1);
+        assert_eq!(named(NamedKey::F3, NONE, EventType::Press, m).as_deref(), Some("\x1b[13~"));
+        assert_eq!(named(NamedKey::F1, CTRL, EventType::Press, m).as_deref(), Some("\x1b[11;5~"));
+    }
+
+    #[test]
+    fn a_bare_modifier_stays_silent_until_flag_8() {
+        // Waking the pty on every Shift press is the invariant the whole
+        // encoder is built around.
+        assert_eq!(named(NamedKey::Shift, SHIFT, EventType::Press, kitty(1)), None);
+        assert_eq!(
+            named(NamedKey::Shift, SHIFT, EventType::Press, kitty(1 | 8)).as_deref(),
+            Some("\x1b[57441;2u")
+        );
+    }
+
+    #[test]
+    fn command_chords_are_still_the_desktops_under_every_flag() {
+        // The protocol does not get to claim Cmd+V. Without this, macOS pastes
+        // nothing and types a `v` -- the bug that put `belongs_to_desktop` in.
+        let m = kitty(1 | 2 | 8);
+        assert_eq!(text("v", ModifiersState::SUPER, EventType::Press, m), None);
     }
 }

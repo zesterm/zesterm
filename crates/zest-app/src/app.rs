@@ -1542,6 +1542,26 @@ impl App {
         }
     }
 
+    /// A key coming back up.
+    ///
+    /// Silent for every program that has not turned on kitty event types, which
+    /// is almost all of them — the encoder returns `None` and nothing is
+    /// written. Deliberately does *not* scroll to the bottom or clear the
+    /// selection the way a press does: releasing a key is not a second thing
+    /// the user did, and a selection that vanished when a finger came off
+    /// `Shift` would be its own bug.
+    fn on_key_release(&mut self, event: &winit::event::KeyEvent) {
+        // A composition owns the keyboard, including the releases.
+        if self.ime.composing() || self.picker.is_some() || self.screen != AppScreen::Terminal {
+            return;
+        }
+        let Some(session) = self.tabs.active_source() else { return };
+        let modes = session.terminal().lock().modes();
+        if let Some(bytes) = key::encode(event, self.modifiers, modes) {
+            session.write(bytes);
+        }
+    }
+
     /// Tell the platform where the composing text is, so the candidate list
     /// appears under it rather than at the window's corner.
     fn place_candidate_window(&self) {
@@ -4115,6 +4135,11 @@ impl ApplicationHandler<Wakeup> for App {
 
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
                 if event.state != ElementState::Pressed {
+                    // A release exists only for a program that asked for kitty
+                    // event types, and it must not walk the rest of this arm:
+                    // every chord below fires on press, so a binding that also
+                    // matched a release would run twice.
+                    self.on_key_release(&event);
                     return;
                 }
                 // While an input method is composing, the keys are its own:

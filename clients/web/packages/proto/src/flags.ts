@@ -50,6 +50,17 @@ export const Modes = {
   FOCUS_REPORTING: 1 << 13,
   SYNC_UPDATE: 1 << 14,
   WIN32_INPUT: 1 << 15,
+  /**
+   * The Kitty keyboard flags, at `1 << (16 + k)` for the protocol's `1 << k`.
+   *
+   * A client that drops these keeps encoding keystrokes the legacy way at a
+   * program that has stopped expecting it, which is a silent and total input
+   * failure rather than a degraded one. The gaps at 18 and 20 are kitty flags
+   * 4 and 16, which the terminal does not implement yet.
+   */
+  KITTY_DISAMBIGUATE: 1 << 16,
+  KITTY_EVENT_TYPES: 1 << 17,
+  KITTY_REPORT_ALL: 1 << 19,
 } as const;
 
 /** Every bit this client knows how to interpret. */
