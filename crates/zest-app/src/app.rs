@@ -964,23 +964,31 @@ impl App {
                 }
             }
             Action::ToggleFleetPicker => self.toggle_picker(),
+            // The activation family leaves any full-pane screen even when
+            // the target is already active: "go to my session" must mean
+            // *look at it*, and re-activating the current tab is exactly
+            // what someone trapped on the fleet screen tries first.
             Action::ActivateTab(n) => {
+                self.leave_screen();
                 if self.tabs.activate(usize::from(n)) {
                     self.after_activation();
                 }
             }
             Action::ActivateLastTab => {
+                self.leave_screen();
                 let last = self.tabs.len().saturating_sub(1);
                 if self.tabs.activate(last) {
                     self.after_activation();
                 }
             }
             Action::PrevTab => {
+                self.leave_screen();
                 if self.tabs.activate_prev() {
                     self.after_activation();
                 }
             }
             Action::NextTab => {
+                self.leave_screen();
                 if self.tabs.activate_next() {
                     self.after_activation();
                 }
@@ -1381,6 +1389,14 @@ impl App {
             consider(u64::from(self.config.cursor_blink_interval_ms.max(100)));
         }
         next.map(std::time::Duration::from_millis)
+    }
+
+    /// Back to the terminal if a full-pane screen is up; free otherwise.
+    fn leave_screen(&mut self) {
+        if self.screen != AppScreen::Terminal {
+            self.screen = AppScreen::Terminal;
+            self.mark_chrome_dirty();
+        }
     }
 
     /// Open or close a full-pane screen; closing always lands on the grid.
@@ -2055,6 +2071,9 @@ impl App {
         }
         match (region, button) {
             (HitRegion::Tab(addr), MouseButton::Left) => {
+                // Even when it is already the active one: clicking a session
+                // means "show me this", which no screen may overrule.
+                self.leave_screen();
                 if self.tabs.activate_addr(addr) {
                     self.after_activation();
                 }
@@ -2074,7 +2093,13 @@ impl App {
                 self.perform(keymap::Action::ToggleFleetPicker, el);
             }
             (HitRegion::FleetFooter, MouseButton::Left) => {
-                self.show_screen(AppScreen::Fleet);
+                // A toggle: the button that opened the fleet view is the most
+                // discoverable way back out of it.
+                self.show_screen(if self.screen == AppScreen::Fleet {
+                    AppScreen::Terminal
+                } else {
+                    AppScreen::Fleet
+                });
             }
             // The screen's ground swallows; its cards claim their own.
             (HitRegion::ScreenPanel, _) => {}
@@ -2680,6 +2705,7 @@ impl App {
             PickerAction::None => return,
             PickerAction::RunBlock { origin, command } => {
                 self.picker = None;
+                self.screen = AppScreen::Terminal;
                 // ⏎ runs here; ⇧⏎ runs where the command came from — the
                 // honest half of "run on host…" until a chooser exists.
                 if shift && self.tabs.activate_addr(origin) {
@@ -2709,10 +2735,12 @@ impl App {
             }
             PickerAction::Attach { addr, route } => {
                 self.picker = None;
+                self.screen = AppScreen::Terminal;
                 self.spawn_tab_worker(route, Some(addr));
             }
             PickerAction::Create { host, route } => {
                 self.picker = None;
+                self.screen = AppScreen::Terminal;
                 // Pin remote creates to the host the roster named: the
                 // address came from an advertisement, which is a claim.
                 let expect = (!route.is_local()).then_some(host);
@@ -2960,6 +2988,11 @@ impl App {
 
     /// Housekeeping after the active tab changed.
     fn after_activation(&mut self) {
+        // Choosing a session is choosing to look at it: any full-pane screen
+        // steps aside. Without this, clicking a sidebar row under the fleet
+        // view activated the session *invisibly* — and the only way out of
+        // the screen was knowing about Esc.
+        self.screen = AppScreen::Terminal;
         // A drag cannot span a tab switch, and half a selection drag leaking
         // into another tab's grid would.
         self.mouse.release();
