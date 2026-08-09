@@ -62,6 +62,18 @@ pub struct Block {
     pub command: String,
     /// Working directory, from OSC 7.
     pub cwd: String,
+    /// Wall clock at OSC 133;C, milliseconds since the Unix epoch.
+    ///
+    /// Caller-supplied ([`crate::Terminal::set_now_ms`]) because this crate is
+    /// `no_std` and has no clock. Wall time rather than a monotonic instant
+    /// because blocks cross the wire, and "2m ago" on another machine only
+    /// means anything against a shared epoch. `None` when the embedder never
+    /// stamped one.
+    pub started_ms: Option<u64>,
+    /// Wall clock at OSC 133;D, same epoch. `ended - started` is the
+    /// duration a header prints; computed by readers, never stored, so a
+    /// running block's payload does not change every tick.
+    pub ended_ms: Option<u64>,
 }
 
 impl Block {
@@ -152,24 +164,31 @@ impl BlockIndex {
             state: BlockState::Prompt,
             command: String::new(),
             cwd,
+            started_ms: None,
+            ended_ms: None,
         });
         id
     }
 
     /// A command was submitted and output begins (OSC 133;C).
-    pub fn begin_output(&mut self, line: LineId, command: String) {
+    ///
+    /// `now_ms` is the embedder's wall clock (see [`Block::started_ms`]);
+    /// `None` when it never provided one.
+    pub fn begin_output(&mut self, line: LineId, command: String, now_ms: Option<u64>) {
         if let Some(b) = self.blocks.last_mut() {
             b.output_line = Some(line);
             b.command = command;
             b.state = BlockState::Running;
+            b.started_ms = now_ms;
         }
     }
 
     /// A command finished (OSC 133;D).
-    pub fn finish(&mut self, line: LineId, exit_code: Option<i32>) {
+    pub fn finish(&mut self, line: LineId, exit_code: Option<i32>, now_ms: Option<u64>) {
         if let Some(b) = self.blocks.last_mut() {
             b.end_line = Some(line);
             b.state = BlockState::Finished { exit_code };
+            b.ended_ms = now_ms;
         }
     }
 
@@ -250,8 +269,8 @@ mod tests {
     fn index_with_one_finished_block() -> BlockIndex {
         let mut idx = BlockIndex::new();
         idx.begin_prompt(10, "/home".into());
-        idx.begin_output(11, "cargo build".into());
-        idx.finish(40, Some(0));
+        idx.begin_output(11, "cargo build".into(), None);
+        idx.finish(40, Some(0), None);
         idx
     }
 
@@ -272,7 +291,7 @@ mod tests {
         // it finishes.
         let mut idx = BlockIndex::new();
         idx.begin_prompt(5, "/x".into());
-        idx.begin_output(6, "cargo test".into());
+        idx.begin_output(6, "cargo test".into(), None);
         let b = idx.last().expect("one block");
         assert!(b.is_running());
         assert!(b.contains(9_999), "a running block has no end yet");
@@ -285,8 +304,8 @@ mod tests {
         // nothing at all.
         let mut idx = BlockIndex::new();
         idx.begin_prompt(0, String::new());
-        idx.begin_output(1, "flaky".into());
-        idx.finish(2, None);
+        idx.begin_output(1, "flaky".into(), None);
+        idx.finish(2, None, None);
         let b = idx.last().expect("one block");
         assert!(!b.failed(), "unknown is not failure");
         assert!(!matches!(b.state, BlockState::Finished { exit_code: Some(0) }), "nor success");
@@ -296,8 +315,8 @@ mod tests {
     fn a_nonzero_status_is_a_failure() {
         let mut idx = BlockIndex::new();
         idx.begin_prompt(0, String::new());
-        idx.begin_output(1, "false".into());
-        idx.finish(2, Some(1));
+        idx.begin_output(1, "false".into(), None);
+        idx.finish(2, Some(1), None);
         assert!(idx.last().expect("one block").failed());
     }
 
@@ -305,8 +324,8 @@ mod tests {
     fn lines_map_back_to_their_block() {
         let mut idx = index_with_one_finished_block();
         idx.begin_prompt(41, "/home".into());
-        idx.begin_output(42, "ls".into());
-        idx.finish(45, Some(0));
+        idx.begin_output(42, "ls".into(), None);
+        idx.finish(45, Some(0), None);
 
         assert_eq!(idx.block_at(25).map(|b| b.command.as_str()), Some("cargo build"));
         assert_eq!(idx.block_at(43).map(|b| b.command.as_str()), Some("ls"));
@@ -322,8 +341,8 @@ mod tests {
         // readable.
         let mut idx = BlockIndex::new();
         idx.begin_prompt(2, "/x".into());
-        idx.begin_output(3, "cargo build".into());
-        idx.finish(9, Some(0));
+        idx.begin_output(3, "cargo build".into(), None);
+        idx.finish(9, Some(0), None);
 
         // Lines 0-2 did not survive the rewrap; 3 onwards did, renumbered down.
         let reindex = crate::grid::Reindex::from_pairs(&[(3, 0), (9, 6)]);
@@ -341,8 +360,8 @@ mod tests {
         // what a live block is.
         let mut idx = index_with_one_finished_block();
         idx.begin_prompt(41, "/home".into());
-        idx.begin_output(42, "ls".into());
-        idx.finish(45, Some(0));
+        idx.begin_output(42, "ls".into(), None);
+        idx.finish(45, Some(0), None);
 
         // Only the newer block's lines came through the rewrap.
         let reindex = crate::grid::Reindex::from_pairs(&[(41, 0), (42, 1), (45, 4)]);
@@ -366,7 +385,7 @@ mod tests {
         // no end line and must not be evicted by a scrollback bound.
         let mut idx = index_with_one_finished_block();
         idx.begin_prompt(41, "/home".into());
-        idx.begin_output(42, "tail -f".into());
+        idx.begin_output(42, "tail -f".into(), None);
 
         idx.evict_before(41);
         assert_eq!(idx.blocks().len(), 1, "the finished block should be gone");

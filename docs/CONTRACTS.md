@@ -29,8 +29,8 @@ paragraph of justification attached.
 | `ClientMessage`, `HostMessage`, `SessionInfo` | `zest-proto/src/lib.rs` | **frozen** at v2 — see below | WS-F, WS-G |
 | `Delta`, `DeltaOp`, `Run`, `RowPayload`, `AttrDef` | `zest-proto/src/delta.rs` | **frozen** at v2 — see below | WS-F, WS-G |
 | `Nonce32`, `Sig64`, `AuthFailure` | `zest-proto/src/auth.rs` | **frozen** — arrived with v2 | WS-F, WS-G, WS-H |
-| `Block`, `BlockIndex`, `BlockState` | `zest-core/src/blocks.rs` | **frozen** — gained `upsert` and `reanchor`, see below | WS-E, WS-F, WS-G |
-| `BlockPayload`, `BlockState` (wire) | `zest-proto/src/delta.rs` | **frozen** — arrived beside `Delta` | WS-E, WS-F, WS-G |
+| `Block`, `BlockIndex`, `BlockState` | `zest-core/src/blocks.rs` | **frozen** — gained `upsert`/`reanchor`, then `started_ms`/`ended_ms` + a caller clock, see below | WS-E, WS-F, WS-G |
+| `BlockPayload`, `BlockState` (wire) | `zest-proto/src/delta.rs` | **frozen** — arrived beside `Delta`; gained additive `started_ms`/`ended_ms`, see below | WS-E, WS-F, WS-G |
 | `ChangeSource`, `Update`, `update_for` | `zest-core/src/subscribe.rs` | **frozen** — `release_before` removed, see below | WS-F |
 | `SessionSource`, `Origin` | `zest-app/src/source.rs` | **frozen** | WS-A, WS-B, WS-F |
 | `Peer`, `Endpoint`, `Reachability`, `Discovery` | `zest-mesh/` | **frozen** | WS-F, WS-H |
@@ -151,6 +151,20 @@ are no markers to replay — and `reanchor`, which maps blocks through the
 **Eviction deliberately has no wire message.** A client evicts on its own
 scrollback bound through the same code the host uses, so a client configured to
 keep more history than the host keeps more, rather than being told to forget.
+
+**Additive once more, for the block headers (design screen 3): timestamps.**
+`Block` and `BlockPayload` gained `started_ms`/`ended_ms` — wall-clock
+milliseconds since the Unix epoch, `#[serde(default)]` on the wire, so an old
+host simply sends blocks without times and the header omits its duration.
+Wall time, not a monotonic instant, because "2m ago · exit 0" is computed on
+whichever device is looking. **Start stamps, never a live elapsed**:
+`diff_blocks` resends a block whenever any field differs, and an elapsed field
+would resend every running block on every tick; readers subtract instead.
+Two `BlockIndex` signatures changed with it — `begin_output` and `finish` take
+`now_ms: Option<u64>` — because `zest-core` is `no_std` and has no clock: the
+embedder states the time (`Terminal::set_now_ms`) where bytes and wall time
+meet, which is the pty reader in both the daemon and the in-process fallback.
+Landed with every consumer in one commit, per the rule below.
 
 ### Additive again, for the tab strip: titles, created, watch_sessions
 

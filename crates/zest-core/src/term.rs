@@ -122,6 +122,11 @@ pub struct TermState {
     /// differ whenever the prompt redraws, which `zsh`'s autosuggestions and
     /// syntax highlighting both do on every keystroke.
     pub(crate) pending_command: Option<String>,
+    /// The embedder's wall clock, milliseconds since the Unix epoch, for
+    /// stamping blocks. This crate has no clock (`no_std`), so whoever feeds
+    /// bytes refreshes this first; stale by at most one read burst, which is
+    /// precision to spare for "51.2s".
+    pub(crate) now_ms: Option<u64>,
 }
 
 impl Terminal {
@@ -139,6 +144,15 @@ impl Terminal {
     /// escape sequence split across two reads is handled correctly.
     pub fn advance(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.state, bytes);
+    }
+
+    /// Tell the terminal what time it is, for stamping command blocks.
+    ///
+    /// Callers set this before [`Self::advance`]; the parser cannot ask an OS
+    /// it is not allowed to know about. Never required — blocks simply carry
+    /// no times when nobody says.
+    pub fn set_now_ms(&mut self, ms: u64) {
+        self.state.now_ms = Some(ms);
     }
 
     #[must_use]
@@ -332,6 +346,7 @@ impl TermState {
             cwd: String::new(),
             prompt_end: None,
             pending_command: None,
+            now_ms: None,
         }
     }
 

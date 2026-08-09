@@ -466,6 +466,27 @@ fn a_bare_d_marker_is_unknown_rather_than_success() {
 }
 
 #[test]
+fn block_timestamps_come_from_the_embedder_and_only_from_it() {
+    // The parser has no clock (`no_std`): a terminal never told the time
+    // produces blocks with no stamps, and one told the time stamps C and D
+    // with whatever was current — which is how "51.2s" can be honest even
+    // when output arrives in bursts.
+    let mut silent = Terminal::new(20, 4, 100);
+    silent.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07x\x1b]133;C\x07\r\n\x1b]133;D;0\x07");
+    let b = silent.blocks().last().expect("one block");
+    assert_eq!((b.started_ms, b.ended_ms), (None, None), "no clock, no stamps");
+
+    let mut timed = Terminal::new(20, 4, 100);
+    timed.set_now_ms(1_000);
+    timed.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07x\x1b]133;C\x07\r\n");
+    timed.set_now_ms(52_200);
+    timed.advance(b"\x1b]133;D;0\x07");
+    let b = timed.blocks().last().expect("one block");
+    assert_eq!(b.started_ms, Some(1_000), "C stamps the start");
+    assert_eq!(b.ended_ms, Some(52_200), "D stamps the end");
+}
+
+#[test]
 fn a_nonzero_status_survives_a_trailing_key_value_tail() {
     // `133;D;1;aid=7` is what several shells actually emit. Parsing the status
     // as "the whole parameter" would make it unknown, which reads as a command

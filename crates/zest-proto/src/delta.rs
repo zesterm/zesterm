@@ -231,6 +231,21 @@ pub struct BlockPayload {
     pub state: BlockState,
     pub command: String,
     pub cwd: String,
+    /// Wall clock at OSC 133;C, milliseconds since the Unix epoch. Additive
+    /// (`serde(default)`), so an old host simply sends blocks without times.
+    ///
+    /// A *start* stamp, never a live elapsed: `diff_blocks` resends a block
+    /// whenever any field changes, and an elapsed field would resend every
+    /// running block on every tick. `f64` on the TypeScript side would also be
+    /// tempting and wrong — see the `rmp-serde` integer-width trap; epoch
+    /// millis stay under 2^53 for the next 285,000 years, so `number` holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(type = "number | null", optional))]
+    pub started_ms: Option<u64>,
+    /// Wall clock at OSC 133;D, same epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(type = "number | null", optional))]
+    pub ended_ms: Option<u64>,
 }
 
 impl BlockPayload {
@@ -255,6 +270,8 @@ impl BlockPayload {
             },
             command: b.command.clone(),
             cwd: b.cwd.clone(),
+            started_ms: b.started_ms,
+            ended_ms: b.ended_ms,
         }
     }
 
@@ -276,6 +293,8 @@ impl BlockPayload {
             },
             command: self.command.clone(),
             cwd: self.cwd.clone(),
+            started_ms: self.started_ms,
+            ended_ms: self.ended_ms,
         }
     }
 }

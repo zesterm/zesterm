@@ -24,6 +24,13 @@ use zest_pty::{CommandSpec, PtySize, PtyTransport};
 
 use crate::DaemonError;
 
+/// Milliseconds since the Unix epoch — the block-timestamp clock.
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
 /// How much the parser consumes per lock acquisition.
 ///
 /// The same bound the app uses, for the same reason: without it a single
@@ -139,6 +146,10 @@ impl Session {
 
                         let events = {
                             let Ok(mut term) = terminal.lock() else { break };
+                            // The parser has no clock (`no_std`); the reader
+                            // is where wall time and bytes meet, so blocks
+                            // get their start/end stamps from here.
+                            term.set_now_ms(unix_ms());
                             term.advance(&buf[..n]);
                             term.take_events()
                         };

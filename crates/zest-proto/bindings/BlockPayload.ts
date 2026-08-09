@@ -28,4 +28,19 @@ output_line: bigint | null,
  * bottom rather than waiting — that is what makes a long build readable
  * while it happens instead of only afterwards.
  */
-end_line: bigint | null, state: BlockState, command: string, cwd: string, };
+end_line: bigint | null, state: BlockState, command: string, cwd: string, 
+/**
+ * Wall clock at OSC 133;C, milliseconds since the Unix epoch. Additive
+ * (`serde(default)`), so an old host simply sends blocks without times.
+ *
+ * A *start* stamp, never a live elapsed: `diff_blocks` resends a block
+ * whenever any field changes, and an elapsed field would resend every
+ * running block on every tick. `f64` on the TypeScript side would also be
+ * tempting and wrong — see the `rmp-serde` integer-width trap; epoch
+ * millis stay under 2^53 for the next 285,000 years, so `number` holds.
+ */
+started_ms?: number | null, 
+/**
+ * Wall clock at OSC 133;D, same epoch.
+ */
+ended_ms?: number | null, };

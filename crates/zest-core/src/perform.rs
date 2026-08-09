@@ -576,7 +576,7 @@ impl TermState {
         // Column zero means the shell emitted the newline first, and then this
         // line really is where output begins.
         let line = if self.grid.cursor.col > 0 { line + 1 } else { line };
-        self.blocks.begin_output(line, command);
+        self.blocks.begin_output(line, command, self.now_ms);
         self.prompt_end = None;
         self.touch();
     }
@@ -597,7 +597,7 @@ impl TermState {
         // ends where it began, and an end line above the start would make
         // `contains` answer for no line and `evict_before` reason backwards.
         let line = self.blocks.last().map_or(line, |b| line.max(b.prompt_line));
-        self.blocks.finish(line, exit_code);
+        self.blocks.finish(line, exit_code, self.now_ms);
         self.prompt_end = None;
         self.pending_command = None;
         self.touch();

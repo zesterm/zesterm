@@ -168,6 +168,14 @@ impl Session {
                         // is already waiting.
                         let events = {
                             let mut term = terminal.lock_unfair();
+                            // The parser has no clock (`no_std`); the reader
+                            // is where wall time and bytes meet, so blocks
+                            // get their start/end stamps from here.
+                            term.set_now_ms(
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map_or(0, |d| d.as_millis() as u64),
+                            );
                             term.advance(&buf[..n]);
                             term.take_events()
                         };
