@@ -7,6 +7,16 @@
 //! region and the rectangle it was drawn as come from the same computation,
 //! so they cannot drift apart.
 
+// The pure half lands ahead of the app wiring (next commit in the #23
+// sequence), so until then only the tests reference it.
+#[allow(dead_code, reason = "consumed by the redraw and input paths one commit later")]
+pub mod hit;
 pub mod insets;
+#[allow(dead_code, reason = "consumed by the redraw and input paths one commit later")]
+pub mod layout;
+#[allow(dead_code, reason = "consumed by the redraw and input paths one commit later")]
+pub mod model;
+#[allow(dead_code, reason = "consumed by the redraw and input paths one commit later")]
+pub mod theme;
 
 pub use insets::Insets;

@@ -1,0 +1,101 @@
+//! What the chrome shows, as data.
+//!
+//! The model is built by the app from live state (tabs, roster, hover) and
+//! consumed by `layout`, which is pure. Nothing here knows about the GPU, the
+//! window, or the network — that is what makes the layout tests meaningful.
+
+use zest_config::settings::TabsPosition;
+use zest_proto::SessionAddr;
+
+use super::hit::HitRegion;
+
+/// How reachable a tab's host currently looks.
+///
+/// A projection of `zest_mesh::Presence` so the chrome does not grow a mesh
+/// dependency for four names. `Unreachable` is the one that changes drawing:
+/// the tab stays put and says so, because a session on a sleeping laptop is
+/// not gone (#22, #23).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabPresence {
+    Online,
+    Away,
+    Unseen,
+    Unreachable,
+}
+
+/// Which machine a tab's shell runs on, as the chrome should say it.
+///
+/// Origin is displayed with *text*, not colour alone — the class of mistake
+/// this UI exists to prevent is acting on the wrong machine, and colour is
+/// the first thing a theme change or colour-blindness takes away.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TabOrigin {
+    Local,
+    Remote { host_label: String },
+}
+
+/// One tab, ready to draw.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TabModel {
+    pub addr: SessionAddr,
+    /// Already derived: OSC title, else cwd basename, else "shell".
+    pub title: String,
+    pub origin: TabOrigin,
+    pub presence: TabPresence,
+    /// An attach or restore is in flight; the tab shows itself but cannot be
+    /// typed into yet.
+    pub connecting: bool,
+}
+
+/// Everything `layout` needs to draw the chrome once.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChromeModel {
+    pub tabs: Vec<TabModel>,
+    /// Index into `tabs`.
+    pub active: usize,
+    pub position: TabsPosition,
+    /// Scroll offset of the tab strip contents, physical pixels. Layout
+    /// clamps it and reports the clamped value back.
+    pub strip_scroll: f32,
+    /// What the pointer is over, from last frame's hit map. Only used for
+    /// hover fills, so one frame of lag is invisible.
+    pub hover: Option<HitRegion>,
+    /// Size of the macOS traffic-light cluster in physical pixels, when the
+    /// buttons overlap the chrome. `None` in fullscreen (they auto-hide) and
+    /// on every other platform.
+    pub traffic_inset: Option<[f32; 2]>,
+    pub focused: bool,
+}
+
+/// The knobs `layout` reads, resolved to physical pixels by the caller.
+///
+/// Text measurement comes in as data too: the pure layout cannot shape, so
+/// the app measures the strings it is about to lay out (via
+/// `zest_render_wgpu::measure_ui_run`) and the tests measure with arithmetic.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChromeMetrics {
+    /// Window size, physical pixels.
+    pub width: f32,
+    pub height: f32,
+    /// Physical pixels per logical pixel.
+    pub scale: f32,
+    /// `tabs.strip_height`, logical.
+    pub strip_height: f32,
+    /// `tabs.sidebar_width`, logical.
+    pub sidebar_width: f32,
+    /// Height of one line of UI text, physical (the grid's cell height).
+    pub line_height: f32,
+    /// Baseline offset from the top of a text line, physical.
+    pub baseline: f32,
+}
+
+impl ChromeMetrics {
+    /// The strip's extent in physical pixels along its defining axis.
+    #[must_use]
+    pub fn strip_extent(&self, position: TabsPosition) -> f32 {
+        match position {
+            TabsPosition::Top => self.strip_height * self.scale,
+            TabsPosition::Left => self.sidebar_width * self.scale,
+        }
+    }
+}
