@@ -83,15 +83,11 @@ pub struct AttachOptions<'a> {
     pub scrollback: usize,
     /// Attach to an existing unattached session instead of starting a new one.
     ///
-    /// **On by default**, and the reasoning reversed once the consequence was
-    /// measured. Creating every time makes opening a terminal deterministic,
-    /// which reads well -- and it means a session can never be picked up again,
-    /// which is the entire promise of ADR-007, *and* it leaks: closing a window
-    /// only detaches, so every launch left a shell running forever with no way
-    /// to reach it.
-    ///
-    /// Adopting the newest unattached session is what "close the lid, pick it
-    /// up later" actually means. `--new-session` forces a fresh one.
+    /// The GUI no longer uses this: restore (#23) reattaches the exact
+    /// sessions a window was showing, which answers "pick it up later"
+    /// without guessing. Adoption survives for `--attach <host:port>`, where
+    /// "a shell on that machine" genuinely is the request, and for the
+    /// reconnect supervisor's `Rebind::AdoptOrCreate`.
     pub adopt: bool,
     /// Whether this connection is the loopback socket.
     ///
@@ -660,6 +656,7 @@ mod tests {
     struct Harness {
         path: String,
         registry: Arc<zest_daemon::Registry>,
+        host_identity: Arc<zest_mesh::identity::HostIdentity>,
     }
 
     /// A cuttable link between the client and the daemon.
@@ -739,8 +736,10 @@ mod tests {
             let registry = Arc::new(zest_daemon::Registry::new());
             // A real host key, because the handshake is real: these tests drive
             // the same code the daemon binary does.
+            let host_identity =
+                Arc::new(zest_mesh::identity::HostIdentity::generate().expect("host key"));
             let auth = Arc::new(zest_daemon::Authenticator::new(
-                Arc::new(zest_mesh::identity::HostIdentity::generate().expect("host key")),
+                Arc::clone(&host_identity),
                 Arc::new(zest_mesh::trust::MemoryTrustStore::new()),
                 zest_mesh::pairing::PairingQueue::new(),
                 "harness",
@@ -766,7 +765,7 @@ mod tests {
             while !std::path::Path::new(&path).exists() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(5));
             }
-            Self { path, registry }
+            Self { path, registry, host_identity }
         }
 
         fn attach(&self, command: &str, wake: impl Fn(Wakeup) + Send + 'static) -> RemoteSession {
@@ -1234,6 +1233,63 @@ mod tests {
             h.registry.len(),
             0,
             "a pinned tab must not respawn a shell for a session that ended"
+        );
+        drop(s);
+    }
+
+    fn opts_pinned<'a>(
+        identity: &'a Arc<ClientIdentity>,
+        expect_host: Option<zest_proto::HostId>,
+    ) -> AttachOptions<'a> {
+        AttachOptions {
+            identity,
+            label: "test",
+            command: "/bin/sh",
+            cols: 40,
+            rows: 6,
+            scrollback: 100,
+            adopt: false,
+            local: true,
+            expect_host,
+        }
+    }
+
+    #[test]
+    fn a_wrong_expected_host_is_refused_before_anything_is_created() {
+        // The picker dials addresses learned from advertisements, which are
+        // claims. The host signs first precisely so the client can hang up
+        // on a machine that is not the one the roster named — before a
+        // session exists, before a keystroke could go anywhere.
+        let h = Harness::start("pin-wrong");
+        let identity = Arc::new(ClientIdentity::generate().expect("client key"));
+        let wrong = zest_proto::HostId::from_bytes([9; 32]);
+        let result =
+            RemoteSession::attach(dial_to(&h.path), &opts_pinned(&identity, Some(wrong)), |_| {});
+        let err = result.err().expect("an imposter host must be refused");
+        assert!(matches!(err, RemoteError::Refused(_)), "expected Refused, got {err:?}");
+        assert_eq!(
+            h.registry.len(),
+            0,
+            "refusal must happen before any session is created"
+        );
+    }
+
+    #[test]
+    fn the_right_expected_host_attaches_normally() {
+        // The pin is a check, not a tax: dialling the machine the roster
+        // actually named works exactly like an unpinned attach.
+        let h = Harness::start("pin-right");
+        let identity = Arc::new(ClientIdentity::generate().expect("client key"));
+        let expected = h.host_identity.host_id();
+        let s = RemoteSession::attach(
+            dial_to(&h.path),
+            &opts_pinned(&identity, Some(expected)),
+            |_| {},
+        )
+        .expect("a correctly pinned attach succeeds");
+        assert!(
+            wait_for(|| h.registry.len() == 1),
+            "the pinned attach must create its session"
         );
         drop(s);
     }
