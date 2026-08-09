@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Geist:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+html,body{margin:0;padding:0;background:#05070d;-webkit-font-smoothing:antialiased}
+*{box-sizing:border-box}
+a{color:#6ea8ff;text-decoration:none}
+a:hover{color:#9cc4ff}
+@keyframes zcaret{0%,49%{opacity:1}50%,100%{opacity:0}}
+@keyframes zpulse{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes zspin{to{transform:rotate(360deg)}}
+</style>
+</helmet>
+
+<div style="min-height:100vh;background:#05070d;font-family:Geist,system-ui,sans-serif;color:#d7dcea;display:flex;flex-direction:column;padding:22px 22px 84px;gap:18px">
+
+  <div style="display:flex;align-items:center;gap:14px;flex:none">
+    <div style="display:flex;align-items:center;gap:9px">
+      <div style="width:16px;height:16px;border-radius:4px;background:#6ea8ff"></div>
+      <span style="font-size:13px;font-weight:600;letter-spacing:-.01em">zesterm</span>
+    </div>
+    <span style="font-size:12px;color:#4a516a">UI mockups · fleet-aware terminal · theme tokens from <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#8b93a7">zest-theme</span></span>
+  </div>
+
+  <sc-if value="{{ isApp }}" hint-placeholder-val="{{ true }}">
+  <div style="flex:1;display:flex;min-height:660px;border-radius:12px;overflow:hidden;background:#0b0f1a;border:1px solid #2a3350;box-shadow:0 24px 70px rgba(0,0,0,.6);position:relative">
+
+    <sc-if value="{{ isTabsV }}" hint-placeholder-val="{{ false }}">
+      <div style="width:262px;flex:none;background:#0d121f;border-right:1px solid #2a3350;display:flex;flex-direction:column">
+        <div style="height:44px;flex:none;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid #1b2338">
+          <div style="display:flex;gap:7px;align-items:center">
+            <div style="width:11px;height:11px;border-radius:50%;background:#e0606a"></div>
+            <div style="width:11px;height:11px;border-radius:50%;background:#e0b341"></div>
+            <div style="width:11px;height:11px;border-radius:50%;background:#5fd17f"></div>
+          </div>
+        </div>
+        <div style="padding:10px 10px 8px">
+          <div style="display:flex;align-items:center;gap:8px;height:30px;padding:0 9px;border-radius:7px;background:#121829;border:1px solid #2a3350;font-size:12px;color:#4a516a">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:11px">⌘K</span>
+            <span>Search sessions, blocks, hosts</span>
+          </div>
+        </div>
+
+        <div style="flex:1;overflow:hidden;padding:0 8px 8px;display:flex;flex-direction:column;gap:14px">
+          <div style="display:flex;flex-direction:column;gap:2px">
+            <div style="display:flex;align-items:center;gap:7px;padding:6px 8px">
+              <div style="width:6px;height:6px;border-radius:50%;background:#5fd17f"></div>
+              <span style="font-size:10.5px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:#8b93a7">studio</span>
+              <span style="font-size:10px;color:#4a516a;font-family:'JetBrains Mono',monospace">macOS · LAN 0.3ms</span>
+            </div>
+            <sc-for list="{{ vtabs }}" as="t" hint-placeholder-count="3">
+              <div onClick="{{ t.onSelect }}" style="{{ t.rowStyle }}">
+                <div style="{{ t.dotStyle }}"></div>
+                <div style="flex:1;min-width:0">
+                  <div style="{{ t.titleStyle }}">{{ t.title }}</div>
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ t.cwd }}</div>
+                </div>
+                <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a">{{ t.age }}</div>
+              </div>
+            </sc-for>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:2px">
+            <div style="display:flex;align-items:center;gap:7px;padding:6px 8px">
+              <div style="width:6px;height:6px;border-radius:50%;background:#5fc4e0"></div>
+              <span style="font-size:10.5px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:#8b93a7">crate</span>
+              <span style="font-size:10px;color:#4a516a;font-family:'JetBrains Mono',monospace">ubuntu · LAN 0.4ms</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:8px;cursor:pointer" style-hover="background:#121829">
+              <div style="width:5px;height:5px;border-radius:50%;background:#e0b341;animation:zpulse 1.6s ease-in-out infinite"></div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:12.5px;color:#8b93a7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">journalctl -fu zestd</div>
+                <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">/var/log</div>
+              </div>
+              <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a">31d</div>
+            </div>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:2px">
+            <div style="display:flex;align-items:center;gap:7px;padding:6px 8px">
+              <div style="width:6px;height:6px;border-radius:50%;background:#b07cff"></div>
+              <span style="font-size:10.5px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:#8b93a7">forge</span>
+              <span style="font-size:10px;color:#4a516a;font-family:'JetBrains Mono',monospace">win11 · tunnel 41ms</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:8px;cursor:pointer" style-hover="background:#121829">
+              <div style="width:5px;height:5px;border-radius:50%;background:#4a516a"></div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:12.5px;color:#8b93a7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">pwsh</div>
+                <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">C:\src\zesterm</div>
+              </div>
+              <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a">12h</div>
+            </div>
+          </div>
+        </div>
+
+        <div onClick="{{ goFleet }}" style="flex:none;height:42px;border-top:1px solid #1b2338;display:flex;align-items:center;gap:8px;padding:0 12px;cursor:pointer" style-hover="background:#121829">
+          <div style="width:6px;height:6px;border-radius:50%;background:#5fd17f"></div>
+          <span style="font-size:11.5px;color:#8b93a7">4 hosts online · 1 asleep</span>
+        </div>
+      </div>
+    </sc-if>
+
+    <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+
+      <sc-if value="{{ isTabsH }}" hint-placeholder-val="{{ true }}">
+        <div style="flex:none;height:46px;display:flex;align-items:flex-end;gap:0;padding:0 12px;background:#0d121f;border-bottom:1px solid #2a3350">
+          <div style="display:flex;gap:7px;align-items:center;height:46px;padding-right:14px">
+            <div style="width:11px;height:11px;border-radius:50%;background:#e0606a"></div>
+            <div style="width:11px;height:11px;border-radius:50%;background:#e0b341"></div>
+            <div style="width:11px;height:11px;border-radius:50%;background:#5fd17f"></div>
+          </div>
+          <div style="display:flex;align-items:flex-end;gap:3px;flex:1;min-width:0;overflow:hidden">
+            <sc-for list="{{ htabs }}" as="t" hint-placeholder-count="3">
+              <div onClick="{{ t.onSelect }}" style="{{ t.tabStyle }}">
+                <div style="{{ t.dotStyle }}"></div>
+                <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:1px">
+                  <div style="{{ t.titleStyle }}">{{ t.title }}</div>
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4a516a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ t.host }} · {{ t.cwd }}</div>
+                </div>
+                <div style="width:16px;height:16px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:12px;color:#4a516a" style-hover="background:#2a3350;color:#d7dcea">×</div>
+              </div>
+            </sc-for>
+            <div style="width:28px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:7px;color:#8b93a7;font-size:16px;cursor:pointer;margin-bottom:4px" style-hover="background:#161d33;color:#d7dcea">+</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;height:46px;padding-left:12px">
+            <div onClick="{{ goTabsV }}" title="Vertical tabs" style="height:26px;padding:0 9px;border-radius:7px;border:1px solid #2a3350;display:flex;align-items:center;gap:6px;font-size:11px;color:#8b93a7;cursor:pointer" style-hover="border-color:#6ea8ff;color:#d7dcea">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px">⌘⇧E</span>
+              <span>Vertical</span>
+            </div>
+            <div onClick="{{ openPalette }}" style="height:26px;padding:0 9px;border-radius:7px;border:1px solid #2a3350;display:flex;align-items:center;gap:6px;font-size:11px;color:#8b93a7;cursor:pointer" style-hover="border-color:#6ea8ff;color:#d7dcea">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px">⌘K</span>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isTabsV }}" hint-placeholder-val="{{ false }}">
+        <div style="flex:none;height:44px;display:flex;align-items:center;gap:10px;padding:0 14px;background:#0d121f;border-bottom:1px solid #2a3350">
+          <span style="font-size:13px;font-weight:500">zsh</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#8b93a7">~/dev/zesterm</span>
+          <div style="height:20px;padding:0 8px;border-radius:6px;background:#16203a;color:#6ea8ff;font-size:10.5px;display:flex;align-items:center;gap:6px">
+            <div style="width:5px;height:5px;border-radius:50%;background:#5fd17f"></div>studio
+          </div>
+          <div style="flex:1"></div>
+          <div onClick="{{ goTabsH }}" style="height:26px;padding:0 9px;border-radius:7px;border:1px solid #2a3350;display:flex;align-items:center;font-size:11px;color:#8b93a7;cursor:pointer" style-hover="border-color:#6ea8ff;color:#d7dcea">Horizontal tabs</div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isBlocks }}" hint-placeholder-val="{{ true }}">
+        <div style="flex:1;overflow:hidden;background:#0b0f1a;padding:16px 0 0;display:flex;flex-direction:column;gap:2px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.62">
+
+          <div style="padding:0 18px 12px;display:flex;flex-direction:column">
+            <div style="display:flex;align-items:center;gap:10px;padding:5px 12px;border-radius:8px;background:#0f1526;border-left:2px solid #5fd17f">
+              <span style="color:#4a516a">▾</span>
+              <span style="color:#5fd17f;font-weight:500">cargo build --workspace</span>
+              <div style="flex:1"></div>
+              <span style="color:#4a516a;font-size:11px">~/dev/zesterm</span>
+              <span style="color:#4a516a;font-size:11px">51.2s</span>
+              <span style="color:#5fd17f;font-size:11px">exit 0</span>
+            </div>
+            <div style="padding:8px 12px 0 24px;color:#8b93a7;white-space:pre">   Compiling zest-core v0.4.0 (crates/zest-core)
+   Compiling zest-theme v0.4.0 (crates/zest-theme)
+   Compiling zest-render-wgpu v0.4.0 (crates/zest-render-wgpu)
+    <span style="color:#5fd17f">Finished</span> `dev` profile [unoptimized] in 51.20s</div>
+          </div>
+
+          <div style="padding:0 18px 12px;display:flex;flex-direction:column">
+            <div onClick="{{ toggleFold }}" style="display:flex;align-items:center;gap:10px;padding:5px 12px;border-radius:8px;background:#0f1526;border-left:2px solid #5fd17f;cursor:pointer" style-hover="background:#121829">
+              <span style="color:#4a516a">{{ foldGlyph }}</span>
+              <span style="color:#5fd17f;font-weight:500">cargo xtask check-deps</span>
+              <div style="flex:1"></div>
+              <span style="color:#4a516a;font-size:11px">3 lines</span>
+              <span style="color:#4a516a;font-size:11px">0.41s</span>
+              <span style="color:#5fd17f;font-size:11px">exit 0</span>
+            </div>
+            <sc-if value="{{ folded }}" hint-placeholder-val="{{ false }}">
+              <div style="padding:8px 12px 0 24px;color:#8b93a7;white-space:pre">zest-core: no forbidden deps (wgpu, winit, windows, tokio)
+zest-core: builds for wasm32-unknown-unknown
+<span style="color:#5fd17f">ok</span> · 1 boundary checked</div>
+            </sc-if>
+          </div>
+
+          <div style="padding:0 18px 12px;display:flex;flex-direction:column">
+            <div style="display:flex;align-items:center;gap:10px;padding:5px 12px;border-radius:8px;background:#121829;border-left:2px solid #e0b341">
+              <span style="color:#4a516a">▾</span>
+              <span style="color:#d7dcea;font-weight:500">cargo run -p zest-render-wgpu --example render_dump</span>
+              <div style="flex:1"></div>
+              <div style="display:flex;align-items:center;gap:6px;color:#e0b341;font-size:11px">
+                <div style="width:8px;height:8px;border-radius:50%;border:1.5px solid #e0b341;border-top-color:transparent;animation:zspin .9s linear infinite"></div>
+                running 4.2s
+              </div>
+              <div style="display:flex;gap:5px">
+                <span style="padding:1px 7px;border-radius:5px;background:#16203a;color:#6ea8ff;font-size:10px">copy output ⌘⇧O</span>
+                <span style="padding:1px 7px;border-radius:5px;background:#16203a;color:#6ea8ff;font-size:10px">re-run ⌘⇧R</span>
+              </div>
+            </div>
+            <div style="padding:8px 12px 0 24px;color:#8b93a7;white-space:pre">   <span style="color:#5fc4e0">adapter</span> Apple M3 Max · Metal
+   atlas 2048×2048 · 3 pipelines
+   rendering grid 120×34 …</div>
+          </div>
+
+          <div style="padding:4px 30px 18px;display:flex;align-items:center;gap:8px;color:#d7dcea">
+            <span style="color:#b07cff">zesterm</span><span style="color:#4a516a">/</span><span style="color:#6ea8ff">~/dev/zesterm</span>
+            <span style="color:#5fd17f">⎇ main*</span>
+            <span style="color:#4a516a">❯</span>
+            <span style="display:inline-block;width:8px;height:16px;background:#6ea8ff;animation:zcaret 1.1s step-end infinite"></span>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isLog }}" hint-placeholder-val="{{ false }}">
+        <div style="flex:1;overflow:hidden;background:#0b0f1a;padding:18px 22px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.7;color:#8b93a7;white-space:pre">
+<span style="color:#4a516a">Aug 09 09:41:02</span> crate <span style="color:#5fc4e0">zestd[1180]</span>: accepted client 7f3a (lan, ed25519 SHA256:8f2a…c41d)
+<span style="color:#4a516a">Aug 09 09:41:02</span> crate <span style="color:#5fc4e0">zestd[1180]</span>: session 3 attached · protocol 2 · keyframe 4.1 KiB
+<span style="color:#4a516a">Aug 09 09:41:19</span> crate <span style="color:#5fc4e0">zestd[1180]</span>: delta batch 128 rows · 2.9 KiB · 0.6 ms
+<span style="color:#4a516a">Aug 09 09:43:55</span> crate <span style="color:#e0b341">zestd[1180]</span>: link stalled 412 ms · buffering deltas
+<span style="color:#4a516a">Aug 09 09:43:56</span> crate <span style="color:#5fd17f">zestd[1180]</span>: resync complete · coalesced 61 deltas → 1 keyframe
+<span style="color:#4a516a">Aug 09 09:44:10</span> crate <span style="color:#5fc4e0">zestd[1180]</span>: block index reanchored after resize 120×34 → 148×40
+<span style="color:#4a516a">Aug 09 09:52:31</span> crate <span style="color:#5fc4e0">zestd[1180]</span>: session 3 detached · shell kept alive (pid 4412)
+<span style="color:#6ea8ff">▍</span></div>
+      </sc-if>
+
+      <sc-if value="{{ isSplit }}" hint-placeholder-val="{{ false }}">
+        <div style="flex:1;display:flex;min-height:0;background:#0b0f1a">
+          <div style="flex:1;min-width:0;display:flex;flex-direction:column;border:1px solid #6ea8ff;border-radius:0;margin:8px;border-radius:10px;overflow:hidden">
+            <div style="height:28px;flex:none;display:flex;align-items:center;gap:8px;padding:0 10px;background:#121829;border-bottom:1px solid #2a3350">
+              <div style="width:5px;height:5px;border-radius:50%;background:#5fd17f"></div>
+              <span style="font-size:11px;color:#d7dcea">studio</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">~/dev/zesterm</span>
+              <div style="flex:1"></div>
+              <span style="font-size:10px;color:#6ea8ff">focused</span>
+            </div>
+            <div style="flex:1;padding:12px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.65;color:#8b93a7;white-space:pre">❯ cargo run --profile fast -p zest-app
+   <span style="color:#5fd17f">Finished</span> `fast` profile in 3.61s
+    <span style="color:#5fc4e0">Running</span> `target/fast/zesterm`
+<span style="color:#4a516a">·</span> window visible at <span style="color:#5fd17f">43 ms</span>
+<span style="color:#4a516a">·</span> shell prompt on frame 1
+<span style="color:#4a516a">·</span> daemon: warm pipe, 0.08 ms
+❯ <span style="display:inline-block;width:7px;height:14px;background:#6ea8ff;vertical-align:-2px;animation:zcaret 1.1s step-end infinite"></span></div>
+          </div>
+          <div style="flex:1;min-width:0;display:flex;flex-direction:column;margin:8px;border:1px solid #2a3350;border-radius:10px;overflow:hidden">
+            <div style="height:28px;flex:none;display:flex;align-items:center;gap:8px;padding:0 10px;background:#0f1526;border-bottom:1px solid #2a3350">
+              <div style="width:5px;height:5px;border-radius:50%;background:#b07cff"></div>
+              <span style="font-size:11px;color:#8b93a7">forge</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">C:\src\zesterm · tunnel 41 ms</span>
+            </div>
+            <div style="flex:1;padding:12px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.65;color:#8b93a7;white-space:pre">PS C:\src\zesterm&gt; cargo test -p zest-core
+<span style="color:#5fd17f">running 77 tests</span>
+test grid::tests::wide_cjk_advances ... <span style="color:#5fd17f">ok</span>
+test vt::tests::decstbm_scroll_region ... <span style="color:#5fd17f">ok</span>
+test osc::tests::osc4_query_roundtrip ... <span style="color:#5fd17f">ok</span>
+test blocks::tests::reanchor_after_reflow ... <span style="color:#e0b341">FAILED</span></div><div style="padding:0 12px 12px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.65;color:#8b93a7;white-space:pre">
+<span style="color:#e0606a">failures:</span>
+    reanchor_after_reflow
+PS C:\src\zesterm&gt; <span style="color:#4a516a">▍</span></div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ showStatus }}" hint-placeholder-val="{{ true }}">
+        <div style="flex:none;height:28px;display:flex;align-items:center;gap:0;padding:0 14px;background:#0d121f;border-top:1px solid #1b2338;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">
+          <span style="color:#8b93a7">~/dev/zesterm</span>
+          <span style="padding:0 8px">·</span>
+          <span style="color:#5fd17f">⎇ main*</span>
+          <span style="padding:0 8px">·</span>
+          <span>3 blocks</span>
+          <div style="flex:1"></div>
+          <span>obsidian</span>
+          <span style="padding:0 8px">·</span>
+          <span style="color:#5fd17f">● LAN direct</span>
+          <span style="padding-left:6px">0.3 ms</span>
+        </div>
+      </sc-if>
+    </div>
+
+    <sc-if value="{{ palette }}" hint-placeholder-val="{{ false }}">
+      <div onClick="{{ closePalette }}" style="position:absolute;inset:0;background:rgba(5,7,13,.66);backdrop-filter:blur(3px);display:flex;align-items:flex-start;justify-content:center;padding-top:88px">
+        <div style="width:620px;max-width:92%;background:#121829;border:1px solid #2a3350;border-radius:14px;box-shadow:0 30px 80px rgba(0,0,0,.65);overflow:hidden">
+          <div style="display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid #1b2338">
+            <span style="color:#6ea8ff;font-size:14px">❯</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#d7dcea">bui</span>
+            <span style="display:inline-block;width:8px;height:16px;background:#6ea8ff;animation:zcaret 1.1s step-end infinite"></span>
+            <div style="flex:1"></div>
+            <span style="font-size:10.5px;color:#4a516a">4 hosts searched</span>
+          </div>
+          <div style="padding:8px 8px 6px">
+            <div style="font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:#4a516a;padding:6px 10px">Blocks</div>
+            <div style="display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:9px;background:#16203a">
+              <span style="color:#5fd17f;font-size:11px">↺</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#d7dcea;flex:1">cargo build --workspace</span>
+              <span style="font-size:10.5px;color:#8b93a7">studio · 2m ago · exit 0</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#6ea8ff">⏎ re-run</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:9px" style-hover="background:#161d33">
+              <span style="color:#e0606a;font-size:11px">↺</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#8b93a7;flex:1">cargo build --release -p zest-app</span>
+              <span style="font-size:10.5px;color:#4a516a">forge · yesterday · exit 101</span>
+            </div>
+            <div style="font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:#4a516a;padding:10px 10px 6px">Sessions</div>
+            <div style="display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:9px" style-hover="background:#161d33">
+              <div style="width:5px;height:5px;border-radius:50%;background:#5fd17f"></div>
+              <span style="font-size:12.5px;color:#8b93a7;flex:1">build watch — <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px">~/dev/zesterm</span></span>
+              <span style="font-size:10.5px;color:#4a516a">crate</span>
+            </div>
+            <div style="font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:#4a516a;padding:10px 10px 6px">Actions</div>
+            <div style="display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:9px" style-hover="background:#161d33">
+              <span style="font-size:12.5px;color:#8b93a7;flex:1">Split right and open a shell on <span style="color:#d7dcea">forge</span></span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a">⌘D</span>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:16px;padding:9px 16px;border-top:1px solid #1b2338;background:#0f1526;font-size:10.5px;color:#4a516a">
+            <span><span style="font-family:'JetBrains Mono',monospace;color:#8b93a7">↑↓</span> navigate</span>
+            <span><span style="font-family:'JetBrains Mono',monospace;color:#8b93a7">⏎</span> run here</span>
+            <span><span style="font-family:'JetBrains Mono',monospace;color:#8b93a7">⇧⏎</span> run on host…</span>
+            <div style="flex:1"></div>
+            <span><span style="font-family:'JetBrains Mono',monospace;color:#8b93a7">esc</span> dismiss</span>
+          </div>
+        </div>
+      </div>
+    </sc-if>
+  </div>
+  </sc-if>
+
+  <sc-if value="{{ isFleet }}" hint-placeholder-val="{{ false }}">
+    <div style="flex:1;min-height:660px;border-radius:12px;background:#0b0f1a;border:1px solid #2a3350;box-shadow:0 24px 70px rgba(0,0,0,.6);padding:34px 38px;overflow:hidden">
+      <div style="display:flex;align-items:baseline;gap:14px;margin-bottom:6px">
+        <h2 style="margin:0;font-size:19px;font-weight:600;letter-spacing:-.01em">Your fleet</h2>
+        <span style="font-size:12px;color:#4a516a">every machine is a host · every window, tab and phone is a client</span>
+      </div>
+      <p style="margin:0 0 26px;font-size:12px;color:#8b93a7;max-width:640px;text-wrap:pretty">The directory knows which machines exist and how to reach them. Sessions never leave the machine they run on.</p>
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px">
+        <div style="background:#121829;border:1px solid #6ea8ff;border-radius:12px;padding:18px">
+          <div style="display:flex;align-items:center;gap:9px;margin-bottom:14px">
+            <div style="width:8px;height:8px;border-radius:50%;background:#5fd17f"></div>
+            <span style="font-size:15px;font-weight:600">studio</span>
+            <span style="font-size:11px;color:#4a516a">this machine</span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:7px;font-size:11.5px;color:#8b93a7">
+            <div style="display:flex;justify-content:space-between"><span style="color:#4a516a">os</span><span>macOS 15 · M3 Max</span></div>
+            <div style="display:flex;justify-content:space-between"><span style="color:#4a516a">path</span><span style="color:#5fd17f">loopback · 0.08 ms</span></div>
+            <div style="display:flex;justify-content:space-between"><span style="color:#4a516a">key</span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px">SHA256:8f2a…c41d</span></div>
+            <div style="display:flex;justify-content:space-between"><span style="color:#4a516a">sessions</span><span style="color:#d7dcea">4 · 2 running</span></div>
+          </div>
+        </div>
+
+        <div style="background:#121829;border:1px solid #2a3350;border-radius:12px;padding:18px">
+          <div style="display:flex;align-items:center;gap:9px;margin-bottom:14px">
+            <div style="width:8px;height:8px;border-radius:50%;background:#5fd17f"></div>
+            <span style="font-size:15px;font-weight:600">crate</span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:7px;font-size:11.5px;color:#8b93a7">
+            <div style="display:flex;justify-content:space-between"><span style="color:#4a516a">os</span><span>Ubuntu 24.04 · headless</span></div>
+            <div style="display:flex;justify-content:space-between"><span style="color:#4a516a">path</span><span style="color:#5fd17f">LAN direct · 0.4 ms</span></div>
+            <div style="display:flex;justify-content:space-between"><span style="color:#4a516a">key</span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px">SHA256:11be…907f</span></div>
+            <div style="display:flex;justify-content:space-between"><span style="color:#4a516a">sessions</span><span style="color:#d7dcea">3 · 1 running</span></div>
+          </div>
+        </div>
+
+        <div style="background:#121829;border:1px solid #2a3350;border-radius:12px;padding:18px">
+          <div style="display:flex;align-items:center;gap:9px;margin-bottom:14px">
+            <div style="width:8px;height:8px;border-radius:50%;background:#e0b341"></div>
+            <span style="font-size:15px;font-weight:600">forge</span>
+            <span style="font-size:10.5px;color:#e0b341;padding:1px 7px;border-radius:5px;background:rgba(224,179,65,.12)">via tunnel</span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:7px;font-size:11.5px;color:#8b93a7">
+            <div style="display:flex;justify-content:space-between"><span style="color:#4a516a">os</span><span>Windows 11 · RTX 3080 Ti</span></div>
+            <div style="display:flex;justify-content:space-between"><span style="color:#4a516a">path</span><span style="color:#e0b341">tunnel · 41 ms</span></div>
+            <div style="display:flex;justify-content:space-between"><span style="color:#4a516a">key</span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px">SHA256:6c04…d2a1</span></div>
+            <div style="display:flex;justify-content:space-between"><span style="color:#4a516a">sessions</span><span style="color:#d7dcea">2 · idle</span></div>
+          </div>
+        </div>
+
+        <div style="background:#0f1526;border:1px dashed #2a3350;border-radius:12px;padding:18px">
+          <div style="display:flex;align-items:center;gap:9px;margin-bottom:14px">
+            <div style="width:8px;height:8px;border-radius:50%;background:#4a516a"></div>
+            <span style="font-size:15px;font-weight:600;color:#8b93a7">nas</span>
+            <span style="font-size:10.5px;color:#4a516a">asleep</span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:7px;font-size:11.5px;color:#4a516a">
+            <div style="display:flex;justify-content:space-between"><span>os</span><span>Debian 12</span></div>
+            <div style="display:flex;justify-content:space-between"><span>last seen</span><span>2 days ago</span></div>
+            <div style="display:flex;justify-content:space-between"><span>sessions</span><span>1 detached, kept</span></div>
+          </div>
+          <div style="margin-top:14px;height:28px;border-radius:7px;border:1px solid #2a3350;display:flex;align-items:center;justify-content:center;font-size:11.5px;color:#8b93a7;cursor:pointer" style-hover="border-color:#6ea8ff;color:#d7dcea">Wake over LAN</div>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ isThemes }}" hint-placeholder-val="{{ false }}">
+    <div style="flex:1;min-height:660px;border-radius:12px;background:#0b0f1a;border:1px solid #2a3350;box-shadow:0 24px 70px rgba(0,0,0,.6);padding:34px 38px;overflow:hidden">
+      <div style="display:flex;align-items:baseline;gap:14px;margin-bottom:6px">
+        <h2 style="margin:0;font-size:19px;font-weight:600;letter-spacing:-.01em">Themes</h2>
+        <span style="font-size:12px;color:#4a516a">one file styles the chrome and any TUI running inside it</span>
+      </div>
+      <p style="margin:0 0 26px;font-size:12px;color:#8b93a7;max-width:660px;text-wrap:pretty">Brights are derived in OKLCH, never hand-authored, so no bright drifts out of its theme's colour family.</p>
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(268px,1fr));gap:18px">
+        <div style="border-radius:12px;overflow:hidden;border:1px solid #6ea8ff">
+          <div style="background:#0b0f1a;padding:14px;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.6;color:#d7dcea;white-space:pre">❯ zesterm --theme obsidian
+<span style="color:#5fd17f">ok</span> · schema 1 · 24 tokens
+<span style="color:#6ea8ff">accent</span> #6ea8ff  <span style="color:#e0606a">danger</span> #e0606a</div>
+          <div style="display:flex;height:10px">
+            <div style="flex:1;background:#0b0f1a"></div><div style="flex:1;background:#e0606a"></div><div style="flex:1;background:#5fd17f"></div><div style="flex:1;background:#e0b341"></div><div style="flex:1;background:#6ea8ff"></div><div style="flex:1;background:#b07cff"></div><div style="flex:1;background:#5fc4e0"></div><div style="flex:1;background:#d7dcea"></div>
+          </div>
+          <div style="background:#121829;padding:9px 12px;display:flex;align-items:center;gap:8px">
+            <span style="font-size:12.5px;font-weight:500">Obsidian</span>
+            <span style="font-size:10.5px;color:#4a516a">dark · default</span>
+            <div style="flex:1"></div>
+            <span style="font-size:11px;color:#6ea8ff">active</span>
+          </div>
+        </div>
+
+        <div style="border-radius:12px;overflow:hidden;border:1px solid #2a3350">
+          <div style="background:#2e3440;padding:14px;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.6;color:#d8dee9;white-space:pre">❯ zesterm --theme nord
+<span style="color:#a3be8c">ok</span> · schema 1 · 24 tokens
+<span style="color:#81a1c1">accent</span> #81a1c1  <span style="color:#bf616a">danger</span> #bf616a</div>
+          <div style="display:flex;height:10px">
+            <div style="flex:1;background:#3b4252"></div><div style="flex:1;background:#bf616a"></div><div style="flex:1;background:#a3be8c"></div><div style="flex:1;background:#ebcb8b"></div><div style="flex:1;background:#81a1c1"></div><div style="flex:1;background:#b48ead"></div><div style="flex:1;background:#88c0d0"></div><div style="flex:1;background:#e5e9f0"></div>
+          </div>
+          <div style="background:#121829;padding:9px 12px;display:flex;align-items:center;gap:8px">
+            <span style="font-size:12.5px;font-weight:500">Nord</span>
+            <span style="font-size:10.5px;color:#4a516a">dark</span>
+          </div>
+        </div>
+
+        <div style="border-radius:12px;overflow:hidden;border:1px solid #2a3350">
+          <div style="background:#1f1b2a;padding:14px;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.6;color:#e6e1f0;white-space:pre">❯ zesterm --theme gum
+<span style="color:#5ce6a8">ok</span> · schema 1 · 24 tokens
+<span style="color:#7aa2ff">accent</span> #7aa2ff  <span style="color:#ff5c8a">danger</span> #ff5c8a</div>
+          <div style="display:flex;height:10px">
+            <div style="flex:1;background:#2b2536"></div><div style="flex:1;background:#ff5c8a"></div><div style="flex:1;background:#5ce6a8"></div><div style="flex:1;background:#ffc857"></div><div style="flex:1;background:#7aa2ff"></div><div style="flex:1;background:#c792ea"></div><div style="flex:1;background:#5fd7e0"></div><div style="flex:1;background:#e6e1f0"></div>
+          </div>
+          <div style="background:#121829;padding:9px 12px;display:flex;align-items:center;gap:8px">
+            <span style="font-size:12.5px;font-weight:500">Gum</span>
+            <span style="font-size:10.5px;color:#4a516a">dark</span>
+          </div>
+        </div>
+
+        <div style="border-radius:12px;overflow:hidden;border:1px solid #2a3350">
+          <div style="background:#faf9f5;padding:14px;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.6;color:#24292f;white-space:pre">❯ zesterm --theme paper
+<span style="color:#27803a">ok</span> · schema 1 · 24 tokens
+<span style="color:#1f6feb">accent</span> #1f6feb  <span style="color:#c0392b">danger</span> #c0392b</div>
+          <div style="display:flex;height:10px">
+            <div style="flex:1;background:#2b2b2b"></div><div style="flex:1;background:#c0392b"></div><div style="flex:1;background:#27803a"></div><div style="flex:1;background:#9a6b00"></div><div style="flex:1;background:#1f6feb"></div><div style="flex:1;background:#8250df"></div><div style="flex:1;background:#1b7c83"></div><div style="flex:1;background:#6e7781"></div>
+          </div>
+          <div style="background:#121829;padding:9px 12px;display:flex;align-items:center;gap:8px">
+            <span style="font-size:12.5px;font-weight:500">Paper</span>
+            <span style="font-size:10.5px;color:#4a516a">light · default</span>
+          </div>
+        </div>
+
+        <div style="border-radius:12px;overflow:hidden;border:1px solid #2a3350">
+          <div style="background:#000000;padding:14px;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.6;color:#e5e5e5;white-space:pre">❯ zesterm --theme classic
+<span style="color:#00cd00">ok</span> · schema 1 · 24 tokens
+<span style="color:#5c5cff">accent</span> #0000ee  <span style="color:#cd0000">danger</span> #cd0000</div>
+          <div style="display:flex;height:10px">
+            <div style="flex:1;background:#000000"></div><div style="flex:1;background:#cd0000"></div><div style="flex:1;background:#00cd00"></div><div style="flex:1;background:#cdcd00"></div><div style="flex:1;background:#0000ee"></div><div style="flex:1;background:#cd00cd"></div><div style="flex:1;background:#00cdcd"></div><div style="flex:1;background:#e5e5e5"></div>
+          </div>
+          <div style="background:#121829;padding:9px 12px;display:flex;align-items:center;gap:8px">
+            <span style="font-size:12.5px;font-weight:500">Classic</span>
+            <span style="font-size:10.5px;color:#4a516a">dark</span>
+          </div>
+        </div>
+
+        <div style="border-radius:12px;border:1px dashed #2a3350;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:24px;min-height:150px">
+          <span style="font-size:12.5px;color:#8b93a7">Import a scheme</span>
+          <span style="font-size:11px;color:#4a516a;text-align:center;line-height:1.6">.itermcolors · Windows Terminal<br>base16 / base24 · Alacritty TOML</span>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ isMobile }}" hint-placeholder-val="{{ false }}">
+    <div style="flex:1;min-height:660px;border-radius:12px;background:#0b0f1a;border:1px solid #2a3350;box-shadow:0 24px 70px rgba(0,0,0,.6);padding:34px 38px;overflow:hidden;display:flex;gap:44px">
+      <div style="max-width:300px;padding-top:8px">
+        <h2 style="margin:0 0 6px;font-size:19px;font-weight:600;letter-spacing:-.01em">On the go</h2>
+        <p style="margin:0 0 18px;font-size:12px;color:#8b93a7;line-height:1.7;text-wrap:pretty">A phone is bad at a 120×34 grid and excellent at a list. So the mobile client is blocks-first: scroll what ran, tap to expand output, long-press to run it again.</p>
+        <div style="display:flex;flex-direction:column;gap:10px;font-size:11.5px;color:#4a516a">
+          <div>Sessions outlive the window — close the laptop, pick the same shell up here.</div>
+          <div>The keyboard bar carries the keys a phone has no room for.</div>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:30px;align-items:flex-start">
+        <div style="width:288px;height:592px;border-radius:38px;background:#0d121f;border:1px solid #2a3350;padding:10px;box-shadow:0 20px 50px rgba(0,0,0,.55);flex:none">
+          <div style="height:100%;border-radius:29px;background:#0b0f1a;overflow:hidden;display:flex;flex-direction:column">
+            <div style="height:40px;flex:none;display:flex;align-items:center;justify-content:center;position:relative">
+              <div style="width:78px;height:20px;border-radius:12px;background:#0d121f"></div>
+              <span style="position:absolute;right:18px;font-size:10.5px;color:#8b93a7;font-family:'JetBrains Mono',monospace">9:41</span>
+            </div>
+            <div style="padding:6px 16px 12px">
+              <div style="font-size:21px;font-weight:600;letter-spacing:-.02em">Sessions</div>
+              <div style="font-size:11.5px;color:#4a516a;margin-top:2px">4 hosts · 9 sessions</div>
+            </div>
+            <div style="flex:1;overflow:hidden;padding:0 12px;display:flex;flex-direction:column;gap:12px">
+              <div>
+                <div style="display:flex;align-items:center;gap:7px;padding:4px 6px 8px">
+                  <div style="width:6px;height:6px;border-radius:50%;background:#5fd17f"></div>
+                  <span style="font-size:10.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:#8b93a7">studio</span>
+                </div>
+                <div style="background:#121829;border:1px solid #2a3350;border-radius:12px;overflow:hidden">
+                  <div style="padding:13px 14px;display:flex;align-items:center;gap:10px;border-bottom:1px solid #1b2338">
+                    <div style="width:6px;height:6px;border-radius:50%;background:#e0b341;animation:zpulse 1.6s ease-in-out infinite"></div>
+                    <div style="flex:1;min-width:0">
+                      <div style="font-size:13.5px">render_dump</div>
+                      <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">~/dev/zesterm · 4.2s</div>
+                    </div>
+                    <span style="font-size:16px;color:#4a516a">›</span>
+                  </div>
+                  <div style="padding:13px 14px;display:flex;align-items:center;gap:10px">
+                    <div style="width:6px;height:6px;border-radius:50%;background:#4a516a"></div>
+                    <div style="flex:1;min-width:0">
+                      <div style="font-size:13.5px;color:#8b93a7">zsh</div>
+                      <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">~/dev/zesterm · idle 6m</div>
+                    </div>
+                    <span style="font-size:16px;color:#4a516a">›</span>
+                  </div>
+                </div>
+              </div>
+              <div>
+                <div style="display:flex;align-items:center;gap:7px;padding:4px 6px 8px">
+                  <div style="width:6px;height:6px;border-radius:50%;background:#e0b341"></div>
+                  <span style="font-size:10.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:#8b93a7">forge</span>
+                  <span style="font-size:10px;color:#4a516a">tunnel · 41 ms</span>
+                </div>
+                <div style="background:#121829;border:1px solid #2a3350;border-radius:12px;padding:13px 14px;display:flex;align-items:center;gap:10px">
+                  <div style="width:6px;height:6px;border-radius:50%;background:#e0606a"></div>
+                  <div style="flex:1;min-width:0">
+                    <div style="font-size:13.5px;color:#8b93a7">cargo test</div>
+                    <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#e0606a">1 failure · 2m ago</div>
+                  </div>
+                  <span style="font-size:16px;color:#4a516a">›</span>
+                </div>
+              </div>
+            </div>
+            <div style="height:62px;flex:none;border-top:1px solid #1b2338;display:flex;align-items:center;justify-content:space-around;padding:0 16px 8px">
+              <div style="display:flex;flex-direction:column;align-items:center;gap:4px;color:#6ea8ff"><div style="width:16px;height:16px;border-radius:4px;background:#6ea8ff"></div><span style="font-size:10px">Sessions</span></div>
+              <div style="display:flex;flex-direction:column;align-items:center;gap:4px;color:#4a516a"><div style="width:16px;height:16px;border-radius:50%;border:1.5px solid #4a516a"></div><span style="font-size:10px">Hosts</span></div>
+              <div style="display:flex;flex-direction:column;align-items:center;gap:4px;color:#4a516a"><div style="width:16px;height:16px;border-radius:4px;border:1.5px solid #4a516a"></div><span style="font-size:10px">Blocks</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div style="width:288px;height:592px;border-radius:38px;background:#0d121f;border:1px solid #2a3350;padding:10px;box-shadow:0 20px 50px rgba(0,0,0,.55);flex:none">
+          <div style="height:100%;border-radius:29px;background:#0b0f1a;overflow:hidden;display:flex;flex-direction:column">
+            <div style="height:40px;flex:none;display:flex;align-items:center;justify-content:center;position:relative">
+              <div style="width:78px;height:20px;border-radius:12px;background:#0d121f"></div>
+            </div>
+            <div style="flex:none;padding:4px 14px 12px;display:flex;align-items:center;gap:9px;border-bottom:1px solid #1b2338">
+              <span style="font-size:17px;color:#6ea8ff">‹</span>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:14px;font-weight:500">render_dump</div>
+                <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a">studio · LAN 0.3 ms · live</div>
+              </div>
+              <div style="width:6px;height:6px;border-radius:50%;background:#5fd17f"></div>
+            </div>
+            <div style="flex:1;overflow:hidden;padding:12px 12px 0;display:flex;flex-direction:column;gap:10px;font-family:'JetBrains Mono',monospace">
+              <div style="border-radius:11px;overflow:hidden;border:1px solid #1b2338">
+                <div style="background:#0f1526;padding:10px 12px;border-left:2px solid #5fd17f;display:flex;align-items:center;gap:8px">
+                  <span style="font-size:11.5px;color:#5fd17f;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">cargo build --workspace</span>
+                  <span style="font-size:10px;color:#4a516a">51.2s</span>
+                </div>
+              </div>
+              <div style="border-radius:11px;overflow:hidden;border:1px solid #1b2338">
+                <div style="background:#0f1526;padding:10px 12px;border-left:2px solid #5fd17f;display:flex;align-items:center;gap:8px">
+                  <span style="font-size:11.5px;color:#5fd17f;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">cargo xtask check-deps</span>
+                  <span style="font-size:10px;color:#4a516a">0.4s</span>
+                </div>
+              </div>
+              <div style="border-radius:11px;overflow:hidden;border:1px solid #2a3350">
+                <div style="background:#121829;padding:10px 12px;border-left:2px solid #e0b341;display:flex;align-items:center;gap:8px">
+                  <span style="font-size:11.5px;color:#d7dcea;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">render_dump --grid 120x34</span>
+                  <div style="width:8px;height:8px;border-radius:50%;border:1.5px solid #e0b341;border-top-color:transparent;animation:zspin .9s linear infinite"></div>
+                </div>
+                <div style="padding:10px 12px;font-size:11px;line-height:1.65;color:#8b93a7;white-space:pre">adapter Apple M3 Max
+atlas 2048×2048
+rendering grid …</div>
+              </div>
+            </div>
+            <div style="flex:none;padding:8px 10px;display:flex;gap:6px;overflow:hidden;border-top:1px solid #1b2338">
+              <div style="height:34px;padding:0 12px;border-radius:9px;background:#121829;border:1px solid #2a3350;display:flex;align-items:center;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#8b93a7">esc</div>
+              <div style="height:34px;padding:0 12px;border-radius:9px;background:#121829;border:1px solid #2a3350;display:flex;align-items:center;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#8b93a7">tab</div>
+              <div style="height:34px;padding:0 12px;border-radius:9px;background:#121829;border:1px solid #2a3350;display:flex;align-items:center;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#8b93a7">ctrl</div>
+              <div style="height:34px;padding:0 12px;border-radius:9px;background:#121829;border:1px solid #2a3350;display:flex;align-items:center;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#8b93a7">↑</div>
+              <div style="height:34px;flex:1;border-radius:9px;background:#16203a;border:1px solid #6ea8ff;display:flex;align-items:center;padding:0 12px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#6ea8ff">❯ run…</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <div style="position:fixed;left:50%;bottom:20px;transform:translateX(-50%);display:flex;gap:4px;padding:5px;border-radius:12px;background:rgba(18,24,41,.92);border:1px solid #2a3350;box-shadow:0 14px 40px rgba(0,0,0,.6);backdrop-filter:blur(8px);z-index:50">
+    <sc-for list="{{ screens }}" as="s" hint-placeholder-count="6">
+      <div onClick="{{ s.onSelect }}" style="{{ s.style }}">{{ s.label }}</div>
+    </sc-for>
+  </div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;showStatus&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Chrome&quot;}}">
+class Component extends DCLogic {
+  state = { screen: 'tabsH', tab: 0, palette: false, folded: true };
+
+  componentDidMount() {
+    this._k = (e) => {
+      const k = (e.key || '').toLowerCase();
+      if ((e.metaKey || e.ctrlKey) && k === 'k') { e.preventDefault(); this.setState(s => ({ palette: !s.palette })); }
+      else if (k === 'escape') this.setState({ palette: false });
+    };
+    window.addEventListener('keydown', this._k);
+  }
+  componentWillUnmount() { window.removeEventListener('keydown', this._k); }
+
+  go(screen) { return () => this.setState({ screen, palette: screen === 'palette' }); }
+
+  renderVals() {
+    const { screen, tab, palette, folded } = this.state;
+    const isApp = screen === 'tabsH' || screen === 'tabsV' || screen === 'palette';
+    const activeTab = screen === 'palette' ? tab : tab;
+
+    const tabDefs = [
+      { title: 'zsh', host: 'studio', cwd: '~/dev/zesterm', dot: '#5fd17f', age: '6m' },
+      { title: 'zestd — logs', host: 'crate', cwd: '/var/log', dot: '#5fc4e0', age: '31d' },
+      { title: 'build ×2', host: 'studio + forge', cwd: 'split', dot: '#b07cff', age: '2m' }
+    ];
+
+    const htabs = tabDefs.map((t, i) => {
+      const on = i === activeTab;
+      return {
+        ...t,
+        onSelect: () => this.setState({ tab: i }),
+        tabStyle: 'display:flex;align-items:center;gap:9px;padding:0 11px;height:34px;min-width:196px;max-width:240px;border-radius:9px 9px 0 0;cursor:pointer;margin-bottom:-1px;border:1px solid ' +
+          (on ? '#2a3350' : 'transparent') + ';border-bottom:none;background:' + (on ? '#0b0f1a' : 'transparent') +
+          ';box-shadow:' + (on ? 'inset 0 2px 0 #6ea8ff' : 'none'),
+        dotStyle: 'width:6px;height:6px;border-radius:50%;flex:none;background:' + (on ? t.dot : '#4a516a'),
+        titleStyle: 'font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:' + (on ? '#d7dcea' : '#8b93a7')
+      };
+    });
+
+    const vtabs = tabDefs.slice(0, 2).map((t, i) => {
+      const on = i === activeTab;
+      return {
+        ...t,
+        onSelect: () => this.setState({ tab: i }),
+        rowStyle: 'display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:8px;cursor:pointer;background:' + (on ? '#16203a' : 'transparent'),
+        dotStyle: 'width:5px;height:5px;border-radius:50%;flex:none;background:' + (on ? t.dot : '#4a516a'),
+        titleStyle: 'font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:' + (on ? '#d7dcea' : '#8b93a7')
+      };
+    });
+
+    const list = [
+      ['tabsH', 'Tabs'], ['tabsV', 'Vertical'], ['split', 'Split'],
+      ['palette', 'Palette'], ['fleet', 'Fleet'], ['themes', 'Themes'], ['mobile', 'Mobile']
+    ];
+    const screens = list.map(([id, label]) => {
+      const on = screen === id || (id === 'split' && screen !== 'palette' && isApp && tab === 2);
+      return {
+        label,
+        onSelect: id === 'split'
+          ? () => this.setState({ screen: 'tabsH', tab: 2, palette: false })
+          : this.go(id),
+        style: 'padding:0 13px;height:30px;display:flex;align-items:center;border-radius:8px;font-size:12px;cursor:pointer;user-select:none;background:' +
+          (on ? '#16203a' : 'transparent') + ';color:' + (on ? '#6ea8ff' : '#8b93a7')
+      };
+    });
+
+    return {
+      isApp,
+      isTabsH: screen === 'tabsH' || screen === 'palette',
+      isTabsV: screen === 'tabsV',
+      isFleet: screen === 'fleet',
+      isThemes: screen === 'themes',
+      isMobile: screen === 'mobile',
+      isBlocks: isApp && activeTab === 0,
+      isLog: isApp && activeTab === 1,
+      isSplit: isApp && activeTab === 2,
+      palette,
+      folded,
+      foldGlyph: folded ? '▾' : '▸',
+      toggleFold: () => this.setState(s => ({ folded: !s.folded })),
+      openPalette: () => this.setState({ palette: true }),
+      closePalette: () => this.setState({ palette: false }),
+      goTabsV: this.go('tabsV'),
+      goTabsH: this.go('tabsH'),
+      goFleet: this.go('fleet'),
+      htabs, vtabs, screens,
+      showStatus: this.props.showStatus ?? true
+    };
+  }
+}
+</script>
+</body>
+</html>

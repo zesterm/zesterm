@@ -206,6 +206,10 @@ the attach path ships compiled and unseen.
 M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
 `zest-render-wgpu/`. Consumes `SessionSource`.
 
+**Visual target:** [docs/design/client-ui/](design/client-ui/README.md) — the
+high-fidelity handoff for the tabbed chrome, command blocks, palette, fleet and
+theme screens. Colours, sizes and spacing come from there, not from this file.
+
 - [x] **The fleet has no face on the desktop.** → [#23](https://github.com/zesterm/zesterm/issues/23) — **closed**; the sequence below is its record.
       The phone and the web client are both planned to list sessions and attach
       to a chosen one; the app most people will use can only take a `--attach
@@ -525,7 +529,9 @@ Shares `unix.rs` with WS-C; owns only Linux-specific parts.
 ### WS-E — Command blocks
 
 M2. Owns `zest-core/src/blocks.rs` and the OSC 133 path. Hot spot: coordinate
-`perform.rs` edits, which WS-F also reads.
+`perform.rs` edits, which WS-F also reads. Block headers, rails, fold affordance
+and the palette's block rows are specified in
+[docs/design/client-ui/](design/client-ui/README.md) (screens 3 and 6).
 
 - [x] **OSC 133 A/B/C/D, OSC 7 (cwd), OSC 633 (VS Code alias) → `BlockIndex`.**
       The index lives on `TermState`, so `Terminal::blocks()` answers for a
