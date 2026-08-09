@@ -21,6 +21,10 @@ pub enum HitRegion {
     /// The strip itself — catches wheel scrolling and swallows clicks that
     /// would otherwise fall through to the grid beneath.
     Strip,
+    /// One row of the open picker, by index into its row list.
+    PickerRow(usize),
+    /// The dimmed backdrop behind the picker; clicking it dismisses.
+    PickerScrim,
 }
 
 /// Rectangles to meanings, in draw order.

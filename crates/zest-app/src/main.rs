@@ -14,8 +14,6 @@ mod console;
 mod daemon;
 mod daemon_client;
 mod fair_mutex;
-// The picker (next commit of #23) is the consumer of the snapshot half.
-#[allow(dead_code, reason = "the picker consumes the snapshot one commit later")]
 mod fleet;
 mod pipeline_cache;
 mod platform;

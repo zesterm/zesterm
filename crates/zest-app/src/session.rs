@@ -63,6 +63,13 @@ pub enum Wakeup {
     /// moved, a session list refreshed. Coalesced by `FleetModel`'s latch,
     /// so a chatty network posts one of these per burst, not per packet.
     FleetChanged,
+    /// A worker finished opening a tab; the pending queue has it.
+    ///
+    /// Attaching from the picker dials over the network, and a dead host
+    /// costs a connect timeout — seconds that must never happen on the event
+    /// loop. The worker parks the finished `Tab` in a shared queue and posts
+    /// this.
+    TabsChanged,
     /// One tab's child exited.
     ///
     /// [`Wakeup::Exited`] predates tabs and means "the window's only session

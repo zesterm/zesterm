@@ -47,6 +47,33 @@ pub struct TabModel {
     pub connecting: bool,
 }
 
+/// One row of the fleet picker, ready to draw.
+///
+/// Display-only: the app keeps a parallel list of *actions* built in the
+/// same pass, so row index `n` here and there mean the same thing by
+/// construction — the drift the hit map exists to prevent, applied to rows.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PickerRow {
+    /// A machine, with its presence spelled out.
+    Host { label: String, presence: TabPresence },
+    /// A session on the host above.
+    Session { title: String, detail: String, attached: bool, attached_here: bool },
+    /// "New session on <label>".
+    CreateOn { label: String },
+}
+
+/// The fleet picker, when open.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PickerModel {
+    pub rows: Vec<PickerRow>,
+    /// Index into `rows` the keyboard is on.
+    pub selected: usize,
+    /// The live filter string, drawn in the search line.
+    pub filter: String,
+    /// Scroll offset of the row list, physical pixels; layout clamps it.
+    pub scroll: f32,
+}
+
 /// Everything `layout` needs to draw the chrome once.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChromeModel {
@@ -65,6 +92,8 @@ pub struct ChromeModel {
     /// on every other platform.
     pub traffic_inset: Option<[f32; 2]>,
     pub focused: bool,
+    /// The fleet picker, drawn over everything when open.
+    pub picker: Option<PickerModel>,
 }
 
 /// The knobs `layout` reads, resolved to physical pixels by the caller.

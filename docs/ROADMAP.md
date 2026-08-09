@@ -222,6 +222,19 @@ M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
       current tab's host; closing a local tab kills, a remote one detaches;
       launch restores the previous tab set, which retires the adopt guess. Both
       orientations — top strip and left sidebar — behind `tabs.position`.
+- [x] **The picker exists — the fleet has a face.** ⌘K (or +) opens a modal
+      overlay over the grid: hosts with presence in words ("andy-mac —
+      online", warn-coloured "unreachable"), their sessions with title, cwd
+      and attached/this-window tags, and "new session on <host>" rows.
+      Type-to-filter, arrows/Enter, click, Esc/scrim to dismiss; the scrim
+      swallows every stray click while open (a layout test sweeps the window
+      to prove nothing escapes). Rows and their actions are built in one
+      pass, so a drawn row and its meaning cannot drift. Attach/create run on
+      a worker — a dead host costs a connect timeout, and the picker never
+      charges that to the event loop; the finished tab arrives by wakeup.
+      Remote dials use the persisted identity (keychain touched on first
+      remote need, never at startup) and pin `expect_host` to the roster's
+      claim.
 - [x] **The app has a fleet model.** `FleetModel` aggregates what the picker
       draws from: mDNS browse (started after first paint — none of it is
       needed to show a prompt), the app-owned dial prober that feeds

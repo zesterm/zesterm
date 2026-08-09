@@ -39,6 +39,8 @@ pub struct ChromeLayout {
     /// app stores this back so the scroll cannot wander off the end of the
     /// strip while tabs close.
     pub strip_scroll: f32,
+    /// The picker's scroll, clamped likewise.
+    pub picker_scroll: f32,
 }
 
 // Logical-pixel constants, scaled at use. Named because the tests reason
@@ -65,9 +67,168 @@ pub fn layout(
     m: &ChromeMetrics,
     measure: &mut dyn FnMut(&str) -> f32,
 ) -> ChromeLayout {
-    match model.position {
+    let mut out = match model.position {
         TabsPosition::Top => horizontal(model, colors, m, measure),
         TabsPosition::Left => vertical(model, colors, m, measure),
+    };
+    if let Some(picker) = &model.picker {
+        // Appended last on purpose: last drawn is topmost, and last pushed
+        // wins the hit lookup — the same fact, stated once.
+        picker_overlay(picker, colors, m, measure, &mut out);
+    }
+    out
+}
+
+// Picker geometry, logical px.
+const PICKER_W: f32 = 560.0;
+const PICKER_H: f32 = 420.0;
+const PICKER_MARGIN: f32 = 40.0;
+const PICKER_PAD: f32 = 12.0;
+const PICKER_ROW_H: f32 = 30.0;
+const PICKER_RADIUS: f32 = 10.0;
+const PICKER_INDENT: f32 = 18.0;
+
+fn picker_overlay(
+    picker: &super::model::PickerModel,
+    colors: &ChromeColors,
+    m: &ChromeMetrics,
+    measure: &mut dyn FnMut(&str) -> f32,
+    out: &mut ChromeLayout,
+) {
+    use super::model::PickerRow;
+
+    let s = m.scale;
+    let no_clip = [0.0, 0.0, m.width, m.height];
+
+    // The scrim swallows every click that is not a row: the grid must not
+    // hear a stray press while a modal list is up.
+    out.rects.push(RectInstance::filled(no_clip, colors.scrim, no_clip));
+    out.hit.push(no_clip, HitRegion::PickerScrim);
+
+    let w = (PICKER_W * s).min(m.width - PICKER_MARGIN * s);
+    let h = (PICKER_H * s).min(m.height - PICKER_MARGIN * s);
+    let panel = [(m.width - w) / 2.0, (m.height - h) / 2.5, w, h];
+    let mut panel_rect = RectInstance::rounded(panel, PICKER_RADIUS * s, colors.panel_bg, no_clip);
+    panel_rect.shadow_blur = 24.0 * s;
+    panel_rect.shadow_alpha = colors.shadow_alpha;
+    out.rects.push(panel_rect);
+
+    // The filter line. An empty filter shows a hint rather than nothing —
+    // an unlabeled empty box reads as broken.
+    let filter_h = m.line_height + 2.0 * PICKER_PAD * s;
+    let (filter_text, filter_color) = if picker.filter.is_empty() {
+        ("attach to a session, or start one".to_string(), colors.text_faint)
+    } else {
+        (picker.filter.clone(), colors.text_active)
+    };
+    out.texts.push(TextRun {
+        text: filter_text,
+        pos: [panel[0] + PICKER_PAD * s, text_baseline(m, panel[1], filter_h)],
+        max_width: w - 2.0 * PICKER_PAD * s,
+        color: filter_color,
+        clip: panel,
+    });
+    out.rects.push(RectInstance::filled(
+        [panel[0], panel[1] + filter_h, w, HAIRLINE * s],
+        colors.line,
+        no_clip,
+    ));
+
+    // Rows, scrolled and clipped inside the panel below the filter line.
+    let rows_clip = [
+        panel[0],
+        panel[1] + filter_h + HAIRLINE * s,
+        w,
+        h - filter_h - HAIRLINE * s,
+    ];
+    let row_h = PICKER_ROW_H * s;
+    let content_h = picker.rows.len() as f32 * row_h;
+    let max_scroll = (content_h - rows_clip[3]).max(0.0);
+    let scroll = picker.scroll.clamp(0.0, max_scroll);
+    out.picker_scroll = scroll;
+
+    for (i, row) in picker.rows.iter().enumerate() {
+        let y = rows_clip[1] + i as f32 * row_h - scroll;
+        let rect = [panel[0], y, w, row_h];
+        if intersect(rect, rows_clip).is_none() {
+            continue;
+        }
+
+        if i == picker.selected {
+            let chip = [panel[0] + 4.0 * s, y + 2.0 * s, w - 8.0 * s, row_h - 4.0 * s];
+            out.rects.push(RectInstance::rounded(chip, RADIUS * s, colors.accent_soft, rows_clip));
+        }
+        if let Some(hit) = intersect(rect, rows_clip) {
+            out.hit.push(hit, HitRegion::PickerRow(i));
+        }
+
+        let baseline = text_baseline(m, y, row_h);
+        match row {
+            PickerRow::Host { label, presence } => {
+                let presence_word = match presence {
+                    super::model::TabPresence::Online => "online",
+                    super::model::TabPresence::Away => "away",
+                    super::model::TabPresence::Unseen => "unseen",
+                    super::model::TabPresence::Unreachable => "unreachable",
+                };
+                let text = format!("{label} — {presence_word}");
+                let color = if matches!(presence, super::model::TabPresence::Unreachable) {
+                    colors.pill_warn_text
+                } else {
+                    colors.text_inactive
+                };
+                out.texts.push(TextRun {
+                    text,
+                    pos: [panel[0] + PICKER_PAD * s, baseline],
+                    max_width: w - 2.0 * PICKER_PAD * s,
+                    color,
+                    clip: rows_clip,
+                });
+            }
+            PickerRow::Session { title, detail, attached, attached_here } => {
+                let x = panel[0] + (PICKER_PAD + PICKER_INDENT) * s;
+                out.texts.push(TextRun {
+                    text: title.clone(),
+                    pos: [x, baseline],
+                    max_width: w * 0.55,
+                    color: colors.text_active,
+                    clip: rows_clip,
+                });
+                // Detail and tags on the right, faint: cwd is orientation,
+                // not the headline.
+                let tag = if *attached_here {
+                    "this window"
+                } else if *attached {
+                    "attached"
+                } else {
+                    ""
+                };
+                let detail = if tag.is_empty() {
+                    detail.clone()
+                } else if detail.is_empty() {
+                    format!("· {tag}")
+                } else {
+                    format!("{detail} · {tag}")
+                };
+                let dw = measure(&detail).min(w * 0.4);
+                out.texts.push(TextRun {
+                    text: detail,
+                    pos: [panel[0] + w - PICKER_PAD * s - dw, baseline],
+                    max_width: w * 0.4,
+                    color: if *attached_here { colors.pill_text } else { colors.text_faint },
+                    clip: rows_clip,
+                });
+            }
+            PickerRow::CreateOn { label } => {
+                out.texts.push(TextRun {
+                    text: format!("+ new session on {label}"),
+                    pos: [panel[0] + (PICKER_PAD + PICKER_INDENT) * s, baseline],
+                    max_width: w - 2.0 * PICKER_PAD * s,
+                    color: colors.pill_text,
+                    clip: rows_clip,
+                });
+            }
+        }
     }
 }
 
@@ -416,6 +577,7 @@ mod tests {
             hover: None,
             traffic_inset: None,
             focused: true,
+            picker: None,
         }
     }
 
@@ -572,6 +734,51 @@ mod tests {
             });
             assert!(found.is_some(), "no way to open a tab in {position:?}");
         }
+    }
+
+    #[test]
+    fn the_picker_sits_above_everything_and_its_scrim_catches_the_rest() {
+        // Modal means modal: a click on a row is that row, a click anywhere
+        // else while the picker is open must never reach a tab or the grid.
+        use crate::chrome::model::{PickerModel, PickerRow};
+        let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut mo = model(tabs, TabsPosition::Top);
+        mo.picker = Some(PickerModel {
+            rows: vec![
+                PickerRow::Host { label: "andy-mac".into(), presence: TabPresence::Online },
+                PickerRow::Session {
+                    title: "vim".into(),
+                    detail: "~/dev".into(),
+                    attached: false,
+                    attached_here: false,
+                },
+                PickerRow::CreateOn { label: "andy-mac".into() },
+            ],
+            selected: 1,
+            filter: String::new(),
+            scroll: 0.0,
+        });
+        let l = layout(&mo, &colors(), &m, &mut measure);
+
+        let mut seen_rows = std::collections::HashSet::new();
+        let mut scrim_hits = 0u32;
+        for x in (0..1200).step_by(4) {
+            for y in (0..800).step_by(4) {
+                match l.hit.hit(x as f32, y as f32) {
+                    Some(HitRegion::PickerRow(i)) => {
+                        seen_rows.insert(i);
+                    }
+                    Some(HitRegion::PickerScrim) => scrim_hits += 1,
+                    Some(other) => {
+                        panic!("a click at ({x},{y}) escaped the picker: {other:?}")
+                    }
+                    None => panic!("({x},{y}) hit nothing; the scrim must cover the window"),
+                }
+            }
+        }
+        assert_eq!(seen_rows, [0usize, 1, 2].into(), "every row must be clickable");
+        assert!(scrim_hits > 0, "the scrim must be reachable around the panel");
     }
 
     #[test]

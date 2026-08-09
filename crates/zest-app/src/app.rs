@@ -106,6 +106,7 @@ impl Default for Config {
 /// One route per window today — ⌘T opens on the same daemon the window is
 /// attached to, which *is* the "current tab's host" rule while every tab
 /// shares a host. The fleet model replaces this with per-host routes.
+#[derive(Clone)]
 enum HostRoute {
     /// This machine's daemon socket.
     LocalSocket(String),
@@ -147,6 +148,28 @@ impl HostRoute {
             }
         }
     }
+}
+
+/// The picker's transient state while it is open, and the action list
+/// parallel to the drawn rows — built in the same pass as the row models, so
+/// index `n` means the same thing in both by construction.
+struct PickerState {
+    selected: usize,
+    filter: String,
+    scroll: f32,
+    actions: Vec<PickerAction>,
+}
+
+#[derive(Clone)]
+enum PickerAction {
+    /// A host header; Enter does nothing.
+    None,
+    /// Focus the tab that already shows this session.
+    Activate(zest_proto::SessionAddr),
+    /// Attach this window to the session.
+    Attach { addr: zest_proto::SessionAddr, route: HostRoute },
+    /// Create a fresh session on the host.
+    Create { host: zest_proto::HostId, route: HostRoute },
 }
 
 /// A tab's wake callback: forward to the event loop, translating the
@@ -200,6 +223,15 @@ pub struct App {
     next_placeholder: u64,
     /// Hosts, presence, and session lists — the picker's data source.
     fleet: Option<crate::fleet::FleetModel>,
+    /// The fleet picker's transient state, while open.
+    picker: Option<PickerState>,
+    /// Tabs opened by worker threads, waiting for the event loop to adopt
+    /// them (`Wakeup::TabsChanged`).
+    pending_tabs: Arc<parking_lot::Mutex<Vec<Tab>>>,
+    /// The persisted identity used for hosts that are not this machine,
+    /// loaded lazily on first need so the keychain stays off the startup
+    /// path (and off it entirely for people who never leave loopback).
+    remote_identity: Option<Arc<zest_mesh::identity::ClientIdentity>>,
     fonts: Option<Fonts>,
     palette: zest_core::PaletteSnapshot,
 
@@ -292,6 +324,9 @@ impl App {
             client_identity: None,
             next_placeholder: 0,
             fleet: None,
+            picker: None,
+            pending_tabs: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            remote_identity: None,
             fonts: None,
             palette,
             chrome_colors,
@@ -987,7 +1022,7 @@ impl App {
     /// tested against the same rectangles the frame drew — the "no drift"
     /// property the layout tests pin, extended to runtime.
     fn refresh_chrome(&mut self) {
-        if !self.strip_shown() {
+        if !self.strip_shown() && self.picker.is_none() {
             self.chrome_layout = None;
             return;
         }
@@ -997,6 +1032,21 @@ impl App {
         if self.chrome_layout.is_some() {
             return;
         }
+        // Built before the font borrow below: row construction reads the
+        // fleet and the tabs, never the fonts.
+        let picker_rows = self.picker.is_some().then(|| self.build_picker());
+        let picker_model = picker_rows.map(|(rows, actions)| {
+            let state = self.picker.as_mut().expect("is_some gated the build");
+            state.actions = actions;
+            state.selected = state.selected.min(rows.len().saturating_sub(1));
+            crate::chrome::model::PickerModel {
+                rows,
+                selected: state.selected,
+                filter: state.filter.clone(),
+                scroll: state.scroll,
+            }
+        });
+
         let Some(window) = self.window.as_ref() else { return };
         let Some(fonts) = self.fonts.as_mut() else { return };
 
@@ -1058,6 +1108,7 @@ impl App {
             hover: self.chrome_hover,
             traffic_inset: traffic,
             focused: self.focused,
+            picker: picker_model,
         };
 
         let colors = self.chrome_colors;
@@ -1065,6 +1116,9 @@ impl App {
             |s: &str| zest_render_wgpu::measure_ui_run(fonts, s, zest_font::Style::default());
         let laid = crate::chrome::layout::layout(&model, &colors, &metrics, &mut measure);
         self.strip_scroll = laid.strip_scroll;
+        if let Some(state) = self.picker.as_mut() {
+            state.scroll = laid.picker_scroll;
+        }
         self.chrome_layout = Some(laid);
     }
 
@@ -1098,6 +1152,21 @@ impl App {
             (HitRegion::NewTab, MouseButton::Left) => {
                 self.new_tab();
             }
+            (HitRegion::PickerRow(i), MouseButton::Left) => {
+                if let Some(p) = self.picker.as_mut() {
+                    p.selected = i;
+                }
+                let action = self.picker.as_ref().and_then(|p| p.actions.get(i).cloned());
+                if let Some(action) = action {
+                    self.run_picker_action(action);
+                } else {
+                    self.mark_chrome_dirty();
+                }
+            }
+            (HitRegion::PickerScrim, MouseButton::Left) => {
+                self.picker = None;
+                self.mark_chrome_dirty();
+            }
             (HitRegion::Drag, MouseButton::Left) => {
                 let now = std::time::Instant::now();
                 let double = self
@@ -1115,6 +1184,234 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Toggle the fleet picker (⌘K, and the picker rows' Escape hatch).
+    fn toggle_picker(&mut self) {
+        self.picker = match self.picker {
+            Some(_) => None,
+            None => Some(PickerState {
+                selected: 0,
+                filter: String::new(),
+                scroll: 0.0,
+                actions: Vec::new(),
+            }),
+        };
+        self.mark_chrome_dirty();
+    }
+
+    /// The picker's rows and their actions, from the fleet snapshot.
+    ///
+    /// One pass builds both lists, which is what keeps a drawn row and its
+    /// meaning aligned by construction — the hit map's discipline, applied
+    /// to indices.
+    fn build_picker(&self) -> (Vec<crate::chrome::model::PickerRow>, Vec<PickerAction>) {
+        use crate::chrome::model::PickerRow;
+        use crate::fleet::SessionsState;
+
+        let mut rows = Vec::new();
+        let mut actions = Vec::new();
+        let Some(fleet) = &self.fleet else { return (rows, actions) };
+        let filter = self
+            .picker
+            .as_ref()
+            .map(|p| p.filter.to_lowercase())
+            .unwrap_or_default();
+
+        for host in fleet.snapshot() {
+            let presence = match host.presence {
+                zest_mesh::discovery::Presence::Online => TabPresence::Online,
+                zest_mesh::discovery::Presence::Away => TabPresence::Away,
+                zest_mesh::discovery::Presence::Unseen => TabPresence::Unseen,
+                zest_mesh::discovery::Presence::Unreachable => TabPresence::Unreachable,
+            };
+            // How this host is dialled: the window's own route for the local
+            // machine, its advertised endpoint otherwise.
+            let route = if host.local {
+                self.route.clone()
+            } else {
+                host.address.clone().map(HostRoute::Tcp)
+            };
+
+            let host_matches = filter.is_empty() || host.label.to_lowercase().contains(&filter);
+            let mut session_rows = Vec::new();
+            if let SessionsState::Fresh(sessions) = &host.sessions {
+                for info in sessions {
+                    let title = info.title.trim();
+                    let title =
+                        if title.is_empty() { "shell".to_string() } else { title.to_string() };
+                    let matches = host_matches
+                        || title.to_lowercase().contains(&filter)
+                        || info.cwd.to_lowercase().contains(&filter);
+                    if !matches {
+                        continue;
+                    }
+                    let attached_here = self.tabs.iter().any(|t| t.addr == info.addr);
+                    let action = if attached_here {
+                        PickerAction::Activate(info.addr)
+                    } else if let Some(route) = route.clone() {
+                        PickerAction::Attach { addr: info.addr, route }
+                    } else {
+                        PickerAction::None
+                    };
+                    session_rows.push((
+                        PickerRow::Session {
+                            title,
+                            detail: info.cwd.clone(),
+                            attached: info.attached,
+                            attached_here,
+                        },
+                        action,
+                    ));
+                }
+            }
+
+            // A host appears when it matches the filter or something on it
+            // does; a fleet of quiet machines is still a fleet.
+            if !host_matches && session_rows.is_empty() {
+                continue;
+            }
+            rows.push(PickerRow::Host { label: host.label.clone(), presence });
+            actions.push(PickerAction::None);
+            for (row, action) in session_rows {
+                rows.push(row);
+                actions.push(action);
+            }
+            // No create row on a host that cannot be dialled: offering an
+            // action that must fail is worse than the row's absence.
+            if let Some(route) = route {
+                if !matches!(presence, TabPresence::Unreachable) {
+                    rows.push(PickerRow::CreateOn { label: host.label.clone() });
+                    actions.push(PickerAction::Create { host: host.host, route });
+                }
+            }
+        }
+
+        (rows, actions)
+    }
+
+    /// Act on a picker row. Every action closes the picker: the user chose.
+    fn run_picker_action(&mut self, action: PickerAction) {
+        match action {
+            PickerAction::None => return,
+            PickerAction::Activate(addr) => {
+                self.picker = None;
+                if self.tabs.activate_addr(addr) {
+                    self.after_activation();
+                }
+            }
+            PickerAction::Attach { addr, route } => {
+                self.picker = None;
+                self.spawn_tab_worker(route, Some(addr));
+            }
+            PickerAction::Create { host, route } => {
+                self.picker = None;
+                // Pin remote creates to the host the roster named: the
+                // address came from an advertisement, which is a claim.
+                let expect = (!route.is_local()).then_some(host);
+                self.spawn_tab_worker_pinned(route, None, expect);
+            }
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// The stored identity for hosts that are not this machine, loaded on
+    /// first need — the keychain stays off the startup path, and off every
+    /// path for people who never leave loopback. Falls back to a throwaway
+    /// key with a loud log, same trade as `--attach`.
+    fn remote_identity(&mut self) -> Option<Arc<zest_mesh::identity::ClientIdentity>> {
+        if self.remote_identity.is_none() {
+            let store = zest_mesh::keystore::OsKeyStore;
+            match zest_mesh::identity::ClientIdentity::load_or_create(&store) {
+                Ok(i) => self.remote_identity = Some(Arc::new(i)),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "no credential store; using a throwaway key, the far host \
+                         will ask for approval every time"
+                    );
+                    self.remote_identity =
+                        zest_mesh::identity::ClientIdentity::generate().ok().map(Arc::new);
+                }
+            }
+        }
+        self.remote_identity.clone()
+    }
+
+    fn spawn_tab_worker(&mut self, route: HostRoute, attach: Option<zest_proto::SessionAddr>) {
+        let expect = attach.and_then(|a| (!route.is_local()).then_some(a.host));
+        self.spawn_tab_worker_pinned(route, attach, expect);
+    }
+
+    /// Open a session on `route` off the event loop and park the finished
+    /// tab for `Wakeup::TabsChanged`.
+    ///
+    /// A worker because a dead host costs a connect timeout, and seconds of
+    /// frozen UI is the one price a picker must never charge.
+    fn spawn_tab_worker_pinned(
+        &mut self,
+        route: HostRoute,
+        attach: Option<zest_proto::SessionAddr>,
+        expect_host: Option<zest_proto::HostId>,
+    ) {
+        let identity = if route.is_local() {
+            self.client_identity.clone()
+        } else {
+            self.remote_identity()
+        };
+        let Some(identity) = identity else {
+            tracing::warn!("no identity to dial with; cannot open the tab");
+            return;
+        };
+
+        let (cols, rows) = self.current_dims();
+        let scrollback = self.config.scrollback;
+        let local = route.is_local();
+        let command =
+            if local { self.config.shell.clone().unwrap_or_default() } else { String::new() };
+
+        self.next_placeholder += 1;
+        let cell = Arc::new(parking_lot::Mutex::new(crate::tabs::placeholder_addr(
+            self.next_placeholder,
+        )));
+        let wake = wake_for(&self.proxy, Arc::clone(&cell));
+        let pending = Arc::clone(&self.pending_tabs);
+        let proxy = self.proxy.clone();
+        let palette = self.palette.clone();
+
+        let spawned = std::thread::Builder::new().name("zest-tab-open".into()).spawn(move || {
+            let opts = crate::remote::AttachOptions {
+                identity: &identity,
+                label: "zesterm",
+                command: &command,
+                cols,
+                rows,
+                scrollback,
+                adopt: false,
+                local,
+                expect_host,
+            };
+            let result = match attach {
+                Some(addr) => {
+                    crate::remote::RemoteSession::attach_existing(route.dialer(), addr, &opts, wake)
+                }
+                None => crate::remote::RemoteSession::create_and_attach(route.dialer(), &opts, wake),
+            };
+            match result {
+                Ok(session) => {
+                    *cell.lock() = session.addr();
+                    session.terminal().lock().set_palette(palette);
+                    pending.lock().push(Tab::daemon(session, local, (cols, rows)));
+                    let _ = proxy.send_event(Wakeup::TabsChanged);
+                }
+                // The picker is already closed; a failure is a log line for
+                // now and a placeholder tab once restore lands.
+                Err(e) => tracing::warn!(error = %e, "could not open the picked session"),
+            }
+        });
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "could not start the tab worker");
         }
     }
 
@@ -1814,13 +2111,9 @@ impl ApplicationHandler<Wakeup> for App {
             Some((tab.addr.host, label))
         });
         let fleet = crate::fleet::FleetModel::start(self.proxy.clone(), local);
-        if let Some(route) = &self.route {
+        if let Some(route) = self.route.clone() {
             // One watching connection to the window's daemon keeps its
             // session list fresh through pushes.
-            let route = match route {
-                HostRoute::LocalSocket(p) => HostRoute::LocalSocket(p.clone()),
-                HostRoute::Tcp(a) => HostRoute::Tcp(a.clone()),
-            };
             fleet.watch(move || route.dialer());
         }
         self.fleet = Some(fleet);
@@ -1854,6 +2147,17 @@ impl ApplicationHandler<Wakeup> for App {
             // The in-place reconnect in `remote.rs` succeeded: same session, same
             // grid, and everything this window had accumulated is still there.
             // Nothing to rebuild — just repaint.
+            // A worker finished opening a tab; adopt everything it parked.
+            Wakeup::TabsChanged => {
+                let mut fresh = self.pending_tabs.lock();
+                let tabs: Vec<Tab> = fresh.drain(..).collect();
+                drop(fresh);
+                for tab in tabs {
+                    self.tabs.push(tab);
+                }
+                self.after_activation();
+                self.relayout_grid();
+            }
             // The picker's data moved. Consume the latch; the chrome decides
             // whether anything visible depends on it.
             Wakeup::FleetChanged => {
@@ -1965,6 +2269,61 @@ impl ApplicationHandler<Wakeup> for App {
                     return;
                 }
 
+                // The open picker owns the keyboard entirely: a keystroke
+                // meant for a list must never reach a shell.
+                if self.picker.is_some() {
+                    use winit::keyboard::{Key, NamedKey};
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            self.picker = None;
+                            self.mark_chrome_dirty();
+                        }
+                        Key::Named(NamedKey::ArrowDown) => {
+                            if let Some(p) = self.picker.as_mut() {
+                                p.selected = p.selected.saturating_add(1);
+                            }
+                            self.mark_chrome_dirty();
+                        }
+                        Key::Named(NamedKey::ArrowUp) => {
+                            if let Some(p) = self.picker.as_mut() {
+                                p.selected = p.selected.saturating_sub(1);
+                            }
+                            self.mark_chrome_dirty();
+                        }
+                        Key::Named(NamedKey::Enter) => {
+                            let action = self
+                                .picker
+                                .as_ref()
+                                .and_then(|p| p.actions.get(p.selected).cloned());
+                            if let Some(action) = action {
+                                self.run_picker_action(action);
+                            }
+                        }
+                        Key::Named(NamedKey::Backspace) => {
+                            if let Some(p) = self.picker.as_mut() {
+                                p.filter.pop();
+                                p.selected = 0;
+                            }
+                            self.mark_chrome_dirty();
+                        }
+                        Key::Character(c) => {
+                            if key::belongs_to_desktop(self.modifiers) {
+                                if c.as_str() == "k" {
+                                    self.toggle_picker();
+                                }
+                            } else if !self.modifiers.control_key() {
+                                if let Some(p) = self.picker.as_mut() {
+                                    p.filter.push_str(c.as_str());
+                                    p.selected = 0;
+                                }
+                                self.mark_chrome_dirty();
+                            }
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+
                 // Tab chords, on the desktop's own modifier (⌘ here). Before
                 // the clipboard block because on macOS both tests are true
                 // for ⌘ — these letters are simply not c/v/o/r.
@@ -1975,6 +2334,10 @@ impl ApplicationHandler<Wakeup> for App {
                             // one day), and shift produces the uppercase.
                             "t" => {
                                 self.new_tab();
+                                return;
+                            }
+                            "k" => {
+                                self.toggle_picker();
                                 return;
                             }
                             "w" => {
@@ -2250,6 +2613,20 @@ impl ApplicationHandler<Wakeup> for App {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
+                // An open picker takes the wheel wholesale — it is modal.
+                if self.picker.is_some() {
+                    let px = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y * 40.0,
+                        MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                    };
+                    if px != 0.0 {
+                        if let Some(p) = self.picker.as_mut() {
+                            p.scroll -= px;
+                        }
+                        self.mark_chrome_dirty();
+                    }
+                    return;
+                }
                 // Over the strip, the wheel scrolls the strip.
                 if self.chrome_hit(self.pointer_pos.0, self.pointer_pos.1).is_some() {
                     let px = match delta {

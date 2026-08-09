@@ -41,6 +41,7 @@ const REWATCH_MAX: Duration = Duration::from_secs(10);
 
 /// What is known about one host's session list.
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code, reason = "remote-host fetches (picker-open dials) construct the other states")]
 pub enum SessionsState {
     /// Never asked.
     #[default]
