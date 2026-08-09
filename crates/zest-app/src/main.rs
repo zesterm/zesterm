@@ -19,6 +19,7 @@ mod platform;
 mod remote;
 mod session;
 mod source;
+mod tabs;
 
 use winit::event_loop::EventLoop;
 

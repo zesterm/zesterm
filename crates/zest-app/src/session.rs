@@ -59,6 +59,14 @@ pub enum Wakeup {
     /// settings, because deciding what a change costs means comparing against
     /// the live ones. The reload happens on the main thread.
     ConfigChanged,
+    /// One tab's child exited.
+    ///
+    /// [`Wakeup::Exited`] predates tabs and means "the window's only session
+    /// ended, close the window". With several tabs the app must know *which*
+    /// ended, so every tab's wake callback translates `Exited` into this,
+    /// carrying the tab's address. The bare variant survives for the paths
+    /// that still mean the whole window.
+    TabExited(zest_proto::SessionAddr),
     /// A pinned session's host answered and said the session no longer
     /// exists.
     ///

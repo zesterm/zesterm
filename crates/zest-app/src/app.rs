@@ -23,6 +23,7 @@ use crate::chrome::Insets;
 use crate::platform;
 use crate::session::{Session, Wakeup};
 use crate::source::{Origin, SessionSource};
+use crate::tabs::{Tab, TabStrip};
 
 
 /// How long the window may take to appear, in milliseconds.
@@ -100,6 +101,74 @@ impl Default for Config {
     }
 }
 
+/// How this window dials the daemon its tabs live on.
+///
+/// One route per window today — ⌘T opens on the same daemon the window is
+/// attached to, which *is* the "current tab's host" rule while every tab
+/// shares a host. The fleet model replaces this with per-host routes.
+enum HostRoute {
+    /// This machine's daemon socket.
+    LocalSocket(String),
+    /// Another machine's daemon at `host:port` (`--attach`).
+    Tcp(String),
+}
+
+impl HostRoute {
+    fn is_local(&self) -> bool {
+        matches!(self, HostRoute::LocalSocket(_))
+    }
+
+    fn dialer(&self) -> crate::remote::Dialer {
+        match self {
+            HostRoute::LocalSocket(path) => {
+                let path = path.clone();
+                Box::new(move || {
+                    let a = crate::daemon::find_or_spawn(&path, DAEMON_START_TIMEOUT)
+                        .map_err(|e| crate::remote::RemoteError::Io(e.to_string()))?;
+                    Ok((a.read, a.write))
+                })
+            }
+            HostRoute::Tcp(addr) => {
+                let addr = addr.clone();
+                Box::new(move || {
+                    let stream = std::net::TcpStream::connect(&addr)
+                        .map_err(|e| crate::remote::RemoteError::Io(e.to_string()))?;
+                    // A terminal's writes are keystrokes: small, latency-bound,
+                    // never worth coalescing.
+                    let _ = stream.set_nodelay(true);
+                    let read = stream
+                        .try_clone()
+                        .map_err(|e| crate::remote::RemoteError::Io(e.to_string()))?;
+                    Ok((
+                        Box::new(read) as Box<dyn std::io::Read + Send>,
+                        Box::new(stream) as Box<dyn std::io::Write + Send>,
+                    ))
+                })
+            }
+        }
+    }
+}
+
+/// A tab's wake callback: forward to the event loop, translating the
+/// window-scoped `Exited` into a tab-scoped `TabExited`.
+///
+/// The address lives in a shared cell because it is not always known when the
+/// callback is built — a created session learns its address from the daemon —
+/// and because a supervisor rebind moves it.
+fn wake_for(
+    proxy: &EventLoopProxy<Wakeup>,
+    addr: Arc<parking_lot::Mutex<zest_proto::SessionAddr>>,
+) -> impl Fn(Wakeup) + Send + 'static {
+    let proxy = proxy.clone();
+    move |w| {
+        let w = match w {
+            Wakeup::Exited => Wakeup::TabExited(*addr.lock()),
+            other => other,
+        };
+        let _ = proxy.send_event(w);
+    }
+}
+
 /// The live GPU state, created once the window exists.
 struct Gpu {
     surface: wgpu::Surface<'static>,
@@ -115,13 +184,20 @@ pub struct App {
 
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
-    /// The terminal this window shows, wherever its shell actually runs.
+    /// The sessions this window holds open, wherever their shells run.
     ///
-    /// Behind [`SessionSource`] rather than being a concrete local `Session`,
-    /// because a window on this machine showing a shell on the Mac is the point
-    /// of the whole project. Boxing costs one indirection per keystroke and per
-    /// frame, against a path that already takes a mutex.
-    session: Option<Box<dyn SessionSource>>,
+    /// Each tab's terminal is behind [`SessionSource`], because a window on
+    /// this machine showing a shell on the Mac is the point of the whole
+    /// project — the renderer cannot tell and must not care.
+    tabs: TabStrip,
+    /// How to reach the daemon this window's tabs live on, for ⌘T and the
+    /// redials it implies. One daemon today; the fleet model generalizes it.
+    route: Option<HostRoute>,
+    /// The identity every daemon tab proves. One per window, minted or loaded
+    /// once — N tabs are one client holding N sessions, not N clients.
+    client_identity: Option<Arc<zest_mesh::identity::ClientIdentity>>,
+    /// Distinct placeholder addresses for sessions with no real one.
+    next_placeholder: u64,
     fonts: Option<Fonts>,
     palette: zest_core::PaletteSnapshot,
 
@@ -209,7 +285,10 @@ impl App {
             proxy,
             window: None,
             gpu: None,
-            session: None,
+            tabs: TabStrip::default(),
+            route: None,
+            client_identity: None,
+            next_placeholder: 0,
             fonts: None,
             palette,
             chrome_colors,
@@ -295,12 +374,12 @@ impl App {
     /// is missing has failed at the only job it has, and both paths already
     /// exist behind `SessionSource`.
     fn attach_to_daemon(
-        &self,
+        &mut self,
         spec: &CommandSpec,
         cols: u16,
         rows: u16,
         proxy: &EventLoopProxy<Wakeup>,
-    ) -> Option<Box<dyn SessionSource>> {
+    ) -> Option<Tab> {
         if self.no_daemon {
             if self.attach_probe {
                 eprintln!("FAIL: --attach-probe measures the daemon path, which --no-daemon disables");
@@ -349,7 +428,11 @@ impl App {
         };
 
         let started = std::time::Instant::now();
-        let proxy = proxy.clone();
+        self.next_placeholder += 1;
+        let addr_cell = Arc::new(parking_lot::Mutex::new(crate::tabs::placeholder_addr(
+            self.next_placeholder,
+        )));
+        let wake = wake_for(proxy, Arc::clone(&addr_cell));
         // The first connection is already open — it was made above so that its
         // cost could be measured and so a failure is a fallback rather than a
         // window that opens onto nothing. So the dialer hands those halves over
@@ -385,9 +468,7 @@ impl App {
                 // and there is no advertisement to have been misled by.
                 expect_host: None,
             },
-            move |w| {
-                let _ = proxy.send_event(w);
-            },
+            wake,
         );
 
         match session {
@@ -420,7 +501,13 @@ impl App {
                     }
                     std::process::exit(0);
                 }
-                Some(Box::new(session))
+                *addr_cell.lock() = session.addr();
+                // ⌘T dials the same daemon this window attached to; recorded
+                // only on success, so a new tab never dials a route that
+                // already failed once.
+                self.route = Some(HostRoute::LocalSocket(socket.clone()));
+                self.client_identity = Some(Arc::clone(&identity));
+                Some(Tab::daemon(session, true, (cols, rows)))
             }
             Err(e) => {
                 tracing::warn!(error = %e, "could not attach; keeping this session in-process");
@@ -440,12 +527,12 @@ impl App {
     /// has a window that looks right and lies. The in-process pty is a fallback
     /// for "my own daemon is broken", not for "the network said no".
     fn attach_remote(
-        &self,
+        &mut self,
         addr: &str,
         cols: u16,
         rows: u16,
         proxy: &EventLoopProxy<Wakeup>,
-    ) -> Option<Box<dyn SessionSource>> {
+    ) -> Option<Tab> {
         // Stored, unlike the loopback path, and the difference is the whole
         // point: a remote host has no socket permissions to lean on, so it asks
         // a *person*. An ephemeral key means it asks again on every launch, and
@@ -495,7 +582,11 @@ impl App {
             Ok((Box::new(read), Box::new(stream)))
         });
 
-        let proxy = proxy.clone();
+        self.next_placeholder += 1;
+        let addr_cell = Arc::new(parking_lot::Mutex::new(crate::tabs::placeholder_addr(
+            self.next_placeholder,
+        )));
+        let wake = wake_for(proxy, Arc::clone(&addr_cell));
         let session = crate::remote::RemoteSession::attach(
             dial,
             &crate::remote::AttachOptions {
@@ -514,9 +605,7 @@ impl App {
                 // with the stored identity.
                 expect_host: None,
             },
-            move |w| {
-                let _ = proxy.send_event(w);
-            },
+            wake,
         );
 
         match session {
@@ -530,7 +619,10 @@ impl App {
                     // first contact, a human reading a six-digit code.
                     std::process::exit(0);
                 }
-                Some(Box::new(session))
+                *addr_cell.lock() = session.addr();
+                self.route = Some(HostRoute::Tcp(addr.to_string()));
+                self.client_identity = Some(Arc::clone(&identity));
+                Some(Tab::daemon(session, false, (cols, rows)))
             }
             Err(e) => {
                 eprintln!("could not attach to {addr}: {e}");
@@ -571,8 +663,8 @@ impl App {
         // Read through the session first, then hand the owned text on, so the
         // session borrow does not overlap the `&mut self` clipboard access.
         let text = self
-            .session
-            .as_ref()
+            .tabs
+            .active_source()
             .and_then(|s| s.terminal().lock().selection_text());
         if let Some(text) = text {
             self.set_clipboard(text);
@@ -587,7 +679,7 @@ impl App {
     fn copy_block_output(&mut self) {
         // Same borrow discipline as `copy_selection`: read through the session,
         // drop the lock, then touch the clipboard behind `&mut self`.
-        let text = self.session.as_ref().and_then(|s| {
+        let text = self.tabs.active_source().and_then(|s| {
             let term = s.terminal().lock();
             let block = block_actions::last_with_output(&term)?;
             block_actions::output_text(&term, &block)
@@ -606,7 +698,7 @@ impl App {
     /// What the click can express and the keyboard cannot: a specific command
     /// somewhere up the scrollback, rather than the last one.
     fn copy_block_output_at(&mut self, row: usize) {
-        let text = self.session.as_ref().and_then(|s| {
+        let text = self.tabs.active_source().and_then(|s| {
             let term = s.terminal().lock();
             let block = block_actions::at_row(&term, row)?;
             block_actions::output_text(&term, &block)
@@ -624,7 +716,7 @@ impl App {
     /// because the host would have to take the client's word for the command
     /// anyway, and typing it is exactly what re-running means.
     fn rerun_last_command(&mut self) {
-        let Some(session) = self.session.as_ref() else { return };
+        let Some(session) = self.tabs.active_source() else { return };
         let bytes = {
             let term = session.terminal().lock();
             block_actions::last_with_output(&term)
@@ -645,7 +737,7 @@ impl App {
     }
 
     fn paste(&mut self) {
-        let Some(session) = self.session.as_ref() else { return };
+        let Some(session) = self.tabs.active_source() else { return };
         let Some(clipboard) = self.clipboard.as_mut() else { return };
         match clipboard.get_text() {
             Ok(text) if !text.is_empty() => {
@@ -688,7 +780,7 @@ impl App {
             }
             Ime::Commit(text) => {
                 self.ime.commit();
-                if let Some(session) = self.session.as_ref() {
+                if let Some(session) = self.tabs.active_source() {
                     if !text.is_empty() {
                         // Straight through as UTF-8, exactly as a physical
                         // keyboard would have delivered it. Not `encode_paste`:
@@ -711,7 +803,7 @@ impl App {
     /// appears under it rather than at the window's corner.
     fn place_candidate_window(&self) {
         let (Some(window), Some(fonts), Some(session)) =
-            (self.window.as_ref(), self.fonts.as_ref(), self.session.as_ref())
+            (self.window.as_ref(), self.fonts.as_ref(), self.tabs.active_source())
         else {
             return;
         };
@@ -748,7 +840,7 @@ impl App {
         if self.modifiers.shift_key() {
             return false;
         }
-        let Some(session) = self.session.as_ref() else { return false };
+        let Some(session) = self.tabs.active_source() else { return false };
 
         let encoded = {
             let term = session.terminal().lock();
@@ -788,7 +880,7 @@ impl App {
         if self.modifiers.shift_key() {
             return false;
         }
-        let Some(session) = self.session.as_ref() else { return false };
+        let Some(session) = self.tabs.active_source() else { return false };
 
         let encoded = {
             let modes = session.terminal().lock().modes();
@@ -823,7 +915,7 @@ impl App {
         if self.modifiers.shift_key() {
             return false;
         }
-        let Some(session) = self.session.as_ref() else { return false };
+        let Some(session) = self.tabs.active_source() else { return false };
         let (row, col) = self.pointer_cell;
 
         let modes = session.terminal().lock().modes();
@@ -874,11 +966,8 @@ impl App {
     }
 
     /// Whether the strip is drawn at all.
-    ///
-    /// One session today, so this is the `show_single_tab` setting; once tabs
-    /// are plural the count joins the condition.
     fn strip_shown(&self) -> bool {
-        self.config.tabs.show_single_tab
+        self.config.tabs.show_single_tab || self.tabs.len() > 1
     }
 
     fn mark_chrome_dirty(&mut self) {
@@ -930,33 +1019,37 @@ impl App {
                 .map(|(x, y)| [x as f32 * scale, y as f32 * scale])
         };
 
-        let title = {
-            let title = self
-                .session
-                .as_ref()
-                .map(|s| s.terminal().lock().title().trim().to_string())
-                .unwrap_or_default();
-            if title.is_empty() { "shell".to_string() } else { title }
-        };
-        let origin = match self.session.as_ref().map(|s| s.origin()) {
-            Some(Origin::Daemon { host, local: false }) => TabOrigin::Remote { host_label: host },
-            _ => TabOrigin::Local,
-        };
+        let tab_models: Vec<TabModel> = self
+            .tabs
+            .iter()
+            .map(|tab| {
+                // A brief lock per tab per chrome rebuild — rebuilds are
+                // event-driven, so this is microseconds, not a frame cost.
+                let title = tab.source().terminal().lock().title().trim().to_string();
+                let title = if title.is_empty() { "shell".to_string() } else { title };
+                let origin = match tab.source().origin() {
+                    Origin::Daemon { host, local: false } => {
+                        TabOrigin::Remote { host_label: host }
+                    }
+                    _ => TabOrigin::Local,
+                };
+                TabModel {
+                    addr: tab.addr,
+                    title: if tab.dead { format!("{title} · ended") } else { title },
+                    origin,
+                    // Presence joins in with the fleet model; until then a
+                    // reachable tab is simply online.
+                    presence: TabPresence::Online,
+                    // Dead tabs borrow the connecting style (faint text): not
+                    // live, not interactive, still present.
+                    connecting: tab.dead,
+                }
+            })
+            .collect();
 
         let model = ChromeModel {
-            tabs: vec![TabModel {
-                // One session and no fleet yet: a placeholder address until
-                // tabs are keyed by real `SessionAddr`s.
-                addr: zest_proto::SessionAddr::new(
-                    zest_proto::HostId::from_bytes([0; 32]),
-                    zest_proto::SessionId(0),
-                ),
-                title,
-                origin,
-                presence: TabPresence::Online,
-                connecting: false,
-            }],
-            active: 0,
+            tabs: tab_models,
+            active: self.tabs.active_index(),
             position: self.config.tabs.position,
             strip_scroll: self.strip_scroll,
             hover: self.chrome_hover,
@@ -990,19 +1083,17 @@ impl App {
             return;
         }
         match (region, button) {
-            (HitRegion::Tab(_), MouseButton::Left) => {
-                // One tab today: activating it changes nothing yet. The region
-                // exists now so the routing is real before the strip is plural.
+            (HitRegion::Tab(addr), MouseButton::Left) => {
+                if self.tabs.activate_addr(addr) {
+                    self.after_activation();
+                }
             }
-            (HitRegion::TabClose(_), MouseButton::Left)
-            | (HitRegion::Tab(_), MouseButton::Middle) => {
-                // Closing the only tab closes the window. Dropping the session
-                // sends the Detach, exactly as `CloseRequested` does.
-                self.session = None;
-                el.exit();
+            (HitRegion::TabClose(addr), MouseButton::Left)
+            | (HitRegion::Tab(addr), MouseButton::Middle) => {
+                self.close_tab(addr, false, el);
             }
             (HitRegion::NewTab, MouseButton::Left) => {
-                tracing::info!("new tab arrives with the multi-tab step of #23");
+                self.new_tab();
             }
             (HitRegion::Drag, MouseButton::Left) => {
                 let now = std::time::Instant::now();
@@ -1024,6 +1115,163 @@ impl App {
         }
     }
 
+    /// What to run in a fresh local shell, per the settings.
+    fn build_spec(&self) -> CommandSpec {
+        let mut spec = CommandSpec::default_shell();
+        if let Some(shell) = &self.config.shell {
+            spec.command_line = shell.clone();
+        }
+        // The in-process path gets the same hook as the daemon's, or
+        // `--no-daemon` would silently be a terminal without command blocks.
+        if let Some(dir) = zest_config::paths::config_dir() {
+            spec.enable_shell_integration(&dir.join("shell-integration"));
+        }
+        spec
+    }
+
+    /// The grid size a tab should be told right now.
+    fn current_dims(&self) -> (u16, u16) {
+        match (self.fonts.as_ref(), self.gpu.as_ref()) {
+            (Some(fonts), Some(gpu)) => {
+                self.insets().grid_dims(fonts.cell_metrics(), gpu.config.width, gpu.config.height)
+            }
+            _ => (80, 24),
+        }
+    }
+
+    /// Open a new tab on the current tab's host (⌘T, the + button).
+    ///
+    /// One daemon per window today, so "the current tab's host" is the
+    /// window's route; the fleet model makes it genuinely per-tab. Runs
+    /// inline: creating on an already-proven route is sub-millisecond on
+    /// loopback and a few on the LAN — the picker's cold dials are the ones
+    /// that must not block, and they arrive with the fleet model.
+    fn new_tab(&mut self) {
+        let (cols, rows) = self.current_dims();
+
+        match (&self.route, &self.client_identity) {
+            (Some(route), Some(identity)) => {
+                self.next_placeholder += 1;
+                let cell = Arc::new(parking_lot::Mutex::new(crate::tabs::placeholder_addr(
+                    self.next_placeholder,
+                )));
+                let wake = wake_for(&self.proxy, Arc::clone(&cell));
+                // Empty means the host's default shell — for a remote host,
+                // its shell, never this machine's command line.
+                let command = match route {
+                    HostRoute::LocalSocket(_) => self.config.shell.clone().unwrap_or_default(),
+                    HostRoute::Tcp(_) => String::new(),
+                };
+                let session = crate::remote::RemoteSession::create_and_attach(
+                    route.dialer(),
+                    &crate::remote::AttachOptions {
+                        identity,
+                        label: "zesterm",
+                        command: &command,
+                        cols,
+                        rows,
+                        scrollback: self.config.scrollback,
+                        adopt: false,
+                        local: route.is_local(),
+                        expect_host: None,
+                    },
+                    wake,
+                );
+                match session {
+                    Ok(session) => {
+                        *cell.lock() = session.addr();
+                        session.terminal().lock().set_palette(self.palette.clone());
+                        let local = route.is_local();
+                        self.tabs.push(Tab::daemon(session, local, (cols, rows)));
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not open a new tab");
+                        return;
+                    }
+                }
+            }
+            // No daemon (--no-daemon, or it was unreachable): another
+            // in-process pty. Degraded but honest — the tab works, it just
+            // cannot outlive the window.
+            _ => {
+                self.next_placeholder += 1;
+                let addr = crate::tabs::placeholder_addr(self.next_placeholder);
+                let cell = Arc::new(parking_lot::Mutex::new(addr));
+                match Session::spawn(
+                    &self.build_spec(),
+                    PtySize::new(cols, rows),
+                    self.config.scrollback,
+                    wake_for(&self.proxy, cell),
+                ) {
+                    Ok(session) => {
+                        session.terminal().lock().set_palette(self.palette.clone());
+                        self.tabs.push(Tab::in_process(session, addr, (cols, rows)));
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not spawn a new in-process tab");
+                        return;
+                    }
+                }
+            }
+        }
+
+        self.after_activation();
+        self.relayout_grid();
+    }
+
+    /// Close one tab: local sessions die, remote ones are only let go of.
+    ///
+    /// `already_exited` marks the child as gone (a `TabExited` wakeup), where
+    /// there is nothing left to kill. The last tab closing closes the window.
+    fn close_tab(&mut self, addr: zest_proto::SessionAddr, already_exited: bool, el: &ActiveEventLoop) {
+        let Some(tab) = self.tabs.close(addr) else { return };
+        if already_exited || tab.dead || !tab.local {
+            // Dropping detaches (the destructor sends it); a remote session
+            // keeps running on its host, which is the point of the fleet.
+            drop(tab);
+        } else {
+            // A local tab closing means "this shell is done" — the opposite
+            // default of a remote one, and what every ordinary terminal does.
+            tab.kill();
+        }
+
+        if self.tabs.is_empty() {
+            el.exit();
+            return;
+        }
+        self.after_activation();
+        self.relayout_grid();
+    }
+
+    /// Housekeeping after the active tab changed.
+    fn after_activation(&mut self) {
+        // A drag cannot span a tab switch, and half a selection drag leaking
+        // into another tab's grid would.
+        self.mouse.release();
+        let dims = self.current_dims();
+        if let Some(tab) = self.tabs.active_mut() {
+            // Background tabs are resized lazily: this is the moment a stale
+            // one catches up (RemoteSession::resize also requests the
+            // keyframe that makes the new shape true).
+            if tab.sized != dims {
+                tab.source().resize(dims.0, dims.1);
+                tab.sized = dims;
+            }
+            tab.source().mark_dirty();
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// Recompute the grid after the strip's extent may have changed —
+    /// opening a second tab or closing back to one moves the grid edge when
+    /// `show_single_tab` is off.
+    fn relayout_grid(&mut self) {
+        if let Some(w) = self.window.as_ref() {
+            let size = w.inner_size();
+            self.resize_surface(size.width, size.height);
+        }
+    }
+
     /// Pointer pixels to a grid cell, clamped into the viewport.
     fn cell_at(&self, x: f64, y: f64) -> (usize, usize) {
         let Some(fonts) = self.fonts.as_ref() else { return (0, 0) };
@@ -1032,7 +1280,7 @@ impl App {
         let col = ((x - f64::from(insets.left)).max(0.0) / f64::from(m.cell_w)) as usize;
         let row = ((y - f64::from(insets.top)).max(0.0) / f64::from(m.cell_h)) as usize;
 
-        let Some(session) = self.session.as_ref() else { return (row, col) };
+        let Some(session) = self.tabs.active_source() else { return (row, col) };
         let term = session.terminal().lock();
         let grid = term.grid();
         (row.min(grid.rows().saturating_sub(1)), col.min(grid.cols().saturating_sub(1)))
@@ -1084,7 +1332,7 @@ impl App {
         let (Some(gpu), Some(fonts), Some(session), Some(window)) = (
             self.gpu.as_mut(),
             self.fonts.as_mut(),
-            self.session.as_ref(),
+            self.tabs.active_source(),
             self.window.as_ref(),
         ) else {
             return;
@@ -1237,7 +1485,7 @@ impl App {
             }
         }
 
-        if let Some(session) = self.session.as_ref() {
+        if let Some(session) = self.tabs.active_source() {
             session.mark_dirty();
         }
         if let Some(w) = self.window.as_ref() {
@@ -1260,9 +1508,11 @@ impl App {
         );
         // Seeding replaces the palette the escape sequences mutate, so an
         // `OSC 4` set before the theme change is deliberately lost -- a theme
-        // change is exactly the moment the seed should win.
-        if let Some(session) = self.session.as_ref() {
-            session.terminal().lock().set_palette(self.palette.clone());
+        // change is exactly the moment the seed should win. Every tab: a
+        // background grid repainted later with a stale palette is a bug
+        // nobody can reproduce on demand.
+        for tab in self.tabs.iter() {
+            tab.source().terminal().lock().set_palette(self.palette.clone());
         }
         if let Some(w) = self.window.as_ref() {
             let bg = resolved.background;
@@ -1298,10 +1548,8 @@ impl App {
 
     fn resize_surface(&mut self, width: u32, height: u32) {
         let insets = self.insets();
-        let (Some(gpu), Some(session)) = (self.gpu.as_mut(), self.session.as_ref()) else {
-            return;
-        };
-        if width == 0 || height == 0 {
+        let Some(gpu) = self.gpu.as_mut() else { return };
+        if self.tabs.is_empty() || width == 0 || height == 0 {
             return;
         }
 
@@ -1323,8 +1571,14 @@ impl App {
         self.chrome_dirty = true;
 
         if let Some(fonts) = self.fonts.as_ref() {
-            let (cols, rows) = insets.grid_dims(fonts.cell_metrics(), width, height);
-            session.resize(cols, rows);
+            let dims = insets.grid_dims(fonts.cell_metrics(), width, height);
+            // Only the visible grid follows a drag live; background tabs
+            // catch up on activation, so a resize costs one message rather
+            // than one per tab per frame.
+            if let Some(tab) = self.tabs.active_mut() {
+                tab.source().resize(dims.0, dims.1);
+                tab.sized = dims;
+            }
         }
 
         // Draw a frame at the new size, now.
@@ -1339,7 +1593,9 @@ impl App {
         // Marking dirty rather than drawing inline keeps the single render path
         // intact: this is the same "something changed" signal the parser sends,
         // and it coalesces the same way when a drag produces a hundred of them.
-        session.mark_dirty();
+        if let Some(session) = self.tabs.active_source() {
+            session.mark_dirty();
+        }
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
@@ -1450,16 +1706,7 @@ impl ApplicationHandler<Wakeup> for App {
         let (cols, rows) = insets.grid_dims(metrics, size.width.max(1), size.height.max(1));
 
         let proxy = self.proxy.clone();
-        let mut spec = CommandSpec::default_shell();
-        if let Some(shell) = &self.config.shell {
-            spec.command_line = shell.clone();
-        }
-        // The in-process path gets the same hook as the daemon's, or
-        // `--no-daemon` would silently be a terminal without command blocks --
-        // and the two paths drifting is exactly what ADR-007 is about.
-        if let Some(dir) = zest_config::paths::config_dir() {
-            spec.enable_shell_integration(&dir.join("shell-integration"));
-        }
+        let spec = self.build_spec();
         // TERM, COLORTERM and the TERM_PROGRAM pair come from
         // `zest_pty::terminal_env`, which `default_shell` already applied --
         // deliberately in one place, because a child that learns the wrong
@@ -1470,16 +1717,17 @@ impl ApplicationHandler<Wakeup> for App {
         // an in-process pty. This slot -- after the window is visible and the
         // first paint is measured, before GPU init -- is the one ADR-007 names,
         // and nothing above line 649 may move below it.
-        let session: Box<dyn SessionSource> = self
-            .attach_to_daemon(&spec, cols, rows, &proxy)
-            .unwrap_or_else(|| {
+        let mut tab: Tab = match self.attach_to_daemon(&spec, cols, rows, &proxy) {
+            Some(tab) => tab,
+            None => {
+                self.next_placeholder += 1;
+                let addr = crate::tabs::placeholder_addr(self.next_placeholder);
+                let cell = Arc::new(parking_lot::Mutex::new(addr));
                 let session = Session::spawn(
                     &spec,
                     PtySize::new(cols, rows),
                     self.config.scrollback,
-                    move |w| {
-                        let _ = proxy.send_event(w);
-                    },
+                    wake_for(&proxy, cell),
                 )
                 .expect("spawn shell");
                 tracing::debug!(
@@ -1488,9 +1736,10 @@ impl ApplicationHandler<Wakeup> for App {
                     rows,
                     "shell spawned in-process"
                 );
-                Box::new(session)
-            });
-        session.terminal().lock().set_palette(self.palette.clone());
+                Tab::in_process(session, addr, (cols, rows))
+            }
+        };
+        tab.source().terminal().lock().set_palette(self.palette.clone());
 
         // The surface is NOT sRGB (the resolve pass encodes), so the clear value
         // is written verbatim -- pass the theme background already in sRGB.
@@ -1508,7 +1757,8 @@ impl ApplicationHandler<Wakeup> for App {
         // window reported, so reconcile before the first frame.
         let (gpu_cols, gpu_rows) = insets.grid_dims(metrics, gpu.config.width, gpu.config.height);
         if (gpu_cols, gpu_rows) != (cols, rows) {
-            session.resize(gpu_cols, gpu_rows);
+            tab.source().resize(gpu_cols, gpu_rows);
+            tab.sized = (gpu_cols, gpu_rows);
         }
 
         self.fonts = Some(fonts);
@@ -1516,7 +1766,7 @@ impl ApplicationHandler<Wakeup> for App {
         // Everything downstream of this line works the same whether the shell
         // is in this process or on another machine, which is the property the
         // abstraction exists for.
-        self.session = Some(session);
+        self.tabs.push(tab);
         self.window = Some(window);
 
         // The window is already visible and painted with the theme background
@@ -1537,7 +1787,7 @@ impl ApplicationHandler<Wakeup> for App {
             rows,
             scale,
             startup_ms = t0.elapsed().as_millis(),
-            origin = ?self.session.as_ref().map_or(Origin::InProcess, |s| s.origin()),
+            origin = ?self.tabs.active_source().map_or(Origin::InProcess, |s| s.origin()),
             "zesterm ready"
         );
 
@@ -1565,7 +1815,7 @@ impl ApplicationHandler<Wakeup> for App {
                 // Nothing to schedule here: `RemoteSession` supervises its own
                 // link and is already dialling. The window goes on showing the
                 // last state that was true, because the session still exists.
-                if let Some(s) = self.session.as_ref() {
+                if let Some(s) = self.tabs.active_source() {
                     s.mark_dirty();
                 }
                 if let Some(w) = self.window.as_ref() {
@@ -1575,17 +1825,26 @@ impl ApplicationHandler<Wakeup> for App {
             // The in-place reconnect in `remote.rs` succeeded: same session, same
             // grid, and everything this window had accumulated is still there.
             // Nothing to rebuild — just repaint.
+            // One tab's child exited. Close that tab — killing is moot, the
+            // child is already gone — and the last tab closing closes the
+            // window, which is exactly the old single-session behavior.
+            Wakeup::TabExited(addr) => {
+                self.close_tab(addr, true, el);
+            }
             // A pinned tab's host answered and its session no longer exists.
             // The supervisor stopped rather than swapping in a fresh shell;
-            // once the strip is plural this marks the tab as ended and offers
-            // recreate. With one session it is a log line and a repaint.
+            // the tab stays put, marked ended, until the user closes it (a
+            // recreate affordance arrives with the picker).
             Wakeup::SessionGone(addr) => {
                 tracing::warn!(%addr, "the session ended on its host");
+                if let Some(tab) = self.tabs.find_mut(addr) {
+                    tab.dead = true;
+                }
                 self.mark_chrome_dirty();
             }
             Wakeup::Reattached => {
                 tracing::info!("the daemon connection is back");
-                if let Some(s) = self.session.as_ref() {
+                if let Some(s) = self.tabs.active_source() {
                     s.mark_dirty();
                 }
                 if let Some(w) = self.window.as_ref() {
@@ -1608,7 +1867,7 @@ impl ApplicationHandler<Wakeup> for App {
             // covers every way this process can end, including the ones no
             // `CloseRequested` arm would see.
             WindowEvent::CloseRequested => {
-                self.session = None;
+                self.tabs.clear();
                 el.exit();
             }
 
@@ -1635,7 +1894,7 @@ impl ApplicationHandler<Wakeup> for App {
 
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
-                if let Some(s) = self.session.as_ref() {
+                if let Some(s) = self.tabs.active_source() {
                     s.mark_dirty();
                 }
                 // The active tab's label dims with the window, like any
@@ -1669,7 +1928,75 @@ impl ApplicationHandler<Wakeup> for App {
                 if self.ime.composing() {
                     return;
                 }
-                let Some(session) = self.session.as_ref() else { return };
+
+                // Tab chords, on the desktop's own modifier (⌘ here). Before
+                // the clipboard block because on macOS both tests are true
+                // for ⌘ — these letters are simply not c/v/o/r.
+                if key::belongs_to_desktop(self.modifiers) {
+                    if let winit::keyboard::Key::Character(c) = &event.logical_key {
+                        match c.as_str() {
+                            // Lowercase only: ⌘⇧T is reserved (reopen-closed,
+                            // one day), and shift produces the uppercase.
+                            "t" => {
+                                self.new_tab();
+                                return;
+                            }
+                            "w" => {
+                                if let Some(tab) = self.tabs.active() {
+                                    let addr = tab.addr;
+                                    self.close_tab(addr, false, el);
+                                }
+                                return;
+                            }
+                            // ⌘1..⌘8 pick a tab; ⌘9 is "last", following the
+                            // browsers everyone's fingers learned it from.
+                            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" => {
+                                let n = c.as_bytes()[0] - b'1';
+                                if self.tabs.activate(usize::from(n)) {
+                                    self.after_activation();
+                                }
+                                return;
+                            }
+                            "9" => {
+                                let last = self.tabs.len().saturating_sub(1);
+                                if self.tabs.activate(last) {
+                                    self.after_activation();
+                                }
+                                return;
+                            }
+                            // ⌘⇧[ and ⌘⇧] arrive as { and }.
+                            "{" => {
+                                if self.tabs.activate_prev() {
+                                    self.after_activation();
+                                }
+                                return;
+                            }
+                            "}" => {
+                                if self.tabs.activate_next() {
+                                    self.after_activation();
+                                }
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // Ctrl+Tab / Ctrl+Shift+Tab cycle, as in every tabbed app.
+                if self.modifiers.control_key()
+                    && event.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Tab)
+                {
+                    let switched = if self.modifiers.shift_key() {
+                        self.tabs.activate_prev()
+                    } else {
+                        self.tabs.activate_next()
+                    };
+                    if switched {
+                        self.after_activation();
+                    }
+                    return;
+                }
+
+                let Some(session) = self.tabs.active_source() else { return };
 
                 // Copy and paste, on whichever chord this desktop uses.
                 // See `key::is_clipboard_chord`.
@@ -1779,7 +2106,7 @@ impl ApplicationHandler<Wakeup> for App {
                 if !self.mouse.is_dragging() {
                     return;
                 }
-                let Some(session) = self.session.as_ref() else { return };
+                let Some(session) = self.tabs.active_source() else { return };
                 let mut term = session.terminal().lock();
                 if let (Some(mut sel), Some(pos)) =
                     (term.selection(), term.abs_pos(cell.0, cell.1))
@@ -1811,7 +2138,7 @@ impl ApplicationHandler<Wakeup> for App {
                     }
                 }
 
-                let Some(session) = self.session.as_ref() else { return };
+                let Some(session) = self.tabs.active_source() else { return };
                 let (row, col) = self.pointer_cell;
 
                 // When the program asked for mouse reporting, the mouse belongs
@@ -1907,7 +2234,7 @@ impl ApplicationHandler<Wakeup> for App {
                     return;
                 }
 
-                let Some(session) = self.session.as_ref() else { return };
+                let Some(session) = self.tabs.active_source() else { return };
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     // Trackpads report pixels. Convert with the cell height so
@@ -1957,14 +2284,14 @@ impl ApplicationHandler<Wakeup> for App {
                 // GPU -- that is a hard requirement, and it is what separates a
                 // real terminal from a demo. The chrome has its own latch,
                 // set only by discrete events, so the guarantee survives it.
-                let grid_dirty = self.session.as_ref().is_some_and(|s| s.take_dirty());
+                let grid_dirty = self.tabs.active_source().is_some_and(|s| s.take_dirty());
                 if grid_dirty {
                     // Title changes arrive as ordinary output damage; noticing
                     // them here keeps the tab label and the OS titlebar honest
                     // without inventing a new event for it.
                     let title = self
-                        .session
-                        .as_ref()
+                        .tabs
+                        .active_source()
                         .map(|s| s.terminal().lock().title().trim().to_string())
                         .unwrap_or_default();
                     if title != self.window_title {
@@ -1982,7 +2309,7 @@ impl ApplicationHandler<Wakeup> for App {
                     // no business knowing that. It also means a flood costs one
                     // snap per frame, not one per line.
                     if grid_dirty && self.config.scroll_on_output {
-                        if let Some(session) = self.session.as_ref() {
+                        if let Some(session) = self.tabs.active_source() {
                             session.terminal().lock().scroll_to_bottom();
                         }
                     }

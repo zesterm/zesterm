@@ -222,6 +222,16 @@ M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
       current tab's host; closing a local tab kills, a remote one detaches;
       launch restores the previous tab set, which retires the adopt guess. Both
       orientations — top strip and left sidebar — behind `tabs.position`.
+- [x] **Tabs are plural.** `TabStrip` replaces the app's single session: each
+      tab is `(SessionAddr, session, local, dead, sized)`, closing is
+      policy-aware — local kills, remote detaches, the last one closes the
+      window — and ⌘T creates on the current tab's host (one route per window
+      until the fleet model; in-process fallback spawns another pty). ⌘W,
+      ⌘1–9, ⌘⇧[/], Ctrl+Tab. Background tabs resize lazily on activation so
+      a window drag costs one pty message, not N per frame; `Wakeup::Exited`
+      is translated per-tab into `TabExited(addr)` so one shell ending closes
+      one tab. A `SessionGone` tab stays put marked "· ended" instead of
+      vanishing or respawning.
 - [x] **Three additive wire fields, no version bump** (CONTRACTS.md has the
       full reasoning): `Keyframe.title` — a complete state finally includes
       the title, so a tab attaching to a running `vim` is labeled at once
