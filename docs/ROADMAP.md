@@ -420,6 +420,20 @@ theme screens. Colours, sizes and spacing come from there, not from this file.
       a blank panel as if broken. Drive-by: `watch_config` now watches
       `zesterm.toml` in portable mode instead of a `config.toml` nobody
       writes.
+- [x] **Screen 1 of the design handoff: the title bar, tab chips and status
+      bar** ([docs/design/client-ui/](design/client-ui/README.md)). The chrome
+      speaks the design's type scale now — `Fonts::set_ui_px` threads a per-run
+      size through shaping/keys/advances (cell geometry untouched, grid path
+      leak-proof by test) — and obsidian authors its full sigx record, with the
+      three off-token surfaces (`titlebar_fill`, `block_header_fill`,
+      `soft_hairline`) derived in `zest_theme::derived` as OKLCH steps so light
+      themes step in their own direction. The 46px bar carries spec chips
+      (196–240px, two lines, host-accent dot, top accent rule, fill meeting the
+      pane) and the two pills; ⌘⇧E / the pill flips `tabs.position` through the
+      settings write path. The 28px status bar says cwd · ⎇ branch (a HEAD
+      read, never a subprocess) · blocks | theme · link path · latency — the
+      fleet prober now keeps the RTT it was already paying for, and
+      `FleetHost` carries `Reachability` instead of discarding it.
 - [ ] Animation clock. Springs `(response, damping)`, not easing curves —
       terminal motion is interruption-dominated and a spring absorbs a changed
       target with continuous velocity for free. Substep the integrator

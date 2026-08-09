@@ -61,6 +61,13 @@ pub struct FleetHost {
     pub local: bool,
     /// The best address to dial, when one is known.
     pub address: Option<String>,
+    /// How the best endpoint reaches the host — loopback, LAN, or tunnel.
+    /// `None` when nothing is advertised (the synthesized local row).
+    pub reachability: Option<zest_mesh::Reachability>,
+    /// The prober's last measured round trip to that address, milliseconds.
+    /// Measured, not `typical_rtt_ms` — the status bar prints this, and an
+    /// honest number is the difference between UI and decoration.
+    pub rtt_ms: Option<f32>,
     pub sessions: SessionsState,
 }
 
@@ -72,6 +79,10 @@ struct State {
     /// than expected from discovery.
     local: Option<(HostId, String)>,
     sessions: HashMap<HostId, SessionsState>,
+    /// Last successful probe's round trip per host, milliseconds. The probe
+    /// was already paying for this connect; keeping the elapsed time is what
+    /// turns "LAN direct" into "LAN direct 0.4 ms".
+    rtt: HashMap<HostId, f32>,
     discovery: Option<MdnsDiscovery>,
 }
 
@@ -151,16 +162,33 @@ impl FleetModel {
                         .collect()
                 };
                 for (host, addr) in targets {
+                    let started = std::time::Instant::now();
                     let up = addr
                         .parse()
                         .ok()
                         .and_then(|sa| std::net::TcpStream::connect_timeout(&sa, PROBE_TIMEOUT).ok())
                         .is_some();
+                    let rtt_ms = up.then(|| started.elapsed().as_secs_f32() * 1000.0);
                     let changed = {
+                        let mut state = inner.state.lock();
+                        match rtt_ms {
+                            Some(ms) => {
+                                // A fresh number is not "changed": redrawing the
+                                // fleet every ten seconds because 0.41 became
+                                // 0.38 would spend frames saying nothing. Only a
+                                // number that would *read* differently wakes the
+                                // UI.
+                                let old = state.rtt.insert(host, ms);
+                                old.is_none_or(|o| (o - ms).abs() / o.max(0.1) > 0.5)
+                            }
+                            None => state.rtt.remove(&host).is_some(),
+                        }
+                    };
+                    let dial_changed = {
                         let state = inner.state.lock();
                         state.discovery.as_ref().is_some_and(|d| d.report_dial(host, up))
                     };
-                    if changed {
+                    if changed || dial_changed {
                         inner.mark_changed();
                     }
                 }
@@ -251,6 +279,8 @@ impl FleetModel {
                 presence: Presence::Online,
                 local: true,
                 address: None,
+                reachability: Some(zest_mesh::Reachability::Loopback),
+                rtt_ms: state.rtt.get(host).copied(),
                 sessions: state.sessions.get(host).cloned().unwrap_or_default(),
             });
         }
@@ -262,13 +292,15 @@ impl FleetModel {
                 if state.local.as_ref().is_some_and(|(h, _)| *h == record.peer.host) {
                     continue;
                 }
-                let address = record.peer.best_endpoint().map(|e| e.address.clone());
+                let best = record.peer.best_endpoint();
                 out.push(FleetHost {
                     host: record.peer.host,
                     label: record.peer.label.clone(),
                     presence: record.presence,
                     local: false,
-                    address,
+                    address: best.map(|e| e.address.clone()),
+                    reachability: best.map(|e| e.reachability),
+                    rtt_ms: state.rtt.get(&record.peer.host).copied(),
                     sessions: state
                         .sessions
                         .get(&record.peer.host)

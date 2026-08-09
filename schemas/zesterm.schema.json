@@ -278,7 +278,7 @@
           "x_zest_widget": "toggle"
         },
         "sidebar_width": {
-          "default": 220,
+          "default": 262,
           "description": "Width of the vertical tab sidebar, in logical pixels.",
           "format": "uint32",
           "maximum": 400,
@@ -288,7 +288,7 @@
           "x_zest_widget": "number"
         },
         "strip_height": {
-          "default": 38,
+          "default": 46,
           "description": "Height of the horizontal tab strip, in logical pixels.",
           "format": "uint32",
           "maximum": 64,
@@ -527,8 +527,8 @@
         "position": "top",
         "restore": true,
         "show_single_tab": true,
-        "sidebar_width": 220,
-        "strip_height": 38
+        "sidebar_width": 262,
+        "strip_height": 46
       },
       "description": "The tab strip: where it lives and how it behaves."
     },

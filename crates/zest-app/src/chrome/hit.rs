@@ -21,6 +21,13 @@ pub enum HitRegion {
     /// The strip itself — catches wheel scrolling and swallows clicks that
     /// would otherwise fall through to the grid beneath.
     Strip,
+    /// The title bar's layout-toggle pill ("⌘⇧E Vertical" / "Horizontal
+    /// tabs"); clicking flips `tabs.position`.
+    LayoutPill,
+    /// The title bar's "⌘K" pill; clicking opens the palette.
+    PalettePill,
+    /// The status bar — swallows clicks like the strip does.
+    Status,
     /// One row of the open picker, by index into its row list.
     PickerRow(usize),
     /// The dimmed backdrop behind the picker; clicking it dismisses.

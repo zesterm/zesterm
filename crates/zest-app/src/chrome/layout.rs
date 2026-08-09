@@ -59,22 +59,70 @@ pub struct ChromeLayout {
 }
 
 // Logical-pixel constants, scaled at use. Named because the tests reason
-// about them; not settings, because nobody should have to care.
-const TAB_MIN: f32 = 120.0;
-const TAB_MAX: f32 = 220.0;
-const TAB_VPAD: f32 = 4.0;
-const TAB_HPAD: f32 = 2.0;
+// about them; not settings, because nobody should have to care. The values
+// are the design handoff's (docs/design/client-ui/README.md) — change them
+// there first or not at all.
+const TAB_H: f32 = 34.0;
+const TAB_MIN: f32 = 196.0;
+const TAB_MAX: f32 = 240.0;
+const TAB_GAP: f32 = 3.0;
+const TAB_PAD: f32 = 11.0;
+const TAB_INNER_GAP: f32 = 9.0;
+const TAB_RADIUS: f32 = 9.0;
+const ACCENT_RULE: f32 = 2.0;
+const DOT: f32 = 6.0;
 const TEXT_PAD: f32 = 8.0;
 const RADIUS: f32 = 6.0;
 const CLOSE: f32 = 16.0;
-const NEW_TAB: f32 = 24.0;
+const NEW_TAB_W: f32 = 28.0;
+const NEW_TAB_H: f32 = 30.0;
+const PILL_H: f32 = 26.0;
+const PILL_RADIUS: f32 = 7.0;
+const PILL_PAD: f32 = 9.0;
+const PILL_GAP: f32 = 6.0;
 const PILL_HPAD: f32 = 5.0;
 const HAIRLINE: f32 = 1.0;
 const EDGE_PAD: f32 = 8.0;
+const BAR_PAD: f32 = 12.0;
+const TRAFFIC_PAD: f32 = 14.0;
 const ROW_H: f32 = 44.0;
 const ROW_HPAD: f32 = 6.0;
 const HEADER_MIN: f32 = 28.0;
 const LINE_GAP: f32 = 2.0;
+
+/// The status bar's height, logical pixels. Public because `insets_at` must
+/// subtract it from the grid.
+pub const STATUS_H: f32 = 28.0;
+const STATUS_HPAD: f32 = 14.0;
+
+// The design's type scale, logical px.
+const UI_BODY: f32 = 12.5;
+const UI_SMALL: f32 = 11.0;
+const UI_TAB_SUB: f32 = 9.5;
+const UI_CHORD: f32 = 10.0;
+const UI_STATUS: f32 = 10.5;
+
+/// Baseline that vertically centres a run of `px`-sized text in a band.
+/// 0.72·px approximates the ascent above baseline for the faces we ship;
+/// exact per-face metrics would need the font here, and being one pixel
+/// off is invisible while being *inconsistent* is not — every band uses
+/// this one rule.
+fn baseline_in(band_y: f32, band_h: f32, px: f32) -> f32 {
+    band_y + (band_h + px * 0.72) / 2.0
+}
+
+/// The host-accent cycle: slot 0 (the local machine) is `success`, then
+/// `info`, `magenta`, `warn` — the design's studio/crate/forge assignment
+/// generalized. Wraps rather than running out.
+fn host_accent(colors: &ChromeColors, slot: usize) -> LinearRgba {
+    [colors.success, colors.info, colors.magenta, colors.warn][slot % 4]
+}
+
+/// A little status dot, as the SDF pipeline draws circles: a square rect
+/// with radius d/2.
+fn dot(rects: &mut Vec<RectInstance>, cx: f32, cy: f32, d: f32, color: LinearRgba, clip: [f32; 4]) {
+    rects.push(RectInstance::rounded([cx - d / 2.0, cy - d / 2.0, d, d], d / 2.0, color, clip));
+}
 
 pub fn layout(
     model: &ChromeModel,
@@ -867,131 +915,343 @@ fn horizontal(
 
     // The traffic lights are native controls that swallow their own clicks;
     // the reserve keeps tabs from being drawn *under* them, and behaves as
-    // window drag like the rest of the empty strip.
-    let reserve = model.traffic_inset.map_or(0.0, |t| t[0]) + EDGE_PAD * s;
+    // window drag like the rest of the empty strip. 14px of air after the
+    // cluster, per the design.
+    let reserve = model.traffic_inset.map_or(BAR_PAD * s, |t| t[0] + TRAFFIC_PAD * s);
     out.hit.push([0.0, 0.0, reserve, sh], HitRegion::Drag);
 
-    let avail = (m.width - reserve - EDGE_PAD * s).max(0.0);
+    // Right side first: the pills have intrinsic widths, the tabs take what
+    // remains. Two pills — "(chord) Vertical" and the palette's "(chord)" —
+    // 26px tall, hairline border that turns accent under the pointer.
+    let pill_y = (sh - PILL_H * s) / 2.0;
+    let mut right = m.width - BAR_PAD * s;
+    {
+        let w = measure(&model.palette_chord, UI_CHORD * s, false) + 2.0 * PILL_PAD * s;
+        let rect = [right - w, pill_y, w, PILL_H * s];
+        let hovered = model.hover == Some(HitRegion::PalettePill);
+        pill_button(&mut out.rects, colors, rect, PILL_RADIUS * s, hovered, no_clip);
+        out.hit.push(rect, HitRegion::PalettePill);
+        out.texts.push(TextRun {
+            text: model.palette_chord.clone(),
+            pos: [rect[0] + PILL_PAD * s, baseline_in(pill_y, PILL_H * s, UI_CHORD * s)],
+            max_width: w,
+            color: if hovered { colors.text_active } else { colors.text_inactive },
+            clip: no_clip,
+            px: UI_CHORD * s,
+            bold: false,
+        });
+        right = rect[0] - PILL_GAP * s;
+    }
+    {
+        let label = if model.position == TabsPosition::Top { "Vertical" } else { "Horizontal" };
+        let chord_w = measure(&model.toggle_chord, UI_CHORD * s, false);
+        let label_w = measure(label, UI_SMALL * s, false);
+        let w = chord_w + PILL_GAP * s + label_w + 2.0 * PILL_PAD * s;
+        let rect = [right - w, pill_y, w, PILL_H * s];
+        let hovered = model.hover == Some(HitRegion::LayoutPill);
+        pill_button(&mut out.rects, colors, rect, PILL_RADIUS * s, hovered, no_clip);
+        out.hit.push(rect, HitRegion::LayoutPill);
+        let color = if hovered { colors.text_active } else { colors.text_inactive };
+        out.texts.push(TextRun {
+            text: model.toggle_chord.clone(),
+            pos: [rect[0] + PILL_PAD * s, baseline_in(pill_y, PILL_H * s, UI_CHORD * s)],
+            max_width: chord_w + 2.0,
+            color,
+            clip: no_clip,
+            px: UI_CHORD * s,
+            bold: false,
+        });
+        out.texts.push(TextRun {
+            text: label.into(),
+            pos: [
+                rect[0] + PILL_PAD * s + chord_w + PILL_GAP * s,
+                baseline_in(pill_y, PILL_H * s, UI_SMALL * s),
+            ],
+            max_width: label_w + 2.0,
+            color,
+            clip: no_clip,
+            px: UI_SMALL * s,
+            bold: false,
+        });
+        right = rect[0] - BAR_PAD * s;
+    }
+
+    let avail = (right - reserve).max(0.0);
+    // Chips reach the strip's bottom edge and cover the hairline there, so
+    // the active tab's fill meets the pane with nothing drawn between them.
     let clip = [reserve, 0.0, avail, sh];
+    let chip_y = sh - TAB_H * s;
 
     let n = model.tabs.len();
+    let gap = TAB_GAP * s;
+    let new_tab_w = NEW_TAB_W * s;
     let tab_w = if n == 0 {
         0.0
     } else {
-        (avail / n as f32).clamp(TAB_MIN * s, TAB_MAX * s)
+        ((avail - new_tab_w - n as f32 * gap) / n as f32).clamp(TAB_MIN * s, TAB_MAX * s)
     };
-    let new_tab_w = NEW_TAB * s;
-    let content_w = n as f32 * tab_w + new_tab_w;
+    let content_w = n as f32 * (tab_w + gap) + new_tab_w;
     let max_scroll = (content_w - avail).max(0.0);
     out.strip_scroll = model.strip_scroll.clamp(0.0, max_scroll);
 
     for (i, tab) in model.tabs.iter().enumerate() {
-        let x = reserve + i as f32 * tab_w - out.strip_scroll;
-        let slot = [x, 0.0, tab_w, sh];
-        let chip = [x + TAB_HPAD * s, TAB_VPAD * s, tab_w - 2.0 * TAB_HPAD * s, sh - 2.0 * TAB_VPAD * s];
+        let x = reserve + i as f32 * (tab_w + gap) - out.strip_scroll;
+        let chip = [x, chip_y, tab_w, TAB_H * s];
 
         let active = i == model.active;
         let hovered = model.hover == Some(HitRegion::Tab(tab.addr));
         if active {
-            out.rects.push(RectInstance::rounded(chip, RADIUS * s, colors.tab_active_bg, clip));
+            // Fill + hairline border, rounded on top only. The bottom border
+            // and the strip hairline under the chip are then painted out with
+            // the fill, which is what "no bottom border" means to an SDF rect
+            // whose stroke is a ring.
+            out.rects.push(RectInstance {
+                radii: [TAB_RADIUS * s, TAB_RADIUS * s, 0.0, 0.0],
+                border: colors.line,
+                border_width: HAIRLINE * s,
+                ..RectInstance::filled(chip, colors.tab_active_bg, clip)
+            });
+            out.rects.push(RectInstance::filled(
+                [x + HAIRLINE * s, sh - HAIRLINE * s, tab_w - 2.0 * HAIRLINE * s, HAIRLINE * s],
+                colors.tab_active_bg,
+                clip,
+            ));
+            // The 2px accent rule along the top edge, inset past the corner
+            // radius so it never pokes out of the curve.
+            out.rects.push(RectInstance::filled(
+                [x + TAB_RADIUS * s, chip_y + HAIRLINE * s, tab_w - 2.0 * TAB_RADIUS * s, ACCENT_RULE * s],
+                colors.accent,
+                clip,
+            ));
         } else if hovered {
-            out.rects.push(RectInstance::rounded(chip, RADIUS * s, colors.tab_hover_bg, clip));
+            out.rects.push(RectInstance {
+                radii: [TAB_RADIUS * s, TAB_RADIUS * s, 0.0, 0.0],
+                ..RectInstance::filled(chip, colors.tab_hover_bg, clip)
+            });
         }
-        if let Some(hit) = intersect(slot, clip) {
+        if let Some(hit) = intersect(chip, clip) {
             out.hit.push(hit, HitRegion::Tab(tab.addr));
         }
 
-        // Right-to-left within the tab: close button, then the origin pill,
-        // and the title gets whatever is left.
-        let mut right = x + tab_w - TEXT_PAD * s;
+        // Host dot: the machine's accent on the active tab, faint otherwise.
+        let dot_color = if active { host_accent(colors, tab.accent) } else { colors.text_faint };
+        dot(
+            &mut out.rects,
+            x + TAB_PAD * s + DOT * s / 2.0,
+            chip_y + TAB_H * s / 2.0,
+            DOT * s,
+            dot_color,
+            clip,
+        );
 
+        let mut text_right = x + tab_w - TAB_PAD * s;
         if active || hovered {
-            let close = [right - CLOSE * s, (sh - CLOSE * s) / 2.0, CLOSE * s, CLOSE * s];
+            let close_hovered = model.hover == Some(HitRegion::TabClose(tab.addr));
+            let close =
+                [x + tab_w - TAB_PAD * s - CLOSE * s, chip_y + (TAB_H * s - CLOSE * s) / 2.0, CLOSE * s, CLOSE * s];
+            if close_hovered {
+                out.rects.push(RectInstance::rounded(close, 4.0 * s, colors.line, clip));
+            }
             if let Some(hit) = intersect(close, clip) {
                 out.hit.push(hit, HitRegion::TabClose(tab.addr));
             }
-            let glyph_w = measure("×", m.font_px, false);
+            let glyph_w = measure("\u{d7}", UI_BODY * s, false);
             out.texts.push(TextRun {
-        px: m.font_px,
-        bold: false,
-                text: "×".into(),
-                pos: [close[0] + (close[2] - glyph_w) / 2.0, text_baseline(m, 0.0, sh)],
+                text: "\u{d7}".into(),
+                pos: [
+                    close[0] + (close[2] - glyph_w) / 2.0,
+                    baseline_in(close[1], close[3], UI_BODY * s),
+                ],
                 max_width: close[2],
-                color: colors.text_inactive,
+                color: if close_hovered { colors.text_active } else { colors.text_faint },
                 clip,
+            px: UI_BODY * s,
+            bold: false,
             });
-            right = close[0] - TEXT_PAD * s / 2.0;
+            text_right = close[0] - TAB_INNER_GAP * s;
         }
 
-        if let Some((label, warn)) = pill_label(tab) {
-            let text_w = measure(&label, m.font_px, false);
-            // The pill may take up to half the tab; past that the label
-            // truncates rather than squeezing the title out entirely.
-            let pill_w = (text_w + 2.0 * PILL_HPAD * s).min(tab_w * 0.5);
-            let pill_h = (m.line_height + 2.0 * s).min(sh - 2.0 * TAB_VPAD * s);
-            let pill = [right - pill_w, (sh - pill_h) / 2.0, pill_w, pill_h];
-            let (bg, fg) = if warn {
-                (colors.pill_warn_bg, colors.pill_warn_text)
-            } else {
-                (colors.pill_bg, colors.pill_text)
-            };
-            out.rects.push(RectInstance::rounded(pill, pill_h / 2.0, bg, clip));
-            out.texts.push(TextRun {
-        px: m.font_px,
-        bold: false,
-                text: label,
-                pos: [pill[0] + PILL_HPAD * s, text_baseline(m, 0.0, sh)],
-                max_width: pill_w - 2.0 * PILL_HPAD * s,
-                color: fg,
-                clip,
-            });
-            right = pill[0] - TEXT_PAD * s / 2.0;
-        }
-
-        let text_x = x + TEXT_PAD * s;
+        // Two stacked lines: the title, then `host \u{b7} cwd` in mono-small.
+        let text_x = x + TAB_PAD * s + DOT * s + TAB_INNER_GAP * s;
         let title_color = match (active, model.focused, tab.connecting) {
             (_, _, true) => colors.text_faint,
             (true, true, _) => colors.text_active,
             _ => colors.text_inactive,
         };
         out.texts.push(TextRun {
-        px: m.font_px,
-        bold: false,
             text: tab.title.clone(),
-            pos: [text_x, text_baseline(m, 0.0, sh)],
-            max_width: (right - text_x).max(0.0),
+            pos: [text_x, chip_y + 14.5 * s],
+            max_width: (text_right - text_x).max(0.0),
             color: title_color,
             clip,
+            px: UI_BODY * s,
+            bold: false,
+        });
+        // Unreachability is words, not colour alone (#23): the sub-line says
+        // it, in warn, where the host's name already lives.
+        let (sub, sub_color) = if tab.presence == TabPresence::Unreachable {
+            (format!("{} · unreachable", tab.detail), colors.pill_warn_text)
+        } else {
+            (tab.detail.clone(), colors.text_faint)
+        };
+        out.texts.push(TextRun {
+            text: sub,
+            pos: [text_x, chip_y + 27.0 * s],
+            max_width: (text_right - text_x).max(0.0),
+            color: sub_color,
+            clip,
+            px: UI_TAB_SUB * s,
+            bold: false,
         });
     }
 
     // The new-tab button trails the last tab and scrolls with the content.
-    let nt_x = reserve + n as f32 * tab_w - out.strip_scroll;
-    let nt = [nt_x + 2.0 * s, (sh - NEW_TAB * s) / 2.0, NEW_TAB * s, NEW_TAB * s];
+    let nt_x = reserve + n as f32 * (tab_w + gap) - out.strip_scroll;
+    let nt = [nt_x, chip_y + (TAB_H * s - NEW_TAB_H * s) / 2.0, NEW_TAB_W * s, NEW_TAB_H * s];
     if model.hover == Some(HitRegion::NewTab) {
-        out.rects.push(RectInstance::rounded(nt, RADIUS * s, colors.tab_hover_bg, clip));
+        out.rects.push(RectInstance::rounded(nt, PILL_RADIUS * s, colors.tab_hover_bg, clip));
     }
     if let Some(hit) = intersect(nt, clip) {
         out.hit.push(hit, HitRegion::NewTab);
     }
-    let plus_w = measure("+", m.font_px, false);
+    let plus_w = measure("+", 16.0 * s, false);
     out.texts.push(TextRun {
-        px: m.font_px,
-        bold: false,
         text: "+".into(),
-        pos: [nt[0] + (nt[2] - plus_w) / 2.0, text_baseline(m, 0.0, sh)],
+        pos: [nt[0] + (nt[2] - plus_w) / 2.0, baseline_in(nt[1], nt[3], 16.0 * s)],
         max_width: nt[2],
         color: colors.text_inactive,
         clip,
+        px: 16.0 * s,
+        bold: false,
     });
 
     // Whatever the content does not cover is a drag handle, like any titlebar.
-    let drag_from = (nt[0] + nt[2] + 2.0 * s).min(m.width);
-    if drag_from < m.width {
-        out.hit.push([drag_from, 0.0, m.width - drag_from, sh], HitRegion::Drag);
+    let drag_from = (nt[0] + nt[2] + 2.0 * s).min(right);
+    if drag_from < right {
+        out.hit.push([drag_from, 0.0, right - drag_from, sh], HitRegion::Drag);
     }
 
+    status_bar(model, colors, m, measure, 0.0, &mut out);
     out
+}
+
+/// A bordered pill button; the border answers hover, the fill stays absent.
+fn pill_button(
+    rects: &mut Vec<RectInstance>,
+    colors: &ChromeColors,
+    rect: [f32; 4],
+    radius: f32,
+    hovered: bool,
+    clip: [f32; 4],
+) {
+    rects.push(RectInstance {
+        radii: [radius; 4],
+        border: if hovered { colors.accent } else { colors.line },
+        border_width: HAIRLINE * rect[3] / PILL_H, // 1px at the pill's own scale
+        ..RectInstance::filled(rect, LinearRgba::TRANSPARENT, clip)
+    });
+}
+
+/// The 28px status bar (design screen 1): cwd, branch and block count on the
+/// left; theme and the link segment on the right. `x0` is where the bar
+/// starts — 0 under a top strip, the sidebar's edge in the vertical layout.
+fn status_bar(
+    model: &ChromeModel,
+    colors: &ChromeColors,
+    m: &ChromeMetrics,
+    measure: &mut dyn FnMut(&str, f32, bool) -> f32,
+    x0: f32,
+    out: &mut ChromeLayout,
+) {
+    let Some(st) = model.status.as_ref() else { return };
+    let s = m.scale;
+    let h = STATUS_H * s;
+    let y = m.height - h;
+    let no_clip = [0.0, 0.0, m.width, m.height];
+    let bar = [x0, y, m.width - x0, h];
+    out.rects.push(RectInstance::filled(bar, colors.strip_bg, no_clip));
+    out.rects.push(RectInstance::filled(
+        [x0, y, m.width - x0, HAIRLINE * s],
+        colors.hairline_soft,
+        no_clip,
+    ));
+    out.hit.push(bar, HitRegion::Status);
+
+    let px = UI_STATUS * s;
+    let base = baseline_in(y, h, px);
+
+    // Right side first, so the left knows where it must stop.
+    let (link_text, link_color) = match st.link {
+        super::model::LinkKind::Loopback => ("\u{25cf} loopback", colors.success),
+        super::model::LinkKind::Lan => ("\u{25cf} LAN direct", colors.success),
+        super::model::LinkKind::Tunnel => ("\u{25cf} tunnel", colors.warn),
+        super::model::LinkKind::Stalled => ("\u{25cf} buffering", colors.warn),
+        super::model::LinkKind::Reconnecting => ("\u{25cf} reconnecting", colors.danger),
+    };
+    let latency = st.latency_ms.map(format_ms);
+    let mut right_runs: Vec<(String, LinearRgba)> =
+        vec![(st.theme.clone(), colors.text_faint), (" \u{b7} ".into(), colors.text_faint)];
+    right_runs.push((link_text.into(), link_color));
+    if let Some(ms) = latency {
+        right_runs.push((format!(" {ms}"), colors.text_faint));
+    }
+    let right_w: f32 = right_runs.iter().map(|(t, _)| measure(t, px, false)).sum();
+    let mut x = m.width - STATUS_HPAD * s - right_w;
+    let right_start = x;
+    for (text, color) in right_runs {
+        let w = measure(&text, px, false);
+        out.texts.push(TextRun {
+            text,
+            pos: [x, base],
+            max_width: w + 2.0,
+            color,
+            clip: no_clip,
+            px,
+            bold: false,
+        });
+        x += w;
+    }
+
+    let mut left_runs: Vec<(String, LinearRgba)> =
+        vec![(st.cwd.clone(), colors.text_inactive)];
+    if let Some(b) = &st.branch {
+        left_runs.push((" \u{b7} ".into(), colors.text_faint));
+        left_runs.push((format!("\u{2387} {b}"), colors.success));
+    }
+    left_runs.push((" \u{b7} ".into(), colors.text_faint));
+    let blocks = if st.blocks == 1 { "1 block".into() } else { format!("{} blocks", st.blocks) };
+    left_runs.push((blocks, colors.text_faint));
+
+    let mut x = x0 + STATUS_HPAD * s;
+    let stop = right_start - TEXT_PAD * s;
+    for (text, color) in left_runs {
+        if x >= stop {
+            break;
+        }
+        let w = measure(&text, px, false).min(stop - x);
+        out.texts.push(TextRun {
+            text,
+            pos: [x, base],
+            max_width: w,
+            color,
+            clip: no_clip,
+            px,
+            bold: false,
+        });
+        x += w;
+    }
+}
+
+/// "0.08 ms", "0.3 ms", "41 ms" — the design's precision: enough digits to
+/// be honest, never trailing noise.
+fn format_ms(ms: f32) -> String {
+    if ms < 0.1 {
+        format!("{ms:.2} ms")
+    } else if ms < 10.0 {
+        format!("{ms:.1} ms")
+    } else {
+        format!("{} ms", ms.round() as i64)
+    }
 }
 
 fn vertical(
@@ -1128,6 +1388,9 @@ fn vertical(
         clip: rows_clip,
     });
 
+    // The status bar spans the main column only; the sidebar keeps its full
+    // height (design screen 2).
+    status_bar(model, colors, m, measure, sw, &mut out);
     out
 }
 
@@ -1147,11 +1410,19 @@ mod tests {
     }
 
     fn tab(n: u8, origin: TabOrigin, presence: TabPresence) -> TabModel {
+        // The detail line carries the host's name exactly as the app composes
+        // it, so the words-not-colour tests exercise the real shape.
+        let host = match &origin {
+            TabOrigin::Remote { host_label } => host_label.clone(),
+            TabOrigin::Local => "local".into(),
+        };
         TabModel {
             addr: addr(n),
             title: format!("tab {n}"),
+            detail: format!("{host} · ~/dir{n}"),
             origin,
             presence,
+            accent: usize::from(n),
             connecting: false,
         }
     }
@@ -1183,6 +1454,16 @@ mod tests {
             hover: None,
             traffic_inset: None,
             focused: true,
+            status: Some(super::super::model::StatusModel {
+                cwd: "~/dev/zesterm".into(),
+                branch: Some("main".into()),
+                blocks: 3,
+                theme: "obsidian".into(),
+                link: super::super::model::LinkKind::Lan,
+                latency_ms: Some(0.3),
+            }),
+            toggle_chord: "⌘⇧E".into(),
+            palette_chord: "⌘K".into(),
             picker: None,
             palette: None,
             settings: None,
@@ -1331,6 +1612,39 @@ mod tests {
                 "{position:?} must spell out host and unreachability"
             );
         }
+    }
+
+    #[test]
+    fn the_title_bar_carries_the_pills_and_the_status_bar_the_bottom() {
+        // Design screen 1: the layout/palette pills are clickable in the top
+        // strip, and the status bar owns exactly its 28 logical pixels — one
+        // pixel above it belongs to the grid, or the bar is eating a row.
+        let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
+        let m = metrics(1200.0, 800.0, 1.0);
+        let l = layout(&model(tabs, TabsPosition::Top), &colors(), &m, &mut measure);
+
+        let strip_has = |want: HitRegion| {
+            (0..1200)
+                .step_by(2)
+                .any(|x| (0..46).step_by(2).any(|y| l.hit.hit(x as f32, y as f32) == Some(want)))
+        };
+        assert!(strip_has(HitRegion::LayoutPill), "the layout toggle must be clickable");
+        assert!(strip_has(HitRegion::PalettePill), "the palette pill must be clickable");
+
+        assert_eq!(
+            l.hit.hit(600.0, 800.0 - STATUS_H / 2.0),
+            Some(HitRegion::Status),
+            "the status bar swallows its own clicks"
+        );
+        assert_eq!(
+            l.hit.hit(600.0, 800.0 - STATUS_H - 1.0),
+            None,
+            "one pixel above the bar is the grid's"
+        );
+        assert!(
+            l.texts.iter().any(|t| t.text.contains("LAN direct")),
+            "the link segment says its path in words"
+        );
     }
 
     #[test]

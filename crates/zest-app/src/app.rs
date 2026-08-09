@@ -920,7 +920,84 @@ impl App {
             Action::ScrollPageDown => self.scroll_page(-1),
             Action::TogglePalette => self.toggle_palette(),
             Action::ToggleSettings => self.toggle_settings(),
+            Action::ToggleTabLayout => self.toggle_tab_layout(),
         }
+    }
+
+    /// Flip `tabs.position` through the settings write path, so the config
+    /// file stays the single source of truth and the watcher's echo diffs to
+    /// nothing — exactly the settings overlay's discipline.
+    fn toggle_tab_layout(&mut self) {
+        use zest_config::settings::TabsPosition;
+        let next = match self.config.tabs.position {
+            TabsPosition::Top => "left",
+            TabsPosition::Left => "top",
+        };
+        let Some(target) = zest_config::paths::config_file()
+            .or_else(|| zest_config::paths::config_dir().map(|d| d.join(zest_config::paths::CONFIG_FILE)))
+        else {
+            return;
+        };
+        match zest_config::write_value(&target, "tabs.position", next.into()) {
+            Ok(()) => self.reload_config(),
+            Err(e) => tracing::error!(error = %e, "could not write tabs.position"),
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// The status bar's model: the active session's facts, plus how its host
+    /// is reached. Never blocks — everything here is memory or one small
+    /// file read (the git HEAD).
+    fn build_status(
+        &self,
+        fleet_hosts: &[crate::fleet::FleetHost],
+    ) -> Option<crate::chrome::model::StatusModel> {
+        use crate::chrome::model::{LinkKind, StatusModel};
+        let tab = self.tabs.active()?;
+        let (cwd_raw, blocks) = {
+            let term = tab.source().terminal();
+            let term = term.lock();
+            let cwd = if term.cwd().is_empty() {
+                term.blocks().last().map(|b| b.cwd.clone()).unwrap_or_default()
+            } else {
+                term.cwd().to_string()
+            };
+            (cwd, term.blocks().blocks().len())
+        };
+
+        let origin = tab.source().origin();
+        let (link, latency_ms, cwd, branch) = match &origin {
+            Origin::Daemon { host, local: false } => {
+                let fleet = fleet_hosts.iter().find(|h| &h.label == host);
+                let link = match fleet.and_then(|h| h.reachability) {
+                    Some(zest_mesh::Reachability::Cloud) => LinkKind::Tunnel,
+                    Some(zest_mesh::Reachability::Loopback) => LinkKind::Loopback,
+                    _ => LinkKind::Lan,
+                };
+                // Another machine's paths: no home shortening, no git probe —
+                // both would be guesses about a filesystem we cannot see.
+                (link, fleet.and_then(|h| h.rtt_ms), cwd_raw, None)
+            }
+            _ => {
+                let branch = (!cwd_raw.is_empty())
+                    .then(|| crate::status::git_branch(std::path::Path::new(&cwd_raw)))
+                    .flatten();
+                (LinkKind::Loopback, None, crate::status::shorten_home(&cwd_raw), branch)
+            }
+        };
+
+        Some(StatusModel {
+            cwd,
+            branch,
+            blocks,
+            theme: if zest_theme::builtin::get(&self.config.theme).is_some() {
+                self.config.theme.clone()
+            } else {
+                zest_theme::builtin::DEFAULT_DARK.to_string()
+            },
+            link,
+            latency_ms,
+        })
     }
 
     /// Page the scrollback by one screen less a line of overlap — the overlap
@@ -1146,6 +1223,9 @@ impl App {
                     insets.left += self.config.tabs.sidebar_width as f32 * scale;
                 }
             }
+            // The status bar comes with the chrome: same latch, same layout
+            // pass, so the grid and the bar cannot disagree about the edge.
+            insets.bottom += crate::chrome::layout::STATUS_H * scale;
         }
         insets
     }
@@ -1250,6 +1330,14 @@ impl App {
             },
         );
 
+        // Built before the font borrow below: the status reads tabs, fleet
+        // and the filesystem, never the fonts.
+        let fleet_hosts = self.fleet.as_ref().map(|f| f.snapshot()).unwrap_or_default();
+        // Only when the strip shows: `insets_at` reserves the bar's edge under
+        // the same condition, and a bar the grid does not know about would
+        // paint over the last row.
+        let status = if self.strip_shown() { self.build_status(&fleet_hosts) } else { None };
+
         let Some(window) = self.window.as_ref() else { return };
         let Some(fonts) = self.fonts.as_mut() else { return };
 
@@ -1276,13 +1364,35 @@ impl App {
                 .map(|(x, y)| [x as f32 * scale, y as f32 * scale])
         };
 
+        let local_label = fleet_hosts
+            .iter()
+            .find(|h| h.local)
+            .map_or_else(|| "local".to_string(), |h| h.label.clone());
+
+        // Host accent slots: the local machine is always slot 0; remote hosts
+        // take the next slots in first-seen strip order, so a host keeps its
+        // colour for the life of the window.
+        let mut remote_slots: Vec<String> = Vec::new();
+
         let tab_models: Vec<TabModel> = self
             .tabs
             .iter()
             .map(|tab| {
                 // A brief lock per tab per chrome rebuild — rebuilds are
                 // event-driven, so this is microseconds, not a frame cost.
-                let title = tab.source().terminal().lock().title().trim().to_string();
+                let (title, cwd) = {
+                    let term = tab.source().terminal();
+                    let term = term.lock();
+                    let title = term.title().trim().to_string();
+                    // A remote terminal's cwd never crosses the wire directly;
+                    // its blocks do, and each carries the cwd it ran in.
+                    let cwd = if term.cwd().is_empty() {
+                        term.blocks().last().map(|b| b.cwd.clone()).unwrap_or_default()
+                    } else {
+                        term.cwd().to_string()
+                    };
+                    (title, cwd)
+                };
                 let title = if title.is_empty() { "shell".to_string() } else { title };
                 let origin = match tab.source().origin() {
                     Origin::Daemon { host, local: false } => {
@@ -1290,13 +1400,35 @@ impl App {
                     }
                     _ => TabOrigin::Local,
                 };
+                let (host_label, accent, cwd) = match &origin {
+                    TabOrigin::Remote { host_label } => {
+                        let slot = remote_slots
+                            .iter()
+                            .position(|l| l == host_label)
+                            .unwrap_or_else(|| {
+                                remote_slots.push(host_label.clone());
+                                remote_slots.len() - 1
+                            });
+                        (host_label.clone(), slot + 1, cwd)
+                    }
+                    TabOrigin::Local => {
+                        (local_label.clone(), 0, crate::status::shorten_home(&cwd))
+                    }
+                };
+                let detail = if cwd.is_empty() {
+                    host_label
+                } else {
+                    format!("{host_label} · {cwd}")
+                };
                 TabModel {
                     addr: tab.addr,
                     title: if tab.dead { format!("{title} · ended") } else { title },
+                    detail,
                     origin,
                     // Presence joins in with the fleet model; until then a
                     // reachable tab is simply online.
                     presence: TabPresence::Online,
+                    accent,
                     // Dead tabs borrow the connecting style (faint text): not
                     // live, not interactive, still present.
                     connecting: tab.dead,
@@ -1312,6 +1444,9 @@ impl App {
             hover: self.chrome_hover,
             traffic_inset: traffic,
             focused: self.focused,
+            status,
+            toggle_chord: keymap::chord_for(keymap::Action::ToggleTabLayout),
+            palette_chord: keymap::chord_for(keymap::Action::ToggleFleetPicker),
             picker: picker_model,
             palette: palette_model,
             settings: settings_model,
@@ -1369,6 +1504,15 @@ impl App {
             (HitRegion::NewTab, MouseButton::Left) => {
                 self.new_tab();
             }
+            (HitRegion::LayoutPill, MouseButton::Left) => {
+                self.perform(keymap::Action::ToggleTabLayout, el);
+            }
+            (HitRegion::PalettePill, MouseButton::Left) => {
+                self.perform(keymap::Action::ToggleFleetPicker, el);
+            }
+            // The status bar swallows clicks like the strip does; nothing on
+            // it is a control yet.
+            (HitRegion::Status, _) => {}
             (HitRegion::PickerRow(i), MouseButton::Left) => {
                 if let Some(p) = self.picker.as_mut() {
                     p.selected = i;

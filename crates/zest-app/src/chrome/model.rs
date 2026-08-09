@@ -40,8 +40,14 @@ pub struct TabModel {
     pub addr: SessionAddr,
     /// Already derived: OSC title, else cwd basename, else "shell".
     pub title: String,
+    /// The mono second line: `host · cwd`, already composed and shortened.
+    pub detail: String,
     pub origin: TabOrigin,
     pub presence: TabPresence,
+    /// Which slot of the host-accent cycle this tab's machine draws in.
+    /// Slot 0 is always the local machine; remotes take the next slots in
+    /// first-seen order, so a host keeps its colour while the window lives.
+    pub accent: usize,
     /// An attach or restore is in flight; the tab shows itself but cannot be
     /// typed into yet.
     pub connecting: bool,
@@ -175,6 +181,36 @@ pub struct SettingsModel {
     pub ensure_visible: bool,
 }
 
+/// How the active tab's host is currently reached, as the status bar says it.
+///
+/// `Stalled` and `Reconnecting` describe the *link*, not the path — a LAN
+/// session mid-hiccup is stalled, whatever route it normally takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkKind {
+    Loopback,
+    Lan,
+    Tunnel,
+    Stalled,
+    Reconnecting,
+}
+
+/// The status bar's data (design screen 1). All strings arrive composed; the
+/// layout draws and colours, it does not format.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StatusModel {
+    /// Home-shortened working directory of the active session.
+    pub cwd: String,
+    /// Current git branch of that directory, when known locally.
+    pub branch: Option<String>,
+    /// Command blocks in the active session's scrollback.
+    pub blocks: usize,
+    /// The resolved theme id.
+    pub theme: String,
+    pub link: LinkKind,
+    /// Measured (or path-typical) round trip, milliseconds.
+    pub latency_ms: Option<f32>,
+}
+
 /// Everything `layout` needs to draw the chrome once.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChromeModel {
@@ -193,6 +229,14 @@ pub struct ChromeModel {
     /// on every other platform.
     pub traffic_inset: Option<[f32; 2]>,
     pub focused: bool,
+    /// The status bar; `None` only when the window is too small to spare it.
+    pub status: Option<StatusModel>,
+    /// The layout-toggle pill's chord, platform-spelled ("⌘⇧E" or
+    /// "Ctrl+Shift+E") — composed by the app because the chrome does not know
+    /// what a modifier is.
+    pub toggle_chord: String,
+    /// The palette pill's chord, likewise platform-spelled ("⌘K").
+    pub palette_chord: String,
     /// The fleet picker, drawn over everything when open.
     pub picker: Option<PickerModel>,
     /// The command palette, likewise modal. The app enforces that at most

@@ -44,6 +44,10 @@ pub enum Action {
     TogglePalette,
     /// The settings overlay (⌘, — the desktop's own convention).
     ToggleSettings,
+    /// Horizontal ⇄ vertical tabs (⌘⇧E, and the title bar's pill). Writes
+    /// `tabs.position` through the settings path, so the file stays the one
+    /// source of truth.
+    ToggleTabLayout,
 }
 
 /// The modifier half of a chord, as *policy* rather than bitmask.
@@ -223,7 +227,18 @@ pub static BINDINGS: &[Binding] = &[
     hidden(Mods::Clipboard, ChordKey::Char("?"), Action::TogglePalette, Category::Help),
     // ⌘, — the settings chord every desktop app shares.
     b(Mods::Desktop, ChordKey::Char(","), Action::ToggleSettings, ",", "Settings", Category::Help),
+    // ⌘⇧E arrives as "E" (shift pre-applies, like { above); the keycap shows
+    // the physical chord.
+    b(Mods::Desktop, ChordKey::Char("E"), Action::ToggleTabLayout, "⇧E", "Toggle vertical tabs", Category::Tabs),
 ];
+
+/// The platform-spelled chord of `action`'s first binding — what the title
+/// bar's pills print. Empty when the action has no chord, which the caller
+/// treats as "draw no chip" rather than an error.
+#[must_use]
+pub fn chord_for(action: Action) -> String {
+    BINDINGS.iter().find(|b| b.action == action).map(chord_label).unwrap_or_default()
+}
 
 fn mods_match(m: Mods, s: ModifiersState) -> bool {
     match m {

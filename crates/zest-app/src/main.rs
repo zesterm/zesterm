@@ -22,6 +22,7 @@ mod remote;
 mod session;
 mod settings_ui;
 mod source;
+mod status;
 mod tabs;
 mod tabs_state;
 

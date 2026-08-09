@@ -288,9 +288,11 @@ pub struct Tabs {
 impl Default for Tabs {
     fn default() -> Self {
         Self {
+            // 46 / 262: the client-UI design's fixed sizes
+            // (docs/design/client-ui/README.md, "Spacing, radii, shadows").
             position: TabsPosition::Top,
-            strip_height: 38,
-            sidebar_width: 220,
+            strip_height: 46,
+            sidebar_width: 262,
             show_single_tab: true,
             restore: true,
         }
