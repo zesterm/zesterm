@@ -1264,6 +1264,7 @@ impl App {
             sidebar_width: self.config.tabs.sidebar_width as f32,
             line_height: cm.cell_h as f32,
             baseline: cm.baseline as f32,
+            font_px: fonts.shaping_px(),
         };
         // In fullscreen the traffic lights auto-hide, so the strip reclaims
         // their reserve; everywhere else the answer comes from AppKit fresh,
@@ -1317,8 +1318,9 @@ impl App {
         };
 
         let colors = self.chrome_colors;
-        let mut measure =
-            |s: &str| zest_render_wgpu::measure_ui_run(fonts, s, zest_font::Style::default());
+        let mut measure = |s: &str, px: f32, bold: bool| {
+            zest_render_wgpu::measure_ui_run(fonts, s, zest_font::Style::new(bold, false), px)
+        };
         let laid = crate::chrome::layout::layout(&model, &colors, &metrics, &mut measure);
         self.strip_scroll = laid.strip_scroll;
         if let Some(state) = self.picker.as_mut() {
@@ -2153,7 +2155,8 @@ impl App {
                     &mut gpu.renderer.atlas,
                     fonts,
                     &run.text,
-                    zest_font::Style::default(),
+                    zest_font::Style::new(run.bold, false),
+                    run.px,
                     run.pos,
                     run.color,
                     run.clip,

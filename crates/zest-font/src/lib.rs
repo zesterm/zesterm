@@ -134,6 +134,10 @@ pub struct Fonts {
     requested: Vec<String>,
     /// Families to try for Private Use Area codepoints, best first.
     symbol_families: Vec<String>,
+    /// A temporary size for UI text, in physical pixels. The chrome's type
+    /// scale runs 9.5–21px against one grid size, so shaping and keys honour
+    /// this when set; cell geometry never does — the grid is `typo`'s alone.
+    ui_px: Option<f32>,
 }
 
 impl Fonts {
@@ -168,6 +172,7 @@ impl Fonts {
             symbol_families: Vec::new(),
             collection,
             source_cache,
+            ui_px: None,
         };
 
         // Found once at startup: enumerating installed families is a real scan,
@@ -537,13 +542,32 @@ impl Fonts {
         })
     }
 
+    /// Set (or clear) a UI text size in physical pixels.
+    ///
+    /// While set, [`shape_run`](Self::shape_run), [`advance_of`](Self::advance_of)
+    /// and [`key`](Self::key) work at this size instead of the grid's — which is
+    /// how the chrome's 9.5–21px type scale shares one font system and one atlas
+    /// with the grid. Cell geometry is untouched: only `set_typography` may
+    /// change what a cell is. Callers pair set/clear around a run; leaking an
+    /// override into the grid path would resize every glyph on screen, so the
+    /// emit/measure helpers in `zest-render-wgpu` own that discipline.
+    pub fn set_ui_px(&mut self, px: Option<f32>) {
+        self.ui_px = px.map(|p| p.max(1.0));
+    }
+
+    /// The size shaping currently works at: the UI override, or the grid size.
+    #[must_use]
+    pub fn shaping_px(&self) -> f32 {
+        self.ui_px.unwrap_or_else(|| self.typo.size_px())
+    }
+
     /// A glyph key for the current size.
     #[must_use]
     pub fn key(&self, font: FontId, glyph: GlyphId) -> GlyphKey {
         GlyphKey {
             font,
             glyph,
-            px: (self.typo.size_px() * 256.0) as u16,
+            px: (self.shaping_px() * 256.0) as u16,
             subpx_x: 0,
             synthetic: self.faces.get(font.0 as usize).map_or(0, |f| f.synthetic),
         }
@@ -559,7 +583,7 @@ impl Fonts {
         let id = self.font_for(style);
         let Some(face) = self.faces.get(id.0 as usize) else { return Vec::new() };
         let Some(font) = face.font_ref() else { return Vec::new() };
-        let px = self.typo.size_px();
+        let px = self.shaping_px();
 
         let settings: Vec<swash::Setting<u16>> =
             features.iter().map(|f| swash::Setting { tag: f.tag, value: f.value }).collect();
@@ -598,7 +622,7 @@ impl Fonts {
     pub fn advance_of(&self, font: FontId, glyph: GlyphId) -> f32 {
         let Some(face) = self.faces.get(font.0 as usize) else { return 0.0 };
         let Some(f) = face.font_ref() else { return 0.0 };
-        f.glyph_metrics(&[]).scale(self.typo.size_px()).advance_width(glyph)
+        f.glyph_metrics(&[]).scale(self.shaping_px()).advance_width(glyph)
     }
 
     /// Direct `cmap` lookup with no shaping.

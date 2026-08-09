@@ -27,6 +27,12 @@ pub struct TextRun {
     pub max_width: f32,
     pub color: LinearRgba,
     pub clip: [f32; 4],
+    /// Type size, physical pixels. The design's scale runs 9.5–21 logical;
+    /// layout multiplies by `m.scale` before it lands here.
+    pub px: f32,
+    /// Semibold, for section labels and headings. Maps to the font stack's
+    /// bold face (or synthesis) — the chrome has no in-between weights.
+    pub bold: bool,
 }
 
 /// The finished chrome for one frame.
@@ -74,7 +80,7 @@ pub fn layout(
     model: &ChromeModel,
     colors: &ChromeColors,
     m: &ChromeMetrics,
-    measure: &mut dyn FnMut(&str) -> f32,
+    measure: &mut dyn FnMut(&str, f32, bool) -> f32,
 ) -> ChromeLayout {
     let mut out = match model.position {
         TabsPosition::Top => horizontal(model, colors, m, measure),
@@ -107,7 +113,7 @@ fn picker_overlay(
     picker: &super::model::PickerModel,
     colors: &ChromeColors,
     m: &ChromeMetrics,
-    measure: &mut dyn FnMut(&str) -> f32,
+    measure: &mut dyn FnMut(&str, f32, bool) -> f32,
     out: &mut ChromeLayout,
 ) {
     use super::model::PickerRow;
@@ -137,6 +143,8 @@ fn picker_overlay(
         (picker.filter.clone(), colors.text_active)
     };
     out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
         text: filter_text,
         pos: [panel[0] + PICKER_PAD * s, text_baseline(m, panel[1], filter_h)],
         max_width: w - 2.0 * PICKER_PAD * s,
@@ -193,6 +201,8 @@ fn picker_overlay(
                     colors.text_inactive
                 };
                 out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                     text,
                     pos: [panel[0] + PICKER_PAD * s, baseline],
                     max_width: w - 2.0 * PICKER_PAD * s,
@@ -203,6 +213,8 @@ fn picker_overlay(
             PickerRow::Session { title, detail, attached, attached_here } => {
                 let x = panel[0] + (PICKER_PAD + PICKER_INDENT) * s;
                 out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                     text: title.clone(),
                     pos: [x, baseline],
                     max_width: w * 0.55,
@@ -225,8 +237,10 @@ fn picker_overlay(
                 } else {
                     format!("{detail} · {tag}")
                 };
-                let dw = measure(&detail).min(w * 0.4);
+                let dw = measure(&detail, m.font_px, false).min(w * 0.4);
                 out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                     text: detail,
                     pos: [panel[0] + w - PICKER_PAD * s - dw, baseline],
                     max_width: w * 0.4,
@@ -236,6 +250,8 @@ fn picker_overlay(
             }
             PickerRow::CreateOn { label } => {
                 out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                     text: format!("+ new session on {label}"),
                     pos: [panel[0] + (PICKER_PAD + PICKER_INDENT) * s, baseline],
                     max_width: w - 2.0 * PICKER_PAD * s,
@@ -260,7 +276,7 @@ fn palette_overlay(
     palette: &super::model::PaletteModel,
     colors: &ChromeColors,
     m: &ChromeMetrics,
-    measure: &mut dyn FnMut(&str) -> f32,
+    measure: &mut dyn FnMut(&str, f32, bool) -> f32,
     out: &mut ChromeLayout,
 ) {
     use super::model::PaletteRow;
@@ -291,6 +307,8 @@ fn palette_overlay(
         (palette.filter.clone(), colors.text_active)
     };
     out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
         text: filter_text,
         pos: [panel[0] + PICKER_PAD * s, text_baseline(m, panel[1], filter_h)],
         max_width: w - 2.0 * PICKER_PAD * s,
@@ -310,6 +328,8 @@ fn palette_overlay(
         // A filter that matches nothing must say so - a silently blank
         // panel reads as broken, not as empty.
         out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
             text: format!("nothing matches \u{201c}{}\u{201d}", palette.filter),
             pos: [panel[0] + PICKER_PAD * s, text_baseline(m, rows_clip[1], PALETTE_ROW_H * s)],
             max_width: w - 2.0 * PICKER_PAD * s,
@@ -357,6 +377,8 @@ fn palette_overlay(
         match row {
             PaletteRow::Group { title } => {
                 out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                     text: title.clone(),
                     // Bottom-aligned in its band so the title sits close to
                     // its rows rather than the previous group's.
@@ -385,6 +407,8 @@ fn palette_overlay(
                 }
                 let baseline = text_baseline(m, y, PALETTE_ROW_H * s);
                 out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                     text: name.clone(),
                     pos: [left, baseline],
                     max_width: w * 0.6,
@@ -395,7 +419,7 @@ fn palette_overlay(
                 });
                 if !chord.is_empty() {
                     // The chord, right-aligned in a keycap-look chip.
-                    let chord_w = measure(chord).min(w * 0.35);
+                    let chord_w = measure(chord, m.font_px, false).min(w * 0.35);
                     let chip = [
                         right - chord_w - 2.0 * CHIP_HPAD * s,
                         y + CHIP_VPAD * s,
@@ -409,6 +433,8 @@ fn palette_overlay(
                         rows_clip,
                     ));
                     out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                         text: chord.clone(),
                         pos: [right - chord_w - CHIP_HPAD * s, baseline],
                         max_width: w * 0.35,
@@ -437,7 +463,7 @@ fn settings_overlay(
     settings: &super::model::SettingsModel,
     colors: &ChromeColors,
     m: &ChromeMetrics,
-    measure: &mut dyn FnMut(&str) -> f32,
+    measure: &mut dyn FnMut(&str, f32, bool) -> f32,
     out: &mut ChromeLayout,
 ) {
     use super::model::{SettingsRowModel, SettingsValueCell};
@@ -466,6 +492,8 @@ fn settings_overlay(
         (settings.filter.clone(), colors.text_active)
     };
     out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
         text: filter_text,
         pos: [panel[0] + PICKER_PAD * s, text_baseline(m, panel[1], filter_h)],
         max_width: w - 2.0 * PICKER_PAD * s,
@@ -515,6 +543,8 @@ fn settings_overlay(
     // reads as broken, not as empty.
     if settings.rows.is_empty() && !settings.filter.is_empty() {
         out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
             text: format!("nothing matches \u{201c}{}\u{201d}", settings.filter),
             pos: [panel[0] + PICKER_PAD * s, text_baseline(m, rows_clip[1], SETTINGS_ROW_H * s)],
             max_width: w - 2.0 * PICKER_PAD * s,
@@ -541,6 +571,8 @@ fn settings_overlay(
                     rows_clip,
                 ));
                 out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                     text: text.clone(),
                     pos: [left, text_baseline(m, y, band[3])],
                     max_width: w - 2.0 * PICKER_PAD * s,
@@ -550,6 +582,8 @@ fn settings_overlay(
             }
             SettingsRowModel::Group { title } => {
                 out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                     text: title.clone(),
                     pos: [
                         left,
@@ -599,6 +633,8 @@ fn settings_overlay(
                 }
                 let label_x = left + 14.0 * s;
                 out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                     text: label.clone(),
                     pos: [label_x, baseline1],
                     max_width: w * 0.4,
@@ -611,9 +647,11 @@ fn settings_overlay(
                 // never be overwritten by a long doc comment.
                 let mut tag_x = right;
                 let mut push_tag = |text: String, color, tag_x: &mut f32| {
-                    let tw = measure(&text).min(w * 0.35);
+                    let tw = measure(&text, m.font_px, false).min(w * 0.35);
                     *tag_x -= tw;
                     out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                         text,
                         pos: [*tag_x, baseline2],
                         max_width: w * 0.35,
@@ -641,6 +679,8 @@ fn settings_overlay(
                     format!("{key} — {description}")
                 };
                 out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                     text: desc,
                     pos: [label_x, baseline2],
                     max_width: (tag_x - label_x - 12.0 * s).max(0.0),
@@ -683,8 +723,10 @@ fn settings_overlay(
                         }
                     }
                     SettingsValueCell::Select { value } => {
-                        let vw = measure(value).min(w * 0.3);
+                        let vw = measure(value, m.font_px, false).min(w * 0.3);
                         out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                             text: value.clone(),
                             pos: [right - vw, baseline1],
                             max_width: w * 0.3,
@@ -718,8 +760,10 @@ fn settings_overlay(
                             colors.accent,
                             rows_clip,
                         ));
-                        let tw = measure(text).min(w * 0.15);
+                        let tw = measure(text, m.font_px, false).min(w * 0.15);
                         out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                             text: text.clone(),
                             pos: [track[0] - tw - 8.0 * s, baseline1],
                             max_width: w * 0.15,
@@ -728,8 +772,10 @@ fn settings_overlay(
                         });
                     }
                     SettingsValueCell::Text { text } => {
-                        let vw = measure(text).min(w * 0.35);
+                        let vw = measure(text, m.font_px, false).min(w * 0.35);
                         out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                             text: text.clone(),
                             pos: [right - vw, baseline1],
                             max_width: w * 0.35,
@@ -738,8 +784,10 @@ fn settings_overlay(
                         });
                     }
                     SettingsValueCell::ReadOnly { text } => {
-                        let vw = measure(text).min(w * 0.35);
+                        let vw = measure(text, m.font_px, false).min(w * 0.35);
                         out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                             text: text.clone(),
                             pos: [right - vw, baseline1],
                             max_width: w * 0.35,
@@ -752,10 +800,12 @@ fn settings_overlay(
                         // the text clip and colour for free, and this is not
                         // a text editor — there is no selection to draw.
                         let text = format!("{buffer}▏");
-                        let vw = measure(&text).min(w * 0.35);
+                        let vw = measure(&text, m.font_px, false).min(w * 0.35);
                         let color =
                             if *error { colors.pill_warn_text } else { colors.text_active };
                         out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                             text,
                             pos: [right - vw, baseline1],
                             max_width: w * 0.35,
@@ -799,7 +849,7 @@ fn horizontal(
     model: &ChromeModel,
     colors: &ChromeColors,
     m: &ChromeMetrics,
-    measure: &mut dyn FnMut(&str) -> f32,
+    measure: &mut dyn FnMut(&str, f32, bool) -> f32,
 ) -> ChromeLayout {
     let s = m.scale;
     let mut out = ChromeLayout::default();
@@ -860,8 +910,10 @@ fn horizontal(
             if let Some(hit) = intersect(close, clip) {
                 out.hit.push(hit, HitRegion::TabClose(tab.addr));
             }
-            let glyph_w = measure("×");
+            let glyph_w = measure("×", m.font_px, false);
             out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                 text: "×".into(),
                 pos: [close[0] + (close[2] - glyph_w) / 2.0, text_baseline(m, 0.0, sh)],
                 max_width: close[2],
@@ -872,7 +924,7 @@ fn horizontal(
         }
 
         if let Some((label, warn)) = pill_label(tab) {
-            let text_w = measure(&label);
+            let text_w = measure(&label, m.font_px, false);
             // The pill may take up to half the tab; past that the label
             // truncates rather than squeezing the title out entirely.
             let pill_w = (text_w + 2.0 * PILL_HPAD * s).min(tab_w * 0.5);
@@ -885,6 +937,8 @@ fn horizontal(
             };
             out.rects.push(RectInstance::rounded(pill, pill_h / 2.0, bg, clip));
             out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                 text: label,
                 pos: [pill[0] + PILL_HPAD * s, text_baseline(m, 0.0, sh)],
                 max_width: pill_w - 2.0 * PILL_HPAD * s,
@@ -901,6 +955,8 @@ fn horizontal(
             _ => colors.text_inactive,
         };
         out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
             text: tab.title.clone(),
             pos: [text_x, text_baseline(m, 0.0, sh)],
             max_width: (right - text_x).max(0.0),
@@ -918,8 +974,10 @@ fn horizontal(
     if let Some(hit) = intersect(nt, clip) {
         out.hit.push(hit, HitRegion::NewTab);
     }
-    let plus_w = measure("+");
+    let plus_w = measure("+", m.font_px, false);
     out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
         text: "+".into(),
         pos: [nt[0] + (nt[2] - plus_w) / 2.0, text_baseline(m, 0.0, sh)],
         max_width: nt[2],
@@ -940,7 +998,7 @@ fn vertical(
     model: &ChromeModel,
     colors: &ChromeColors,
     m: &ChromeMetrics,
-    measure: &mut dyn FnMut(&str) -> f32,
+    measure: &mut dyn FnMut(&str, f32, bool) -> f32,
 ) -> ChromeLayout {
     let s = m.scale;
     let mut out = ChromeLayout::default();
@@ -991,8 +1049,10 @@ fn vertical(
             if let Some(hit) = intersect(close, rows_clip) {
                 out.hit.push(hit, HitRegion::TabClose(tab.addr));
             }
-            let glyph_w = measure("×");
+            let glyph_w = measure("×", m.font_px, false);
             out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                 text: "×".into(),
                 pos: [
                     close[0] + (close[2] - glyph_w) / 2.0,
@@ -1018,6 +1078,8 @@ fn vertical(
             let block = 2.0 * m.line_height + LINE_GAP * s;
             let top = y + (row_h - block).max(0.0) / 2.0;
             out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                 text: tab.title.clone(),
                 pos: [text_x, top + m.baseline],
                 max_width: (right - text_x).max(0.0),
@@ -1025,6 +1087,8 @@ fn vertical(
                 clip: rows_clip,
             });
             out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                 text: label,
                 pos: [text_x, top + m.line_height + LINE_GAP * s + m.baseline],
                 max_width: (right - text_x).max(0.0),
@@ -1033,6 +1097,8 @@ fn vertical(
             });
         } else {
             out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
                 text: tab.title.clone(),
                 pos: [text_x, text_baseline(m, y, row_h)],
                 max_width: (right - text_x).max(0.0),
@@ -1053,6 +1119,8 @@ fn vertical(
         out.hit.push(hit, HitRegion::NewTab);
     }
     out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
         text: "+".into(),
         pos: [(ROW_HPAD + TEXT_PAD) * s, text_baseline(m, y, row_h)],
         max_width: sw,
@@ -1102,6 +1170,7 @@ mod tests {
             sidebar_width: 220.0,
             line_height: 20.0 * scale,
             baseline: 15.0 * scale,
+            font_px: GRID_PX * scale,
         }
     }
 
@@ -1120,11 +1189,15 @@ mod tests {
         }
     }
 
-    /// Eight pixels a character: enough for the tests to reason about
-    /// truncation without a font.
-    fn measure(s: &str) -> f32 {
-        s.chars().count() as f32 * 8.0
+    /// Eight pixels a character at the grid size, scaled linearly for other
+    /// sizes: enough for the tests to reason about truncation and the type
+    /// scale without a font.
+    fn measure(s: &str, px: f32, _bold: bool) -> f32 {
+        s.chars().count() as f32 * 8.0 * (px / GRID_PX)
     }
+
+    /// The grid font size the test metrics report.
+    const GRID_PX: f32 = 13.0;
 
     #[test]
     fn every_drawn_tab_is_hit_at_its_centre() {

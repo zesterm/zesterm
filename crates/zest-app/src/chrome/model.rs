@@ -222,6 +222,9 @@ pub struct ChromeMetrics {
     pub line_height: f32,
     /// Baseline offset from the top of a text line, physical.
     pub baseline: f32,
+    /// The grid font's size, physical pixels — the default for any text run
+    /// the design does not size explicitly.
+    pub font_px: f32,
 }
 
 impl ChromeMetrics {

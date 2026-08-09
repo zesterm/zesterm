@@ -150,23 +150,54 @@ fn ellipsis_glyphs(fonts: &mut Fonts, style: Style) -> (Vec<(GlyphKey, f32)>, f3
     (out, w)
 }
 
-/// The width `text` would occupy, in physical pixels.
+/// The width `text` would occupy at `px` physical pixels.
 ///
 /// This is the measurement half of [`emit_ui_run`]: chrome layout uses it to
 /// decide tab widths and truncation before any drawing happens.
+///
+/// `px` is set on `fonts` for the duration of the call and always cleared
+/// after — the UI type scale must never leak into the grid path, where it
+/// would resize every glyph on screen.
 #[must_use]
-pub fn measure_ui_run(fonts: &mut Fonts, text: &str, style: Style) -> f32 {
-    place_run(fonts, text, style).width
+pub fn measure_ui_run(fonts: &mut Fonts, text: &str, style: Style, px: f32) -> f32 {
+    fonts.set_ui_px(Some(px));
+    let width = place_run(fonts, text, style).width;
+    fonts.set_ui_px(None);
+    width
 }
 
-/// Shape, truncate and emit one run of UI text into `out`.
+/// Shape, truncate and emit one run of UI text into `out`, at `px` physical
+/// pixels.
 ///
 /// `pos` is the baseline-left origin in physical pixels. Every emitted glyph
 /// carries [`glyph_flags::FIXED`], so chrome text stays put when the grid
 /// smooth-scrolls. Returns the width actually emitted (including the ellipsis
 /// when the run was cut), which is what centring and right-alignment need.
+///
+/// Like [`measure_ui_run`], the size override is cleared on every path out.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_ui_run(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    atlas: &mut Atlas,
+    fonts: &mut Fonts,
+    text: &str,
+    style: Style,
+    px: f32,
+    pos: [f32; 2],
+    color: LinearRgba,
+    clip: [f32; 4],
+    max_width: f32,
+    out: &mut Vec<GlyphInstance>,
+) -> f32 {
+    fonts.set_ui_px(Some(px));
+    let width = emit_sized(device, queue, atlas, fonts, text, style, pos, color, clip, max_width, out);
+    fonts.set_ui_px(None);
+    width
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_sized(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     atlas: &mut Atlas,
@@ -285,15 +316,36 @@ mod tests {
         let mut fonts = Fonts::new(&["monospace".to_string()], Typography::default())
             .expect("the CSS generic `monospace` must resolve");
 
-        let plain = measure_ui_run(&mut fonts, "hello", Style::default());
+        let plain = measure_ui_run(&mut fonts, "hello", Style::default(), 13.0);
         assert!(plain > 0.0, "a shaped ASCII run must have width");
 
         // A char no monospace primary face carries: measured through system
         // fallback it should still come out wider than nothing on any machine
         // that can draw it at all — and never panic on one that cannot.
-        let cjk = measure_ui_run(&mut fonts, "終", Style::default());
-        let empty = measure_ui_run(&mut fonts, "", Style::default());
+        let cjk = measure_ui_run(&mut fonts, "終", Style::default(), 13.0);
+        let empty = measure_ui_run(&mut fonts, "", Style::default(), 13.0);
         assert_eq!(empty, 0.0, "empty text is zero wide");
         assert!(cjk >= 0.0);
+    }
+
+    /// The chrome's type scale is real sizes, not one size scaled in the
+    /// shader: a 10.5px metadata line must measure narrower than the same
+    /// text at 19px, and measuring must leave the grid's size untouched.
+    #[test]
+    fn ui_sizes_are_honoured_and_never_leak_into_the_grid() {
+        let mut fonts = Fonts::new(&["monospace".to_string()], Typography::default())
+            .expect("the CSS generic `monospace` must resolve");
+        let grid_px = fonts.shaping_px();
+
+        let small = measure_ui_run(&mut fonts, "metadata", Style::default(), 10.5);
+        let large = measure_ui_run(&mut fonts, "metadata", Style::default(), 19.0);
+        assert!(small > 0.0 && large > small, "sizes must actually size");
+
+        assert_eq!(
+            fonts.shaping_px(),
+            grid_px,
+            "a UI measurement must clear its size override — the grid path \
+             shapes at whatever is left behind"
+        );
     }
 }
