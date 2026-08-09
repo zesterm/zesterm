@@ -1143,6 +1143,14 @@ on each host. → ADR-005, ADR-006.
       lists, and you drop into grid view only when `alt_screen` is true, which
       the host already reports. Sticky `Ctrl` toggle, local history from the
       block index, long-press to re-run.
+
+      **Designed** → `docs/design/phone/README.md`, written against what the
+      web slice proved: the phone reuses `@zesterm/proto`/`auth`/`client`/
+      `theme` unchanged over a `lynx-websocket` `Dial`, reads the same
+      `SessionDirectory` live via `socketTransport({connect})`, and keeps a
+      persistent device key in secure storage from day one. The one open piece
+      is grid rendering on Lynx (no canvas package at 0.26); blocks-first is
+      what makes that deferrable.
 - [ ] **E2E encryption of the data plane** (Noise IK / HPKE, keys bound to
       device enrollment). The only mitigation that survives a hostile relay —
       first class, not a stretch goal. It converts Cloudflare from a trusted
