@@ -169,6 +169,21 @@ struct ShortcutsState {
     scroll: f32,
 }
 
+/// The settings overlay's transient state while it is open.
+struct SettingsUiState {
+    selected: usize,
+    filter: String,
+    scroll: f32,
+    /// Bring the selection into view on the next layout — set by keyboard
+    /// navigation, never by the wheel, so free scrolling does not snap back.
+    scroll_to_selected: bool,
+    /// Parallel to the drawn rows, same-pass built (the picker discipline).
+    actions: Vec<crate::settings_ui::RowAction>,
+    /// The schema walk, cached at open: the schema cannot change while the
+    /// overlay is up, and re-walking it per hover would be pure waste.
+    fields: Vec<zest_config::ui::UiField>,
+}
+
 #[derive(Clone)]
 enum PickerAction {
     /// A host header; Enter does nothing.
@@ -235,6 +250,10 @@ pub struct App {
     /// The fleet picker's transient state, while open.
     picker: Option<PickerState>,
     shortcuts: Option<ShortcutsState>,
+    settings_ui: Option<SettingsUiState>,
+    /// Where each non-default setting came from, kept from the last resolve —
+    /// the settings overlay's "set by profile `k8s`" chips read it.
+    provenance: std::collections::BTreeMap<String, zest_config::Source>,
     /// Tabs opened by worker threads, waiting for the event loop to adopt
     /// them (`Wakeup::TabsChanged`). The flag says whether the tab takes the
     /// keyboard: picked tabs do, restored ones arrive in the background.
@@ -308,11 +327,15 @@ pub struct App {
 
 impl App {
     pub fn new(
-        settings: zest_config::Settings,
+        resolved: zest_config::Resolved,
         cli_layer: toml::Table,
         profile: Option<String>,
         proxy: EventLoopProxy<Wakeup>,
     ) -> Self {
+        // Taken whole rather than as bare settings: provenance is the part
+        // of a resolve that is easy to drop and expensive to add back — the
+        // settings overlay's "set by ..." chips are built from it.
+        let zest_config::Resolved { settings, provenance, .. } = resolved;
         let config = Config::from(&settings);
         let theme = zest_theme::builtin::get(&config.theme)
             .unwrap_or_else(zest_theme::builtin::obsidian);
@@ -337,6 +360,8 @@ impl App {
             fleet: None,
             picker: None,
             shortcuts: None,
+            settings_ui: None,
+            provenance,
             pending_tabs: Arc::new(parking_lot::Mutex::new(Vec::new())),
             remote_identity: None,
             fonts: None,
@@ -869,6 +894,7 @@ impl App {
             Action::ScrollPageUp => self.scroll_page(1),
             Action::ScrollPageDown => self.scroll_page(-1),
             Action::ToggleShortcuts => self.toggle_shortcuts(),
+            Action::ToggleSettings => self.toggle_settings(),
         }
     }
 
@@ -1118,7 +1144,11 @@ impl App {
     /// tested against the same rectangles the frame drew — the "no drift"
     /// property the layout tests pin, extended to runtime.
     fn refresh_chrome(&mut self) {
-        if !self.strip_shown() && self.picker.is_none() && self.shortcuts.is_none() {
+        if !self.strip_shown()
+            && self.picker.is_none()
+            && self.shortcuts.is_none()
+            && self.settings_ui.is_none()
+        {
             self.chrome_layout = None;
             return;
         }
@@ -1150,6 +1180,32 @@ impl App {
                 scroll: sheet.scroll,
             }
         });
+
+        // Inputs gathered before the &mut borrow of the overlay state below;
+        // the clone is a handful of provenance entries, on an event-driven
+        // rebuild, not a frame path.
+        let settings_inputs = self.settings_ui.is_some().then(|| {
+            (
+                serde_json::to_value(&self.settings).unwrap_or(serde_json::Value::Null),
+                self.provenance.clone(),
+            )
+        });
+        let settings_model =
+            self.settings_ui.as_mut().zip(settings_inputs).map(|(ui, (values, provenance))| {
+                let (rows, actions) =
+                    crate::settings_ui::build_rows(&ui.fields, &values, &provenance, &ui.filter);
+                ui.actions = actions;
+                // A filter edit can strand the selection on a header or past
+                // the end; land it on the nearest real row instead.
+                ui.selected = crate::settings_ui::nearest_field(&ui.actions, ui.selected);
+                crate::chrome::model::SettingsModel {
+                    rows,
+                    selected: ui.selected,
+                    filter: ui.filter.clone(),
+                    scroll: ui.scroll,
+                    ensure_visible: ui.scroll_to_selected,
+                }
+            });
 
         let Some(window) = self.window.as_ref() else { return };
         let Some(fonts) = self.fonts.as_mut() else { return };
@@ -1214,6 +1270,7 @@ impl App {
             focused: self.focused,
             picker: picker_model,
             shortcuts: shortcuts_model,
+            settings: settings_model,
         };
 
         let colors = self.chrome_colors;
@@ -1226,6 +1283,11 @@ impl App {
         }
         if let Some(state) = self.shortcuts.as_mut() {
             state.scroll = laid.shortcuts_scroll;
+        }
+        if let Some(state) = self.settings_ui.as_mut() {
+            state.scroll = laid.settings_scroll;
+            // One layout consumed the request; the wheel is free again.
+            state.scroll_to_selected = false;
         }
         self.chrome_layout = Some(laid);
     }
@@ -1279,8 +1341,18 @@ impl App {
                 self.shortcuts = None;
                 self.mark_chrome_dirty();
             }
-            // ShortcutsPanel deliberately has no arm: the panel exists in the
-            // hit map to swallow clicks, not to act on them.
+            (HitRegion::SettingsRow(i), MouseButton::Left) => {
+                if let Some(ui) = self.settings_ui.as_mut() {
+                    ui.selected = i;
+                }
+                self.mark_chrome_dirty();
+            }
+            (HitRegion::SettingsScrim, MouseButton::Left) => {
+                self.settings_ui = None;
+                self.mark_chrome_dirty();
+            }
+            // ShortcutsPanel and SettingsPanel deliberately have no arm: the
+            // panels exist in the hit map to swallow clicks, not to act.
             (HitRegion::Drag, MouseButton::Left) => {
                 let now = std::time::Instant::now();
                 let double = self
@@ -1334,10 +1406,11 @@ impl App {
         self.picker = match self.picker {
             Some(_) => None,
             None => {
-                // One modal at a time: opening either overlay closes the
-                // other, which is what keeps the modal input blocks
+                // One modal at a time: opening any overlay closes the
+                // others, which is what keeps the modal input blocks
                 // order-independent.
                 self.shortcuts = None;
+                self.settings_ui = None;
                 Some(PickerState {
                     selected: 0,
                     filter: String::new(),
@@ -1355,7 +1428,28 @@ impl App {
             Some(_) => None,
             None => {
                 self.picker = None;
+                self.settings_ui = None;
                 Some(ShortcutsState { filter: String::new(), scroll: 0.0 })
+            }
+        };
+        self.mark_chrome_dirty();
+    }
+
+    /// Toggle the settings overlay (⌘,).
+    fn toggle_settings(&mut self) {
+        self.settings_ui = match self.settings_ui {
+            Some(_) => None,
+            None => {
+                self.picker = None;
+                self.shortcuts = None;
+                Some(SettingsUiState {
+                    selected: 0,
+                    filter: String::new(),
+                    scroll: 0.0,
+                    scroll_to_selected: true,
+                    actions: Vec::new(),
+                    fields: zest_config::ui::fields(),
+                })
             }
         };
         self.mark_chrome_dirty();
@@ -1930,6 +2024,11 @@ impl App {
 
         self.settings = new.clone();
         self.config = Config::from(new);
+        self.provenance = load.resolved.provenance;
+        // The overlay, if open, is showing values that just moved under it.
+        if self.settings_ui.is_some() {
+            self.mark_chrome_dirty();
+        }
 
         match class {
             zest_config::Invalidation::None => {}
@@ -2539,6 +2638,10 @@ impl ApplicationHandler<Wakeup> for App {
                             if key::belongs_to_desktop(self.modifiers) {
                                 if c.as_str() == "k" {
                                     self.toggle_picker();
+                                } else if c.as_str() == "," {
+                                    // ⌘, switches overlays rather than dying
+                                    // against the modal wall.
+                                    self.toggle_settings();
                                 }
                             } else if !self.modifiers.control_key() {
                                 if let Some(p) = self.picker.as_mut() {
@@ -2589,16 +2692,94 @@ impl ApplicationHandler<Wakeup> for App {
                         }
                         Key::Character(c) => {
                             // The opening chord closes too, aliases included —
-                            // resolved through the table so ⌘/ and ⌘? agree.
-                            let toggles = keymap::lookup(&event.logical_key, self.modifiers)
-                                .is_some_and(|b| b.action == keymap::Action::ToggleShortcuts);
-                            if toggles {
-                                self.shortcuts = None;
-                            } else if !self.modifiers.control_key()
-                                && !key::belongs_to_desktop(self.modifiers)
+                            // resolved through the table so ⌘/ and ⌘? agree —
+                            // and the sibling overlays' chords switch to them.
+                            match keymap::lookup(&event.logical_key, self.modifiers)
+                                .map(|b| b.action)
                             {
-                                if let Some(sheet) = self.shortcuts.as_mut() {
-                                    sheet.filter.push_str(c.as_str());
+                                Some(keymap::Action::ToggleShortcuts) => self.shortcuts = None,
+                                Some(keymap::Action::ToggleSettings) => self.toggle_settings(),
+                                Some(keymap::Action::ToggleFleetPicker) => self.toggle_picker(),
+                                _ => {
+                                    if !self.modifiers.control_key()
+                                        && !key::belongs_to_desktop(self.modifiers)
+                                    {
+                                        if let Some(sheet) = self.shortcuts.as_mut() {
+                                            sheet.filter.push_str(c.as_str());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    self.mark_chrome_dirty();
+                    return;
+                }
+
+                // And the open settings overlay, the same way.
+                if self.settings_ui.is_some() {
+                    use winit::keyboard::{Key, NamedKey};
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            // Layered: a search in progress clears first, a
+                            // second Escape closes. A settings filter is a
+                            // navigation the user built, not the picker's
+                            // throwaway two letters.
+                            if let Some(ui) = self.settings_ui.as_mut() {
+                                if ui.filter.is_empty() {
+                                    self.settings_ui = None;
+                                } else {
+                                    ui.filter.clear();
+                                    ui.selected = 0;
+                                    ui.scroll_to_selected = true;
+                                }
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowDown) => {
+                            if let Some(ui) = self.settings_ui.as_mut() {
+                                ui.selected = crate::settings_ui::step_selection(
+                                    &ui.actions,
+                                    ui.selected,
+                                    true,
+                                );
+                                ui.scroll_to_selected = true;
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowUp) => {
+                            if let Some(ui) = self.settings_ui.as_mut() {
+                                ui.selected = crate::settings_ui::step_selection(
+                                    &ui.actions,
+                                    ui.selected,
+                                    false,
+                                );
+                                ui.scroll_to_selected = true;
+                            }
+                        }
+                        Key::Named(NamedKey::Backspace) => {
+                            if let Some(ui) = self.settings_ui.as_mut() {
+                                ui.filter.pop();
+                                ui.selected = 0;
+                                ui.scroll_to_selected = true;
+                            }
+                        }
+                        Key::Character(c) => {
+                            match keymap::lookup(&event.logical_key, self.modifiers)
+                                .map(|b| b.action)
+                            {
+                                Some(keymap::Action::ToggleSettings) => self.toggle_settings(),
+                                Some(keymap::Action::ToggleFleetPicker) => self.toggle_picker(),
+                                Some(keymap::Action::ToggleShortcuts) => self.toggle_shortcuts(),
+                                _ => {
+                                    if !self.modifiers.control_key()
+                                        && !key::belongs_to_desktop(self.modifiers)
+                                    {
+                                        if let Some(ui) = self.settings_ui.as_mut() {
+                                            ui.filter.push_str(c.as_str());
+                                            ui.selected = 0;
+                                            ui.scroll_to_selected = true;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -2786,7 +2967,8 @@ impl ApplicationHandler<Wakeup> for App {
 
             WindowEvent::MouseWheel { delta, .. } => {
                 // An open modal overlay takes the wheel wholesale.
-                if self.picker.is_some() || self.shortcuts.is_some() {
+                if self.picker.is_some() || self.shortcuts.is_some() || self.settings_ui.is_some()
+                {
                     let px = match delta {
                         MouseScrollDelta::LineDelta(_, y) => y * 40.0,
                         MouseScrollDelta::PixelDelta(p) => p.y as f32,
@@ -2797,6 +2979,9 @@ impl ApplicationHandler<Wakeup> for App {
                         }
                         if let Some(sheet) = self.shortcuts.as_mut() {
                             sheet.scroll -= px;
+                        }
+                        if let Some(ui) = self.settings_ui.as_mut() {
+                            ui.scroll -= px;
                         }
                         self.mark_chrome_dirty();
                     }

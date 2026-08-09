@@ -30,6 +30,12 @@ pub enum HitRegion {
     ShortcutsPanel,
     /// The dimmed backdrop behind the sheet; clicking it dismisses.
     ShortcutsScrim,
+    /// One row of the settings overlay, by index; clicking selects it.
+    SettingsRow(usize),
+    /// The settings panel between rows (filter line, headers) — swallows.
+    SettingsPanel,
+    /// The dimmed backdrop behind the settings overlay; clicking dismisses.
+    SettingsScrim,
 }
 
 /// Rectangles to meanings, in draw order.

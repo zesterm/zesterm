@@ -40,6 +40,8 @@ pub enum Action {
     /// The shortcuts sheet itself — rendered from this table, so it can
     /// never list a chord that does not exist.
     ToggleShortcuts,
+    /// The settings overlay (⌘, — the desktop's own convention).
+    ToggleSettings,
 }
 
 /// The modifier half of a chord, as *policy* rather than bitmask.
@@ -217,6 +219,8 @@ pub static BINDINGS: &[Binding] = &[
         Category::Help,
     ),
     hidden(Mods::Clipboard, ChordKey::Char("?"), Action::ToggleShortcuts, Category::Help),
+    // ⌘, — the settings chord every desktop app shares.
+    b(Mods::Desktop, ChordKey::Char(","), Action::ToggleSettings, ",", "Settings", Category::Help),
 ];
 
 fn mods_match(m: Mods, s: ModifiersState) -> bool {

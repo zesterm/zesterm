@@ -349,6 +349,23 @@ M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
       exactly-once coverage of every other schema key. `toml_edit` is
       re-exported (fs-gated): `write_value`'s signature names its `Value`, so
       callers get the type from the same place as the function.
+- [x] **The settings overlay (⌘,), read-only browse.** The third modal on the
+      picker recipe, rows *generated* from `zest_config::ui::fields()` by the
+      pure `settings_ui::build_rows` — schema coverage is a test, so a new
+      setting appears without a UI change. Two-line rows: humanized label +
+      value cell (toggle/select/slider/number/text; list-shaped values
+      read-only for now), then dotted key + doc-comment summary with tags on
+      the right. Tags tell the truth: "set by profile `k8s`" chips from the
+      kept cascade provenance (warn-coloured when the source outranks the
+      user file, because an edit there will be visibly shadowed), "applies on
+      next launch" from `invalidate::class_of` (the authoritative table, not
+      the sparser `x_zest_restart`), and "not applied yet" from
+      `NOT_YET_WIRED` — settings the schema declares but the app does not
+      consume; deleting the entry is part of wiring one. Type-to-filter
+      (Esc layers: clear filter, then close), arrows skip headers,
+      keyboard navigation ensure-visible-scrolls without the wheel snapping
+      back (tested), ⌘K/⌘//⌘, switch between the three overlays. Editing is
+      the next commit; today the rows only tell the truth.
 - [ ] Animation clock. Springs `(response, damping)`, not easing curves —
       terminal motion is interruption-dominated and a spring absorbs a changed
       target with continuous velocity for free. Substep the integrator

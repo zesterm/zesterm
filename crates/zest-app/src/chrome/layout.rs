@@ -43,6 +43,9 @@ pub struct ChromeLayout {
     pub picker_scroll: f32,
     /// The shortcuts sheet's scroll, clamped likewise.
     pub shortcuts_scroll: f32,
+    /// The settings overlay's scroll, clamped — and possibly *adjusted*, when
+    /// the model asked for the selection to be brought into view.
+    pub settings_scroll: f32,
 }
 
 // Logical-pixel constants, scaled at use. Named because the tests reason
@@ -80,6 +83,9 @@ pub fn layout(
     }
     if let Some(shortcuts) = &model.shortcuts {
         shortcuts_overlay(shortcuts, colors, m, measure, &mut out);
+    }
+    if let Some(settings) = &model.settings {
+        settings_overlay(settings, colors, m, measure, &mut out);
     }
     out
 }
@@ -373,6 +379,293 @@ fn shortcuts_overlay(
             y += SHEET_NOTE_H * s;
         }
         y += SHEET_GAP * s;
+    }
+}
+
+// Settings overlay geometry, logical px. Two-line rows: label + value on the
+// first line, description + tags on the second.
+const SETTINGS_W: f32 = 720.0;
+const SETTINGS_H: f32 = 560.0;
+const SETTINGS_ROW_H: f32 = 48.0;
+const SETTINGS_HEADER_H: f32 = 38.0;
+const TOGGLE_W: f32 = 36.0;
+const TOGGLE_H: f32 = 20.0;
+const TRACK_W: f32 = 120.0;
+const TRACK_H: f32 = 4.0;
+
+fn settings_overlay(
+    settings: &super::model::SettingsModel,
+    colors: &ChromeColors,
+    m: &ChromeMetrics,
+    measure: &mut dyn FnMut(&str) -> f32,
+    out: &mut ChromeLayout,
+) {
+    use super::model::{SettingsRowModel, SettingsValueCell};
+
+    let s = m.scale;
+    let no_clip = [0.0, 0.0, m.width, m.height];
+
+    out.rects.push(RectInstance::filled(no_clip, colors.scrim, no_clip));
+    out.hit.push(no_clip, HitRegion::SettingsScrim);
+
+    let w = (SETTINGS_W * s).min(m.width - PICKER_MARGIN * s);
+    let h = (SETTINGS_H * s).min(m.height - PICKER_MARGIN * s);
+    let panel = [(m.width - w) / 2.0, (m.height - h) / 2.5, w, h];
+    let mut panel_rect = RectInstance::rounded(panel, PICKER_RADIUS * s, colors.panel_bg, no_clip);
+    panel_rect.shadow_blur = 24.0 * s;
+    panel_rect.shadow_alpha = colors.shadow_alpha;
+    out.rects.push(panel_rect);
+    // Swallow panel clicks that miss every row: dismissing what the user is
+    // reading because they clicked a header would be hostile.
+    out.hit.push(panel, HitRegion::SettingsPanel);
+
+    let filter_h = m.line_height + 2.0 * PICKER_PAD * s;
+    let (filter_text, filter_color) = if settings.filter.is_empty() {
+        ("type to filter settings".to_string(), colors.text_faint)
+    } else {
+        (settings.filter.clone(), colors.text_active)
+    };
+    out.texts.push(TextRun {
+        text: filter_text,
+        pos: [panel[0] + PICKER_PAD * s, text_baseline(m, panel[1], filter_h)],
+        max_width: w - 2.0 * PICKER_PAD * s,
+        color: filter_color,
+        clip: panel,
+    });
+    out.rects.push(RectInstance::filled(
+        [panel[0], panel[1] + filter_h, w, HAIRLINE * s],
+        colors.line,
+        no_clip,
+    ));
+
+    let rows_clip =
+        [panel[0], panel[1] + filter_h + HAIRLINE * s, w, h - filter_h - HAIRLINE * s];
+
+    let row_h = |row: &SettingsRowModel| match row {
+        SettingsRowModel::Group { .. } => SETTINGS_HEADER_H * s,
+        SettingsRowModel::Setting { .. } => SETTINGS_ROW_H * s,
+    };
+    // Row offsets before any drawing, because ensure-visible needs the
+    // selected row's extent to decide the scroll it draws with.
+    let mut tops = Vec::with_capacity(settings.rows.len());
+    let mut content_h = 0.0f32;
+    for row in &settings.rows {
+        tops.push(content_h);
+        content_h += row_h(row);
+    }
+    let max_scroll = (content_h - rows_clip[3]).max(0.0);
+    let mut scroll = settings.scroll.clamp(0.0, max_scroll);
+    if settings.ensure_visible {
+        if let (Some(top), Some(row)) =
+            (tops.get(settings.selected), settings.rows.get(settings.selected))
+        {
+            let bottom = top + row_h(row);
+            if *top < scroll {
+                scroll = *top;
+            } else if bottom > scroll + rows_clip[3] {
+                scroll = bottom - rows_clip[3];
+            }
+            scroll = scroll.clamp(0.0, max_scroll);
+        }
+    }
+    out.settings_scroll = scroll;
+
+    let left = panel[0] + PICKER_PAD * s;
+    let right = panel[0] + w - PICKER_PAD * s;
+    for (i, row) in settings.rows.iter().enumerate() {
+        let y = rows_clip[1] + tops[i] - scroll;
+        let band = [panel[0], y, w, row_h(row)];
+        let Some(visible) = intersect(band, rows_clip) else { continue };
+
+        match row {
+            SettingsRowModel::Group { title } => {
+                out.texts.push(TextRun {
+                    text: title.clone(),
+                    pos: [
+                        left,
+                        text_baseline(
+                            m,
+                            y + (SETTINGS_HEADER_H - 24.0) * s,
+                            24.0 * s,
+                        ),
+                    ],
+                    max_width: w - 2.0 * PICKER_PAD * s,
+                    color: colors.text_faint,
+                    clip: rows_clip,
+                });
+            }
+            SettingsRowModel::Setting {
+                label,
+                key,
+                description,
+                value,
+                provenance,
+                restart,
+                inert,
+                modified,
+            } => {
+                if i == settings.selected {
+                    let chip =
+                        [panel[0] + 4.0 * s, y + 2.0 * s, w - 8.0 * s, band[3] - 4.0 * s];
+                    out.rects.push(RectInstance::rounded(
+                        chip,
+                        RADIUS * s,
+                        colors.accent_soft,
+                        rows_clip,
+                    ));
+                }
+                out.hit.push(visible, HitRegion::SettingsRow(i));
+
+                let line1_h = band[3] / 2.0;
+                let baseline1 = text_baseline(m, y, line1_h);
+                let baseline2 = text_baseline(m, y + line1_h, line1_h);
+
+                // The modified dot: a small accent square beside the label.
+                // Text markers survive what colour alone does not, but this
+                // one pairs with reset-to-default later; keep it visual.
+                if *modified {
+                    let dot = [left, y + (line1_h - 6.0 * s) / 2.0, 6.0 * s, 6.0 * s];
+                    out.rects.push(RectInstance::rounded(dot, 3.0 * s, colors.accent, rows_clip));
+                }
+                let label_x = left + 14.0 * s;
+                out.texts.push(TextRun {
+                    text: label.clone(),
+                    pos: [label_x, baseline1],
+                    max_width: w * 0.4,
+                    color: colors.text_active,
+                    clip: rows_clip,
+                });
+
+                // Second line: description left, tags right. The dotted key
+                // rides with the description so the user can grep their
+                // config for exactly what this row is.
+                let desc = if description.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{key} — {description}")
+                };
+                out.texts.push(TextRun {
+                    text: desc,
+                    pos: [label_x, baseline2],
+                    max_width: w * 0.62,
+                    color: colors.text_faint,
+                    clip: rows_clip,
+                });
+
+                let mut tag_x = right;
+                let mut push_tag = |text: String, color, tag_x: &mut f32| {
+                    let tw = measure(&text).min(w * 0.35);
+                    *tag_x -= tw;
+                    out.texts.push(TextRun {
+                        text,
+                        pos: [*tag_x, baseline2],
+                        max_width: w * 0.35,
+                        color,
+                        clip: rows_clip,
+                    });
+                    *tag_x -= 12.0 * s;
+                };
+                if *inert {
+                    push_tag("not applied yet".to_string(), colors.text_faint, &mut tag_x);
+                }
+                if *restart {
+                    push_tag("applies on next launch".to_string(), colors.text_faint, &mut tag_x);
+                }
+                if let Some((text, warn)) = provenance {
+                    let color = if *warn { colors.pill_warn_text } else { colors.text_faint };
+                    push_tag(text.clone(), color, &mut tag_x);
+                }
+
+                // The value cell, right-aligned on the first line.
+                match value {
+                    SettingsValueCell::Toggle { on } => {
+                        let track = [
+                            right - TOGGLE_W * s,
+                            y + (line1_h - TOGGLE_H * s) / 2.0,
+                            TOGGLE_W * s,
+                            TOGGLE_H * s,
+                        ];
+                        let fill = if *on { colors.accent } else { colors.line };
+                        out.rects.push(RectInstance::rounded(
+                            track,
+                            TOGGLE_H * s / 2.0,
+                            fill,
+                            rows_clip,
+                        ));
+                        let knob_d = (TOGGLE_H - 4.0) * s;
+                        let knob_x = if *on {
+                            track[0] + track[2] - knob_d - 2.0 * s
+                        } else {
+                            track[0] + 2.0 * s
+                        };
+                        out.rects.push(RectInstance::rounded(
+                            [knob_x, track[1] + 2.0 * s, knob_d, knob_d],
+                            knob_d / 2.0,
+                            colors.text_active,
+                            rows_clip,
+                        ));
+                    }
+                    SettingsValueCell::Select { value } => {
+                        let vw = measure(value).min(w * 0.3);
+                        out.texts.push(TextRun {
+                            text: value.clone(),
+                            pos: [right - vw, baseline1],
+                            max_width: w * 0.3,
+                            color: colors.text_active,
+                            clip: rows_clip,
+                        });
+                    }
+                    SettingsValueCell::Slider { frac, text } => {
+                        let track = [
+                            right - TRACK_W * s,
+                            y + (line1_h - TRACK_H * s) / 2.0,
+                            TRACK_W * s,
+                            TRACK_H * s,
+                        ];
+                        out.rects.push(RectInstance::rounded(
+                            track,
+                            TRACK_H * s / 2.0,
+                            colors.line,
+                            rows_clip,
+                        ));
+                        out.rects.push(RectInstance::rounded(
+                            [track[0], track[1], track[2] * frac.clamp(0.0, 1.0), track[3]],
+                            TRACK_H * s / 2.0,
+                            colors.accent,
+                            rows_clip,
+                        ));
+                        let tw = measure(text).min(w * 0.15);
+                        out.texts.push(TextRun {
+                            text: text.clone(),
+                            pos: [track[0] - tw - 8.0 * s, baseline1],
+                            max_width: w * 0.15,
+                            color: colors.text_active,
+                            clip: rows_clip,
+                        });
+                    }
+                    SettingsValueCell::Text { text } => {
+                        let vw = measure(text).min(w * 0.35);
+                        out.texts.push(TextRun {
+                            text: text.clone(),
+                            pos: [right - vw, baseline1],
+                            max_width: w * 0.35,
+                            color: colors.text_active,
+                            clip: rows_clip,
+                        });
+                    }
+                    SettingsValueCell::ReadOnly { text } => {
+                        let vw = measure(text).min(w * 0.35);
+                        out.texts.push(TextRun {
+                            text: text.clone(),
+                            pos: [right - vw, baseline1],
+                            max_width: w * 0.35,
+                            color: colors.text_faint,
+                            clip: rows_clip,
+                        });
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -723,6 +1016,7 @@ mod tests {
             focused: true,
             picker: None,
             shortcuts: None,
+            settings: None,
         }
     }
 
@@ -987,6 +1281,104 @@ mod tests {
         let l = layout(&mo, &colors(), &m, &mut measure);
         assert!(l.shortcuts_scroll > 0.0, "an overflowing sheet scrolls");
         assert!(l.shortcuts_scroll < 1e9, "and the scroll is clamped to the content");
+    }
+
+    fn settings_rows(n: usize) -> Vec<crate::chrome::model::SettingsRowModel> {
+        use crate::chrome::model::{SettingsRowModel, SettingsValueCell};
+        let mut rows = vec![SettingsRowModel::Group { title: "Text".into() }];
+        rows.extend((0..n).map(|i| SettingsRowModel::Setting {
+            label: format!("Setting {i}"),
+            key: format!("group.key_{i}"),
+            description: "a setting".into(),
+            value: SettingsValueCell::Toggle { on: i % 2 == 0 },
+            provenance: None,
+            restart: false,
+            inert: false,
+            modified: false,
+        }));
+        rows
+    }
+
+    #[test]
+    fn the_settings_overlay_is_modal_like_the_picker() {
+        // The same definition of modal the picker and the sheet answer to:
+        // every point resolves to a settings region, nothing falls through.
+        use crate::chrome::model::SettingsModel;
+        let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut mo = model(tabs, TabsPosition::Top);
+        mo.settings = Some(SettingsModel {
+            rows: settings_rows(3),
+            selected: 1,
+            filter: String::new(),
+            scroll: 0.0,
+            ensure_visible: false,
+        });
+        let l = layout(&mo, &colors(), &m, &mut measure);
+
+        let mut seen_rows = std::collections::HashSet::new();
+        let mut scrim_hits = 0u32;
+        for x in (0..1200).step_by(4) {
+            for y in (0..800).step_by(4) {
+                match l.hit.hit(x as f32, y as f32) {
+                    Some(HitRegion::SettingsRow(i)) => {
+                        seen_rows.insert(i);
+                    }
+                    Some(HitRegion::SettingsPanel) => {}
+                    Some(HitRegion::SettingsScrim) => scrim_hits += 1,
+                    Some(other) => {
+                        panic!("a click at ({x},{y}) escaped the settings overlay: {other:?}")
+                    }
+                    None => panic!("({x},{y}) hit nothing; the scrim must cover the window"),
+                }
+            }
+        }
+        assert_eq!(
+            seen_rows,
+            [1usize, 2, 3].into(),
+            "every setting row must be clickable; the header (row 0) must not be"
+        );
+        assert!(scrim_hits > 0, "the scrim must be reachable around the panel");
+    }
+
+    #[test]
+    fn keyboard_navigation_never_acts_on_an_offscreen_row() {
+        // Forty rows overflow the panel. With the selection at the end and
+        // the scroll at the top, ensure_visible must move the scroll so the
+        // selected row is actually hittable — otherwise arrows act on rows
+        // the user cannot see.
+        use crate::chrome::model::SettingsModel;
+        let m = metrics(1200.0, 800.0, 1.0);
+        let rows = settings_rows(40);
+        let selected = rows.len() - 1;
+        let mut mo = model(Vec::new(), TabsPosition::Top);
+        mo.settings = Some(SettingsModel {
+            rows,
+            selected,
+            filter: String::new(),
+            scroll: 0.0,
+            ensure_visible: true,
+        });
+        let l = layout(&mo, &colors(), &m, &mut measure);
+        assert!(l.settings_scroll > 0.0, "the view must have moved to the selection");
+        let found = (0..1200).step_by(4).any(|x| {
+            (0..800).step_by(4).any(|y| {
+                l.hit.hit(x as f32, y as f32) == Some(HitRegion::SettingsRow(selected))
+            })
+        });
+        assert!(found, "the selected row must be visible and hittable after ensure_visible");
+
+        // And the wheel must stay free: without the flag the scroll stays
+        // where the user put it, selection offscreen or not.
+        if let Some(settings) = mo.settings.as_mut() {
+            settings.ensure_visible = false;
+            settings.scroll = 0.0;
+        }
+        let l = layout(&mo, &colors(), &m, &mut measure);
+        assert!(
+            l.settings_scroll.abs() < f32::EPSILON,
+            "without ensure_visible the scroll must not snap to the selection"
+        );
     }
 
     #[test]

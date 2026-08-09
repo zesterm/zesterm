@@ -102,6 +102,70 @@ pub struct ShortcutsModel {
     pub scroll: f32,
 }
 
+/// The value half of a settings row, as it should be drawn.
+///
+/// Which cell a field gets is the row builder's decision (from the schema's
+/// widget hint); the chrome just draws what arrives.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SettingsValueCell {
+    Toggle { on: bool },
+    /// A chosen option, e.g. a theme id or an enum variant.
+    Select { value: String },
+    /// A bounded number: the filled fraction and its numeric text.
+    Slider { frac: f32, text: String },
+    /// A scalar drawn as plain text (numbers, strings, paths).
+    Text { text: String },
+    /// A list-shaped value the overlay displays but does not edit (yet);
+    /// drawn faint to say so.
+    ReadOnly { text: String },
+}
+
+/// One row of the settings overlay, ready to draw.
+///
+/// Display-only, like [`PickerRow`]: the app keeps a parallel action list
+/// built in the same pass, so index `n` means the same thing to the renderer
+/// and the input path by construction.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SettingsRowModel {
+    /// A group header ("Text", "Window", …).
+    Group { title: String },
+    /// One setting.
+    Setting {
+        /// Humanized field name ("Font size").
+        label: String,
+        /// The dotted key, drawn faint — it is what the user greps their
+        /// config for.
+        key: String,
+        /// First line of the field's doc comment.
+        description: String,
+        value: SettingsValueCell,
+        /// `("set by profile `k8s`", warn)` — warn when the source outranks
+        /// the user's file, because an edit there would be shadowed.
+        provenance: Option<(String, bool)>,
+        /// Changing this applies on the next launch.
+        restart: bool,
+        /// Declared in the schema but not consumed by the app yet.
+        inert: bool,
+        /// Differs from the schema default.
+        modified: bool,
+    },
+}
+
+/// The settings overlay, when open.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettingsModel {
+    pub rows: Vec<SettingsRowModel>,
+    /// Index into `rows` the keyboard is on.
+    pub selected: usize,
+    pub filter: String,
+    /// Scroll offset, physical pixels; layout clamps it.
+    pub scroll: f32,
+    /// Bring the selected row into view this pass. Set after keyboard
+    /// navigation only — the wheel must scroll freely without the view
+    /// snapping back to the selection.
+    pub ensure_visible: bool,
+}
+
 /// Everything `layout` needs to draw the chrome once.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChromeModel {
@@ -125,6 +189,8 @@ pub struct ChromeModel {
     /// The shortcuts sheet, likewise modal. The app enforces that at most
     /// one overlay is open, so layout never has to rank them.
     pub shortcuts: Option<ShortcutsModel>,
+    /// The settings overlay, likewise modal and likewise exclusive.
+    pub settings: Option<SettingsModel>,
 }
 
 /// The knobs `layout` reads, resolved to physical pixels by the caller.

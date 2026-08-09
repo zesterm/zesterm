@@ -20,6 +20,7 @@ mod pipeline_cache;
 mod platform;
 mod remote;
 mod session;
+mod settings_ui;
 mod source;
 mod tabs;
 mod tabs_state;
@@ -307,7 +308,7 @@ fn main() {
         .expect("create event loop");
     let proxy = event_loop.create_proxy();
 
-    let mut app = App::new(load.resolved.settings, cli_table, profile_name, proxy);
+    let mut app = App::new(load.resolved, cli_table, profile_name, proxy);
     if startup_probe {
         app = app.with_startup_probe();
     }
