@@ -52,8 +52,11 @@ pub struct BlockChrome {
     pub hit: ChromeHitMap,
 }
 
-// Geometry, logical px (design screen 3).
-const INSET: f32 = 6.0;
+// Geometry, logical px (design screen 3). The band runs the full grid
+// width — the design insets it 18px inside an empty pane gutter, but our
+// band covers live prompt rows, and any inset lets their first characters
+// peek out beside it.
+const INSET: f32 = 0.0;
 const RADIUS: f32 = 8.0;
 const RAIL: f32 = 2.0;
 const HPAD: f32 = 12.0;

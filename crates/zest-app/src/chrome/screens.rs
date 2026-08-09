@@ -80,8 +80,9 @@ fn page_frame(
     lede: &str,
     measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
 ) -> f32 {
-    // Opaque ground: the grid is still underneath, and a screen is a screen.
-    out.rects.push(RectInstance::filled(area, colors.bg, area));
+    // Opaque ground — deliberately not the chrome-opacity fill: the grid is
+    // still underneath, and a screen is a screen, not a scrim.
+    out.rects.push(RectInstance::filled(area, colors.bg_opaque, area));
     out.hit.push(area, HitRegion::ScreenPanel);
 
     let x = area[0] + PAD_X * s;

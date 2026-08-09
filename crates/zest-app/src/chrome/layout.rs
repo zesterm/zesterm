@@ -59,6 +59,11 @@ pub struct ChromeLayout {
     /// Slider tracks by row index, exactly as drawn — a click's fraction is
     /// computed against these, so pointer and pixels cannot disagree.
     pub settings_tracks: Vec<(usize, [f32; 4])>,
+    /// Index into `rects`/`texts` where the overlay layer (picker, palette,
+    /// settings) begins. The renderer draws base chrome's text before the
+    /// overlay's panel, so text under a panel cannot bleed through it.
+    pub overlay_rects_at: usize,
+    pub overlay_texts_at: usize,
 }
 
 // Logical-pixel constants, scaled at use. Named because the tests reason
@@ -97,7 +102,9 @@ const GROUP_HEADER_H: f32 = 26.0;
 const GROUP_GAP: f32 = 14.0;
 const SIDE_ROW_H: f32 = 44.0;
 const FOOTER_H: f32 = 42.0;
-const SLIM_BAR_H: f32 = 44.0;
+/// Public because `insets_at` must reserve it above the grid, exactly as it
+/// reserves the strip: a bar the grid does not know about paints over row 0.
+pub const SLIM_BAR_H: f32 = 44.0;
 const SLIM_PAD: f32 = 14.0;
 
 /// The status bar's height, logical pixels. Public because `insets_at` must
@@ -183,6 +190,10 @@ pub fn layout(
         // an overlay, so the picker can still open above it.
         super::screens::screen_overlay(screen, model.grid_area, colors, m.scale, measure, &mut out);
     }
+    // Everything below is the overlay layer; everything above must have its
+    // text drawn before an overlay's panel covers it.
+    out.overlay_rects_at = out.rects.len();
+    out.overlay_texts_at = out.texts.len();
     if let Some(picker) = &model.picker {
         // Appended last on purpose: last drawn is topmost, and last pushed
         // wins the hit lookup — the same fact, stated once.
@@ -373,15 +384,18 @@ fn picker_overlay(
             tracking: 0.0,
         });
         qx += 16.0 * s;
-        let (qtext, qcolor) = if picker.filter.is_empty() {
-            ("Search sessions, blocks, hosts".to_string(), colors.text_faint)
+        // Caret first when the query is empty — over the first letter of the
+        // placeholder is where it looked broken.
+        let (qtext, qcolor, caret_x, text_x) = if picker.filter.is_empty() {
+            ("Search sessions, blocks, hosts".to_string(), colors.text_faint, qx, qx + 14.0 * s)
         } else {
-            (picker.filter.clone(), colors.text_active)
+            let qw = measure(&picker.filter, prompt_px, false, 0.0).min(w * 0.6);
+            (picker.filter.clone(), colors.text_active, qx + qw + 2.0 * s, qx)
         };
         let qw = measure(&qtext, prompt_px, false, 0.0).min(w * 0.6);
         out.texts.push(TextRun {
             text: qtext,
-            pos: [qx, baseline_in(qy, qh, prompt_px)],
+            pos: [text_x, baseline_in(qy, qh, prompt_px)],
             max_width: qw,
             color: qcolor,
             clip: no_clip,
@@ -389,13 +403,11 @@ fn picker_overlay(
             bold: false,
             tracking: 0.0,
         });
-        if !picker.filter.is_empty() {
-            qx += qw;
-        }
+        let _ = qx;
         // The caret: an 8×16 accent block on the design's step-end blink.
         if picker.caret_on {
             out.rects.push(RectInstance::filled(
-                [qx + 2.0 * s, qy + (qh - 16.0 * s) / 2.0, 8.0 * s, 16.0 * s],
+                [caret_x, qy + (qh - 16.0 * s) / 2.0, 8.0 * s, 16.0 * s],
                 colors.accent,
                 no_clip,
             ));

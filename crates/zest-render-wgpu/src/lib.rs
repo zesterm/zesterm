@@ -425,8 +425,18 @@ impl Renderer {
             // rects — which is a fleet picker with the shell's prompt shining
             // through its panel. Grid first, decorations, then the chrome
             // ranges on top.
-            let chrome_rects = scene.chrome_rects_at as u32..scene.rects.len() as u32;
-            let chrome_glyphs = scene.chrome_glyphs_at as u32..scene.glyphs.len() as u32;
+            // Two chrome layers: base (bars, tabs, screens, block headers)
+            // and overlay (picker/palette/settings). Without the second
+            // split, every base-chrome glyph paints *after* the overlay's
+            // panel — the fleet screen's text bled straight through the
+            // palette floating over it.
+            let overlay_r = scene.overlay_rects_at.clamp(scene.chrome_rects_at, scene.rects.len());
+            let overlay_g =
+                scene.overlay_glyphs_at.clamp(scene.chrome_glyphs_at, scene.glyphs.len());
+            let base_rects = scene.chrome_rects_at as u32..overlay_r as u32;
+            let base_glyphs = scene.chrome_glyphs_at as u32..overlay_g as u32;
+            let overlay_rects = overlay_r as u32..scene.rects.len() as u32;
+            let overlay_glyphs = overlay_g as u32..scene.glyphs.len() as u32;
 
             if scene.chrome_rects_at > 0 {
                 pass.set_pipeline(&self.rect_pipeline);
@@ -449,18 +459,21 @@ impl Renderer {
                 pass.draw(0..4, 0..scene.decors.len() as u32);
             }
 
-            if !chrome_rects.is_empty() {
-                pass.set_pipeline(&self.rect_pipeline);
-                pass.set_vertex_buffer(0, self.rects.slice());
-                pass.draw(0..4, chrome_rects);
-            }
-
-            if !chrome_glyphs.is_empty() {
-                if let Some(bg) = self.atlas_bind_group.as_ref() {
-                    pass.set_pipeline(&self.glyph_pipeline);
-                    pass.set_bind_group(1, bg, &[]);
-                    pass.set_vertex_buffer(0, self.glyphs.slice());
-                    pass.draw(0..4, chrome_glyphs);
+            for (rects, glyphs) in
+                [(base_rects, base_glyphs), (overlay_rects, overlay_glyphs)]
+            {
+                if !rects.is_empty() {
+                    pass.set_pipeline(&self.rect_pipeline);
+                    pass.set_vertex_buffer(0, self.rects.slice());
+                    pass.draw(0..4, rects);
+                }
+                if !glyphs.is_empty() {
+                    if let Some(bg) = self.atlas_bind_group.as_ref() {
+                        pass.set_pipeline(&self.glyph_pipeline);
+                        pass.set_bind_group(1, bg, &[]);
+                        pass.set_vertex_buffer(0, self.glyphs.slice());
+                        pass.draw(0..4, glyphs);
+                    }
                 }
             }
         }

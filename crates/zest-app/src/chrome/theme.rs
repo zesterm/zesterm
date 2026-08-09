@@ -63,6 +63,10 @@ pub struct ChromeColors {
     pub info: LinearRgba,
     /// Prompt user segment, third host accent.
     pub magenta: LinearRgba,
+    /// The terminal surface at full alpha, for the full-pane screens: like
+    /// the picker's panel, a see-through fleet directory over a busy grid is
+    /// unreadable at exactly the moment someone is trying to read it.
+    pub bg_opaque: LinearRgba,
     /// The panel fill for floating chrome (picker, palette, settings).
     pub panel_bg: LinearRgba,
     /// The scrim behind modal chrome.
@@ -92,7 +96,10 @@ impl ChromeColors {
             bg: fill(ui.bg, chrome_opacity),
             tab_active_bg: fill(ui.bg, chrome_opacity),
             tab_hover_bg: fill(ui.sel_soft, chrome_opacity),
-            block_header_bg: fill(zest_theme::derived::block_header_fill(ui), chrome_opacity),
+            // Always opaque, like the picker's panel: a block header
+            // *replaces* the prompt rows it covers, and a translucent one
+            // double-prints the very text it exists to reword.
+            block_header_bg: fill(zest_theme::derived::block_header_fill(ui), 1.0),
             text_active: text(ui.fg),
             text_inactive: text(ui.dim),
             text_faint: text(ui.faint),
@@ -109,6 +116,7 @@ impl ChromeColors {
             danger: text(ui.danger),
             info: text(ui.info),
             magenta: text(ui.magenta),
+            bg_opaque: fill(ui.bg, 1.0),
             // The picker floats above translucent chrome, so its panel is
             // always opaque: a see-through session list over a busy grid is
             // unreadable at exactly the moment the user is trying to read.

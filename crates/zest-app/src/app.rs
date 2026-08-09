@@ -1686,6 +1686,11 @@ impl App {
                 }
                 zest_config::settings::TabsPosition::Left => {
                     insets.left += self.config.tabs.sidebar_width as f32 * scale;
+                    // The slim title bar over the main column: the vertical
+                    // layout's counterpart of the strip, and it was once
+                    // forgotten here — the grid painted its first two rows
+                    // straight over the session name.
+                    insets.top += crate::chrome::layout::SLIM_BAR_H * scale;
                 }
             }
             // The status bar comes with the chrome: same latch, same layout
@@ -2560,7 +2565,13 @@ impl App {
                     session_rows.push((
                         PickerRow::Session {
                             title,
-                            detail: info.cwd.clone(),
+                            // Home-shortened for this machine only — another
+                            // machine's home is unknowable from here.
+                            detail: if host.local {
+                                crate::status::shorten_home(&info.cwd)
+                            } else {
+                                info.cwd.clone()
+                            },
                             host: host.label.clone(),
                             attached: info.attached,
                             attached_here,
@@ -3015,6 +3026,11 @@ impl App {
     /// viewport rows each header covers, plus its state and pre-formatted
     /// labels. One short terminal lock; plain data out.
     fn build_block_views(&self) -> Vec<crate::chrome::blocks::BlockView> {
+        // A full-pane screen covers the grid; headers floating above the
+        // fleet directory would be chrome over the wrong content.
+        if self.screen != AppScreen::Terminal {
+            return Vec::new();
+        }
         let Some(tab) = self.tabs.active() else { return Vec::new() };
         let pane_dead = match (&tab.split, tab.focus_right) {
             (Some(split), true) => split.dead,
@@ -3200,10 +3216,17 @@ impl App {
 
         // Chrome instances: rectangles come finished from the layout pass;
         // text runs resolve against the atlas here, where the GPU lives.
+        // Assembled in layer order — cached base, block headers, then the
+        // cached overlay — so the renderer's overlay split lands between
+        // "chrome the panels cover" and "the panels themselves".
         let mut chrome = Chrome::default();
+        let (overlay_rects, overlay_texts) = self
+            .chrome_layout
+            .as_ref()
+            .map_or((0, 0), |l| (l.overlay_rects_at, l.overlay_texts_at));
         if let Some(layout) = self.chrome_layout.as_ref() {
-            chrome.rects.extend_from_slice(&layout.rects);
-            for run in &layout.texts {
+            chrome.rects.extend_from_slice(&layout.rects[..overlay_rects]);
+            for run in &layout.texts[..overlay_texts] {
                 zest_render_wgpu::emit_ui_run(
                     &gpu.device,
                     &gpu.queue,
@@ -3268,6 +3291,30 @@ impl App {
                 );
             }
             self.block_hits = block_chrome.hit;
+        }
+
+        // The overlay layer last: its panels must cover every glyph above.
+        chrome.overlay_rects_at = chrome.rects.len();
+        chrome.overlay_glyphs_at = chrome.glyphs.len();
+        if let Some(layout) = self.chrome_layout.as_ref() {
+            chrome.rects.extend_from_slice(&layout.rects[overlay_rects..]);
+            for run in &layout.texts[overlay_texts..] {
+                zest_render_wgpu::emit_ui_run(
+                    &gpu.device,
+                    &gpu.queue,
+                    &mut gpu.renderer.atlas,
+                    fonts,
+                    &run.text,
+                    zest_font::Style::new(run.bold, false),
+                    run.px,
+                    run.tracking,
+                    run.pos,
+                    run.color,
+                    run.clip,
+                    run.max_width,
+                    &mut chrome.glyphs,
+                );
+            }
         }
 
         // Build the frame FIRST, and only then acquire the swapchain texture.

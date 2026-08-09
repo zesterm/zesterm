@@ -95,6 +95,13 @@ pub struct Preedit<'a> {
 pub struct Chrome {
     pub rects: Vec<RectInstance>,
     pub glyphs: Vec<GlyphInstance>,
+    /// Index into `rects`/`glyphs` where the *overlay* layer (picker,
+    /// palette, settings) begins. Base chrome — bars, tabs, screens, block
+    /// headers — must finish its text before an overlay's panel draws, or
+    /// that text bleeds through the panel. Both equal to the vec length (or
+    /// 0 with the vecs empty) when nothing overlays.
+    pub overlay_rects_at: usize,
+    pub overlay_glyphs_at: usize,
 }
 
 /// Everything to draw this frame.
@@ -114,6 +121,10 @@ pub struct Scene {
     pub chrome_rects_at: usize,
     /// Index in `glyphs` where the chrome's instances begin.
     pub chrome_glyphs_at: usize,
+    /// Absolute index where the chrome's overlay layer begins (see
+    /// [`Chrome::overlay_rects_at`]).
+    pub overlay_rects_at: usize,
+    pub overlay_glyphs_at: usize,
 }
 
 impl Scene {
@@ -126,6 +137,8 @@ impl Scene {
         self.grid_origin = [0.0, 0.0];
         self.chrome_rects_at = 0;
         self.chrome_glyphs_at = 0;
+        self.overlay_rects_at = 0;
+        self.overlay_glyphs_at = 0;
     }
 
     /// Build a frame.
@@ -158,6 +171,9 @@ impl Scene {
     fn append_chrome(&mut self, chrome: &Chrome) {
         self.chrome_rects_at = self.rects.len();
         self.chrome_glyphs_at = self.glyphs.len();
+        self.overlay_rects_at = self.chrome_rects_at + chrome.overlay_rects_at.min(chrome.rects.len());
+        self.overlay_glyphs_at =
+            self.chrome_glyphs_at + chrome.overlay_glyphs_at.min(chrome.glyphs.len());
         self.rects.extend_from_slice(&chrome.rects);
         self.glyphs.extend_from_slice(&chrome.glyphs);
     }
@@ -700,19 +716,30 @@ mod tests {
         scene.rects.push(RectInstance::filled([1.0; 4], LinearRgba([0.0; 4]), [1.0; 4]));
         scene.glyphs.push(glyph());
         let chrome = Chrome {
-            rects: vec![RectInstance::filled([2.0; 4], LinearRgba([0.0; 4]), [2.0; 4])],
+            rects: vec![
+                RectInstance::filled([2.0; 4], LinearRgba([0.0; 4]), [2.0; 4]),
+                RectInstance::filled([3.0; 4], LinearRgba([0.0; 4]), [3.0; 4]),
+            ],
             glyphs: vec![glyph(), glyph()],
+            // The second chrome rect and glyph belong to the overlay layer.
+            overlay_rects_at: 1,
+            overlay_glyphs_at: 1,
         };
         scene.append_chrome(&chrome);
         assert_eq!(scene.chrome_rects_at, 2, "chrome rects start after the grid's");
         assert_eq!(scene.chrome_glyphs_at, 1, "chrome glyphs start after the grid's");
-        assert_eq!(scene.rects.len(), 3);
+        assert_eq!(
+            (scene.overlay_rects_at, scene.overlay_glyphs_at),
+            (3, 2),
+            "the overlay boundary is absolute: chrome start plus the chrome-local split"
+        );
+        assert_eq!(scene.rects.len(), 4);
         assert_eq!(scene.glyphs.len(), 3);
 
         scene.clear();
         assert_eq!(
-            (scene.chrome_rects_at, scene.chrome_glyphs_at),
-            (0, 0),
+            (scene.chrome_rects_at, scene.chrome_glyphs_at, scene.overlay_rects_at, scene.overlay_glyphs_at),
+            (0, 0, 0, 0),
             "a cleared scene must not carry last frame's boundary into this one"
         );
     }
