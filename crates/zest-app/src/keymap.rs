@@ -212,20 +212,15 @@ pub static BINDINGS: &[Binding] = &[
     // still belongs to the program.
     scroll(ChordKey::Named(NamedKey::PageUp), Action::ScrollPageUp, "PgUp", "Page up"),
     scroll(ChordKey::Named(NamedKey::PageDown), Action::ScrollPageDown, "PgDn", "Page down"),
-    // The palette itself. Three chords, one visible row: ⌘/ arrives as "/",
-    // while ⌘? and Ctrl+Shift+/ arrive as "?"; and ⌘⇧P (arriving as "P" —
-    // exact match, so plain ⌘P stays free) is the spelling every editor
-    // taught people's fingers.
-    b(
-        Mods::Clipboard,
-        ChordKey::Char("/"),
-        Action::TogglePalette,
-        "/",
-        "Command palette",
-        Category::Help,
-    ),
-    hidden(Mods::Clipboard, ChordKey::Char("?"), Action::TogglePalette, Category::Help),
+    // The palette itself. Four chords, one visible row. ⌘P is canonical —
+    // it is what fingers actually try, and it was a dead chord anyway: the
+    // desktop modifier never reaches the shell, so nothing is lost. ⌘⇧P is
+    // the spelling the editors taught; ⌘/ and ⌘? (also Ctrl+Shift+/, which
+    // arrives as "?") are the help-key tradition.
+    b(Mods::Desktop, ChordKey::Char("p"), Action::TogglePalette, "P", "Command palette", Category::Help),
     hidden(Mods::Desktop, ChordKey::Char("P"), Action::TogglePalette, Category::Help),
+    hidden(Mods::Clipboard, ChordKey::Char("/"), Action::TogglePalette, Category::Help),
+    hidden(Mods::Clipboard, ChordKey::Char("?"), Action::TogglePalette, Category::Help),
     // ⌘, — the settings chord every desktop app shares.
     b(Mods::Desktop, ChordKey::Char(","), Action::ToggleSettings, ",", "Settings", Category::Help),
 ];
@@ -556,8 +551,8 @@ mod tests {
         );
         assert_eq!(
             action_for(&char_key("p"), SUPER),
-            None,
-            "plain ⌘P stays free — the palette alias is shift-exact"
+            Some(Action::TogglePalette),
+            "⌘P is what fingers actually try, and it was a dead chord before"
         );
     }
 

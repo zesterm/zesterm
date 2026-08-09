@@ -326,7 +326,9 @@ M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
       through to the encoder in the alt screen). This is the rail for the
       command palette (below) and, one day, user-configurable keybindings — a
       config section would layer over `BINDINGS` as data, not a rewrite.
-- [x] **The command palette (⌘/, ⌘⇧P; ⌘? and Ctrl+Shift+/ too).** Began life
+- [x] **The command palette (⌘P; also ⌘⇧P, ⌘/, ⌘? and Ctrl+Shift+/).** ⌘P is
+      canonical because it is what fingers actually try, and the desktop
+      modifier never reaches the shell, so the chord was dead anyway. Began life
       as a display-only shortcuts sheet and was refactored the same day: a
       list that can *name* every command should also *run* it. Rows come from
       `keymap::palette` over `BINDINGS` — name + platform-spelled chord chip
