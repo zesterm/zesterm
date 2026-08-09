@@ -160,10 +160,18 @@ fn setting_row(
         },
         None => value_cell(field, value),
     };
+    // List-shaped values have no inline editor yet; the row says where the
+    // edit happens instead of leaving Enter to silently do nothing.
+    let description = match field.widget {
+        Widget::FontList | Widget::TagList | Widget::KeyValue => {
+            format!("{} · edit in config.toml", first_line(&field.description))
+        }
+        _ => first_line(&field.description),
+    };
     SettingsRowModel::Setting {
         label: humanize_key(&field.key),
         key: field.key.clone(),
-        description: first_line(&field.description),
+        description,
         value: cell,
         provenance,
         restart: zest_config::invalidate::class_of(&field.key) == zest_config::Invalidation::Restart,
@@ -337,11 +345,29 @@ pub fn parse_input(field: &UiField, text: &str) -> Option<serde_json::Value> {
 /// user would type it back.
 #[must_use]
 pub fn edit_seed(field: &UiField, value: Option<&serde_json::Value>) -> String {
-    match value {
-        Some(v) if field.integer => v.as_i64().map_or_else(String::new, |i| i.to_string()),
-        Some(v) => v.as_f64().map_or_else(String::new, format_number),
-        None => String::new(),
+    match (field.widget, value) {
+        (_, None) => String::new(),
+        (Widget::Text | Widget::Path, Some(v)) => v.as_str().unwrap_or_default().to_string(),
+        (_, Some(v)) if field.integer => {
+            v.as_i64().map_or_else(String::new, |i| i.to_string())
+        }
+        (_, Some(v)) => v.as_f64().map_or_else(String::new, format_number),
     }
+}
+
+/// A slider position (0..1 along the drawn track) as the value to write,
+/// quantized to the same twentieth-of-travel grid the arrow keys use — a
+/// drag and a keypress must never disagree about which values exist.
+#[must_use]
+pub fn slider_value(field: &UiField, frac: f64) -> Option<serde_json::Value> {
+    let (min, max) = field.range?;
+    let frac = frac.clamp(0.0, 1.0);
+    if field.integer {
+        let v = min + frac * (max - min);
+        return Some(serde_json::json!(v.round() as i64));
+    }
+    let steps = (frac * 20.0).round();
+    Some(serde_json::json!(clean_float(min + steps * (max - min) / 20.0)))
 }
 
 /// A committed value as the TOML to write, or `None` for the widgets that
@@ -722,6 +748,52 @@ mod tests {
             SettingsValueCell::Editing { buffer: "18".to_string(), error: false },
             "while a buffer is open the row draws the buffer, or typing is invisible"
         );
+    }
+
+    #[test]
+    fn strings_seed_their_buffer_and_round_trip() {
+        let cmd = field("shell.command");
+        assert_eq!(
+            edit_seed(&cmd, Some(&serde_json::json!("/bin/zsh"))),
+            "/bin/zsh",
+            "a string edit starts from the current value, not a blank line"
+        );
+        assert_eq!(parse_input(&cmd, "/bin/fish"), Some(serde_json::json!("/bin/fish")));
+        let v = to_toml(&cmd, &serde_json::json!("/bin/fish")).expect("writable");
+        assert_eq!(v.to_string().trim(), "\"/bin/fish\"");
+    }
+
+    #[test]
+    fn a_slider_quantizes_to_the_arrow_keys_grid() {
+        // A drag and a keypress must never disagree about which values
+        // exist, or dragging leaves noise the arrows then walk through.
+        let opacity = field("window.opacity");
+        assert_eq!(slider_value(&opacity, 0.5), Some(serde_json::json!(0.5)));
+        assert_eq!(
+            slider_value(&opacity, 0.52),
+            Some(serde_json::json!(0.5)),
+            "positions snap to twentieths of the travel"
+        );
+        assert_eq!(slider_value(&opacity, 2.0), Some(serde_json::json!(1.0)), "clamped past the end");
+        assert_eq!(slider_value(&opacity, -1.0), Some(serde_json::json!(0.0)));
+    }
+
+    #[test]
+    fn list_rows_say_where_the_edit_happens() {
+        let (rows, _) = build(&values(), &BTreeMap::new(), "");
+        for row in &rows {
+            if let SettingsRowModel::Setting { key, description, .. } = row {
+                let listy = matches!(
+                    field(key).widget,
+                    Widget::FontList | Widget::TagList | Widget::KeyValue
+                );
+                assert_eq!(
+                    description.contains("edit in config.toml"),
+                    listy,
+                    "'{key}': exactly the uneditable rows must point at the file"
+                );
+            }
+        }
     }
 
     #[test]

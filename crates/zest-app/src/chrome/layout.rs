@@ -46,6 +46,9 @@ pub struct ChromeLayout {
     /// The settings overlay's scroll, clamped — and possibly *adjusted*, when
     /// the model asked for the selection to be brought into view.
     pub settings_scroll: f32,
+    /// Slider tracks by row index, exactly as drawn — a click's fraction is
+    /// computed against these, so pointer and pixels cannot disagree.
+    pub settings_tracks: Vec<(usize, [f32; 4])>,
 }
 
 // Logical-pixel constants, scaled at use. Named because the tests reason
@@ -313,6 +316,16 @@ fn shortcuts_overlay(
     let scroll = sheet.scroll.clamp(0.0, max_scroll);
     out.shortcuts_scroll = scroll;
 
+    if sheet.sections.is_empty() && !sheet.filter.is_empty() {
+        out.texts.push(TextRun {
+            text: format!("nothing matches \u{201c}{}\u{201d}", sheet.filter),
+            pos: [panel[0] + PICKER_PAD * s, text_baseline(m, rows_clip[1], SHEET_ROW_H * s)],
+            max_width: w - 2.0 * PICKER_PAD * s,
+            color: colors.text_faint,
+            clip: rows_clip,
+        });
+    }
+
     let left = panel[0] + PICKER_PAD * s;
     let right = panel[0] + w - PICKER_PAD * s;
     let mut y = rows_clip[1] - scroll;
@@ -472,6 +485,18 @@ fn settings_overlay(
     }
     out.settings_scroll = scroll;
 
+    // A filter that matches nothing must say so — a silently blank panel
+    // reads as broken, not as empty.
+    if settings.rows.is_empty() && !settings.filter.is_empty() {
+        out.texts.push(TextRun {
+            text: format!("nothing matches \u{201c}{}\u{201d}", settings.filter),
+            pos: [panel[0] + PICKER_PAD * s, text_baseline(m, rows_clip[1], SETTINGS_ROW_H * s)],
+            max_width: w - 2.0 * PICKER_PAD * s,
+            color: colors.text_faint,
+            clip: rows_clip,
+        });
+    }
+
     let left = panel[0] + PICKER_PAD * s;
     let right = panel[0] + w - PICKER_PAD * s;
     for (i, row) in settings.rows.iter().enumerate() {
@@ -555,22 +580,9 @@ fn settings_overlay(
                     clip: rows_clip,
                 });
 
-                // Second line: description left, tags right. The dotted key
-                // rides with the description so the user can grep their
-                // config for exactly what this row is.
-                let desc = if description.is_empty() {
-                    key.clone()
-                } else {
-                    format!("{key} — {description}")
-                };
-                out.texts.push(TextRun {
-                    text: desc,
-                    pos: [label_x, baseline2],
-                    max_width: w * 0.62,
-                    color: colors.text_faint,
-                    clip: rows_clip,
-                });
-
+                // Second line: tags right, then the description in whatever
+                // room is left — tags are the truth-telling part and must
+                // never be overwritten by a long doc comment.
                 let mut tag_x = right;
                 let mut push_tag = |text: String, color, tag_x: &mut f32| {
                     let tw = measure(&text).min(w * 0.35);
@@ -594,6 +606,21 @@ fn settings_overlay(
                     let color = if *warn { colors.pill_warn_text } else { colors.text_faint };
                     push_tag(text.clone(), color, &mut tag_x);
                 }
+
+                // The dotted key rides with the description so the user can
+                // grep their config for exactly what this row is.
+                let desc = if description.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{key} — {description}")
+                };
+                out.texts.push(TextRun {
+                    text: desc,
+                    pos: [label_x, baseline2],
+                    max_width: (tag_x - label_x - 12.0 * s).max(0.0),
+                    color: colors.text_faint,
+                    clip: rows_clip,
+                });
 
                 // The value cell, right-aligned on the first line.
                 match value {
@@ -646,6 +673,13 @@ fn settings_overlay(
                             TRACK_W * s,
                             TRACK_H * s,
                         ];
+                        out.settings_tracks.push((i, track));
+                        // The hit band is the first line's height, not the
+                        // 4px track: nobody can click a hairline.
+                        let grab = [track[0] - 6.0 * s, y, track[2] + 12.0 * s, line1_h];
+                        if let Some(hit) = intersect(grab, rows_clip) {
+                            out.hit.push(hit, HitRegion::SettingsSlider(i));
+                        }
                         out.rects.push(RectInstance::rounded(
                             track,
                             TRACK_H * s / 2.0,
@@ -1418,6 +1452,46 @@ mod tests {
         assert!(
             l.settings_scroll.abs() < f32::EPSILON,
             "without ensure_visible the scroll must not snap to the selection"
+        );
+    }
+
+    #[test]
+    fn a_drawn_slider_reports_the_track_it_drew() {
+        // The click-to-set fraction is computed against `settings_tracks`;
+        // if the reported rect and the drawn one could differ, the pointer
+        // would set values the pixels never showed.
+        use crate::chrome::model::{SettingsModel, SettingsRowModel, SettingsValueCell};
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut mo = model(Vec::new(), TabsPosition::Top);
+        mo.settings = Some(SettingsModel {
+            rows: vec![
+                SettingsRowModel::Group { title: "Window".into() },
+                SettingsRowModel::Setting {
+                    label: "Opacity".into(),
+                    key: "window.opacity".into(),
+                    description: "background opacity".into(),
+                    value: SettingsValueCell::Slider { frac: 0.5, text: "0.5".into() },
+                    provenance: None,
+                    restart: false,
+                    inert: false,
+                    modified: false,
+                },
+            ],
+            selected: 1,
+            filter: String::new(),
+            scroll: 0.0,
+            ensure_visible: false,
+        });
+        let l = layout(&mo, &colors(), &m, &mut measure);
+        let (row, track) =
+            *l.settings_tracks.first().expect("the slider row must report its track");
+        assert_eq!(row, 1);
+        // The centre of the reported track must answer as that slider.
+        let (cx, cy) = (track[0] + track[2] / 2.0, track[1] + track[3] / 2.0);
+        assert_eq!(
+            l.hit.hit(cx, cy),
+            Some(HitRegion::SettingsSlider(1)),
+            "the grab band must cover the track it reports"
         );
     }
 

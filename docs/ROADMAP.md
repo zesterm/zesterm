@@ -385,6 +385,21 @@ M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
       of pretending. Verified live: cycling the theme wrote
       `[appearance] theme = "nord"`, re-themed the window instantly, and the
       row's chip flipped to "set by config file" through the real cascade.
+- [x] **Settings polish: strings, sliders, honesty for lists.** Text/path
+      fields edit through the same typed buffer (seeded with the current
+      value); sliders click- and drag-to-set against the *track the layout
+      actually drew* (`ChromeLayout.settings_tracks`, tested), quantized to
+      the arrow keys' twentieth-of-travel grid so a drag and a keypress
+      agree about which values exist — and applied only when the quantized
+      value changes, so a full drag is at most twenty writes. List-shaped
+      rows say "edit in config.toml" in their description instead of letting
+      Enter silently do nothing. Found live and fixed: **winit delivers the
+      spacebar as `Named(Space)`**, so no overlay filter or edit buffer
+      could ever contain a space — picker included, since it shipped; an
+      empty filter result now says "nothing matches" instead of presenting
+      a blank panel as if broken. Drive-by: `watch_config` now watches
+      `zesterm.toml` in portable mode instead of a `config.toml` nobody
+      writes.
 - [ ] Animation clock. Springs `(response, damping)`, not easing curves —
       terminal motion is interruption-dominated and a spring absorbs a changed
       target with continuous velocity for free. Substep the integrator

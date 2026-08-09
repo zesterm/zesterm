@@ -261,6 +261,9 @@ pub struct App {
     restart_pending: std::collections::BTreeSet<String>,
     /// The last settings write that failed, shown as a banner in the overlay.
     settings_error: Option<String>,
+    /// A slider drag in progress, by settings row index. The pointer keeps
+    /// setting the value until the button releases, even off the track.
+    slider_drag: Option<usize>,
     /// Tabs opened by worker threads, waiting for the event loop to adopt
     /// them (`Wakeup::TabsChanged`). The flag says whether the tab takes the
     /// keyboard: picked tabs do, restored ones arrive in the background.
@@ -371,6 +374,7 @@ impl App {
             provenance,
             restart_pending: std::collections::BTreeSet::new(),
             settings_error: None,
+            slider_drag: None,
             pending_tabs: Arc::new(parking_lot::Mutex::new(Vec::new())),
             remote_identity: None,
             fonts: None,
@@ -739,7 +743,13 @@ impl App {
     /// reload, and a filesystem that will not support a watch — a network share,
     /// a container mount — is not a reason to refuse to run.
     fn watch_config(&mut self) {
-        let Some(path) = zest_config::paths::config_dir().map(|d| d.join("config.toml")) else {
+        // `config_file()` first: in portable mode the file is `zesterm.toml`
+        // beside the binary, and watching `config.toml` there would watch a
+        // file nobody writes. The fallback names the file that will exist
+        // once the first save creates it.
+        let Some(path) = zest_config::paths::config_file()
+            .or_else(|| zest_config::paths::config_dir().map(|d| d.join(zest_config::paths::CONFIG_FILE)))
+        else {
             return;
         };
         let proxy = self.proxy.clone();
@@ -1374,6 +1384,13 @@ impl App {
                 }
                 self.adjust_selected_setting(1);
             }
+            (HitRegion::SettingsSlider(i), MouseButton::Left) => {
+                if let Some(ui) = self.settings_ui.as_mut() {
+                    ui.selected = i;
+                }
+                self.slider_drag = Some(i);
+                self.apply_slider_at(i, self.pointer_pos.0 as f32);
+            }
             (HitRegion::SettingsScrim, MouseButton::Left) => {
                 self.settings_ui = None;
                 self.mark_chrome_dirty();
@@ -1534,9 +1551,10 @@ impl App {
             Widget::Toggle | Widget::Select | Widget::ThemePicker => {
                 self.adjust_selected_setting(1);
             }
-            // Numbers open a buffer: arrows step, but "make it 18" should
-            // not be nine keypresses.
-            Widget::Number | Widget::Slider => {
+            // Numbers, text and paths open a buffer: arrows step a number,
+            // but "make it 18" should not be nine keypresses, and a string
+            // has no other way in.
+            Widget::Number | Widget::Slider | Widget::Text | Widget::Path => {
                 let seed = self.settings_ui.as_ref().and_then(|ui| {
                     let field = ui.fields.get(idx)?;
                     let values = serde_json::to_value(&self.settings).ok()?;
@@ -1553,10 +1571,45 @@ impl App {
                     });
                 }
             }
-            // Text, paths and the list widgets arrive in the next commit.
-            _ => {}
+            // The list widgets have no inline editor; their rows say where
+            // the edit happens instead.
+            Widget::FontList | Widget::TagList | Widget::KeyValue => {}
         }
         self.mark_chrome_dirty();
+    }
+
+    /// Set a slider row's value from a pointer x, against the track the last
+    /// layout actually drew.
+    ///
+    /// Quantized to the arrow keys' grid and applied only when the quantized
+    /// value changes — a drag is then at most twenty writes across the whole
+    /// travel, not one per motion event.
+    fn apply_slider_at(&mut self, row: usize, x: f32) {
+        self.refresh_chrome();
+        let Some(track) = self.chrome_layout.as_ref().and_then(|l| {
+            l.settings_tracks.iter().find(|(i, _)| *i == row).map(|(_, r)| *r)
+        }) else {
+            return;
+        };
+        let frac = f64::from(((x - track[0]) / track[2]).clamp(0.0, 1.0));
+        let Some(field_idx) = self.settings_ui.as_ref().and_then(|ui| {
+            match ui.actions.get(row) {
+                Some(crate::settings_ui::RowAction::Field(i)) => Some(*i),
+                _ => None,
+            }
+        }) else {
+            return;
+        };
+        let candidate = self
+            .settings_ui
+            .as_ref()
+            .and_then(|ui| ui.fields.get(field_idx))
+            .and_then(|field| crate::settings_ui::slider_value(field, frac));
+        let Some(candidate) = candidate else { return };
+        if self.settings_value_of(field_idx).as_ref() == Some(&candidate) {
+            return;
+        }
+        self.apply_edit(field_idx, candidate);
     }
 
     /// Write one edited setting through to the user's config file, then apply
@@ -2779,6 +2832,16 @@ impl ApplicationHandler<Wakeup> for App {
                             }
                             self.mark_chrome_dirty();
                         }
+                        // winit delivers the spacebar as Named(Space), not
+                        // Character(" ") — without this arm no filter can
+                        // ever contain a space. Found by typing one.
+                        Key::Named(NamedKey::Space) => {
+                            if let Some(p) = self.picker.as_mut() {
+                                p.filter.push(' ');
+                                p.selected = 0;
+                            }
+                            self.mark_chrome_dirty();
+                        }
                         Key::Character(c) => {
                             if key::belongs_to_desktop(self.modifiers) {
                                 if c.as_str() == "k" {
@@ -2833,6 +2896,12 @@ impl ApplicationHandler<Wakeup> for App {
                         Key::Named(NamedKey::Backspace) => {
                             if let Some(sheet) = self.shortcuts.as_mut() {
                                 sheet.filter.pop();
+                            }
+                        }
+                        // Spacebar arrives as Named(Space); see the picker.
+                        Key::Named(NamedKey::Space) => {
+                            if let Some(sheet) = self.shortcuts.as_mut() {
+                                sheet.filter.push(' ');
                             }
                         }
                         Key::Character(c) => {
@@ -2914,6 +2983,16 @@ impl ApplicationHandler<Wakeup> for App {
                                     edit.error = false;
                                 }
                             }
+                            // Spacebar arrives as Named(Space); a path or
+                            // command with a space must be typeable.
+                            Key::Named(NamedKey::Space) => {
+                                if let Some(edit) =
+                                    self.settings_ui.as_mut().and_then(|ui| ui.editing.as_mut())
+                                {
+                                    edit.buffer.push(' ');
+                                    edit.error = false;
+                                }
+                            }
                             Key::Character(c) => {
                                 if !self.modifiers.control_key()
                                     && !key::belongs_to_desktop(self.modifiers)
@@ -2986,6 +3065,14 @@ impl ApplicationHandler<Wakeup> for App {
                                 ui.scroll_to_selected = true;
                             }
                         }
+                        // Spacebar arrives as Named(Space); see the picker.
+                        Key::Named(NamedKey::Space) => {
+                            if let Some(ui) = self.settings_ui.as_mut() {
+                                ui.filter.push(' ');
+                                ui.selected = 0;
+                                ui.scroll_to_selected = true;
+                            }
+                        }
                         Key::Character(c) => {
                             match keymap::lookup(&event.logical_key, self.modifiers)
                                 .map(|b| b.action)
@@ -3053,6 +3140,13 @@ impl ApplicationHandler<Wakeup> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer_pos = (position.x, position.y);
 
+                // A held slider follows the pointer before anything else —
+                // including off the track, which is how every slider works.
+                if let Some(row) = self.slider_drag {
+                    self.apply_slider_at(row, position.x as f32);
+                    return;
+                }
+
                 // The chrome sees the pointer first — unless a grid drag is in
                 // progress, which keeps the grid: a selection that wanders
                 // into the strip must not die there.
@@ -3104,6 +3198,11 @@ impl ApplicationHandler<Wakeup> for App {
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
+                // A slider drag ends when any button releases, wherever the
+                // pointer wandered to in the meantime.
+                if state == ElementState::Released && self.slider_drag.take().is_some() {
+                    return;
+                }
                 // Chrome clicks never reach the grid. A drag in progress keeps
                 // the grid for symmetry with CursorMoved.
                 if !self.mouse.is_dragging() {

@@ -34,6 +34,9 @@ pub enum HitRegion {
     SettingsRow(usize),
     /// A toggle's track inside its settings row; clicking flips the value.
     SettingsToggle(usize),
+    /// A slider's grab band inside its settings row; click or drag sets the
+    /// value from the pointer's position along the track.
+    SettingsSlider(usize),
     /// The settings panel between rows (filter line, headers) — swallows.
     SettingsPanel,
     /// The dimmed backdrop behind the settings overlay; clicking dismisses.
