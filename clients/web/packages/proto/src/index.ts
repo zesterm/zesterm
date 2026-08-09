@@ -12,7 +12,16 @@
  */
 
 export { decode, MsgpackError } from './msgpack.ts';
-export { FrameReader, FrameError, MAX_FRAME } from './frame.ts';
+export { encode } from './msgpack-encode.ts';
+export { FrameReader, FrameError, MAX_FRAME, encodeFrame } from './frame.ts';
+export {
+  type ClientMessage,
+  type SessionAddrLike,
+  type IntLike,
+  encodeClientMessage,
+  bytesToHex,
+  hexToBytes,
+} from './wire-client.ts';
 export {
   type Color,
   DEFAULT_COLOR,
