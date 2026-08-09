@@ -913,8 +913,12 @@ is now unblocked and building.
       read live over the actors WebSocket. Grid deltas never touch the actors
       socket — the terminal view dials the daemon's binary WebSocket directly,
       at an address it learned *from* the directory. V1 cuts, named: no
-      selection/copy, no mouse, no IME, no scrollback paging, no splits, no
-      palette; device identity is a localStorage seed until M4's enrollment.
+      selection/copy, no mouse, no scrollback paging, no splits, no palette;
+      device identity is a localStorage seed until M4's enrollment. (IME was a
+      cut for one day: the first live run typed an emoji and the shell
+      received nothing, so composed-text input landed — a hidden textarea
+      whose composition commits ride `encodeComposedText`, un-bracketed
+      because a commit is typing, not a paste.)
 - [ ] Local echo prediction for high-latency links (mosh's other trick): predict
       printable-char echo when not in alt-screen, render dim, reconcile on delta
       arrival. The largest perceived-latency win available.

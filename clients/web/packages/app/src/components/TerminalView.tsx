@@ -15,7 +15,14 @@ import {
   type ConnectionState,
   type DirtyRows,
 } from '@zesterm/client';
-import { belongsToBrowser, encodeFocus, encodeKey, encodePaste, modsOf } from '@zesterm/input';
+import {
+  belongsToBrowser,
+  encodeComposedText,
+  encodeFocus,
+  encodeKey,
+  encodePaste,
+  modsOf,
+} from '@zesterm/input';
 import type { BlockPayload } from '@zesterm/proto';
 import { GridPainter, measureMetrics, type Metrics } from '@zesterm/render';
 import { resolveTerminalPalette, type Theme } from '@zesterm/theme';
@@ -44,6 +51,14 @@ export const TerminalView = component<{
 
   let canvas: HTMLCanvasElement | null = null;
   let wrapper: HTMLElement | null = null;
+  /**
+   * The real focus target — a hidden textarea, because composition events
+   * only exist for editable elements. An IME commit, the emoji picker and
+   * dictation all arrive as composed *text*, not keydowns; a bare div sees
+   * none of it, which is exactly how the first live run typed an emoji and
+   * the shell received nothing.
+   */
+  let inputEl: HTMLTextAreaElement | null = null;
   let painter: GridPainter | null = null;
   let metrics: Metrics | null = null;
   let client: SessionClient | null = null;
@@ -132,7 +147,7 @@ export const TerminalView = component<{
       schedulePaint('all');
     });
     observer.observe(el);
-    el.focus();
+    inputEl?.focus();
   });
 
   onUnmounted(() => {
@@ -147,12 +162,44 @@ export const TerminalView = component<{
 
   const onKeyDown = (e: KeyboardEvent): void => {
     if (!client) return;
+    // Mid-composition keydowns are the IME's business ('Process' keys and
+    // the like); encoding them would type fragments the commit then repeats.
+    if (e.isComposing) return;
     const mods = modsOf(e);
     if (belongsToBrowser(e, mods, platform)) return;
     const bytes = encodeKey(e, mods, client.grid.modes);
     if (bytes === null) return;
+    // preventDefault on a handled key also suppresses the textarea's own
+    // `input` event, which is the coordination that keeps ordinary typing
+    // from arriving twice — once encoded, once as composed text.
     e.preventDefault();
     client.input(bytes);
+  };
+
+  const clearInput = (): void => {
+    if (inputEl) inputEl.value = '';
+  };
+
+  const sendComposed = (text: string): void => {
+    const bytes = encodeComposedText(text);
+    if (bytes !== null) client?.input(bytes);
+    clearInput();
+  };
+
+  // Chrome's order is beforeinput → input → compositionend, so the commit is
+  // read HERE, once; the in-flight `insertCompositionText` events are skipped
+  // below rather than sent as they mutate.
+  const onCompositionEnd = (e: CompositionEvent): void => {
+    sendComposed(e.data);
+  };
+
+  const onInput = (e: Event): void => {
+    const ev = e as InputEvent;
+    if (ev.isComposing || ev.inputType === 'insertCompositionText') return;
+    // The non-composition insertions: the emoji picker, dictation, autofill —
+    // anything that writes text without keydowns the encoder handled.
+    const text = inputEl?.value ?? '';
+    if (text !== '') sendComposed(text);
   };
 
   const onPaste = (e: ClipboardEvent): void => {
@@ -206,19 +253,35 @@ export const TerminalView = component<{
 
       <div
         class="term-wrap"
-        tabIndex={0}
         ref={(el: HTMLElement) => {
           wrapper = el;
         }}
-        onKeyDown={onKeyDown}
-        onPaste={onPaste}
-        onFocus={() => sendFocus(true)}
-        onBlur={() => sendFocus(false)}
+        onMouseDown={() => {
+          // Clicking anywhere in the terminal focuses the hidden input —
+          // preventDefault would break future selection, so focus rides the
+          // next tick instead of fighting the browser's own focus handling.
+          setTimeout(() => inputEl?.focus(), 0);
+        }}
       >
         <canvas
           ref={(el: HTMLCanvasElement) => {
             canvas = el;
           }}
+        />
+        <textarea
+          class="term-input"
+          ref={(el: HTMLTextAreaElement) => {
+            inputEl = el;
+          }}
+          autoComplete="off"
+          autocapitalize="off"
+          spellCheck={false}
+          onKeyDown={onKeyDown}
+          onCompositionEnd={onCompositionEnd}
+          onInput={onInput}
+          onPaste={onPaste}
+          onFocus={() => sendFocus(true)}
+          onBlur={() => sendFocus(false)}
         />
       </div>
 

@@ -17,14 +17,18 @@
  *
  * # Deferred, on purpose
  *
- * Mouse encoding and IME composition are not ported yet, and there are no stub
- * functions to reach for by accident — a stub that returns bytes is worse than
- * an import error. They land with the app shell, which is where pointer
- * geometry and composition events actually live.
+ * Mouse encoding is not ported yet, and there is no stub function to reach
+ * for by accident — a stub that returns bytes is worse than an import error.
+ * It lands when the app grows selection, which is where pointer geometry
+ * lives. Composition is split in two: the *events* belong to the app (only a
+ * DOM sees `compositionend`), and the *bytes* are `encodeComposedText` here —
+ * found the hard way, when the first live browser run typed an emoji and the
+ * shell received nothing.
  */
 
 export { type Mods, NO_MODS, mods, modsOf } from './mods.ts';
 export { type KeyLike, encodeKey } from './key.ts';
 export { belongsToDesktop, isClipboardChord, belongsToBrowser } from './desktop.ts';
 export { encodePaste } from './paste.ts';
+export { encodeComposedText } from './text.ts';
 export { encodeFocus } from './focus.ts';

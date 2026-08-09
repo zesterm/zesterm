@@ -190,8 +190,35 @@ body {
   background: var(--zt-bg);
 }
 
+.term-wrap {
+  position: relative;
+}
+
 .term-wrap canvas {
   display: block;
+}
+
+/*
+ * The real focus target. Present and focusable — a display:none element
+ * cannot hold focus or receive composition — but invisible and out of the
+ * layout's way. It sits at the top-left so an IME's candidate window opens
+ * near the terminal instead of off-screen.
+ */
+.term-input {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: none;
+  outline: none;
+  resize: none;
+  opacity: 0;
+  background: transparent;
+  color: transparent;
+  caret-color: transparent;
+  overflow: hidden;
 }
 
 .block-rail {

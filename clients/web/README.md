@@ -125,5 +125,7 @@ Two gates, catching different things:
   frame time actually goes. The `Dial → SessionClient → paint(grid, dirty)`
   seams make moving decode into a Worker mechanical if a profile ever demands
   it; do it on measurement, not on instinct.
-- Selection/copy, mouse reporting, IME composition, scrollback paging, splits,
-  the palette — each named in the roadmap with its seam already in place.
+- Selection/copy, mouse reporting, scrollback paging, splits, the palette —
+  each named in the roadmap with its seam already in place. (IME composition
+  is *not* on this list anymore: composed text — IME commits, the emoji
+  picker, dictation — rides a hidden textarea into `encodeComposedText`.)
