@@ -388,6 +388,7 @@ const SETTINGS_W: f32 = 720.0;
 const SETTINGS_H: f32 = 560.0;
 const SETTINGS_ROW_H: f32 = 48.0;
 const SETTINGS_HEADER_H: f32 = 38.0;
+const SETTINGS_NOTICE_H: f32 = 32.0;
 const TOGGLE_W: f32 = 36.0;
 const TOGGLE_H: f32 = 20.0;
 const TRACK_W: f32 = 120.0;
@@ -444,6 +445,7 @@ fn settings_overlay(
     let row_h = |row: &SettingsRowModel| match row {
         SettingsRowModel::Group { .. } => SETTINGS_HEADER_H * s,
         SettingsRowModel::Setting { .. } => SETTINGS_ROW_H * s,
+        SettingsRowModel::Notice { .. } => SETTINGS_NOTICE_H * s,
     };
     // Row offsets before any drawing, because ensure-visible needs the
     // selected row's extent to decide the scroll it draws with.
@@ -478,6 +480,23 @@ fn settings_overlay(
         let Some(visible) = intersect(band, rows_clip) else { continue };
 
         match row {
+            SettingsRowModel::Notice { text } => {
+                // A warn-tinted band across the panel: pinned truth, not a row.
+                let band_rect = [panel[0] + 4.0 * s, y + 2.0 * s, w - 8.0 * s, band[3] - 4.0 * s];
+                out.rects.push(RectInstance::rounded(
+                    band_rect,
+                    RADIUS * s,
+                    colors.pill_warn_bg,
+                    rows_clip,
+                ));
+                out.texts.push(TextRun {
+                    text: text.clone(),
+                    pos: [left, text_baseline(m, y, band[3])],
+                    max_width: w - 2.0 * PICKER_PAD * s,
+                    color: colors.pill_warn_text,
+                    clip: rows_clip,
+                });
+            }
             SettingsRowModel::Group { title } => {
                 out.texts.push(TextRun {
                     text: title.clone(),
@@ -604,6 +623,11 @@ fn settings_overlay(
                             colors.text_active,
                             rows_clip,
                         ));
+                        // Pushed after the row, so the track outranks it: a
+                        // click here flips, a click elsewhere only selects.
+                        if let Some(hit) = intersect(track, rows_clip) {
+                            out.hit.push(hit, HitRegion::SettingsToggle(i));
+                        }
                     }
                     SettingsValueCell::Select { value } => {
                         let vw = measure(value).min(w * 0.3);
@@ -660,6 +684,22 @@ fn settings_overlay(
                             pos: [right - vw, baseline1],
                             max_width: w * 0.35,
                             color: colors.text_faint,
+                            clip: rows_clip,
+                        });
+                    }
+                    SettingsValueCell::Editing { buffer, error } => {
+                        // The caret is a character, not a rect: it inherits
+                        // the text clip and colour for free, and this is not
+                        // a text editor — there is no selection to draw.
+                        let text = format!("{buffer}▏");
+                        let vw = measure(&text).min(w * 0.35);
+                        let color =
+                            if *error { colors.pill_warn_text } else { colors.text_active };
+                        out.texts.push(TextRun {
+                            text,
+                            pos: [right - vw, baseline1],
+                            max_width: w * 0.35,
+                            color,
                             clip: rows_clip,
                         });
                     }
@@ -1321,7 +1361,7 @@ mod tests {
         for x in (0..1200).step_by(4) {
             for y in (0..800).step_by(4) {
                 match l.hit.hit(x as f32, y as f32) {
-                    Some(HitRegion::SettingsRow(i)) => {
+                    Some(HitRegion::SettingsRow(i) | HitRegion::SettingsToggle(i)) => {
                         seen_rows.insert(i);
                     }
                     Some(HitRegion::SettingsPanel) => {}

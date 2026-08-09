@@ -118,6 +118,9 @@ pub enum SettingsValueCell {
     /// A list-shaped value the overlay displays but does not edit (yet);
     /// drawn faint to say so.
     ReadOnly { text: String },
+    /// A typed edit in progress; drawn as the buffer with a caret, in warn
+    /// colours after a failed parse.
+    Editing { buffer: String, error: bool },
 }
 
 /// One row of the settings overlay, ready to draw.
@@ -149,6 +152,8 @@ pub enum SettingsRowModel {
         /// Differs from the schema default.
         modified: bool,
     },
+    /// A banner pinned above the list — restart owed, or a failed write.
+    Notice { text: String },
 }
 
 /// The settings overlay, when open.

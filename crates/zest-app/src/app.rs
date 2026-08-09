@@ -182,6 +182,8 @@ struct SettingsUiState {
     /// The schema walk, cached at open: the schema cannot change while the
     /// overlay is up, and re-walking it per hover would be pure waste.
     fields: Vec<zest_config::ui::UiField>,
+    /// A typed edit in progress; while `Some`, characters belong to it.
+    editing: Option<crate::settings_ui::EditBuffer>,
 }
 
 #[derive(Clone)]
@@ -254,6 +256,11 @@ pub struct App {
     /// Where each non-default setting came from, kept from the last resolve —
     /// the settings overlay's "set by profile `k8s`" chips read it.
     provenance: std::collections::BTreeMap<String, zest_config::Source>,
+    /// Restart-class keys edited this run. On `App` rather than the overlay
+    /// state: closing and reopening the overlay does not un-owe the restart.
+    restart_pending: std::collections::BTreeSet<String>,
+    /// The last settings write that failed, shown as a banner in the overlay.
+    settings_error: Option<String>,
     /// Tabs opened by worker threads, waiting for the event loop to adopt
     /// them (`Wakeup::TabsChanged`). The flag says whether the tab takes the
     /// keyboard: picked tabs do, restored ones arrive in the background.
@@ -362,6 +369,8 @@ impl App {
             shortcuts: None,
             settings_ui: None,
             provenance,
+            restart_pending: std::collections::BTreeSet::new(),
+            settings_error: None,
             pending_tabs: Arc::new(parking_lot::Mutex::new(Vec::new())),
             remote_identity: None,
             fonts: None,
@@ -1188,12 +1197,21 @@ impl App {
             (
                 serde_json::to_value(&self.settings).unwrap_or(serde_json::Value::Null),
                 self.provenance.clone(),
+                self.restart_pending.clone(),
+                self.settings_error.clone(),
             )
         });
-        let settings_model =
-            self.settings_ui.as_mut().zip(settings_inputs).map(|(ui, (values, provenance))| {
-                let (rows, actions) =
-                    crate::settings_ui::build_rows(&ui.fields, &values, &provenance, &ui.filter);
+        let settings_model = self.settings_ui.as_mut().zip(settings_inputs).map(
+            |(ui, (values, provenance, restart_pending, error))| {
+                let (rows, actions) = crate::settings_ui::build_rows(
+                    &ui.fields,
+                    &values,
+                    &provenance,
+                    &ui.filter,
+                    ui.editing.as_ref(),
+                    &restart_pending,
+                    error.as_deref(),
+                );
                 ui.actions = actions;
                 // A filter edit can strand the selection on a header or past
                 // the end; land it on the nearest real row instead.
@@ -1205,7 +1223,8 @@ impl App {
                     scroll: ui.scroll,
                     ensure_visible: ui.scroll_to_selected,
                 }
-            });
+            },
+        );
 
         let Some(window) = self.window.as_ref() else { return };
         let Some(fonts) = self.fonts.as_mut() else { return };
@@ -1347,6 +1366,14 @@ impl App {
                 }
                 self.mark_chrome_dirty();
             }
+            (HitRegion::SettingsToggle(i), MouseButton::Left) => {
+                // Select first, then flip through the same path the keyboard
+                // uses — one code path per change, however it arrives.
+                if let Some(ui) = self.settings_ui.as_mut() {
+                    ui.selected = i;
+                }
+                self.adjust_selected_setting(1);
+            }
             (HitRegion::SettingsScrim, MouseButton::Left) => {
                 self.settings_ui = None;
                 self.mark_chrome_dirty();
@@ -1449,9 +1476,127 @@ impl App {
                     scroll_to_selected: true,
                     actions: Vec::new(),
                     fields: zest_config::ui::fields(),
+                    editing: None,
                 })
             }
         };
+        self.mark_chrome_dirty();
+    }
+
+    /// The selected settings row's field index, when it is a real field.
+    fn selected_settings_field(&self) -> Option<usize> {
+        let ui = self.settings_ui.as_ref()?;
+        match ui.actions.get(ui.selected) {
+            Some(crate::settings_ui::RowAction::Field(i)) => Some(*i),
+            _ => None,
+        }
+    }
+
+    /// The live value of a field, read from the resolved settings — the same
+    /// serialization the rows display, so an edit steps from what is shown.
+    fn settings_value_of(&self, field_idx: usize) -> Option<serde_json::Value> {
+        let ui = self.settings_ui.as_ref()?;
+        let field = ui.fields.get(field_idx)?;
+        let values = serde_json::to_value(&self.settings).ok()?;
+        zest_config::ui::value_at(&values, &field.key).cloned()
+    }
+
+    /// Arrow-key editing on the selected row: flip, cycle or step, then write.
+    fn adjust_selected_setting(&mut self, dir: i32) {
+        let Some(idx) = self.selected_settings_field() else { return };
+        let Some(current) = self.settings_value_of(idx) else { return };
+        let next = self.settings_ui.as_ref().and_then(|ui| {
+            let field = ui.fields.get(idx)?;
+            let themes: Vec<String> =
+                zest_theme::builtin::all().into_iter().map(|t| t.id).collect();
+            crate::settings_ui::adjust(field, &current, dir, &themes)
+        });
+        if let Some(value) = next {
+            self.apply_edit(idx, value);
+        }
+    }
+
+    /// Enter on the selected row: act on it the way its widget wants.
+    fn activate_selected_setting(&mut self) {
+        use zest_config::ui::Widget;
+        let Some(idx) = self.selected_settings_field() else { return };
+        let Some(widget) = self
+            .settings_ui
+            .as_ref()
+            .and_then(|ui| ui.fields.get(idx))
+            .map(|f| f.widget)
+        else {
+            return;
+        };
+        match widget {
+            // One keypress, one change: instant for the widgets whose next
+            // value is unambiguous.
+            Widget::Toggle | Widget::Select | Widget::ThemePicker => {
+                self.adjust_selected_setting(1);
+            }
+            // Numbers open a buffer: arrows step, but "make it 18" should
+            // not be nine keypresses.
+            Widget::Number | Widget::Slider => {
+                let seed = self.settings_ui.as_ref().and_then(|ui| {
+                    let field = ui.fields.get(idx)?;
+                    let values = serde_json::to_value(&self.settings).ok()?;
+                    Some(crate::settings_ui::edit_seed(
+                        field,
+                        zest_config::ui::value_at(&values, &field.key),
+                    ))
+                });
+                if let (Some(ui), Some(buffer)) = (self.settings_ui.as_mut(), seed) {
+                    ui.editing = Some(crate::settings_ui::EditBuffer {
+                        field_idx: idx,
+                        buffer,
+                        error: false,
+                    });
+                }
+            }
+            // Text, paths and the list widgets arrive in the next commit.
+            _ => {}
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// Write one edited setting through to the user's config file, then apply
+    /// it by re-running the cascade synchronously.
+    ///
+    /// The file stays the single source of truth: the overlay never holds a
+    /// value the file does not. The watcher will echo this write ~120ms
+    /// later; its reload diffs to `Invalidation::None` and is a no-op — the
+    /// synchronous reload here is what makes a toggle feel like a switch
+    /// rather than a request.
+    fn apply_edit(&mut self, field_idx: usize, new_value: serde_json::Value) {
+        let Some((key, value)) = self.settings_ui.as_ref().and_then(|ui| {
+            let field = ui.fields.get(field_idx)?;
+            Some((field.key.clone(), crate::settings_ui::to_toml(field, &new_value)?))
+        }) else {
+            return;
+        };
+        // `config_file()` is None until the file exists — first-ever edit —
+        // and in portable mode it points at `zesterm.toml`, which the
+        // fallback would get wrong; that is why the file path wins.
+        let Some(target) = zest_config::paths::config_file()
+            .or_else(|| zest_config::paths::config_dir().map(|d| d.join(zest_config::paths::CONFIG_FILE)))
+        else {
+            self.settings_error = Some("no config directory on this system".to_string());
+            self.mark_chrome_dirty();
+            return;
+        };
+        match zest_config::write_value(&target, &key, value) {
+            Ok(()) => {
+                self.settings_error = None;
+                if zest_config::invalidate::class_of(&key) == zest_config::Invalidation::Restart {
+                    self.restart_pending.insert(key);
+                }
+                self.reload_config();
+            }
+            Err(e) => {
+                tracing::error!(error = %e, key = %key, "could not write the setting");
+                self.settings_error = Some(format!("could not save {key}: {e}"));
+            }
+        }
         self.mark_chrome_dirty();
     }
 
@@ -2720,7 +2865,85 @@ impl ApplicationHandler<Wakeup> for App {
                 // And the open settings overlay, the same way.
                 if self.settings_ui.is_some() {
                     use winit::keyboard::{Key, NamedKey};
+
+                    // A typed edit owns the keys before the list does — while
+                    // a buffer is open, a digit is a digit, never a filter.
+                    if self.settings_ui.as_ref().is_some_and(|ui| ui.editing.is_some()) {
+                        match &event.logical_key {
+                            Key::Named(NamedKey::Escape) => {
+                                if let Some(ui) = self.settings_ui.as_mut() {
+                                    ui.editing = None;
+                                }
+                            }
+                            Key::Named(NamedKey::Enter) => {
+                                let parsed = self.settings_ui.as_ref().and_then(|ui| {
+                                    let edit = ui.editing.as_ref()?;
+                                    let field = ui.fields.get(edit.field_idx)?;
+                                    Some((
+                                        edit.field_idx,
+                                        crate::settings_ui::parse_input(field, &edit.buffer),
+                                    ))
+                                });
+                                match parsed {
+                                    Some((idx, Some(value))) => {
+                                        if let Some(ui) = self.settings_ui.as_mut() {
+                                            ui.editing = None;
+                                        }
+                                        self.apply_edit(idx, value);
+                                    }
+                                    // A failed parse keeps the buffer and
+                                    // marks it: silently dropping typed input
+                                    // reads as a broken Enter key.
+                                    Some((_, None)) => {
+                                        if let Some(edit) = self
+                                            .settings_ui
+                                            .as_mut()
+                                            .and_then(|ui| ui.editing.as_mut())
+                                        {
+                                            edit.error = true;
+                                        }
+                                    }
+                                    None => {}
+                                }
+                            }
+                            Key::Named(NamedKey::Backspace) => {
+                                if let Some(edit) =
+                                    self.settings_ui.as_mut().and_then(|ui| ui.editing.as_mut())
+                                {
+                                    edit.buffer.pop();
+                                    edit.error = false;
+                                }
+                            }
+                            Key::Character(c) => {
+                                if !self.modifiers.control_key()
+                                    && !key::belongs_to_desktop(self.modifiers)
+                                {
+                                    if let Some(edit) = self
+                                        .settings_ui
+                                        .as_mut()
+                                        .and_then(|ui| ui.editing.as_mut())
+                                    {
+                                        edit.buffer.push_str(c.as_str());
+                                        edit.error = false;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        self.mark_chrome_dirty();
+                        return;
+                    }
+
                     match &event.logical_key {
+                        Key::Named(NamedKey::Enter) => {
+                            self.activate_selected_setting();
+                        }
+                        Key::Named(NamedKey::ArrowRight) => {
+                            self.adjust_selected_setting(1);
+                        }
+                        Key::Named(NamedKey::ArrowLeft) => {
+                            self.adjust_selected_setting(-1);
+                        }
                         Key::Named(NamedKey::Escape) => {
                             // Layered: a search in progress clears first, a
                             // second Escape closes. A settings filter is a

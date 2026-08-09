@@ -364,8 +364,27 @@ M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
       consume; deleting the entry is part of wiring one. Type-to-filter
       (Esc layers: clear filter, then close), arrows skip headers,
       keyboard navigation ensure-visible-scrolls without the wheel snapping
-      back (tested), ⌘K/⌘//⌘, switch between the three overlays. Editing is
-      the next commit; today the rows only tell the truth.
+      back (tested), ⌘K/⌘//⌘, switch between the three overlays.
+- [x] **Settings edit inline and apply instantly.** Enter/→ flips a toggle,
+      cycles a select, live-previews the next theme; ←/→ step numbers to the
+      *next grid point* in the travel direction (so repeated presses cannot
+      accumulate float noise — every result is a value the user could have
+      typed); Enter on a number opens a typed buffer (chars go to the buffer,
+      never the filter — the mode collision is resolved by construction),
+      parse-clamped on commit, error-coloured on garbage. Every change goes
+      one way: `settings_ui::to_toml` → `zest_config::write_value` into the
+      user's `config.toml` (comments preserved; first edit creates the file)
+      → a **synchronous** `reload_config` so a toggle feels like a switch —
+      the watcher's 120ms echo then diffs to `Invalidation::None` and no-ops.
+      The file stays the single source of truth; the overlay never holds a
+      value the file does not. f32→f64 widening noise is scrubbed before it
+      can reach the file (`clean_float`, pinned by test against the schema's
+      own noisy `spring_response` default). Restart-class edits join a
+      banner pinned above the list — the user-visible surface the old
+      `tracing::warn!` never had — and a failed write banners too, instead
+      of pretending. Verified live: cycling the theme wrote
+      `[appearance] theme = "nord"`, re-themed the window instantly, and the
+      row's chip flipped to "set by config file" through the real cascade.
 - [ ] Animation clock. Springs `(response, damping)`, not easing curves —
       terminal motion is interruption-dominated and a spring absorbs a changed
       target with continuous velocity for free. Substep the integrator

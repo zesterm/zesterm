@@ -32,6 +32,8 @@ pub enum HitRegion {
     ShortcutsScrim,
     /// One row of the settings overlay, by index; clicking selects it.
     SettingsRow(usize),
+    /// A toggle's track inside its settings row; clicking flips the value.
+    SettingsToggle(usize),
     /// The settings panel between rows (filter line, headers) — swallows.
     SettingsPanel,
     /// The dimmed backdrop behind the settings overlay; clicking dismisses.
