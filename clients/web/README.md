@@ -4,13 +4,41 @@ A browser tab is a client of a host's daemon exactly as the desktop window is,
 speaking the same `zest-proto` messages. → [ADR-004](../../docs/ARCHITECTURE.md),
 [WS-G](../../docs/ROADMAP.md#ws-g--web-client).
 
-Today this is the decoder and nothing else.
-
 ## What is here
 
 ```
-packages/proto/    the wire protocol: framing, MessagePack, the delta decoder
+packages/proto/    the wire protocol: framing, MessagePack en/decode, the delta
+                   decoder, blocks — zero runtime deps, byte-golden to the Rust
+packages/auth/     the Ed25519 handshake: transcript, pairing code, sign/verify
+                   (@noble/ed25519 — the crypto is quarantined here)
+packages/client/   the data-plane session client: handshake driver, ack
+                   cadence, resync, reconnect — remote.rs's lessons, ported
+packages/input/    key/paste/focus → terminal bytes, a port of zest-input
+packages/theme/    the 24 UiTokens, builtins, --zt-* CSS vars, the terminal
+                   palette — zero runtime deps
+packages/render/   the Canvas 2D grid painter, (grid, dirtyRows) → paint
+packages/control/  the control-plane actors (SessionDirectory) — @sigx/actors
+packages/sidecar/  the Node process hosting them: daemon feed in, actors
+                   socket out, static files for the app
+packages/app/      the sigx web app: session list, terminal view, input
 ```
+
+Dependency policy: `proto`, `theme` and `input` stay dependency-free; crypto
+lives only in `auth`; sigx packages appear only in `control`/`sidecar`/`app`.
+
+## Running the experience
+
+```
+zest-daemon --listen-ws                        # the data plane (port 7718)
+pnpm --filter @zesterm/app build               # once, or after app changes
+pnpm --filter @zesterm/sidecar start -- --static packages/app/dist
+open http://127.0.0.1:7350
+```
+
+Dev loop for the app itself: `pnpm --filter @zesterm/app dev` (vite, port
+5173), with the sidecar started as
+`--allow-origin http://localhost:5173` so the proxied actors socket passes the
+origin posture.
 
 ## The one rule
 
@@ -42,10 +70,11 @@ pnpm -r typecheck     # also where the generated-bindings check fails
 pnpm -r test
 ```
 
-Node 24 or newer: the suite runs TypeScript directly through Node's type
-stripping, so there is no build step and `typescript` is the only devDependency.
-`erasableSyntaxOnly` makes anything that would need a transform a compile error
-rather than a surprise at runtime.
+Node 24 or newer: the suites run TypeScript directly through Node's type
+stripping, so there is no build step anywhere except the app (vite, because a
+browser needs a bundle). `erasableSyntaxOnly` makes anything that would need a
+transform a compile error rather than a surprise at runtime — the app package
+alone opts out, for JSX.
 
 ## How it is checked
 
@@ -88,8 +117,13 @@ Two gates, catching different things:
 
 ## Not here yet
 
-- **A transport.** A browser cannot open a unix socket or raw TCP, and the daemon
-  speaks nothing else. ADR-005 names the data plane as a binary WebSocket;
-  nothing implements it. This is what blocks everything below.
-- The grid renderer — **Canvas 2D**, decided; see WS-G in the roadmap for why.
-- The SignalX app, and local echo prediction.
+- **Local echo prediction** (mosh's other trick) — the largest perceived-latency
+  win still on the table; see WS-G.
+- **A Worker for the decoder.** Decode + apply runs on the main thread, and
+  measurement says that is fine: the whole 82k-cell corpus replays in well under
+  a second, and `fillText` — which must be on the main thread anyway — is where
+  frame time actually goes. The `Dial → SessionClient → paint(grid, dirty)`
+  seams make moving decode into a Worker mechanical if a profile ever demands
+  it; do it on measurement, not on instinct.
+- Selection/copy, mouse reporting, IME composition, scrollback paging, splits,
+  the palette — each named in the roadmap with its seam already in place.

@@ -897,18 +897,24 @@ is now unblocked and building.
       viewport sizes only `vim-macos` scrolled enough for `scroll`-before-`row`
       to matter, so the ordering invariant had one fixture behind it and now has
       three.
-- [ ] Grid renderer. **`@sigx/terminal` cannot be reused** — it paints TSX *to* a
-      TTY, which is the inverse of what a web client needs.
-
-      **Canvas 2D**, behind a "given a grid and its dirty rows, paint" seam.
-      Deltas already name the rows that changed, so repaints are row-scoped and
-      the usual reason to reach for WebGL never arises; `fillText` inherits the
-      browser's font fallback, colour emoji and PUA icons, which is the `Zyyy`
-      trap this project has already paid for once; and WebGL would share no code
-      with `zest-render-wgpu` without a wasm crate. Swap in an atlas backend on
-      measurement — a large grid repainting most rows below 60fps — not on
-      instinct.
-- [ ] SignalX app: session list, attach, input.
+- [x] Grid renderer: `@zesterm/render`, **Canvas 2D**, behind the "given a grid
+      and its dirty rows, paint" seam — repaints are row-scoped because deltas
+      name their rows, `fillText` inherits the browser's font fallback, colour
+      emoji and PUA icons (the `Zyyy` trap, already paid for once), and
+      backgrounds coalesce before glyphs so a wide char's spacer cannot erase
+      its right half. (**`@sigx/terminal` cannot be reused** — it paints TSX
+      *to* a TTY, the inverse job.) Swap in an atlas backend on measurement —
+      a large grid repainting most rows below 60fps — not on instinct.
+- [x] SignalX app: session list, attach, input — `@zesterm/app`, with the
+      control plane on `@sigx/actors` 0.7.0 exactly as ADR-005 draws it: a
+      `SessionDirectory` actor hosted by the sidecar (`@zesterm/sidecar`,
+      standalone Node in v1; M4's Bun-child-of-daemon shape is a packaging
+      change over the same code), fed by a loopback `watch_sessions` client,
+      read live over the actors WebSocket. Grid deltas never touch the actors
+      socket — the terminal view dials the daemon's binary WebSocket directly,
+      at an address it learned *from* the directory. V1 cuts, named: no
+      selection/copy, no mouse, no IME, no scrollback paging, no splits, no
+      palette; device identity is a localStorage seed until M4's enrollment.
 - [ ] Local echo prediction for high-latency links (mosh's other trick): predict
       printable-char echo when not in alt-screen, render dim, reconcile on delta
       arrival. The largest perceived-latency win available.

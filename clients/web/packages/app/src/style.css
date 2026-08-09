@@ -1,0 +1,233 @@
+/*
+ * Chrome styling, driven entirely by the theme's custom properties — the
+ * mockup's rule: the 24 tokens arrive as --zt-*, and the CSS never invents a
+ * color of its own.
+ */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app,
+.shell {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--zt-bg);
+  color: var(--zt-fg);
+  font:
+    13px/1.45 ui-sans-serif,
+    system-ui,
+    sans-serif;
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;
+}
+
+.shell-error {
+  padding: 6px 12px;
+  background: var(--zt-danger);
+  color: var(--zt-bg);
+}
+
+/* --- session list ------------------------------------------------------- */
+
+.session-list {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 24px 16px;
+  width: 100%;
+}
+
+.session-list header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--zt-line);
+  padding-bottom: 12px;
+}
+
+.session-list h1 {
+  font-size: 16px;
+  margin: 0;
+  color: var(--zt-fg);
+}
+
+.link-state {
+  font-size: 12px;
+  color: var(--zt-dim);
+}
+
+.link-state.ok {
+  color: var(--zt-success);
+}
+
+.link-state.degraded {
+  color: var(--zt-warn);
+}
+
+.sessions {
+  list-style: none;
+  margin: 16px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.session-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  background: var(--zt-panel);
+  color: var(--zt-fg);
+  border: 1px solid var(--zt-line);
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.session-row:hover {
+  border-color: var(--zt-accent);
+}
+
+.state-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--zt-success);
+  flex: none;
+}
+
+.state-dot.alt {
+  background: var(--zt-info);
+}
+
+.session-row .title {
+  font-weight: 600;
+}
+
+.session-row .meta {
+  color: var(--zt-dim);
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.empty {
+  color: var(--zt-faint);
+  padding: 16px 0;
+}
+
+.create {
+  padding: 8px 14px;
+  background: var(--zt-accent);
+  color: var(--zt-accent-text);
+  border: none;
+  border-radius: 8px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.create:disabled {
+  background: var(--zt-accent-soft);
+  cursor: default;
+}
+
+/* --- terminal ----------------------------------------------------------- */
+
+.terminal-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.term-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 10px;
+  background: var(--zt-chrome);
+  border-bottom: 1px solid var(--zt-line);
+  flex: none;
+}
+
+.back {
+  background: none;
+  border: none;
+  color: var(--zt-accent);
+  font: inherit;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.term-title {
+  font-weight: 600;
+}
+
+.term-banner {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--zt-warn);
+}
+
+.term-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 8px;
+  outline: none;
+  background: var(--zt-bg);
+}
+
+.term-wrap canvas {
+  display: block;
+}
+
+.block-rail {
+  display: flex;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--zt-panel);
+  border-top: 1px solid var(--zt-line);
+  overflow-x: auto;
+  flex: none;
+}
+
+.block-chip {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--zt-line);
+  background: var(--zt-chrome);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.block-chip .cmd {
+  font-family: ui-monospace, monospace;
+  color: var(--zt-fg);
+}
+
+.block-chip .verdict {
+  color: var(--zt-dim);
+}
+
+.block-chip.running .verdict {
+  color: var(--zt-info);
+}
+
+.block-chip.finished .verdict {
+  color: var(--zt-dim);
+}

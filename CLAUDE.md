@@ -290,8 +290,10 @@ cannot be the web client's grid renderer. Its `terminal-zero` token contract
 *is* reused: `zest-theme`'s `UiTokens` is that record field-for-field, so
 `{...theme.ui, name, mode}` is a valid argument to sigx's `registerTheme()`.
 
-`clients/web/` is a pnpm workspace, Node 24, `node --test`, and no runtime
-dependencies at all — the decoder will run in a worker and the framing,
-MessagePack and delta application are hand-written. sigx arrives with the app
-shell, not before. The packages are published to npm; the local checkouts lag by
-a minor, so install from npm rather than linking.
+`clients/web/` is a pnpm workspace, Node 24, `node --test`. The proto/theme/
+input packages have no runtime dependencies (framing, MessagePack and delta
+application are hand-written); crypto is quarantined in `auth`, and sigx
+(`@sigx/actors` 0.7.0 with its WebSocket transport) appears only in
+`control`/`sidecar`/`app`. Decode+apply runs on the main thread by measurement,
+not in a worker — see the README. The sigx packages are published to npm; the
+local checkouts lag, so install from npm rather than linking.
