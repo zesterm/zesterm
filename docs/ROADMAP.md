@@ -45,7 +45,7 @@ move.
 
 ## Status
 
-**657 tests, six gates green**, measured on macOS rather than remembered.
+**691 tests, six gates green**, measured on macOS rather than remembered.
 First paint 35ms **on Windows**; the Mac paints against a different compositor
 and its number (48ms) is reported rather than gated.
 
