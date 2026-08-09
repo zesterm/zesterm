@@ -101,6 +101,7 @@ cargo run -p zest-render-wgpu --example alpha_probe   # transparency capability
 zest-daemon --socket-path                      # where this user's daemon listens
 zest-daemon --socket <path>                    # serve this machine's terminals
 zest-daemon --listen-lan                       # serve other machines too (off by default)
+zest-daemon --listen-ws                        # serve browsers over WebSocket (off by default, port 7718)
 zest-daemon --identity                         # this host's public key
 zest-daemon --trusted                          # which devices are paired
 zest-daemon --ephemeral                        # throwaway key, for the edit-run loop

@@ -114,6 +114,12 @@ impl LanListener {
         self.addr
     }
 
+    /// Give up the socket, for a transport that wraps its own protocol around
+    /// the same hardened accept loop. `ws.rs` is that transport.
+    pub(crate) fn into_parts(self) -> (TcpListener, Duration) {
+        (self.listener, self.handshake_timeout)
+    }
+
     /// Accept until the process ends.
     ///
     /// Takes an [`Authenticator`] by value and not by option: there is no way

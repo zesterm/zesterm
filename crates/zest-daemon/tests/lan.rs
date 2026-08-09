@@ -50,6 +50,9 @@ fn host() -> Host {
         listen_lan: true,
         lan_bind: "127.0.0.1".into(),
         lan_port: addr.port(),
+        listen_ws: false,
+        ws_bind: "127.0.0.1".into(),
+        ws_port: 0,
         shell_integration: true,
     };
     let registry = Arc::new(Registry::new());

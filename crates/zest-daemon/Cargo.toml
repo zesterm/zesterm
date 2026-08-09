@@ -34,6 +34,16 @@ directories = { workspace = true }
 # its own, which is what lets the handler do non-signal-safe work like waiting
 # for the goodbye to actually leave.
 ctrlc = { version = "3.5", features = ["termination"] }
+# The Sec-WebSocket-Accept digest and nothing else. A protocol checksum, not a
+# security boundary; the hashes that matter are SHA-256 in zest-mesh.
+sha1 = "0.10"
+
+[dev-dependencies]
+# The end-to-end WebSocket tests drive our hand-rolled server with an
+# independent implementation, so the server is proven against the RFC rather
+# than against a mirror of itself. Never a runtime dependency: ws.rs explains
+# why sync tungstenite cannot serve `serve`'s split read/write halves.
+tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
 
 [target.'cfg(unix)'.dependencies]
 # `flock` on the socket path, so two daemons starting at once cannot each

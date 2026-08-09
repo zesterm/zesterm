@@ -843,6 +843,23 @@ and the palette's block rows are specified in
       a window that looks right and lies. Identity is still ephemeral per
       launch, so the far host prompts each time; a stored identity (and the
       keychain prompt it drags onto this path) is deliberately future work.
+- [x] **The daemon serves WebSocket** (`--listen-ws`, default port 7718, off by
+      default like `--listen-lan`). The transport browsers can actually reach:
+      a hand-rolled server-side RFC 6455 codec in `zest-daemon/src/ws.rs` —
+      hand-rolled because `serve` requires independently owned read and write
+      halves and sync tungstenite cannot be split without a mutex deadlock or
+      two unsynchronized writers interleaving a pong into a keyframe; the
+      module docs carry the full argument. The WebSocket layer is a byte pipe:
+      the identical length-prefixed MessagePack stream, one binary message per
+      write batch, whole frames only — so `serve` is untouched and the
+      browser's streaming `FrameReader` runs unchanged. Same Ed25519 handshake,
+      same `accept_hardened` watchdog/cap/cooldown posture as the LAN,
+      deliberately no Origin check (auth is the signature, not ambient
+      authority) and deliberately no TLS yet (localhost is a secure context;
+      M4's tunnel terminates wss at the edge; LAN ws:// is parity with raw
+      TCP). Proven end to end by `tests/ws.rs` with tungstenite as the
+      *independent* client, and by `attach --ws`, which is also the
+      layer-isolating debug tool for everything the web client will build.
 - [ ] SQLite scrollback. Scrollback is in memory and bounded; a session that
       outlives its window does not yet outlive the daemon.
 
@@ -852,10 +869,11 @@ and the palette's block rows are specified in
 exporter cannot live in TypeScript, and "no path ownership" is the rule now
 anyway.
 
-The decoder was built before the daemon can be reached at all, which was the
-point: **a browser cannot open a unix socket or raw TCP, and the daemon speaks
-nothing else.** ADR-005 names the data plane as a binary WebSocket; nothing
-implements it. Everything below the first item waits on that.
+The decoder was built before the daemon could be reached at all, which was the
+point: a browser cannot open a unix socket or raw TCP, and for a long time the
+daemon spoke nothing else. **That blocker is gone**: ADR-005's binary WebSocket
+data plane exists (`zest-daemon --listen-ws`, WS-F above), so everything below
+is now unblocked and building.
 
 - [x] TypeScript delta decoder against the `ts-rs` bindings, replaying the
       conformance corpus frame by frame. `cargo xtask fixtures` exports
