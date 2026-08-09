@@ -1542,9 +1542,9 @@ fn horizontal(
             clip,
         );
 
-        let mut text_right = x + tab_w - TAB_PAD * s;
         // Every tab carries its close affordance, as the mock draws it; only
         // its hover treatment is conditional.
+        let text_right;
         {
             let close_hovered = model.hover == Some(HitRegion::TabClose(tab.addr));
             let close =
