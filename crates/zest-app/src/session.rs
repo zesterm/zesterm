@@ -59,6 +59,16 @@ pub enum Wakeup {
     /// settings, because deciding what a change costs means comparing against
     /// the live ones. The reload happens on the main thread.
     ConfigChanged,
+    /// A pinned session's host answered and said the session no longer
+    /// exists.
+    ///
+    /// **Not `Detached`** — the link is fine; the session is gone. And not
+    /// `Exited` either: that means *this window's* child ended and closes the
+    /// window, while a gone session under one tab of several must only mark
+    /// that tab. The supervisor that sends this has already stopped, because
+    /// silently swapping a fresh shell in under a labeled tab is how someone
+    /// types into the wrong machine.
+    SessionGone(zest_proto::SessionAddr),
 }
 
 pub struct Session {

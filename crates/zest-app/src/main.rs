@@ -12,6 +12,7 @@ mod block_actions;
 mod chrome;
 mod console;
 mod daemon;
+mod daemon_client;
 mod fair_mutex;
 mod pipeline_cache;
 mod platform;

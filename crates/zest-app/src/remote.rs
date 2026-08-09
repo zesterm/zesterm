@@ -24,13 +24,12 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 use zest_core::Terminal;
-use zest_mesh::identity::{ClientIdentity, Nonce, Purpose, Signature};
-use zest_mesh::pairing::{auth_transcript, verify_challenge, Transcript};
+use zest_mesh::identity::ClientIdentity;
 use zest_proto::{
     frame, Applied, Applier, ClientMessage, FrameReader, HostMessage, SessionAddr, Seq,
-    PROTOCOL_VERSION,
 };
 
+use crate::daemon_client::DaemonClient;
 use crate::fair_mutex::FairMutex;
 use crate::session::Wakeup;
 use crate::source::{Origin, SessionSource};
@@ -109,6 +108,32 @@ pub struct AttachOptions<'a> {
     pub expect_host: Option<zest_proto::HostId>,
 }
 
+/// What the supervisor does when the host answers but the session is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code, reason = "the tab strip is the second consumer, later in the #23 sequence")]
+pub enum Rebind {
+    /// Adopt any unattached session, else create a fresh one. Right for a
+    /// window that wants *a* shell on that machine more than a particular
+    /// one — today's GUI default, and `--attach`'s.
+    AdoptOrCreate,
+    /// The tab is a name for one session. If the host answers and that
+    /// session no longer exists, report [`Wakeup::SessionGone`] and stop —
+    /// silently swapping a fresh shell in under a labeled tab is how someone
+    /// types into the wrong machine's wrong shell.
+    Pinned,
+}
+
+/// How the first connection picks its session.
+#[allow(dead_code, reason = "the tab strip is the second consumer, later in the #23 sequence")]
+enum Target {
+    /// List, then adopt-or-create per [`AttachOptions::adopt`].
+    Open,
+    /// Exactly this session, which must already exist.
+    Existing(SessionAddr),
+    /// A fresh session, never adopted.
+    Create,
+}
+
 pub struct RemoteSession {
     terminal: Arc<FairMutex<Terminal>>,
     /// Set by the reader, cleared by the renderer. Also the coalescing latch.
@@ -116,9 +141,13 @@ pub struct RemoteSession {
     /// Interior mutability for `write`/`resize` on `&self` — the same trick
     /// `Session::pty_tx` uses, for the same reason.
     tx: Sender<Outbound>,
-    addr: SessionAddr,
+    /// Shared with the supervisor, which rebinds it when a restarted daemon
+    /// hands out a fresh session. Before this was shared, input kept
+    /// addressing the *old* session after such a rebind: output flowed (the
+    /// reader uses its own copy) while every keystroke went to an address the
+    /// daemon no longer had.
+    addr: Arc<parking_lot::Mutex<SessionAddr>>,
     origin: Origin,
-    /// `cols << 16 | rows`, so a reconnect can replay the size as one read.
     /// Joined on drop, so the `Detach` is actually written before the process
     /// ends rather than racing it.
     writer: Option<std::thread::JoinHandle<()>>,
@@ -133,7 +162,8 @@ pub struct RemoteSession {
 /// would see.
 impl Drop for RemoteSession {
     fn drop(&mut self) {
-        let _ = self.tx.send(Outbound::Msg(ClientMessage::Detach { session: self.addr }));
+        let addr = *self.addr.lock();
+        let _ = self.tx.send(Outbound::Msg(ClientMessage::Detach { session: addr }));
         let _ = self.tx.send(Outbound::Shutdown);
         // Joined, not fire-and-forget: the writer runs on its own thread, and
         // without this the process can exit before the frame reaches the
@@ -155,6 +185,69 @@ impl RemoteSession {
         opts: &AttachOptions<'_>,
         wake: impl Fn(Wakeup) + Send + 'static,
     ) -> Result<Self, RemoteError> {
+        Self::start(dial, opts, Target::Open, Rebind::AdoptOrCreate, wake)
+    }
+
+    /// Attach to exactly this session, which must already exist.
+    ///
+    /// The tab strip's constructor: a tab is a name for one session, so the
+    /// supervisor is [`Rebind::Pinned`] — a host that answers without the
+    /// session makes the tab say so instead of quietly becoming a new shell.
+    #[allow(dead_code, reason = "the tab strip is the second consumer, later in the #23 sequence")]
+    pub fn attach_existing(
+        dial: Dialer,
+        addr: SessionAddr,
+        opts: &AttachOptions<'_>,
+        wake: impl Fn(Wakeup) + Send + 'static,
+    ) -> Result<Self, RemoteError> {
+        Self::start(dial, opts, Target::Existing(addr), Rebind::Pinned, wake)
+    }
+
+    /// Create a fresh session and attach to it, never adopting.
+    ///
+    /// ⌘T's constructor. Pinned for the same reason as
+    /// [`Self::attach_existing`]: once created, the tab names that session.
+    #[allow(dead_code, reason = "the tab strip is the second consumer, later in the #23 sequence")]
+    pub fn create_and_attach(
+        dial: Dialer,
+        opts: &AttachOptions<'_>,
+        wake: impl Fn(Wakeup) + Send + 'static,
+    ) -> Result<Self, RemoteError> {
+        Self::start(dial, opts, Target::Create, Rebind::Pinned, wake)
+    }
+
+    /// The session this window is currently attached to.
+    ///
+    /// "Currently": under [`Rebind::AdoptOrCreate`] a daemon restart rebinds
+    /// the supervisor to a fresh session, and this follows it.
+    #[must_use]
+    #[allow(dead_code, reason = "the tab strip is the second consumer, later in the #23 sequence")]
+    pub fn addr(&self) -> SessionAddr {
+        *self.addr.lock()
+    }
+
+    /// End the session deliberately — the daemon hangs its child up — then
+    /// detach.
+    ///
+    /// Consuming `self` is the delivery guarantee: the `CloseSession` is
+    /// enqueued ahead of Drop's `Detach` + `Shutdown` on the same ordered
+    /// channel, and Drop joins the writer, so the frame reaches the socket
+    /// before the process moves on. The same hazard class as the explicit
+    /// drop before `process::exit` in the attach probe.
+    #[allow(dead_code, reason = "the tab strip is the second consumer, later in the #23 sequence")]
+    pub fn kill(self) {
+        let addr = *self.addr.lock();
+        let _ = self.tx.send(Outbound::Msg(ClientMessage::CloseSession { session: addr }));
+        // Drop runs here: Detach, Shutdown, join.
+    }
+
+    fn start(
+        dial: Dialer,
+        opts: &AttachOptions<'_>,
+        target: Target,
+        rebind: Rebind,
+        wake: impl Fn(Wakeup) + Send + 'static,
+    ) -> Result<Self, RemoteError> {
         let &AttachOptions {
             identity,
             label,
@@ -172,10 +265,16 @@ impl RemoteSession {
         // an error the caller can fall back from rather than a window that
         // opens and then reports it has nothing to show.
         let (read, write) = dial()?;
-        let mut conn = Handshake::new(read, write);
-        let (host_label, addr, keyframe_seq, keyframe) =
-            conn.run(identity, label, command, cols, rows, adopt, expect_host)?;
+        let mut conn = DaemonClient::connect(read, write, identity, label, expect_host)?;
+        let addr = match target {
+            Target::Open => conn.open_session(command, cols, rows, adopt)?,
+            Target::Existing(a) => a,
+            Target::Create => conn.create(command, "", cols, rows)?,
+        };
+        let (keyframe_seq, keyframe) = conn.attach(addr, cols, rows)?;
+        let host_label = conn.host_label().to_string();
         let (mut reader, writer) = conn.into_halves();
+        let addr_cell = Arc::new(parking_lot::Mutex::new(addr));
 
         let terminal = Arc::new(FairMutex::new(Terminal::new(
             usize::from(cols),
@@ -249,6 +348,7 @@ impl RemoteSession {
             let identity = Arc::clone(identity);
             let label = label.to_string();
             let command = command.to_string();
+            let addr_cell = Arc::clone(&addr_cell);
             std::thread::Builder::new()
                 .name("zest-remote-reader".into())
                 .spawn(move || {
@@ -379,22 +479,46 @@ impl RemoteSession {
                         wait = (wait * 2).min(REDIAL_MAX);
 
                         let Ok((r, w)) = dial() else { continue };
-                        let mut conn = Handshake::new(r, w);
-                        if conn.authenticate(&identity, &label, expect_host).is_err() {
+                        let Ok(mut conn) =
+                            DaemonClient::connect(r, w, &identity, &label, expect_host)
+                        else {
                             continue;
-                        }
+                        };
                         // The session we lost first. Its shell is still running
                         // and our subscriber was released when the connection
                         // dropped, so it is sitting there unattached.
-                        let attached = conn.attach_to(addr, cols, rows).or_else(|_| {
-                            // Gone -- the daemon itself was restarted, so the
-                            // shells went with it. A new one is the honest
-                            // outcome: a window that can be typed into again,
-                            // rather than one that never recovers.
-                            let fresh = conn.open_session(&command, cols, rows, true)?;
-                            addr = fresh;
-                            conn.attach_to(fresh, cols, rows)
-                        });
+                        let attached = match conn.attach(addr, cols, rows) {
+                            Ok(ok) => Ok(ok),
+                            // Gone -- and what happens next is the whole
+                            // difference between the two rebind modes.
+                            Err(e) => match rebind {
+                                // The daemon was restarted, so the shells went
+                                // with it. A new one is the honest outcome for
+                                // a window that wants *a* shell: one that can
+                                // be typed into again, rather than one that
+                                // never recovers.
+                                Rebind::AdoptOrCreate => conn
+                                    .open_session(&command, cols, rows, true)
+                                    .and_then(|fresh| {
+                                        addr = fresh;
+                                        *addr_cell.lock() = fresh;
+                                        conn.attach(fresh, cols, rows)
+                                    }),
+                                Rebind::Pinned => match e {
+                                    // The host answered and said no: the
+                                    // session is gone, not the link. A pinned
+                                    // tab reports that and stops, rather than
+                                    // guessing at a replacement.
+                                    RemoteError::Refused(_) => {
+                                        wake(Wakeup::SessionGone(addr));
+                                        return;
+                                    }
+                                    // Anything else is the link's fault; keep
+                                    // dialling.
+                                    _ => continue,
+                                },
+                            },
+                        };
                         let Ok((seq, keyframe)) = attached else { continue };
 
                         let (r, w) = conn.into_halves();
@@ -423,13 +547,11 @@ impl RemoteSession {
             terminal,
             needs_redraw,
             tx,
-            addr,
+            addr: addr_cell,
             origin: Origin::Daemon { host: host_label, local },
             writer: Some(writer_thread),
         })
     }
-
-
 }
 
 /// Write one message to the current sink, dropping it if the link is gone.
@@ -467,15 +589,13 @@ impl SessionSource for RemoteSession {
         if bytes.is_empty() {
             return;
         }
-        let _ = self
-            .tx
-            .send(Outbound::Msg(ClientMessage::Input { session: self.addr, bytes }));
+        let session = *self.addr.lock();
+        let _ = self.tx.send(Outbound::Msg(ClientMessage::Input { session, bytes }));
     }
 
     fn resize(&self, cols: u16, rows: u16) {
-        let _ = self
-            .tx
-            .send(Outbound::Msg(ClientMessage::Resize { session: self.addr, cols, rows }));
+        let session = *self.addr.lock();
+        let _ = self.tx.send(Outbound::Msg(ClientMessage::Resize { session, cols, rows }));
 
         // And ask for the whole state back.
         //
@@ -496,9 +616,7 @@ impl SessionSource for RemoteSession {
         // be attached at a different size, so what this one asked for is a
         // request, not a fact. Resizing is human-speed, so a whole state costs
         // nothing worth counting.
-        let _ = self
-            .tx
-            .send(Outbound::Msg(ClientMessage::RequestKeyframe { session: self.addr }));
+        let _ = self.tx.send(Outbound::Msg(ClientMessage::RequestKeyframe { session }));
     }
 
     fn take_dirty(&self) -> bool {
@@ -526,227 +644,6 @@ pub enum RemoteError {
     Io(String),
     #[error("could not start a thread: {0}")]
     Thread(String),
-}
-
-/// Hello → Welcome → CreateSession → Attach → Keyframe, inline.
-struct Handshake {
-    read: Box<dyn Read + Send>,
-    write: Box<dyn Write + Send>,
-    frames: FrameReader,
-}
-
-impl Handshake {
-    fn new(read: Box<dyn Read + Send>, write: Box<dyn Write + Send>) -> Self {
-        Self { read, write, frames: FrameReader::new() }
-    }
-
-    fn into_halves(self) -> (Box<dyn Read + Send>, Box<dyn Write + Send>) {
-        (self.read, self.write)
-    }
-
-    fn send(&mut self, msg: &ClientMessage) -> Result<(), RemoteError> {
-        let bytes = frame::encode(msg).map_err(|e| RemoteError::Io(e.to_string()))?;
-        self.write.write_all(&bytes).map_err(|e| RemoteError::Io(e.to_string()))?;
-        self.write.flush().map_err(|e| RemoteError::Io(e.to_string()))
-    }
-
-    fn recv(&mut self) -> Result<HostMessage, RemoteError> {
-        let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            if let Ok(Some(body)) = self.frames.next_frame() {
-                return frame::decode::<HostMessage>(&body)
-                    .map_err(|e| RemoteError::Io(e.to_string()));
-            }
-            let n = self.read.read(&mut buf).map_err(|e| RemoteError::Io(e.to_string()))?;
-            if n == 0 {
-                return Err(RemoteError::Closed);
-            }
-            self.frames.feed(&buf[..n]);
-        }
-    }
-
-    /// The whole of a first connection: prove who we are, find or make a
-    /// session, and attach to it.
-    #[allow(clippy::too_many_arguments, reason = "one handshake, one call site")]
-    fn run(
-        &mut self,
-        identity: &ClientIdentity,
-        label: &str,
-        command: &str,
-        cols: u16,
-        rows: u16,
-        adopt: bool,
-        expect_host: Option<zest_proto::HostId>,
-    ) -> Result<(String, SessionAddr, u64, zest_proto::Keyframe), RemoteError> {
-        let host_label = self.authenticate(identity, label, expect_host)?;
-        let addr = self.open_session(command, cols, rows, adopt)?;
-        let (seq, keyframe) = self.attach_to(addr, cols, rows)?;
-        Ok((host_label, addr, seq, keyframe))
-    }
-
-    /// Hello → Challenge → Auth → Welcome. Returns the host's label.
-    ///
-    /// Separate from the rest because a reconnect has to do exactly this and
-    /// then *not* create anything — the session it wants already exists.
-    fn authenticate(
-        &mut self,
-        identity: &ClientIdentity,
-        label: &str,
-        expect_host: Option<zest_proto::HostId>,
-    ) -> Result<String, RemoteError> {
-        let client_nonce = Nonce::random().map_err(|e| RemoteError::Io(e.to_string()))?;
-        self.send(&ClientMessage::Hello {
-            version: PROTOCOL_VERSION,
-            client: identity.client_id(),
-            label: label.to_string(),
-            nonce: zest_proto::Nonce32::from_bytes(*client_nonce.as_bytes()),
-        })?;
-
-        // Challenge -> Auth -> Welcome. Two round trips on connect, which on a
-        // loopback socket is tens of microseconds and on a LAN is under a
-        // millisecond -- paid once, against a session that lasts hours.
-        let host_label = loop {
-            match self.recv()? {
-                HostMessage::Challenge { version, host, label: host_label, nonce, signature } => {
-                    if version != PROTOCOL_VERSION {
-                        return Err(RemoteError::Version { ours: PROTOCOL_VERSION, theirs: version });
-                    }
-                    let transcript = Transcript {
-                        version,
-                        host,
-                        client: identity.client_id(),
-                        host_nonce: Nonce::from_bytes(nonce.0),
-                        client_nonce,
-                        host_label: host_label.clone(),
-                        client_label: label.to_string(),
-                    };
-                    let host_sig = Signature::from_slice(&signature.0)
-                        .map_err(|e| RemoteError::Refused(e.to_string()))?;
-
-                    // Before revealing anything: is this the machine that was
-                    // dialled? On a LAN the address came from an advertisement,
-                    // which is a claim rather than a fact.
-                    verify_challenge(expect_host, &transcript, &host_sig)
-                        .map_err(|e| RemoteError::Refused(e.to_string()))?;
-
-                    let sig = identity.sign(Purpose::Auth, &auth_transcript(&transcript));
-                    self.send(&ClientMessage::Auth {
-                        signature: zest_proto::Sig64::from_bytes(sig.to_bytes()),
-                    })?;
-                }
-                HostMessage::Welcome { version, label, .. } => {
-                    if version != PROTOCOL_VERSION {
-                        return Err(RemoteError::Version { ours: PROTOCOL_VERSION, theirs: version });
-                    }
-                    break label;
-                }
-                // Not an error: the key is good and nobody has said yes yet.
-                // The caller decides how long to wait.
-                HostMessage::AuthPending { code, expires_in_secs } => {
-                    tracing::info!(
-                        %code,
-                        expires_in_secs,
-                        "waiting for this device to be approved on the host"
-                    );
-                }
-                HostMessage::AuthFailed { reason, message } => {
-                    return Err(RemoteError::Refused(format!("{reason:?}: {message}")));
-                }
-                HostMessage::Error { message, .. } => return Err(RemoteError::Refused(message)),
-                _ => {}
-            }
-        };
-
-        Ok(host_label)
-    }
-
-    /// Find a session to use, or make one.
-    fn open_session(
-        &mut self,
-        command: &str,
-        cols: u16,
-        rows: u16,
-        adopt: bool,
-    ) -> Result<SessionAddr, RemoteError> {
-        // Ask what is running first. The listing costs one round trip inside
-        // the window GPU initialization is already occupying, and it is what
-        // makes adopting possible at all.
-        self.send(&ClientMessage::ListSessions)?;
-        let existing = loop {
-            match self.recv()? {
-                HostMessage::Sessions { sessions } => break sessions,
-                HostMessage::Error { message, .. } => return Err(RemoteError::Refused(message)),
-                _ => {}
-            }
-        };
-
-        // Default is create, not adopt: silently reattaching to whatever
-        // happened to be there makes opening a window nondeterministic.
-        let adopted = adopt
-            .then(|| existing.iter().rev().find(|s| !s.attached).map(|s| s.addr))
-            .flatten();
-
-        let addr = match adopted {
-            Some(addr) => addr,
-            None => {
-                self.send(&ClientMessage::CreateSession {
-                    command: command.to_string(),
-                    cwd: String::new(),
-                    cols,
-                    rows,
-                })?;
-                loop {
-                    match self.recv()? {
-                        HostMessage::Sessions { sessions } => {
-                            let Some(newest) = sessions.last() else { continue };
-                            break newest.addr;
-                        }
-                        HostMessage::Error { message, .. } => {
-                            return Err(RemoteError::Refused(message))
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        };
-
-        Ok(addr)
-    }
-
-    /// Attach to a session that already exists, and take its keyframe.
-    ///
-    /// Every attach starts with a keyframe, including a reattach: the host has
-    /// no idea what this client still holds, and after a link drop neither does
-    /// the client with any confidence.
-    fn attach_to(
-        &mut self,
-        addr: SessionAddr,
-        cols: u16,
-        rows: u16,
-    ) -> Result<(u64, zest_proto::Keyframe), RemoteError> {
-        self.send(&ClientMessage::Attach { session: addr, cols, rows })?;
-
-        loop {
-            match self.recv()? {
-                HostMessage::Keyframe { seq, cols, rows, rows_data, attrs, cursor, modes, blocks, .. } => {
-                    return Ok((
-                        seq.0,
-                        zest_proto::Keyframe {
-                            cols,
-                            rows,
-                            rows_data,
-                            attrs,
-                            cursor,
-                            modes: zest_core::Modes::from_bits_truncate(modes),
-                            blocks,
-                        },
-                    ));
-                }
-                HostMessage::Error { message, .. } => return Err(RemoteError::Refused(message)),
-                _ => {}
-            }
-        }
-    }
 }
 
 #[cfg(all(test, unix))]
@@ -1208,5 +1105,135 @@ mod tests {
             !events.contains(&Wakeup::Exited),
             "a dropped connection reported Exited: {events:?}"
         );
+    }
+
+    fn dial_to(socket: &str) -> Dialer {
+        let path = socket.to_string();
+        Box::new(move || {
+            let stream =
+                zest_daemon::connect(&path).map_err(|e| RemoteError::Io(e.to_string()))?;
+            let write = stream.try_clone().map_err(|e| RemoteError::Io(e.to_string()))?;
+            Ok((
+                Box::new(stream) as Box<dyn Read + Send>,
+                Box::new(write) as Box<dyn Write + Send>,
+            ))
+        })
+    }
+
+    #[test]
+    fn attach_existing_binds_the_session_it_named() {
+        // The tab strip's whole premise: a tab names one session, and
+        // attaching by address reaches that session — not the newest, not an
+        // adopted one, that one.
+        let h = Harness::start("existing");
+        let first = h.attach("/bin/sh", |_| {});
+        std::thread::sleep(Duration::from_millis(300));
+        let addr = first.addr();
+        drop(first); // detach; the shell stays running in the daemon
+        std::thread::sleep(Duration::from_millis(200));
+
+        let identity = Arc::new(ClientIdentity::generate().expect("client key"));
+        let s = RemoteSession::attach_existing(
+            dial_to(&h.path),
+            addr,
+            &AttachOptions {
+                identity: &identity,
+                label: "test",
+                command: "",
+                cols: 40,
+                rows: 6,
+                scrollback: 100,
+                adopt: false,
+                local: true,
+                expect_host: None,
+            },
+            |_| {},
+        )
+        .expect("attach existing");
+
+        assert_eq!(s.addr(), addr, "a pinned attach binds the session it named");
+        std::thread::sleep(Duration::from_millis(200));
+        s.write(b"echo pinned-round-trip\n".to_vec());
+        assert!(
+            wait_for(|| s.terminal().lock().screen_text().contains("pinned-round-trip")),
+            "the named session never echoed; grid was:\n{}",
+            s.terminal().lock().screen_text()
+        );
+    }
+
+    #[test]
+    fn kill_ends_the_session_rather_than_detaching() {
+        // Closing a *local* tab means the shell should die — the opposite of
+        // the drop path, and the reason `kill` consumes self: the
+        // CloseSession frame must reach the socket before the process moves
+        // on, which the writer join in Drop guarantees.
+        let h = Harness::start("kill");
+        let s = h.attach("/bin/sh", |_| {});
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(h.registry.len(), 1);
+
+        s.kill();
+        assert!(
+            wait_for(|| h.registry.is_empty()),
+            "CloseSession never removed the session from the registry"
+        );
+    }
+
+    #[test]
+    fn a_pinned_session_that_died_reports_gone_and_does_not_respawn() {
+        // The AdoptOrCreate supervisor answers a missing session by making a
+        // new one — right for "give me a shell", wrong for a labeled tab. The
+        // pinned supervisor must say SessionGone and stop.
+        let gone = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&gone);
+
+        let h = Harness::start("gone");
+        let seed = h.attach("/bin/sh", |_| {});
+        std::thread::sleep(Duration::from_millis(300));
+        let addr = seed.addr();
+        drop(seed);
+        std::thread::sleep(Duration::from_millis(200));
+
+        let link = Link::new(&h.path, "gone");
+        let identity = Arc::new(ClientIdentity::generate().expect("client key"));
+        let s = RemoteSession::attach_existing(
+            dial_to(&link.path),
+            addr,
+            &AttachOptions {
+                identity: &identity,
+                label: "test",
+                command: "",
+                cols: 40,
+                rows: 6,
+                scrollback: 100,
+                adopt: false,
+                local: true,
+                expect_host: None,
+            },
+            move |w| {
+                if matches!(w, Wakeup::SessionGone(_)) {
+                    flag.store(true, Ordering::Release);
+                }
+            },
+        )
+        .expect("attach existing");
+        std::thread::sleep(Duration::from_millis(200));
+
+        // Cut the link, then end the session while the supervisor is inside
+        // its redial backoff — the direct registry call finishes long before
+        // the first redial at +200ms.
+        link.cut();
+        h.registry.close(addr.session);
+
+        assert!(
+            wait_for(|| gone.load(Ordering::Acquire)),
+            "the pinned supervisor never reported SessionGone"
+        );
+        assert_eq!(
+            h.registry.len(),
+            0,
+            "a pinned tab must not respawn a shell for a session that ended"
+        );
+        drop(s);
     }
 }

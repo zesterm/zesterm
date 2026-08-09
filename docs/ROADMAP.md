@@ -222,6 +222,19 @@ M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
       current tab's host; closing a local tab kills, a remote one detaches;
       launch restores the previous tab set, which retires the adopt guess. Both
       orientations — top strip and left sidebar — behind `tabs.position`.
+- [x] **The daemon conversation is a reusable object.** `DaemonClient`
+      (extracted from `remote.rs`'s private handshake): connect/auth once,
+      then `list`, `create`, `attach`, `close` — the picker's verbs, no longer
+      reachable only through attaching. It captures the host's `HostId` from
+      the signed Welcome, which is how the app learns its local daemon's
+      identity with zero wire change. `RemoteSession` gains `attach_existing`
+      / `create_and_attach` (both `Rebind::Pinned`: a host that answers
+      without the session posts `Wakeup::SessionGone` instead of silently
+      swapping in a fresh shell), `addr()`, and `kill()` — CloseSession whose
+      delivery is guaranteed by consuming self ahead of Drop's writer join.
+      Fixed en route: after an adopt-or-create rebind, input kept addressing
+      the *old* session — output flowed while keystrokes went nowhere; the
+      address is now shared with the supervisor.
 - [x] **Chrome text foundations.** `ui_text::emit_ui_run`/`measure_ui_run` in
       `zest-render-wgpu`: shaped with kept advances (issue #5's rule), truncated
       with an ellipsis at cluster boundaries, falling back per character where

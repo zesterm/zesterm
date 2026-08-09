@@ -1575,6 +1575,14 @@ impl ApplicationHandler<Wakeup> for App {
             // The in-place reconnect in `remote.rs` succeeded: same session, same
             // grid, and everything this window had accumulated is still there.
             // Nothing to rebuild — just repaint.
+            // A pinned tab's host answered and its session no longer exists.
+            // The supervisor stopped rather than swapping in a fresh shell;
+            // once the strip is plural this marks the tab as ended and offers
+            // recreate. With one session it is a log line and a repaint.
+            Wakeup::SessionGone(addr) => {
+                tracing::warn!(%addr, "the session ended on its host");
+                self.mark_chrome_dirty();
+            }
             Wakeup::Reattached => {
                 tracing::info!("the daemon connection is back");
                 if let Some(s) = self.session.as_ref() {
