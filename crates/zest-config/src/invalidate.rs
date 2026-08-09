@@ -80,6 +80,13 @@ pub const KEYS: &[(&str, Invalidation)] = &[
     ("window.custom_chrome", Invalidation::Restart),
     ("window.columns", Invalidation::Restart),
     ("window.rows", Invalidation::Restart),
+    // The strip takes space from the grid, so moving or resizing it changes
+    // how many cells fit -- geometry, exactly like padding.
+    ("tabs.position", Invalidation::Geometry),
+    ("tabs.strip_height", Invalidation::Geometry),
+    ("tabs.sidebar_width", Invalidation::Geometry),
+    ("tabs.show_single_tab", Invalidation::Geometry),
+    ("tabs.restore", Invalidation::None),
     ("shell.command", Invalidation::Restart),
     ("shell.cwd", Invalidation::Restart),
     ("shell.env", Invalidation::Restart),
@@ -151,7 +158,14 @@ fn walk(a: &serde_json::Value, b: &serde_json::Value, path: &mut String, out: &m
 fn is_group(path: &str) -> bool {
     matches!(
         path,
-        "" | "typography" | "appearance" | "window" | "shell" | "scrolling" | "cursor" | "motion"
+        "" | "typography"
+            | "appearance"
+            | "window"
+            | "tabs"
+            | "shell"
+            | "scrolling"
+            | "cursor"
+            | "motion"
     )
 }
 
@@ -223,6 +237,27 @@ mod tests {
         let mut b = a.clone();
         b.window.backdrop = Backdrop::Mica;
         assert_eq!(diff(&a, &b), Invalidation::SurfaceRebuild);
+    }
+
+    #[test]
+    fn moving_the_tab_strip_is_geometry() {
+        // The strip takes its space from the grid: moving it from top to left
+        // trades rows for columns, and the shell has to hear about both.
+        let a = Settings::default();
+        let mut b = a.clone();
+        b.tabs.position = crate::settings::TabsPosition::Left;
+        assert_eq!(changed_keys(&a, &b), vec!["tabs.position"]);
+        assert_eq!(diff(&a, &b), Invalidation::Geometry);
+    }
+
+    #[test]
+    fn tab_restore_costs_nothing_until_the_next_launch() {
+        // Not `Restart`: nothing in the running process is stale — the flag is
+        // simply read at the moment it matters.
+        let a = Settings::default();
+        let mut b = a.clone();
+        b.tabs.restore = false;
+        assert_eq!(diff(&a, &b), Invalidation::None);
     }
 
     #[test]

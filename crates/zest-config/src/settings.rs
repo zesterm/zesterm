@@ -32,6 +32,8 @@ pub struct Settings {
     pub appearance: Appearance,
     /// Window shape, transparency, and chrome.
     pub window: Window,
+    /// The tab strip: where it lives and how it behaves.
+    pub tabs: Tabs,
     /// What to run, and where.
     pub shell: Shell,
     /// Scrollback and scrolling behaviour.
@@ -61,6 +63,7 @@ impl Default for Settings {
             typography: Typography::default(),
             appearance: Appearance::default(),
             window: Window::default(),
+            tabs: Tabs::default(),
             shell: Shell::default(),
             scrolling: Scrolling::default(),
             cursor: Cursor::default(),
@@ -239,6 +242,57 @@ impl Default for Window {
             custom_chrome: false,
             columns: 100,
             rows: 30,
+        }
+    }
+}
+
+/// Where the tab strip lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum TabsPosition {
+    /// A horizontal strip along the top of the window.
+    Top,
+    /// A vertical sidebar on the left, wide enough to show each tab's host.
+    Left,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Tabs {
+    /// Where the tab strip lives: a horizontal strip at the top, or a vertical
+    /// sidebar on the left.
+    #[schemars(extend("x_zest_group" = "Tabs", "x_zest_widget" = "select"))]
+    pub position: TabsPosition,
+    /// Height of the horizontal tab strip, in logical pixels.
+    #[schemars(range(min = 24, max = 64))]
+    #[schemars(extend("x_zest_group" = "Tabs", "x_zest_widget" = "number"))]
+    pub strip_height: u32,
+    /// Width of the vertical tab sidebar, in logical pixels.
+    #[schemars(range(min = 120, max = 400))]
+    #[schemars(extend("x_zest_group" = "Tabs", "x_zest_widget" = "number"))]
+    pub sidebar_width: u32,
+    /// Show the tab strip when only one tab is open.
+    ///
+    /// On by default: the strip doubles as the titlebar, and a window whose
+    /// chrome appears and disappears as tabs come and go is unsettling.
+    #[schemars(extend("x_zest_group" = "Tabs", "x_zest_widget" = "toggle"))]
+    pub show_single_tab: bool,
+    /// Reattach this window's tabs on the next launch.
+    ///
+    /// When off, every launch starts with one fresh local shell and existing
+    /// sessions are reachable only through the picker.
+    #[schemars(extend("x_zest_group" = "Tabs", "x_zest_widget" = "toggle"))]
+    pub restore: bool,
+}
+
+impl Default for Tabs {
+    fn default() -> Self {
+        Self {
+            position: TabsPosition::Top,
+            strip_height: 38,
+            sidebar_width: 220,
+            show_single_tab: true,
+            restore: true,
         }
     }
 }

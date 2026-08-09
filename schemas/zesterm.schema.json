@@ -254,6 +254,67 @@
       },
       "type": "object"
     },
+    "Tabs": {
+      "properties": {
+        "position": {
+          "$ref": "#/$defs/TabsPosition",
+          "default": "top",
+          "description": "Where the tab strip lives: a horizontal strip at the top, or a vertical\nsidebar on the left.",
+          "x_zest_group": "Tabs",
+          "x_zest_widget": "select"
+        },
+        "restore": {
+          "default": true,
+          "description": "Reattach this window's tabs on the next launch.\n\nWhen off, every launch starts with one fresh local shell and existing\nsessions are reachable only through the picker.",
+          "type": "boolean",
+          "x_zest_group": "Tabs",
+          "x_zest_widget": "toggle"
+        },
+        "show_single_tab": {
+          "default": true,
+          "description": "Show the tab strip when only one tab is open.\n\nOn by default: the strip doubles as the titlebar, and a window whose\nchrome appears and disappears as tabs come and go is unsettling.",
+          "type": "boolean",
+          "x_zest_group": "Tabs",
+          "x_zest_widget": "toggle"
+        },
+        "sidebar_width": {
+          "default": 220,
+          "description": "Width of the vertical tab sidebar, in logical pixels.",
+          "format": "uint32",
+          "maximum": 400,
+          "minimum": 120,
+          "type": "integer",
+          "x_zest_group": "Tabs",
+          "x_zest_widget": "number"
+        },
+        "strip_height": {
+          "default": 38,
+          "description": "Height of the horizontal tab strip, in logical pixels.",
+          "format": "uint32",
+          "maximum": 64,
+          "minimum": 24,
+          "type": "integer",
+          "x_zest_group": "Tabs",
+          "x_zest_widget": "number"
+        }
+      },
+      "type": "object"
+    },
+    "TabsPosition": {
+      "description": "Where the tab strip lives.",
+      "oneOf": [
+        {
+          "const": "top",
+          "description": "A horizontal strip along the top of the window.",
+          "type": "string"
+        },
+        {
+          "const": "left",
+          "description": "A vertical sidebar on the left, wide enough to show each tab's host.",
+          "type": "string"
+        }
+      ]
+    },
     "Typography": {
       "properties": {
         "families": {
@@ -459,6 +520,17 @@
         "env": {}
       },
       "description": "What to run, and where."
+    },
+    "tabs": {
+      "$ref": "#/$defs/Tabs",
+      "default": {
+        "position": "top",
+        "restore": true,
+        "show_single_tab": true,
+        "sidebar_width": 220,
+        "strip_height": 38
+      },
+      "description": "The tab strip: where it lives and how it behaves."
     },
     "typography": {
       "$ref": "#/$defs/Typography",
