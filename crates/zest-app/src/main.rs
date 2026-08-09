@@ -15,6 +15,7 @@ mod daemon;
 mod daemon_client;
 mod fair_mutex;
 mod fleet;
+mod keymap;
 mod pipeline_cache;
 mod platform;
 mod remote;

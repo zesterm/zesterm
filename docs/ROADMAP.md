@@ -314,6 +314,18 @@ M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
       Landed with #23's chrome: `chrome::layout` is the pure pass issue #5
       sketched, and the tests pin the property (tab centres answer as their
       tab, close outranks its tab, a modal picker lets nothing through).
+- [x] **Every chord has a name and one table.** `zest-app/src/keymap.rs`:
+      `Action` enum + ordered `BINDINGS` (chord policy → action, first match
+      wins, table order = the old cascade's precedence), consulted by the
+      keyboard dispatch through an exhaustive `App::perform` — a new `Action`
+      without a handler is a compile error, and a chord that is not a table
+      row cannot exist. Modal overlays (the picker's type-to-filter) stay
+      outside the table on purpose: their keys are a line editor, not
+      commands. Behavior-preserving; the tricky arrivals are pinned by test
+      (⌘⇧[ arrives as `{`, Ctrl+Shift+C arrives uppercase, Shift+PgUp falls
+      through to the encoder in the alt screen). This is the rail for the
+      shortcuts sheet (next) and, one day, user-configurable keybindings — a
+      config section would layer over `BINDINGS` as data, not a rewrite.
 - [ ] Animation clock. Springs `(response, damping)`, not easing curves —
       terminal motion is interruption-dominated and a spring absorbs a changed
       target with continuous velocity for free. Substep the integrator

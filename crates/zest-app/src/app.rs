@@ -20,6 +20,7 @@ use crate::chrome::layout::ChromeLayout;
 use crate::chrome::model::{ChromeMetrics, ChromeModel, TabModel, TabOrigin, TabPresence};
 use crate::chrome::theme::ChromeColors;
 use crate::chrome::Insets;
+use crate::keymap;
 use crate::platform;
 use crate::session::{Session, Wakeup};
 use crate::source::{Origin, SessionSource};
@@ -806,6 +807,71 @@ impl App {
             }
             Ok(_) => {}
             Err(e) => tracing::debug!(error = %e, "nothing to paste"),
+        }
+    }
+
+    /// Run one table-resolved action.
+    ///
+    /// Exhaustive on purpose — no `_` arm: a new [`keymap::Action`] that can
+    /// be reached from the table without being handled here is a compile
+    /// error, not a dead shortcut.
+    fn perform(&mut self, action: keymap::Action, el: &ActiveEventLoop) {
+        use keymap::Action;
+        match action {
+            Action::NewTab => self.new_tab(),
+            Action::CloseTab => {
+                if let Some(tab) = self.tabs.active() {
+                    let addr = tab.addr;
+                    self.close_tab(addr, false, el);
+                }
+            }
+            Action::ToggleFleetPicker => self.toggle_picker(),
+            Action::ActivateTab(n) => {
+                if self.tabs.activate(usize::from(n)) {
+                    self.after_activation();
+                }
+            }
+            Action::ActivateLastTab => {
+                let last = self.tabs.len().saturating_sub(1);
+                if self.tabs.activate(last) {
+                    self.after_activation();
+                }
+            }
+            Action::PrevTab => {
+                if self.tabs.activate_prev() {
+                    self.after_activation();
+                }
+            }
+            Action::NextTab => {
+                if self.tabs.activate_next() {
+                    self.after_activation();
+                }
+            }
+            Action::Copy => self.copy_selection(),
+            Action::Paste => {
+                self.paste();
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            Action::CopyBlockOutput => self.copy_block_output(),
+            Action::RerunLastCommand => self.rerun_last_command(),
+            Action::ScrollPageUp => self.scroll_page(1),
+            Action::ScrollPageDown => self.scroll_page(-1),
+        }
+    }
+
+    /// Page the scrollback by one screen less a line of overlap — the overlap
+    /// is what makes paged reading continuous rather than guessing where the
+    /// seam was.
+    fn scroll_page(&mut self, dir: isize) {
+        let Some(session) = self.tabs.active_source() else { return };
+        let rows = session.terminal().lock().grid().rows();
+        let lines = dir * (rows.saturating_sub(1).max(1)) as isize;
+        session.terminal().lock().scroll_display(lines);
+        session.mark_dirty();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
         }
     }
 
@@ -2440,141 +2506,29 @@ impl ApplicationHandler<Wakeup> for App {
                     return;
                 }
 
-                // Tab chords, on the desktop's own modifier (⌘ here). Before
-                // the clipboard block because on macOS both tests are true
-                // for ⌘ — these letters are simply not c/v/o/r.
-                if key::belongs_to_desktop(self.modifiers) {
-                    if let winit::keyboard::Key::Character(c) = &event.logical_key {
-                        match c.as_str() {
-                            // Lowercase only: ⌘⇧T is reserved (reopen-closed,
-                            // one day), and shift produces the uppercase.
-                            "t" => {
-                                self.new_tab();
-                                return;
-                            }
-                            "k" => {
-                                self.toggle_picker();
-                                return;
-                            }
-                            "w" => {
-                                if let Some(tab) = self.tabs.active() {
-                                    let addr = tab.addr;
-                                    self.close_tab(addr, false, el);
-                                }
-                                return;
-                            }
-                            // ⌘1..⌘8 pick a tab; ⌘9 is "last", following the
-                            // browsers everyone's fingers learned it from.
-                            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" => {
-                                let n = c.as_bytes()[0] - b'1';
-                                if self.tabs.activate(usize::from(n)) {
-                                    self.after_activation();
-                                }
-                                return;
-                            }
-                            "9" => {
-                                let last = self.tabs.len().saturating_sub(1);
-                                if self.tabs.activate(last) {
-                                    self.after_activation();
-                                }
-                                return;
-                            }
-                            // ⌘⇧[ and ⌘⇧] arrive as { and }.
-                            "{" => {
-                                if self.tabs.activate_prev() {
-                                    self.after_activation();
-                                }
-                                return;
-                            }
-                            "}" => {
-                                if self.tabs.activate_next() {
-                                    self.after_activation();
-                                }
-                                return;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                // Ctrl+Tab / Ctrl+Shift+Tab cycle, as in every tabbed app.
-                if self.modifiers.control_key()
-                    && event.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Tab)
-                {
-                    let switched = if self.modifiers.shift_key() {
-                        self.tabs.activate_prev()
-                    } else {
-                        self.tabs.activate_next()
+                // Every global chord resolves through the one binding table.
+                // Adding a chord as an if-block here instead of a BINDINGS row
+                // is the bug the shortcuts sheet exists to prevent: the sheet
+                // renders from BINDINGS, so an unlisted chord is an
+                // undiscoverable one.
+                if let Some(binding) = keymap::lookup(&event.logical_key, self.modifiers) {
+                    let swallow = match binding.when {
+                        keymap::When::Always => true,
+                        // In the alternate screen the chord falls through to
+                        // the encoder rather than being swallowed: `less` and
+                        // `vim` page themselves and are owed the bytes.
+                        keymap::When::NotAltScreen => !self.tabs.active_source().is_some_and(|s| {
+                            s.terminal().lock().modes().contains(zest_core::Modes::ALT_SCREEN)
+                        }),
                     };
-                    if switched {
-                        self.after_activation();
-                    }
-                    return;
-                }
-
-                let Some(session) = self.tabs.active_source() else { return };
-
-                // Copy and paste, on whichever chord this desktop uses.
-                // See `key::is_clipboard_chord`.
-                if key::is_clipboard_chord(self.modifiers) {
-                    if let winit::keyboard::Key::Character(c) = &event.logical_key {
-                        match c.to_ascii_lowercase().as_str() {
-                            "c" => {
-                                self.copy_selection();
-                                return;
-                            }
-                            "v" => {
-                                self.paste();
-                                if let Some(w) = self.window.as_ref() {
-                                    w.request_redraw();
-                                }
-                                return;
-                            }
-                            // Command blocks. On the same chord as copy and
-                            // paste because they are the same kind of thing --
-                            // the desktop acting on the terminal rather than
-                            // the terminal receiving a keystroke -- and because
-                            // that chord is already the one the encoder refuses
-                            // to pass through to the shell.
-                            "o" => {
-                                self.copy_block_output();
-                                return;
-                            }
-                            "r" => {
-                                self.rerun_last_command();
-                                return;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-
-                let modes = session.terminal().lock().modes();
-
-                // Shift+PgUp/PgDn pages the scrollback. The shift is what makes
-                // this unambiguous: bare PgUp still belongs to the program, and
-                // in the alternate screen there is no scrollback to page through
-                // at all -- `less` and `vim` do their own paging and would be
-                // left showing a stale screen.
-                if self.modifiers.shift_key() && !modes.contains(zest_core::Modes::ALT_SCREEN) {
-                    let page = match &event.logical_key {
-                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::PageUp) => Some(1isize),
-                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::PageDown) => Some(-1),
-                        _ => None,
-                    };
-                    if let Some(dir) = page {
-                        // A page is one screen less a line of overlap, which is
-                        // what makes paged reading continuous rather than
-                        // guessing where the seam was.
-                        let rows = session.terminal().lock().grid().rows();
-                        let lines = dir * (rows.saturating_sub(1).max(1)) as isize;
-                        session.terminal().lock().scroll_display(lines);
-                        session.mark_dirty();
-                        if let Some(w) = self.window.as_ref() {
-                            w.request_redraw();
-                        }
+                    if swallow {
+                        self.perform(binding.action, el);
                         return;
                     }
                 }
+
+                let Some(session) = self.tabs.active_source() else { return };
+                let modes = session.terminal().lock().modes();
 
                 if let Some(bytes) = key::encode(&event, self.modifiers, modes) {
                     // Written synchronously, before anything else. Deferring
