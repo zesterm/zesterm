@@ -37,9 +37,11 @@ pub mod lan;
 pub mod local;
 pub mod server;
 pub mod session;
+pub mod ws;
 
 pub use auth::{Auth, Authenticator};
 pub use lan::LanListener;
+pub use ws::WsListener;
 pub use local::{connect, default_socket_path, listen};
 #[cfg(windows)]
 pub use local::PipeStream;
@@ -76,6 +78,16 @@ pub struct DaemonConfig {
     /// A preference, not a promise: if it is taken the listener falls back and
     /// advertises what it actually bound.
     pub lan_port: u16,
+    /// Accept WebSocket connections — the transport browsers can reach.
+    ///
+    /// Off by default, same posture as `listen_lan`: a public port is
+    /// something someone asks for. Independent of `listen_lan` because the
+    /// local web client needs this one without wanting raw TCP served.
+    pub listen_ws: bool,
+    /// Which interface to serve WebSocket clients on. `0.0.0.0` unless pinned.
+    pub ws_bind: String,
+    /// Which port to prefer for WebSocket clients. 0 means "always ephemeral".
+    pub ws_port: u16,
     /// Load zesterm's OSC 133 hook into shells this daemon spawns.
     ///
     /// On by default: it writes no file of the user's, and without it there are

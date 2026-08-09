@@ -751,6 +751,9 @@ mod tests {
                 listen_lan: false,
                 lan_bind: "127.0.0.1".into(),
                 lan_port: 0,
+                listen_ws: false,
+                ws_bind: "127.0.0.1".into(),
+                ws_port: 0,
                 shell_integration: true,
             };
             {

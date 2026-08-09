@@ -843,6 +843,23 @@ and the palette's block rows are specified in
       a window that looks right and lies. Identity is still ephemeral per
       launch, so the far host prompts each time; a stored identity (and the
       keychain prompt it drags onto this path) is deliberately future work.
+- [x] **The daemon serves WebSocket** (`--listen-ws`, default port 7718, off by
+      default like `--listen-lan`). The transport browsers can actually reach:
+      a hand-rolled server-side RFC 6455 codec in `zest-daemon/src/ws.rs` —
+      hand-rolled because `serve` requires independently owned read and write
+      halves and sync tungstenite cannot be split without a mutex deadlock or
+      two unsynchronized writers interleaving a pong into a keyframe; the
+      module docs carry the full argument. The WebSocket layer is a byte pipe:
+      the identical length-prefixed MessagePack stream, one binary message per
+      write batch, whole frames only — so `serve` is untouched and the
+      browser's streaming `FrameReader` runs unchanged. Same Ed25519 handshake,
+      same `accept_hardened` watchdog/cap/cooldown posture as the LAN,
+      deliberately no Origin check (auth is the signature, not ambient
+      authority) and deliberately no TLS yet (localhost is a secure context;
+      M4's tunnel terminates wss at the edge; LAN ws:// is parity with raw
+      TCP). Proven end to end by `tests/ws.rs` with tungstenite as the
+      *independent* client, and by `attach --ws`, which is also the
+      layer-isolating debug tool for everything the web client will build.
 - [ ] SQLite scrollback. Scrollback is in memory and bounded; a session that
       outlives its window does not yet outlive the daemon.
 
@@ -852,10 +869,11 @@ and the palette's block rows are specified in
 exporter cannot live in TypeScript, and "no path ownership" is the rule now
 anyway.
 
-The decoder was built before the daemon can be reached at all, which was the
-point: **a browser cannot open a unix socket or raw TCP, and the daemon speaks
-nothing else.** ADR-005 names the data plane as a binary WebSocket; nothing
-implements it. Everything below the first item waits on that.
+The decoder was built before the daemon could be reached at all, which was the
+point: a browser cannot open a unix socket or raw TCP, and for a long time the
+daemon spoke nothing else. **That blocker is gone**: ADR-005's binary WebSocket
+data plane exists (`zest-daemon --listen-ws`, WS-F above), so everything below
+is now unblocked and building.
 
 - [x] TypeScript delta decoder against the `ts-rs` bindings, replaying the
       conformance corpus frame by frame. `cargo xtask fixtures` exports
@@ -879,18 +897,28 @@ implements it. Everything below the first item waits on that.
       viewport sizes only `vim-macos` scrolled enough for `scroll`-before-`row`
       to matter, so the ordering invariant had one fixture behind it and now has
       three.
-- [ ] Grid renderer. **`@sigx/terminal` cannot be reused** — it paints TSX *to* a
-      TTY, which is the inverse of what a web client needs.
-
-      **Canvas 2D**, behind a "given a grid and its dirty rows, paint" seam.
-      Deltas already name the rows that changed, so repaints are row-scoped and
-      the usual reason to reach for WebGL never arises; `fillText` inherits the
-      browser's font fallback, colour emoji and PUA icons, which is the `Zyyy`
-      trap this project has already paid for once; and WebGL would share no code
-      with `zest-render-wgpu` without a wasm crate. Swap in an atlas backend on
-      measurement — a large grid repainting most rows below 60fps — not on
-      instinct.
-- [ ] SignalX app: session list, attach, input.
+- [x] Grid renderer: `@zesterm/render`, **Canvas 2D**, behind the "given a grid
+      and its dirty rows, paint" seam — repaints are row-scoped because deltas
+      name their rows, `fillText` inherits the browser's font fallback, colour
+      emoji and PUA icons (the `Zyyy` trap, already paid for once), and
+      backgrounds coalesce before glyphs so a wide char's spacer cannot erase
+      its right half. (**`@sigx/terminal` cannot be reused** — it paints TSX
+      *to* a TTY, the inverse job.) Swap in an atlas backend on measurement —
+      a large grid repainting most rows below 60fps — not on instinct.
+- [x] SignalX app: session list, attach, input — `@zesterm/app`, with the
+      control plane on `@sigx/actors` 0.7.0 exactly as ADR-005 draws it: a
+      `SessionDirectory` actor hosted by the sidecar (`@zesterm/sidecar`,
+      standalone Node in v1; M4's Bun-child-of-daemon shape is a packaging
+      change over the same code), fed by a loopback `watch_sessions` client,
+      read live over the actors WebSocket. Grid deltas never touch the actors
+      socket — the terminal view dials the daemon's binary WebSocket directly,
+      at an address it learned *from* the directory. V1 cuts, named: no
+      selection/copy, no mouse, no scrollback paging, no splits, no palette;
+      device identity is a localStorage seed until M4's enrollment. (IME was a
+      cut for one day: the first live run typed an emoji and the shell
+      received nothing, so composed-text input landed — a hidden textarea
+      whose composition commits ride `encodeComposedText`, un-bracketed
+      because a commit is typing, not a paste.)
 - [ ] Local echo prediction for high-latency links (mosh's other trick): predict
       printable-char echo when not in alt-screen, render dim, reconcile on delta
       arrival. The largest perceived-latency win available.
@@ -1119,6 +1147,14 @@ on each host. → ADR-005, ADR-006.
       lists, and you drop into grid view only when `alt_screen` is true, which
       the host already reports. Sticky `Ctrl` toggle, local history from the
       block index, long-press to re-run.
+
+      **Designed** → `docs/design/phone/README.md`, written against what the
+      web slice proved: the phone reuses `@zesterm/proto`/`auth`/`client`/
+      `theme` unchanged over a `lynx-websocket` `Dial`, reads the same
+      `SessionDirectory` live via `socketTransport({connect})`, and keeps a
+      persistent device key in secure storage from day one. The one open piece
+      is grid rendering on Lynx (no canvas package at 0.26); blocks-first is
+      what makes that deferrable.
 - [ ] **E2E encryption of the data plane** (Noise IK / HPKE, keys bound to
       device enrollment). The only mitigation that survives a hostile relay —
       first class, not a stretch goal. It converts Cloudflare from a trusted

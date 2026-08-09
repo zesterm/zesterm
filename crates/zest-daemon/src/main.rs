@@ -46,7 +46,10 @@ fn main() {
              \x20                   do not load the command-block hook into spawned\n\
              \x20                   shells (no file of yours is written either way)\n\
              --lan-bind <addr>   which interface (default 0.0.0.0)\n\
-             --lan-port <port>   preferred port (default 7717)\n\n\
+             --lan-port <port>   preferred port (default 7717)\n\
+             --listen-ws         serve WebSocket clients -- browsers (off by default)\n\
+             --ws-bind <addr>    which interface (default 0.0.0.0)\n\
+             --ws-port <port>    preferred port (default 7718)\n\n\
              Sessions outlive the clients attached to them. Closing a window\n\
              does not end a shell."
         );
@@ -196,6 +199,11 @@ fn main() {
         lan_port: opt("--lan-port")
             .and_then(|p| p.parse().ok())
             .unwrap_or(zest_daemon::lan::DEFAULT_PORT),
+        listen_ws: flag("--listen-ws"),
+        ws_bind: opt("--ws-bind").unwrap_or_else(|| "0.0.0.0".into()),
+        ws_port: opt("--ws-port")
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(zest_daemon::ws::DEFAULT_PORT),
         shell_integration: !flag("--no-shell-integration"),
     };
 
@@ -240,6 +248,15 @@ fn main() {
     } else {
         None
     };
+
+    // The WebSocket port, if asked for. Same failure posture as the LAN:
+    // refused, not degraded, and loopback keeps working while someone reads
+    // the error.
+    if config.listen_ws {
+        if let Err(e) = start_ws(&config, &registry, &auth) {
+            tracing::error!(error = %e, "not serving WebSocket clients; loopback is unaffected");
+        }
+    }
 
     // A signal runs no destructors, so without this the goodbye only goes out
     // when the process *returns* -- which a daemon never does. Every pkill,
@@ -318,6 +335,46 @@ fn start_lan(
         .map_err(|e| e.to_string())?;
 
     Ok(Some(advertiser))
+}
+
+/// Bind and start serving browsers.
+///
+/// No mDNS advertisement, unlike the LAN: a browser cannot browse mDNS, so
+/// the web client is handed this address by its control plane rather than
+/// discovering it. Advertising a port nothing can discover through would be
+/// one more record to go stale.
+fn start_ws(
+    config: &DaemonConfig,
+    registry: &Arc<Registry>,
+    auth: &Arc<Authenticator>,
+) -> Result<(), String> {
+    // Same check as the LAN, same reason: a trust store that cannot persist
+    // means every device re-prompts on every reconnect.
+    auth.trust().list().map_err(|e| format!("the trust store is unusable: {e}"))?;
+
+    let listener = zest_daemon::WsListener::bind(&config.ws_bind, config.ws_port)
+        .map_err(|e| e.to_string())?;
+    let addr = listener.local_addr();
+    tracing::info!(
+        %addr,
+        host = %config.host.short(),
+        "serving WebSocket clients; browsers dial ws://<this host>:{}",
+        addr.port()
+    );
+
+    let config = config.clone();
+    let registry = Arc::clone(registry);
+    let auth = Arc::clone(auth);
+    std::thread::Builder::new()
+        .name("zest-daemon-ws".into())
+        .spawn(move || {
+            if let Err(e) = listener.serve_forever(config, registry, auth) {
+                tracing::error!(error = %e, "the WebSocket listener stopped");
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
 }
 
 /// Ask on stdin when a device wants to pair.

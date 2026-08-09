@@ -1,0 +1,23 @@
+{
+  "name": "@zesterm/auth",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The Ed25519 handshake: preimages, the auth transcript, pairing codes.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@noble/ed25519": "^3.0.0",
+    "@noble/hashes": "^2.0.0",
+    "@zesterm/proto": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3"
+  }
+}

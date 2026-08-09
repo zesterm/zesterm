@@ -1,0 +1,34 @@
+{
+  "name": "@zesterm/app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The zesterm web app: a sigx shell over the control-plane actors and the binary data plane.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vite build --logLevel error"
+  },
+  "dependencies": {
+    "@sigx/actors": "^0.7.0",
+    "@sigx/actors-ws": "^0.7.0",
+    "@sigx/reactivity": "^0.15.3",
+    "@sigx/serialize": "^0.15.3",
+    "@sigx/server": "^0.15.3",
+    "@zesterm/auth": "workspace:*",
+    "@zesterm/client": "workspace:*",
+    "@zesterm/control": "workspace:*",
+    "@zesterm/input": "workspace:*",
+    "@zesterm/proto": "workspace:*",
+    "@zesterm/render": "workspace:*",
+    "@zesterm/theme": "workspace:*",
+    "sigx": "^0.15.3"
+  },
+  "devDependencies": {
+    "@sigx/vite": "^0.15.3",
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.0"
+  }
+}

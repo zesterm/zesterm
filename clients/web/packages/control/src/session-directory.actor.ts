@@ -1,0 +1,133 @@
+/**
+ * The fleet's session list, as a virtual actor.
+ *
+ * ADR-005's line, held in code: actors are the **control plane** — session
+ * list, cwd, where the data plane lives — and never carry a grid byte. The
+ * sidecar's daemon feed is this actor's only writer; every UI is a live
+ * reader. The actor never computes anything about a session, because the
+ * daemon owns that truth and pushes it whole.
+ *
+ * Key is `'local'` in v1 — one daemon per sidecar. When the fleet arrives,
+ * the key becomes the `HostId` and the same shape scales to one directory
+ * actor per host, which is exactly what virtual actors are for.
+ *
+ * State is deliberately **never persisted**: a directory restored from disk
+ * would show ghost sessions until the feed reconnects, and "possibly stale
+ * list" is strictly worse than "connecting…". The feed re-primes on connect,
+ * so activation-fresh state costs one push.
+ */
+
+import { defineActor } from '@sigx/actors';
+
+/**
+ * `SessionInfo`, projected to plain JSON. `SessionId` is a `bigint` in the
+ * proto package; the actor wire is `@sigx/serialize` JSON and the UI only
+ * compares and displays ids, so a string is honest and portable.
+ */
+export interface SessionEntry {
+  readonly host: string;
+  readonly session: string;
+  readonly title: string;
+  readonly cwd: string;
+  readonly cols: number;
+  readonly rows: number;
+  /** What the phone's blocks-first view switches on. */
+  readonly altScreen: boolean;
+  readonly attached: boolean;
+}
+
+export interface HostInfo {
+  /** 64 hex chars. */
+  readonly id: string;
+  readonly label: string;
+}
+
+/** Where the binary WebSocket data plane listens — the daemon's port, never the sidecar's. */
+export interface DataPlane {
+  readonly host: string;
+  readonly port: number;
+}
+
+export interface DirectoryState {
+  v: 1;
+  /** Whether the sidecar currently holds its daemon connection. */
+  connected: boolean;
+  host: HostInfo | null;
+  sessions: SessionEntry[];
+  /**
+   * How a browser reaches the grid. Learned from the control plane rather
+   * than hardcoded — the seam the daemon's `--listen-ws` address plugs into.
+   */
+  dataPlane: DataPlane | null;
+  /** The newest session this connection created, for select-on-create UIs. */
+  lastCreated: string | null;
+}
+
+export interface DirectoryView {
+  readonly connected: boolean;
+  readonly host: HostInfo | null;
+  readonly sessions: readonly SessionEntry[];
+  readonly dataPlane: DataPlane | null;
+  readonly lastCreated: string | null;
+}
+
+/**
+ * v1 posture, stated where it bites: `allowAnonymous` because the sidecar
+ * binds loopback and serves same-origin, so reaching this socket is the same
+ * authority the daemon's own loopback socket accepts. The write methods being
+ * wire-callable is a cosmetic-corruption risk only — the next daemon push
+ * overwrites. The tightening (a policy allowing only `list` for wire
+ * principals) lands with device enrollment; see docs/design/phone/README.md.
+ */
+export const SessionDirectory = defineActor({
+  type: 'SessionDirectory',
+  allowAnonymous: true,
+  state: (): DirectoryState => ({
+    v: 1,
+    connected: false,
+    host: null,
+    sessions: [],
+    dataPlane: null,
+    lastCreated: null,
+  }),
+  methods: (ctx) => ({
+    /** The one read; `useActorState(..., 'list', { live: true })` rides it. */
+    async list(): Promise<DirectoryView> {
+      return {
+        connected: ctx.state.connected,
+        host: ctx.state.host,
+        sessions: ctx.state.sessions,
+        dataPlane: ctx.state.dataPlane,
+        lastCreated: ctx.state.lastCreated,
+      };
+    },
+
+    /**
+     * Feed-only: the daemon pushed a complete listing. Replace, never merge —
+     * the daemon's list is the truth and a merge would resurrect closed
+     * sessions.
+     */
+    async replaceAll(sessions: SessionEntry[], created: string | null): Promise<void> {
+      ctx.state.sessions = sessions;
+      if (created !== null) ctx.state.lastCreated = created;
+      // No ctx.save(), here or anywhere: see the module doc.
+    },
+
+    /** Feed-only: the daemon link came up or went down. */
+    async setLink(
+      connected: boolean,
+      host: HostInfo | null,
+      dataPlane: DataPlane | null,
+    ): Promise<void> {
+      ctx.state.connected = connected;
+      if (host !== null) ctx.state.host = host;
+      if (dataPlane !== null) ctx.state.dataPlane = dataPlane;
+      if (!connected) {
+        // A disconnected feed means the list can no longer be trusted; an
+        // empty list under a "disconnected" banner beats a stale one under
+        // none.
+        ctx.state.sessions = [];
+      }
+    },
+  }),
+});

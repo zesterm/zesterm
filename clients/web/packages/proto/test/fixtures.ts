@@ -56,12 +56,31 @@ export interface RowExpect {
   marks?: MarkExpect[];
 }
 
+/**
+ * A block expectation, in the wire's own JSON shape (serialized
+ * `BlockPayload`): line ids as numbers, state internally tagged, timestamps
+ * absent when the host never stamped them.
+ */
+export interface BlockExpect {
+  id: number;
+  prompt_line: number;
+  output_line: number | null;
+  end_line: number | null;
+  state: { state: 'prompt' } | { state: 'running' } | { state: 'finished'; exit_code: number | null };
+  command: string;
+  cwd: string;
+  started_ms?: number;
+  ended_ms?: number;
+}
+
 export interface FrameExpect {
   cursor: { row: number; col: number; visible: boolean; shape: number };
   modes: number;
   alt_screen: boolean;
   title: string;
   rows: RowExpect[];
+  /** Absent when the host held no blocks; `[]` and absent mean the same. */
+  blocks?: BlockExpect[];
 }
 
 export interface FixtureFrame {
@@ -97,9 +116,28 @@ export function loadFixture(name: string): Fixture {
 /** Every recording on disk, so a new one is picked up without editing a list. */
 export function fixtureNames(): string[] {
   return readdirSync(FIXTURES_DIR)
-    .filter((f) => f.endsWith('.json') && f !== 'bits.json')
+    .filter((f) => f.endsWith('.json') && f !== 'bits.json' && f !== 'client-messages.json')
     .map((f) => f.replace(/\.json$/, ''))
     .sort();
+}
+
+/** The canonical `ClientMessage` encodings the TS encoder is held byte-equal to. */
+export function loadClientMessages(): {
+  schema: number;
+  protocol: number;
+  messages: Array<{ name: string; wire: string }>;
+} {
+  const g = JSON.parse(readFileSync(join(FIXTURES_DIR, 'client-messages.json'), 'utf8')) as {
+    schema: number;
+    protocol: number;
+    messages: Array<{ name: string; wire: string }>;
+  };
+  if (g.schema !== FIXTURE_SCHEMA) {
+    throw new Error(
+      `client-messages.json is schema ${g.schema}, this suite reads ${FIXTURE_SCHEMA}`,
+    );
+  }
+  return g;
 }
 
 export function loadBits(): {

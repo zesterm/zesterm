@@ -1,0 +1,21 @@
+{
+  "name": "@zesterm/input",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Keyboard events to terminal byte sequences: the zest-input key encoder, ported to browser KeyboardEvent semantics.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@zesterm/proto": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3"
+  }
+}

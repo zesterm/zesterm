@@ -17,6 +17,11 @@
 //! throwaway, so an unpaired host will prompt and print a code; compare it with
 //! the one this prints, the same ritual as `pair`.
 //!
+//! `--ws <host:port>` does it over the WebSocket transport (the daemon needs
+//! `--listen-ws`). This is the layer-isolating tool for the web client: when a
+//! session misbehaves in a browser, this says whether the daemon's WebSocket
+//! transport or the browser's stack is at fault, with no browser involved.
+//!
 //! `--close` ends the session on the way out instead of merely detaching. It is
 //! the only way to see the difference from outside the daemon: detaching leaves
 //! the child running by design, so "did closing actually end it" is a question
@@ -46,9 +51,27 @@ fn main() {
     // useless against a microsecond claim.
     let ping: usize = opt("--ping").and_then(|s| s.parse().ok()).unwrap_or(0);
 
-    // Two transports, one loop: the protocol is transport-blind and this
+    // Three transports, one loop: the protocol is transport-blind and this
     // example should prove that, not re-litigate it.
-    if let Some(addr) = opt("--addr") {
+    if let Some(addr) = opt("--ws") {
+        let stream = match std::net::TcpStream::connect(&addr) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[attach] could not reach {addr}: {e}");
+                eprintln!("[attach] the daemon needs --listen-ws");
+                std::process::exit(1);
+            }
+        };
+        let (reader, writer) = match zest_daemon::ws::client::connect(stream) {
+            Ok(halves) => halves,
+            Err(e) => {
+                eprintln!("[attach] the WebSocket upgrade failed: {e}");
+                std::process::exit(1);
+            }
+        };
+        eprintln!("[attach] connected to {addr} (websocket)");
+        run(reader, Arc::new(Mutex::new(writer)), cmd, seconds, close, ping);
+    } else if let Some(addr) = opt("--addr") {
         let stream = match std::net::TcpStream::connect(&addr) {
             Ok(s) => s,
             Err(e) => {
@@ -57,9 +80,9 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        let closer = stream.try_clone().expect("clone the stream for the deadline thread");
+        let writer = stream.try_clone().expect("clone the stream for the writer");
         eprintln!("[attach] connected to {addr} (tcp)");
-        run(stream, closer, cmd, seconds, close, ping);
+        run(stream, Arc::new(Mutex::new(writer)), cmd, seconds, close, ping);
     } else {
         let socket = opt("--socket").unwrap_or_else(default_socket_path);
         let stream = match connect(&socket) {
@@ -70,24 +93,28 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        let closer = stream.try_clone().expect("clone the stream for the deadline thread");
+        let writer = stream.try_clone().expect("clone the stream for the writer");
         eprintln!("[attach] connected to {socket}");
-        run(stream, closer, cmd, seconds, close, ping);
+        run(stream, Arc::new(Mutex::new(writer)), cmd, seconds, close, ping);
     }
 }
 
-fn run<S: Read + Write + Send + 'static>(
-    mut stream: S,
-    mut closer: S,
+/// Read and write halves taken separately, because the WebSocket transport
+/// cannot hand out one bidirectional value — and a shared writer is what lets
+/// the deadline thread close the session on any transport.
+fn run<R: Read + Send + 'static, W: Write + Send + 'static>(
+    mut stream: R,
+    writer: Arc<Mutex<W>>,
     cmd: String,
     seconds: u64,
     close: bool,
     ping: usize,
 ) {
-    let send = |stream: &mut _, msg: &ClientMessage| {
+    let send = |writer: &Arc<Mutex<W>>, msg: &ClientMessage| {
         let bytes = frame::encode(msg).expect("encode");
-        Write::write_all(stream, &bytes).expect("write");
-        Write::flush(stream).expect("flush");
+        let mut w = writer.lock().expect("writer");
+        Write::write_all(&mut *w, &bytes).expect("write");
+        Write::flush(&mut *w).expect("flush");
     };
 
     // A throwaway key. This is a diagnostic, not a device: it should not
@@ -97,7 +124,7 @@ fn run<S: Read + Write + Send + 'static>(
     eprintln!("[attach] client {}", identity.client_id().short());
 
     send(
-        &mut stream,
+        &writer,
         &ClientMessage::Hello {
             version: PROTOCOL_VERSION,
             client: identity.client_id(),
@@ -125,6 +152,7 @@ fn run<S: Read + Write + Send + 'static>(
 
     {
         let opened = Arc::clone(&opened);
+        let writer = Arc::clone(&writer);
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(seconds));
             if close {
@@ -132,8 +160,10 @@ fn run<S: Read + Write + Send + 'static>(
                     eprintln!("[attach] closing {session}");
                     let bytes = frame::encode(&ClientMessage::CloseSession { session })
                         .expect("encode");
-                    let _ = Write::write_all(&mut closer, &bytes);
-                    let _ = Write::flush(&mut closer);
+                    let mut w = writer.lock().expect("writer");
+                    let _ = Write::write_all(&mut *w, &bytes);
+                    let _ = Write::flush(&mut *w);
+                    drop(w);
                     // The daemon hangs the child up synchronously, so give the
                     // write time to be served before this process disappears.
                     std::thread::sleep(Duration::from_millis(500));
@@ -171,7 +201,7 @@ fn run<S: Read + Write + Send + 'static>(
                 HostMessage::Welcome { host, label, .. } => {
                     eprintln!("[attach] authenticated to {} ({label})", host.short());
                     if let Some(msg) = create.take() {
-                        send(&mut stream, &msg);
+                        send(&writer, &msg);
                     }
                 }
                 HostMessage::Sessions { sessions, .. } => {
@@ -182,7 +212,7 @@ fn run<S: Read + Write + Send + 'static>(
                     if !attached {
                         if let Some(s) = sessions.last() {
                             send(
-                                &mut stream,
+                                &writer,
                                 &ClientMessage::Attach { session: s.addr, cols: 100, rows: 30 },
                             );
                             *opened.lock().expect("session slot") = Some(s.addr);
@@ -201,7 +231,7 @@ fn run<S: Read + Write + Send + 'static>(
                     );
                     if ping > 0 {
                         pinged = Some(session);
-                        send(&mut stream, &ClientMessage::Input { session, bytes: vec![b'.'] });
+                        send(&writer, &ClientMessage::Input { session, bytes: vec![b'.'] });
                         sent_at = Some(Instant::now());
                         continue;
                     }
@@ -223,7 +253,7 @@ fn run<S: Read + Write + Send + 'static>(
                             std::process::exit(0);
                         }
                         if let Some(session) = pinged {
-                            send(&mut stream, &ClientMessage::Input { session, bytes: vec![b'.'] });
+                            send(&writer, &ClientMessage::Input { session, bytes: vec![b'.'] });
                             sent_at = Some(Instant::now());
                         }
                         continue;
@@ -295,7 +325,7 @@ fn run<S: Read + Write + Send + 'static>(
                         &zest_mesh::pairing::auth_transcript(&transcript),
                     );
                     send(
-                        &mut stream,
+                        &writer,
                         &ClientMessage::Auth {
                             signature: zest_proto::Sig64::from_bytes(sig.to_bytes()),
                         },

@@ -1,0 +1,24 @@
+{
+  "name": "@zesterm/client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The data-plane session client: handshake, attach, deltas in, input out.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@zesterm/auth": "workspace:*",
+    "@zesterm/proto": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3",
+    "@noble/ed25519": "^3.0.0",
+    "@noble/hashes": "^2.0.0"
+  }
+}

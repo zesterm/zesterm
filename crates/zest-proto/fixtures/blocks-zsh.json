@@ -2047,6 +2047,19 @@
               ]
             ]
           }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": null,
+            "end_line": null,
+            "state": {
+              "state": "prompt"
+            },
+            "command": "",
+            "cwd": "/tmp/zestdemo"
+          }
         ]
       }
     },
@@ -2455,6 +2468,19 @@
                 0
               ]
             ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": null,
+            "end_line": null,
+            "state": {
+              "state": "prompt"
+            },
+            "command": "",
+            "cwd": "/tmp/zestdemo"
           }
         ]
       }
@@ -2865,6 +2891,19 @@
               ]
             ]
           }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": null,
+            "end_line": null,
+            "state": {
+              "state": "prompt"
+            },
+            "command": "",
+            "cwd": "/tmp/zestdemo"
+          }
         ]
       }
     },
@@ -3273,6 +3312,19 @@
                 0
               ]
             ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": null,
+            "end_line": null,
+            "state": {
+              "state": "prompt"
+            },
+            "command": "",
+            "cwd": "/tmp/zestdemo"
           }
         ]
       }
@@ -3683,6 +3735,19 @@
               ]
             ]
           }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": null,
+            "end_line": null,
+            "state": {
+              "state": "prompt"
+            },
+            "command": "",
+            "cwd": "/tmp/zestdemo"
+          }
         ]
       }
     },
@@ -4091,6 +4156,19 @@
                 0
               ]
             ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": null,
+            "end_line": null,
+            "state": {
+              "state": "prompt"
+            },
+            "command": "",
+            "cwd": "/tmp/zestdemo"
           }
         ]
       }
@@ -4501,6 +4579,19 @@
               ]
             ]
           }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": null,
+            "end_line": null,
+            "state": {
+              "state": "prompt"
+            },
+            "command": "",
+            "cwd": "/tmp/zestdemo"
+          }
         ]
       }
     },
@@ -4909,6 +5000,19 @@
                 0
               ]
             ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": 4,
+            "end_line": null,
+            "state": {
+              "state": "running"
+            },
+            "command": "echo hello",
+            "cwd": "/tmp/zestdemo"
           }
         ]
       }
@@ -5319,6 +5423,19 @@
               ]
             ]
           }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": 4,
+            "end_line": null,
+            "state": {
+              "state": "running"
+            },
+            "command": "echo hello",
+            "cwd": "/tmp/zestdemo"
+          }
         ]
       }
     },
@@ -5727,6 +5844,19 @@
                 0
               ]
             ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": 4,
+            "end_line": null,
+            "state": {
+              "state": "running"
+            },
+            "command": "echo hello",
+            "cwd": "/tmp/zestdemo"
           }
         ]
       }
@@ -6137,6 +6267,20 @@
               ]
             ]
           }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": 4,
+            "end_line": 4,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "echo hello",
+            "cwd": "/tmp/zestdemo"
+          }
         ]
       }
     },
@@ -6545,6 +6689,20 @@
                 0
               ]
             ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": 4,
+            "end_line": 4,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "echo hello",
+            "cwd": "/tmp/zestdemo"
           }
         ]
       }
@@ -6955,6 +7113,31 @@
               ]
             ]
           }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": 4,
+            "end_line": 4,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "echo hello",
+            "cwd": "/tmp/zestdemo"
+          },
+          {
+            "id": 1,
+            "prompt_line": 5,
+            "output_line": null,
+            "end_line": null,
+            "state": {
+              "state": "prompt"
+            },
+            "command": "",
+            "cwd": "/tmp/zestdemo"
+          }
         ]
       }
     },
@@ -7363,6 +7546,31 @@
                 0
               ]
             ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": 4,
+            "end_line": 4,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "echo hello",
+            "cwd": "/tmp/zestdemo"
+          },
+          {
+            "id": 1,
+            "prompt_line": 5,
+            "output_line": null,
+            "end_line": null,
+            "state": {
+              "state": "prompt"
+            },
+            "command": "",
+            "cwd": "/tmp/zestdemo"
           }
         ]
       }
@@ -7773,6 +7981,31 @@
               ]
             ]
           }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": 4,
+            "end_line": 4,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "echo hello",
+            "cwd": "/tmp/zestdemo"
+          },
+          {
+            "id": 1,
+            "prompt_line": 5,
+            "output_line": null,
+            "end_line": null,
+            "state": {
+              "state": "prompt"
+            },
+            "command": "",
+            "cwd": "/tmp/zestdemo"
+          }
         ]
       }
     },
@@ -8181,6 +8414,31 @@
                 0
               ]
             ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": 4,
+            "end_line": 4,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "echo hello",
+            "cwd": "/tmp/zestdemo"
+          },
+          {
+            "id": 1,
+            "prompt_line": 5,
+            "output_line": null,
+            "end_line": null,
+            "state": {
+              "state": "prompt"
+            },
+            "command": "",
+            "cwd": "/tmp/zestdemo"
           }
         ]
       }
@@ -8591,6 +8849,31 @@
               ]
             ]
           }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": 4,
+            "end_line": 4,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "echo hello",
+            "cwd": "/tmp/zestdemo"
+          },
+          {
+            "id": 1,
+            "prompt_line": 5,
+            "output_line": null,
+            "end_line": null,
+            "state": {
+              "state": "prompt"
+            },
+            "command": "",
+            "cwd": "/tmp/zestdemo"
+          }
         ]
       }
     },
@@ -8999,6 +9282,31 @@
                 0
               ]
             ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": 4,
+            "end_line": 4,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "echo hello",
+            "cwd": "/tmp/zestdemo"
+          },
+          {
+            "id": 1,
+            "prompt_line": 5,
+            "output_line": 6,
+            "end_line": null,
+            "state": {
+              "state": "running"
+            },
+            "command": "false",
+            "cwd": "/tmp/zestdemo"
           }
         ]
       }
@@ -9409,6 +9717,31 @@
               ]
             ]
           }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": 4,
+            "end_line": 4,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "echo hello",
+            "cwd": "/tmp/zestdemo"
+          },
+          {
+            "id": 1,
+            "prompt_line": 5,
+            "output_line": 6,
+            "end_line": null,
+            "state": {
+              "state": "running"
+            },
+            "command": "false",
+            "cwd": "/tmp/zestdemo"
+          }
         ]
       }
     },
@@ -9817,6 +10150,32 @@
                 0
               ]
             ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": 4,
+            "end_line": 4,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "echo hello",
+            "cwd": "/tmp/zestdemo"
+          },
+          {
+            "id": 1,
+            "prompt_line": 5,
+            "output_line": 6,
+            "end_line": 5,
+            "state": {
+              "state": "finished",
+              "exit_code": 1
+            },
+            "command": "false",
+            "cwd": "/tmp/zestdemo"
           }
         ]
       }
@@ -10227,6 +10586,32 @@
               ]
             ]
           }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": 4,
+            "end_line": 4,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "echo hello",
+            "cwd": "/tmp/zestdemo"
+          },
+          {
+            "id": 1,
+            "prompt_line": 5,
+            "output_line": 6,
+            "end_line": 5,
+            "state": {
+              "state": "finished",
+              "exit_code": 1
+            },
+            "command": "false",
+            "cwd": "/tmp/zestdemo"
+          }
         ]
       }
     },
@@ -10635,6 +11020,43 @@
                 0
               ]
             ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": 4,
+            "end_line": 4,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "echo hello",
+            "cwd": "/tmp/zestdemo"
+          },
+          {
+            "id": 1,
+            "prompt_line": 5,
+            "output_line": 6,
+            "end_line": 5,
+            "state": {
+              "state": "finished",
+              "exit_code": 1
+            },
+            "command": "false",
+            "cwd": "/tmp/zestdemo"
+          },
+          {
+            "id": 2,
+            "prompt_line": 6,
+            "output_line": null,
+            "end_line": null,
+            "state": {
+              "state": "prompt"
+            },
+            "command": "",
+            "cwd": "/tmp/zestdemo"
           }
         ]
       }
@@ -11045,6 +11467,43 @@
               ]
             ]
           }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": 4,
+            "end_line": 4,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "echo hello",
+            "cwd": "/tmp/zestdemo"
+          },
+          {
+            "id": 1,
+            "prompt_line": 5,
+            "output_line": 6,
+            "end_line": 5,
+            "state": {
+              "state": "finished",
+              "exit_code": 1
+            },
+            "command": "false",
+            "cwd": "/tmp/zestdemo"
+          },
+          {
+            "id": 2,
+            "prompt_line": 6,
+            "output_line": null,
+            "end_line": null,
+            "state": {
+              "state": "prompt"
+            },
+            "command": "",
+            "cwd": "/tmp/zestdemo"
+          }
         ]
       }
     },
@@ -11453,6 +11912,43 @@
                 0
               ]
             ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": 4,
+            "end_line": 4,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "echo hello",
+            "cwd": "/tmp/zestdemo"
+          },
+          {
+            "id": 1,
+            "prompt_line": 5,
+            "output_line": 6,
+            "end_line": 5,
+            "state": {
+              "state": "finished",
+              "exit_code": 1
+            },
+            "command": "false",
+            "cwd": "/tmp/zestdemo"
+          },
+          {
+            "id": 2,
+            "prompt_line": 6,
+            "output_line": null,
+            "end_line": null,
+            "state": {
+              "state": "prompt"
+            },
+            "command": "",
+            "cwd": "/tmp/zestdemo"
           }
         ]
       }
@@ -11863,6 +12359,43 @@
               ]
             ]
           }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": 4,
+            "end_line": 4,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "echo hello",
+            "cwd": "/tmp/zestdemo"
+          },
+          {
+            "id": 1,
+            "prompt_line": 5,
+            "output_line": 6,
+            "end_line": 5,
+            "state": {
+              "state": "finished",
+              "exit_code": 1
+            },
+            "command": "false",
+            "cwd": "/tmp/zestdemo"
+          },
+          {
+            "id": 2,
+            "prompt_line": 6,
+            "output_line": null,
+            "end_line": null,
+            "state": {
+              "state": "prompt"
+            },
+            "command": "",
+            "cwd": "/tmp/zestdemo"
+          }
         ]
       }
     },
@@ -12271,6 +12804,43 @@
                 0
               ]
             ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 3,
+            "output_line": 4,
+            "end_line": 4,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "echo hello",
+            "cwd": "/tmp/zestdemo"
+          },
+          {
+            "id": 1,
+            "prompt_line": 5,
+            "output_line": 6,
+            "end_line": 5,
+            "state": {
+              "state": "finished",
+              "exit_code": 1
+            },
+            "command": "false",
+            "cwd": "/tmp/zestdemo"
+          },
+          {
+            "id": 2,
+            "prompt_line": 6,
+            "output_line": 7,
+            "end_line": null,
+            "state": {
+              "state": "running"
+            },
+            "command": "exit",
+            "cwd": "/tmp/zestdemo"
           }
         ]
       }

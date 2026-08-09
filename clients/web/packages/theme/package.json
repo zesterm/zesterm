@@ -1,0 +1,18 @@
+{
+  "name": "@zesterm/theme",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "zest-theme's token vocabulary in TypeScript: the 24-key UiTokens record, the built-in themes, derived chrome surfaces, and the resolved terminal palette.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3"
+  }
+}

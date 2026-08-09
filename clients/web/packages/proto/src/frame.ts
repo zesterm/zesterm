@@ -15,6 +15,24 @@ export class FrameError extends Error {
 }
 
 /**
+ * Wrap one encoded message body in its length prefix — `frame.rs`'s `encode`,
+ * minus the MessagePack step, which `wire-client.ts` owns.
+ *
+ * Emitted on every transport, including WebSocket where the message boundary
+ * makes it redundant: the daemon does the same on its side, deliberately, so
+ * neither end special-cases a transport.
+ */
+export function encodeFrame(body: Uint8Array): Uint8Array {
+  if (body.length > MAX_FRAME) {
+    throw new FrameError(`frame of ${body.length} bytes exceeds the ${MAX_FRAME} byte limit`);
+  }
+  const out = new Uint8Array(4 + body.length);
+  new DataView(out.buffer).setUint32(0, body.length, true);
+  out.set(body, 4);
+  return out;
+}
+
+/**
  * Reassembles frames from a byte stream that arrives in arbitrary pieces.
  *
  * `feed` then `next` until it returns `undefined`, which is "not yet", never

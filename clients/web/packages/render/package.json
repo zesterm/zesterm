@@ -1,0 +1,22 @@
+{
+  "name": "@zesterm/render",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The Canvas 2D grid painter: (grid, dirtyRows) → paint. Row-scoped repaints, colors resolved against the theme at paint time only.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@zesterm/proto": "workspace:*",
+    "@zesterm/theme": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3"
+  }
+}

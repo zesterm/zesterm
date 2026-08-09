@@ -142,6 +142,34 @@ for (const name of names) {
       );
       assert.equal(view.title, want.title, `${name} frame ${i}: window title diverged`);
 
+      // Blocks against the host's own index, at every frame — the phone's
+      // whole view. Line ids stringified so bigint and number compare on
+      // value; state compared structurally so a null exit code cannot pass
+      // as a zero.
+      const wantBlocks = (want.blocks ?? []).map((b) => ({
+        id: b.id,
+        prompt_line: String(b.prompt_line),
+        output_line: b.output_line === null ? null : String(b.output_line),
+        end_line: b.end_line === null ? null : String(b.end_line),
+        state: b.state,
+        command: b.command,
+        cwd: b.cwd,
+      }));
+      const gotBlocks = view.blocks.map((b) => ({
+        id: b.id,
+        prompt_line: String(b.prompt_line),
+        output_line: b.output_line === null ? null : String(b.output_line),
+        end_line: b.end_line === null ? null : String(b.end_line),
+        state: b.state,
+        command: b.command,
+        cwd: b.cwd,
+      }));
+      assert.deepEqual(
+        gotBlocks,
+        wantBlocks,
+        `${name} frame ${i}: the block index diverged from the host's`,
+      );
+
       frames += 1;
     }
 
