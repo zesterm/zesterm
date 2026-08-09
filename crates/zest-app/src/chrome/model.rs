@@ -74,32 +74,36 @@ pub struct PickerModel {
     pub scroll: f32,
 }
 
-/// One line of the shortcuts sheet: a name and the chord that does it.
+/// One row of the command palette, ready to draw.
+///
+/// Display-only, like [`PickerRow`]: the app keeps a parallel list of the
+/// actions each row runs, built in the same pass, so index `n` means the
+/// same thing to the renderer and the input path by construction.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ShortcutRow {
-    pub name: String,
-    /// Already platform-spelled by `keymap::chord_label` — the chrome draws
-    /// strings, it does not know what a modifier is.
-    pub chord: String,
+pub enum PaletteRow {
+    /// A category header ("Tabs", "Mouse").
+    Group { title: String },
+    /// A command. `chord` is already platform-spelled by
+    /// `keymap::chord_label` (empty when the command has none — the chrome
+    /// draws strings, it does not know what a modifier is). Reference rows
+    /// — mouse gestures, footnotes — are `runnable: false`, drawn without a
+    /// selection affordance and skipped by the keyboard.
+    Command { name: String, chord: String, runnable: bool },
 }
 
-/// A titled group of shortcut rows, with an optional footnote.
+/// The command palette, when open.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ShortcutSection {
-    pub title: String,
-    pub rows: Vec<ShortcutRow>,
-    /// A faint line under the section — the "both chords work" fact.
-    pub note: Option<String>,
-}
-
-/// The shortcuts sheet, when open.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ShortcutsModel {
-    /// Pre-filtered by the app; empty sections never arrive here.
-    pub sections: Vec<ShortcutSection>,
+pub struct PaletteModel {
+    /// Pre-filtered by the app; empty groups never arrive here.
+    pub rows: Vec<PaletteRow>,
+    /// Index into `rows` the keyboard is on.
+    pub selected: usize,
     pub filter: String,
     /// Scroll offset, physical pixels; layout clamps it.
     pub scroll: f32,
+    /// Bring the selected row into view this pass — keyboard navigation
+    /// only, so wheel scrolling never snaps back to the selection.
+    pub ensure_visible: bool,
 }
 
 /// The value half of a settings row, as it should be drawn.
@@ -191,9 +195,9 @@ pub struct ChromeModel {
     pub focused: bool,
     /// The fleet picker, drawn over everything when open.
     pub picker: Option<PickerModel>,
-    /// The shortcuts sheet, likewise modal. The app enforces that at most
+    /// The command palette, likewise modal. The app enforces that at most
     /// one overlay is open, so layout never has to rank them.
-    pub shortcuts: Option<ShortcutsModel>,
+    pub palette: Option<PaletteModel>,
     /// The settings overlay, likewise modal and likewise exclusive.
     pub settings: Option<SettingsModel>,
 }

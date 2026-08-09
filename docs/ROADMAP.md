@@ -45,7 +45,7 @@ move.
 
 ## Status
 
-**691 tests, six gates green**, measured on macOS rather than remembered.
+**692 tests, six gates green**, measured on macOS rather than remembered.
 First paint 35ms **on Windows**; the Mac paints against a different compositor
 and its number (48ms) is reported rather than gated.
 
@@ -324,20 +324,24 @@ M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
       commands. Behavior-preserving; the tricky arrivals are pinned by test
       (⌘⇧[ arrives as `{`, Ctrl+Shift+C arrives uppercase, Shift+PgUp falls
       through to the encoder in the alt screen). This is the rail for the
-      shortcuts sheet (below) and, one day, user-configurable keybindings — a
+      command palette (below) and, one day, user-configurable keybindings — a
       config section would layer over `BINDINGS` as data, not a rewrite.
-- [x] **The shortcuts sheet (⌘/, also ⌘? and Ctrl+Shift+/).** A modal overlay
-      on the picker's exact recipe — scrim, opaque panel, type-to-filter,
-      wheel/arrow scrolling with layout-clamped offset — whose rows are
-      *rendered from `BINDINGS`* via `keymap::sections`: name + platform-
-      spelled chord (`chord_label`: ⌘ on macOS, Ctrl+Shift/Super elsewhere,
-      keycaps shown physically — `⇧[`, not `{`). Mouse chords live beside the
-      table in `MOUSE_SHORTCUTS` so the file that names every chord names all
-      of them; the copy/paste section carries the one both-conventions
-      footnote. Tests pin that every visible binding reaches the sheet, every
-      hidden alias has a visible representative, filtering never leaves an
-      empty header, and the sheet is modal by the same window-sweep the
-      picker answers to.
+- [x] **The command palette (⌘/, ⌘⇧P; ⌘? and Ctrl+Shift+/ too).** Began life
+      as a display-only shortcuts sheet and was refactored the same day: a
+      list that can *name* every command should also *run* it. Rows come from
+      `keymap::palette` over `BINDINGS` — name + platform-spelled chord chip
+      (`chord_label`: ⌘ on macOS, Ctrl+Shift/Super elsewhere, keycaps shown
+      physically — `⇧[`, not `{`) — and Enter or a click performs the row's
+      action through the same `App::perform` the chord dispatches to, so
+      "what it says" and "what it does" are one fact, pinned by a
+      parallel-list alignment test. Each ⌘1–⌘8 digit is its own searchable
+      row. Type-to-filter, arrows skip headers and reference rows
+      (mouse gestures from `MOUSE_SHORTCUTS` — no `Key` to replay — and the
+      both-conventions footnote), ensure-visible scrolling without wheel
+      snap-back, modal by the same window-sweep the picker answers to, and
+      "nothing matches" instead of a blank panel. A command with no chord
+      becomes representable the day one exists — `keymap::palette`, not
+      `BINDINGS`, is the palette's contract.
 - [x] **The schema walk a settings UI renders from.** `zest_config::ui` turns
       the JSON Schema into `UiField`s — dotted key, `x_zest_group`, parsed
       `x_zest_widget`, doc-comment description, min/max range, int-vs-float,

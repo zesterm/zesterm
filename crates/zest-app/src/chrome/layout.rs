@@ -41,8 +41,9 @@ pub struct ChromeLayout {
     pub strip_scroll: f32,
     /// The picker's scroll, clamped likewise.
     pub picker_scroll: f32,
-    /// The shortcuts sheet's scroll, clamped likewise.
-    pub shortcuts_scroll: f32,
+    /// The command palette's scroll, clamped — and possibly *adjusted*, when
+    /// the model asked for the selection to be brought into view.
+    pub palette_scroll: f32,
     /// The settings overlay's scroll, clamped — and possibly *adjusted*, when
     /// the model asked for the selection to be brought into view.
     pub settings_scroll: f32,
@@ -84,8 +85,8 @@ pub fn layout(
         // wins the hit lookup — the same fact, stated once.
         picker_overlay(picker, colors, m, measure, &mut out);
     }
-    if let Some(shortcuts) = &model.shortcuts {
-        shortcuts_overlay(shortcuts, colors, m, measure, &mut out);
+    if let Some(palette) = &model.palette {
+        palette_overlay(palette, colors, m, measure, &mut out);
     }
     if let Some(settings) = &model.settings {
         settings_overlay(settings, colors, m, measure, &mut out);
@@ -246,48 +247,48 @@ fn picker_overlay(
     }
 }
 
-// Shortcuts sheet geometry, logical px. Taller and wider than the picker:
-// it is a reference card, not a jump list.
-const SHEET_W: f32 = 640.0;
-const SHEET_H: f32 = 500.0;
-const SHEET_ROW_H: f32 = 28.0;
-const SHEET_HEADER_H: f32 = 36.0;
-const SHEET_NOTE_H: f32 = 24.0;
-const SHEET_GAP: f32 = 8.0;
+// Command palette geometry, logical px. Taller and wider than the picker:
+// it lists everything the app can do, not just open sessions.
+const PALETTE_W: f32 = 640.0;
+const PALETTE_H: f32 = 500.0;
+const PALETTE_ROW_H: f32 = 28.0;
+const PALETTE_HEADER_H: f32 = 36.0;
 const CHIP_HPAD: f32 = 8.0;
 const CHIP_VPAD: f32 = 3.0;
 
-fn shortcuts_overlay(
-    sheet: &super::model::ShortcutsModel,
+fn palette_overlay(
+    palette: &super::model::PaletteModel,
     colors: &ChromeColors,
     m: &ChromeMetrics,
     measure: &mut dyn FnMut(&str) -> f32,
     out: &mut ChromeLayout,
 ) {
+    use super::model::PaletteRow;
+
     let s = m.scale;
     let no_clip = [0.0, 0.0, m.width, m.height];
 
     // Same modality recipe as the picker: the scrim swallows what the panel
-    // does not, so the grid hears nothing while the sheet is up.
+    // does not, so the grid hears nothing while the palette is up.
     out.rects.push(RectInstance::filled(no_clip, colors.scrim, no_clip));
-    out.hit.push(no_clip, HitRegion::ShortcutsScrim);
+    out.hit.push(no_clip, HitRegion::PaletteScrim);
 
-    let w = (SHEET_W * s).min(m.width - PICKER_MARGIN * s);
-    let h = (SHEET_H * s).min(m.height - PICKER_MARGIN * s);
+    let w = (PALETTE_W * s).min(m.width - PICKER_MARGIN * s);
+    let h = (PALETTE_H * s).min(m.height - PICKER_MARGIN * s);
     let panel = [(m.width - w) / 2.0, (m.height - h) / 2.5, w, h];
     let mut panel_rect = RectInstance::rounded(panel, PICKER_RADIUS * s, colors.panel_bg, no_clip);
     panel_rect.shadow_blur = 24.0 * s;
     panel_rect.shadow_alpha = colors.shadow_alpha;
     out.rects.push(panel_rect);
-    // Nothing on the sheet is clickable, but a click on it must not fall
-    // through to the scrim and dismiss what the user is reading.
-    out.hit.push(panel, HitRegion::ShortcutsPanel);
+    // A click that misses every runnable row must not fall through to the
+    // scrim and dismiss what the user is reading.
+    out.hit.push(panel, HitRegion::PalettePanel);
 
     let filter_h = m.line_height + 2.0 * PICKER_PAD * s;
-    let (filter_text, filter_color) = if sheet.filter.is_empty() {
-        ("type to filter shortcuts".to_string(), colors.text_faint)
+    let (filter_text, filter_color) = if palette.filter.is_empty() {
+        ("type to run a command".to_string(), colors.text_faint)
     } else {
-        (sheet.filter.clone(), colors.text_active)
+        (palette.filter.clone(), colors.text_active)
     };
     out.texts.push(TextRun {
         text: filter_text,
@@ -305,93 +306,118 @@ fn shortcuts_overlay(
     let rows_clip =
         [panel[0], panel[1] + filter_h + HAIRLINE * s, w, h - filter_h - HAIRLINE * s];
 
-    let section_h = |section: &super::model::ShortcutSection| {
-        SHEET_HEADER_H
-            + section.rows.len() as f32 * SHEET_ROW_H
-            + if section.note.is_some() { SHEET_NOTE_H } else { 0.0 }
-            + SHEET_GAP
-    };
-    let content_h: f32 = sheet.sections.iter().map(|sec| section_h(sec) * s).sum();
-    let max_scroll = (content_h - rows_clip[3]).max(0.0);
-    let scroll = sheet.scroll.clamp(0.0, max_scroll);
-    out.shortcuts_scroll = scroll;
-
-    if sheet.sections.is_empty() && !sheet.filter.is_empty() {
+    if palette.rows.is_empty() && !palette.filter.is_empty() {
+        // A filter that matches nothing must say so - a silently blank
+        // panel reads as broken, not as empty.
         out.texts.push(TextRun {
-            text: format!("nothing matches \u{201c}{}\u{201d}", sheet.filter),
-            pos: [panel[0] + PICKER_PAD * s, text_baseline(m, rows_clip[1], SHEET_ROW_H * s)],
+            text: format!("nothing matches \u{201c}{}\u{201d}", palette.filter),
+            pos: [panel[0] + PICKER_PAD * s, text_baseline(m, rows_clip[1], PALETTE_ROW_H * s)],
             max_width: w - 2.0 * PICKER_PAD * s,
             color: colors.text_faint,
             clip: rows_clip,
         });
     }
 
+    let row_h = |row: &PaletteRow| match row {
+        PaletteRow::Group { .. } => PALETTE_HEADER_H * s,
+        PaletteRow::Command { .. } => PALETTE_ROW_H * s,
+    };
+    // Row offsets before any drawing: ensure-visible needs the selected
+    // row's extent to decide the scroll it draws with.
+    let mut tops = Vec::with_capacity(palette.rows.len());
+    let mut content_h = 0.0f32;
+    for row in &palette.rows {
+        tops.push(content_h);
+        content_h += row_h(row);
+    }
+    let max_scroll = (content_h - rows_clip[3]).max(0.0);
+    let mut scroll = palette.scroll.clamp(0.0, max_scroll);
+    if palette.ensure_visible {
+        if let (Some(top), Some(row)) =
+            (tops.get(palette.selected), palette.rows.get(palette.selected))
+        {
+            let bottom = top + row_h(row);
+            if *top < scroll {
+                scroll = *top;
+            } else if bottom > scroll + rows_clip[3] {
+                scroll = bottom - rows_clip[3];
+            }
+            scroll = scroll.clamp(0.0, max_scroll);
+        }
+    }
+    out.palette_scroll = scroll;
+
     let left = panel[0] + PICKER_PAD * s;
     let right = panel[0] + w - PICKER_PAD * s;
-    let mut y = rows_clip[1] - scroll;
-    for section in &sheet.sections {
-        let header = [panel[0], y, w, SHEET_HEADER_H * s];
-        if intersect(header, rows_clip).is_some() {
-            out.texts.push(TextRun {
-                text: section.title.clone(),
-                // Bottom-aligned in its band so the title sits close to its
-                // rows rather than the previous section's.
-                pos: [left, text_baseline(m, y + (SHEET_HEADER_H - SHEET_ROW_H) * s, SHEET_ROW_H * s)],
-                max_width: w - 2.0 * PICKER_PAD * s,
-                color: colors.text_faint,
-                clip: rows_clip,
-            });
-        }
-        y += SHEET_HEADER_H * s;
-        for row in &section.rows {
-            let band = [panel[0], y, w, SHEET_ROW_H * s];
-            if intersect(band, rows_clip).is_some() {
-                let baseline = text_baseline(m, y, SHEET_ROW_H * s);
+    for (i, row) in palette.rows.iter().enumerate() {
+        let y = rows_clip[1] + tops[i] - scroll;
+        let band = [panel[0], y, w, row_h(row)];
+        let Some(visible) = intersect(band, rows_clip) else { continue };
+
+        match row {
+            PaletteRow::Group { title } => {
                 out.texts.push(TextRun {
-                    text: row.name.clone(),
-                    pos: [left, baseline],
-                    max_width: w * 0.6,
-                    color: colors.text_inactive,
-                    clip: rows_clip,
-                });
-                // The chord, right-aligned in a keycap-look chip.
-                let chord_w = measure(&row.chord).min(w * 0.35);
-                let chip = [
-                    right - chord_w - 2.0 * CHIP_HPAD * s,
-                    y + CHIP_VPAD * s,
-                    chord_w + 2.0 * CHIP_HPAD * s,
-                    SHEET_ROW_H * s - 2.0 * CHIP_VPAD * s,
-                ];
-                out.rects.push(RectInstance::rounded(
-                    chip,
-                    RADIUS * s,
-                    colors.accent_soft,
-                    rows_clip,
-                ));
-                out.texts.push(TextRun {
-                    text: row.chord.clone(),
-                    pos: [right - chord_w - CHIP_HPAD * s, baseline],
-                    max_width: w * 0.35,
-                    color: colors.text_active,
-                    clip: rows_clip,
-                });
-            }
-            y += SHEET_ROW_H * s;
-        }
-        if let Some(note) = &section.note {
-            let band = [panel[0], y, w, SHEET_NOTE_H * s];
-            if intersect(band, rows_clip).is_some() {
-                out.texts.push(TextRun {
-                    text: note.clone(),
-                    pos: [left, text_baseline(m, y, SHEET_NOTE_H * s)],
+                    text: title.clone(),
+                    // Bottom-aligned in its band so the title sits close to
+                    // its rows rather than the previous group's.
+                    pos: [
+                        left,
+                        text_baseline(m, y + (PALETTE_HEADER_H - PALETTE_ROW_H) * s, PALETTE_ROW_H * s),
+                    ],
                     max_width: w - 2.0 * PICKER_PAD * s,
                     color: colors.text_faint,
                     clip: rows_clip,
                 });
             }
-            y += SHEET_NOTE_H * s;
+            PaletteRow::Command { name, chord, runnable } => {
+                if *runnable {
+                    if i == palette.selected {
+                        let chip =
+                            [panel[0] + 4.0 * s, y + 1.0 * s, w - 8.0 * s, band[3] - 2.0 * s];
+                        out.rects.push(RectInstance::rounded(
+                            chip,
+                            RADIUS * s,
+                            colors.accent_soft,
+                            rows_clip,
+                        ));
+                    }
+                    out.hit.push(visible, HitRegion::PaletteRow(i));
+                }
+                let baseline = text_baseline(m, y, PALETTE_ROW_H * s);
+                out.texts.push(TextRun {
+                    text: name.clone(),
+                    pos: [left, baseline],
+                    max_width: w * 0.6,
+                    // Reference rows read as annotations, not as commands
+                    // that mysteriously refuse to run.
+                    color: if *runnable { colors.text_inactive } else { colors.text_faint },
+                    clip: rows_clip,
+                });
+                if !chord.is_empty() {
+                    // The chord, right-aligned in a keycap-look chip.
+                    let chord_w = measure(chord).min(w * 0.35);
+                    let chip = [
+                        right - chord_w - 2.0 * CHIP_HPAD * s,
+                        y + CHIP_VPAD * s,
+                        chord_w + 2.0 * CHIP_HPAD * s,
+                        PALETTE_ROW_H * s - 2.0 * CHIP_VPAD * s,
+                    ];
+                    out.rects.push(RectInstance::rounded(
+                        chip,
+                        RADIUS * s,
+                        colors.accent_soft,
+                        rows_clip,
+                    ));
+                    out.texts.push(TextRun {
+                        text: chord.clone(),
+                        pos: [right - chord_w - CHIP_HPAD * s, baseline],
+                        max_width: w * 0.35,
+                        color: colors.text_active,
+                        clip: rows_clip,
+                    });
+                }
+            }
         }
-        y += SHEET_GAP * s;
     }
 }
 
@@ -1089,7 +1115,7 @@ mod tests {
             traffic_inset: None,
             focused: true,
             picker: None,
-            shortcuts: None,
+            palette: None,
             settings: None,
         }
     }
@@ -1294,67 +1320,94 @@ mod tests {
         assert!(scrim_hits > 0, "the scrim must be reachable around the panel");
     }
 
+    fn palette_rows(n: usize) -> Vec<crate::chrome::model::PaletteRow> {
+        use crate::chrome::model::PaletteRow;
+        let mut rows = vec![PaletteRow::Group { title: "Tabs".into() }];
+        rows.extend((0..n).map(|i| PaletteRow::Command {
+            name: format!("Command {i}"),
+            chord: "⌘X".into(),
+            runnable: true,
+        }));
+        rows.push(PaletteRow::Command {
+            name: "a reference row".into(),
+            chord: String::new(),
+            runnable: false,
+        });
+        rows
+    }
+
     #[test]
-    fn the_shortcuts_sheet_is_modal_like_the_picker() {
+    fn the_palette_is_modal_and_only_runnable_rows_answer() {
         // Same definition of modal as the picker test above: every point in
-        // the window answers as the sheet's panel or its scrim, and a click
-        // can never reach a tab or fall through to the grid while it is up.
-        use crate::chrome::model::{ShortcutRow, ShortcutSection, ShortcutsModel};
+        // the window answers as the palette's rows, panel or scrim, and a
+        // click can never reach a tab or the grid while it is up. Reference
+        // rows must NOT answer as rows — a click on one runs nothing, so it
+        // must land on the panel.
+        use crate::chrome::model::PaletteModel;
         let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
         let m = metrics(1200.0, 800.0, 1.0);
         let mut mo = model(tabs, TabsPosition::Top);
-        mo.shortcuts = Some(ShortcutsModel {
-            sections: vec![ShortcutSection {
-                title: "Tabs".into(),
-                rows: vec![
-                    ShortcutRow { name: "New tab".into(), chord: "⌘T".into() },
-                    ShortcutRow { name: "Close tab".into(), chord: "⌘W".into() },
-                ],
-                note: Some("a note".into()),
-            }],
+        mo.palette = Some(PaletteModel {
+            rows: palette_rows(2),
+            selected: 1,
             filter: String::new(),
             scroll: 0.0,
+            ensure_visible: false,
         });
         let l = layout(&mo, &colors(), &m, &mut measure);
 
+        let mut seen_rows = std::collections::HashSet::new();
         let mut panel_hits = 0u32;
         let mut scrim_hits = 0u32;
         for x in (0..1200).step_by(4) {
             for y in (0..800).step_by(4) {
                 match l.hit.hit(x as f32, y as f32) {
-                    Some(HitRegion::ShortcutsPanel) => panel_hits += 1,
-                    Some(HitRegion::ShortcutsScrim) => scrim_hits += 1,
-                    Some(other) => panic!("a click at ({x},{y}) escaped the sheet: {other:?}"),
+                    Some(HitRegion::PaletteRow(i)) => {
+                        seen_rows.insert(i);
+                    }
+                    Some(HitRegion::PalettePanel) => panel_hits += 1,
+                    Some(HitRegion::PaletteScrim) => scrim_hits += 1,
+                    Some(other) => panic!("a click at ({x},{y}) escaped the palette: {other:?}"),
                     None => panic!("({x},{y}) hit nothing; the scrim must cover the window"),
                 }
             }
         }
-        assert!(panel_hits > 0, "the panel must swallow clicks on itself");
+        assert_eq!(
+            seen_rows,
+            [1usize, 2].into(),
+            "the runnable commands answer; the header (0) and reference row (3) must not"
+        );
+        assert!(panel_hits > 0, "the panel must swallow clicks between rows");
         assert!(scrim_hits > 0, "the scrim must be reachable around the panel");
     }
 
     #[test]
-    fn a_long_sheet_clamps_its_scroll_to_the_content() {
-        // Forty rows overflow a 500-logical-px panel; a wild scroll value
-        // must clamp to the content or the list scrolls into blank space
-        // and appears empty.
-        use crate::chrome::model::{ShortcutRow, ShortcutSection, ShortcutsModel};
+    fn palette_navigation_never_acts_on_an_offscreen_row() {
+        // Forty rows overflow the panel: a wild scroll clamps, and with the
+        // selection at the end ensure_visible must move the view so the
+        // selected row is hittable — Enter must never run something the
+        // user cannot see.
+        use crate::chrome::model::PaletteModel;
         let m = metrics(1200.0, 800.0, 1.0);
+        let rows = palette_rows(40);
+        let selected = 40; // the last runnable command
         let mut mo = model(Vec::new(), TabsPosition::Top);
-        mo.shortcuts = Some(ShortcutsModel {
-            sections: vec![ShortcutSection {
-                title: "Everything".into(),
-                rows: (0..40)
-                    .map(|i| ShortcutRow { name: format!("row {i}"), chord: "⌘X".into() })
-                    .collect(),
-                note: None,
-            }],
+        mo.palette = Some(PaletteModel {
+            rows,
+            selected,
             filter: String::new(),
             scroll: 1e9,
+            ensure_visible: true,
         });
         let l = layout(&mo, &colors(), &m, &mut measure);
-        assert!(l.shortcuts_scroll > 0.0, "an overflowing sheet scrolls");
-        assert!(l.shortcuts_scroll < 1e9, "and the scroll is clamped to the content");
+        assert!(l.palette_scroll > 0.0, "an overflowing palette scrolls");
+        assert!(l.palette_scroll < 1e9, "and the scroll is clamped to the content");
+        let found = (0..1200).step_by(4).any(|x| {
+            (0..800)
+                .step_by(4)
+                .any(|y| l.hit.hit(x as f32, y as f32) == Some(HitRegion::PaletteRow(selected)))
+        });
+        assert!(found, "the selected command must be visible and hittable after ensure_visible");
     }
 
     fn settings_rows(n: usize) -> Vec<crate::chrome::model::SettingsRowModel> {

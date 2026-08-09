@@ -161,12 +161,18 @@ struct PickerState {
     actions: Vec<PickerAction>,
 }
 
-/// The shortcuts sheet's transient state while it is open. No action list:
-/// nothing on the sheet is clickable, its rows come straight from
-/// `keymap::sections`.
-struct ShortcutsState {
+/// The command palette's transient state while it is open, and the action
+/// list parallel to the drawn rows — built in the same `keymap::palette`
+/// pass, so index `n` means the same thing in both by construction. `None`
+/// entries are headers and reference rows the selection skips.
+struct PaletteState {
+    selected: usize,
     filter: String,
     scroll: f32,
+    /// Bring the selection into view on the next layout — keyboard
+    /// navigation only, never the wheel.
+    scroll_to_selected: bool,
+    actions: Vec<Option<keymap::Action>>,
 }
 
 /// The settings overlay's transient state while it is open.
@@ -251,7 +257,7 @@ pub struct App {
     fleet: Option<crate::fleet::FleetModel>,
     /// The fleet picker's transient state, while open.
     picker: Option<PickerState>,
-    shortcuts: Option<ShortcutsState>,
+    palette_ui: Option<PaletteState>,
     settings_ui: Option<SettingsUiState>,
     /// Where each non-default setting came from, kept from the last resolve —
     /// the settings overlay's "set by profile `k8s`" chips read it.
@@ -369,7 +375,7 @@ impl App {
             next_placeholder: 0,
             fleet: None,
             picker: None,
-            shortcuts: None,
+            palette_ui: None,
             settings_ui: None,
             provenance,
             restart_pending: std::collections::BTreeSet::new(),
@@ -912,7 +918,7 @@ impl App {
             Action::RerunLastCommand => self.rerun_last_command(),
             Action::ScrollPageUp => self.scroll_page(1),
             Action::ScrollPageDown => self.scroll_page(-1),
-            Action::ToggleShortcuts => self.toggle_shortcuts(),
+            Action::TogglePalette => self.toggle_palette(),
             Action::ToggleSettings => self.toggle_settings(),
         }
     }
@@ -1165,7 +1171,7 @@ impl App {
     fn refresh_chrome(&mut self) {
         if !self.strip_shown()
             && self.picker.is_none()
-            && self.shortcuts.is_none()
+            && self.palette_ui.is_none()
             && self.settings_ui.is_none()
         {
             self.chrome_layout = None;
@@ -1192,11 +1198,19 @@ impl App {
             }
         });
 
-        let shortcuts_model = self.shortcuts.as_ref().map(|sheet| {
-            crate::chrome::model::ShortcutsModel {
-                sections: keymap::sections(&sheet.filter),
-                filter: sheet.filter.clone(),
-                scroll: sheet.scroll,
+        let palette_model = self.palette_ui.as_mut().map(|state| {
+            let (rows, actions) = keymap::palette(&state.filter);
+            state.actions = actions;
+            // A filter edit can strand the selection on a header, a
+            // reference row, or past the end; land it on the nearest
+            // runnable command instead.
+            state.selected = keymap::nearest_runnable(&state.actions, state.selected);
+            crate::chrome::model::PaletteModel {
+                rows,
+                selected: state.selected,
+                filter: state.filter.clone(),
+                scroll: state.scroll,
+                ensure_visible: state.scroll_to_selected,
             }
         });
 
@@ -1298,7 +1312,7 @@ impl App {
             traffic_inset: traffic,
             focused: self.focused,
             picker: picker_model,
-            shortcuts: shortcuts_model,
+            palette: palette_model,
             settings: settings_model,
         };
 
@@ -1310,8 +1324,10 @@ impl App {
         if let Some(state) = self.picker.as_mut() {
             state.scroll = laid.picker_scroll;
         }
-        if let Some(state) = self.shortcuts.as_mut() {
-            state.scroll = laid.shortcuts_scroll;
+        if let Some(state) = self.palette_ui.as_mut() {
+            state.scroll = laid.palette_scroll;
+            // One layout consumed the request; the wheel is free again.
+            state.scroll_to_selected = false;
         }
         if let Some(state) = self.settings_ui.as_mut() {
             state.scroll = laid.settings_scroll;
@@ -1366,8 +1382,14 @@ impl App {
                 self.picker = None;
                 self.mark_chrome_dirty();
             }
-            (HitRegion::ShortcutsScrim, MouseButton::Left) => {
-                self.shortcuts = None;
+            (HitRegion::PaletteRow(i), MouseButton::Left) => {
+                if let Some(p) = self.palette_ui.as_mut() {
+                    p.selected = i;
+                }
+                self.run_palette_selection(el);
+            }
+            (HitRegion::PaletteScrim, MouseButton::Left) => {
+                self.palette_ui = None;
                 self.mark_chrome_dirty();
             }
             (HitRegion::SettingsRow(i), MouseButton::Left) => {
@@ -1395,7 +1417,7 @@ impl App {
                 self.settings_ui = None;
                 self.mark_chrome_dirty();
             }
-            // ShortcutsPanel and SettingsPanel deliberately have no arm: the
+            // PalettePanel and SettingsPanel deliberately have no arm: the
             // panels exist in the hit map to swallow clicks, not to act.
             (HitRegion::Drag, MouseButton::Left) => {
                 let now = std::time::Instant::now();
@@ -1453,7 +1475,7 @@ impl App {
                 // One modal at a time: opening any overlay closes the
                 // others, which is what keeps the modal input blocks
                 // order-independent.
-                self.shortcuts = None;
+                self.palette_ui = None;
                 self.settings_ui = None;
                 Some(PickerState {
                     selected: 0,
@@ -1466,17 +1488,34 @@ impl App {
         self.mark_chrome_dirty();
     }
 
-    /// Toggle the shortcuts sheet (⌘/).
-    fn toggle_shortcuts(&mut self) {
-        self.shortcuts = match self.shortcuts {
+    /// Toggle the command palette (⌘/, ⌘⇧P).
+    fn toggle_palette(&mut self) {
+        self.palette_ui = match self.palette_ui {
             Some(_) => None,
             None => {
                 self.picker = None;
                 self.settings_ui = None;
-                Some(ShortcutsState { filter: String::new(), scroll: 0.0 })
+                Some(PaletteState {
+                    selected: 0,
+                    filter: String::new(),
+                    scroll: 0.0,
+                    scroll_to_selected: true,
+                    actions: Vec::new(),
+                })
             }
         };
         self.mark_chrome_dirty();
+    }
+
+    /// Run the palette's selected command: close first, then perform —
+    /// the command may itself open an overlay (settings, the picker).
+    fn run_palette_selection(&mut self, el: &ActiveEventLoop) {
+        let action =
+            self.palette_ui.as_ref().and_then(|p| p.actions.get(p.selected).copied()).flatten();
+        let Some(action) = action else { return };
+        self.palette_ui = None;
+        self.mark_chrome_dirty();
+        self.perform(action, el);
     }
 
     /// Toggle the settings overlay (⌘,).
@@ -1485,7 +1524,7 @@ impl App {
             Some(_) => None,
             None => {
                 self.picker = None;
-                self.shortcuts = None;
+                self.palette_ui = None;
                 Some(SettingsUiState {
                     selected: 0,
                     filter: String::new(),
@@ -2864,62 +2903,73 @@ impl ApplicationHandler<Wakeup> for App {
                     return;
                 }
 
-                // The open shortcuts sheet likewise owns the keyboard. It and
+                // The open command palette likewise owns the keyboard. It and
                 // the picker are mutually exclusive (the toggles enforce it),
-                // so the order of these two blocks carries no meaning.
-                if self.shortcuts.is_some() {
+                // so the order of these blocks carries no meaning.
+                if self.palette_ui.is_some() {
                     use winit::keyboard::{Key, NamedKey};
                     match &event.logical_key {
                         Key::Named(NamedKey::Escape) => {
-                            self.shortcuts = None;
+                            self.palette_ui = None;
+                        }
+                        Key::Named(NamedKey::Enter) => {
+                            self.run_palette_selection(el);
                         }
                         Key::Named(NamedKey::ArrowDown) => {
-                            if let Some(sheet) = self.shortcuts.as_mut() {
-                                sheet.scroll += 40.0;
+                            if let Some(p) = self.palette_ui.as_mut() {
+                                p.selected = keymap::step_runnable(&p.actions, p.selected, true);
+                                p.scroll_to_selected = true;
                             }
                         }
                         Key::Named(NamedKey::ArrowUp) => {
-                            if let Some(sheet) = self.shortcuts.as_mut() {
-                                sheet.scroll -= 40.0;
+                            if let Some(p) = self.palette_ui.as_mut() {
+                                p.selected = keymap::step_runnable(&p.actions, p.selected, false);
+                                p.scroll_to_selected = true;
                             }
                         }
                         Key::Named(NamedKey::PageDown) => {
-                            if let Some(sheet) = self.shortcuts.as_mut() {
-                                sheet.scroll += 300.0;
+                            if let Some(p) = self.palette_ui.as_mut() {
+                                p.scroll += 300.0;
                             }
                         }
                         Key::Named(NamedKey::PageUp) => {
-                            if let Some(sheet) = self.shortcuts.as_mut() {
-                                sheet.scroll -= 300.0;
+                            if let Some(p) = self.palette_ui.as_mut() {
+                                p.scroll -= 300.0;
                             }
                         }
                         Key::Named(NamedKey::Backspace) => {
-                            if let Some(sheet) = self.shortcuts.as_mut() {
-                                sheet.filter.pop();
+                            if let Some(p) = self.palette_ui.as_mut() {
+                                p.filter.pop();
+                                p.selected = 0;
+                                p.scroll_to_selected = true;
                             }
                         }
                         // Spacebar arrives as Named(Space); see the picker.
                         Key::Named(NamedKey::Space) => {
-                            if let Some(sheet) = self.shortcuts.as_mut() {
-                                sheet.filter.push(' ');
+                            if let Some(p) = self.palette_ui.as_mut() {
+                                p.filter.push(' ');
+                                p.selected = 0;
+                                p.scroll_to_selected = true;
                             }
                         }
                         Key::Character(c) => {
                             // The opening chord closes too, aliases included —
-                            // resolved through the table so ⌘/ and ⌘? agree —
-                            // and the sibling overlays' chords switch to them.
+                            // resolved through the table so ⌘/, ⌘? and ⌘⇧P
+                            // agree — and the sibling overlays' chords switch.
                             match keymap::lookup(&event.logical_key, self.modifiers)
                                 .map(|b| b.action)
                             {
-                                Some(keymap::Action::ToggleShortcuts) => self.shortcuts = None,
+                                Some(keymap::Action::TogglePalette) => self.palette_ui = None,
                                 Some(keymap::Action::ToggleSettings) => self.toggle_settings(),
                                 Some(keymap::Action::ToggleFleetPicker) => self.toggle_picker(),
                                 _ => {
                                     if !self.modifiers.control_key()
                                         && !key::belongs_to_desktop(self.modifiers)
                                     {
-                                        if let Some(sheet) = self.shortcuts.as_mut() {
-                                            sheet.filter.push_str(c.as_str());
+                                        if let Some(p) = self.palette_ui.as_mut() {
+                                            p.filter.push_str(c.as_str());
+                                            p.selected = 0;
+                                            p.scroll_to_selected = true;
                                         }
                                     }
                                 }
@@ -3079,7 +3129,7 @@ impl ApplicationHandler<Wakeup> for App {
                             {
                                 Some(keymap::Action::ToggleSettings) => self.toggle_settings(),
                                 Some(keymap::Action::ToggleFleetPicker) => self.toggle_picker(),
-                                Some(keymap::Action::ToggleShortcuts) => self.toggle_shortcuts(),
+                                Some(keymap::Action::TogglePalette) => self.toggle_palette(),
                                 _ => {
                                     if !self.modifiers.control_key()
                                         && !key::belongs_to_desktop(self.modifiers)
@@ -3100,10 +3150,10 @@ impl ApplicationHandler<Wakeup> for App {
                 }
 
                 // Every global chord resolves through the one binding table.
-                // Adding a chord as an if-block here instead of a BINDINGS row
-                // is the bug the shortcuts sheet exists to prevent: the sheet
-                // renders from BINDINGS, so an unlisted chord is an
-                // undiscoverable one.
+                // Adding a chord as an if-block here instead of a BINDINGS
+                // row is the bug the command palette exists to prevent: the
+                // palette renders and runs from BINDINGS, so an unlisted
+                // chord is an undiscoverable one.
                 if let Some(binding) = keymap::lookup(&event.logical_key, self.modifiers) {
                     let swallow = match binding.when {
                         keymap::When::Always => true,
@@ -3289,8 +3339,7 @@ impl ApplicationHandler<Wakeup> for App {
 
             WindowEvent::MouseWheel { delta, .. } => {
                 // An open modal overlay takes the wheel wholesale.
-                if self.picker.is_some() || self.shortcuts.is_some() || self.settings_ui.is_some()
-                {
+                if self.picker.is_some() || self.palette_ui.is_some() || self.settings_ui.is_some() {
                     let px = match delta {
                         MouseScrollDelta::LineDelta(_, y) => y * 40.0,
                         MouseScrollDelta::PixelDelta(p) => p.y as f32,
@@ -3299,8 +3348,8 @@ impl ApplicationHandler<Wakeup> for App {
                         if let Some(p) = self.picker.as_mut() {
                             p.scroll -= px;
                         }
-                        if let Some(sheet) = self.shortcuts.as_mut() {
-                            sheet.scroll -= px;
+                        if let Some(p) = self.palette_ui.as_mut() {
+                            p.scroll -= px;
                         }
                         if let Some(ui) = self.settings_ui.as_mut() {
                             ui.scroll -= px;

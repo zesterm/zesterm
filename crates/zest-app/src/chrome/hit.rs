@@ -25,11 +25,13 @@ pub enum HitRegion {
     PickerRow(usize),
     /// The dimmed backdrop behind the picker; clicking it dismisses.
     PickerScrim,
-    /// The shortcuts sheet's panel — swallows clicks so they cannot fall
-    /// through to a tab or the grid; nothing on it is clickable.
-    ShortcutsPanel,
-    /// The dimmed backdrop behind the sheet; clicking it dismisses.
-    ShortcutsScrim,
+    /// One runnable row of the command palette, by index; clicking runs it.
+    PaletteRow(usize),
+    /// The palette's panel between rows (filter line, headers, reference
+    /// rows) — swallows clicks so they cannot fall through to the grid.
+    PalettePanel,
+    /// The dimmed backdrop behind the palette; clicking it dismisses.
+    PaletteScrim,
     /// One row of the settings overlay, by index; clicking selects it.
     SettingsRow(usize),
     /// A toggle's track inside its settings row; clicking flips the value.

@@ -4,7 +4,8 @@
 //! shape that cannot be enumerated, so nothing could *display* the shortcuts
 //! without hand-maintaining a second list that drifts the first time anyone
 //! adds a chord. The table is what the dispatch consults and what the
-//! shortcuts sheet renders, so an unlisted chord structurally cannot exist.
+//! command palette renders *and runs*, so an unlisted chord structurally
+//! cannot exist and a palette row cannot do anything but what its chord does.
 //! It is also the rail user-configurable keybindings would layer onto: a
 //! config section becomes data merged over [`BINDINGS`], not a rewrite.
 //!
@@ -16,7 +17,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 use zest_input::key;
 
-use crate::chrome::model::{ShortcutRow, ShortcutSection};
+use crate::chrome::model::PaletteRow;
 
 /// What the user asked the *app* to do — never the shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,9 +38,10 @@ pub enum Action {
     RerunLastCommand,
     ScrollPageUp,
     ScrollPageDown,
-    /// The shortcuts sheet itself — rendered from this table, so it can
-    /// never list a chord that does not exist.
-    ToggleShortcuts,
+    /// The command palette itself — rendered from this table, so it can
+    /// never list a chord that does not exist, and every row it lists runs
+    /// through the same dispatch the chord does.
+    TogglePalette,
     /// The settings overlay (⌘, — the desktop's own convention).
     ToggleSettings,
 }
@@ -89,7 +91,7 @@ pub enum When {
     NotAltScreen,
 }
 
-/// Where a binding appears on the shortcuts sheet.
+/// Where a binding appears in the command palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
     Tabs,
@@ -110,8 +112,8 @@ pub struct Binding {
     pub keycap: &'static str,
     pub name: &'static str,
     pub category: Category,
-    /// Collapsed rows (⌘2..⌘8, the `?` alias of `/`) get no line of their
-    /// own on the sheet; the representative row shows the range.
+    /// Alias rows (`?` for `/`, `⇧P` for the palette) get no palette line of
+    /// their own; the canonical binding shows the chord.
     pub show: bool,
 }
 
@@ -161,14 +163,16 @@ pub static BINDINGS: &[Binding] = &[
         Category::Fleet,
     ),
     b(Mods::Desktop, ChordKey::Char("w"), Action::CloseTab, "W", "Close tab", Category::Tabs),
-    b(Mods::Desktop, ChordKey::Char("1"), Action::ActivateTab(0), "1…8", "Go to tab 1–8", Category::Tabs),
-    hidden(Mods::Desktop, ChordKey::Char("2"), Action::ActivateTab(1), Category::Tabs),
-    hidden(Mods::Desktop, ChordKey::Char("3"), Action::ActivateTab(2), Category::Tabs),
-    hidden(Mods::Desktop, ChordKey::Char("4"), Action::ActivateTab(3), Category::Tabs),
-    hidden(Mods::Desktop, ChordKey::Char("5"), Action::ActivateTab(4), Category::Tabs),
-    hidden(Mods::Desktop, ChordKey::Char("6"), Action::ActivateTab(5), Category::Tabs),
-    hidden(Mods::Desktop, ChordKey::Char("7"), Action::ActivateTab(6), Category::Tabs),
-    hidden(Mods::Desktop, ChordKey::Char("8"), Action::ActivateTab(7), Category::Tabs),
+    // Each digit is its own palette command — "go to tab 3" must be
+    // searchable and runnable, not a footnote of "1–8".
+    b(Mods::Desktop, ChordKey::Char("1"), Action::ActivateTab(0), "1", "Go to tab 1", Category::Tabs),
+    b(Mods::Desktop, ChordKey::Char("2"), Action::ActivateTab(1), "2", "Go to tab 2", Category::Tabs),
+    b(Mods::Desktop, ChordKey::Char("3"), Action::ActivateTab(2), "3", "Go to tab 3", Category::Tabs),
+    b(Mods::Desktop, ChordKey::Char("4"), Action::ActivateTab(3), "4", "Go to tab 4", Category::Tabs),
+    b(Mods::Desktop, ChordKey::Char("5"), Action::ActivateTab(4), "5", "Go to tab 5", Category::Tabs),
+    b(Mods::Desktop, ChordKey::Char("6"), Action::ActivateTab(5), "6", "Go to tab 6", Category::Tabs),
+    b(Mods::Desktop, ChordKey::Char("7"), Action::ActivateTab(6), "7", "Go to tab 7", Category::Tabs),
+    b(Mods::Desktop, ChordKey::Char("8"), Action::ActivateTab(7), "8", "Go to tab 8", Category::Tabs),
     b(Mods::Desktop, ChordKey::Char("9"), Action::ActivateLastTab, "9", "Go to last tab", Category::Tabs),
     // ⌘⇧[ and ⌘⇧] arrive as { and }; the keycap shows the physical key.
     b(Mods::Desktop, ChordKey::Char("{"), Action::PrevTab, "⇧[", "Previous tab", Category::Tabs),
@@ -208,17 +212,20 @@ pub static BINDINGS: &[Binding] = &[
     // still belongs to the program.
     scroll(ChordKey::Named(NamedKey::PageUp), Action::ScrollPageUp, "PgUp", "Page up"),
     scroll(ChordKey::Named(NamedKey::PageDown), Action::ScrollPageDown, "PgDn", "Page down"),
-    // The sheet itself. Two rows because ⌘/ arrives as "/" while ⌘? and
-    // Ctrl+Shift+/ arrive as "?" — one visible row covers both.
+    // The palette itself. Three chords, one visible row: ⌘/ arrives as "/",
+    // while ⌘? and Ctrl+Shift+/ arrive as "?"; and ⌘⇧P (arriving as "P" —
+    // exact match, so plain ⌘P stays free) is the spelling every editor
+    // taught people's fingers.
     b(
         Mods::Clipboard,
         ChordKey::Char("/"),
-        Action::ToggleShortcuts,
+        Action::TogglePalette,
         "/",
-        "Keyboard shortcuts",
+        "Command palette",
         Category::Help,
     ),
-    hidden(Mods::Clipboard, ChordKey::Char("?"), Action::ToggleShortcuts, Category::Help),
+    hidden(Mods::Clipboard, ChordKey::Char("?"), Action::TogglePalette, Category::Help),
+    hidden(Mods::Desktop, ChordKey::Char("P"), Action::TogglePalette, Category::Help),
     // ⌘, — the settings chord every desktop app shares.
     b(Mods::Desktop, ChordKey::Char(","), Action::ToggleSettings, ",", "Settings", Category::Help),
 ];
@@ -331,7 +338,7 @@ pub static MOUSE_SHORTCUTS: &[MouseShortcut] = &[
     MouseShortcut { gesture: "Double-click title bar", name: "Zoom the window" },
 ];
 
-const SECTION_ORDER: &[(Category, &str)] = &[
+const CATEGORY_ORDER: &[(Category, &str)] = &[
     (Category::Tabs, "Tabs"),
     (Category::Fleet, "Fleet"),
     (Category::Clipboard, "Copy & paste"),
@@ -340,51 +347,102 @@ const SECTION_ORDER: &[(Category, &str)] = &[
     (Category::Help, "Help"),
 ];
 
-fn row_matches(filter: &str, row: &ShortcutRow) -> bool {
+fn row_matches(filter: &str, name: &str, chord: &str) -> bool {
     filter.is_empty()
-        || row.name.to_lowercase().contains(filter)
-        || row.chord.to_lowercase().contains(filter)
+        || name.to_lowercase().contains(filter)
+        || chord.to_lowercase().contains(filter)
 }
 
-/// The shortcuts sheet's content, straight from the table.
+/// The command palette's rows and the actions they run — parallel lists,
+/// one pass (the picker discipline: index `n` means the same thing to the
+/// renderer and the input path by construction).
 ///
-/// Pure so it is testable without a window; the app calls it from
-/// `refresh_chrome` with the live filter.
+/// Every row shows its chord and Enter runs its action through the same
+/// dispatch the chord uses, so "what it says" and "what it does" are one
+/// fact. Reference rows carry `None` and the selection skips them: mouse
+/// gestures (there is no `Key` to replay), the both-conventions footnote,
+/// and the palette's own entry (running "open the palette" from inside it
+/// is a no-op wearing a command's name). A command with no chord at all
+/// becomes representable the day one exists — this list, not [`BINDINGS`],
+/// is the palette's contract.
 #[must_use]
-pub fn sections(filter: &str) -> Vec<ShortcutSection> {
+pub fn palette(filter: &str) -> (Vec<PaletteRow>, Vec<Option<Action>>) {
     let filter = filter.to_lowercase();
-    let mut out = Vec::new();
-    for (category, title) in SECTION_ORDER {
-        let rows: Vec<ShortcutRow> = BINDINGS
-            .iter()
-            .filter(|binding| binding.show && binding.category == *category)
-            .map(|binding| ShortcutRow {
+    let mut rows = Vec::new();
+    let mut actions = Vec::new();
+
+    for (category, title) in CATEGORY_ORDER {
+        let start = rows.len();
+        for binding in BINDINGS.iter().filter(|b| b.show && b.category == *category) {
+            let chord = chord_label(binding);
+            if !row_matches(&filter, binding.name, &chord) {
+                continue;
+            }
+            let runnable = binding.action != Action::TogglePalette;
+            rows.push(PaletteRow::Command {
                 name: binding.name.to_string(),
-                chord: chord_label(binding),
-            })
-            .filter(|row| row_matches(&filter, row))
-            .collect();
-        if rows.is_empty() {
+                chord,
+                runnable,
+            });
+            actions.push(runnable.then_some(binding.action));
+        }
+        if rows.len() == start {
             continue;
         }
-        // The one place the both-conventions fact is displayed; see
-        // `key::is_clipboard_chord` for why both are accepted.
-        let note = (*category == Category::Clipboard)
-            .then(|| "⌘ and Ctrl+Shift both work, on every platform".to_string());
-        out.push(ShortcutSection { title: (*title).to_string(), rows, note });
+        rows.insert(start, PaletteRow::Group { title: (*title).to_string() });
+        actions.insert(start, None);
+        if *category == Category::Clipboard {
+            // The one place the both-conventions fact is displayed; see
+            // `key::is_clipboard_chord` for why both are accepted.
+            rows.push(PaletteRow::Command {
+                name: "⌘ and Ctrl+Shift both work, on every platform".to_string(),
+                chord: String::new(),
+                runnable: false,
+            });
+            actions.push(None);
+        }
     }
-    let mouse: Vec<ShortcutRow> = MOUSE_SHORTCUTS
-        .iter()
-        .map(|shortcut| ShortcutRow {
+
+    let start = rows.len();
+    for shortcut in MOUSE_SHORTCUTS {
+        if !row_matches(&filter, shortcut.name, shortcut.gesture) {
+            continue;
+        }
+        rows.push(PaletteRow::Command {
             name: shortcut.name.to_string(),
             chord: shortcut.gesture.to_string(),
-        })
-        .filter(|row| row_matches(&filter, row))
-        .collect();
-    if !mouse.is_empty() {
-        out.push(ShortcutSection { title: "Mouse".to_string(), rows: mouse, note: None });
+            runnable: false,
+        });
+        actions.push(None);
     }
-    out
+    if rows.len() > start {
+        rows.insert(start, PaletteRow::Group { title: "Mouse".to_string() });
+        actions.insert(start, None);
+    }
+
+    (rows, actions)
+}
+
+/// The nearest runnable row at or after `from`, wrapping backwards —
+/// headers and reference rows are labels; the keyboard never rests on one.
+#[must_use]
+pub fn nearest_runnable(actions: &[Option<Action>], from: usize) -> usize {
+    let runnable = |i: &usize| actions.get(*i).copied().flatten().is_some();
+    (from..actions.len())
+        .find(runnable)
+        .or_else(|| (0..from).rev().find(runnable))
+        .unwrap_or(0)
+}
+
+/// The next runnable row in the given direction, or `from` at the edge.
+#[must_use]
+pub fn step_runnable(actions: &[Option<Action>], from: usize, down: bool) -> usize {
+    let runnable = |i: &usize| actions.get(*i).copied().flatten().is_some();
+    if down {
+        (from + 1..actions.len()).find(runnable).unwrap_or(from)
+    } else {
+        (0..from).rev().find(runnable).unwrap_or(from)
+    }
 }
 
 #[cfg(test)]
@@ -479,33 +537,55 @@ mod tests {
     }
 
     #[test]
-    fn the_sheet_chord_and_its_aliases_all_resolve() {
-        assert_eq!(action_for(&char_key("/"), SUPER), Some(Action::ToggleShortcuts));
+    fn the_palette_chord_and_its_aliases_all_resolve() {
+        assert_eq!(action_for(&char_key("/"), SUPER), Some(Action::TogglePalette));
         assert_eq!(
             action_for(&char_key("?"), SUPER),
-            Some(Action::ToggleShortcuts),
+            Some(Action::TogglePalette),
             "⌘? arrives pre-shifted as ?"
         );
         assert_eq!(
             action_for(&char_key("?"), CTRL.union(SHIFT)),
-            Some(Action::ToggleShortcuts),
+            Some(Action::TogglePalette),
             "Ctrl+Shift+/ arrives as ?, and case-folding cannot map ? to / for it"
+        );
+        assert_eq!(
+            action_for(&char_key("P"), SUPER.union(SHIFT)),
+            Some(Action::TogglePalette),
+            "⌘⇧P is the spelling every editor taught"
+        );
+        assert_eq!(
+            action_for(&char_key("p"), SUPER),
+            None,
+            "plain ⌘P stays free — the palette alias is shift-exact"
         );
     }
 
     #[test]
-    fn every_visible_binding_reaches_the_cheat_sheet() {
-        let secs = sections("");
-        let rows: Vec<&ShortcutRow> = secs.iter().flat_map(|s| s.rows.iter()).collect();
+    fn every_visible_binding_is_a_palette_row_that_runs_its_own_action() {
+        // "Trigger and show" must be one fact: the row that displays a
+        // chord runs exactly the action that chord dispatches to, verified
+        // through the same parallel-list the input path uses.
+        let (rows, actions) = palette("");
         for binding in BINDINGS.iter().filter(|b| b.show) {
-            assert!(
-                rows.iter()
-                    .any(|r| r.name == binding.name && r.chord == chord_label(binding)),
-                "'{}' works but is not on the sheet — the drift this table exists to kill",
+            let at = rows
+                .iter()
+                .position(|r| matches!(r, PaletteRow::Command { name, chord, .. }
+                    if *name == binding.name && *chord == chord_label(binding)))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "'{}' works but is not in the palette — the drift this table exists to kill",
+                        binding.name
+                    )
+                });
+            let expected = (binding.action != Action::TogglePalette).then_some(binding.action);
+            assert_eq!(
+                actions[at], expected,
+                "'{}': the palette must run what the chord runs",
                 binding.name
             );
         }
-        // Hidden rows are collapsed, not secret: a visible row must perform
+        // Alias rows are collapsed, not secret: a visible row must perform
         // the same kind of action, or a chord became undiscoverable.
         for hidden in BINDINGS.iter().filter(|b| !b.show) {
             assert!(
@@ -516,26 +596,44 @@ mod tests {
             );
         }
         assert!(
-            secs.iter().any(|s| s.title == "Mouse" && !s.rows.is_empty()),
+            rows.iter().any(|r| matches!(r, PaletteRow::Group { title } if title == "Mouse")),
             "the pointer chords must be listed too — they exist nowhere else"
         );
     }
 
     #[test]
-    fn filtering_never_leaves_an_empty_section() {
-        for filter in ["tab", "copy", "PASTE", "no-such-shortcut-anywhere"] {
-            for section in sections(filter) {
-                assert!(
-                    !section.rows.is_empty(),
-                    "'{filter}' left section '{}' as an empty header",
-                    section.title
-                );
+    fn filtering_never_leaves_an_empty_group() {
+        for filter in ["tab", "copy", "PASTE", "no-such-command-anywhere"] {
+            let (rows, actions) = palette(filter);
+            assert_eq!(rows.len(), actions.len(), "the lists are parallel by construction");
+            for (i, row) in rows.iter().enumerate() {
+                if matches!(row, PaletteRow::Group { .. }) {
+                    assert!(
+                        matches!(rows.get(i + 1), Some(PaletteRow::Command { .. })),
+                        "'{filter}' left a group header with nothing under it"
+                    );
+                }
             }
         }
+        let (rows, _) = palette("PASTE");
         assert!(
-            sections("PASTE").iter().any(|s| s.rows.iter().any(|r| r.name == "Paste")),
+            rows.iter().any(|r| matches!(r, PaletteRow::Command { name, .. } if name == "Paste")),
             "the filter must be case-insensitive"
         );
+    }
+
+    #[test]
+    fn selection_skips_headers_and_reference_rows() {
+        let (rows, actions) = palette("");
+        let first = nearest_runnable(&actions, 0);
+        assert!(actions[first].is_some(), "the selection must land on a runnable command");
+        assert!(
+            matches!(&rows[0], PaletteRow::Group { .. }),
+            "…and row zero is a header, so landing there would be resting on a label"
+        );
+        // Walking down from the last runnable row goes nowhere.
+        let last = (0..actions.len()).rev().find(|i| actions[*i].is_some()).expect("some");
+        assert_eq!(step_runnable(&actions, last, true), last, "the end is a wall, not a wrap");
     }
 
     #[test]
