@@ -21,6 +21,7 @@ mod remote;
 mod session;
 mod source;
 mod tabs;
+mod tabs_state;
 
 use winit::event_loop::EventLoop;
 

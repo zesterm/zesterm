@@ -226,8 +226,9 @@ pub struct App {
     /// The fleet picker's transient state, while open.
     picker: Option<PickerState>,
     /// Tabs opened by worker threads, waiting for the event loop to adopt
-    /// them (`Wakeup::TabsChanged`).
-    pending_tabs: Arc<parking_lot::Mutex<Vec<Tab>>>,
+    /// them (`Wakeup::TabsChanged`). The flag says whether the tab takes the
+    /// keyboard: picked tabs do, restored ones arrive in the background.
+    pending_tabs: Arc<parking_lot::Mutex<Vec<(Tab, bool)>>>,
     /// The persisted identity used for hosts that are not this machine,
     /// loaded lazily on first need so the keychain stays off the startup
     /// path (and off it entirely for people who never leave loopback).
@@ -417,6 +418,7 @@ impl App {
         cols: u16,
         rows: u16,
         proxy: &EventLoopProxy<Wakeup>,
+        restore: Option<zest_proto::SessionAddr>,
     ) -> Option<Tab> {
         if self.no_daemon {
             if self.attach_probe {
@@ -487,27 +489,44 @@ impl App {
             Ok((a.read, a.write))
         });
 
-        let session = crate::remote::RemoteSession::attach(
-            dial,
-            &crate::remote::AttachOptions {
-                identity: &identity,
-                label: "zesterm",
-                command: &spec.command_line,
-                cols,
-                rows,
-                scrollback: self.config.scrollback,
-                // Adopt an unattached session if there is one. Creating every
-                // time meant a session could never be picked up again -- the
-                // whole point of the daemon owning it -- and leaked one shell
-                // per launch, because closing a window only detaches.
-                adopt: !self.new_session,
-                local: true,
-                // Loopback: the socket already answered "is this my machine",
-                // and there is no advertisement to have been misled by.
-                expect_host: None,
-            },
-            wake,
-        );
+        let opts = crate::remote::AttachOptions {
+            identity: &identity,
+            label: "zesterm",
+            command: &spec.command_line,
+            cols,
+            rows,
+            scrollback: self.config.scrollback,
+            // Restore replaced adoption for the GUI (#23): a launch reopens
+            // what this window was showing, or starts fresh — it never again
+            // guesses at a session another machine may be driving. `--attach`
+            // keeps adopting; see `attach_remote`.
+            adopt: false,
+            local: true,
+            // Loopback: the socket already answered "is this my machine",
+            // and there is no advertisement to have been misled by.
+            expect_host: None,
+        };
+        let session = match restore {
+            Some(addr) => {
+                let retry_wake = wake_for(proxy, Arc::clone(&addr_cell));
+                crate::remote::RemoteSession::attach_existing(dial, addr, &opts, wake).or_else(
+                    |e| {
+                        // The remembered session ended while the window was
+                        // closed. A fresh shell is the honest launch; the
+                        // stale entry is overwritten at the next persist.
+                        tracing::warn!(error = %e, "the remembered session is gone; starting fresh");
+                        let socket = socket.clone();
+                        let fresh: crate::remote::Dialer = Box::new(move || {
+                            let a = crate::daemon::find_or_spawn(&socket, DAEMON_START_TIMEOUT)
+                                .map_err(|e| crate::remote::RemoteError::Io(e.to_string()))?;
+                            Ok((a.read, a.write))
+                        });
+                        crate::remote::RemoteSession::create_and_attach(fresh, &opts, retry_wake)
+                    },
+                )
+            }
+            None => crate::remote::RemoteSession::create_and_attach(dial, &opts, wake),
+        };
 
         match session {
             Ok(session) => {
@@ -522,11 +541,11 @@ impl App {
                     println!("daemon_connect_ms={connect_ms:.2}");
                     println!("attach_keyframe_ms={attach_ms:.2}");
                     println!("daemon_spawned={spawned}");
-                    // Dropped explicitly, because `process::exit` below runs no
-                    // destructors: without this the Detach is never written,
-                    // the daemon goes on believing a dead client is attached,
-                    // and the next probe cannot adopt the session it left.
-                    drop(session);
+                    // Killed explicitly, because `process::exit` below runs
+                    // no destructors — and killed rather than detached now
+                    // that nothing adopts: a probe that leaked one shell per
+                    // run would rebuild the very pile #23 started from.
+                    session.kill();
                     let budget = if spawned { 150.0 } else { 10.0 };
                     let total = connect_ms + attach_ms;
                     if total > budget {
@@ -1187,6 +1206,34 @@ impl App {
         }
     }
 
+    /// Remember what this window is showing, so the next launch can pick it
+    /// back up instead of guessing (#23's adopt bug, retired).
+    fn persist_tabs(&self) {
+        if !self.config.tabs.restore {
+            return;
+        }
+        let mut tabs = Vec::new();
+        let mut active = 0;
+        for (i, tab) in self.tabs.iter().enumerate() {
+            // Placeholders (in-process ptys) die with the window and cannot
+            // be reattached; dead sessions have nothing to reattach to.
+            if crate::tabs::is_placeholder(tab.addr) || tab.dead {
+                continue;
+            }
+            if i == self.tabs.active_index() {
+                active = tabs.len();
+            }
+            let title = tab.source().terminal().lock().title().trim().to_string();
+            tabs.push(crate::tabs_state::SavedTab {
+                addr: tab.addr,
+                local: tab.local,
+                dial_hint: tab.dial_hint.clone(),
+                title,
+            });
+        }
+        crate::tabs_state::save(&crate::tabs_state::SavedTabs::new(active, tabs));
+    }
+
     /// Toggle the fleet picker (⌘K, and the picker rows' Escape hatch).
     fn toggle_picker(&mut self) {
         self.picker = match self.picker {
@@ -1310,7 +1357,7 @@ impl App {
                 // Pin remote creates to the host the roster named: the
                 // address came from an advertisement, which is a claim.
                 let expect = (!route.is_local()).then_some(host);
-                self.spawn_tab_worker_pinned(route, None, expect);
+                self.spawn_tab_worker_pinned(route, None, expect, true);
             }
         }
         self.mark_chrome_dirty();
@@ -1341,7 +1388,7 @@ impl App {
 
     fn spawn_tab_worker(&mut self, route: HostRoute, attach: Option<zest_proto::SessionAddr>) {
         let expect = attach.and_then(|a| (!route.is_local()).then_some(a.host));
-        self.spawn_tab_worker_pinned(route, attach, expect);
+        self.spawn_tab_worker_pinned(route, attach, expect, true);
     }
 
     /// Open a session on `route` off the event loop and park the finished
@@ -1354,6 +1401,7 @@ impl App {
         route: HostRoute,
         attach: Option<zest_proto::SessionAddr>,
         expect_host: Option<zest_proto::HostId>,
+        focus: bool,
     ) {
         let identity = if route.is_local() {
             self.client_identity.clone()
@@ -1402,7 +1450,13 @@ impl App {
                 Ok(session) => {
                     *cell.lock() = session.addr();
                     session.terminal().lock().set_palette(palette);
-                    pending.lock().push(Tab::daemon(session, local, (cols, rows)));
+                    let hint = match &route {
+                        HostRoute::Tcp(a) => Some(a.clone()),
+                        HostRoute::LocalSocket(_) => None,
+                    };
+                    pending
+                        .lock()
+                        .push((Tab::daemon(session, local, (cols, rows)).with_dial_hint(hint), focus));
                     let _ = proxy.send_event(Wakeup::TabsChanged);
                 }
                 // The picker is already closed; a failure is a log line for
@@ -1517,6 +1571,7 @@ impl App {
 
         self.after_activation();
         self.relayout_grid();
+        self.persist_tabs();
     }
 
     /// Close one tab: local sessions die, remote ones are only let go of.
@@ -1535,6 +1590,7 @@ impl App {
             tab.kill();
         }
 
+        self.persist_tabs();
         if self.tabs.is_empty() {
             el.exit();
             return;
@@ -1560,6 +1616,7 @@ impl App {
             tab.source().mark_dirty();
         }
         self.mark_chrome_dirty();
+        self.persist_tabs();
     }
 
     /// Recompute the grid after the strip's extent may have changed —
@@ -2017,7 +2074,39 @@ impl ApplicationHandler<Wakeup> for App {
         // an in-process pty. This slot -- after the window is visible and the
         // first paint is measured, before GPU init -- is the one ADR-007 names,
         // and nothing above line 649 may move below it.
-        let mut tab: Tab = match self.attach_to_daemon(&spec, cols, rows, &proxy) {
+        // Restore replaces adoption: reopen what this window was showing
+        // last time. The synchronous slot fits exactly one attach, and only
+        // a local one keeps the startup budget honest — everything else
+        // arrives in the background.
+        let restore = (!self.new_session
+            && !self.no_daemon
+            && self.attach_addr.is_none()
+            && self.config.tabs.restore)
+            .then(crate::tabs_state::load)
+            .flatten();
+        let (restore_active, restore_rest) = match restore {
+            Some(saved) => {
+                let mut tabs = saved.tabs;
+                let sync = if tabs.get(saved.active).is_some_and(|t| t.local) {
+                    Some(saved.active)
+                } else {
+                    // A remote active tab would put a network dial on the
+                    // startup path; restore it in the background and lead
+                    // with the first local one instead.
+                    tabs.iter().position(|t| t.local)
+                };
+                match sync {
+                    Some(i) => {
+                        let lead = tabs.remove(i);
+                        (Some(lead.addr), tabs)
+                    }
+                    None => (None, tabs),
+                }
+            }
+            None => (None, Vec::new()),
+        };
+
+        let mut tab: Tab = match self.attach_to_daemon(&spec, cols, rows, &proxy, restore_active) {
             Some(tab) => tab,
             None => {
                 self.next_placeholder += 1;
@@ -2067,6 +2156,25 @@ impl ApplicationHandler<Wakeup> for App {
         // is in this process or on another machine, which is the property the
         // abstraction exists for.
         self.tabs.push(tab);
+        // The rest of the remembered set, off the startup path. Parallel
+        // workers, so one sleeping host cannot serialize the others behind
+        // its timeout; arrival order may differ from the saved order, which
+        // a background tab can afford.
+        for saved in restore_rest {
+            let route = if saved.local {
+                HostRoute::LocalSocket(zest_daemon::default_socket_path())
+            } else {
+                match saved.dial_hint.clone() {
+                    Some(addr) => HostRoute::Tcp(addr),
+                    None => {
+                        tracing::warn!(addr = %saved.addr, "no way to dial a remembered host; skipping");
+                        continue;
+                    }
+                }
+            };
+            let expect = (!saved.local).then_some(saved.addr.host);
+            self.spawn_tab_worker_pinned(route, Some(saved.addr), expect, false);
+        }
         self.window = Some(window);
 
         // The window is already visible and painted with the theme background
@@ -2150,13 +2258,18 @@ impl ApplicationHandler<Wakeup> for App {
             // A worker finished opening a tab; adopt everything it parked.
             Wakeup::TabsChanged => {
                 let mut fresh = self.pending_tabs.lock();
-                let tabs: Vec<Tab> = fresh.drain(..).collect();
+                let tabs: Vec<(Tab, bool)> = fresh.drain(..).collect();
                 drop(fresh);
-                for tab in tabs {
-                    self.tabs.push(tab);
+                for (tab, focus) in tabs {
+                    if focus {
+                        self.tabs.push(tab);
+                    } else {
+                        self.tabs.push_background(tab);
+                    }
                 }
                 self.after_activation();
                 self.relayout_grid();
+                self.persist_tabs();
             }
             // The picker's data moved. Consume the latch; the chrome decides
             // whether anything visible depends on it.
@@ -2207,6 +2320,9 @@ impl ApplicationHandler<Wakeup> for App {
             // covers every way this process can end, including the ones no
             // `CloseRequested` arm would see.
             WindowEvent::CloseRequested => {
+                // Remember the set first: dropping is the detach, and what
+                // was open is what the next launch reopens.
+                self.persist_tabs();
                 self.tabs.clear();
                 el.exit();
             }

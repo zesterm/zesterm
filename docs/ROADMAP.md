@@ -222,6 +222,18 @@ M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
       current tab's host; closing a local tab kills, a remote one detaches;
       launch restores the previous tab set, which retires the adopt guess. Both
       orientations — top strip and left sidebar — behind `tabs.position`.
+- [x] **Launch restores; the adopt guess is dead.** The tab set persists to
+      `state_dir()/tabs.json` (atomic, versioned, state-not-settings — the
+      config watcher must not fire on it) on every mutation, and launching
+      reattaches exactly those sessions: the active local one synchronously
+      in the same startup slot an attach always used (probe unchanged), the
+      rest via background workers that cannot let one sleeping host serialize
+      the others. A remembered session that ended means a fresh shell, said
+      out loud. The GUI never adopts anymore — the answer to "what should
+      open do" #23 deferred until the picker existed — while `--attach`
+      keeps adopting and `--new-session`/`tabs.restore=false` opt out.
+      `--attach-probe` now kills its probe session: with nothing adopting,
+      a leaked shell per run would rebuild the pile #23 started from.
 - [x] **The picker exists — the fleet has a face.** ⌘K (or +) opens a modal
       overlay over the grid: hosts with presence in words ("andy-mac —
       online", warn-coloured "unreachable"), their sessions with title, cwd

@@ -28,6 +28,9 @@ zest-daemon.workspace = true
 # other client, over the same wire the phone will use.
 zest-mesh.workspace = true
 thiserror = { workspace = true }
+# The remembered tab set (tabs_state.rs): plain JSON in the state dir.
+serde.workspace = true
+serde_json.workspace = true
 toml.workspace = true
 winit.workspace = true
 wgpu.workspace = true

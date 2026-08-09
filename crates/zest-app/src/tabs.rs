@@ -43,15 +43,39 @@ pub struct Tab {
     /// resized lazily on activation, so a window drag costs one resize for
     /// the visible grid instead of N network messages per frame.
     pub sized: (u16, u16),
+    /// How this tab's host was dialled when it was not the local socket —
+    /// persisted so a restore can reach the host even before discovery has
+    /// found it again.
+    pub dial_hint: Option<String>,
 }
 
 impl Tab {
     pub fn daemon(remote: RemoteSession, local: bool, sized: (u16, u16)) -> Self {
-        Self { addr: remote.addr(), session: TabSession::Daemon(remote), local, dead: false, sized }
+        Self {
+            addr: remote.addr(),
+            session: TabSession::Daemon(remote),
+            local,
+            dead: false,
+            sized,
+            dial_hint: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_dial_hint(mut self, hint: Option<String>) -> Self {
+        self.dial_hint = hint;
+        self
     }
 
     pub fn in_process(session: Session, addr: SessionAddr, sized: (u16, u16)) -> Self {
-        Self { addr, session: TabSession::InProcess(session), local: true, dead: false, sized }
+        Self {
+            addr,
+            session: TabSession::InProcess(session),
+            local: true,
+            dead: false,
+            sized,
+            dial_hint: None,
+        }
     }
 
     pub fn source(&self) -> &dyn SessionSource {
@@ -142,6 +166,13 @@ impl TabStrip {
     pub fn push(&mut self, tab: Tab) {
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
+    }
+
+    /// Add a tab without taking the keyboard — restored tabs arrive in the
+    /// background, and a launch that steals focus once per remembered tab
+    /// would be unusable.
+    pub fn push_background(&mut self, tab: Tab) {
+        self.tabs.push(tab);
     }
 
     /// Returns true when the active tab changed.

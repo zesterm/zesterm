@@ -59,6 +59,24 @@ pub fn trust_file() -> Option<PathBuf> {
     config_dir().map(|d| d.join("trusted.toml"))
 }
 
+/// Where mutable app state lives — the remembered tab set, and whatever
+/// joins it.
+///
+/// **Not the config directory**, for two live reasons: state is not settings
+/// (nothing here belongs in a generated settings UI or a dotfiles repo), and
+/// the config watcher fires on writes to its directory — an app that saves
+/// state on every tab change into a watched directory reloads its own config
+/// in a loop. Portable mode keeps state beside the binary, matching where
+/// its config lives.
+#[must_use]
+pub fn state_dir() -> Option<PathBuf> {
+    if let Some(dir) = portable_dir() {
+        return Some(dir.join("state"));
+    }
+    directories::ProjectDirs::from("dev", "zesterm", "zesterm")
+        .map(|d| d.data_local_dir().join("state"))
+}
+
 /// A `.zesterm.toml` in `dir`, if there is one.
 #[must_use]
 pub fn workspace_file(dir: &Path) -> Option<PathBuf> {
