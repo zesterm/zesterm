@@ -126,77 +126,109 @@ impl LanListener {
         auth: Arc<Authenticator>,
     ) -> Result<(), DaemonError> {
         tracing::info!(addr = %self.addr, "serving the LAN");
-        let limiter = Arc::new(RateLimiter::default());
-        let unauthenticated = Arc::new(AtomicUsize::new(0));
-        let handshake_timeout = self.handshake_timeout;
-
-        for stream in self.listener.incoming() {
-            let Ok(stream) = stream else { continue };
-            let peer = stream
-                .peer_addr()
-                .map_or_else(|_| "unknown".to_string(), |a| a.to_string());
-
-            if let Some(wait) = limiter.blocked(&peer) {
-                tracing::warn!(%peer, ?wait, "refusing: too many failed handshakes");
-                drop(stream);
-                continue;
-            }
-
-            // Accept-and-close rather than leaving them queued: a peer told no
-            // immediately can back off, where one left hanging cannot.
-            if unauthenticated.load(Ordering::Acquire) >= MAX_UNAUTHENTICATED {
-                tracing::warn!(%peer, "refusing: too many connections are mid-handshake");
-                drop(stream);
-                continue;
-            }
-
-            let Ok(write_half) = stream.try_clone() else { continue };
-            let config = config.clone();
-            let registry = Arc::clone(&registry);
-            let auth = Arc::clone(&auth);
-            let limiter = Arc::clone(&limiter);
-            let unauthenticated = Arc::clone(&unauthenticated);
-
-            unauthenticated.fetch_add(1, Ordering::AcqRel);
-            std::thread::spawn(move || {
-                let watchdog = Watchdog::start(&stream, handshake_timeout);
-                // Dropped when the handshake completes, not when the
-                // connection ends -- the cap is on connections *mid-handshake*,
-                // and holding it for the session made it a hard limit of 32
-                // concurrent clients.
-                let guard = Countdown(Some(unauthenticated));
-
+        accept_hardened(
+            self.listener,
+            self.handshake_timeout,
+            move |stream, peer, watchdog, slot| {
+                let write_half = stream
+                    .try_clone()
+                    .map_err(|e| DaemonError::Transport(e.to_string()))?;
                 // `Auth::Proof`: the trust store decides, and this connection
                 // may not approve other devices.
-                let result = serve_lan(
+                serve_lan(
                     stream,
                     write_half,
-                    config,
-                    registry,
-                    Auth::Proof(auth),
-                    peer.clone(),
-                    watchdog.handle(),
-                    guard,
-                );
-
-                // Read before disarming: `authenticated` is `!armed && !fired`,
-                // so disarming first would report every stranger's dropped
-                // connection as a success and starve the rate limiter -- the
-                // exact bug its comment says it once had.
-                let authenticated = watchdog.authenticated();
-                watchdog.disarm();
-                if authenticated {
-                    limiter.succeeded(&peer);
-                } else {
-                    limiter.failed(&peer);
-                }
-                if let Err(e) = result {
-                    tracing::warn!(%peer, error = %e, "connection ended");
-                }
-            });
-        }
-        Ok(())
+                    config.clone(),
+                    Arc::clone(&registry),
+                    Auth::Proof(Arc::clone(&auth)),
+                    peer,
+                    watchdog,
+                    slot,
+                )
+            },
+        )
     }
+}
+
+/// Accept connections forever with the hardening every public port needs.
+///
+/// The module docs list the three obligations — watchdog, mid-handshake cap,
+/// per-address failure limit — and this loop is where all three live, factored
+/// out of [`LanListener`] so a second public transport (the WebSocket listener)
+/// cannot accidentally take the port without taking the posture. `serve_conn`
+/// runs on its own thread with the watchdog already armed, so however long its
+/// transport takes to say hello — an HTTP upgrade, a raw `Hello`, nothing at
+/// all — the same deadline covers it.
+///
+/// The closure's `Result` is logged, not returned: one connection's failure is
+/// that connection's news, and the accept loop outlives them all.
+pub(crate) fn accept_hardened<F>(
+    listener: TcpListener,
+    handshake_timeout: Duration,
+    serve_conn: F,
+) -> Result<(), DaemonError>
+where
+    F: Fn(TcpStream, String, WatchdogHandle, Countdown) -> Result<(), DaemonError>
+        + Send
+        + Sync
+        + 'static,
+{
+    let serve_conn = Arc::new(serve_conn);
+    let limiter = Arc::new(RateLimiter::default());
+    let unauthenticated = Arc::new(AtomicUsize::new(0));
+
+    for stream in listener.incoming() {
+        let Ok(stream) = stream else { continue };
+        let peer = stream
+            .peer_addr()
+            .map_or_else(|_| "unknown".to_string(), |a| a.to_string());
+
+        if let Some(wait) = limiter.blocked(&peer) {
+            tracing::warn!(%peer, ?wait, "refusing: too many failed handshakes");
+            drop(stream);
+            continue;
+        }
+
+        // Accept-and-close rather than leaving them queued: a peer told no
+        // immediately can back off, where one left hanging cannot.
+        if unauthenticated.load(Ordering::Acquire) >= MAX_UNAUTHENTICATED {
+            tracing::warn!(%peer, "refusing: too many connections are mid-handshake");
+            drop(stream);
+            continue;
+        }
+
+        let serve_conn = Arc::clone(&serve_conn);
+        let limiter = Arc::clone(&limiter);
+        let unauthenticated = Arc::clone(&unauthenticated);
+
+        unauthenticated.fetch_add(1, Ordering::AcqRel);
+        std::thread::spawn(move || {
+            let watchdog = Watchdog::start(&stream, handshake_timeout);
+            // Dropped when the handshake completes, not when the
+            // connection ends -- the cap is on connections *mid-handshake*,
+            // and holding it for the session made it a hard limit of 32
+            // concurrent clients.
+            let guard = Countdown(Some(unauthenticated));
+
+            let result = serve_conn(stream, peer.clone(), watchdog.handle(), guard);
+
+            // Read before disarming: `authenticated` is `!armed && !fired`,
+            // so disarming first would report every stranger's dropped
+            // connection as a success and starve the rate limiter -- the
+            // exact bug its comment says it once had.
+            let authenticated = watchdog.authenticated();
+            watchdog.disarm();
+            if authenticated {
+                limiter.succeeded(&peer);
+            } else {
+                limiter.failed(&peer);
+            }
+            if let Err(e) = result {
+                tracing::warn!(%peer, error = %e, "connection ended");
+            }
+        });
+    }
+    Ok(())
 }
 
 /// Decrements the mid-handshake count once, however it is released.
