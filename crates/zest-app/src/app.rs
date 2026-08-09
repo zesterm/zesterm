@@ -256,6 +256,15 @@ pub struct App {
     /// this machine showing a shell on the Mac is the point of the whole
     /// project — the renderer cannot tell and must not care.
     tabs: TabStrip,
+    /// Hit regions of the per-frame block headers, consulted where the
+    /// cached chrome layout says nothing. Rebuilt every redraw.
+    block_hits: crate::chrome::hit::ChromeHitMap,
+    /// Folded blocks, per session — a view preference, never on the wire:
+    /// two clients watching one session may disagree.
+    folded_blocks: std::collections::HashMap<
+        zest_proto::SessionAddr,
+        std::collections::BTreeSet<u32>,
+    >,
     /// When each session last produced output, stamped by the wake callbacks.
     /// Feeds the sidebar's age column; never pruned aggressively — a closed
     /// tab's entry is a few bytes and the map is per-window.
@@ -385,6 +394,8 @@ impl App {
             window: None,
             gpu: None,
             tabs: TabStrip::default(),
+            block_hits: crate::chrome::hit::ChromeHitMap::default(),
+            folded_blocks: std::collections::HashMap::new(),
             activity: ActivityMap::default(),
             route: None,
             client_identity: None,
@@ -1544,7 +1555,13 @@ impl App {
     /// What the pointer is over in the chrome, using the current layout.
     fn chrome_hit(&mut self, x: f64, y: f64) -> Option<HitRegion> {
         self.refresh_chrome();
-        self.chrome_layout.as_ref().and_then(|l| l.hit.hit(x as f32, y as f32))
+        // Cached chrome first — its overlays and scrims must outrank the
+        // per-frame block headers, whose regions only exist inside the grid
+        // area anyway.
+        self.chrome_layout
+            .as_ref()
+            .and_then(|l| l.hit.hit(x as f32, y as f32))
+            .or_else(|| self.block_hits.hit(x as f32, y as f32))
     }
 
     /// A pointer action that landed in the chrome.
@@ -1586,6 +1603,28 @@ impl App {
             // The status bar swallows clicks like the strip does; nothing on
             // it is a control yet.
             (HitRegion::Status, _) => {}
+            (HitRegion::BlockFold(id), MouseButton::Left) => {
+                if let Some(tab) = self.tabs.active() {
+                    let set = self.folded_blocks.entry(tab.addr).or_default();
+                    if !set.remove(&id) {
+                        set.insert(id);
+                    }
+                    // Fold state lives outside the cached layout; the header
+                    // pass rebuilds per frame, so a redraw is all it takes.
+                    self.chrome_dirty = true;
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                }
+            }
+            // The chips mirror the chords: both act on the most recent block
+            // *with output*, which is what the design specifies — at a prompt
+            // the cursor's block has printed nothing.
+            (HitRegion::BlockCopy(_), MouseButton::Left) => self.copy_block_output(),
+            (HitRegion::BlockRerun(_), MouseButton::Left) => self.rerun_last_command(),
+            // The band itself swallows: the text it paints over must not be
+            // selectable through it.
+            (HitRegion::BlockHeader(_), _) => {}
             (HitRegion::PickerRow(i), MouseButton::Left) => {
                 if let Some(p) = self.picker.as_mut() {
                     p.selected = i;
@@ -2292,6 +2331,88 @@ impl App {
         }
     }
 
+    /// The active session's blocks as the header pass wants them: which
+    /// viewport rows each header covers, plus its state and pre-formatted
+    /// labels. One short terminal lock; plain data out.
+    fn build_block_views(&self) -> Vec<crate::chrome::blocks::BlockView> {
+        let Some(tab) = self.tabs.active() else { return Vec::new() };
+        let term = tab.source().terminal();
+        let term = term.lock();
+        // The alt screen is a separate grid whose ids restart at zero; a
+        // primary-grid block would overlay whatever rows happen to collide.
+        if term.in_alt_screen() {
+            return Vec::new();
+        }
+        let grid = term.grid();
+        let row_lines: Vec<Option<u64>> = (0..grid.rows()).map(|r| grid.line_id_at(r)).collect();
+        let folded = self.folded_blocks.get(&tab.addr);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+
+        term.blocks()
+            .blocks()
+            .iter()
+            .filter_map(|b| {
+                // A block still at its prompt is where the user is typing;
+                // never overlaid.
+                let out_line = b.output_line?;
+                let header = (b.prompt_line, out_line.max(b.prompt_line + 1));
+                let mut first = None;
+                let mut last = None;
+                for (r, line) in row_lines.iter().enumerate() {
+                    if line.is_some_and(|l| l >= header.0 && l < header.1) {
+                        first.get_or_insert(r);
+                        last = Some(r + 1);
+                    }
+                }
+                let rows = (first?, last?);
+                let is_folded = folded.is_some_and(|f| f.contains(&b.id.0));
+                let running = b.is_running();
+                let duration = match (b.started_ms, b.ended_ms) {
+                    (Some(s), Some(e)) if !running => {
+                        crate::chrome::blocks::format_duration(e.saturating_sub(s))
+                    }
+                    _ => String::new(),
+                };
+                let running_label = if running {
+                    b.started_ms.map_or_else(
+                        || "running".to_string(),
+                        |s| {
+                            format!(
+                                "running {:.1}s",
+                                now_ms.saturating_sub(s) as f64 / 1000.0
+                            )
+                        },
+                    )
+                } else {
+                    String::new()
+                };
+                let no_output = !running && b.end_line.is_some_and(|e| e <= out_line);
+                let exit_label = match b.state {
+                    zest_core::BlockState::Finished { exit_code: Some(c) } => format!("exit {c}"),
+                    _ => String::new(),
+                };
+                Some(crate::chrome::blocks::BlockView {
+                    id: b.id.0,
+                    rows,
+                    running,
+                    failed: b.failed(),
+                    no_output,
+                    command: b.command.clone(),
+                    cwd: crate::status::shorten_home(&b.cwd),
+                    duration,
+                    exit_label,
+                    running_label,
+                    folded: is_folded,
+                    folded_lines: b
+                        .end_line
+                        .map_or(0, |e| e.saturating_sub(out_line) as usize),
+                })
+            })
+            .collect()
+    }
+
     /// Pointer pixels to a grid cell, clamped into the viewport.
     fn cell_at(&self, x: f64, y: f64) -> (usize, usize) {
         let Some(fonts) = self.fonts.as_ref() else { return (0, 0) };
@@ -2349,6 +2470,10 @@ impl App {
     fn redraw(&mut self) {
         let insets = self.insets();
         self.refresh_chrome();
+        // Extracted under its own short lock, before the borrows below: the
+        // views are plain data, and holding the terminal across atlas work
+        // would stall the reader thread.
+        let block_views = self.build_block_views();
         let (Some(gpu), Some(fonts), Some(session), Some(window)) = (
             self.gpu.as_mut(),
             self.fonts.as_mut(),
@@ -2382,6 +2507,52 @@ impl App {
                     &mut chrome.glyphs,
                 );
             }
+        }
+
+        // Block headers ride the scrollback, so unlike the cached layout they
+        // are rebuilt per frame — pure arithmetic over the views above.
+        {
+            let area = insets.grid_rect(gpu.config.width, gpu.config.height);
+            let scale = window.scale_factor() as f32;
+            let block_chrome = {
+                let mut measure = |t: &str, px: f32, bold: bool, tr: f32| {
+                    zest_render_wgpu::measure_ui_run(
+                        fonts,
+                        t,
+                        zest_font::Style::new(bold, false),
+                        px,
+                        tr,
+                    )
+                };
+                crate::chrome::blocks::layout_blocks(
+                    &block_views,
+                    area,
+                    metrics.cell_h as f32,
+                    scale,
+                    &self.chrome_colors,
+                    self.chrome_hover,
+                    &mut measure,
+                )
+            };
+            chrome.rects.extend_from_slice(&block_chrome.rects);
+            for run in &block_chrome.texts {
+                zest_render_wgpu::emit_ui_run(
+                    &gpu.device,
+                    &gpu.queue,
+                    &mut gpu.renderer.atlas,
+                    fonts,
+                    &run.text,
+                    zest_font::Style::new(run.bold, false),
+                    run.px,
+                    run.tracking,
+                    run.pos,
+                    run.color,
+                    run.clip,
+                    run.max_width,
+                    &mut chrome.glyphs,
+                );
+            }
+            self.block_hits = block_chrome.hit;
         }
 
         // Build the frame FIRST, and only then acquire the swapchain texture.

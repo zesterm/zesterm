@@ -33,6 +33,15 @@ pub enum HitRegion {
     /// The sidebar's footer ("4 hosts online · 1 asleep"); clicking opens
     /// the fleet view.
     FleetFooter,
+    /// A block header's band — swallows clicks so a press on the painted-over
+    /// prompt cannot select the text it hides.
+    BlockHeader(u32),
+    /// A block header's fold affordance; clicking folds/unfolds that block.
+    BlockFold(u32),
+    /// The hover chip that copies the last command's output.
+    BlockCopy(u32),
+    /// The hover chip that re-runs the last command.
+    BlockRerun(u32),
     /// One row of the open picker, by index into its row list.
     PickerRow(usize),
     /// The dimmed backdrop behind the picker; clicking it dismisses.
@@ -81,6 +90,9 @@ impl ChromeHitMap {
             .map(|(_, region)| *region)
     }
 
+    /// Test-only: the layout tests assert a chrome model always yields
+    /// regions. Production code asks *where*, never *whether*.
+    #[cfg(test)]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.regions.is_empty()

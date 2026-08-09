@@ -146,6 +146,17 @@ impl Terminal {
         self.parser.advance(&mut self.state, bytes);
     }
 
+    /// Whether the alternate screen is active.
+    ///
+    /// The blocks UI hides there: the alt screen is a separate grid whose
+    /// line ids restart at zero, so a block anchored in the primary grid
+    /// would overlay a full-screen program's rows at whatever ids happen to
+    /// collide.
+    #[must_use]
+    pub fn in_alt_screen(&self) -> bool {
+        self.state.alt_grid.is_some()
+    }
+
     /// Tell the terminal what time it is, for stamping command blocks.
     ///
     /// Callers set this before [`Self::advance`]; the parser cannot ask an OS
