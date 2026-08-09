@@ -194,6 +194,14 @@ struct SettingsUiState {
     editing: Option<crate::settings_ui::EditBuffer>,
 }
 
+/// Which full-pane screen the window shows in place of the grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppScreen {
+    Terminal,
+    Fleet,
+    Themes,
+}
+
 #[derive(Clone)]
 enum PickerAction {
     /// A group label or an empty-state row; Enter does nothing.
@@ -210,6 +218,8 @@ enum PickerAction {
     RunBlock { origin: zest_proto::SessionAddr, command: String },
     /// A keymap command, dispatched through the same `perform` its chord is.
     Perform(keymap::Action),
+    /// Open a full-pane screen (fleet, themes).
+    ShowScreen(AppScreen),
 }
 
 /// A tab's wake callback: forward to the event loop, translating the
@@ -264,6 +274,8 @@ pub struct App {
     /// this machine showing a shell on the Mac is the point of the whole
     /// project — the renderer cannot tell and must not care.
     tabs: TabStrip,
+    /// The full-pane screen over the grid, when one is open; Esc returns.
+    screen: AppScreen,
     /// Hit regions of the per-frame block headers, consulted where the
     /// cached chrome layout says nothing. Rebuilt every redraw.
     block_hits: crate::chrome::hit::ChromeHitMap,
@@ -402,6 +414,7 @@ impl App {
             window: None,
             gpu: None,
             tabs: TabStrip::default(),
+            screen: AppScreen::Terminal,
             block_hits: crate::chrome::hit::ChromeHitMap::default(),
             folded_blocks: std::collections::HashMap::new(),
             activity: ActivityMap::default(),
@@ -983,6 +996,142 @@ impl App {
         self.mark_chrome_dirty();
     }
 
+    /// The full-pane screen's model, when one is open (design screens 7–8).
+    fn build_screen_model(
+        &self,
+        fleet_hosts: &[crate::fleet::FleetHost],
+    ) -> Option<crate::chrome::model::ScreenModel> {
+        use crate::chrome::model::{FleetCard, ScreenModel, ThemeCard};
+        use crate::fleet::SessionsState;
+        match self.screen {
+            AppScreen::Terminal => None,
+            AppScreen::Fleet => {
+                let cards = fleet_hosts
+                    .iter()
+                    .map(|h| {
+                        let online =
+                            h.local || h.presence == zest_mesh::discovery::Presence::Online;
+                        let mut rows: Vec<(String, String, u8)> = Vec::new();
+                        // Only what is actually known: an os row we cannot
+                        // fill would be a dash pretending to be a fact.
+                        match h.reachability {
+                            Some(zest_mesh::Reachability::Loopback) => {
+                                rows.push(("path".into(), "loopback".into(), 1));
+                            }
+                            Some(zest_mesh::Reachability::Lan) => {
+                                let v = match h.rtt_ms {
+                                    Some(ms) => format!(
+                                        "LAN direct · {}",
+                                        crate::chrome::layout::format_ms(ms)
+                                    ),
+                                    None => "LAN direct".into(),
+                                };
+                                rows.push(("path".into(), v, 1));
+                            }
+                            Some(zest_mesh::Reachability::Cloud) => {
+                                let v = match h.rtt_ms {
+                                    Some(ms) => format!(
+                                        "tunnel · {}",
+                                        crate::chrome::layout::format_ms(ms)
+                                    ),
+                                    None => "tunnel".into(),
+                                };
+                                rows.push(("path".into(), v, 2));
+                            }
+                            None => {}
+                        }
+                        rows.push(("key".into(), h.host.short(), 0));
+                        if let SessionsState::Fresh(sessions) = &h.sessions {
+                            let n = sessions.len();
+                            let label =
+                                if n == 1 { "1 session".into() } else { format!("{n} sessions") };
+                            rows.push(("sessions".into(), label, 0));
+                        }
+                        FleetCard {
+                            name: h.label.clone(),
+                            local: h.local,
+                            online,
+                            pill: matches!(
+                                h.reachability,
+                                Some(zest_mesh::Reachability::Cloud)
+                            )
+                            .then(|| "via tunnel".to_string()),
+                            rows,
+                        }
+                    })
+                    .collect();
+                Some(ScreenModel::Fleet { cards })
+            }
+            AppScreen::Themes => {
+                let active = if zest_theme::builtin::get(&self.config.theme).is_some() {
+                    self.config.theme.clone()
+                } else {
+                    zest_theme::builtin::DEFAULT_DARK.to_string()
+                };
+                let cards = zest_theme::builtin::all()
+                    .into_iter()
+                    .map(|t| {
+                        let c = |x: zest_theme::Rgba8| [x.r, x.g, x.b];
+                        let default = match t.mode {
+                            zest_theme::ThemeMode::Dark => {
+                                t.id == zest_theme::builtin::DEFAULT_DARK
+                            }
+                            zest_theme::ThemeMode::Light => {
+                                t.id == zest_theme::builtin::DEFAULT_LIGHT
+                            }
+                        };
+                        let mode = match t.mode {
+                            zest_theme::ThemeMode::Dark => "dark",
+                            zest_theme::ThemeMode::Light => "light",
+                        };
+                        let qualifier =
+                            if default { format!("{mode} · default") } else { mode.to_string() };
+                        ThemeCard {
+                            active: t.id == active,
+                            id: t.id,
+                            name: t.name,
+                            qualifier,
+                            bg: c(t.ui.bg),
+                            fg: c(t.ui.fg),
+                            accent: c(t.ui.accent),
+                            danger: c(t.ui.danger),
+                            green: c(t.ui.green),
+                            // Read from the theme, never re-typed — the strip
+                            // is builtin.rs's ANSI row in index order.
+                            ansi: t.ansi.normal.map_or([[0; 3]; 8], |row| row.map(c)),
+                        }
+                    })
+                    .collect();
+                Some(ScreenModel::Themes { cards })
+            }
+        }
+    }
+
+    /// Open or close a full-pane screen; closing always lands on the grid.
+    fn show_screen(&mut self, screen: AppScreen) {
+        self.screen = screen;
+        self.picker = None;
+        self.palette_ui = None;
+        self.settings_ui = None;
+        self.mark_chrome_dirty();
+    }
+
+    /// Apply a theme from the gallery, through the settings write path —
+    /// the file stays the single source of truth, exactly as the settings
+    /// overlay's theme row does it.
+    fn apply_theme_choice(&mut self, id: &str) {
+        let Some(target) = zest_config::paths::config_file()
+            .or_else(|| zest_config::paths::config_dir().map(|d| d.join(zest_config::paths::CONFIG_FILE)))
+        else {
+            return;
+        };
+        match zest_config::write_value(&target, "appearance.theme", id.into()) {
+            Ok(()) => self.reload_config(),
+            Err(e) => tracing::error!(error = %e, "could not write appearance.theme"),
+        }
+        self.mark_chrome_dirty();
+    }
+
     /// The status bar's model: the active session's facts, plus how its host
     /// is reached. Never blocks — everything here is memory or one small
     /// file read (the git HEAD).
@@ -1291,6 +1440,7 @@ impl App {
             && self.picker.is_none()
             && self.palette_ui.is_none()
             && self.settings_ui.is_none()
+            && self.screen == AppScreen::Terminal
         {
             self.chrome_layout = None;
             return;
@@ -1304,6 +1454,10 @@ impl App {
         // Built before the font borrow below: row construction reads the
         // fleet and the tabs, never the fonts.
         let hosts_searched = self.fleet.as_ref().map_or(0, |f| f.snapshot().len());
+        let early_geometry = self.window.as_ref().map(|w| {
+            let scale = w.scale_factor() as f32;
+            (scale, w.inner_size())
+        });
         let picker_rows = self.picker.is_some().then(|| self.build_picker());
         let picker_model = picker_rows.map(|(rows, actions)| {
             let state = self.picker.as_mut().expect("is_some gated the build");
@@ -1389,6 +1543,10 @@ impl App {
         // the same condition, and a bar the grid does not know about would
         // paint over the last row.
         let status = if self.strip_shown() { self.build_status(&fleet_hosts) } else { None };
+        let screen_model = self.build_screen_model(&fleet_hosts);
+        let grid_area = early_geometry.map_or([0.0; 4], |(scale, size)| {
+            self.insets_at(scale).grid_rect(size.width, size.height)
+        });
 
         let Some(window) = self.window.as_ref() else { return };
         let Some(fonts) = self.fonts.as_mut() else { return };
@@ -1548,6 +1706,8 @@ impl App {
             focused: self.focused,
             status,
             sidebar,
+            screen: screen_model,
+            grid_area,
             toggle_chord: keymap::chord_for(keymap::Action::ToggleTabLayout),
             palette_chord: keymap::chord_for(keymap::Action::ToggleFleetPicker),
             picker: picker_model,
@@ -1622,10 +1782,16 @@ impl App {
             | (HitRegion::SidebarSearch, MouseButton::Left) => {
                 self.perform(keymap::Action::ToggleFleetPicker, el);
             }
-            // The fleet view (design screen 7) will own this; until it
-            // exists, the picker is the closest door to the fleet.
             (HitRegion::FleetFooter, MouseButton::Left) => {
-                self.perform(keymap::Action::ToggleFleetPicker, el);
+                self.show_screen(AppScreen::Fleet);
+            }
+            // The screen's ground swallows; its cards claim their own.
+            (HitRegion::ScreenPanel, _) => {}
+            (HitRegion::ThemeCard(i), MouseButton::Left) => {
+                let id = zest_theme::builtin::IDS.get(i).copied();
+                if let Some(id) = id {
+                    self.apply_theme_choice(id);
+                }
             }
             // The status bar swallows clicks like the strip does; nothing on
             // it is a control yet.
@@ -2162,6 +2328,18 @@ impl App {
         // dispatch their chords use.
         let action_cap = if filter.is_empty() { 4 } else { 8 };
         let mut action_rows = Vec::new();
+        // The two full-pane screens, searchable by name; chords may come
+        // later, and the palette contract already allows a chordless row.
+        for (name, screen) in
+            [("Fleet", AppScreen::Fleet), ("Themes", AppScreen::Themes)]
+        {
+            if matches(name) {
+                action_rows.push((
+                    PickerRow::Action { name: name.to_string(), chord: String::new() },
+                    PickerAction::ShowScreen(screen),
+                ));
+            }
+        }
         for b in keymap::BINDINGS.iter().filter(|b| b.show && matches(b.name)) {
             if action_rows.len() >= action_cap {
                 break;
@@ -2212,6 +2390,10 @@ impl App {
                 self.picker = None;
                 self.mark_chrome_dirty();
                 self.perform(action, el);
+                return;
+            }
+            PickerAction::ShowScreen(screen) => {
+                self.show_screen(screen);
                 return;
             }
             PickerAction::Activate(addr) => {
@@ -3779,6 +3961,22 @@ impl ApplicationHandler<Wakeup> for App {
                         _ => {}
                     }
                     self.mark_chrome_dirty();
+                    return;
+                }
+
+                // A full-pane screen owns the keyboard the way an overlay
+                // does, minus the filter: Esc returns to the grid, chords
+                // still work, and nothing falls through to the shell — the
+                // user is not looking at it.
+                if self.screen != AppScreen::Terminal {
+                    use winit::keyboard::{Key, NamedKey};
+                    if matches!(&event.logical_key, Key::Named(NamedKey::Escape)) {
+                        self.show_screen(AppScreen::Terminal);
+                        return;
+                    }
+                    if let Some(binding) = keymap::lookup(&event.logical_key, self.modifiers) {
+                        self.perform(binding.action, el);
+                    }
                     return;
                 }
 

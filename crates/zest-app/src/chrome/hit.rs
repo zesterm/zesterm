@@ -42,6 +42,11 @@ pub enum HitRegion {
     BlockCopy(u32),
     /// The hover chip that re-runs the last command.
     BlockRerun(u32),
+    /// A full-pane screen's ground (fleet, themes) — swallows what its
+    /// cards do not claim; Esc is the way back.
+    ScreenPanel,
+    /// One theme card of the gallery; clicking applies that theme.
+    ThemeCard(usize),
     /// One row of the open picker, by index into its row list.
     PickerRow(usize),
     /// The picker's panel between rows (query line, group labels, footer) —

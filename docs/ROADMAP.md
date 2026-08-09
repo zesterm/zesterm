@@ -454,6 +454,19 @@ theme screens. Colours, sizes and spacing come from there, not from this file.
       skips group labels, ensure-visible scrolling without wheel snap-back,
       "nothing matches" instead of a blank panel, and the modal sweep test
       now also proves group labels are *not* clickable.
+- [x] **Screens 7 and 8: the fleet directory and the theme gallery.** Full-pane
+      screens over the grid (Esc returns; chords still work; bare typing never
+      falls through to a shell nobody is looking at), sharing one page frame.
+      Fleet cards say only what is known — path with measured latency, key
+      fingerprint, session count; asleep hosts go dashed (a layout-side dashed
+      border, the SDF stroke cannot dash) with no wake button offered because
+      wake-on-LAN does not exist yet. Theme cards render their preview in each
+      theme's *own* bg/fg with the green/blue/red applied, the swatch strip is
+      builtin.rs's normal ANSI row read not re-typed, and clicking a card
+      writes `appearance.theme` through the settings path — instant re-theme
+      via the same synchronous reload the overlay uses. Entered from the
+      sidebar's fleet footer and from ⌘K's Actions group (chordless rows, the
+      palette contract's first use of one).
 - [ ] Animation clock. Springs `(response, damping)`, not easing curves —
       terminal motion is interruption-dominated and a spring absorbs a changed
       target with continuous velocity for free. Substep the integrator

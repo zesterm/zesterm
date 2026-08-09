@@ -12,6 +12,8 @@
 #[allow(dead_code, reason = "consumed by the redraw and input paths one commit later")]
 pub mod blocks;
 pub mod hit;
+#[allow(dead_code, reason = "consumed by the redraw and input paths one commit later")]
+pub mod screens;
 pub mod insets;
 #[allow(dead_code, reason = "consumed by the redraw and input paths one commit later")]
 pub mod layout;

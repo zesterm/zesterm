@@ -144,6 +144,11 @@ pub fn layout(
         TabsPosition::Top => horizontal(model, colors, m, measure),
         TabsPosition::Left => vertical(model, colors, m, measure),
     };
+    if let Some(screen) = &model.screen {
+        // Over the grid, under the modals: a screen is window content, not
+        // an overlay, so the picker can still open above it.
+        super::screens::screen_overlay(screen, model.grid_area, colors, m.scale, measure, &mut out);
+    }
     if let Some(picker) = &model.picker {
         // Appended last on purpose: last drawn is topmost, and last pushed
         // wins the hit lookup — the same fact, stated once.
@@ -2025,6 +2030,8 @@ mod tests {
                 latency_ms: Some(0.3),
             }),
             sidebar: None,
+            screen: None,
+            grid_area: [0.0, 46.0, 1200.0, 726.0],
             toggle_chord: "⌘⇧E".into(),
             palette_chord: "⌘K".into(),
             picker: None,

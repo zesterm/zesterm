@@ -146,6 +146,45 @@ pub struct PickerModel {
     pub hosts_searched: usize,
 }
 
+/// One host card of the fleet view (design screen 7).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FleetCard {
+    pub name: String,
+    /// The window's own machine — accent border, "this machine" note.
+    pub local: bool,
+    pub online: bool,
+    /// A warn pill ("via tunnel"), when the path warrants one.
+    pub pill: Option<String>,
+    /// Label/value rows: path, key, sessions — only what is actually known.
+    /// The value colour is by role: 0 plain, 1 success, 2 warn.
+    pub rows: Vec<(String, String, u8)>,
+}
+
+/// One card of the theme gallery (design screen 8). Colours arrive as raw
+/// theme values because the preview renders in *that* theme, not the UI's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThemeCard {
+    pub id: String,
+    pub name: String,
+    /// "dark", "light · default".
+    pub qualifier: String,
+    pub bg: [u8; 3],
+    pub fg: [u8; 3],
+    pub accent: [u8; 3],
+    pub danger: [u8; 3],
+    pub green: [u8; 3],
+    /// The normal ANSI row, index order — the swatch strip.
+    pub ansi: [[u8; 3]; 8],
+    pub active: bool,
+}
+
+/// A full-pane screen replacing the grid (fleet directory, theme gallery).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScreenModel {
+    Fleet { cards: Vec<FleetCard> },
+    Themes { cards: Vec<ThemeCard> },
+}
+
 /// One row of the command palette, ready to draw.
 ///
 /// Display-only, like [`PickerRow`]: the app keeps a parallel list of the
@@ -299,6 +338,11 @@ pub struct ChromeModel {
     pub status: Option<StatusModel>,
     /// Sidebar grouping and footer counts; `None` in the horizontal layout.
     pub sidebar: Option<SidebarModel>,
+    /// A full-pane screen over the grid area (fleet, themes); Esc returns.
+    pub screen: Option<ScreenModel>,
+    /// Where the grid area is, physical pixels — the rectangle a screen
+    /// covers. Computed by the app from its insets.
+    pub grid_area: [f32; 4],
     /// The layout-toggle pill's chord, platform-spelled ("⌘⇧E" or
     /// "Ctrl+Shift+E") — composed by the app because the chrome does not know
     /// what a modifier is.
