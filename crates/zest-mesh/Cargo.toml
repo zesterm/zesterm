@@ -51,6 +51,27 @@ sha2 = "0.10"
 # `SigningKey::generate` would only add dalek's `rand_core` feature and a
 # `SysRng`/`UnwrapErr` dance to arrive at the same place.
 getrandom = "0.4"
+
+# X25519 for the ephemeral half of the handshake. Version 3 deliberately: it is
+# the one built on `curve25519-dalek 5`, which `ed25519-dalek 3` already pulls
+# in. A version that wanted curve4 would compile a second copy of the field
+# arithmetic into the binary and double the build.
+#
+# The identity key still signs and only signs. Converting it to Montgomery form
+# is possible in both dalek and @noble and is refused here: it reuses one key
+# across two algorithms, defeats the Role/Purpose domain separation, and gives
+# up forward secrecy — a later key compromise would decrypt every recorded
+# session.
+x25519-dalek = { version = "3.0", features = ["static_secrets"] }
+
+# ChaCha20-Poly1305 rather than AES-GCM, and not for speed: `crypto.subtle` is
+# async, and the web client decodes and applies on the main thread
+# synchronously by measurement. AES-GCM in the browser would make the whole
+# decode path async. @noble/ciphers' ChaCha is synchronous.
+chacha20poly1305 = "0.10"
+
+# The key schedule. Salt is the transcript hash both sides already sign.
+hkdf = "0.12"
 zeroize = "1.9"
 
 # Keychain on macOS, Credential Manager on Windows, Secret Service elsewhere.

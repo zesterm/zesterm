@@ -34,6 +34,7 @@ pub mod enroll;
 pub mod identity;
 pub mod keystore;
 pub mod pairing;
+pub mod secure;
 pub mod trust;
 
 /// How a peer was found, and therefore how much it should be trusted before
