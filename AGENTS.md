@@ -68,8 +68,9 @@ Never commit straight to `main`.**
    any type on the wire. Stage specific files (`git add <path>`), never
    `git add -A`. No co-author trailers.
 
-4. **Open a PR, then request Copilot over GraphQL.** Two commands, in this
-   order. Reference the issue so it auto-closes on merge:
+4. **Open a PR, then request Copilot over GraphQL.** Two steps, in this order;
+   the middle line only captures the PR's node id for the second. Reference the
+   issue so it auto-closes on merge:
    ```sh
    gh pr create --base main --title "<title>" \
      --body "Closes #N. <short summary of the change>"
