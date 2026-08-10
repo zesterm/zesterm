@@ -689,13 +689,98 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// A human name for this machine, for the fleet listing.
+/// What this machine calls itself.
+///
+/// The fleet listing's label, and now the name a device enrols under — so
+/// getting it wrong is not cosmetic: every Mac in the fleet showed as
+/// `unnamed`.
+///
+/// It used to read `COMPUTERNAME` then `HOSTNAME`. **`HOSTNAME` is a shell
+/// variable, not an exported one**: bash and zsh set it for themselves and
+/// never put it in the environment, so a daemon — which is spawned, not run
+/// from a prompt — never sees it. `COMPUTERNAME` is Windows-only. On this Mac
+/// neither is present, so the fallback was not a fallback, it was the answer.
+///
+/// `uname()` is what actually knows, and `rustix` is already a dependency.
+/// The environment variables stay ahead of it, because a person who exports
+/// one is asking for it deliberately.
 fn machine_label() -> String {
+    machine_label_from(|k| std::env::var(k).ok())
+}
+
+/// The lookup, with the environment injected.
+///
+/// Split so the fallback can be tested against the environment a daemon
+/// actually has — neither variable set — without mutating process-global state
+/// from a test that runs in parallel with others. With the variables set, the
+/// broken version passed too, so testing it any other way proves nothing.
+fn machine_label_from(env: impl Fn(&str) -> Option<String>) -> String {
     for var in ["COMPUTERNAME", "HOSTNAME"] {
-        if let Ok(name) = std::env::var(var) {
+        if let Some(name) = env(var) {
             if !name.is_empty() {
                 return name;
             }
         }
     }
+
+    #[cfg(unix)]
+    {
+        let uname = rustix::system::uname();
+        let node = uname.nodename().to_string_lossy();
+        // Trim the domain: `andy-mac.local` is the mDNS form, and the label is
+        // for a person reading a list rather than for resolution.
+        let short = node.split('.').next().unwrap_or("");
+        if !short.is_empty() {
+            return short.to_string();
+        }
+    }
+
     "unnamed".to_string()
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::{machine_label, machine_label_from};
+
+    #[test]
+    fn a_machine_knows_its_own_name_without_help_from_the_environment() {
+        // The bug this replaced: `HOSTNAME` is a *shell* variable and is never
+        // exported, and `COMPUTERNAME` is Windows-only -- so on macOS the
+        // lookup fell through to "unnamed" every time. That was already the
+        // daemon's `--label` default, so every Mac in the fleet listing showed
+        // as `unnamed`, and it would have become the name every Mac enrolled
+        // under.
+        //
+        // The empty environment is the point: with either variable set, the
+        // broken version passed too.
+        let label = machine_label_from(|_| None);
+        assert_ne!(
+            label, "unnamed",
+            "a machine must name itself from uname(), not from a shell variable \
+             a daemon never receives"
+        );
+        assert!(!label.contains('.'), "the domain is trimmed: `{label}`");
+        assert!(!label.is_empty());
+    }
+
+    #[test]
+    fn an_exported_name_still_wins() {
+        // Someone who exports one is asking for it deliberately.
+        assert_eq!(
+            machine_label_from(|k| (k == "HOSTNAME").then(|| "chosen-by-hand".to_string())),
+            "chosen-by-hand"
+        );
+        assert_eq!(
+            machine_label_from(|k| (k == "COMPUTERNAME").then(|| "win-box".to_string())),
+            "win-box"
+        );
+    }
+
+    #[test]
+    fn an_empty_variable_is_not_a_name() {
+        // An exported-but-empty HOSTNAME is common in stripped environments and
+        // must not win over uname().
+        assert_ne!(machine_label_from(|_| Some(String::new())), "");
+        assert_eq!(machine_label_from(|_| Some(String::new())), machine_label());
+    }
 }

@@ -112,6 +112,12 @@ pub enum EnrollError {
     /// The token could not be kept, or the store could not be consulted.
     #[error("{0}")]
     Store(#[from] MeshError),
+    /// A code or label too long to encode unambiguously in the preimage.
+    ///
+    /// Refused rather than truncated: two labels sharing their first 65535
+    /// bytes would otherwise sign identical bytes.
+    #[error("{0}")]
+    Preimage(#[from] zest_mesh::enroll::EnrollError),
 }
 
 /// What this machine got out of enrolling.
@@ -130,9 +136,17 @@ pub struct Enrolled {
 /// no transport and no store in the way. `HostId` and `Sig64` serialize as hex
 /// through `zest-proto`, which is what keeps this field-compatible with every
 /// other place an id or a signature crosses a wire.
-pub fn signed_body(identity: &HostIdentity, code: &str, label: &str) -> String {
+pub fn signed_body(
+    identity: &HostIdentity,
+    code: &str,
+    label: &str,
+) -> Result<String, EnrollError> {
     let host = identity.host_id();
-    let sig = identity.sign(Purpose::Enrollment, &enrollment_request(code, host, label));
+    // Fallible since the preimage refuses a field it cannot encode rather than
+    // truncating it -- see zest-mesh's enroll module. Refusing here is the only
+    // honest option: there is nothing to sign.
+    let message = enrollment_request(code, host, label).map_err(EnrollError::Preimage)?;
+    let sig = identity.sign(Purpose::Enrollment, &message);
 
     #[derive(serde::Serialize)]
     struct Body<'a> {
@@ -146,7 +160,7 @@ pub fn signed_body(identity: &HostIdentity, code: &str, label: &str) -> String {
         sig: Sig64,
     }
 
-    serde_json::to_string(&Body {
+    Ok(serde_json::to_string(&Body {
         code,
         host_id: host,
         label,
@@ -154,7 +168,7 @@ pub fn signed_body(identity: &HostIdentity, code: &str, label: &str) -> String {
     })
     // Infallible in practice: every field is a string or a fixed-width byte
     // array, and none of them can fail to serialize.
-    .unwrap_or_else(|e| unreachable!("an enrolment body cannot fail to serialize: {e}"))
+    .unwrap_or_else(|e| unreachable!("an enrolment body cannot fail to serialize: {e}")))
 }
 
 /// Sign the code, post it, and keep whatever token comes back.
@@ -181,7 +195,7 @@ pub fn enroll(
     let _ = secrets.load_secret(CLOUD_TOKEN_NAME)?;
 
     let url = format!("{}{ENROLL_PATH}", base_url.trim_end_matches('/'));
-    let response = http.post_json(&url, &signed_body(identity, code, label))?;
+    let response = http.post_json(&url, &signed_body(identity, code, label)?)?;
 
     if !(200..300).contains(&response.status) {
         return Err(EnrollError::Refused {
@@ -340,7 +354,7 @@ mod tests {
         // are separate implementations, so agreement here is the only thing
         // that makes the daemon's signature worth anything.
         let host = identity();
-        let body = signed_body(&host, "ABCD1234", "andy-mac");
+        let body = signed_body(&host, "ABCD1234", "andy-mac").expect("fits");
         let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
 
         let sig_hex = parsed["sig"].as_str().expect("a sig field");
@@ -368,15 +382,39 @@ mod tests {
     }
 
     #[test]
-    fn the_code_and_the_label_are_the_ones_that_were_asked_for() {
-        // Guards the argument order of `enrollment_request`, which takes three
-        // values of which two are strings. Swapping them still signs, still
-        // verifies against itself, and enrols under the wrong name.
+    fn the_signature_covers_the_code_and_label_in_the_right_order() {
+        // The previous version of this test read `parsed["code"]` and
+        // `parsed["label"]` back out of the JSON -- fields written straight
+        // from the same parameters -- and claimed to guard the argument order
+        // of `enrollment_request`. It could not: swapping the arguments inside
+        // `signed_body` leaves the JSON identical and only corrupts the bytes
+        // that were signed.
+        //
+        // Verifying the signature against the *correctly ordered* preimage is
+        // what actually catches it, because that is the thing a wrong order
+        // changes.
         let host = identity();
-        let body = signed_body(&host, "code-here", "label-here");
+        let body = signed_body(&host, "code-here", "label-here").expect("fits");
         let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
-        assert_eq!(parsed["code"], "code-here");
-        assert_eq!(parsed["label"], "label-here");
+
+        let sig_hex = parsed["sig"].as_str().expect("sig is a hex string");
+        let sig_bytes: Vec<u8> = (0..sig_hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&sig_hex[i..i + 2], 16).expect("hex"))
+            .collect();
+        let sig = Signature::from_bytes(
+            <[u8; 64]>::try_from(sig_bytes.as_slice()).expect("64 bytes"),
+        );
+
+        assert!(
+            verify_enrollment("code-here", host.host_id(), "label-here", &sig),
+            "the signature must cover the code and the label in the order the \
+             control plane will verify them"
+        );
+        assert!(
+            !verify_enrollment("label-here", host.host_id(), "code-here", &sig),
+            "and swapping them must not also verify, or the guard proves nothing"
+        );
     }
 
     #[test]

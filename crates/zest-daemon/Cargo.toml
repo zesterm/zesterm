@@ -53,7 +53,9 @@ tungstenite = { version = "0.26", default-features = false, features = ["handsha
 # `flock` on the socket path, so two daemons starting at once cannot each
 # unlink the other's socket and serve half the clients. Already in the tree via
 # zest-pty, so this costs no build time.
-rustix = { workspace = true, features = ["fs", "process"] }
+# `system` is for uname(), which is how a machine learns its own name --
+# `HOSTNAME` is a *shell* variable and is not in a daemon's environment.
+rustix = { workspace = true, features = ["fs", "process", "system"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [

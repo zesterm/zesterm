@@ -470,16 +470,18 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn a_store_that_cannot_be_read_does_not_report_the_machine_as_unenrolled() {
-        let store = FailingKeyStore;
-        assert!(
-            store.load_secret(CLOUD_TOKEN_NAME).is_err(),
-            "a locked keychain reported as `Ok(None)` tells a person to enrol a \
-             machine that already is, and the second enrolment overwrites the \
-             token the first one earned"
-        );
-    }
+    // A test asserting that `FailingKeyStore::load_secret` returns `Err` used to
+    // live here. It could not fail: the double's body is a hardcoded `Err`
+    // twenty lines above, and no production code ran at all.
+    //
+    // The property it was reaching for is real -- a locked keychain reported as
+    // `Ok(None)` tells a person to enrol a machine that already is, and the
+    // second enrolment overwrites the token the first one earned. But nothing
+    // in this crate consumes a `SecretStore`; the consumer is `zest-daemon`,
+    // and the assertion belongs where the code is:
+    // `enroll::tests::a_store_that_cannot_be_read_is_refused_before_the_code_is_spent`
+    // drives the real `enroll()` against this same double and asserts the code
+    // is never spent.
 
     #[test]
     fn a_forgotten_token_is_gone_and_forgetting_it_again_is_not_an_error() {
