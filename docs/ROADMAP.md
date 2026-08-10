@@ -306,6 +306,24 @@ theme screens. Colours, sizes and spacing come from there, not from this file.
       uniform, so without a per-instance bit tab titles would ride smooth
       scrolling the day it ships. Shader constant held in sync by a test, like
       `LAYER_SIZE`.
+- [x] **Every chord is reachable on Windows.** `Mods::Desktop` was Super-only
+      on every platform, and the Windows shell reserves Win+T, Win+W, Win+K,
+      Win+P, Win+, and Win+1–9 — so new tab, close tab, the fleet picker, the
+      palette, settings and the tab digits could not be pressed at all here,
+      while the title bar cheerfully advertised them as `Super+K`. The family
+      now takes **⌘ or Ctrl+Shift, both everywhere**, which is the policy
+      `is_clipboard_chord` had already settled on, and `chord_label` prints
+      whichever the platform can deliver.
+      Three things this could not be done naively. `belongs_to_desktop` stayed
+      super-only: it is the *pty encoder's* gate, and widening it would have
+      stopped Ctrl+Shift+Arrow, the Ctrl+Shift F-keys and vim's `CTRL-^` from
+      ever reaching the shell. Matching had to learn which spelling was used,
+      because Ctrl+Shift spends Shift on the modifier — `⌘⇧T` must stay
+      reserved while `Ctrl+Shift+T` folds onto the `⌘T` row. And the digits
+      moved to **positional** matching (`ChordKey::Code`), because Shift+1 is
+      `!` on US and `!"#¤%&/()` on the Swedish layout this was built on; that
+      fixes ⌘1 on a French Mac on the way past. `@ ^ _` are guarded so
+      Ctrl+Shift+6 stays vim's `CTRL-^` on the layouts where it is one.
 - [ ] Borderless window, GPU-drawn titlebar and tab strip through the SDF rect
       pipeline. `WM_NCCALCSIZE` returning 0 with `top` untouched removes the
       caption while keeping frame, shadow and snap — **but when maximized you

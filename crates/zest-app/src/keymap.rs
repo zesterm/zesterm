@@ -13,9 +13,7 @@
 //! table on purpose: their keys are a line editor, not commands, and "any
 //! character appends to the filter" is not expressible as a chord row.
 
-use winit::keyboard::{Key, ModifiersState, NamedKey};
-
-use zest_input::key;
+use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
 use crate::chrome::model::PaletteRow;
 
@@ -60,10 +58,23 @@ pub enum Action {
 /// binding must not become reachable or unreachable by moving into the table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mods {
-    /// [`key::belongs_to_desktop`]: Super/Command, the modifier no shell can
-    /// receive. Shifted keys arrive pre-shifted (`{`, not `⇧[`).
+    /// Super/Command *or* Ctrl+Shift, both accepted everywhere — the same
+    /// policy as [`Mods::Clipboard`], and for the same reason.
+    ///
+    /// Super alone was the rule until Windows was looked at: the shell there
+    /// reserves Win+T, Win+W, Win+K, Win+P, Win+, and Win+1–9, so every chord
+    /// in this family was unreachable on the platform the project calls
+    /// primary. Ctrl+Shift is what Windows Terminal and VS Code use and what
+    /// the clipboard rows had already settled on.
+    ///
+    /// Note this is *not* [`zest_input::key::belongs_to_desktop`], which stayed super-only
+    /// on purpose: that predicate is the pty encoder's gate, and widening it
+    /// would stop Ctrl+Shift+Arrow, the Ctrl+Shift F-keys and vim's `CTRL-^`
+    /// from reaching the shell at all. The policy moved; the encoder did not.
+    ///
+    /// Shifted keys arrive pre-shifted (`{`, not `⇧[`).
     Desktop,
-    /// [`key::is_clipboard_chord`]: Super *or* Ctrl+Shift, both, everywhere.
+    /// [`zest_input::key::is_clipboard_chord`]: Super *or* Ctrl+Shift, both, everywhere.
     Clipboard,
     /// Ctrl without Shift.
     Ctrl,
@@ -79,13 +90,37 @@ pub enum Mods {
 /// The key half of a chord, stored as winit *delivers* it, never as the
 /// physical keycap: ⌘⇧[ arrives as `Character("{")`, Ctrl+Tab as
 /// `Named(Tab)`. This is layout-dependent — on a layout where ⇧[ is not `{`
-/// these chords are unreachable, exactly as they were before the table;
-/// fixing that means physical-key matching and belongs to the rebinding
-/// milestone.
+/// those chords are unreachable, exactly as they were before the table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChordKey {
     Char(&'static str),
     Named(NamedKey),
+    /// Matched by *position* rather than by what it types.
+    ///
+    /// For chords whose keycap becomes unreachable once Shift is spent on the
+    /// modifier: ⌘1 arrives as `Character("1")`, but Ctrl+Shift+1 arrives as
+    /// the shifted symbol — `!` on US, and the row differs again on every
+    /// other layout (Swedish gives `! " # ¤ % & / ( )`). There is no character
+    /// to write in the table, so the table names the key instead.
+    ///
+    /// It fixes a live bug on the way past: ⌘1 does nothing on a French Mac
+    /// today, because the digit row there types `&é"'(`.
+    Code(KeyCode),
+}
+
+/// Which spelling of a two-convention policy a press actually used.
+///
+/// The distinction is load-bearing rather than bookkeeping. Ctrl+Shift spends
+/// Shift on the modifier, so the letter arrives *uppercase* and has to be
+/// folded; the Super form must stay exact, or ⌘⇧T matches the ⌘T row and burns
+/// the slot reopen-closed-tab is holding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Form {
+    Super,
+    CtrlShift,
+    /// Neither convention — a plain Ctrl, Ctrl+Shift or Shift row, where the
+    /// question does not arise.
+    Plain,
 }
 
 /// Context gate for bindings that are conditional but not modal.
@@ -171,16 +206,18 @@ pub static BINDINGS: &[Binding] = &[
     ),
     b(Mods::Desktop, ChordKey::Char("w"), Action::CloseTab, "W", "Close tab", Category::Tabs),
     // Each digit is its own palette command — "go to tab 3" must be
-    // searchable and runnable, not a footnote of "1–8".
-    b(Mods::Desktop, ChordKey::Char("1"), Action::ActivateTab(0), "1", "Go to tab 1", Category::Tabs),
-    b(Mods::Desktop, ChordKey::Char("2"), Action::ActivateTab(1), "2", "Go to tab 2", Category::Tabs),
-    b(Mods::Desktop, ChordKey::Char("3"), Action::ActivateTab(2), "3", "Go to tab 3", Category::Tabs),
-    b(Mods::Desktop, ChordKey::Char("4"), Action::ActivateTab(3), "4", "Go to tab 4", Category::Tabs),
-    b(Mods::Desktop, ChordKey::Char("5"), Action::ActivateTab(4), "5", "Go to tab 5", Category::Tabs),
-    b(Mods::Desktop, ChordKey::Char("6"), Action::ActivateTab(5), "6", "Go to tab 6", Category::Tabs),
-    b(Mods::Desktop, ChordKey::Char("7"), Action::ActivateTab(6), "7", "Go to tab 7", Category::Tabs),
-    b(Mods::Desktop, ChordKey::Char("8"), Action::ActivateTab(7), "8", "Go to tab 8", Category::Tabs),
-    b(Mods::Desktop, ChordKey::Char("9"), Action::ActivateLastTab, "9", "Go to last tab", Category::Tabs),
+    // searchable and runnable, not a footnote of "1–8". Matched by position:
+    // see `ChordKey::Code` for why a digit is the one thing that cannot be
+    // written as the character it types.
+    b(Mods::Desktop, ChordKey::Code(KeyCode::Digit1), Action::ActivateTab(0), "1", "Go to tab 1", Category::Tabs),
+    b(Mods::Desktop, ChordKey::Code(KeyCode::Digit2), Action::ActivateTab(1), "2", "Go to tab 2", Category::Tabs),
+    b(Mods::Desktop, ChordKey::Code(KeyCode::Digit3), Action::ActivateTab(2), "3", "Go to tab 3", Category::Tabs),
+    b(Mods::Desktop, ChordKey::Code(KeyCode::Digit4), Action::ActivateTab(3), "4", "Go to tab 4", Category::Tabs),
+    b(Mods::Desktop, ChordKey::Code(KeyCode::Digit5), Action::ActivateTab(4), "5", "Go to tab 5", Category::Tabs),
+    b(Mods::Desktop, ChordKey::Code(KeyCode::Digit6), Action::ActivateTab(5), "6", "Go to tab 6", Category::Tabs),
+    b(Mods::Desktop, ChordKey::Code(KeyCode::Digit7), Action::ActivateTab(6), "7", "Go to tab 7", Category::Tabs),
+    b(Mods::Desktop, ChordKey::Code(KeyCode::Digit8), Action::ActivateTab(7), "8", "Go to tab 8", Category::Tabs),
+    b(Mods::Desktop, ChordKey::Code(KeyCode::Digit9), Action::ActivateLastTab, "9", "Go to last tab", Category::Tabs),
     // ⌘⇧[ and ⌘⇧] arrive as { and }; the keycap shows the physical key.
     b(Mods::Desktop, ChordKey::Char("{"), Action::PrevTab, "⇧[", "Previous tab", Category::Tabs),
     b(Mods::Desktop, ChordKey::Char("}"), Action::NextTab, "⇧]", "Next tab", Category::Tabs),
@@ -228,8 +265,10 @@ pub static BINDINGS: &[Binding] = &[
     hidden(Mods::Desktop, ChordKey::Char("P"), Action::TogglePalette, Category::Help),
     hidden(Mods::Clipboard, ChordKey::Char("/"), Action::TogglePalette, Category::Help),
     hidden(Mods::Clipboard, ChordKey::Char("?"), Action::TogglePalette, Category::Help),
-    // ⌘, — the settings chord every desktop app shares.
-    b(Mods::Desktop, ChordKey::Char(","), Action::ToggleSettings, ",", "Settings", Category::Help),
+    // ⌘, — the settings chord every desktop app shares. By position for the
+    // same reason as the digits: Shift+, is `<`, so the Ctrl+Shift form has no
+    // comma in it.
+    b(Mods::Desktop, ChordKey::Code(KeyCode::Comma), Action::ToggleSettings, ",", "Settings", Category::Help),
     // ⌘⇧E arrives as "E" (shift pre-applies, like { above); the keycap shows
     // the physical chord.
     b(Mods::Desktop, ChordKey::Char("E"), Action::ToggleTabLayout, "⇧E", "Toggle vertical tabs", Category::Tabs),
@@ -244,47 +283,103 @@ pub fn chord_for(action: Action) -> String {
     BINDINGS.iter().find(|b| b.action == action).map(chord_label).unwrap_or_default()
 }
 
-fn mods_match(m: Mods, s: ModifiersState) -> bool {
+/// Which convention this press used for `m`, or `None` if it is not that row.
+fn mods_match(m: Mods, s: ModifiersState) -> Option<Form> {
+    // Super first in both two-convention arms: on macOS ⌘ satisfies either
+    // spelling, and answering `Super` there is what keeps ⌘⇧T exact.
+    let two_conventions = || {
+        if s.super_key() {
+            Some(Form::Super)
+        } else if s.control_key() && s.shift_key() {
+            Some(Form::CtrlShift)
+        } else {
+            None
+        }
+    };
     match m {
-        Mods::Desktop => key::belongs_to_desktop(s),
-        Mods::Clipboard => key::is_clipboard_chord(s),
-        Mods::Ctrl => s.control_key() && !s.shift_key(),
-        Mods::CtrlShift => s.control_key() && s.shift_key(),
-        Mods::Shift => s.shift_key(),
+        Mods::Desktop | Mods::Clipboard => two_conventions(),
+        Mods::Ctrl => (s.control_key() && !s.shift_key()).then_some(Form::Plain),
+        Mods::CtrlShift => (s.control_key() && s.shift_key()).then_some(Form::Plain),
+        Mods::Shift => s.shift_key().then_some(Form::Plain),
     }
 }
 
-fn key_match(binding: &Binding, logical: &Key) -> bool {
+fn key_match(binding: &Binding, logical: &Key, physical: PhysicalKey, form: Form) -> bool {
     match (&binding.key, logical) {
         (ChordKey::Named(want), Key::Named(got)) => want == got,
-        (ChordKey::Char(want), Key::Character(got)) => match binding.mods {
-            // Ctrl+Shift+C arrives uppercase; the old clipboard block
-            // lowercased before matching.
-            Mods::Clipboard => got.eq_ignore_ascii_case(want),
-            // Desktop is exact: ⌘⇧T must not be ⌘T.
-            _ => got.as_str() == *want,
-        },
+        (ChordKey::Code(want), _) => physical == PhysicalKey::Code(*want),
+        (ChordKey::Char(want), Key::Character(got)) => {
+            // Case-folding is decided by the row *and* the spelling used.
+            //
+            // Under Ctrl+Shift the letter always arrives uppercase, because
+            // Shift is spent on the modifier — `"T"`, never `"t"` — so folding
+            // is the only way any row is reachable at all.
+            //
+            // Under ⌘, Shift is still free to shift, so ⌘⇧T is genuinely a
+            // different chord from ⌘T and Desktop rows must stay exact or the
+            // reserved reopen-closed-tab slot is burnt. The clipboard rows
+            // fold under ⌘ too, and that is not an oversight: ⌘⇧C copied
+            // before this table existed, and behaviour-preserving means it
+            // still does.
+            let fold = matches!(binding.mods, Mods::Clipboard) || form == Form::CtrlShift;
+            if fold {
+                got.eq_ignore_ascii_case(want)
+            } else {
+                got.as_str() == *want
+            }
+        }
         _ => false,
     }
 }
 
 /// First match in table order — table order is the dispatch precedence.
+///
+/// `physical` is the keycap's position, needed only by [`ChordKey::Code`] rows;
+/// it is a third parameter rather than a `&KeyEvent` because winit's
+/// `KeyEvent` carries a private platform field and cannot be constructed in a
+/// test, which would take the whole of this module's test suite with it.
 #[must_use]
-pub fn lookup(logical: &Key, mods: ModifiersState) -> Option<&'static Binding> {
-    BINDINGS.iter().find(|binding| mods_match(binding.mods, mods) && key_match(binding, logical))
+pub fn lookup(
+    logical: &Key,
+    physical: PhysicalKey,
+    mods: ModifiersState,
+) -> Option<&'static Binding> {
+    // Ctrl+Shift is the *only* way to reach a handful of control codes,
+    // because the character they are named after is itself shifted: `@` is
+    // NUL, `^` is RS, `_` is US. vim's `CTRL-^` — switch to the alternate
+    // file — is that rule's most-used consequence, and a tab chord that ate
+    // it would be a silent regression in the one editor most likely to be
+    // running in here.
+    //
+    // Tested against the *logical* key, so it follows the keyboard rather than
+    // a `cfg`: on a Swedish layout Shift+6 is `&`, which reaches no control
+    // code, so Ctrl+Shift+6 switches tabs there and only a US-layout user
+    // spends those two chords.
+    if mods.control_key() && mods.shift_key() && !mods.super_key() {
+        if let Key::Character(c) = logical {
+            if matches!(c.as_str(), "@" | "^" | "_") {
+                return None;
+            }
+        }
+    }
+    BINDINGS.iter().find(|binding| {
+        mods_match(binding.mods, mods)
+            .is_some_and(|form| key_match(binding, logical, physical, form))
+    })
 }
 
 const MAC: bool = cfg!(target_os = "macos");
 
 /// The platform-primary spelling of a chord.
 ///
-/// The clipboard policy is *both* chords everywhere; the sheet shows the
-/// local convention and one section note says the other is accepted too —
-/// that fact lives in one place, next to `key::is_clipboard_chord`.
-/// `Mods::Desktop` renders honestly as Super off macOS, because
-/// `belongs_to_desktop` is super-only on every platform; if the tab chords
-/// grow a Ctrl+Shift form later, that is a policy change and this label
-/// updates itself.
+/// Both chords work everywhere; the sheet shows the local convention and one
+/// palette note says the other is accepted too — that fact lives in one place.
+///
+/// `Mods::Desktop` used to render as `Super+` off macOS, which was honest
+/// about the code and useless to the user: Windows reserves Win+T, Win+K,
+/// Win+P, Win+, and Win+1–9 for its own shell, so every one of those pills
+/// named a chord that could not be pressed. Now that Desktop takes Ctrl+Shift
+/// as well, the label says the reachable one.
 #[must_use]
 pub fn chord_label(binding: &Binding) -> String {
     let prefix = match binding.mods {
@@ -292,7 +387,7 @@ pub fn chord_label(binding: &Binding) -> String {
             if MAC {
                 "⌘"
             } else {
-                "Super+"
+                "Ctrl+Shift+"
             }
         }
         Mods::Clipboard => {
@@ -324,7 +419,11 @@ pub fn chord_label(binding: &Binding) -> String {
             }
         }
     };
-    format!("{prefix}{}", binding.keycap)
+    // The keycap spells its own shift for the ⌘ forms — `⇧[`, `⇧E`. Every
+    // non-mac prefix already ends in `Shift+`, so keeping it would print
+    // `Ctrl+Shift+⇧E`.
+    let keycap = if MAC { binding.keycap } else { binding.keycap.trim_start_matches('⇧') };
+    format!("{prefix}{keycap}")
 }
 
 /// A pointer chord, listed beside the keyboard ones.
@@ -406,10 +505,11 @@ pub fn palette(filter: &str) -> (Vec<PaletteRow>, Vec<Option<Action>>) {
         rows.insert(start, PaletteRow::Group { title: (*title).to_string() });
         actions.insert(start, None);
         if *category == Category::Clipboard {
-            // The one place the both-conventions fact is displayed; see
-            // `key::is_clipboard_chord` for why both are accepted.
+            // The one place the both-conventions fact is displayed. It used to
+            // be true of the clipboard rows alone, which is why it lives under
+            // this group; it is now true of every chord in the table.
             rows.push(PaletteRow::Command {
-                name: "⌘ and Ctrl+Shift both work, on every platform".to_string(),
+                name: "Every shortcut takes ⌘ or Ctrl+Shift, on every platform".to_string(),
                 chord: String::new(),
                 runnable: false,
             });
@@ -467,13 +567,23 @@ mod tests {
         Key::Character(s.into())
     }
 
+    /// A press whose position is irrelevant — every row but [`ChordKey::Code`].
+    const NOWHERE: PhysicalKey = PhysicalKey::Code(KeyCode::F35);
+
     fn action_for(logical: &Key, mods: ModifiersState) -> Option<Action> {
-        lookup(logical, mods).map(|b| b.action)
+        lookup(logical, NOWHERE, mods).map(|b| b.action)
+    }
+
+    /// A press the table must answer by *position*, so the character is free
+    /// to be whatever that layout types — which is the whole point.
+    fn action_at(logical: &Key, code: KeyCode, mods: ModifiersState) -> Option<Action> {
+        lookup(logical, PhysicalKey::Code(code), mods).map(|b| b.action)
     }
 
     const SUPER: ModifiersState = ModifiersState::SUPER;
     const CTRL: ModifiersState = ModifiersState::CONTROL;
     const SHIFT: ModifiersState = ModifiersState::SHIFT;
+    const CTRL_SHIFT: ModifiersState = CTRL.union(SHIFT);
 
     #[test]
     fn the_table_resolves_every_chord_the_cascade_did() {
@@ -484,9 +594,6 @@ mod tests {
             (char_key("t"), SUPER, Action::NewTab),
             (char_key("k"), SUPER, Action::ToggleFleetPicker),
             (char_key("w"), SUPER, Action::CloseTab),
-            (char_key("1"), SUPER, Action::ActivateTab(0)),
-            (char_key("8"), SUPER, Action::ActivateTab(7)),
-            (char_key("9"), SUPER, Action::ActivateLastTab),
             // ⌘⇧[ arrives pre-shifted; the table stores winit's delivery,
             // not the keycap.
             (char_key("{"), SUPER.union(SHIFT), Action::PrevTab),
@@ -520,6 +627,123 @@ mod tests {
                 "{logical:?} + {mods:?} must resolve to {want:?}"
             );
         }
+        // The digits and the comma moved to positional matching, so they are
+        // pinned by position. The cascade's behaviour is unchanged on any
+        // layout whose number row types digits, which is the only kind the
+        // cascade ever worked on.
+        let positional: &[(KeyCode, Action)] = &[
+            (KeyCode::Digit1, Action::ActivateTab(0)),
+            (KeyCode::Digit8, Action::ActivateTab(7)),
+            (KeyCode::Digit9, Action::ActivateLastTab),
+            (KeyCode::Comma, Action::ToggleSettings),
+        ];
+        for (code, want) in positional {
+            assert_eq!(
+                action_at(&char_key("unused"), *code, SUPER),
+                Some(*want),
+                "{code:?} + ⌘ must resolve to {want:?} whatever that key types"
+            );
+        }
+    }
+
+    #[test]
+    fn every_desktop_chord_has_a_ctrl_shift_form() {
+        // The policy, pinned. It fails the day someone adds a Desktop row
+        // Windows cannot reach -- which is the state this whole family was in
+        // until now, because Win+T, Win+K, Win+P, Win+, and Win+1-9 all belong
+        // to the Windows shell and never arrive.
+        for binding in BINDINGS.iter().filter(|b| b.mods == Mods::Desktop) {
+            let got = match binding.key {
+                // Shift is spent on the modifier, so the letter arrives
+                // uppercase.
+                ChordKey::Char(c) => action_for(&char_key(&c.to_ascii_uppercase()), CTRL_SHIFT),
+                // Deliberately a *wrong* character: a positional row must not
+                // care what the key types, and passing the right one would
+                // prove nothing.
+                ChordKey::Code(code) => action_at(&char_key("\u{0}"), code, CTRL_SHIFT),
+                ChordKey::Named(n) => action_for(&Key::Named(n), CTRL_SHIFT),
+            };
+            assert_eq!(
+                got,
+                Some(binding.action),
+                "'{}' is reachable with ⌘ and must be reachable with Ctrl+Shift",
+                binding.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_super_form_stays_exact_so_the_reserved_chord_survives() {
+        assert_eq!(
+            action_for(&char_key("T"), SUPER.union(SHIFT)),
+            None,
+            "⌘⇧T is held for reopen-closed-tab; folding it onto ⌘T would burn the slot"
+        );
+        assert_eq!(
+            action_for(&char_key("T"), CTRL_SHIFT),
+            Some(Action::NewTab),
+            "…while Ctrl+Shift+T has no unshifted spelling at all, so it must fold"
+        );
+    }
+
+    #[test]
+    fn unbound_ctrl_shift_chords_still_reach_the_shell() {
+        // The regression the whole design exists to avoid. `key::encode` runs
+        // only when the table declines, so a table that over-matches silently
+        // swallows real terminal input.
+        for (logical, what) in [
+            (char_key("A"), "Ctrl+Shift+A is nothing of ours"),
+            (Key::Named(NamedKey::ArrowLeft), "vim and tmux read Ctrl+Shift+Arrow"),
+            (Key::Named(NamedKey::F5), "full-screen apps read the Ctrl+Shift F-keys"),
+            (Key::Named(NamedKey::Home), "editors read Ctrl+Shift+Home"),
+        ] {
+            assert_eq!(action_for(&logical, CTRL_SHIFT), None, "{what}");
+        }
+    }
+
+    #[test]
+    fn the_control_codes_only_shift_can_reach_are_not_stolen() {
+        // On a US layout these three characters are *only* reachable with
+        // Shift held, and each encodes a control byte: @ is NUL, ^ is RS,
+        // _ is US. vim's CTRL-^ -- switch to the alternate file -- is the
+        // most-used of them, and a tab chord eating it would be invisible.
+        assert_eq!(
+            action_at(&char_key("^"), KeyCode::Digit6, CTRL_SHIFT),
+            None,
+            "Ctrl+Shift+6 is vim's CTRL-^ on a US layout, not 'go to tab 6'"
+        );
+        assert_eq!(
+            action_at(&char_key("@"), KeyCode::Digit2, CTRL_SHIFT),
+            None,
+            "Ctrl+Shift+2 is the only way to send NUL"
+        );
+        // …and the guard follows the keyboard rather than a `cfg`: on a
+        // Swedish layout Shift+6 is `&`, which encodes nothing, so the chord
+        // is free and the tab switch stands.
+        assert_eq!(
+            action_at(&char_key("&"), KeyCode::Digit6, CTRL_SHIFT),
+            Some(Action::ActivateTab(5)),
+            "a layout where the shifted digit reaches no control code keeps its tab chord"
+        );
+    }
+
+    #[test]
+    fn the_rows_ctrl_shift_already_owned_are_not_shadowed() {
+        assert_eq!(
+            action_for(&Key::Named(NamedKey::Tab), CTRL_SHIFT),
+            Some(Action::PrevTab),
+            "Ctrl+Shift+Tab cycled backwards before the Desktop family widened"
+        );
+        assert_eq!(
+            action_for(&Key::Named(NamedKey::PageUp), CTRL_SHIFT),
+            Some(Action::ScrollPageUp),
+            "Ctrl+Shift+PgUp paged before it too"
+        );
+        assert_eq!(
+            action_for(&char_key("C"), CTRL_SHIFT),
+            Some(Action::Copy),
+            "and the clipboard rows are untouched"
+        );
     }
 
     #[test]
@@ -530,12 +754,18 @@ mod tests {
             "⌘⇧T is reserved for reopen-closed-tab; matching it as ⌘T would burn the slot"
         );
         for binding in BINDINGS {
-            if let ChordKey::Char(c) = binding.key {
-                assert_eq!(
+            match binding.key {
+                ChordKey::Char(c) => assert_eq!(
                     action_for(&char_key(c), ModifiersState::empty()),
                     None,
                     "bare '{c}' must reach the shell, not the app — otherwise typing it acts"
-                );
+                ),
+                ChordKey::Code(code) => assert_eq!(
+                    action_at(&char_key("1"), code, ModifiersState::empty()),
+                    None,
+                    "bare {code:?} must reach the shell — a positional row is still a chord"
+                ),
+                ChordKey::Named(_) => {}
             }
         }
         assert_eq!(
@@ -661,5 +891,28 @@ mod tests {
             label.contains('[') && !label.contains('{'),
             "the sheet shows the physical keycap, not winit's shifted delivery: {label}"
         );
+    }
+
+    #[test]
+    fn chord_labels_never_double_the_shift() {
+        // Off macOS the prefix already ends in `Shift+`, so a keycap that
+        // spells its own `⇧` would print `Ctrl+Shift+⇧E`. On macOS `⌘⇧E` is
+        // exactly right. One test, both legs of CI asserting something.
+        for binding in BINDINGS.iter().filter(|b| b.mods == Mods::Desktop) {
+            let label = chord_label(binding);
+            if MAC {
+                assert!(
+                    label.starts_with('⌘'),
+                    "the Mac spelling of '{}' is ⌘-prefixed: {label}",
+                    binding.name
+                );
+            } else {
+                assert!(
+                    label.starts_with("Ctrl+Shift+") && !label.contains('⇧'),
+                    "'{}' must name the chord Windows can actually deliver: {label}",
+                    binding.name
+                );
+            }
+        }
     }
 }

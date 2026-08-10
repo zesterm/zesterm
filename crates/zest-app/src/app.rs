@@ -4157,6 +4157,27 @@ impl ApplicationHandler<Wakeup> for App {
                 // meant for a list must never reach a shell.
                 if self.picker.is_some() {
                     use winit::keyboard::{Key, NamedKey};
+                    // The two chords that switch overlays rather than dying
+                    // against the modal wall. Resolved through the binding
+                    // table like everything else, because a character
+                    // comparison here could only ever match one of the two
+                    // spellings: ⌘, arrives as `Character(",")` while
+                    // Ctrl+Shift+, arrives as `"<"`.
+                    if let Some(binding) =
+                        keymap::lookup(&event.logical_key, event.physical_key, self.modifiers)
+                    {
+                        match binding.action {
+                            keymap::Action::ToggleFleetPicker => {
+                                self.toggle_picker();
+                                return;
+                            }
+                            keymap::Action::ToggleSettings => {
+                                self.toggle_settings();
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
                     match &event.logical_key {
                         Key::Named(NamedKey::Escape) => {
                             self.picker = None;
@@ -4220,15 +4241,13 @@ impl ApplicationHandler<Wakeup> for App {
                             self.mark_chrome_dirty();
                         }
                         Key::Character(c) => {
-                            if key::belongs_to_desktop(self.modifiers) {
-                                if c.as_str() == "k" {
-                                    self.toggle_picker();
-                                } else if c.as_str() == "," {
-                                    // ⌘, switches overlays rather than dying
-                                    // against the modal wall.
-                                    self.toggle_settings();
-                                }
-                            } else if !self.modifiers.control_key() {
+                            // Anything carrying a desktop modifier is a chord,
+                            // not text. The two that mean something here were
+                            // handled above; the rest are swallowed rather
+                            // than typed, or ⌘X would put an `x` in the filter.
+                            if !key::belongs_to_desktop(self.modifiers)
+                                && !self.modifiers.control_key()
+                            {
                                 if let Some(p) = self.picker.as_mut() {
                                     p.filter.push_str(c.as_str());
                                     p.selected = 0;
@@ -4294,7 +4313,7 @@ impl ApplicationHandler<Wakeup> for App {
                             // The opening chord closes too, aliases included —
                             // resolved through the table so ⌘/, ⌘? and ⌘⇧P
                             // agree — and the sibling overlays' chords switch.
-                            match keymap::lookup(&event.logical_key, self.modifiers)
+                            match keymap::lookup(&event.logical_key, event.physical_key, self.modifiers)
                                 .map(|b| b.action)
                             {
                                 Some(keymap::Action::TogglePalette) => self.palette_ui = None,
@@ -4462,7 +4481,7 @@ impl ApplicationHandler<Wakeup> for App {
                             }
                         }
                         Key::Character(c) => {
-                            match keymap::lookup(&event.logical_key, self.modifiers)
+                            match keymap::lookup(&event.logical_key, event.physical_key, self.modifiers)
                                 .map(|b| b.action)
                             {
                                 Some(keymap::Action::ToggleSettings) => self.toggle_settings(),
@@ -4497,7 +4516,7 @@ impl ApplicationHandler<Wakeup> for App {
                         self.show_screen(AppScreen::Terminal);
                         return;
                     }
-                    if let Some(binding) = keymap::lookup(&event.logical_key, self.modifiers) {
+                    if let Some(binding) = keymap::lookup(&event.logical_key, event.physical_key, self.modifiers) {
                         self.perform(binding.action, el);
                     }
                     return;
@@ -4508,7 +4527,7 @@ impl ApplicationHandler<Wakeup> for App {
                 // row is the bug the command palette exists to prevent: the
                 // palette renders and runs from BINDINGS, so an unlisted
                 // chord is an undiscoverable one.
-                if let Some(binding) = keymap::lookup(&event.logical_key, self.modifiers) {
+                if let Some(binding) = keymap::lookup(&event.logical_key, event.physical_key, self.modifiers) {
                     let swallow = match binding.when {
                         keymap::When::Always => true,
                         // In the alternate screen the chord falls through to
