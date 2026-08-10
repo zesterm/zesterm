@@ -67,6 +67,23 @@ stays as the local browser path. **The sidecar path is not a subset of the cloud
 path — it is the path that survives Cloudflare being unreachable**, which
 ADR-005 requires of a local terminal.
 
+## Running it locally
+
+```sh
+cp packages/web/.dev.vars.example packages/web/.dev.vars   # then fill it in
+pnpm exec wrangler d1 migrations apply zesterm --local
+pnpm --filter @zesterm/web-worker dev                      # workerd, port 8787
+```
+
+**`APP_ORIGIN` in `.dev.vars` is the reason that file exists.** The CSRF rule
+compares each mutating request's `Origin` against it, so with the production
+value in place every write from localhost is correctly refused 403 — sign-out
+included. That refusal is the rule working, and it makes the local loop useless
+without the override.
+
+Sign-in locally also needs the **second** OAuth app: a GitHub OAuth app accepts
+exactly one callback URL, so production cannot also serve `localhost`.
+
 ## Deploying
 
 Nothing here deploys yet: there is no Cloudflare account wired up and

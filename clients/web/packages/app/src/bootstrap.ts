@@ -18,10 +18,18 @@ export interface LocalBootstrap {
   readonly mode: 'local';
 }
 
-/** The edge. `user` stays `null` until accounts land. */
+/** Who is signed in. Mirrors the Worker's `publicUser`, field for field. */
+export interface User {
+  readonly id: string;
+  readonly displayName: string;
+  readonly email: string | null;
+  readonly avatarUrl: string | null;
+}
+
+/** The edge. `user` is `null` when signed out. */
 export interface CloudBootstrap {
   readonly mode: 'cloud';
-  readonly user: null;
+  readonly user: User | null;
 }
 
 export type Bootstrap = LocalBootstrap | CloudBootstrap;
@@ -38,13 +46,32 @@ export type Bootstrap = LocalBootstrap | CloudBootstrap;
  */
 export const FALLBACK: Bootstrap = { mode: 'local' };
 
+/**
+ * Narrow the user, or `null`.
+ *
+ * Field by field rather than a cast: this is the one place a server response
+ * becomes something the UI renders, and `displayName` being `undefined`
+ * further in reads as a blank account menu rather than as a bad response.
+ */
+export function parseUser(value: unknown): User | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const u = value as Record<string, unknown>;
+  if (typeof u['id'] !== 'string' || typeof u['displayName'] !== 'string') return null;
+  return {
+    id: u['id'],
+    displayName: u['displayName'],
+    email: typeof u['email'] === 'string' ? u['email'] : null,
+    avatarUrl: typeof u['avatarUrl'] === 'string' ? u['avatarUrl'] : null,
+  };
+}
+
 /** Narrow an unknown JSON body, rather than trusting the server's shape. */
 export function parseBootstrap(value: unknown): Bootstrap | null {
   if (typeof value !== 'object' || value === null) return null;
   const mode = (value as { mode?: unknown }).mode;
   if (mode === 'local') return { mode: 'local' };
-  if (mode === 'cloud') return { mode: 'cloud', user: null };
-  return null;
+  if (mode !== 'cloud') return null;
+  return { mode: 'cloud', user: parseUser((value as { user?: unknown }).user) };
 }
 
 /**

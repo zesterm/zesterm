@@ -14,6 +14,7 @@
     "@sigx/actors": "^0.7.0",
     "@sigx/actors-ws": "^0.7.0",
     "@sigx/reactivity": "^0.15.3",
+    "@sigx/router": "^0.12.1",
     "@sigx/serialize": "^0.15.3",
     "@sigx/server": "^0.15.3",
     "@zesterm/auth": "workspace:*",

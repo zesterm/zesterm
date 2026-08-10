@@ -147,15 +147,24 @@ function cmdNew(positional, flags) {
     }
 
     // 2. Install deps. Diverges from the template's plain `pnpm install` at the
-    //    root: zesterm is a Rust workspace whose only node dependencies live in
-    //    clients/web, and cargo needs no install step at all. A root install
-    //    would write a second lockfile and node_modules that nothing consumes.
-    const webDir = path.join(worktree, 'clients', 'web');
-    if (existsSync(path.join(webDir, 'pnpm-lock.yaml'))) {
-        console.log('Installing web client dependencies (pnpm install in clients/web)…');
-        const install = sh('pnpm install', { cwd: webDir, stdio: 'inherit' });
+    //    root: zesterm is a Rust workspace whose node dependencies live in two
+    //    *separate* pnpm workspaces, and cargo needs no install step at all. A
+    //    root install would write a lockfile and node_modules that nothing
+    //    consumes.
+    //
+    //    Both are installed, keyed off their own lockfiles. `cloud/` was added
+    //    later and missed here at first, and the symptom was indirect: `pnpm
+    //    exec wrangler` in a fresh worktree reported "Command wrangler not
+    //    found", which reads as a broken install rather than an absent one.
+    for (const [label, dir] of [
+        ['web client', path.join(worktree, 'clients', 'web')],
+        ['cloud workers', path.join(worktree, 'cloud')],
+    ]) {
+        if (!existsSync(path.join(dir, 'pnpm-lock.yaml'))) continue;
+        console.log(`Installing ${label} dependencies (pnpm install in ${path.relative(worktree, dir)})…`);
+        const install = sh('pnpm install', { cwd: dir, stdio: 'inherit' });
         if (install.status !== 0) {
-            die(`Worktree created at ${worktree}, but 'pnpm install' in clients/web failed — fix and re-run it there.`);
+            die(`Worktree created at ${worktree}, but 'pnpm install' in ${path.relative(worktree, dir)} failed — fix and re-run it there.`);
         }
     }
 
