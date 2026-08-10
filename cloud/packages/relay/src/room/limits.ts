@@ -12,11 +12,18 @@
  * - Duration dominates and is not billed while hibernating, which is why "never
  *   write storage on the data path" is a policy and not a preference.
  *
- * The platform limits below were **measured against workerd**, not read off a
- * doc page: a throwaway Durable Object under miniflare, driven past each
- * boundary until it threw. Cloudflare has moved two of these at least once
- * (the WebSocket message ceiling was 1 MiB before 2025-10-31), so the numbers
- * are dated by the compatibility date in `wrangler.jsonc` rather than eternal.
+ * Three of the limits below were **measured against workerd**, not read off a
+ * doc page: `MAX_TAGS`, `MAX_TAG_CHARS` and `MAX_ATTACHMENT_BYTES`, each driven
+ * past its boundary under miniflare until it threw. `MAX_MESSAGE_BYTES` is
+ * **not** one of them — it is carried from ADR-009's prose, and a 32 MiB
+ * message is expensive enough to send that nobody has driven a Durable Object
+ * past it here.
+ *
+ * The distinction is laboured on purpose. This repo keeps a "measured, so it is
+ * not folklore" discipline, and a comment that quietly widens what was actually
+ * checked is how a number stops being either. The message ceiling has already
+ * moved once (it was 1 MiB before 2025-10-31), so all of these are dated by the
+ * compatibility date in `wrangler.jsonc` rather than eternal.
  */
 
 // --- what the platform enforces --------------------------------------------

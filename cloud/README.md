@@ -45,7 +45,9 @@ The order, once there is an account to deploy to:
 
 ```sh
 pnpm -C clients/web --filter @zesterm/app build     # the web Worker serves this directory
-pnpm exec wrangler d1 migrations apply zesterm --remote
+# Inside a package, because `wrangler` is a devDependency of the Workers and
+# `d1 migrations apply` reads the D1 binding and `migrations_dir` from a config.
+pnpm -C cloud --filter @zesterm/web-worker exec wrangler d1 migrations apply zesterm --remote
 pnpm -C cloud --filter @zesterm/web-worker run deploy
 pnpm -C cloud --filter @zesterm/relay-worker run deploy   # last, and least often
 ```
