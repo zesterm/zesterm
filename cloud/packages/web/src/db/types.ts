@@ -66,3 +66,92 @@ export function publicUser(row: UserRow): PublicUser {
     avatarUrl: row.avatar_url,
   };
 }
+
+// --- the device registry ---------------------------------------------------
+
+/** Which table a code enrols into, and which role its signature must carry. */
+export type EnrollKind = 'host' | 'device';
+
+/** `devices.kind`. Closed, because the devices screen renders an icon per value. */
+export type DeviceKind = 'browser' | 'phone' | 'desktop';
+
+export interface EnrollCodeRow {
+  readonly code: string;
+  readonly user_id: string;
+  readonly kind: EnrollKind;
+  readonly created_at: number;
+  readonly expires_at: number;
+  readonly used_at: number | null;
+  readonly used_by: string | null;
+}
+
+export interface HostRow {
+  readonly id: string;
+  readonly user_id: string;
+  readonly label: string;
+  readonly platform: string;
+  readonly enrolled_at: number;
+  readonly last_seen_at: number | null;
+  readonly revoked_at: number | null;
+}
+
+export interface DeviceRow {
+  readonly id: string;
+  readonly user_id: string;
+  readonly label: string;
+  readonly kind: DeviceKind;
+  readonly extractable: number;
+  readonly enrolled_at: number;
+  readonly last_seen_at: number | null;
+  readonly revoked_at: number | null;
+}
+
+/**
+ * What the app is told about a machine. Never the row verbatim — `user_id` in
+ * particular is a fact about the account, and the caller already knows it.
+ */
+export interface PublicHost {
+  readonly id: string;
+  readonly label: string;
+  readonly platform: string;
+  readonly enrolledAt: number;
+  readonly lastSeenAt: number | null;
+}
+
+export interface PublicDevice {
+  readonly id: string;
+  readonly label: string;
+  readonly kind: DeviceKind;
+  /**
+   * Whether the private key can be read by script on the origin. Reported
+   * rather than assumed, so the devices screen can say which instead of
+   * showing a green tick that is not true.
+   */
+  readonly extractable: boolean;
+  readonly enrolledAt: number;
+  readonly lastSeenAt: number | null;
+}
+
+// Field by field, for the reason `publicUser` is: both tables will grow
+// columns, `do_id` is already one of them, and a spread ships each new one to
+// the browser by default.
+export function publicHost(row: HostRow): PublicHost {
+  return {
+    id: row.id,
+    label: row.label,
+    platform: row.platform,
+    enrolledAt: row.enrolled_at,
+    lastSeenAt: row.last_seen_at,
+  };
+}
+
+export function publicDevice(row: DeviceRow): PublicDevice {
+  return {
+    id: row.id,
+    label: row.label,
+    kind: row.kind,
+    extractable: row.extractable !== 0,
+    enrolledAt: row.enrolled_at,
+    lastSeenAt: row.last_seen_at,
+  };
+}

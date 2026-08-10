@@ -13,6 +13,7 @@ export {
   fromBase64Url,
   utf8,
   hex,
+  fromHex,
   timingSafeEqual,
   randomBytes,
   sha256Base64Url,

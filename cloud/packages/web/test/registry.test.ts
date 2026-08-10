@@ -1,0 +1,313 @@
+/**
+ * `/api/hosts`, `/api/devices` and the two revoke routes.
+ *
+ * The whole surface is "the caller's own or nothing", so what is asserted here
+ * is mostly the negative: that another account's machine is invisible, that it
+ * is also un-revokable, and that neither answer says whether it exists.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import { SESSION_COOKIE } from '@zesterm/cloud-shared';
+
+import { createEnrollCode, enrolHost, spendEnrollCode } from '../src/db/registry.ts';
+import { createSession } from '../src/db/sessions.ts';
+import { routeApi } from '../src/router.ts';
+import { rowOf, seedUser, testDb, type TestDb } from './d1.ts';
+import type { Env } from '../src/env.ts';
+
+const ORIGIN = 'https://zesterm.sigx.workers.dev';
+const NOW = 1_700_000_000_000;
+
+const MAC = 'aa'.repeat(32);
+const WINDOWS = 'bb'.repeat(32);
+const PHONE = 'cc'.repeat(32);
+
+function env(db: TestDb): Env {
+  return {
+    ASSETS: { fetch: async () => new Response('assets') },
+    DB: db,
+    APP_ORIGIN: ORIGIN,
+    GITHUB_CLIENT_ID: 'client-id',
+    GITHUB_CLIENT_SECRET: 'client-secret',
+    COOKIE_MAC_KEY: 'mac-key',
+  };
+}
+
+async function signedIn(db: TestDb, userId: string): Promise<string> {
+  seedUser(db, userId);
+  const { token } = await createSession(db, userId, NOW);
+  return `${SESSION_COOKIE}=${token}`;
+}
+
+function seedHost(
+  db: TestDb,
+  args: { id: string; userId: string; label: string; enrolledAt?: number; revokedAt?: number },
+): void {
+  db.raw
+    .prepare(
+      `INSERT INTO hosts (id, user_id, label, platform, enrolled_at, revoked_at)
+       VALUES (?, ?, ?, 'macos', ?, ?)`,
+    )
+    .run(args.id, args.userId, args.label, args.enrolledAt ?? NOW, args.revokedAt ?? null);
+}
+
+function seedDevice(db: TestDb, args: { id: string; userId: string; label: string }): void {
+  db.raw
+    .prepare(
+      `INSERT INTO devices (id, user_id, label, kind, enrolled_at) VALUES (?, ?, ?, 'phone', ?)`,
+    )
+    .run(args.id, args.userId, args.label, NOW);
+}
+
+const get = (path: string, cookie?: string) =>
+  new Request(`${ORIGIN}${path}`, cookie === undefined ? undefined : { headers: { cookie } });
+
+const revoke = (path: string, cookie?: string) => {
+  const headers: Record<string, string> = { origin: ORIGIN, 'content-type': 'application/json' };
+  if (cookie !== undefined) headers['cookie'] = cookie;
+  return new Request(`${ORIGIN}${path}`, { method: 'POST', headers, body: '{}' });
+};
+
+// --- listing ---------------------------------------------------------------
+
+test('listing requires a session', async () => {
+  const db = testDb();
+  for (const path of ['/api/hosts', '/api/devices']) {
+    const res = await routeApi(get(path), env(db), fetch, NOW);
+    assert.equal(res?.status, 401, path);
+  }
+  db.close();
+});
+
+test('a listing is the caller’s own machines, and never anybody else’s', async () => {
+  const db = testDb();
+  const mine = await signedIn(db, 'user-a');
+  await signedIn(db, 'user-b');
+  seedHost(db, { id: MAC, userId: 'user-a', label: 'andy-mac' });
+  seedHost(db, { id: WINDOWS, userId: 'user-b', label: 'not-mine' });
+
+  const res = await routeApi(get('/api/hosts', mine), env(db), fetch, NOW);
+  const { hosts } = (await res!.json()) as { hosts: Array<{ id: string }> };
+  assert.deepEqual(
+    hosts.map((h) => h.id),
+    [MAC],
+    'ownership is in the WHERE clause, not a check the caller could forget',
+  );
+  db.close();
+});
+
+test('a revoked machine is simply not in the listing', async () => {
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  seedHost(db, { id: MAC, userId: 'user-a', label: 'andy-mac' });
+  seedHost(db, { id: WINDOWS, userId: 'user-a', label: 'old-box', revokedAt: NOW - 1 });
+
+  const res = await routeApi(get('/api/hosts', cookie), env(db), fetch, NOW);
+  const { hosts } = (await res!.json()) as { hosts: Array<{ id: string }> };
+  assert.deepEqual(hosts.map((h) => h.id), [MAC], 'the row is kept for the audit, not for the screen');
+  db.close();
+});
+
+test('a host is described field by field, never as the row', async () => {
+  // `hosts` already has a column the browser has no business with -- `do_id`,
+  // reserved for the relay -- and it will grow more. A spread would ship each
+  // new one by default; the safe direction for that mistake is a missing field.
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  seedHost(db, { id: MAC, userId: 'user-a', label: 'andy-mac' });
+
+  const res = await routeApi(get('/api/hosts', cookie), env(db), fetch, NOW);
+  const { hosts } = (await res!.json()) as { hosts: Array<Record<string, unknown>> };
+  assert.deepEqual(Object.keys(hosts[0] ?? {}).sort(), [
+    'enrolledAt',
+    'id',
+    'label',
+    'lastSeenAt',
+    'platform',
+  ]);
+  db.close();
+});
+
+test('hosts and devices are separate listings', async () => {
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  seedHost(db, { id: MAC, userId: 'user-a', label: 'andy-mac' });
+  seedDevice(db, { id: PHONE, userId: 'user-a', label: 'andy-phone' });
+
+  const devices = (await (
+    await routeApi(get('/api/devices', cookie), env(db), fetch, NOW)
+  )!.json()) as { devices: Array<{ id: string; kind: string; extractable: boolean }> };
+  assert.deepEqual(devices.devices.map((d) => d.id), [PHONE]);
+  assert.equal(devices.devices[0]?.kind, 'phone');
+  assert.equal(
+    devices.devices[0]?.extractable,
+    true,
+    'the schema stores 1/0; the screen must be told which, not shown a tick that is not true',
+  );
+  db.close();
+});
+
+// --- revoking --------------------------------------------------------------
+
+test('revoking my own machine takes it out of the listing', async () => {
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  seedHost(db, { id: MAC, userId: 'user-a', label: 'andy-mac' });
+
+  const res = await routeApi(revoke(`/api/hosts/${MAC}/revoke`, cookie), env(db), fetch, NOW);
+  assert.equal(res?.status, 200);
+  assert.deepEqual(await res!.json(), { id: MAC, revokedAt: NOW });
+
+  const after = (await (
+    await routeApi(get('/api/hosts', cookie), env(db), fetch, NOW)
+  )!.json()) as { hosts: unknown[] };
+  assert.equal(after.hosts.length, 0);
+  db.close();
+});
+
+test('revoking twice does not move the timestamp', async () => {
+  // "Since when" is the fact anyone asking later wants, and a second click on a
+  // slow page must not rewrite it.
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  seedHost(db, { id: MAC, userId: 'user-a', label: 'andy-mac' });
+
+  await routeApi(revoke(`/api/hosts/${MAC}/revoke`, cookie), env(db), fetch, NOW);
+  const again = await routeApi(revoke(`/api/hosts/${MAC}/revoke`, cookie), env(db), fetch, NOW + 5_000);
+
+  assert.equal(again?.status, 200, 'revoking an already-revoked machine is not an error');
+  assert.deepEqual(await again!.json(), { id: MAC, revokedAt: NOW });
+  db.close();
+});
+
+test('another account’s machine cannot be revoked, and is not admitted to exist', async () => {
+  const db = testDb();
+  const mine = await signedIn(db, 'user-a');
+  await signedIn(db, 'user-b');
+  seedHost(db, { id: WINDOWS, userId: 'user-b', label: 'not-mine' });
+
+  const theirs = await routeApi(revoke(`/api/hosts/${WINDOWS}/revoke`, mine), env(db), fetch, NOW);
+  const nobody = await routeApi(revoke(`/api/hosts/${MAC}/revoke`, mine), env(db), fetch, NOW);
+
+  assert.equal(theirs?.status, 404);
+  assert.deepEqual(
+    await theirs!.json(),
+    await nobody!.json(),
+    'the ids are public keys, so telling the two apart answers "is this key enrolled with zesterm" for strangers',
+  );
+  assert.deepEqual(
+    rowOf(db, `SELECT revoked_at FROM hosts WHERE id = ?`, WINDOWS),
+    { revoked_at: null },
+    'and it must not have been revoked on the way to that 404',
+  );
+  db.close();
+});
+
+test('revoking requires a session', async () => {
+  const db = testDb();
+  await signedIn(db, 'user-a');
+  seedHost(db, { id: MAC, userId: 'user-a', label: 'andy-mac' });
+
+  const res = await routeApi(revoke(`/api/hosts/${MAC}/revoke`), env(db), fetch, NOW);
+  assert.equal(res?.status, 401);
+  assert.deepEqual(rowOf(db, `SELECT revoked_at FROM hosts WHERE id = ?`, MAC), {
+    revoked_at: null,
+  });
+  db.close();
+});
+
+test('a device revoke does not reach a host with the same id', async () => {
+  // The two tables have separate key spaces by design -- `HostId` and
+  // `ClientId` are kept apart so an authorization check cannot ask the wrong
+  // question -- and one machine holds a key in each.
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  seedHost(db, { id: MAC, userId: 'user-a', label: 'andy-mac' });
+
+  const res = await routeApi(revoke(`/api/devices/${MAC}/revoke`, cookie), env(db), fetch, NOW);
+  assert.equal(res?.status, 404);
+  assert.deepEqual(rowOf(db, `SELECT revoked_at FROM hosts WHERE id = ?`, MAC), {
+    revoked_at: null,
+  });
+  db.close();
+});
+
+test('an id that is not 32 bytes of lowercase hex is a 404, not a round trip', async () => {
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  for (const id of ['abc', MAC.toUpperCase(), `${MAC}ff`, "'; DROP TABLE hosts; --"]) {
+    const res = await routeApi(
+      revoke(`/api/hosts/${encodeURIComponent(id)}/revoke`, cookie),
+      env(db),
+      fetch,
+      NOW,
+    );
+    assert.equal(res?.status, 404, id);
+  }
+  db.close();
+});
+
+test('the registry routes refuse the wrong method', async () => {
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+
+  const list = await routeApi(revoke('/api/hosts', cookie), env(db), fetch, NOW);
+  assert.equal(list?.status, 405, 'a listing is a GET');
+
+  const rev = await routeApi(get(`/api/hosts/${MAC}/revoke`, cookie), env(db), fetch, NOW);
+  assert.equal(rev?.status, 405, 'revoking is a POST');
+  db.close();
+});
+
+// --- the store's own guards, below the route -------------------------------
+
+test('the insert refuses a revoked or foreign key on its own, not only via the route', async () => {
+  // The route checks first and answers 409, which is what a caller sees. These
+  // conditions on `ON CONFLICT DO UPDATE` are the backstop for the window
+  // between that check and this write — an owner revoking a machine while it is
+  // mid-enrolment — so they need a test that reaches past the route, or the
+  // only thing proving them is a race nobody can schedule.
+  const db = testDb();
+  seedUser(db, 'user-a');
+  seedUser(db, 'user-b');
+  seedHost(db, { id: MAC, userId: 'user-a', label: 'andy-mac', revokedAt: NOW - 1 });
+  seedHost(db, { id: WINDOWS, userId: 'user-b', label: 'not-mine' });
+
+  assert.equal(
+    await enrolHost(db, { id: MAC, userId: 'user-a', label: 'back-please', platform: '', now: NOW }),
+    null,
+    'a revoked machine that could re-enrol itself has un-revoked itself',
+  );
+  assert.equal(
+    await enrolHost(db, { id: WINDOWS, userId: 'user-a', label: 'mine-now', platform: '', now: NOW }),
+    null,
+    'holding a key is not a claim on somebody else’s row',
+  );
+  assert.deepEqual(
+    rowOf(db, `SELECT user_id, label, revoked_at FROM hosts WHERE id = ?`, WINDOWS),
+    { user_id: 'user-b', label: 'not-mine', revoked_at: null },
+    'and a refused write must not have changed anything on the way to refusing',
+  );
+  db.close();
+});
+
+test('a code cannot be spent twice, whatever the caller does', async () => {
+  // The compare-and-set that makes a replay inert, tested where the race can be
+  // written down: two spends of one code, with no route in between.
+  const db = testDb();
+  seedUser(db, 'user-a');
+  const { code } = await createEnrollCode(db, 'user-a', 'host', NOW);
+
+  assert.equal(await spendEnrollCode(db, code, MAC, NOW), 'host');
+  assert.equal(
+    await spendEnrollCode(db, code, WINDOWS, NOW),
+    null,
+    'the second caller must learn it lost, rather than enrolling a second machine',
+  );
+  assert.deepEqual(rowOf(db, `SELECT used_by FROM enroll_codes WHERE code = ?`, code), {
+    used_by: MAC,
+  });
+  db.close();
+});

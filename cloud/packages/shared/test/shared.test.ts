@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import {
   clearCookie,
   fromBase64Url,
+  fromHex,
+  hex,
   looksLikeSessionToken,
   newSessionToken,
   OAUTH_COOKIE,
@@ -135,4 +137,27 @@ test('a cookie whose name merely ends with ours is not mistaken for it', () => {
   // would hand the attacker's value to the session lookup.
   assert.equal(readCookie(`evil${SESSION_COOKIE}=attacker`, SESSION_COOKIE), null);
   assert.equal(readCookie(`${SESSION_COOKIE}_x=attacker`, SESSION_COOKIE), null);
+});
+
+test('hex decodes only what hex() could have written', () => {
+  // Public keys and signatures arrive as hex from a daemon, and the decoder
+  // below this (`@noble/ed25519`) takes a `Uint8Array` of any length and then
+  // throws -- so a lenient parser turns "31 bytes arrived" into an exception
+  // inside code that was reasoning about cryptography.
+  const bytes = new Uint8Array([0x00, 0x0f, 0xff, 0xa5]);
+  assert.deepEqual(fromHex(hex(bytes), 4), bytes, 'hex() and fromHex() must round-trip');
+
+  for (const [why, text, len] of [
+    ['short', '00', 4],
+    ['long', '000f00ffa5', 4],
+    ['odd', '000', 2],
+    ['not hex at all', 'zzzz', 2],
+    ['whitespace', '00 0f', 2],
+    // Uppercase is refused rather than folded: these values are stored as, and
+    // compared against, `hex()`'s lowercase output, so two spellings of one key
+    // would be two rows.
+    ['uppercase', 'AABB', 2],
+  ] as Array<[string, string, number]>) {
+    assert.equal(fromHex(text, len), null, why);
+  }
 });

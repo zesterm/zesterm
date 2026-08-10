@@ -39,6 +39,28 @@ export function hex(bytes: Uint8Array): string {
 }
 
 /**
+ * `null` on anything that is not `length` bytes of lowercase hex.
+ *
+ * The strictness is the point. Public keys and signatures arrive as hex from a
+ * daemon, and the decoders below them (`@noble/ed25519`) accept a `Uint8Array`
+ * of any length and then throw — so a lenient parser turns "the client sent 31
+ * bytes" into an exception on a code path that was reasoning about
+ * cryptography. Uppercase is refused rather than folded because these values
+ * are also compared against, and stored as, `hex()`'s own lowercase output: two
+ * spellings of one key are two rows.
+ */
+export function fromHex(text: string, length: number): Uint8Array | null {
+  if (text.length !== length * 2) return null;
+  const out = new Uint8Array(length);
+  for (let i = 0; i < length; i++) {
+    const pair = text.slice(i * 2, i * 2 + 2);
+    if (!/^[0-9a-f]{2}$/.test(pair)) return null;
+    out[i] = Number.parseInt(pair, 16);
+  }
+  return out;
+}
+
+/**
  * Compare two strings without leaking where they first differ.
  *
  * `===` on a secret returns as soon as a byte differs, so the time it takes is
