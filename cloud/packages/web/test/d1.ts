@@ -13,7 +13,7 @@
  */
 
 import { DatabaseSync } from 'node:sqlite';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import type { D1PreparedStatement, Db, D1Result } from '../src/db/types.ts';
@@ -22,7 +22,16 @@ import type { D1PreparedStatement, Db, D1Result } from '../src/db/types.ts';
 // structurally different under these lib settings, so passing the object is
 // rejected by both `readFileSync` and `fileURLToPath`. The string form is
 // what they agree on.
-const MIGRATION = fileURLToPath(new URL('../../../migrations/0001_init.sql', import.meta.url).href);
+const MIGRATIONS_DIR = fileURLToPath(new URL('../../../migrations/', import.meta.url).href);
+
+// The directory rather than a list of filenames, in the same numeric order
+// wrangler applies them. A named list is a list someone adds a migration
+// without: the schema would then be one file behind here and correct in
+// production, and the tests would pass by testing a database that no longer
+// exists.
+const MIGRATIONS = readdirSync(MIGRATIONS_DIR)
+  .filter((name) => name.endsWith('.sql'))
+  .sort();
 
 class Statement implements D1PreparedStatement {
   #db: DatabaseSync;
@@ -69,7 +78,7 @@ export function testDb(): TestDb {
   // REFERENCES checks would silently do nothing and the tests would pass while
   // proving less than they claim.
   sqlite.exec('PRAGMA foreign_keys = ON');
-  sqlite.exec(readFileSync(MIGRATION, 'utf8'));
+  for (const name of MIGRATIONS) sqlite.exec(readFileSync(MIGRATIONS_DIR + name, 'utf8'));
 
   return {
     prepare: (sql: string) => new Statement(sqlite, sql),
@@ -86,4 +95,18 @@ export function seedUser(db: TestDb, id: string, now = 1_000): void {
        VALUES (?, ?, ?, ?, ?, ?)`,
     )
     .run(id, `${id}@example.com`, id, null, now, now);
+}
+
+/**
+ * A row read straight from SQLite, as a **plain** object.
+ *
+ * `node:sqlite` hands back null-prototype rows, and `assert.deepEqual` under
+ * `node:assert/strict` compares prototypes — so an object literal never matches
+ * one, and the failure prints the two sides looking identical. D1 itself
+ * returns ordinary objects, so this is the shape a test should be asserting
+ * against anyway.
+ */
+export function rowOf<T>(db: TestDb, sql: string, ...bind: unknown[]): T | null {
+  const row = db.raw.prepare(sql).get(...(bind as never[]));
+  return row === undefined ? null : ({ ...row } as T);
 }

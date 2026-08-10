@@ -1107,6 +1107,31 @@ is now unblocked and building.
       Sign-out is a `POST` with `content-type: application/json`, because that
       is exactly what the CSRF rule requires; a link or a form is refused 403.
       Verified in a browser on both paths, signed out and in.
+- [ ] **The device registry** — the account's list of machines and browsers.
+      The Worker's half is in: `POST /api/enroll/code` mints a one-shot code
+      for the signed-in person to carry, `POST /api/enroll/claim` is answered by
+      the daemon with an Ed25519 signature over it, and `GET /api/hosts` /
+      `GET /api/devices` plus the two revoke routes are the caller's own or
+      nothing.
+      **The claim verifies the signature before it spends the code.** Reversed,
+      anyone who can reach the endpoint burns codes without holding a key, and
+      the person minting them never gets a machine enrolled. Spending is then a
+      compare-and-set in one statement — D1 has no transaction across two
+      `prepare` calls — so a replayed claim matches no row rather than enrolling
+      twice.
+      **`/api/enroll/claim` is the one route exempt from the `Origin` half of
+      the CSRF rule**, named as such in the router rather than special-cased in
+      a handler. A daemon is not a browser and sends no `Origin`; the exemption
+      is sound only because the route reads no session cookie, so there is no
+      ambient authority to forge. It still requires
+      `content-type: application/json`, which keeps a victim's browser off it.
+      The preimage is a byte-for-byte port of `zest-mesh`'s, pinned to it by
+      `zest-mesh`'s own golden hex **and** a signature the Rust actually
+      produced — the two implementations share no code, and a drift otherwise
+      surfaces at bring-up as a mismatch that names neither side. Verification
+      is `zip215: false`, matching dalek's `verify_strict`: noble's default
+      accepts small-order keys, which verify almost anything.
+      Still open: the daemon's `--enroll`, and the devices screen.
 - [ ] Local echo prediction for high-latency links (mosh's other trick): predict
       printable-char echo when not in alt-screen, render dim, reconcile on delta
       arrival. The largest perceived-latency win available.

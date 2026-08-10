@@ -32,6 +32,52 @@ mocked. The whole OAuth round trip runs against a stubbed GitHub, including the
 failures nobody clicks on purpose: a mismatched state, an expired one, and
 GitHub's 200-with-an-error-body.
 
+## The device registry
+
+What an account owns is public keys: `hosts.id` and `devices.id` **are** the
+64-hex Ed25519 keys (ADR-006), so enrolment is a signature rather than a claim.
+
+```
+POST /api/enroll/code    signed in    { kind }        -> { code, expiresAt }
+POST /api/enroll/claim   a daemon     { code, hostId, label, sig }
+GET  /api/hosts          signed in                    -> { hosts: [...] }
+GET  /api/devices        signed in                    -> { devices: [...] }
+POST /api/hosts/:id/revoke      signed in, own only
+POST /api/devices/:id/revoke    signed in, own only
+```
+
+The code is eight characters of an alphabet with no `0`/`O` and no `1`/`I`/`L`,
+because a person reads it off one screen and types it into another. It lives ten
+minutes: for the whole of that window it is a bearer token, and whoever reads it
+over your shoulder can enrol *their* machine instead — their signature over it is
+perfectly valid.
+
+Two things about `/api/enroll/claim` are worth knowing before changing it.
+
+**It verifies the signature before it spends the code.** Reversed, anybody who
+can reach the endpoint burns codes without holding any key at all, and the
+person minting them never manages to enrol a machine. Spending is then a
+compare-and-set inside one `UPDATE … WHERE used_at IS NULL … RETURNING` — D1
+offers no transaction across two `prepare` calls — so a replayed claim matches
+no row instead of enrolling twice.
+
+**It is the one route exempt from the `Origin` half of the CSRF rule**, listed
+by name in `router.ts`. A daemon is not a browser and sends no `Origin` at all.
+The exemption is sound only because the route consults no session cookie: CSRF
+is the forgery of a request that succeeds on ambient credentials, and there are
+none here. It still requires `content-type: application/json`, which keeps the
+one cross-site request a browser makes without a preflight — a form POST — off
+it entirely. Whatever an attacker can send with `curl` is theirs to send; what a
+victim's browser can be made to send is ours to prevent.
+
+The enrolment preimage in `src/enroll/preimage.ts` is a byte-for-byte port of
+`crates/zest-mesh/src/enroll.rs`. The two share no code, so `test/enroll-preimage.test.ts`
+pins them with the Rust's own golden hex **and** a signature the Rust
+actually produced; without those a drift shows up at bring-up as a signature
+mismatch that names neither side. Verification passes `zip215: false` to match
+dalek's `verify_strict` — noble's default accepts small-order public keys, and
+those verify almost anything.
+
 Migrations are applied by hand for now:
 
 ```sh
