@@ -48,21 +48,41 @@ export function parseBootstrap(value: unknown): Bootstrap | null {
 }
 
 /**
+ * How long boot will wait for an answer before assuming one.
+ *
+ * Nothing mounts until this resolves, so the number is a blank-page budget
+ * rather than a network one. A stalled request — a captive portal that accepts
+ * the connection and never answers is the usual way — would otherwise hang
+ * boot forever, and "forever" is the one duration a splash cannot cover.
+ * Loopback answers in single-digit milliseconds and the edge in tens, so three
+ * seconds is far past either and still short of feeling broken.
+ */
+export const BOOTSTRAP_TIMEOUT_MS = 3_000;
+
+/**
  * Fetch it, or fall back.
  *
- * Never rejects. A boot path that can throw is a boot path that renders a blank
- * page, and "which server am I talking to" is not worth that — the fallback is
- * a working app on the more likely of the two answers.
+ * Never rejects, and never hangs. A boot path that can throw *or* stall is a
+ * boot path that renders a blank page, and "which server am I talking to" is
+ * not worth that — the fallback is a working app on the more likely answer.
  */
 export async function fetchBootstrap(
   fetchImpl: typeof fetch = fetch,
   url = '/api/bootstrap',
+  timeoutMs = BOOTSTRAP_TIMEOUT_MS,
 ): Promise<Bootstrap> {
   try {
-    const res = await fetchImpl(url, { headers: { accept: 'application/json' } });
+    const res = await fetchImpl(url, {
+      headers: { accept: 'application/json' },
+      // `AbortSignal.timeout` rather than a `Promise.race`: racing leaves the
+      // request running and its rejection unhandled, which surfaces later as
+      // an unrelated console error nobody can place.
+      signal: AbortSignal.timeout(timeoutMs),
+    });
     if (!res.ok) return FALLBACK;
     return parseBootstrap(await res.json()) ?? FALLBACK;
   } catch {
+    // Abort included: a timeout is exactly the case the fallback exists for.
     return FALLBACK;
   }
 }

@@ -33,6 +33,17 @@ const themeId = localStorage.getItem('zesterm.theme') ?? 'obsidian';
 const theme = themeById(themeId) ?? obsidian;
 applyCssVars(theme.ui, document.documentElement);
 
+// Cache the resolved background for the next load's first paint. index.html
+// replays it before this bundle exists, so someone on a light theme does not
+// get a dark flash every time. Written after applyCssVars, so it only ever
+// records a background that was actually used.
+try {
+  localStorage.setItem('zesterm.boot-bg', theme.ui.bg);
+} catch {
+  // Private modes throw on write. The inline fallback stands; nothing else here
+  // depends on this succeeding.
+}
+
 const socketUrl =
   (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/_sigx/socket';
 

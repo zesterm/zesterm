@@ -47,6 +47,38 @@ test('boot never throws, whatever the network does', async () => {
   assert.deepEqual(await fetchBootstrap(notJson), FALLBACK, 'SPA fallback served HTML');
 });
 
+test('a server that accepts and never answers cannot hang boot', async () => {
+  // The captive-portal case: the connection is accepted, the request never
+  // resolves. Nothing mounts until this returns, so without the timeout the
+  // page stays blank forever -- the one duration a splash cannot cover.
+  const stalling: typeof fetch = ((_url: string, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+    })) as unknown as typeof fetch;
+
+  const started = Date.now();
+  const got = await fetchBootstrap(stalling, '/api/bootstrap', 60);
+  assert.deepEqual(got, FALLBACK);
+  assert.ok(
+    Date.now() - started < 2_000,
+    'fetchBootstrap must give up on its own rather than wait on the network',
+  );
+});
+
+test('the request carries an abort signal, so nothing is left running', async () => {
+  // `AbortSignal.timeout` rather than racing a timer: a race leaves the request
+  // alive and its later rejection unhandled, surfacing as an unrelated console
+  // error nobody can place.
+  let seen: AbortSignal | null | undefined;
+  const capturing: typeof fetch = ((_url: string, init?: RequestInit) => {
+    seen = init?.signal;
+    return Promise.resolve(new Response(JSON.stringify({ mode: 'local' })));
+  }) as unknown as typeof fetch;
+
+  await fetchBootstrap(capturing);
+  assert.ok(seen instanceof AbortSignal, 'no signal was passed to fetch');
+});
+
 test('the fallback is local, because that is the path that still works', () => {
   // Assuming cloud would show a signed-out screen to someone on loopback,
   // where there is nothing to sign in to.
