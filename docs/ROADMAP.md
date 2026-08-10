@@ -31,7 +31,7 @@ move.
         ├── zesterm.exe (Windows) ┘
         │
         │   LAN direct (~0.3ms) where possible,
-        │   Cloudflare Tunnel (~60ms) when away
+        │   the Cloudflare relay (~60ms) when away
         │
    ┌────┴──────────┬──────────────┬───────────────┐
    │ zest-daemon   │ zest-daemon  │ zest-daemon   │  hosts
@@ -39,8 +39,14 @@ move.
    │  PTYs, grid, scrollback, command blocks      │
    └──────────────────────────────────────────────┘
 
-   Cloudflare holds a *directory* only: which hosts exist, are they up,
-   how to reach them. No grid, no scrollback, never in the data path.
+   Cloudflare holds a *directory*: which hosts are yours, and are they up.
+   Not how to reach them — under dial-back there is no address to hold, and
+   the LAN finds its own over mDNS. No grid, no scrollback, no session
+   state — ever.
+
+   On the away path it also carries the bytes, and carries them blind: the
+   relay is a pipe both ends dial out to, and everything after the Challenge
+   is sealed end to end before it arrives. → ADR-008, ADR-009.
 ```
 
 ## Status
@@ -60,7 +66,8 @@ and its number (48ms) is reported rather than gated.
 | `zest-input` | ✅ extracted; keys + SGR mouse + selection + IME + Kitty CSI u (flags 1, 2, 8), Rust and TypeScript — ⬜ Kitty flags 4/16, keypad |
 | `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), restore-on-launch — runs on Windows *and* macOS (Metal, transparent titlebar) — ⬜ Windows chrome, motion |
 | `zest-proto` | ✅ protocol 2, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, cell-for-cell conformance, chaos-resync, command blocks |
-| `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store — ⬜ Cloudflare transport (M4) |
+| `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store, sealed channel |
+| `zest-cloud` | ⬜ not yet a crate. The relay dialler's TLS and HTTP, and the only crate allowed either (M6) |
 | `zest-daemon` | ✅ session ownership *and* lifecycle, protocol loop, loopback *and* LAN transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing |
 
 ### What works end to end today
@@ -177,7 +184,7 @@ below means "do not touch this file".
 | **E** | [Command blocks](#ws-e) | `zest-core/src/blocks.rs`, OSC 133, shell integration | Open | [#6](https://github.com/zesterm/zesterm/issues/6) |
 | **F** | [`zest-proto` + `zest-daemon`](#ws-f) | `crates/zest-proto/`, `crates/zest-daemon/` | Protocol + daemon ✅ · **applier, app attach, LAN listener next** | [#4](https://github.com/zesterm/zesterm/issues/4) |
 | **G** | [Web client](#ws-g) | `clients/web/`, `zest-proto/fixtures/` | Decoder + fixtures ✅ · renderer next, transport blocked | [#8](https://github.com/zesterm/zesterm/issues/8) |
-| **H** | [Mesh identity, discovery, transports](#ws-h) | `crates/zest-mesh/`, `cloud/` | Identity + discovery ✅ · **pairing next** | [#7](https://github.com/zesterm/zesterm/issues/7) |
+| **H** | [Mesh identity, discovery, transports](#ws-h) | `crates/zest-mesh/`, `crates/zest-cloud/`, `cloud/` | Identity, discovery, pairing, accounts ✅ · **the relay next** ([#59](https://github.com/zesterm/zesterm/issues/59)) | [#7](https://github.com/zesterm/zesterm/issues/7) |
 
 **Ordering that mattered, and is now settled.** B landed before A, so `zest-app`
 is free of input code and A can fill it with chrome. C1 landed before D, so
@@ -1189,10 +1196,26 @@ is now unblocked and building.
       one interval and stayed there through 47s of cache re-announcements —
       and a probed live daemon logs nothing, after the handshake watchdog
       learned to warn only when it cuts a connection that still exists.
-- [ ] Cloudflare Tunnel + Access per host. **Origin-side JWT validation is
-      mandatory** — the origin never trusts the tunnel.
-- [ ] The directory Worker: host ids, labels, last-seen endpoints. **No session
-      state, never in the data path.** → ADR-006.
+- [x] **The directory Worker**: host ids, labels, last seen. **No session
+      state.** → ADR-006. Landed with the account (#53): `hosts` and `devices`
+      keyed on the Ed25519 public key itself, so enrolment is a signature
+      rather than a claim.
+
+      **It holds no *endpoints*, and after the relay it never will.** ADR-006
+      wrote the row as "host ids, labels, last-seen endpoints", which assumed
+      an away client dials an address the host published. Under dial-back there
+      is no such address — the host reaches *out*, and the directory answers
+      "which machines are mine and are they up", not "how do I route to one".
+      The LAN still discovers endpoints, and discovers them locally over mDNS,
+      which is where they were always more accurate anyway. One fewer thing on
+      someone else's disk.
+- [ ] ~~Cloudflare Tunnel + Access per host~~ — **superseded by the relay**
+      (#59, ADR-009). A tunnel terminates TLS at the edge, which is precisely
+      what ADR-008 spent a protocol version making unnecessary; and it needs a
+      per-host tunnel and an Access policy configured by hand on every machine,
+      where a relay needs one outbound dial. The mandatory origin-side JWT
+      validation that made a tunnel safe has no equivalent job left to do once
+      the origin trusts nothing in the path at all. → M6.
 - [ ] Remote access **off by default**, persistent indicator, audit log.
 
 ---
@@ -1374,8 +1397,12 @@ than textual, and two VT emulators means two truths. → ADR-004.
 
 ## M4 — the fleet, anywhere
 
-Cloudflare Tunnel + Access per host, device enrollment, the directory Worker,
-the web client. → WS-G, WS-H.
+Device enrollment, the directory Worker, the web client. → WS-G, WS-H.
+
+This milestone originally opened with *"Cloudflare Tunnel + Access per host"*.
+That is now M6's relay instead, for the reasons in WS-H's row and ADR-009 — the
+short version being that a tunnel terminates TLS at the edge, which is the one
+thing ADR-008 spent a protocol version making unnecessary.
 
 **Actors are the control plane, never the data plane**, and they run **locally**
 on each host. → ADR-005, ADR-006.
@@ -1460,6 +1487,61 @@ on each host. → ADR-005, ADR-006.
       straddling the 2²⁴ ratchet — it caught a full-HKDF-vs-Expand mistake in
       the second implementation on first use.
 - [ ] `AiActor` over sigx `streams:`, per-block consent, redaction.
+
+---
+
+## M6 — the relay, and the fleet from anywhere
+
+**Win condition:** *the daemon on the Mac, a laptop tethered to a phone, the
+deployed URL — `vim`, a resize, close the lid, reattach from a second device.*
+Two genuinely different networks. Nothing short of that proves it, because
+every part of this that can be wrong is wrong only when there is no route
+between the two machines. → #59, ADR-009.
+
+The design is settled and the arithmetic is checked; see ADR-009 for dial-back
+versus a mux, one object per host, why the relay is a second Worker, and the
+three facts about Cloudflare that changed after #59 was written.
+
+- [ ] **The relay Worker and its Durable Object.** A control link the daemon
+      parks, an attach ticket the browser carries on `Sec-WebSocket-Protocol`
+      (not the query string — a secret in a URL lands in referrers, edge logs
+      and history), and a pipe that comes into existence when the two meet.
+
+      **Nothing in instance fields**, because the object is evicted between
+      messages; tags and attachments are what survive. The guard is the test
+      suite run twice, the second time constructing a new instance before every
+      handler call. → ADR-009.
+
+      Provable **before any Rust exists**: a Node script holding the control
+      link with a real host key, dialling a real `zest-daemon --listen-ws`,
+      proves the browser, the ticket, the object, the pipe, the `zest-proto`
+      handshake and the sealed channel end to end. Only the daemon's own
+      outbound leg needs TLS.
+- [ ] **`zest-cloud`, and the workspace's first TLS stack.** The one crate that
+      owns rustls and HTTP, with `cargo xtask check-deps` growing a boundary
+      that keeps them out of every crate that crosses to wasm or to a client.
+
+      **The hard part is not TLS, it is splitting it.** `serve()` needs two
+      independently owned halves and a `rustls::StreamOwned` can be neither
+      cloned nor split, while a mutex reproduces exactly the deadlock `ws.rs`
+      documents. The answer holds the connection lock across no syscall at all
+      — and the constraint that rules out the obvious two-mutex version is that
+      **TLS records carry an implicit sequence number**, so two threads racing
+      to the socket reorder them and the peer fails the MAC. That is a rare,
+      unreproducible disconnect under load, which is the whole bug class this
+      milestone is trying not to ship.
+- [ ] **`--enroll` over a real HTTP client.** `NoHttpClient` names the missing
+      dependency today; this is where it stops being missing. Falls out of the
+      TLS work and is worth having months before the relay does.
+- [ ] **The web client learns a second data plane.** `DataPlane` grows a
+      discriminant, a relay `Dial` mints its ticket before opening the socket
+      (the seam stays synchronous — a failed mint is a dropped dial, and
+      `SessionClient`'s backoff already handles that), and the cloud session
+      list becomes a reactive store per host rather than an actors host in a
+      browser tab.
+- [ ] **The coalescing floor, with a test that asserts the message rate.** It is
+      what keeps the object hibernating between keystrokes; unthrottled is
+      ~1000 msg/s and an object that never sleeps. → ADR-009's arithmetic.
 
 ---
 

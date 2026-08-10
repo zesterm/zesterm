@@ -133,9 +133,10 @@ carrying grid deltas.
 - The *local* terminal would depend on Cloudflare being reachable.
 
 The "PC joins the Cloudflare actor cluster" variant is additionally **mechanically impossible**:
-clustering requires hosts to advertise dialable addresses, and Cloudflare Tunnel is strictly
-origin-initiated. There is no address to advertise. The host-to-host mount also runs no
-policies, so it would expose an unauthenticated RPC surface.
+clustering requires hosts to advertise dialable addresses, and every away path this project will
+ever have is strictly origin-initiated — the tunnel this originally named, and the relay that
+replaced it (ADR-009), for the same reason: a laptop behind NAT has no address to advertise. The
+host-to-host mount also runs no policies, so it would expose an unauthenticated RPC surface.
 
 Do not "simplify" toward edge actors.
 
@@ -338,3 +339,139 @@ moment a disagreement is undetectable.
 **TLS is still not here, and is still wanted.** E2E hides the payload; it does not hide that a
 connection exists, to whom, or how large its frames are. The relay needs `wss://` for the browser
 regardless, and the daemon will need a TLS client to dial it — see the roadmap's M5/M6 rows.
+
+---
+
+## ADR-009 — The relay is a dial-back pipe, one Durable Object per host
+
+**Status:** accepted (design; implementation is M6)
+
+ADR-008 settled *what* the relay is allowed to know: nothing. This settles *how* it is built.
+
+Neither a daemon on café wifi nor a browser on 5G has a dialable address, and mDNS does not cross
+routers. Both dial **out** to a Cloudflare Durable Object, which pairs them into a pipe.
+
+### Dial-back, not a mux
+
+The daemon holds one long-lived outbound **control link**. A browser attaching causes a *new*
+connection to come into existence through it: the object sends `open`, the daemon dials a second
+socket for that pipe alone.
+
+**Rejected: multiplexing session streams over the one trunk.**
+
+1. **Head-of-line blocking is not hypothetical.** One trunk means a `cat` of a 1 MB file and a
+   slow browser share one TCP connection and one edge send window — one busy session stalls every
+   other session on that host.
+2. **A mux reintroduces the exact hazard `ws.rs` was hand-rolled to avoid.** Its module comment:
+   two instances over `try_clone`d streams share no write lock, so an auto-queued pong can
+   interleave mid-frame with a keyframe. A mux is N logical writers on one socket. Dial-back
+   reuses `serve()` unchanged, one connection at a time, which is what `serve()`'s doc comment
+   requires.
+3. **E2E is per-pipe.** One trunk-level session would make the object an endpoint, defeating the
+   thing ADR-008 buys.
+4. Hibernation only pays off per-pipe; a trunk is awake whenever any session is.
+5. A malformed stream kills one session, not the host.
+
+It pays for itself a third time, in a place that is easy to miss: the handshake watchdog cuts a
+connection by `shutdown`ing its socket, and under dial-back **a logical stream *is* a socket**. A
+mux would have needed a "cut substream N" control message, a second writer on the trunk, and
+precisely the interleaving hazard point 2 rejects.
+
+Cost: one extra round-trip chain on first attach, once. If it ever grates, park one pre-dialled
+idle stream at the object.
+
+### One object per host, and where it lands
+
+`idFromName('host:' + hostId)`. Not per user — a five-host user would funnel every stream through
+one colo. Not per session — a control link per session is the thing being avoided.
+
+ADR-005's hazard restated: an object "possibly neither near the user nor near their PC,
+permanently". **Verified against current Cloudflare behaviour rather than assumed: placement
+follows the data centre of the first `get()`, not a hash of the name.** So per-host naming plus
+*the daemon connecting at startup* biases the object toward the fixed machine rather than the
+roaming client, which is the outcome wanted. `hosts.do_id` stays reserved and unused, and
+`get(id, {locationHint})` — which only affects the first `get()` and is best-effort — stays
+unspent. Revisit only if a measurement shows a bad colo.
+
+For the same reason there is **no D1 migration**: `hosts` already carries every column, and the
+attach ticket's replay set belongs in the object's own storage, never in D1, because it is on the
+attach path.
+
+### The relay is a second Worker, and that is not a preference
+
+**Deploying a Worker that owns a Durable Object class evicts every live instance of that class.**
+Serving the relay from the same Worker as the web app would therefore drop every terminal in the
+fleet every time anyone changed a stylesheet. Two Workers, two `wrangler.jsonc`, two deploy
+cadences; the web app is deployed freely, the relay deliberately.
+
+### Nothing may live in instance fields
+
+The object is evicted between messages. **Tags and `serializeAttachment` are what survive**, so
+the byte pump derives its pairing from `getWebSockets('pipe:<id>')` every single time. A
+`Map<WebSocket, WebSocket>` held in memory is the classic hibernation bug: it passes every test
+written against a single live instance and drops sessions in production after the first idle gap.
+The guard is a test suite run twice, the second time constructing a new instance before every
+handler call — which is what eviction does.
+
+The one legal exception is the promise resolver for a pipe whose host has not dialled back yet,
+because a Durable Object cannot be evicted while a `fetch` is in flight. It is legal there and
+nowhere else, and it looks exactly like the bug, so it carries a comment saying why.
+
+**And never write storage on the data path.** Keepalive is
+`ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping','pong'))`, which answers
+without waking the object at all — the difference between an idle host costing nothing and costing
+a request every thirty seconds forever.
+
+### The arithmetic, corrected
+
+The first draft of this plan put an active session at $0.022/hour and a working day at $5/month.
+That was about 20× too high, and the correction matters because the number is what a future
+"simplification" of the coalescing floor would be argued against.
+
+Outgoing messages and protocol pings are **free**; incoming bill at **20:1** (a hundred incoming
+messages are charged as five requests). One active session at the daemon's ~30ms coalescing floor
+is ~8 incoming messages/second ≈ 1,440 billed requests/hour ≈ **$0.0002/hour**. Duration dominates
+and is not billed while hibernating; one session for eight hours a day is ~3,500 GB-s/month,
+inside the 400,000 GB-s included allowance. A single-user fleet is effectively free.
+
+**The coalescing floor is still load-bearing** — for a better reason than the bill. Unthrottled is
+~1000 msg/s: 125× the requests, and, worse, an object that never goes idle long enough to
+hibernate, which converts the dominant cost term from zero into continuous. Two policies keep it
+there: never write storage on the data path, and relay only when off-LAN.
+
+### The message size limit moved, and chunking would now cost money
+
+An earlier draft called for splitting relay writes into ≤256 KiB messages, against Cloudflare's
+1 MiB WebSocket limit. **That limit is 32 MiB as of 2025-10-31**, and `zest_proto`'s `MAX_FRAME`
+is 8 MiB and bounds the *plaintext*, so the largest frame this protocol can produce is ~8 MiB plus
+a tag — comfortably under. Meanwhile billing is per message, so splitting one 8 MiB scrollback
+response into 32 messages multiplies its cost by 32 on exactly the responses the split was meant
+to protect.
+
+So frames cross whole. The test survives the reasoning that motivated it: **an 8 MiB `MAX_FRAME`
+frame crosses the relay intact**, which is a real assertion about a real ceiling rather than a
+rare 3am disconnect discovered later.
+
+### What is rejected, and stays rejected
+
+1. Terminating the crypto at the relay — the entire thing ADR-008 prevents.
+2. Authorizing the relay with the session cookie. Two origins make it impossible, and it should
+   stay impossible.
+3. Letting the attach ticket substitute for pairing. **The relay authorizes transport; the host
+   authorizes shells.**
+4. Putting the *session list* in a Durable Object or in D1. ADR-006 permits host ids, labels and
+   endpoints and nothing else; a session list is cwd and titles — shell context on someone else's
+   disk.
+5. Running `@sigx/actors`' host in the browser to hold that list. It pulls turns, placement,
+   storage, reminders and metrics into a terminal client's bundle to hold one array, and a
+   single-tab host is not a control plane, it is a variable.
+6. Adding `nodejs_als`/`nodejs_compat` to run that host at the edge instead. That is ADR-005
+   undone by a compatibility flag.
+
+### The honest alternative, named so it is not rediscovered
+
+**WebRTC data channels with the object as signalling only** takes the bytes off Cloudflare
+entirely. It costs a WebRTC stack in the daemon — large, and against this project's grain — plus
+ICE/STUN, plus TURN for symmetric NAT, which is where you pay again anyway. Revisit if the relay
+bill ever becomes the reason not to use the product. The corrected arithmetic above says that is
+far off.
