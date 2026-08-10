@@ -34,7 +34,11 @@
 
 use std::collections::HashMap;
 
-use zeroize::Zeroizing;
+/// Re-exported because it is in [`KeyStore`]'s and [`SecretStore`]'s
+/// signatures: an implementor in another crate — `zest-daemon`'s tests are the
+/// first — would otherwise have to depend on `zeroize` at exactly this version
+/// to name the type it is handed.
+pub use zeroize::Zeroizing;
 
 use crate::MeshError;
 
@@ -48,6 +52,13 @@ pub const SECRET_LEN: usize = 32;
 pub const HOST_KEY_NAME: &str = "host-key";
 /// See [`HOST_KEY_NAME`].
 pub const CLIENT_KEY_NAME: &str = "client-key";
+
+/// The control plane's bearer token for this machine, if it has enrolled.
+///
+/// Same namespace as the two key names above — one credential store, one entry
+/// per name — which is why the names have to stay distinct. See
+/// [`SecretStore`] for why the token does not travel through [`KeyStore`].
+pub const CLOUD_TOKEN_NAME: &str = "cloud-token";
 
 /// The service every zesterm credential is filed under.
 ///
@@ -74,6 +85,68 @@ pub trait KeyStore: Send + Sync {
 
     /// A human name for this store, for the startup log and error messages.
     fn describe(&self) -> String;
+}
+
+/// Where a secret that is *not* a key lives when the process is not running.
+///
+/// A sibling of [`KeyStore`] rather than a widening of it. `KeyStore`'s fixed
+/// `[u8; SECRET_LEN]` is what makes "the store handed back 31 bytes" a refusal
+/// at the door instead of a silently different identity, and relaxing it to a
+/// `Vec` would demote that guarantee to a runtime check every caller has to
+/// remember to write. A bearer token has no such length to check — it is
+/// whatever the control plane minted — so the two traits sit side by side over
+/// the same backend and the same [`KEY_SERVICE`].
+///
+/// The `*_secret` suffixes are not a style choice. Both traits are implemented
+/// by the same types, so a plain `load` here would make `store.load(name)`
+/// ambiguous (E0034) at every call site that has both traits in scope —
+/// including ones that exist today.
+pub trait SecretStore: Send + Sync {
+    /// `Ok(None)` means there is nothing under `name`, which for
+    /// [`CLOUD_TOKEN_NAME`] is the normal state of a machine that has never
+    /// enrolled.
+    ///
+    /// `Option` inside `Result` for the same reason as [`KeyStore::load`], and
+    /// the failure it prevents is the mirror image: collapse the two and a
+    /// locked keychain is indistinguishable from "not enrolled", so the daemon
+    /// tells a person to enrol a machine that already is — and, worse, a
+    /// successful re-enrolment then writes a second token over the first.
+    fn load_secret(&self, name: &str) -> Result<Option<Zeroizing<Vec<u8>>>, MeshError>;
+
+    fn store_secret(&self, name: &str, secret: &[u8]) -> Result<(), MeshError>;
+
+    /// Signing out, and tests that clean up after themselves. Deleting
+    /// something that is not there is not an error — see [`KeyStore::delete`].
+    fn delete_secret(&self, name: &str) -> Result<(), MeshError>;
+
+    /// A human name for this store. Spelled apart from [`KeyStore::describe`]
+    /// for the ambiguity reason above, not because they differ.
+    fn describe_secret_store(&self) -> String;
+}
+
+/// Both halves of one machine's credential store.
+///
+/// Exists so a caller does not have to choose between two boxes to talk to one
+/// keychain: the OS backend really is a single store, [`KEY_SERVICE`] with an
+/// entry per name, holding the host key and the cloud token side by side. The
+/// bug this shape prevents is specific — a daemon that builds a `KeyStore` for
+/// its identity and reaches for the OS store separately for the token ends up
+/// with `--ephemeral` meaning a throwaway key *and* a durable token, which is
+/// the one combination that enrols a machine nobody can reach afterwards.
+pub trait CredentialStore: KeyStore + SecretStore {}
+
+impl<T: KeyStore + SecretStore> CredentialStore for T {}
+
+/// The refusal a store gives when an entry is not a key.
+///
+/// Shared by every [`KeyStore`] rather than written twice, because this is the
+/// sentence a person reads when their identity will not load, and the two must
+/// not drift into disagreeing about what happened.
+fn wrong_key_length(name: &str, store: &str, len: usize) -> MeshError {
+    MeshError::Identity(format!(
+        "{name} in {store} is {len} bytes, not {SECRET_LEN} — refusing to \
+         pad or truncate it into a different identity"
+    ))
 }
 
 /// The platform store's name, for messages only.
@@ -147,12 +220,7 @@ impl KeyStore for OsKeyStore {
         // whatever allocates that page next.
         zeroize::Zeroize::zeroize(&mut secret);
 
-        let bytes = copied.map_err(|_| {
-            MeshError::Identity(format!(
-                "{name} in {STORE_NAME} is {len} bytes, not {SECRET_LEN} — refusing to \
-                 pad or truncate it into a different identity"
-            ))
-        })?;
+        let bytes = copied.map_err(|_| wrong_key_length(name, STORE_NAME, len))?;
         Ok(Some(Zeroizing::new(bytes)))
     }
 
@@ -176,13 +244,51 @@ impl KeyStore for OsKeyStore {
     }
 }
 
+#[cfg(feature = "os-keystore")]
+impl SecretStore for OsKeyStore {
+    fn load_secret(&self, name: &str) -> Result<Option<Zeroizing<Vec<u8>>>, MeshError> {
+        match Self::entry(name)?.get_secret() {
+            // Wrapped as it arrives rather than copied out: the `Vec` keyring
+            // returns is ordinary heap memory, and `Zeroizing` taking ownership
+            // of *this* allocation is what scrubs the page the token was
+            // actually decrypted into.
+            Ok(secret) => Ok(Some(Zeroizing::new(secret))),
+            // The only error that is not an error; see `KeyStore::load`.
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(MeshError::Identity(format!(
+                "{STORE_NAME} would not return {name}: {e}"
+            ))),
+        }
+    }
+
+    fn store_secret(&self, name: &str, secret: &[u8]) -> Result<(), MeshError> {
+        Self::entry(name)?
+            .set_secret(secret)
+            .map_err(|e| MeshError::Identity(format!("{STORE_NAME} would not store {name}: {e}")))
+    }
+
+    fn delete_secret(&self, name: &str) -> Result<(), MeshError> {
+        self.delete(name)
+    }
+
+    fn describe_secret_store(&self) -> String {
+        STORE_NAME.to_string()
+    }
+}
+
 /// Keys that vanish with the process.
 ///
 /// For tests, and for anything that legitimately wants an identity that lasts
 /// exactly one run.
 #[derive(Debug, Default)]
 pub struct MemoryKeyStore {
-    keys: parking_lot::Mutex<HashMap<String, Zeroizing<[u8; SECRET_LEN]>>>,
+    /// One namespace for keys and secrets alike, deliberately.
+    ///
+    /// The OS store files every entry under [`KEY_SERVICE`] by name, so a
+    /// double with a map per kind would let a test hold a key and a secret
+    /// under one name — a state the machine cannot reach, proving a property
+    /// the real store does not have.
+    secrets: parking_lot::Mutex<HashMap<String, Zeroizing<Vec<u8>>>>,
 }
 
 impl MemoryKeyStore {
@@ -194,23 +300,53 @@ impl MemoryKeyStore {
 
 impl KeyStore for MemoryKeyStore {
     fn load(&self, name: &str) -> Result<Option<Zeroizing<[u8; SECRET_LEN]>>, MeshError> {
-        Ok(self.keys.lock().get(name).cloned())
+        let Some(stored) = self.secrets.lock().get(name).cloned() else {
+            return Ok(None);
+        };
+        // Length-checked here as well as in `OsKeyStore`, because the namespace
+        // this shares with `SecretStore` can hold anything: a double that
+        // returned the first 32 bytes of a token would be the one place the
+        // "never pad or truncate" rule does not hold.
+        let bytes = <[u8; SECRET_LEN]>::try_from(stored.as_slice())
+            .map_err(|_| wrong_key_length(name, &self.describe(), stored.len()))?;
+        Ok(Some(Zeroizing::new(bytes)))
     }
 
     fn store(&self, name: &str, secret: &[u8; SECRET_LEN]) -> Result<(), MeshError> {
-        self.keys
+        self.secrets
             .lock()
-            .insert(name.to_string(), Zeroizing::new(*secret));
+            .insert(name.to_string(), Zeroizing::new(secret.to_vec()));
         Ok(())
     }
 
     fn delete(&self, name: &str) -> Result<(), MeshError> {
-        self.keys.lock().remove(name);
+        self.secrets.lock().remove(name);
         Ok(())
     }
 
     fn describe(&self) -> String {
         "an in-memory store that forgets on exit".to_string()
+    }
+}
+
+impl SecretStore for MemoryKeyStore {
+    fn load_secret(&self, name: &str) -> Result<Option<Zeroizing<Vec<u8>>>, MeshError> {
+        Ok(self.secrets.lock().get(name).cloned())
+    }
+
+    fn store_secret(&self, name: &str, secret: &[u8]) -> Result<(), MeshError> {
+        self.secrets
+            .lock()
+            .insert(name.to_string(), Zeroizing::new(secret.to_vec()));
+        Ok(())
+    }
+
+    fn delete_secret(&self, name: &str) -> Result<(), MeshError> {
+        self.delete(name)
+    }
+
+    fn describe_secret_store(&self) -> String {
+        self.describe()
     }
 }
 
@@ -235,6 +371,21 @@ pub(crate) mod tests {
             Err(MeshError::Identity("the keychain is locked".into()))
         }
         fn describe(&self) -> String {
+            "a store that cannot be read".into()
+        }
+    }
+
+    impl SecretStore for FailingKeyStore {
+        fn load_secret(&self, _name: &str) -> Result<Option<Zeroizing<Vec<u8>>>, MeshError> {
+            Err(MeshError::Identity("the keychain is locked".into()))
+        }
+        fn store_secret(&self, _name: &str, _secret: &[u8]) -> Result<(), MeshError> {
+            Err(MeshError::Identity("the keychain is locked".into()))
+        }
+        fn delete_secret(&self, _name: &str) -> Result<(), MeshError> {
+            Err(MeshError::Identity("the keychain is locked".into()))
+        }
+        fn describe_secret_store(&self) -> String {
             "a store that cannot be read".into()
         }
     }
@@ -296,6 +447,89 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn a_token_survives_a_round_trip_and_keeps_its_length() {
+        let store = MemoryKeyStore::new();
+        // Deliberately not 32 bytes: the length `KeyStore` is fixed at is the
+        // one length a token store must not quietly round to.
+        let token = b"zt_a-token-of-no-particular-length";
+        store.store_secret(CLOUD_TOKEN_NAME, token).expect("store");
+        assert_eq!(
+            store.load_secret(CLOUD_TOKEN_NAME).expect("load").as_deref().map(Vec::as_slice),
+            Some(token.as_slice()),
+            "a bearer token that comes back a different length is not the token"
+        );
+    }
+
+    #[test]
+    fn a_machine_that_never_enrolled_reports_no_token_rather_than_failing() {
+        let store = MemoryKeyStore::new();
+        assert!(
+            store.load_secret(CLOUD_TOKEN_NAME).expect("load").is_none(),
+            "not being enrolled is the state every machine starts in, not an error"
+        );
+    }
+
+    // A test asserting that `FailingKeyStore::load_secret` returns `Err` used to
+    // live here. It could not fail: the double's body is a hardcoded `Err`
+    // twenty lines above, and no production code ran at all.
+    //
+    // The property it was reaching for is real -- a locked keychain reported as
+    // `Ok(None)` tells a person to enrol a machine that already is, and the
+    // second enrolment overwrites the token the first one earned. But nothing
+    // in this crate consumes a `SecretStore`; the consumer is `zest-daemon`,
+    // and the assertion belongs where the code is:
+    // `enroll::tests::a_store_that_cannot_be_read_is_refused_before_the_code_is_spent`
+    // drives the real `enroll()` against this same double and asserts the code
+    // is never spent.
+
+    #[test]
+    fn a_forgotten_token_is_gone_and_forgetting_it_again_is_not_an_error() {
+        let store = MemoryKeyStore::new();
+        store.store_secret(CLOUD_TOKEN_NAME, b"zt_token").expect("store");
+        store.delete_secret(CLOUD_TOKEN_NAME).expect("delete");
+        assert!(
+            store.load_secret(CLOUD_TOKEN_NAME).expect("load").is_none(),
+            "--logout that leaves a readable token has not logged anything out"
+        );
+        store
+            .delete_secret(CLOUD_TOKEN_NAME)
+            .expect("logging out twice is a no-op, not a failure");
+    }
+
+    #[test]
+    fn a_token_read_back_as_a_key_is_refused_rather_than_truncated() {
+        // Keys and tokens share one namespace because the OS store does, so
+        // this is reachable by a name collision rather than only by a corrupt
+        // store. Truncating would hand back the first 32 bytes of a token as an
+        // identity: every signature valid, and made by a machine nobody has
+        // ever heard of.
+        let store = MemoryKeyStore::new();
+        store
+            .store_secret(HOST_KEY_NAME, b"a token that is definitely not a key")
+            .expect("store");
+        let err = store.load(HOST_KEY_NAME).expect_err("must refuse");
+        assert!(
+            err.to_string().contains("not 32"),
+            "the refusal must say what was wrong with it; got {err}"
+        );
+    }
+
+    #[test]
+    fn one_name_holds_one_thing_in_the_double_as_in_the_real_store() {
+        // `keyring` files entries under (KEY_SERVICE, name) and has no notion
+        // of a kind, so the second write wins there. A double with a map per
+        // kind would let both survive, and a test written against it would pass
+        // on a property no machine has.
+        let store = MemoryKeyStore::new();
+        store.store(HOST_KEY_NAME, &[9u8; SECRET_LEN]).expect("store");
+        store.store_secret(HOST_KEY_NAME, b"overwritten").expect("store");
+        assert!(
+            store.load(HOST_KEY_NAME).is_err(),
+            "the key must be gone, not shadowed by a secret stored beside it"
+        );
+    }
+
     #[cfg(feature = "os-keystore")]
     #[test]
     #[ignore = "writes to this machine's real credential store, and on macOS can \
@@ -316,6 +550,31 @@ pub(crate) mod tests {
         assert_eq!(
             loaded.map(|s| *s),
             Some(secret),
+            "the platform store must return exactly the bytes it was given"
+        );
+    }
+
+    #[cfg(feature = "os-keystore")]
+    #[test]
+    #[ignore = "writes to this machine's real credential store, and on macOS can \
+                block on a keychain prompt; run with `cargo test -p zest-mesh -- --ignored`"]
+    fn the_os_key_store_round_trips_a_token_of_arbitrary_length() {
+        // Ignored for the same reason as the test above, and worth having for
+        // one thing it does not cover: `set_secret`/`get_secret` are the same
+        // two calls, but the Windows Credential Manager caps a blob at 2560
+        // bytes and the Secret Service does not — so "how long may a token be"
+        // is a platform question this is the only way to ask.
+        let store = OsKeyStore::new().expect("this machine has a credential store");
+        let name = "test-cloud-token";
+        let token = b"zt_0123456789abcdef0123456789abcdef";
+
+        store.store_secret(name, token).expect("store");
+        let loaded = store.load_secret(name).expect("load");
+        store.delete_secret(name).expect("clean up after ourselves");
+
+        assert_eq!(
+            loaded.as_deref().map(Vec::as_slice),
+            Some(token.as_slice()),
             "the platform store must return exactly the bytes it was given"
         );
     }

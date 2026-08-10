@@ -7,9 +7,10 @@
 
 use std::sync::Arc;
 
+use zest_daemon::enroll::{self, NoHttpClient};
 use zest_daemon::{default_socket_path, listen, Authenticator, DaemonConfig, Registry};
 use zest_mesh::identity::HostIdentity;
-use zest_mesh::keystore::{KeyStore, MemoryKeyStore};
+use zest_mesh::keystore::{CredentialStore, MemoryKeyStore};
 use zest_mesh::pairing::{Decision, PairingQueue};
 use zest_mesh::trust::{FileTrustStore, MemoryTrustStore, TrustStore};
 use zest_proto::ClientId;
@@ -36,6 +37,12 @@ fn main() {
              --socket-path       print the default socket path and exit\n\
              --identity          print this host's id and exit\n\
              --ephemeral         use a throwaway key, not the OS keychain\n\
+             --enroll <code>     join this machine to an account, using a code\n\
+             \x20                   from its devices screen, and exit\n\
+             --logout            forget the account token this machine holds\n\
+             --account           print what this machine has stored, and exit\n\
+             --control-plane <url>\n\
+             \x20                   where the accounts API lives\n\
              --trust <hex>       trust a client id without a prompt\n\
              --forget <hex>      remove a trusted client\n\
              --trusted           list trusted clients and exit\n\
@@ -70,7 +77,7 @@ fn main() {
     // small-order point that `verifying_key` already rejects, so nothing signed
     // under it could ever have verified.
     let ephemeral = flag("--ephemeral");
-    let store: Box<dyn KeyStore> = if ephemeral {
+    let store: Box<dyn CredentialStore> = if ephemeral {
         // For the edit-run loop. `keyring` keys access to the *binary*, so on
         // macOS every rebuild re-prompts for the keychain -- and the outcome of
         // that is a developer who turns authentication off to get work done.
@@ -104,6 +111,92 @@ fn main() {
         return;
     }
 
+    // --- the account ------------------------------------------------------
+    //
+    // Foreground, and then exit, exactly like --trust and --trusted below. A
+    // detached daemon has no terminal a one-shot code can be handed to, and the
+    // two places it could read one from — a config file, an environment
+    // variable — are both places a credential should never be written down. The
+    // running daemon picks the token up from the credential store next time it
+    // starts. → enroll.rs.
+    //
+    // The label is settled here rather than further down because enrolment
+    // signs it: whatever this machine calls itself in a fleet listing is what
+    // the account's devices screen will call it, and the two disagreeing would
+    // be a name that changes depending on where you look.
+    let label = opt("--label").unwrap_or_else(machine_label);
+
+    if let Some(code) = opt("--enroll") {
+        if ephemeral {
+            // Refused rather than warned. The key dies with this process, so
+            // the account would gain a host row nothing can ever answer for —
+            // and the code is one-shot, so it is spent either way and the
+            // mistake costs a trip back to the browser.
+            eprintln!(
+                "zest-daemon: --enroll claims this machine's lasting identity, and\n\
+                 --ephemeral is a key that dies with the process. Enrolling one would\n\
+                 leave the account listing a host nobody can reach."
+            );
+            std::process::exit(1);
+        }
+        let base =
+            opt("--control-plane").unwrap_or_else(|| enroll::DEFAULT_CONTROL_PLANE.to_string());
+        match enroll::enroll(&identity, &code, &label, &base, &NoHttpClient, store.as_ref()) {
+            Ok(enrolled) => {
+                let account = enrolled.account.unwrap_or_else(|| "this account".into());
+                println!(
+                    "enrolled \"{label}\" ({}) with {account}",
+                    identity.host_id().short()
+                );
+                println!("the token is kept in {}", store.describe_secret_store());
+            }
+            Err(e) => {
+                eprintln!("zest-daemon: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if flag("--logout") {
+        match enroll::forget_token(store.as_ref()) {
+            Ok(true) => {
+                println!("forgot the token kept in {}", store.describe_secret_store());
+                // Said plainly, because the comfortable reading is the wrong
+                // one: this drops *this machine's* copy and nothing else. The
+                // account keeps listing the host until it is revoked there.
+                println!("the account still lists this host until it is revoked there");
+            }
+            Ok(false) => println!("no token was stored in {}", store.describe_secret_store()),
+            Err(e) => {
+                eprintln!("zest-daemon: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if flag("--account") {
+        println!("host   {}", hex(&identity.host_id().0));
+        println!("label  {label}");
+        match enroll::stored_token(store.as_ref()) {
+            // Presence, never the token. It is a bearer credential — whoever
+            // holds it is this machine as far as the control plane is
+            // concerned — and a terminal's scrollback is one of the places
+            // people copy from without reading.
+            Ok(Some(_)) => println!("token  stored in {}", store.describe_secret_store()),
+            Ok(None) => println!(
+                "token  none. This machine has not enrolled; run --enroll <code> with a \
+                 code from the account's devices screen"
+            ),
+            Err(e) => {
+                eprintln!("zest-daemon: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // --- trust ------------------------------------------------------------
 
     let trust: Arc<dyn TrustStore> = if ephemeral {
@@ -131,7 +224,6 @@ fn main() {
     };
 
     let queue = PairingQueue::new();
-    let label = opt("--label").unwrap_or_else(machine_label);
     let auth = Arc::new(Authenticator::new(
         Arc::clone(&identity),
         Arc::clone(&trust),
@@ -597,13 +689,140 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// A human name for this machine, for the fleet listing.
+/// What this machine calls itself.
+///
+/// The fleet listing's label, and now the name a device enrols under — so
+/// getting it wrong is not cosmetic: every Mac in the fleet showed as
+/// `unnamed`.
+///
+/// It used to read `COMPUTERNAME` then `HOSTNAME`. **`HOSTNAME` is a shell
+/// variable, not an exported one**: bash and zsh set it for themselves and
+/// never put it in the environment, so a daemon — which is spawned, not run
+/// from a prompt — never sees it. `COMPUTERNAME` is Windows-only. On this Mac
+/// neither is present, so the fallback was not a fallback, it was the answer.
+///
+/// `uname()` is what actually knows, and `rustix` is already a dependency.
+/// The environment variables stay ahead of it, because a person who exports
+/// one is asking for it deliberately.
 fn machine_label() -> String {
+    machine_label_from(|k| std::env::var(k).ok())
+}
+
+/// What the operating system calls this machine, asked directly.
+///
+/// Both arms exist because the test that matters runs with no environment at
+/// all, and a platform that could only answer from `COMPUTERNAME` would fail
+/// it — which is how the original bug got in: Windows genuinely does export
+/// that variable, so the unix hole was invisible from there.
+#[cfg(unix)]
+fn os_hostname() -> Option<String> {
+    Some(rustix::system::uname().nodename().to_string_lossy().into_owned())
+}
+
+#[cfg(windows)]
+fn os_hostname() -> Option<String> {
+    use windows_sys::Win32::System::SystemInformation::{
+        ComputerNameDnsHostname, GetComputerNameExW,
+    };
+
+    let mut len: u32 = 0;
+    // First call sizes the buffer; it is expected to fail with the length set.
+    unsafe { GetComputerNameExW(ComputerNameDnsHostname, std::ptr::null_mut(), &mut len) };
+    if len == 0 {
+        return None;
+    }
+
+    let mut buf = vec![0u16; len as usize];
+    let ok = unsafe { GetComputerNameExW(ComputerNameDnsHostname, buf.as_mut_ptr(), &mut len) };
+    if ok == 0 {
+        return None;
+    }
+    buf.truncate(len as usize);
+    Some(String::from_utf16_lossy(&buf))
+}
+
+/// The lookup, with the environment injected.
+///
+/// Split so the fallback can be tested against the environment a daemon
+/// actually has — neither variable set — without mutating process-global state
+/// from a test that runs in parallel with others. With the variables set, the
+/// broken version passed too, so testing it any other way proves nothing.
+fn machine_label_from(env: impl Fn(&str) -> Option<String>) -> String {
     for var in ["COMPUTERNAME", "HOSTNAME"] {
-        if let Ok(name) = std::env::var(var) {
+        if let Some(name) = env(var) {
             if !name.is_empty() {
                 return name;
             }
         }
     }
+
+    if let Some(name) = os_hostname() {
+        // Trim the domain: `andy-mac.local` is the mDNS form, and the label is
+        // for a person reading a list rather than for resolution.
+        let short = name.split('.').next().unwrap_or("");
+        if !short.is_empty() {
+            return short.to_string();
+        }
+    }
+
     "unnamed".to_string()
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::machine_label_from;
+
+    #[test]
+    fn a_machine_knows_its_own_name_without_help_from_the_environment() {
+        // The bug this replaced: `HOSTNAME` is a *shell* variable and is never
+        // exported, and `COMPUTERNAME` is Windows-only -- so on macOS the
+        // lookup fell through to "unnamed" every time. That was already the
+        // daemon's `--label` default, so every Mac in the fleet listing showed
+        // as `unnamed`, and it would have become the name every Mac enrolled
+        // under.
+        //
+        // The empty environment is the point: with either variable set, the
+        // broken version passed too.
+        let label = machine_label_from(|_| None);
+        assert_ne!(
+            label, "unnamed",
+            "a machine must name itself from uname(), not from a shell variable \
+             a daemon never receives"
+        );
+        assert!(!label.contains('.'), "the domain is trimmed: `{label}`");
+        assert!(!label.is_empty());
+    }
+
+    #[test]
+    fn an_exported_name_still_wins() {
+        // Someone who exports one is asking for it deliberately.
+        assert_eq!(
+            machine_label_from(|k| (k == "HOSTNAME").then(|| "chosen-by-hand".to_string())),
+            "chosen-by-hand"
+        );
+        assert_eq!(
+            machine_label_from(|k| (k == "COMPUTERNAME").then(|| "win-box".to_string())),
+            "win-box"
+        );
+    }
+
+    #[test]
+    fn an_empty_variable_is_not_a_name() {
+        // An exported-but-empty HOSTNAME is common in stripped environments and
+        // must not win over the OS.
+        //
+        // Compared against the *injected* empty environment, not against
+        // `machine_label()`. That reads the real process environment, so on any
+        // machine where `COMPUTERNAME` or `HOSTNAME` is genuinely set the two
+        // sides differ and the test fails for a reason that has nothing to do
+        // with what it is checking. It passes on CI only because neither
+        // variable is set there -- a test whose result depends on the
+        // environment of whoever runs it.
+        assert_ne!(machine_label_from(|_| Some(String::new())), "");
+        assert_eq!(
+            machine_label_from(|_| Some(String::new())),
+            machine_label_from(|_| None),
+            "an empty variable must fall through exactly as an absent one does"
+        );
+    }
 }

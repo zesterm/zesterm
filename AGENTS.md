@@ -381,6 +381,9 @@ zest-daemon --listen-ws                        # serve browsers over WebSocket (
 zest-daemon --identity                         # this host's public key
 zest-daemon --trusted                          # which devices are paired
 zest-daemon --ephemeral                        # throwaway key, for the edit-run loop
+zest-daemon --enroll <code>                    # join this machine to an account (no transport yet — see enroll.rs)
+zest-daemon --account                          # what this machine has stored; never the token itself
+zest-daemon --logout                           # forget this machine's copy of the token
 cargo run -p zest-daemon --example attach      # drive a daemon session, no GUI
 cargo run -p zest-mesh   --example mesh_probe  # advertise and browse the fleet
 cargo run -p zest-daemon --example pair -- --addr <host:port>   # pair with a host
