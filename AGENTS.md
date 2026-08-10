@@ -549,6 +549,32 @@ Each of these cost real time and is documented where it bites:
   only for absurd ones. Normalized at one boundary in
   `clients/web/packages/proto/src/wire.ts`; the real fix is in the Rust
   attributes.
+- **HKDF-Expand and HKDF are different functions, and the ratchet needs
+  Expand.** The session keys are Extract-then-Expand off the transcript hash;
+  the rekey at 2^24 records is Expand *alone*, because the current key already
+  is the PRK. Full HKDF with an empty salt produces a different key and is one
+  identifier away — `@noble/hashes/hkdf` exports both `hkdf` and `expand`. No
+  ordinary test can catch it: the branch is 16 million records into a session,
+  so it ships and is reported as "it dies after a few hours".
+  `fixtures/handshake.json` carries two records straddling the boundary for
+  exactly this reason, and caught it the first time a second implementation was
+  written against it. (ADR-008.)
+- **The `v2` in `zesterm-auth-v2` counts transcript layouts, not protocol
+  versions.** The protocol is at 3. Deriving one from the other is one line
+  away and produces signatures that will not verify, with nothing in the error
+  naming the cause. A test pins the literal and asserts the two numbers differ.
+- **A sealed frame's length prefix describes the ciphertext**, which is 16 bytes
+  longer than the plaintext. Bound the *plaintext* against `MAX_FRAME` instead
+  and every small test passes while a maximal keyframe fails — that is, it
+  breaks only on very large grids.
+- **The seal switch is positional, and its two halves flip at different
+  moments.** Incoming flips when the `Challenge` is *produced*, so a client that
+  pipelines its `Auth` behind the `Hello` is still read; outgoing flips when the
+  `Challenge` is *written*, because that frame carries the DH key and cannot be
+  sealed under a key derived from itself. One flag for both is a bug that only
+  appears under pipelining. In the browser, open a frame where it is
+  *processed*, not where it arrives — a frame landing while a signature is
+  pending is stalled, and at that moment the channel does not exist yet.
 - **A JavaScript client must iterate code points, never `text.length`.** That
   counts UTF-16 code units, so one astral-plane emoji counts as two and every
   cell after it shifts left. **CJK does not catch this** — it is BMP, where the

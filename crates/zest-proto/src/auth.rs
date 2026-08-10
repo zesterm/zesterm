@@ -38,9 +38,11 @@
 //!
 //! That makes LAN listening *trusted-network* security: it stops the
 //! neighbour's laptop from getting a shell, and it does not stop a hostile
-//! network. The end-to-end encryption that closes this is M5, and nothing here
-//! needs undoing to get there — the same keys become the static keys and the
-//! same transcript becomes the handshake hash.
+//! network. Since protocol 3 the end-to-end encryption closes that: nothing
+//! here had to be undone to get there, exactly as this note predicted — the
+//! same keys sign, the same transcript is the handshake hash, and the only
+//! addition is a [`Pub32`] in each direction. See `zest_mesh::secure` and
+//! ADR-008.
 
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +58,52 @@ pub struct Nonce32(
     #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub [u8; 32],
 );
+
+/// An X25519 public key, ephemeral to one connection.
+///
+/// Beside `Nonce32` rather than reusing it, though both are 32 bytes: a nonce
+/// is freshness and this is key material, and a type that means either is a
+/// type a caller can pass to the wrong parameter. The wire carries the bytes;
+/// `zest-mesh` decides what they mean — this crate has no crypto dependency
+/// and gains none here.
+/// `Default` is all zeroes, and exists for exactly one reason: so a peer
+/// speaking the previous protocol reaches the *version* check with a decodable
+/// message instead of failing to parse. It is never a usable key —
+/// `is_absent` recognises it and `zest-mesh` refuses to derive from it.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct Pub32(
+    #[serde(with = "crate::hex")]
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
+    pub [u8; 32],
+);
+
+impl Pub32 {
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// All zero — what `#[serde(default)]` produces for a peer that sent none.
+    ///
+    /// Same discipline as [`Nonce32::is_absent`], and the same reason: the
+    /// default has to be recognisable, because agreeing on a shared secret
+    /// with a peer that contributed nothing would look like success on both
+    /// sides. The refusal lives in `zest-mesh`, where the key is used.
+    #[must_use]
+    pub fn is_absent(&self) -> bool {
+        self.0 == [0u8; 32]
+    }
+}
+
+impl std::fmt::Debug for Pub32 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Short form, for the same reason `Sig64` has one: this appears on
+        // every connection and the full 64 characters push the useful fields
+        // off the line.
+        write!(f, "Pub32({})", crate::hex::encode(&self.0[..4]))
+    }
+}
 
 /// A detached Ed25519 signature.
 ///

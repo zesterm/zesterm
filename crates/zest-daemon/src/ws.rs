@@ -42,13 +42,27 @@
 //!
 //! # Why there is no TLS
 //!
-//! Deferred, deliberately. `http://localhost` is a secure context and may open
-//! `ws://`, which covers the local sidecar; the internet path is a Cloudflare
-//! Tunnel (roadmap M4) where the browser speaks `wss://` to the edge and the
-//! tunnel speaks plaintext to this origin, so origin TLS never needs to exist
-//! on that path. LAN `ws://` is unencrypted — which is parity with the raw-TCP
-//! LAN transport today, not a regression. Transport encryption is a known open
-//! item on the roadmap, not something to half-do here.
+//! Deferred, deliberately — but for different reasons than it once was, so the
+//! old ones are not left standing.
+//!
+//! **The payload is no longer in the clear.** Since protocol 3 every frame
+//! after the `Challenge` is sealed end to end (ADR-008), on this transport as
+//! on every other. The line that used to sit here — "LAN `ws://` is
+//! unencrypted, which is parity with raw TCP" — described a real gap and no
+//! longer describes anything.
+//!
+//! **The rest of the old reasoning is dead too.** It said the internet path
+//! would be a Cloudflare Tunnel terminating TLS at the edge and speaking
+//! plaintext to this origin, so origin TLS would never be needed. That path is
+//! now a relay which is deliberately not trusted to terminate anything.
+//!
+//! **What TLS would still buy, and why it is wanted:** E2E hides the payload;
+//! it does not hide that a connection exists, to whom, or how large its frames
+//! are. `http://localhost` remains a secure context and may open `ws://`, which
+//! covers the local sidecar, but the relay needs `wss://` for the browser
+//! regardless and the daemon will need a TLS client to dial it. That is the
+//! roadmap's M6 work and the largest new dependency in it — not something to
+//! half-do here.
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};

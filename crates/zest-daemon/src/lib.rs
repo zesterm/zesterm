@@ -31,6 +31,7 @@
 //! paint so this has a number to break rather than a memory to argue with.
 
 pub mod audit;
+pub mod client;
 pub mod auth;
 pub mod enroll;
 pub mod history;
@@ -141,6 +142,17 @@ pub enum DaemonError {
     Spawn(String),
     #[error("transport failed: {0}")]
     Transport(String),
+    // The three below belong to the client half (`client.rs`) and came down
+    // with it from `zest-app`. They are separate variants rather than more
+    // `Transport(String)` because the app branches on them: a version mismatch
+    // is a message about upgrading, a refusal is a message about pairing, and a
+    // closed socket is a retry.
+    #[error("daemon speaks protocol {theirs}, this build speaks {ours}")]
+    Version { ours: u16, theirs: u16 },
+    #[error("the daemon refused this client: {0}")]
+    Refused(String),
+    #[error("the daemon closed the connection during the handshake")]
+    Closed,
 }
 
 #[cfg(test)]

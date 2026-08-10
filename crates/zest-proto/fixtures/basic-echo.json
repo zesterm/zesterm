@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "protocol": 2,
+  "protocol": 3,
   "recording": "basic-echo",
   "source": "vtrec",
   "cols": 80,

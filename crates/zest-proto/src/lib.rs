@@ -40,7 +40,7 @@ pub(crate) mod hex;
 pub mod ids;
 
 pub use apply::{Applied, Applier};
-pub use auth::{AuthFailure, Nonce32, Sig64};
+pub use auth::{AuthFailure, Nonce32, Pub32, Sig64};
 pub use delta::{
     AttrDef, AttrId, BlockPayload, BlockState, CellMarks, CursorState, Delta, DeltaOp, Run,
     RowPayload,
@@ -77,7 +77,7 @@ pub use ids::{ClientId, HostId, SessionAddr, SessionId};
 /// Neither could ride on `serde`'s tolerance: a field an old peer silently
 /// ignores is exactly wrong for authentication, and a mode a client never
 /// receives is not a degraded experience but a broken one.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// A monotonically increasing state number for one session.
 ///
@@ -115,6 +115,16 @@ pub enum ClientMessage {
         /// so the version check runs first and says the useful thing.
         #[serde(default)]
         nonce: Nonce32,
+        /// The client's ephemeral X25519 public key.
+        ///
+        /// Signed into the transcript alongside the nonces, so the *existing*
+        /// Ed25519 signatures certify it — that is what removes the need for a
+        /// certificate type or a stored static key. `#[serde(default)]` for the
+        /// same reason `nonce` has it: a version-2 `Hello` must fail the
+        /// version check with a truthful message rather than fail to decode
+        /// and be told "message was not understood".
+        #[serde(default)]
+        dh: Pub32,
         /// Ask to be told when this host's session list changes.
         ///
         /// A live tab picker needs to hear about sessions other clients
@@ -196,7 +206,23 @@ pub enum HostMessage {
     /// over an attacker-chosen nonce. Ed25519 has no chosen-message weakness
     /// and the signing domain confines these to what they already are, so this
     /// is a bounded CPU cost, not a key-recovery risk.
-    Challenge { version: u16, host: HostId, label: String, nonce: Nonce32, signature: Sig64 },
+    Challenge {
+        version: u16,
+        host: HostId,
+        label: String,
+        nonce: Nonce32,
+        /// The host's ephemeral X25519 public key. See `Hello::dh`.
+        ///
+        /// **This message is the switch.** Everything after a Challenge is
+        /// sealed, in both directions; everything up to and including it is
+        /// plaintext. Positional rather than per-message-type, because a table
+        /// of which variants are encrypted is a table two independent
+        /// implementations can disagree about — and the set of refusals that
+        /// happen *before* a Challenge is exactly "the host never sent one".
+        #[serde(default)]
+        dh: Pub32,
+        signature: Sig64,
+    },
     /// The client proved its key, but nobody has approved it yet.
     ///
     /// `code` is the matching code to display. A person compares it with the
@@ -334,6 +360,7 @@ mod tests {
             client: ClientId::from_bytes([1; 32]),
             label: "phone".to_string(),
             nonce: Nonce32::from_bytes([4; 32]),
+            dh: Pub32::from_bytes([6; 32]),
             watch_sessions: false,
         };
         let json = serde_json::to_string(&msg).expect("serialize");
@@ -368,10 +395,16 @@ mod tests {
             client: ClientId::from_bytes([2; 32]),
             label: "no-nonce".into(),
             nonce: Nonce32::default(),
+            dh: Pub32::default(),
             watch_sessions: false,
         };
-        let ClientMessage::Hello { nonce, .. } = msg else { panic!("expected Hello") };
+        let ClientMessage::Hello { nonce, dh, .. } = msg else { panic!("expected Hello") };
         assert!(nonce.is_absent());
+        // The DH key gets the same treatment for a sharper reason: a nonce
+        // nobody supplied only costs freshness, while a key nobody supplied
+        // produces a shared secret an attacker already knows -- and it would
+        // look like a working channel on both sides.
+        assert!(dh.is_absent());
     }
 
     #[test]

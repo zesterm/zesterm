@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 use zest_daemon::{Authenticator, DaemonConfig, Registry, WsListener};
-use zest_mesh::identity::{ClientIdentity, HostIdentity, Nonce, Purpose};
-use zest_mesh::pairing::{auth_transcript, PairingQueue, Transcript};
+use zest_mesh::identity::{ClientIdentity, HostIdentity, Nonce};
+use zest_mesh::pairing::PairingQueue;
 use zest_mesh::trust::{MemoryTrustStore, TrustRecord, TrustStore};
 use zest_proto::{frame, ClientMessage, FrameReader, HostMessage, PROTOCOL_VERSION};
 
@@ -89,8 +89,25 @@ fn trust(h: &Host, client: &ClientIdentity) {
         .expect("insert");
 }
 
-fn send(ws: &mut Ws, msg: &ClientMessage) {
-    let bytes = frame::encode(msg).expect("encode");
+/// A connection's channel, `None` until the `Challenge` has been answered.
+///
+/// Threaded through the helpers as a parameter rather than bundled with `Ws`,
+/// because tungstenite owns the socket and several tests below reach past these
+/// helpers to send raw WebSocket frames.
+type Chan = Option<zest_mesh::secure::SecureChannel>;
+
+/// Serialize and seal one message, without sending it.
+fn body_for(ch: &mut Chan, msg: &ClientMessage) -> Vec<u8> {
+    let body = frame::encode_body(msg).expect("encode");
+    let body = match ch.as_mut() {
+        Some(c) => c.seal(&body).expect("seal"),
+        None => body,
+    };
+    frame::frame_bytes(&body).expect("frame")
+}
+
+fn send(ws: &mut Ws, ch: &mut Chan, msg: &ClientMessage) {
+    let bytes = body_for(ch, msg);
     ws.send(Message::Binary(bytes.into())).expect("send");
 }
 
@@ -100,11 +117,21 @@ fn send(ws: &mut Ws, msg: &ClientMessage) {
 fn wait_for(
     ws: &mut Ws,
     frames: &mut FrameReader,
+    ch: &mut Chan,
     mut f: impl FnMut(&HostMessage) -> bool,
 ) -> Option<HostMessage> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         while let Ok(Some(body)) = frames.next_frame() {
+            let body = match ch.as_mut() {
+                Some(c) => match c.open(&body) {
+                    Ok(plain) => plain,
+                    // Not a panic: some tests here are about a refusal, which
+                    // is a connection that simply ends.
+                    Err(_) => return None,
+                },
+                None => body,
+            };
             let msg = frame::decode::<HostMessage>(&body).expect("decode");
             if f(&msg) {
                 return Some(msg);
@@ -129,36 +156,43 @@ fn wait_for(
 
 /// Say hello and answer the challenge, exactly as over TCP — the transport
 /// must not change one byte of the protocol.
-fn handshake(ws: &mut Ws, frames: &mut FrameReader, identity: &ClientIdentity) {
-    let client_nonce = Nonce::from_bytes([0x5c; 32]);
+fn handshake(ws: &mut Ws, frames: &mut FrameReader, ch: &mut Chan, identity: &Arc<ClientIdentity>) {
+    let mut hs = zest_mesh::pairing::ClientHandshake::new(Arc::clone(identity), "ws-device")
+        .expect("client handshake");
     send(
         ws,
+        ch,
         &ClientMessage::Hello {
             version: PROTOCOL_VERSION,
             client: identity.client_id(),
             label: "ws-device".into(),
-            nonce: zest_proto::Nonce32::from_bytes(*client_nonce.as_bytes()),
+            nonce: zest_proto::Nonce32::from_bytes(*hs.nonce().as_bytes()),
+            dh: zest_proto::Pub32::from_bytes(hs.dh().0),
             watch_sessions: false,
         },
     );
 
-    let challenge =
-        wait_for(ws, frames, |m| matches!(m, HostMessage::Challenge { .. })).expect("no challenge");
-    let HostMessage::Challenge { version, host, label, nonce, .. } = challenge else {
+    let challenge = wait_for(ws, frames, ch, |m| matches!(m, HostMessage::Challenge { .. }))
+        .expect("no challenge");
+    let HostMessage::Challenge { version, host, label, nonce, dh, signature } = challenge else {
         unreachable!()
     };
-
-    let transcript = Transcript {
-        version,
-        host,
-        client: identity.client_id(),
-        host_nonce: Nonce::from_bytes(nonce.0),
-        client_nonce,
-        host_label: label,
-        client_label: "ws-device".into(),
-    };
-    let sig = identity.sign(Purpose::Auth, &auth_transcript(&transcript));
-    send(ws, &ClientMessage::Auth { signature: zest_proto::Sig64::from_bytes(sig.to_bytes()) });
+    let host_sig = zest_mesh::identity::Signature::from_slice(&signature.0).expect("signature");
+    let (sig, _, channel) = hs
+        .on_challenge(
+            None,
+            &zest_mesh::pairing::Challenge {
+                version,
+                host,
+                label,
+                nonce: Nonce::from_bytes(nonce.0),
+                dh: zest_mesh::secure::DhPublic(dh.0),
+                signature: host_sig,
+            },
+        )
+        .expect("the host must prove itself");
+    *ch = Some(channel);
+    send(ws, ch, &ClientMessage::Auth { signature: zest_proto::Sig64::from_bytes(sig.to_bytes()) });
 }
 
 #[test]
@@ -167,14 +201,15 @@ fn a_paired_device_drives_a_session_over_websocket() {
     // session created and attached, a keyframe painted — over a socket a
     // browser could have opened.
     let h = host();
-    let client = ClientIdentity::generate().expect("client key");
+    let client = Arc::new(ClientIdentity::generate().expect("client key"));
     trust(&h, &client);
 
     let mut ws = dial(&h);
     let mut frames = FrameReader::new();
-    handshake(&mut ws, &mut frames, &client);
+    let mut ch: Chan = None;
+    handshake(&mut ws, &mut frames, &mut ch, &client);
 
-    let welcome = wait_for(&mut ws, &mut frames, |m| matches!(m, HostMessage::Welcome { .. }))
+    let welcome = wait_for(&mut ws, &mut frames, &mut ch, |m| matches!(m, HostMessage::Welcome { .. }))
         .expect("no welcome");
     let HostMessage::Welcome { host, .. } = welcome else { unreachable!() };
     assert_eq!(host, h.host_id, "the host announced an identity that is not its own");
@@ -182,6 +217,7 @@ fn a_paired_device_drives_a_session_over_websocket() {
     let cmd = if cfg!(windows) { "cmd.exe /c echo over-websocket" } else { "/bin/echo over-websocket" };
     send(
         &mut ws,
+        &mut ch,
         &ClientMessage::CreateSession {
             command: cmd.into(),
             cwd: String::new(),
@@ -189,7 +225,7 @@ fn a_paired_device_drives_a_session_over_websocket() {
             rows: 24,
         },
     );
-    let listing = wait_for(&mut ws, &mut frames, |m| {
+    let listing = wait_for(&mut ws, &mut frames, &mut ch, |m| {
         matches!(m, HostMessage::Sessions { .. } | HostMessage::Error { .. })
     })
     .expect("no listing");
@@ -198,8 +234,8 @@ fn a_paired_device_drives_a_session_over_websocket() {
     };
     assert_eq!(sessions.len(), 1, "the session was not created");
 
-    send(&mut ws, &ClientMessage::Attach { session: sessions[0].addr, cols: 80, rows: 24 });
-    let keyframe = wait_for(&mut ws, &mut frames, |m| matches!(m, HostMessage::Keyframe { .. }));
+    send(&mut ws, &mut ch, &ClientMessage::Attach { session: sessions[0].addr, cols: 80, rows: 24 });
+    let keyframe = wait_for(&mut ws, &mut frames, &mut ch, |m| matches!(m, HostMessage::Keyframe { .. }));
     assert!(keyframe.is_some(), "every attach starts from a keyframe, on every transport");
 }
 
@@ -210,10 +246,11 @@ fn an_unpaired_device_is_not_served_over_websocket() {
     let h = host();
     let mut ws = dial(&h);
     let mut frames = FrameReader::new();
-    let client = ClientIdentity::generate().expect("client key");
+    let mut ch: Chan = None;
+    let client = Arc::new(ClientIdentity::generate().expect("client key"));
 
-    handshake(&mut ws, &mut frames, &client);
-    let answer = wait_for(&mut ws, &mut frames, |m| {
+    handshake(&mut ws, &mut frames, &mut ch, &client);
+    let answer = wait_for(&mut ws, &mut frames, &mut ch, |m| {
         matches!(m, HostMessage::AuthPending { .. } | HostMessage::Welcome { .. })
     })
     .expect("no answer");
@@ -222,8 +259,8 @@ fn an_unpaired_device_is_not_served_over_websocket() {
         "an unpaired device was welcomed: {answer:?}"
     );
 
-    send(&mut ws, &ClientMessage::ListSessions);
-    let answer = wait_for(&mut ws, &mut frames, |m| {
+    send(&mut ws, &mut ch, &ClientMessage::ListSessions);
+    let answer = wait_for(&mut ws, &mut frames, &mut ch, |m| {
         matches!(m, HostMessage::Sessions { .. } | HostMessage::Error { .. })
     })
     .expect("no answer");
@@ -276,17 +313,18 @@ fn a_ping_mid_session_is_answered_and_the_stream_survives() {
     // frames share one write lock, so a ping must neither stall the session
     // nor corrupt the next reply.
     let h = host();
-    let client = ClientIdentity::generate().expect("client key");
+    let client = Arc::new(ClientIdentity::generate().expect("client key"));
     trust(&h, &client);
 
     let mut ws = dial(&h);
     let mut frames = FrameReader::new();
-    handshake(&mut ws, &mut frames, &client);
-    wait_for(&mut ws, &mut frames, |m| matches!(m, HostMessage::Welcome { .. }))
+    let mut ch: Chan = None;
+    handshake(&mut ws, &mut frames, &mut ch, &client);
+    wait_for(&mut ws, &mut frames, &mut ch, |m| matches!(m, HostMessage::Welcome { .. }))
         .expect("no welcome");
 
     ws.send(Message::Ping(vec![0xab, 0xcd].into())).expect("ping");
-    send(&mut ws, &ClientMessage::ListSessions);
+    send(&mut ws, &mut ch, &ClientMessage::ListSessions);
 
     let mut pong = None;
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -299,7 +337,8 @@ fn a_ping_mid_session_is_answered_and_the_stream_survives() {
             Ok(Message::Binary(payload)) => {
                 frames.feed(&payload);
                 if let Ok(Some(body)) = frames.next_frame() {
-                    break frame::decode::<HostMessage>(&body).expect("decode");
+                    let plain = ch.as_mut().expect("a channel").open(&body).expect("open");
+                    break frame::decode::<HostMessage>(&plain).expect("decode");
                 }
             }
             Ok(_) => {}
@@ -326,17 +365,22 @@ fn several_protocol_frames_share_one_websocket_message() {
     // message carrying two length-prefixed frames — which the browser's
     // streaming FrameReader must split, and this test does split.
     let h = host();
-    let client = ClientIdentity::generate().expect("client key");
+    let client = Arc::new(ClientIdentity::generate().expect("client key"));
     trust(&h, &client);
 
     let mut ws = dial(&h);
     let mut frames = FrameReader::new();
-    handshake(&mut ws, &mut frames, &client);
-    wait_for(&mut ws, &mut frames, |m| matches!(m, HostMessage::Welcome { .. }))
+    let mut ch: Chan = None;
+    handshake(&mut ws, &mut frames, &mut ch, &client);
+    wait_for(&mut ws, &mut frames, &mut ch, |m| matches!(m, HostMessage::Welcome { .. }))
         .expect("no welcome");
 
-    let mut two = frame::encode(&ClientMessage::ListSessions).expect("encode");
-    two.extend(frame::encode(&ClientMessage::ListSessions).expect("encode"));
+    // Sealed individually, then concatenated: each frame is its own record with
+    // its own nonce, and the WebSocket message is just a bag of bytes carrying
+    // two of them. That is the whole claim of the byte-pipe mapping, and it
+    // stays true with encryption on.
+    let mut two = body_for(&mut ch, &ClientMessage::ListSessions);
+    two.extend(body_for(&mut ch, &ClientMessage::ListSessions));
     ws.send(Message::Binary(two.into())).expect("send");
 
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -348,7 +392,8 @@ fn several_protocol_frames_share_one_websocket_message() {
                 messages += 1;
                 frames.feed(&payload);
                 while let Ok(Some(body)) = frames.next_frame() {
-                    let msg = frame::decode::<HostMessage>(&body).expect("decode");
+                    let plain = ch.as_mut().expect("a channel").open(&body).expect("open");
+                    let msg = frame::decode::<HostMessage>(&plain).expect("decode");
                     assert!(matches!(msg, HostMessage::Sessions { .. }));
                     decoded += 1;
                 }
@@ -376,18 +421,20 @@ fn the_daemons_own_client_codec_interoperates() {
     // handshake completes, client-role masking and server-role unmasking
     // agree.
     let h = host();
-    let client = ClientIdentity::generate().expect("client key");
+    let client = Arc::new(ClientIdentity::generate().expect("client key"));
     trust(&h, &client);
 
     let stream = TcpStream::connect(h.addr).expect("connect");
     let (mut reader, mut writer) = zest_daemon::ws::client::connect(stream).expect("upgrade");
 
-    let client_nonce = Nonce::from_bytes([0x5c; 32]);
+    let mut hs = zest_mesh::pairing::ClientHandshake::new(Arc::clone(&client), "native-ws")
+        .expect("client handshake");
     let hello = frame::encode(&ClientMessage::Hello {
         version: PROTOCOL_VERSION,
         client: client.client_id(),
         label: "native-ws".into(),
-        nonce: zest_proto::Nonce32::from_bytes(*client_nonce.as_bytes()),
+        nonce: zest_proto::Nonce32::from_bytes(*hs.nonce().as_bytes()),
+        dh: zest_proto::Pub32::from_bytes(hs.dh().0),
         watch_sessions: false,
     })
     .expect("encode");
@@ -397,10 +444,18 @@ fn the_daemons_own_client_codec_interoperates() {
     let mut frames = FrameReader::new();
     let mut buf = [0u8; 4096];
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut next = |reader: &mut dyn Read, frames: &mut FrameReader| -> HostMessage {
+    let mut channel: Chan = None;
+    let mut next = |reader: &mut dyn Read,
+                    frames: &mut FrameReader,
+                    ch: &mut Chan|
+     -> HostMessage {
         loop {
             assert!(Instant::now() < deadline, "no reply arrived");
             if let Ok(Some(body)) = frames.next_frame() {
+                let body = match ch.as_mut() {
+                    Some(c) => c.open(&body).expect("open"),
+                    None => body,
+                };
                 return frame::decode::<HostMessage>(&body).expect("decode");
             }
             match reader.read(&mut buf) {
@@ -411,25 +466,29 @@ fn the_daemons_own_client_codec_interoperates() {
         }
     };
 
-    let challenge = next(&mut reader, &mut frames);
-    let HostMessage::Challenge { version, host, label, nonce, .. } = challenge else {
+    let challenge = next(&mut reader, &mut frames, &mut channel);
+    let HostMessage::Challenge { version, host, label, nonce, dh, signature } = challenge else {
         panic!("expected a challenge, got {challenge:?}");
     };
-
-    let transcript = Transcript {
-        version,
-        host,
-        client: client.client_id(),
-        host_nonce: Nonce::from_bytes(nonce.0),
-        client_nonce,
-        host_label: label,
-        client_label: "native-ws".into(),
-    };
-    let sig = client.sign(Purpose::Auth, &auth_transcript(&transcript));
-    let auth = frame::encode(&ClientMessage::Auth {
-        signature: zest_proto::Sig64::from_bytes(sig.to_bytes()),
-    })
-    .expect("encode");
+    let host_sig = zest_mesh::identity::Signature::from_slice(&signature.0).expect("signature");
+    let (sig, _, derived) = hs
+        .on_challenge(
+            None,
+            &zest_mesh::pairing::Challenge {
+                version,
+                host,
+                label,
+                nonce: Nonce::from_bytes(nonce.0),
+                dh: zest_mesh::secure::DhPublic(dh.0),
+                signature: host_sig,
+            },
+        )
+        .expect("the host must prove itself");
+    channel = Some(derived);
+    let auth = body_for(
+        &mut channel,
+        &ClientMessage::Auth { signature: zest_proto::Sig64::from_bytes(sig.to_bytes()) },
+    );
     std::io::Write::write_all(&mut writer, &auth).expect("write");
     std::io::Write::flush(&mut writer).expect("flush");
 
@@ -437,7 +496,7 @@ fn the_daemons_own_client_codec_interoperates() {
     // frame with a two-byte header, which is the shape that underflowed the
     // client-role parser on the first real run. Stopping at the challenge —
     // a large frame with an extended length — proved nothing about it.
-    let welcome = next(&mut reader, &mut frames);
+    let welcome = next(&mut reader, &mut frames, &mut channel);
     assert!(
         matches!(welcome, HostMessage::Welcome { .. }),
         "the native client codec did not survive the full handshake: {welcome:?}"

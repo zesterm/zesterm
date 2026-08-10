@@ -1326,7 +1326,23 @@ loopback, keystroke bytes on the wire to the delta carrying their echo:
 | max | 35µs | 132µs |
 
 Comfortably inside the claim, and the first run is slower for the ordinary
-reason — nothing is warm yet. This is a **floor** for input-to-paint, not the
+reason — nothing is warm yet.
+
+**Protocol 3 seals loopback too, and it cost 2µs.** Measured back to back on one
+machine rather than against the table above, because that was a different build
+on a different day and comparing across them would attribute the machine to the
+encryption. `attach --ping 500`, `--profile fast`, one warm-up run discarded,
+six runs each:
+
+| | p50 across six runs |
+|---|---|
+| plaintext (protocol 2) | 18, 16, 16, 17, 17, 17 |
+| sealed (protocol 3) | 17, 19, 19, 19, 19, 19 |
+
+**≈17µs → ≈19µs.** Two ChaCha20-Poly1305 operations per round trip, on frames
+small enough that the per-record setup dominates and the per-byte rate does not
+appear at all. ADR-008 argues why loopback is sealed anyway; this is what the
+argument costs. This is a **floor** for input-to-paint, not the
 number a person feels: it stops at the delta and never touches the renderer.
 
 Two things the bring-up established that no test could have, both recorded so
@@ -1424,10 +1440,25 @@ on each host. → ADR-005, ADR-006.
       persistent device key in secure storage from day one. The one open piece
       is grid rendering on Lynx (no canvas package at 0.26); blocks-first is
       what makes that deferrable.
-- [ ] **E2E encryption of the data plane** (Noise IK / HPKE, keys bound to
-      device enrollment). The only mitigation that survives a hostile relay —
-      first class, not a stretch goal. It converts Cloudflare from a trusted
-      party into a dumb pipe.
+- [x] **E2E encryption of the data plane** — **done, protocol 3** (#55). The
+      only mitigation that survives a hostile relay, and it landed *before* the
+      relay so Cloudflare is a dumb pipe the day that ships rather than a
+      trusted party demoted later.
+
+      **Not Noise IK, and not HPKE.** Signed ephemeral X25519 instead: each side
+      puts a DH public key into the transcript both were already signing, so the
+      existing Ed25519 signatures certify it — no certificate type, no static DH
+      key to store or rotate, and forward secrecy for free. Two implementations
+      of a *framework* is far more surface than two of one handshake, and `snow`
+      has no browser twin. ChaCha20-Poly1305 over AES-GCM because
+      `crypto.subtle` is async and the browser's decode path is not. ADR-008 has
+      the full argument and what it supersedes.
+
+      Sealed on loopback too, and **measured: p50 ≈17µs → ≈19µs** (see above).
+      Both implementations are pinned to `fixtures/handshake.json`, which
+      carries the transcript, its hash, both directional keys and records
+      straddling the 2²⁴ ratchet — it caught a full-HKDF-vs-Expand mistake in
+      the second implementation on first use.
 - [ ] `AiActor` over sigx `streams:`, per-block consent, redaction.
 
 ---

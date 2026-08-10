@@ -16,7 +16,16 @@ import { hexToBytes } from '@zesterm/proto';
 
 const TEXT = new TextEncoder();
 
-const AUTH_DOMAIN = 'zesterm-auth-v1';
+/**
+ * **The `v2` counts transcript layouts, not protocol versions.**
+ *
+ * This is the second shape the signed bytes have ever had; the protocol they
+ * carry is at 3, and the two will keep diverging. Deriving one from the other
+ * is one line away and produces signatures that will not verify with nothing
+ * in the error naming the cause. The Rust pins the literal with a test for the
+ * same reason.
+ */
+const AUTH_DOMAIN = 'zesterm-auth-v2';
 /** Distinct from the signature domains, so the code can never collide with a preimage. */
 const CODE_DOMAIN = 'zesterm-pairing-code-v1\0';
 
@@ -34,6 +43,16 @@ export interface Transcript {
   readonly clientNonce: string;
   readonly hostLabel: string;
   readonly clientLabel: string;
+  /**
+   * 64 hex chars each — the two ephemeral X25519 public keys.
+   *
+   * In here so the Ed25519 signatures that were already being exchanged
+   * certify them, which is what removes the need for a certificate type or a
+   * stored static key. A relay that substituted one would have to forge a
+   * signature to make both sides agree on a channel.
+   */
+  readonly hostDh: string;
+  readonly clientDh: string;
 }
 
 function fixed(hex: string, bytes: number, what: string): Uint8Array {
@@ -44,14 +63,28 @@ function fixed(hex: string, bytes: number, what: string): Uint8Array {
   return out;
 }
 
-/** The label, UTF-8, u16-BE length prefix — truncated at 64 KiB like the Rust. */
+/**
+ * The label, UTF-8, u16-BE length prefix. **Refuses** anything that will not
+ * fit rather than truncating.
+ *
+ * It used to clamp to 0xffff and truncate, matching what the Rust then did.
+ * Both were wrong the same way: two labels sharing their first 65535 bytes
+ * produced identical signed bytes, so a signature over one was a valid
+ * signature over the other — and a label is attacker-influenced and is the
+ * entire text of the approval prompt a person reads. Worse, the truncation was
+ * an implicit rule this file had to reproduce exactly, and a disagreement
+ * surfaced as a signature that would not verify with nothing naming the
+ * length. (#43.)
+ */
 function lenPrefixed(label: string): Uint8Array {
   const bytes = TEXT.encode(label);
-  const len = Math.min(bytes.length, 0xffff);
-  const out = new Uint8Array(2 + len);
-  out[0] = len >> 8;
-  out[1] = len & 0xff;
-  out.set(bytes.subarray(0, len), 2);
+  if (bytes.length > 0xffff) {
+    throw new Error(`label is ${bytes.length} bytes, which will not fit in a transcript`);
+  }
+  const out = new Uint8Array(2 + bytes.length);
+  out[0] = bytes.length >> 8;
+  out[1] = bytes.length & 0xff;
+  out.set(bytes, 2);
   return out;
 }
 
@@ -64,6 +97,10 @@ export function authTranscript(t: Transcript): Uint8Array {
     fixed(t.client, 32, 'Transcript.client'),
     fixed(t.hostNonce, 32, 'Transcript.hostNonce'),
     fixed(t.clientNonce, 32, 'Transcript.clientNonce'),
+    // After the nonces, before the labels: fixed-width fields stay together,
+    // ahead of anything carrying its own length.
+    fixed(t.hostDh, 32, 'Transcript.hostDh'),
+    fixed(t.clientDh, 32, 'Transcript.clientDh'),
     lenPrefixed(t.hostLabel),
     lenPrefixed(t.clientLabel),
   ];

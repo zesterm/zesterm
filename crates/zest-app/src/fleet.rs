@@ -24,7 +24,7 @@ use zest_mesh::discovery::{Discovery, Presence};
 use zest_mesh::identity::ClientIdentity;
 use zest_proto::{HostId, SessionInfo};
 
-use crate::daemon_client::DaemonClient;
+use zest_daemon::client::DaemonClient;
 use crate::remote::Dialer;
 use crate::session::Wakeup;
 

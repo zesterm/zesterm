@@ -48,7 +48,8 @@ fn main() {
         zest_proto::HostId::from_bytes(out)
     });
 
-    let identity = zest_mesh::identity::ClientIdentity::generate().expect("client key");
+    let identity =
+        std::sync::Arc::new(zest_mesh::identity::ClientIdentity::generate().expect("client key"));
     println!("this device: {}", identity.client_id().short());
     println!("full id:     {}", hex(&identity.client_id().0));
     println!();
@@ -63,52 +64,74 @@ fn main() {
         }
     };
 
-    let client_nonce = zest_mesh::identity::Nonce::random().expect("nonce");
+    let mut hs =
+        zest_mesh::pairing::ClientHandshake::new(std::sync::Arc::clone(&identity), label.clone())
+            .expect("client handshake");
     let hello = ClientMessage::Hello {
         version: PROTOCOL_VERSION,
         client: identity.client_id(),
         label: label.clone(),
-        nonce: zest_proto::Nonce32::from_bytes(*client_nonce.as_bytes()),
+        nonce: zest_proto::Nonce32::from_bytes(*hs.nonce().as_bytes()),
+        dh: zest_proto::Pub32::from_bytes(hs.dh().0),
         watch_sessions: false,
     };
-    write(&mut stream, &hello);
+    write(&mut stream, None, &hello);
 
+    // Everything from the `Auth` on is sealed, in both directions. Held here
+    // rather than inside the loop because a pairing can sit at `AuthPending`
+    // for two minutes and the channel has to survive that wait.
+    let mut channel: Option<zest_mesh::secure::SecureChannel> = None;
     let mut frames = FrameReader::new();
     let mut buf = vec![0u8; 64 * 1024];
     let deadline = Instant::now() + Duration::from_secs(180);
 
     loop {
         while let Ok(Some(body)) = frames.next_frame() {
+            let body = match channel.as_mut() {
+                Some(ch) => match ch.open(&body) {
+                    Ok(plain) => plain,
+                    Err(e) => {
+                        eprintln!("a sealed frame did not open: {e}");
+                        std::process::exit(1);
+                    }
+                },
+                None => body,
+            };
             match frame::decode::<HostMessage>(&body).expect("decode") {
-                HostMessage::Challenge { version, host, label: host_label, nonce, signature } => {
-                    let transcript = zest_mesh::pairing::Transcript {
-                        version,
-                        host,
-                        client: identity.client_id(),
-                        host_nonce: zest_mesh::identity::Nonce::from_bytes(nonce.0),
-                        client_nonce,
-                        host_label: host_label.clone(),
-                        client_label: label.clone(),
-                    };
+                HostMessage::Challenge { version, host, label: host_label, nonce, dh, signature } => {
                     let host_sig = zest_mesh::identity::Signature::from_slice(&signature.0)
                         .expect("signature");
 
-                    if let Err(e) =
-                        zest_mesh::pairing::verify_challenge(expect, &transcript, &host_sig)
-                    {
-                        eprintln!("the host did not prove itself: {e}");
-                        std::process::exit(1);
-                    }
+                    // Verifies, signs and derives, in that order -- the same
+                    // call the app makes, so what this example proves about a
+                    // real host is what the app would find.
+                    let (sig, transcript, derived) = match hs.on_challenge(
+                        expect,
+                        &zest_mesh::pairing::Challenge {
+                            version,
+                            host,
+                            label: host_label.clone(),
+                            nonce: zest_mesh::identity::Nonce::from_bytes(nonce.0),
+                            dh: zest_mesh::secure::DhPublic(dh.0),
+                            signature: host_sig,
+                        },
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("the host did not prove itself: {e}");
+                            std::process::exit(1);
+                        }
+                    };
+                    let code = zest_mesh::pairing::pairing_code(&transcript)
+                        .expect("a transcript that signed has a code");
                     println!("host:        {} ({host_label})", host.short());
-                    println!("code:        {}", spaced(&zest_mesh::pairing::pairing_code(&transcript)));
+                    println!("code:        {}", spaced(&code));
                     println!("\nwaiting for approval...\n");
 
-                    let sig = identity.sign(
-                        zest_mesh::identity::Purpose::Auth,
-                        &zest_mesh::pairing::auth_transcript(&transcript),
-                    );
+                    channel = Some(derived);
                     write(
                         &mut stream,
+                        channel.as_mut(),
                         &ClientMessage::Auth {
                             signature: zest_proto::Sig64::from_bytes(sig.to_bytes()),
                         },
@@ -152,8 +175,17 @@ fn main() {
     }
 }
 
-fn write(stream: &mut TcpStream, msg: &ClientMessage) {
-    let bytes = frame::encode(msg).expect("encode");
+fn write(
+    stream: &mut TcpStream,
+    channel: Option<&mut zest_mesh::secure::SecureChannel>,
+    msg: &ClientMessage,
+) {
+    let body = frame::encode_body(msg).expect("encode");
+    let body = match channel {
+        Some(ch) => ch.seal(&body).expect("seal"),
+        None => body,
+    };
+    let bytes = frame::frame_bytes(&body).expect("frame");
     stream.write_all(&bytes).expect("write");
     stream.flush().expect("flush");
 }

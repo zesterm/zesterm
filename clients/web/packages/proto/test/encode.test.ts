@@ -117,10 +117,11 @@ test('every client message round-trips through the real decoder', () => {
   const messages: ClientMessage[] = [
     {
       t: 'hello',
-      version: 2,
+      version: 3,
       client: 'cd'.repeat(32),
       label: 'web',
       nonce: '12'.repeat(32),
+      dh: '34'.repeat(32),
       watch_sessions: true,
     },
     { t: 'auth', signature: 'ef'.repeat(64) },
@@ -154,15 +155,17 @@ test('the wire map is built in declaration order, whatever order the caller used
     nonce: '00'.repeat(32),
     label: 'x',
     client: 'ab'.repeat(32),
-    version: 2,
+    version: 3,
+    dh: '77'.repeat(32),
     t: 'hello',
   } as ClientMessage;
   const forwards: ClientMessage = {
     t: 'hello',
-    version: 2,
+    version: 3,
     client: 'ab'.repeat(32),
     label: 'x',
     nonce: '00'.repeat(32),
+    dh: '77'.repeat(32),
     watch_sessions: false,
   };
   assert.deepEqual(encodeClientMessage(backwards), encodeClientMessage(forwards));

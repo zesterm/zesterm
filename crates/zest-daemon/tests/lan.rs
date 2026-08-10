@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use zest_daemon::{Authenticator, DaemonConfig, LanListener, Registry};
-use zest_mesh::identity::{ClientIdentity, HostIdentity, Nonce, Purpose};
-use zest_mesh::pairing::{auth_transcript, PairingQueue, Transcript};
+use zest_mesh::identity::{ClientIdentity, HostIdentity, Nonce};
+use zest_mesh::pairing::{PairingQueue, Transcript};
 use zest_mesh::trust::{MemoryTrustStore, TrustRecord, TrustStore};
 use zest_proto::{frame, ClientMessage, FrameReader, HostMessage, PROTOCOL_VERSION};
 
@@ -74,15 +74,56 @@ fn trust(h: &Host, client: &ClientIdentity) {
         .expect("insert");
 }
 
-fn send(stream: &mut TcpStream, msg: &ClientMessage) {
-    let bytes = frame::encode(msg).expect("encode");
-    stream.write_all(&bytes).expect("write");
-    stream.flush().expect("flush");
+/// One client connection: the socket, its framing, and its channel.
+///
+/// Bundled since protocol 3. They were three separate locals, which was fine
+/// while a frame was a frame; now the channel has to travel with the socket and
+/// advance in step with it, and a test that held the wrong one would produce
+/// frames the host silently cannot open.
+struct Peer {
+    stream: TcpStream,
+    frames: FrameReader,
+    channel: Option<zest_mesh::secure::SecureChannel>,
+}
+
+impl Peer {
+    fn connect(addr: std::net::SocketAddr) -> Self {
+        Self {
+            stream: TcpStream::connect(addr).expect("connect"),
+            frames: FrameReader::new(),
+            channel: None,
+        }
+    }
+
+    fn send(&mut self, msg: &ClientMessage) {
+        let bytes = self.frame_for(msg);
+        self.write_raw(&bytes);
+    }
+
+    /// Serialize and seal, without writing — for a test that wants the bytes.
+    fn frame_for(&mut self, msg: &ClientMessage) -> Vec<u8> {
+        let body = frame::encode_body(msg).expect("encode");
+        let body = match self.channel.as_mut() {
+            Some(ch) => ch.seal(&body).expect("seal"),
+            None => body,
+        };
+        frame::frame_bytes(&body).expect("frame")
+    }
+
+    fn write_raw(&mut self, bytes: &[u8]) {
+        self.stream.write_all(bytes).expect("write");
+        self.stream.flush().expect("flush");
+    }
+
+    fn wait_for(&mut self, f: impl FnMut(&HostMessage) -> bool) -> Option<HostMessage> {
+        wait_for(&mut self.stream, &mut self.frames, self.channel.as_mut(), f)
+    }
 }
 
 fn wait_for(
     stream: &mut TcpStream,
     frames: &mut FrameReader,
+    mut channel: Option<&mut zest_mesh::secure::SecureChannel>,
     mut f: impl FnMut(&HostMessage) -> bool,
 ) -> Option<HostMessage> {
     let mut buf = vec![0u8; 64 * 1024];
@@ -94,6 +135,16 @@ fn wait_for(
     stream.set_read_timeout(Some(Duration::from_millis(200))).expect("set read timeout");
     loop {
         while let Ok(Some(body)) = frames.next_frame() {
+            let body = match channel.as_mut() {
+                Some(ch) => match ch.open(&body) {
+                    Ok(plain) => plain,
+                    // Not a panic: several tests below are about a host that
+                    // refuses, and a refusal it cannot seal is a connection
+                    // that simply ends.
+                    Err(_) => return None,
+                },
+                None => body,
+            };
             let msg = frame::decode::<HostMessage>(&body).expect("decode");
             if f(&msg) {
                 return Some(msg);
@@ -117,46 +168,48 @@ fn wait_for(
     }
 }
 
-/// Say hello and answer the challenge. Returns the encoded `Auth` frame, so a
-/// test can replay it.
-fn handshake(
-    stream: &mut TcpStream,
-    frames: &mut FrameReader,
-    identity: &ClientIdentity,
-) -> Vec<u8> {
-    let client_nonce = Nonce::from_bytes([0x5c; 32]);
-    send(
-        stream,
-        &ClientMessage::Hello {
-            version: PROTOCOL_VERSION,
-            client: identity.client_id(),
-            label: "test-device".into(),
-            nonce: zest_proto::Nonce32::from_bytes(*client_nonce.as_bytes()),
-            watch_sessions: false,
-        },
-    );
+/// Say hello and answer the challenge. Returns the `Auth` message and the
+/// sealed frame it went out as, so a test can replay either.
+fn handshake(peer: &mut Peer, identity: &Arc<ClientIdentity>) -> (ClientMessage, Vec<u8>) {
+    // The shared client half, not a hand-rolled one. A test peer with its own
+    // idea of the transcript would fail every frame *after* the handshake,
+    // which reads as a broken daemon rather than a broken test.
+    let mut hs = zest_mesh::pairing::ClientHandshake::new(Arc::clone(identity), "test-device")
+        .expect("client handshake");
+    peer.send(&ClientMessage::Hello {
+        version: PROTOCOL_VERSION,
+        client: identity.client_id(),
+        label: "test-device".into(),
+        nonce: zest_proto::Nonce32::from_bytes(*hs.nonce().as_bytes()),
+        dh: zest_proto::Pub32::from_bytes(hs.dh().0),
+        watch_sessions: false,
+    });
 
-    let challenge = wait_for(stream, frames, |m| matches!(m, HostMessage::Challenge { .. }))
-        .expect("no challenge arrived");
-    let HostMessage::Challenge { version, host, label, nonce, .. } = challenge else {
+    let challenge =
+        peer.wait_for(|m| matches!(m, HostMessage::Challenge { .. })).expect("no challenge arrived");
+    let HostMessage::Challenge { version, host, label, nonce, dh, signature } = challenge else {
         unreachable!()
     };
+    let host_sig = zest_mesh::identity::Signature::from_slice(&signature.0).expect("signature");
+    let (sig, _, channel) = hs
+        .on_challenge(
+            None,
+            &zest_mesh::pairing::Challenge {
+                version,
+                host,
+                label,
+                nonce: Nonce::from_bytes(nonce.0),
+                dh: zest_mesh::secure::DhPublic(dh.0),
+                signature: host_sig,
+            },
+        )
+        .expect("the host must prove itself");
 
-    let transcript = Transcript {
-        version,
-        host,
-        client: identity.client_id(),
-        host_nonce: Nonce::from_bytes(nonce.0),
-        client_nonce,
-        host_label: label,
-        client_label: "test-device".into(),
-    };
-    let sig = identity.sign(Purpose::Auth, &auth_transcript(&transcript));
+    peer.channel = Some(channel);
     let msg = ClientMessage::Auth { signature: zest_proto::Sig64::from_bytes(sig.to_bytes()) };
-    let bytes = frame::encode(&msg).expect("encode");
-    stream.write_all(&bytes).expect("write");
-    stream.flush().expect("flush");
-    bytes
+    let bytes = peer.frame_for(&msg);
+    peer.write_raw(&bytes);
+    (msg, bytes)
 }
 
 #[test]
@@ -164,13 +217,12 @@ fn an_unpaired_device_is_not_served_and_gets_no_session() {
     // "Refused" alone is not the property. A host that says no and starts a
     // shell anyway has still handed one out.
     let h = host();
-    let mut stream = TcpStream::connect(h.addr).expect("connect");
-    let mut frames = FrameReader::new();
-    let client = ClientIdentity::generate().expect("client key");
+    let mut stream = Peer::connect(h.addr);
+    let client = Arc::new(ClientIdentity::generate().expect("client key"));
 
-    handshake(&mut stream, &mut frames, &client);
+    handshake(&mut stream, &client);
 
-    let answer = wait_for(&mut stream, &mut frames, |m| {
+    let answer = stream.wait_for(|m| {
         matches!(m, HostMessage::AuthPending { .. } | HostMessage::Welcome { .. })
     })
     .expect("no answer");
@@ -179,8 +231,8 @@ fn an_unpaired_device_is_not_served_and_gets_no_session() {
         "an unpaired device was welcomed: {answer:?}"
     );
 
-    send(&mut stream, &ClientMessage::ListSessions);
-    let answer = wait_for(&mut stream, &mut frames, |m| {
+    stream.send(&ClientMessage::ListSessions);
+    let answer = stream.wait_for(|m| {
         matches!(m, HostMessage::Sessions { .. } | HostMessage::Error { .. })
     })
     .expect("no answer");
@@ -193,14 +245,13 @@ fn an_unpaired_device_is_not_served_and_gets_no_session() {
 #[test]
 fn a_paired_device_drives_a_session_over_tcp() {
     let h = host();
-    let client = ClientIdentity::generate().expect("client key");
+    let client = Arc::new(ClientIdentity::generate().expect("client key"));
     trust(&h, &client);
 
-    let mut stream = TcpStream::connect(h.addr).expect("connect");
-    let mut frames = FrameReader::new();
-    handshake(&mut stream, &mut frames, &client);
+    let mut stream = Peer::connect(h.addr);
+    handshake(&mut stream, &client);
 
-    let welcome = wait_for(&mut stream, &mut frames, |m| matches!(m, HostMessage::Welcome { .. }))
+    let welcome = stream.wait_for(|m| matches!(m, HostMessage::Welcome { .. }))
         .expect("no welcome");
     let HostMessage::Welcome { host, .. } = welcome else { unreachable!() };
     assert_eq!(host, h.host_id, "the host announced an identity that is not its own");
@@ -213,8 +264,7 @@ fn a_paired_device_drives_a_session_over_tcp() {
     } else {
         "/bin/echo over-the-lan"
     };
-    send(
-        &mut stream,
+    stream.send(
         &ClientMessage::CreateSession {
             command: cmd.into(),
             cwd: String::new(),
@@ -223,7 +273,7 @@ fn a_paired_device_drives_a_session_over_tcp() {
         },
     );
     // Accept `Error` too, so a spawn failure names itself instead of timing out.
-    let listing = wait_for(&mut stream, &mut frames, |m| {
+    let listing = stream.wait_for(|m| {
         matches!(m, HostMessage::Sessions { .. } | HostMessage::Error { .. })
     })
     .expect("no listing");
@@ -240,47 +290,88 @@ fn a_captured_proof_cannot_be_replayed_onto_a_second_connection() {
     // *is* the replay window. Entirely doable in-process, which is what makes
     // this a test rather than a claim in a comment.
     let h = host();
-    let client = ClientIdentity::generate().expect("client key");
+    let client = Arc::new(ClientIdentity::generate().expect("client key"));
     trust(&h, &client);
 
-    let mut first = TcpStream::connect(h.addr).expect("connect");
-    let mut frames = FrameReader::new();
-    let captured = handshake(&mut first, &mut frames, &client);
+    let mut first = Peer::connect(h.addr);
+    let (auth_msg, captured) = handshake(&mut first, &client);
     assert!(
-        wait_for(&mut first, &mut frames, |m| matches!(m, HostMessage::Welcome { .. })).is_some(),
+        first.wait_for(|m| matches!(m, HostMessage::Welcome { .. })).is_some(),
         "the first connection was not served"
     );
 
-    let mut second = TcpStream::connect(h.addr).expect("connect");
-    let mut frames2 = FrameReader::new();
-    send(
-        &mut second,
-        &ClientMessage::Hello {
-            version: PROTOCOL_VERSION,
-            client: client.client_id(),
-            label: "test-device".into(),
-            nonce: zest_proto::Nonce32::from_bytes([0x5c; 32]),
-            watch_sessions: false,
-        },
-    );
-    assert!(
-        wait_for(&mut second, &mut frames2, |m| matches!(m, HostMessage::Challenge { .. }))
-            .is_some(),
-        "no challenge on the second connection"
-    );
-    second.write_all(&captured).expect("write");
-    second.flush().expect("flush");
+    // Replayed *inside a valid channel*, which is what still tests the property
+    // this test is named for. Protocol 3 would refuse the captured ciphertext
+    // at the seal, and that refusal proves nothing about nonce binding — it
+    // would pass just as happily if the signature covered no nonce at all. So
+    // the second connection runs its own handshake, gets its own key, and seals
+    // the *same signature* under it. Only the host nonce differs, and only the
+    // signature can notice.
+    let mut second = Peer::connect(h.addr);
+    let mut hs = zest_mesh::pairing::ClientHandshake::new(Arc::clone(&client), "test-device")
+        .expect("client handshake");
+    second.send(&ClientMessage::Hello {
+        version: PROTOCOL_VERSION,
+        client: client.client_id(),
+        label: "test-device".into(),
+        nonce: zest_proto::Nonce32::from_bytes(*hs.nonce().as_bytes()),
+        dh: zest_proto::Pub32::from_bytes(hs.dh().0),
+        watch_sessions: false,
+    });
+    let challenge = second
+        .wait_for(|m| matches!(m, HostMessage::Challenge { .. }))
+        .expect("no challenge on the second connection");
+    let HostMessage::Challenge { version, host, label, nonce, dh, signature } = challenge else {
+        unreachable!()
+    };
+    let host_sig = zest_mesh::identity::Signature::from_slice(&signature.0).expect("signature");
+    let (_, _, channel) = hs
+        .on_challenge(
+            None,
+            &zest_mesh::pairing::Challenge {
+                version,
+                host,
+                label,
+                nonce: Nonce::from_bytes(nonce.0),
+                dh: zest_mesh::secure::DhPublic(dh.0),
+                signature: host_sig,
+            },
+        )
+        .expect("the host must prove itself");
+    second.channel = Some(channel);
+    second.send(&auth_msg);
 
-    let answer = wait_for(&mut second, &mut frames2, |m| {
-        matches!(m, HostMessage::Welcome { .. } | HostMessage::AuthFailed { .. })
-    })
-    .expect("no answer");
+    let answer = second
+        .wait_for(|m| matches!(m, HostMessage::Welcome { .. } | HostMessage::AuthFailed { .. }))
+        .expect("no answer");
     assert!(
         matches!(
             answer,
             HostMessage::AuthFailed { reason: zest_proto::AuthFailure::Signature, .. }
         ),
         "a replayed proof was accepted: {answer:?}"
+    );
+
+    // And the cruder replay — the captured bytes verbatim — is refused earlier
+    // still, at the seal, with the connection simply ending. Asserted so the
+    // two failures are known to be different things.
+    let mut third = Peer::connect(h.addr);
+    third.send(&ClientMessage::Hello {
+        version: PROTOCOL_VERSION,
+        client: client.client_id(),
+        label: "test-device".into(),
+        nonce: zest_proto::Nonce32::from_bytes([0x5c; 32]),
+        dh: zest_proto::Pub32::from_bytes([0x11; 32]),
+        watch_sessions: false,
+    });
+    assert!(
+        third.wait_for(|m| matches!(m, HostMessage::Challenge { .. })).is_some(),
+        "no challenge on the third connection"
+    );
+    third.write_raw(&captured);
+    assert!(
+        third.wait_for(|m| matches!(m, HostMessage::Welcome { .. })).is_none(),
+        "a captured frame from another connection was served"
     );
 }
 
@@ -298,21 +389,20 @@ fn an_authenticated_connection_outlives_the_handshake_watchdog() {
     // Every previous LAN test finished in milliseconds, which is exactly why
     // none of them noticed. This one deliberately waits.
     let h = host();
-    let client = ClientIdentity::generate().expect("client key");
+    let client = Arc::new(ClientIdentity::generate().expect("client key"));
     trust(&h, &client);
 
-    let mut stream = TcpStream::connect(h.addr).expect("connect");
-    let mut frames = FrameReader::new();
-    handshake(&mut stream, &mut frames, &client);
-    wait_for(&mut stream, &mut frames, |m| matches!(m, HostMessage::Welcome { .. }))
+    let mut stream = Peer::connect(h.addr);
+    handshake(&mut stream, &client);
+    stream.wait_for(|m| matches!(m, HostMessage::Welcome { .. }))
         .expect("no welcome");
 
     std::thread::sleep(PAST_THE_WATCHDOG);
 
     // Still usable: the watchdog must not have touched an authenticated
     // connection.
-    send(&mut stream, &ClientMessage::ListSessions);
-    let answer = wait_for(&mut stream, &mut frames, |m| {
+    stream.send(&ClientMessage::ListSessions);
+    let answer = stream.wait_for(|m| {
         matches!(m, HostMessage::Sessions { .. })
     });
     assert!(
@@ -337,13 +427,12 @@ fn a_device_waiting_for_approval_outlives_the_handshake_watchdog() {
     let h = host();
     // Deliberately NOT trusted: being unknown is what sends this connection
     // down the approval path instead of straight to a welcome.
-    let client = ClientIdentity::generate().expect("client key");
+    let client = Arc::new(ClientIdentity::generate().expect("client key"));
 
-    let mut stream = TcpStream::connect(h.addr).expect("connect");
-    let mut frames = FrameReader::new();
-    handshake(&mut stream, &mut frames, &client);
+    let mut stream = Peer::connect(h.addr);
+    handshake(&mut stream, &client);
 
-    let pending = wait_for(&mut stream, &mut frames, |m| {
+    let pending = stream.wait_for(|m| {
         matches!(m, HostMessage::AuthPending { .. })
     });
     assert!(pending.is_some(), "an unknown device should be asked about, not refused");
@@ -352,11 +441,11 @@ fn a_device_waiting_for_approval_outlives_the_handshake_watchdog() {
 
     // The connection must still be there for a person to approve. A read that
     // returns EOF means the host hung up on someone it had just asked to wait.
-    stream.set_read_timeout(Some(Duration::from_millis(300))).expect("timeout");
+    stream.stream.set_read_timeout(Some(Duration::from_millis(300))).expect("timeout");
     let mut buf = [0u8; 16];
     // A timeout is the expected outcome: the host is waiting, quietly, for a
     // decision this test never makes. EOF is the failure.
-    if let Ok(0) = stream.read(&mut buf) {
+    if let Ok(0) = stream.stream.read(&mut buf) {
         panic!(
             "the host cut a connection it had just told to wait -- pairing over \
              the LAN is impossible, because nobody can answer a prompt in less \
@@ -387,13 +476,12 @@ fn a_silent_connection_does_not_block_a_real_one() {
     let h = host();
     let _silent = TcpStream::connect(h.addr).expect("connect");
 
-    let client = ClientIdentity::generate().expect("client key");
+    let client = Arc::new(ClientIdentity::generate().expect("client key"));
     trust(&h, &client);
-    let mut stream = TcpStream::connect(h.addr).expect("connect");
-    let mut frames = FrameReader::new();
-    handshake(&mut stream, &mut frames, &client);
+    let mut stream = Peer::connect(h.addr);
+    handshake(&mut stream, &client);
     assert!(
-        wait_for(&mut stream, &mut frames, |m| matches!(m, HostMessage::Welcome { .. })).is_some(),
+        stream.wait_for(|m| matches!(m, HostMessage::Welcome { .. })).is_some(),
         "a connection that said nothing blocked a real one"
     );
 }
@@ -403,24 +491,22 @@ fn a_remote_device_may_not_approve_other_devices() {
     // Refused even for a *paired* client: otherwise one compromised device
     // enrols the rest.
     let h = host();
-    let client = ClientIdentity::generate().expect("client key");
+    let client = Arc::new(ClientIdentity::generate().expect("client key"));
     trust(&h, &client);
 
-    let mut stream = TcpStream::connect(h.addr).expect("connect");
-    let mut frames = FrameReader::new();
-    handshake(&mut stream, &mut frames, &client);
-    wait_for(&mut stream, &mut frames, |m| matches!(m, HostMessage::Welcome { .. }))
+    let mut stream = Peer::connect(h.addr);
+    handshake(&mut stream, &client);
+    stream.wait_for(|m| matches!(m, HostMessage::Welcome { .. }))
         .expect("no welcome");
 
-    send(
-        &mut stream,
+    stream.send(
         &ClientMessage::PairingDecision {
             client: zest_proto::ClientId::from_bytes([0xaa; 32]),
             approve: true,
         },
     );
     assert!(
-        wait_for(&mut stream, &mut frames, |m| matches!(m, HostMessage::Error { .. })).is_some(),
+        stream.wait_for(|m| matches!(m, HostMessage::Error { .. })).is_some(),
         "a remote device was allowed to approve another"
     );
 }
@@ -431,38 +517,40 @@ fn a_client_that_dialled_another_host_notices() {
     // advertisement is a claim; without this check "connect to my Mac" means
     // "connect to whatever answered on that port".
     let h = host();
-    let client = ClientIdentity::generate().expect("client key");
+    let client = Arc::new(ClientIdentity::generate().expect("client key"));
     trust(&h, &client);
 
-    let mut stream = TcpStream::connect(h.addr).expect("connect");
-    let mut frames = FrameReader::new();
-    let client_nonce = Nonce::from_bytes([0x5c; 32]);
-    send(
-        &mut stream,
-        &ClientMessage::Hello {
-            version: PROTOCOL_VERSION,
-            client: client.client_id(),
-            label: "test-device".into(),
-            nonce: zest_proto::Nonce32::from_bytes(*client_nonce.as_bytes()),
-            watch_sessions: false,
-        },
-    );
-    let challenge = wait_for(&mut stream, &mut frames, |m| {
-        matches!(m, HostMessage::Challenge { .. })
-    })
-    .expect("no challenge");
-    let HostMessage::Challenge { version, host, label, nonce, signature } = challenge else {
+    let mut stream = Peer::connect(h.addr);
+    let hs = zest_mesh::pairing::ClientHandshake::new(Arc::clone(&client), "test-device")
+        .expect("client handshake");
+    let client_dh = hs.dh();
+    stream.send(&ClientMessage::Hello {
+        version: PROTOCOL_VERSION,
+        client: client.client_id(),
+        label: "test-device".into(),
+        nonce: zest_proto::Nonce32::from_bytes(*hs.nonce().as_bytes()),
+        dh: zest_proto::Pub32::from_bytes(client_dh.0),
+        watch_sessions: false,
+    });
+    let challenge =
+        stream.wait_for(|m| matches!(m, HostMessage::Challenge { .. })).expect("no challenge");
+    let HostMessage::Challenge { version, host, label, nonce, dh, signature } = challenge else {
         unreachable!()
     };
 
+    // Rebuilt by hand rather than through `on_challenge`, because this test is
+    // about `verify_challenge` answering two different questions about the same
+    // signature — which `on_challenge` deliberately does not expose.
     let transcript = Transcript {
         version,
         host,
         client: client.client_id(),
         host_nonce: Nonce::from_bytes(nonce.0),
-        client_nonce,
+        client_nonce: hs.nonce(),
         host_label: label,
         client_label: "test-device".into(),
+        host_dh: dh.0,
+        client_dh: client_dh.0,
     };
     let host_sig = zest_mesh::identity::Signature::from_slice(&signature.0).expect("signature");
 

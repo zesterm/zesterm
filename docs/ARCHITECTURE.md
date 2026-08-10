@@ -229,3 +229,112 @@ every launch after the first, it is a pipe open costing microseconds.
 command rather than a vague sense that it used to feel faster. A flag rather than a `#[test]`
 because first paint means a real window on a real compositor, and an assertion that gets silently
 skipped in CI protects nothing.
+
+## ADR-008 — E2E ships before the relay, and the relay is a dumb pipe
+
+**Status:** accepted (implemented; protocol 3)
+
+Everything after the `Challenge` is encrypted end to end, on every transport including loopback.
+Each side puts an ephemeral X25519 public key into the transcript both were already signing, so
+the existing Ed25519 signatures certify those keys and the shared secret is salted with the hash
+of the signed bytes.
+
+### Why this comes before the relay, not after
+
+The relay is a Cloudflare Durable Object that both the daemon and the browser dial *out* to,
+because neither has a dialable address. That makes Cloudflare a party to every byte of every
+session — unless the bytes are already opaque when they arrive. Shipping the relay first and the
+crypto second would mean a period during which the honest description of the product is "your
+shell, in someone else's process", and would make the encryption a change to a working system
+rather than a property it always had.
+
+It also settles a question that would otherwise be argued per-feature: the relay cannot be
+trusted with anything, so it is never asked to be. It routes, it counts, it enforces a rate
+limit. It never terminates the protocol.
+
+### Signed ephemeral X25519, not Noise
+
+**Rejected: Noise IK**, which the roadmap named at M5. Two independent implementations of a
+*framework* is far more surface than two of one specified handshake; `snow` has no browser twin,
+so the browser would get a hand-written Noise anyway; and what Noise buys here — identity hiding
+and 0-RTT — is not wanted. The host proving itself first is a *feature* (a client that dialled an
+address from an mDNS advertisement must be able to hang up on the wrong machine), and 0-RTT
+resumption is meaningless when a redial is always a fresh handshake.
+
+What replaced it is smaller than the thing it replaced: two 32-byte fields in a transcript that
+already existed, signed by signatures that already existed.
+
+**Rejected: converting the Ed25519 identity key to X25519** by the birational map. Both dalek and
+`@noble` support it, and it would remove the ephemerals entirely. It also reuses one key across
+two algorithms, defeats the `Role`/`Purpose` domain separation this codebase invests in
+everywhere else, and gives up forward secrecy — a stolen identity key would decrypt every session
+ever recorded. The identity key signs; ephemeral keys agree.
+
+### ChaCha20-Poly1305, not AES-GCM
+
+The deciding argument is not the cipher. **`crypto.subtle` is async**, and the web client decodes
+and applies deltas on the main thread synchronously — by measurement, not by preference (see
+`clients/web/README.md`). AES-GCM through WebCrypto would make the entire browser decode path
+async to gain hardware acceleration the client is not bottlenecked on. `@noble/ciphers`' ChaCha is
+synchronous.
+
+### The seal switch is positional
+
+The `Challenge` is the last plaintext frame in each direction; the client's `Auth` is the first
+sealed one. Not a table of which message types are encrypted — that is a table two independent
+implementations can disagree about, and the disagreement is invisible until a frame fails to
+open. A position is not.
+
+This has a pleasant consequence: the set of refusals that can be sent in plaintext is exactly "the
+host never sent a `Challenge`", which needs no enumerating. And it means a sealed `Auth` that opens
+is implicit key confirmation client→host, with the sealed `Welcome` confirming the other way.
+
+The host therefore derives its key *before* it can read the signature that decides whether to
+serve. That is not trust granted early: opening the `Auth` proves only that whoever completed the
+DH also sent it, and the trust store still decides who gets a shell.
+
+### Loopback is sealed too, and it cost 2µs
+
+ADR-007 rejected two session paths because the local one is exercised daily and the remote one is
+the one that breaks. The same argument applies here: an encrypted path that is skipped on the
+transport every developer uses is an encrypted path nobody exercises.
+
+Measured rather than assumed — `attach --ping 500`, six runs each, one machine, back to back:
+**p50 ≈17µs plaintext, ≈19µs sealed.** Two ChaCha operations per round trip on frames small enough
+that per-record setup dominates. Against a 10ms keystroke budget.
+
+### The golden is the artifact that makes two implementations possible
+
+`crates/zest-proto/fixtures/handshake.json` carries fixed seeds, the transcript bytes, their hash,
+both directional keys, and sealed records with plaintexts and counters — including two straddling
+the ratchet at 2²⁴. Every other fixture pins encoding; this one pins the *key schedule*.
+
+The reason it carries intermediates rather than just sealed records: two implementations can agree
+on every transcript field, produce signatures each other verifies, and still derive different
+keys. It presents identically every time — the handshake completes and the first frame does not
+open — whether the cause was field order, the hash input, an HKDF info string, or a swapped
+direction. A golden that only proves the last step names none of them.
+
+It earned this the first time it was used. A throwaway verifier written against it took full HKDF
+where the ratchet needs Expand alone — a branch 16 million records away, so it would have shipped
+and been reported as "it dies after a few hours".
+
+### The ratchet is deterministic and unannounced
+
+At 2²⁴ records the counter resets, the epoch increments, and the key ratchets. **No message on the
+wire.** Both sides count the same records in the same order, so both turn at the same point; a
+rekey message would be one more thing two implementations could disagree about, at exactly the
+moment a disagreement is undetectable.
+
+### What this supersedes
+
+- `zest-mesh/src/pairing.rs` said the handshake was "entity authentication, not a secure channel"
+  and that "M5's Noise IK closes it". Both were true and are not any more; the module doc now
+  describes the channel.
+- `zest-daemon/src/ws.rs` deferred TLS on the grounds that the internet path would be a Cloudflare
+  Tunnel terminating TLS at the edge. That path is now a relay that is not trusted to terminate
+  anything, and LAN `ws://` is no longer unencrypted at the protocol layer.
+
+**TLS is still not here, and is still wanted.** E2E hides the payload; it does not hide that a
+connection exists, to whom, or how large its frames are. The relay needs `wss://` for the browser
+regardless, and the daemon will need a TLS client to dial it — see the roadmap's M5/M6 rows.

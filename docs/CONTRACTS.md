@@ -26,9 +26,12 @@ paragraph of justification attached.
 |---|---|---|---|
 | `PtyTransport` | `zest-pty/src/lib.rs` | **frozen** — `hangup` added, see below | WS-C, WS-D, WS-F |
 | `HostId`, `ClientId`, `SessionId`, `SessionAddr` | `zest-proto/src/ids.rs` | **frozen** | WS-F, WS-G, WS-H |
-| `ClientMessage`, `HostMessage`, `SessionInfo` | `zest-proto/src/lib.rs` | **frozen** at v2 — see below | WS-F, WS-G |
-| `Delta`, `DeltaOp`, `Run`, `RowPayload`, `AttrDef` | `zest-proto/src/delta.rs` | **frozen** at v2 — see below | WS-F, WS-G |
-| `Nonce32`, `Sig64`, `AuthFailure` | `zest-proto/src/auth.rs` | **frozen** — arrived with v2 | WS-F, WS-G, WS-H |
+| `ClientMessage`, `HostMessage`, `SessionInfo` | `zest-proto/src/lib.rs` | **frozen** at v3 — see below | WS-F, WS-G |
+| `Delta`, `DeltaOp`, `Run`, `RowPayload`, `AttrDef` | `zest-proto/src/delta.rs` | **frozen** at v3 — unchanged in content, but the frame carrying it is now ciphertext | WS-F, WS-G |
+| `Nonce32`, `Sig64`, `Pub32`, `AuthFailure` | `zest-proto/src/auth.rs` | **frozen** — `Nonce32`/`Sig64` arrived with v2, `Pub32` with v3 | WS-F, WS-G, WS-H |
+| `SecureChannel`, `Sealer`, `Opener`, `EphemeralDh`, `DhPublic` | `zest-mesh/src/secure.rs` | **frozen** at v3 — the browser has a second implementation, pinned to `fixtures/handshake.json` | WS-F, WS-G, WS-H |
+| `ClientHandshake`, `Challenge`, `Transcript`, `auth_transcript` | `zest-mesh/src/pairing.rs` | **frozen** at v3 — the transcript layout is signed bytes; a golden pins it | WS-F, WS-G, WS-H |
+| `DaemonClient` | `zest-daemon/src/client.rs` | draft — moved down from `zest-app` at v3, see below | WS-A, WS-F |
 | `Block`, `BlockIndex`, `BlockState` | `zest-core/src/blocks.rs` | **frozen** — gained `upsert`/`reanchor`, then `started_ms`/`ended_ms` + a caller clock, see below | WS-E, WS-F, WS-G |
 | `BlockPayload`, `BlockState` (wire) | `zest-proto/src/delta.rs` | **frozen** — arrived beside `Delta`; gained additive `started_ms`/`ended_ms`, see below | WS-E, WS-F, WS-G |
 | `ChangeSource`, `Update`, `update_for` | `zest-core/src/subscribe.rs` | **frozen** — `release_before` removed, see below | WS-F |
@@ -222,6 +225,39 @@ The whole consumer set at the time was `zest-daemon`, its tests and its `attach`
 files. Once a web or phone client ships, the same change is a release across three codebases gated
 on an app-store cycle. That asymmetry is the argument for doing it now rather than later, and for
 doing it *once*.
+
+### Done once, deliberately: protocol 3
+
+One change a peer cannot ignore, and this time it is not a field but the *meaning of the bytes*.
+Since v3 everything after the `Challenge` is sealed with ChaCha20-Poly1305 (ADR-008). A v2 peer
+hands ciphertext to `rmp_serde` and reports "message was not understood" — the wrong-layer
+diagnosis that `Hello.nonce`'s `#[serde(default)]` exists to prevent — so there was no serde
+attribute that could express it. No attribute can express "the bytes are now opaque".
+
+Three things moved together, because a half-updated one of them is worse than any of them:
+
+- **`Hello.dh` and `Challenge.dh`**, two `Pub32`s. `#[serde(default)]` on both, which is *not* an
+  attempt at compatibility — the version check refuses a v2 peer regardless. It is so the peer
+  reaches that check with a decodable message and hears "protocol 2 is not compatible with 3"
+  instead of a parse error naming nothing.
+- **The transcript layout**, which gained both DH keys and became fallible. It refuses an
+  unencodable label rather than truncating at 65535 bytes: two labels sharing that prefix used to
+  sign identical bytes, so a signature over one was valid for the other, and a label is
+  attacker-influenced and is the entire text of the approval prompt. (#43.)
+- **`frame::encode` split** into `encode_body` and `frame_bytes`, so a sealer has somewhere to
+  stand. The `u32` LE prefix now describes the *ciphertext*, which is 16 bytes longer than the
+  plaintext — so the size bound moved to the sealer. A bound left on the plaintext passes every
+  small test and fails only on a maximal keyframe, which is to say only on very large grids.
+
+**The consumer set was larger than v2's, and one part of it was not a consumer at all.** Nine
+places inside `zest-daemon` hand-rolled the client half of the handshake — its tests, its `attach`
+and `pair` examples, its loopback test. That was survivable while a wrong peer failed loudly at
+the signature; it stopped being survivable when the same steps derive the key everything
+afterwards is encrypted under. So `DaemonClient` moved down from `zest-app` into `zest-daemon` and
+all nine now use it. One implementation, exercised by the app *and* by every diagnostic.
+
+`fixtures/handshake.json` is new and is the reason a second implementation is possible at all —
+see ADR-008.
 
 ### Added once, deliberately: `PtyTransport::hangup`
 

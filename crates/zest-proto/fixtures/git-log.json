@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "protocol": 2,
+  "protocol": 3,
   "recording": "git-log",
   "source": "vtrec",
   "cols": 100,

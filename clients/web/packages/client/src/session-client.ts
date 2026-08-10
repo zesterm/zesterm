@@ -20,7 +20,8 @@
  */
 
 import {
-  encodeClientMessage,
+  encodeClientMessageBody,
+  encodeFrame,
   FrameReader,
   GridView,
   decode,
@@ -274,7 +275,28 @@ export class SessionClient {
     }
   }
 
-  #onMessage(body: Uint8Array): void {
+  #onMessage(sealed: Uint8Array): void {
+    // Opened here rather than in `#onBytes`, and the difference is load-bearing:
+    // a frame arriving while a signature is pending is stalled, and at *that*
+    // moment the channel does not exist yet -- it comes into being when the
+    // challenge is answered. `#stalled` is a FIFO drained in order, so opening
+    // at processing time still counts records in arrival order, which is what
+    // the nonce schedule requires.
+    //
+    // A frame that will not open ends the connection rather than being skipped:
+    // the counter has already advanced, so there is no position to resume from,
+    // and reading on would decrypt every later frame under the wrong nonce.
+    let body = sealed;
+    const channel = this.#handshake?.channel;
+    if (channel) {
+      try {
+        body = channel.open(sealed);
+      } catch (e) {
+        this.#events.onError?.(`a sealed frame did not open: ${String(e)}`);
+        this.#link?.close();
+        return;
+      }
+    }
     const msg = parseHostMessage(decode(body));
     const handshake = this.#handshake;
 
@@ -431,7 +453,13 @@ export class SessionClient {
   }
 
   #send(msg: ClientMessage): void {
-    this.#link?.send(encodeClientMessage(msg));
+    const body = encodeClientMessageBody(msg);
+    // The positional switch: the channel exists from the moment the challenge
+    // is answered, and the `auth` that answers it is itself the first sealed
+    // frame. `hello` goes out before there is a channel at all, so it is
+    // plaintext without needing to be named as an exception.
+    const channel = this.#handshake?.channel;
+    this.#link?.send(encodeFrame(channel ? channel.seal(body) : body));
   }
 
   #emitConnection(state: ConnectionState): void {

@@ -22,10 +22,11 @@ const SESSION = { host: HOST, session: 7n };
 const CANONICAL: Record<string, ClientMessage> = {
   hello: {
     t: 'hello',
-    version: 2,
+    version: 3,
     client: 'ab'.repeat(32),
     label: 'golden',
     nonce: '5c'.repeat(32),
+    dh: '2d'.repeat(32),
     watch_sessions: true,
   },
   auth: { t: 'auth', signature: 'ef'.repeat(64) },
@@ -55,7 +56,7 @@ test('every client message variant has a golden, and every golden a construction
 
 test('the TypeScript encoder produces the exact bytes rmp_serde wrote', () => {
   const golden = loadClientMessages();
-  assert.equal(golden.protocol, 2, 'the goldens were written for a different protocol');
+  assert.equal(golden.protocol, 3, 'the goldens were written for a different protocol');
 
   for (const entry of golden.messages) {
     const msg = CANONICAL[entry.name];

@@ -17,6 +17,7 @@ import {
   type ClientIdentity,
   type ClientSigner,
 } from '@zesterm/auth';
+import { ephemeralFromSeed, type SecureChannel } from '@zesterm/auth/secure';
 import {
   decode,
   encode,
@@ -25,6 +26,7 @@ import {
   bytesToHex,
   hexToBytes,
 } from '@zesterm/proto';
+import { PROTOCOL_VERSION } from '../src/index.ts';
 import type { ByteLink, ByteLinkHandlers, Clock, TimerHandle } from '../src/index.ts';
 
 ed.hashes.sha512 = sha512;
@@ -82,6 +84,17 @@ export class FakeLink implements ByteLink {
   closed = false;
   #handlers: ByteLinkHandlers;
   #frames = new FrameReader();
+  /**
+   * The host's half of this connection's channel, once there is one.
+   *
+   * The fake daemon plays the seal switch exactly as the real one does, and
+   * that is the point: a harness that stayed in plaintext would let the client
+   * seal nothing, seal the wrong things, or seal in the wrong order, and every
+   * test here would still pass.
+   */
+  channel: SecureChannel | null = null;
+  /** Outgoing seals only once the challenge itself has gone out. */
+  #sealOut = false;
 
   constructor(handlers: ByteLinkHandlers) {
     this.#handlers = handlers;
@@ -96,7 +109,10 @@ export class FakeLink implements ByteLink {
     for (;;) {
       const body = this.#frames.next();
       if (body === undefined) return;
-      this.sent.push(decode(body) as Record<string, unknown>);
+      // Incoming is sealed from the client's `auth` onwards, which is to say
+      // from the moment this fake issued a challenge.
+      const plain = this.channel ? this.channel.open(body) : body;
+      this.sent.push(decode(plain) as Record<string, unknown>);
     }
   }
 
@@ -106,9 +122,15 @@ export class FakeLink implements ByteLink {
     this.#handlers.onClose();
   }
 
-  /** Deliver one host message, framed and encoded like the daemon would. */
+  /** Deliver one host message, framed, sealed and encoded like the daemon would. */
   deliver(wireShape: Record<string, unknown>): void {
-    this.#handlers.onMessage(encodeFrame(encode(wireShape)));
+    const body = encode(wireShape);
+    const out = this.#sealOut && this.channel ? this.channel.seal(body) : body;
+    this.#handlers.onMessage(encodeFrame(out));
+    // The challenge carries the host's DH key, so it is the last plaintext
+    // frame out. Flipped *after* sending, or it would be sealed under a key
+    // the client cannot have yet.
+    if (wireShape['t'] === 'challenge') this.#sealOut = true;
   }
 
   /** Messages of one tag, for targeted assertions. */
@@ -122,6 +144,8 @@ export class FakeLink implements ByteLink {
 }
 
 export const HOST_SEED = '7a'.repeat(32);
+/** The fake host's ephemeral, fixed so a failing test reproduces. */
+export const HOST_DH_SEED = '3c'.repeat(32);
 
 /**
  * The daemon side: hands out links, answers hellos with a real signed
@@ -179,6 +203,8 @@ export class FakeDaemon {
   challengeFor(link: FakeLink): Record<string, unknown> {
     const hello = link.lastOfType('hello');
     if (!hello) throw new Error('the client did not say hello');
+    // A fixed seed, so a failing test is reproducible. Real hosts generate.
+    const ephemeral = ephemeralFromSeed(hexToBytes(HOST_DH_SEED));
     const transcript = {
       version: hello['version'] as number,
       host: this.host.clientId,
@@ -187,20 +213,27 @@ export class FakeDaemon {
       clientNonce: hello['nonce'] as string,
       hostLabel: 'fake-daemon',
       clientLabel: hello['label'] as string,
+      hostDh: ephemeral.publicKey,
+      clientDh: hello['dh'] as string,
     };
     const bytes = authTranscript(transcript);
+    // Armed now, not on delivery: the client's `auth` is sealed and arrives
+    // before anything else is sent, so the receiving half has to be ready the
+    // moment the challenge is built.
+    link.channel = ephemeral.agree(hello['dh'] as string, transcript, 'host');
     return {
       t: 'challenge',
-      version: 2,
+      version: PROTOCOL_VERSION,
       host: this.host.clientId,
       label: 'fake-daemon',
       nonce: this.hostNonce,
+      dh: ephemeral.publicKey,
       signature: bytesToHex(ed.sign(preimage('host', 'auth', bytes), hexToBytes(HOST_SEED))),
     };
   }
 
   get welcome(): Record<string, unknown> {
-    return { t: 'welcome', version: 2, host: this.host.clientId, label: 'fake-daemon' };
+    return { t: 'welcome', version: PROTOCOL_VERSION, host: this.host.clientId, label: 'fake-daemon' };
   }
 }
 
