@@ -20,6 +20,22 @@
 use crate::identity::{Purpose, Role, Signature, verify_host};
 use zest_proto::HostId;
 
+/// Why a preimage could not be built.
+///
+/// Fallible on purpose. The alternative — clamping an oversize field to
+/// `u16::MAX` and truncating, which is what the older `auth_transcript` does —
+/// destroys the property this signature exists for: two labels sharing their
+/// first 65535 bytes would produce identical signed bytes, so a signature over
+/// one would be a valid signature over the other. The label is attacker-chosen,
+/// so "nobody would do that" is not an argument available here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum EnrollError {
+    #[error("enrolment code is longer than 65535 bytes")]
+    CodeTooLong,
+    #[error("device label is longer than 65535 bytes")]
+    LabelTooLong,
+}
+
 /// The domain this preimage lives in.
 ///
 /// Separate from [`Purpose::Enrollment`]'s place in the signing prefix rather
@@ -36,20 +52,18 @@ const ENROLL_DOMAIN: &[u8] = b"zesterm-enroll-v1";
 /// strings. Without prefixes, `code="ab", label="cd"` and `code="abc",
 /// label="d"` would produce identical bytes — so a signature over one would be
 /// a valid signature over the other, and a label is attacker-chosen.
-#[must_use]
-pub fn enrollment_request(code: &str, host: HostId, label: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(ENROLL_DOMAIN.len() + 4 + 32 + code.len() + label.len() + 4);
-    out.extend_from_slice(ENROLL_DOMAIN);
-    push_len_prefixed(&mut out, code.as_bytes());
-    out.extend_from_slice(&host.0);
-    push_len_prefixed(&mut out, label.as_bytes());
-    out
-}
+pub fn enrollment_request(code: &str, host: HostId, label: &str) -> Result<Vec<u8>, EnrollError> {
+    let code_len = u16::try_from(code.len()).map_err(|_| EnrollError::CodeTooLong)?;
+    let label_len = u16::try_from(label.len()).map_err(|_| EnrollError::LabelTooLong)?;
 
-fn push_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) {
-    let len = u16::try_from(bytes.len()).unwrap_or(u16::MAX);
-    out.extend_from_slice(&len.to_be_bytes());
-    out.extend_from_slice(&bytes[..len as usize]);
+    let mut out = Vec::with_capacity(ENROLL_DOMAIN.len() + 4 + 32 + code.len() + label.len());
+    out.extend_from_slice(ENROLL_DOMAIN);
+    out.extend_from_slice(&code_len.to_be_bytes());
+    out.extend_from_slice(code.as_bytes());
+    out.extend_from_slice(&host.0);
+    out.extend_from_slice(&label_len.to_be_bytes());
+    out.extend_from_slice(label.as_bytes());
+    Ok(out)
 }
 
 /// Whether this machine really holds the key it is enrolling.
@@ -60,7 +74,10 @@ fn push_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) {
 /// not mixed in here where a missing check would look like a passing one.
 #[must_use]
 pub fn verify_enrollment(code: &str, host: HostId, label: &str, sig: &Signature) -> bool {
-    verify_host(host, Purpose::Enrollment, &enrollment_request(code, host, label), sig).is_ok()
+    // A field too long to encode is refused rather than truncated-then-checked:
+    // there is no signature that can be correct over bytes we decline to build.
+    let Ok(message) = enrollment_request(code, host, label) else { return false };
+    verify_host(host, Purpose::Enrollment, &message, sig).is_ok()
 }
 
 /// The role this preimage is signed under, for callers building the signature.
@@ -83,7 +100,7 @@ mod tests {
     #[test]
     fn a_machine_that_holds_the_key_is_accepted() {
         let host = identity();
-        let sig = host.sign(Purpose::Enrollment, &enrollment_request("ABCD1234", host.host_id(), "andy-mac"));
+        let sig = host.sign(Purpose::Enrollment, &enrollment_request("ABCD1234", host.host_id(), "andy-mac").expect("fits"));
         assert!(
             verify_enrollment("ABCD1234", host.host_id(), "andy-mac", &sig),
             "the holder of the key must be able to enrol it"
@@ -93,7 +110,7 @@ mod tests {
     #[test]
     fn changing_any_signed_field_invalidates_it() {
         let host = identity();
-        let sig = host.sign(Purpose::Enrollment, &enrollment_request("ABCD1234", host.host_id(), "andy-mac"));
+        let sig = host.sign(Purpose::Enrollment, &enrollment_request("ABCD1234", host.host_id(), "andy-mac").expect("fits"));
 
         assert!(!verify_enrollment("WRONG123", host.host_id(), "andy-mac", &sig), "a different code");
         assert!(!verify_enrollment("ABCD1234", host.host_id(), "someone-else", &sig), "a different label");
@@ -112,8 +129,8 @@ mod tests {
         // never given.
         let host = identity();
         assert_ne!(
-            enrollment_request("ab", host.host_id(), "cd"),
-            enrollment_request("abc", host.host_id(), "d"),
+            enrollment_request("ab", host.host_id(), "cd").expect("fits"),
+            enrollment_request("abc", host.host_id(), "d").expect("fits"),
             "field boundaries must be unambiguous"
         );
     }
@@ -124,12 +141,37 @@ mod tests {
         // one flow cannot be replayed into the other. Without this a stolen
         // enrolment signature would be a login.
         let host = identity();
-        let message = enrollment_request("ABCD1234", host.host_id(), "andy-mac");
+        let message = enrollment_request("ABCD1234", host.host_id(), "andy-mac").expect("fits");
         let auth_sig = host.sign(Purpose::Auth, &message);
         assert!(
             !verify_enrollment("ABCD1234", host.host_id(), "andy-mac", &auth_sig),
             "a signature made for Auth must not verify as Enrollment"
         );
+    }
+
+    #[test]
+    fn an_unencodable_field_is_refused_rather_than_truncated() {
+        // The bug this replaced: clamping to u16::MAX and slicing meant two
+        // labels sharing their first 65535 bytes produced identical signed
+        // bytes, so a signature over one verified the other. The label is
+        // attacker-chosen, so that is a machine enrolling under a name it was
+        // never granted.
+        let host = HostId::from_bytes([0x11; 32]);
+        let huge = "x".repeat(usize::from(u16::MAX) + 1);
+
+        assert_eq!(
+            enrollment_request("ABCD1234", host, &huge),
+            Err(EnrollError::LabelTooLong),
+        );
+        assert_eq!(
+            enrollment_request(&huge, host, "andy-mac"),
+            Err(EnrollError::CodeTooLong),
+        );
+
+        // Exactly at the boundary still encodes, so the limit is the encoding's
+        // and not an arbitrary one.
+        let max = "x".repeat(u16::MAX.into());
+        assert!(enrollment_request("ABCD1234", host, &max).is_ok());
     }
 
     #[test]
@@ -140,7 +182,7 @@ mod tests {
         // already enrolled, and the failure is a signature mismatch that names
         // nothing.
         let host = HostId::from_bytes([0x11; 32]);
-        let bytes = enrollment_request("ABCD1234", host, "andy-mac");
+        let bytes = enrollment_request("ABCD1234", host, "andy-mac").expect("fits");
         let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(
             hex,

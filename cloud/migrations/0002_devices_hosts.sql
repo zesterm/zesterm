@@ -14,7 +14,21 @@ PRAGMA foreign_keys = ON;
 
 -- A machine running a daemon.
 CREATE TABLE hosts (
-  id           TEXT    PRIMARY KEY,        -- HostId: 64 hex, the Ed25519 public key
+  -- HostId: 64 hex, the Ed25519 public key. The CHECK is not decoration -- the
+  -- comment above is a claim, and a claim the database does not enforce is one
+  -- that eventually stops being true. A malformed id would otherwise surface
+  -- much later as a signature that never verifies, which points at the crypto
+  -- rather than at whatever wrote the row.
+  --
+  -- LOWERCASE ONLY, and callers must normalise. This is deliberate and it is
+  -- asymmetric with the wire: `zest_proto::hex` *encodes* lowercase, but its
+  -- decoder uses `to_digit(16)`, which accepts both cases -- so an uppercase id
+  -- is a valid protocol value that this table will refuse. Accepting both here
+  -- would be worse: the same key in two casings would be two primary keys, so
+  -- one machine would appear twice and revoking one would not revoke the other.
+  -- Normalise on the way in.
+  id           TEXT    PRIMARY KEY
+                       CHECK (length(id) = 64 AND id NOT GLOB '*[^0-9a-f]*'),
   user_id      TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   label        TEXT    NOT NULL,           -- what a person calls it; the only mutable identity
   platform     TEXT    NOT NULL DEFAULT '',
@@ -34,10 +48,12 @@ CREATE INDEX hosts_user ON hosts(user_id) WHERE revoked_at IS NULL;
 
 -- A browser, phone or desktop app that attaches to one.
 CREATE TABLE devices (
-  id           TEXT    PRIMARY KEY,        -- ClientId: 64 hex, the Ed25519 public key
+  -- ClientId: 64 hex, the Ed25519 public key. See `hosts.id`.
+  id           TEXT    PRIMARY KEY
+                       CHECK (length(id) = 64 AND id NOT GLOB '*[^0-9a-f]*'),
   user_id      TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   label        TEXT    NOT NULL,
-  kind         TEXT    NOT NULL,           -- 'browser' | 'phone' | 'desktop'
+  kind         TEXT    NOT NULL CHECK (kind IN ('browser', 'phone', 'desktop')),
   -- 1 while the private key is a localStorage seed any script on the origin
   -- can read; 0 once a non-extractable WebCrypto key backs it. Recorded rather
   -- than assumed so the devices screen can say which, instead of showing a
@@ -59,7 +75,9 @@ CREATE INDEX devices_user ON devices(user_id) WHERE revoked_at IS NULL;
 CREATE TABLE enroll_codes (
   code       TEXT    PRIMARY KEY,          -- short, unambiguous alphabet, single use
   user_id    TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  kind       TEXT    NOT NULL,             -- 'host' | 'device'
+  -- Decides which table a claim writes into, so an unexpected value here is a
+  -- row in neither or a branch nobody wrote.
+  kind       TEXT    NOT NULL CHECK (kind IN ('host', 'device')),
   created_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL,
   -- Set the moment it is spent. Checked rather than deleted, so a replay is
