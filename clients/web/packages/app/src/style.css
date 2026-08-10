@@ -398,3 +398,56 @@ body {
   display: flex;
   flex-direction: column;
 }
+
+/* The fleet screen: machines, and the keys that can reach them. */
+.fleet {
+  padding: 20px 24px;
+  max-width: 72ch;
+}
+
+.fleet section + section {
+  margin-top: 28px;
+}
+
+.fleet h2 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--zt-dim);
+}
+
+.rows {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--zt-line);
+  border-radius: 8px;
+  background: var(--zt-panel);
+}
+
+.row + .row {
+  margin-top: 6px;
+}
+
+.row-name {
+  font-weight: 600;
+}
+
+.row-meta {
+  flex: 1;
+  color: var(--zt-dim);
+  font-size: 12px;
+}
+
+.warn {
+  color: var(--zt-warn);
+}

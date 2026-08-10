@@ -1132,6 +1132,22 @@ is now unblocked and building.
       is `zip215: false`, matching dalek's `verify_strict`: noble's default
       accepts small-order keys, which verify almost anything.
       Still open: the daemon's `--enroll`, and the devices screen.
+- [x] **The fleet screen reads the account** — `GET /api/hosts` and
+      `/api/devices`, with revoke on both.
+      The plan called for a separate `/settings/devices`; that was wrong and
+      the duplication is why. A devices screen listing machines would shadow
+      the fleet screen, which already exists. But `hosts` and `devices` are not
+      the same set: a browser holds a key that can attach to every machine you
+      own and will *never* appear in a fleet listing, because it serves no
+      sessions. So machines fold into the fleet view, and browsers and phones
+      get the section they had nowhere else to be — which is where a stolen
+      laptop's key is revoked.
+      **Enrolment is the spine, discovery decorates it.** The account's list is
+      durable and survives a machine being asleep; presence attaches once there
+      is a relay to learn it from. Until then `last seen` is the only honest
+      thing to show. A seed-backed key is named as such on screen — a browser
+      on the fallback path is working, not secure, and a row that looks like
+      every other row is a comfortable lie about the one that matters.
 - [ ] Local echo prediction for high-latency links (mosh's other trick): predict
       printable-char echo when not in alt-screen, render dim, reconcile on delta
       arrival. The largest perceived-latency win available.
