@@ -57,6 +57,21 @@ pub struct CommandSpec {
     pub env: Vec<(String, String)>,
 }
 
+/// Whether a command line already tells the shell what to run.
+///
+/// PowerShell's `-Command` consumes everything after it, so appending ours to a
+/// line that has one produces either a swallowed hook or a swallowed command.
+/// Matched as whole arguments, case-insensitively: `-c` is a prefix of
+/// `-Confirm`, and `pwsh -NoLogo` must not look like `-NoExit -Command`.
+fn has_command_argument(command_line: &str) -> bool {
+    command_line.split_whitespace().any(|word| {
+        matches!(
+            word.trim_start_matches('/').to_ascii_lowercase().as_str(),
+            "-c" | "-command" | "-f" | "-file" | "-ec" | "-e" | "-encodedcommand"
+        )
+    })
+}
+
 impl CommandSpec {
     /// A sensible default shell for the platform.
     #[must_use]
@@ -96,8 +111,24 @@ impl CommandSpec {
             return;
         };
         match shell_integration::install(shell, dir) {
-            Ok(env) => {
-                self.env.extend(env);
+            Ok(injection) => {
+                self.env.extend(injection.env);
+                if let Some(args) = injection.args {
+                    // PowerShell has no environment seam, so the hook rides the
+                    // command line. Skipped when the user already put a
+                    // `-Command`/`-File` there: `-Command` swallows the rest of
+                    // the line, so ours would either be eaten or eat theirs,
+                    // and theirs is the one that was asked for.
+                    if has_command_argument(&self.command_line) {
+                        tracing::debug!(
+                            command = %self.command_line,
+                            "shell already has its own -Command/-File; not injecting blocks"
+                        );
+                    } else {
+                        self.command_line.push(' ');
+                        self.command_line.push_str(&args);
+                    }
+                }
                 tracing::debug!(shell = shell.name(), "shell integration injected");
             }
             Err(e) => {

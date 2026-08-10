@@ -748,12 +748,53 @@ and the palette's block rows are specified in
       the documented path for ssh, tmux and subshells, which injection
       structurally cannot reach. `zest-daemon --no-shell-integration` turns it
       off.
-- [ ] **bash, fish and PowerShell.** Deliberately not written yet: none can be
-      *seen working* on the machine this is built on. There is no fish and no
-      pwsh here, and `/bin/bash` is 3.2.57 — Apple's patched build, where the
-      `ENV` startup path injection depends on is disabled, and which Ghostty
-      excludes on Darwin outright for that reason. Writing them blind is how the
-      attach path nearly shipped compiled and unseen.
+- [x] **PowerShell.** Written on a Windows box, where it *can* be seen working —
+      which was the whole of the objection. Until now command blocks were the
+      headline feature of M2 and inert on the platform the project calls
+      primary: the default shell there is `pwsh`, nothing emitted OSC 133, and
+      the status bar read `0 blocks` forever.
+      **The injection differs from zsh's, because PowerShell has no seam that
+      looks like `ZDOTDIR`.** `$PROFILE` is four fixed paths no environment
+      redirects and `PSModulePath` affects module *resolution*, never startup,
+      so the hook rides the command line: `-NoExit -Command "try { . '<path>' }
+      catch { }"`. `install` therefore returns an `Injection { env, args }`
+      rather than a bare env list. The property that made injection safe to do
+      without asking is unchanged — no file of the user's is read for
+      modification, written, or appended to.
+      The `try/catch` is not defensive noise: dot-sourcing a `.ps1` obeys
+      execution policy, and a machine under an `AllSigned` group policy would
+      otherwise greet every single shell with a red error. `-ExecutionPolicy
+      Bypass` was the obvious alternative and is worse twice over — it is
+      *ignored* when the policy comes from machine scope, which is the only case
+      that matters, and a terminal spawning shells with it looks exactly like
+      something an EDR should quarantine.
+      **PSReadLine is required, and the hook refuses without it.**
+      `PSConsoleHostReadLine` is PowerShell's only preexec, so without it there
+      is no `C` marker — and A/B/D without C is blocks that start and never
+      finish, which renders worse than none. `prompt` is the `precmd` and the
+      only place `A` and `B` can go, exactly as PS1 is in zsh. `$?` is captured
+      as the first statement of `prompt` because *reading* it is itself a
+      statement, the same hazard as `local ret=$?`.
+      Two Windows specifics: cwd goes over **OSC 633;P**, not OSC 7, because
+      `file://HOST/C:/x` parses back to `/C:/x` in most consumers and a drive
+      letter behind a slash is not a path anything can spawn into; and the
+      command text comes from **OSC 633;E**, which the parser already prefers
+      over reading it back off the grid. Detection had to learn one level of
+      quoting first — `default_shell` builds `"C:\Program Files\...\pwsh.exe"`,
+      and splitting that on whitespace yields `"C:\Program`.
+      `cmd.exe` is still refused, deliberately: `PROMPT` can carry `A` and `B`
+      but there is no preexec, so `C` and `D` are unreachable and every block
+      would stay Running forever.
+      Verified at the machine: `echo` and a failing `Get-Item` render as two
+      blocks with rails, fold chevrons, durations, a native `C:\Dev\zesterm`
+      cwd, and `exit 0` / `exit 1` — a real status from a failing cmdlet, not
+      the flattened `1` that `[int]!$?` would have given.
+- [ ] **bash and fish.** Still not written, and still for the original reason:
+      neither can be *seen working* here. `/bin/bash` on the Mac is 3.2.57 —
+      Apple's patched build, where the `ENV` startup path injection depends on
+      is disabled, and which Ghostty excludes on Darwin outright for that
+      reason. Writing them blind is how the attach path nearly shipped compiled
+      and unseen.
 - [ ] **A settings key for shell integration.** Today it is a daemon flag, which
       is not where anyone will look. The shell runs on the *host*, so the host
       decides — but `zest-daemon` has no settings reader, since it does not

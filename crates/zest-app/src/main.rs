@@ -235,7 +235,7 @@ fn main() {
                     None => {
                         eprintln!(
                             "no shell integration for {name:?}.\n\
-                             zsh is supported; bash, fish and PowerShell are not yet — \
+                             zsh and PowerShell are supported; bash and fish are not yet — \
                              see docs/ROADMAP.md, WS-E."
                         );
                         std::process::exit(2);
