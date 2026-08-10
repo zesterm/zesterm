@@ -39,8 +39,10 @@ move.
    │  PTYs, grid, scrollback, command blocks      │
    └──────────────────────────────────────────────┘
 
-   Cloudflare holds a *directory*: which hosts exist, are they up, how to
-   reach them. No grid, no scrollback, no session state — ever.
+   Cloudflare holds a *directory*: which hosts are yours, and are they up.
+   Not how to reach them — under dial-back there is no address to hold, and
+   the LAN finds its own over mDNS. No grid, no scrollback, no session
+   state — ever.
 
    On the away path it also carries the bytes, and carries them blind: the
    relay is a pipe both ends dial out to, and everything after the Challenge

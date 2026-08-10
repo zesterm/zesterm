@@ -418,9 +418,9 @@ because a Durable Object cannot be evicted while a `fetch` is in flight. It is l
 nowhere else, and it looks exactly like the bug, so it carries a comment saying why.
 
 **And never write storage on the data path.** Keepalive is
-`setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping','pong'))`, which answers without
-waking the object at all — the difference between an idle host costing nothing and costing a
-request every thirty seconds forever.
+`ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping','pong'))`, which answers
+without waking the object at all — the difference between an idle host costing nothing and costing
+a request every thirty seconds forever.
 
 ### The arithmetic, corrected
 
