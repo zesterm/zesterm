@@ -16,6 +16,7 @@ import {
   type SessionEntry,
 } from '@zesterm/control';
 
+import { dataPlaneUrl } from '../data-plane-url.ts';
 import { describeDeviceKey, type DeviceKeyKind } from '../device-key.ts';
 
 export interface OpenTarget {
@@ -38,8 +39,7 @@ export const SessionList = component<{
   const directory = useActorState(SessionDirectory, LOCAL_DIRECTORY_KEY, 'list', { live: true });
   const creating = signal({ busy: false });
 
-  const urlOf = (view: DirectoryView): string | null =>
-    view.dataPlane === null ? null : `ws://${view.dataPlane.host}:${view.dataPlane.port}`;
+  const urlOf = (view: DirectoryView): string | null => dataPlaneUrl(view.dataPlane);
 
   const create = (view: DirectoryView): void => {
     const url = urlOf(view);

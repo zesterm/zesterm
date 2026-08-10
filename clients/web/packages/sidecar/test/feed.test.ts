@@ -132,7 +132,7 @@ test('a daemon push lands in the directory, projected to plain JSON', async () =
   const stop = startFeed({
     host,
     dial: daemon.dial,
-    dataPlane: { host: '127.0.0.1', port: 7718 },
+    dataPlane: { kind: 'ws', host: '127.0.0.1', port: 7718 },
   });
 
   try {
@@ -147,7 +147,11 @@ test('a daemon push lands in the directory, projected to plain JSON', async () =
 
     const view = await host.actor(SessionDirectory, LOCAL_DIRECTORY_KEY).list();
     assert.equal(view.connected, true);
-    assert.equal(view.dataPlane?.port, 7718, 'browsers learn the data plane from the feed');
+    assert.deepEqual(
+      view.dataPlane,
+      { kind: 'ws', host: '127.0.0.1', port: 7718 },
+      'browsers learn the data plane from the feed, discriminant and all',
+    );
     assert.deepEqual(
       view.sessions.map((s) => [s.session, s.title]),
       [

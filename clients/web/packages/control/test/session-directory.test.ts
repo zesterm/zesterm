@@ -40,13 +40,17 @@ test('the feed replaces the list and readers see the daemon truth', async () => 
   const host = await directoryHost();
   try {
     const dir = host.actor(SessionDirectory, LOCAL_DIRECTORY_KEY);
-    await dir.setLink(true, { id: '2e'.repeat(32), label: 'andy-mac' }, { host: '127.0.0.1', port: 7718 });
+    await dir.setLink(true, { id: '2e'.repeat(32), label: 'andy-mac' }, { kind: 'ws', host: '127.0.0.1', port: 7718 });
     await dir.replaceAll([entry('1', 'zsh'), entry('2', 'vim')], null);
 
     const view = await dir.list();
     assert.equal(view.connected, true);
     assert.equal(view.sessions.length, 2);
-    assert.equal(view.dataPlane?.port, 7718, 'the app learns the data plane from the directory');
+    assert.deepEqual(
+      view.dataPlane,
+      { kind: 'ws', host: '127.0.0.1', port: 7718 },
+      'the app learns the data plane from the directory, discriminant and all',
+    );
 
     // The daemon closed one; the push replaces rather than merges — a merge
     // would resurrect it.
@@ -77,14 +81,18 @@ test('a dropped daemon link empties the list rather than serving it stale', asyn
   const host = await directoryHost();
   try {
     const dir = host.actor(SessionDirectory, LOCAL_DIRECTORY_KEY);
-    await dir.setLink(true, { id: '2e'.repeat(32), label: 'andy-mac' }, { host: '127.0.0.1', port: 7718 });
+    await dir.setLink(true, { id: '2e'.repeat(32), label: 'andy-mac' }, { kind: 'ws', host: '127.0.0.1', port: 7718 });
     await dir.replaceAll([entry('1', 'zsh')], null);
 
     await dir.setLink(false, null, null);
     const view = await dir.list();
     assert.equal(view.connected, false);
     assert.equal(view.sessions.length, 0, 'a list nobody can vouch for is not a list');
-    assert.equal(view.dataPlane?.port, 7718, 'the last known data plane survives for the banner UI');
+    assert.deepEqual(
+      view.dataPlane,
+      { kind: 'ws', host: '127.0.0.1', port: 7718 },
+      'the last known data plane survives for the banner UI',
+    );
   } finally {
     await host.stop();
   }
