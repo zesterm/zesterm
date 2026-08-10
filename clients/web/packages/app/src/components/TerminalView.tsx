@@ -176,6 +176,26 @@ export const TerminalView = component<{
     client.input(bytes);
   };
 
+  /**
+   * A key coming back up.
+   *
+   * Silent for every program that has not turned on kitty event types, which is
+   * almost all of them: the encoder returns null and nothing is written. Bound
+   * unconditionally anyway, because the flags are the host's to change at any
+   * moment and a listener attached only on demand would miss the first release
+   * after a program asked.
+   */
+  const onKeyUp = (e: KeyboardEvent): void => {
+    if (!client) return;
+    if (e.isComposing) return;
+    const mods = modsOf(e);
+    if (belongsToBrowser(e, mods, platform)) return;
+    const bytes = encodeKey(e, mods, client.grid.modes);
+    if (bytes === null) return;
+    e.preventDefault();
+    client.input(bytes);
+  };
+
   const clearInput = (): void => {
     if (inputEl) inputEl.value = '';
   };
@@ -277,6 +297,7 @@ export const TerminalView = component<{
           autocapitalize="off"
           spellCheck={false}
           onKeyDown={onKeyDown}
+          onKeyUp={onKeyUp}
           onCompositionEnd={onCompositionEnd}
           onInput={onInput}
           onPaste={onPaste}

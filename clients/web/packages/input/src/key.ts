@@ -30,17 +30,35 @@
  *   DOM and falls out of the same default arm.
  */
 
-import { Modes } from '@zesterm/proto';
+import { Modes, kittyFlags } from '@zesterm/proto';
 import type { Mods } from './mods.ts';
 import { belongsToDesktop } from './desktop.ts';
+import { type EventType, encodeKitty } from './kitty.ts';
 
 const UTF8 = new TextEncoder();
+
+/** Which of press, repeat and release a DOM event describes. */
+function eventTypeOf(key: KeyLike): EventType {
+  if (key.type === 'keyup') return 'release';
+  return key.repeat === true ? 'repeat' : 'press';
+}
 
 /** The `key`/`code` pair off a KeyboardEvent, kept structural so tests need no DOM. */
 export interface KeyLike {
   readonly key: string;
   /** Unused today: the Rust encoder works from the logical key only, and so does this port. */
   readonly code: string;
+  /**
+   * The rest is read only under the Kitty keyboard protocol, and is optional so
+   * that a caller with nothing but a key name still type-checks — a real
+   * `KeyboardEvent` satisfies all of it structurally.
+   */
+  /** `'keyup'` rather than `'keydown'`. Absent means a press. */
+  readonly type?: string;
+  /** A key held down and auto-repeating. */
+  readonly repeat?: boolean;
+  /** `KeyboardEvent.location`: which of a paired modifier this is. */
+  readonly location?: number;
 }
 
 /**
@@ -56,6 +74,21 @@ export function encodeKey(key: KeyLike, mods: Mods, modes: number): Uint8Array |
   // and inserts a `v`. `null` leaves the chord to the caller, which is where
   // the clipboard shortcuts live.
   if (belongsToDesktop(mods)) {
+    return null;
+  }
+
+  // The Kitty keyboard protocol, when the program asked for it. A separate path
+  // rather than a tweak to the one below: its disambiguation model is not
+  // expressible as one, and everything under it must stay byte-identical for
+  // the programs that never asked.
+  if (kittyFlags(modes) !== 0) {
+    return encodeKitty(key.key, key.location ?? 0, mods, eventTypeOf(key), modes);
+  }
+
+  // Nothing asked for event types, so a release is not encodable and a repeat
+  // is indistinguishable from a press -- which is what every program not
+  // speaking that protocol expects.
+  if (key.type === 'keyup') {
     return null;
   }
 

@@ -57,7 +57,7 @@ and its number (48ms) is reported rather than gated.
 | `zest-theme` | ✅ tokens, OKLCH derivation, 5 built-ins, 4 importers |
 | `zest-render-wgpu` | ✅ pipelines, atlas, offscreen resolve, selection — ⬜ gamma validation |
 | `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema |
-| `zest-input` | ✅ extracted; keys + SGR mouse + selection + IME + Kitty CSI u (flags 1, 2, 8) — ⬜ Kitty flags 4/16, keypad |
+| `zest-input` | ✅ extracted; keys + SGR mouse + selection + IME + Kitty CSI u (flags 1, 2, 8), Rust and TypeScript — ⬜ Kitty flags 4/16, keypad |
 | `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), restore-on-launch — runs on Windows *and* macOS (Metal, transparent titlebar) — ⬜ Windows chrome, motion |
 | `zest-proto` | ✅ protocol 2, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, cell-for-cell conformance, chaos-resync, command blocks |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store — ⬜ Cloudflare transport (M4) |
@@ -543,6 +543,14 @@ Extraction from `zest-app` collides with WS-A, so it landed early and small.
       only reach an attached client because `sync_kitty_modes` bumps `seq`;
       without that the local window looks perfect and every remote session
       encodes the legacy way at a program that has stopped expecting it.
+      **Ported to the web client in the same commit**, because the two encoders
+      serve one session and this is the case where drift is not cosmetic: a
+      program that turned the flags on has stopped expecting the legacy form, so
+      a browser tab that kept sending it types into a void while the native
+      window works. `clients/web/packages/input/src/kitty.ts` mirrors the Rust
+      case for case, its tests assert the same bytes, and the app now binds
+      `keyup` — which the DOM delivers for everything, where winit's releases
+      were filtered before the encoder ever saw them.
 - [ ] Kitty flags 4 (alternate keys) and 16 (associated text). 4 needs the
       base-layout key, which winit exposes through a trait that does not cover
       Wayland — a platform-capability question, not a table to fill in. 16 is

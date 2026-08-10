@@ -86,6 +86,19 @@ export function knownModes(bits: number): number {
   return bits & KNOWN_MODES;
 }
 
+/**
+ * The Kitty keyboard flags in force, as the protocol numbers them.
+ *
+ * Mirrors `Modes::kitty_flags` in `zest-core/src/modes.rs`: the flags sit at
+ * `1 << (16 + k)` for the protocol's `1 << k`, so this is a shift and a mask.
+ * The result is 0 for every program that never asked, which is the case the
+ * encoders check first.
+ */
+export const KITTY_SUPPORTED = 1 | 2 | 8;
+export function kittyFlags(modes: number): number {
+  return (modes >>> 16) & KITTY_SUPPORTED;
+}
+
 /** For failure messages. */
 export function cellFlagNames(bits: number): string {
   const names = Object.entries(CellFlags)
