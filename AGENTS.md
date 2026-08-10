@@ -154,11 +154,36 @@ Never commit straight to `main`.**
    differs from the merging account; an explicit message is used verbatim, so
    no trailers. Then remove the worktree: `pnpm wt rm <name>`.
 
-`main` is protected by the ruleset **"sigx-standard: protect main"** — no direct
-pushes, no force-push, no deletion, squash-only merges, review threads must
-resolve. Re-apply or reconcile it with `pnpm branch-protection zesterm/zesterm`
-(see `scripts/apply-branch-protection.mjs` for what it enforces and why required
-status checks are opt-in).
+### `main` protection — configured, currently **off**
+
+The ruleset **"sigx-standard: protect main"** exists on `zesterm/zesterm` (id
+`20627800`) — no direct pushes, no force-push, no deletion, squash-only merges,
+review threads must resolve — and is **`enforcement: disabled` while the work
+in flight when this landed finishes**. `gh api repos/zesterm/zesterm/rules/branches/main`
+returns `[]` today; that is the state to check, not the ruleset's existence.
+
+**The workflow above is not suspended.** It is exactly as mandatory as when the
+ruleset was on; it is simply held up by discipline rather than by GitHub for the
+moment, which is the weaker of the two and the reason this is temporary. Branch
+first anyway.
+
+Turn it back on once the in-flight work has landed (this is the whole command —
+the script is idempotent and reconciles drift):
+
+```sh
+pnpm branch-protection zesterm/zesterm --approvals 0
+```
+
+Then, and only once a PR has actually reported them, require CI:
+
+```sh
+pnpm branch-protection zesterm/zesterm --approvals 0 \
+  --checks "test (windows-latest); test (macos-latest); test (ubuntu-latest); invariants; web client"
+```
+
+Those five names are this repo's real check-run names, confirmed on PR #25.
+Requiring a name that never reports blocks every merge forever, which is why
+the script makes checks opt-in rather than guessing.
 
 ## The gates
 
