@@ -515,6 +515,32 @@ Each of these cost real time and is documented where it bites:
 - **A unix pty master reports EOF as `EIO`, not as a zero-length read.** Treat it
   as EOF or every clean shell exit logs an I/O error and looks like a crash.
   (`zest-pty/src/unix.rs`, gotcha 2.)
+- **macOS destroys a dead pty's queued output ~0.6s after the last slave
+  closes**, and *instantly* if you reap the child first. A command that prints
+  and exits — `echo`, `git status`, anything one-shot — therefore loses its
+  entire output if the owner has not read the master yet, and the loss is
+  silent: `read` returns 0, exactly as if the child had printed nothing.
+  Measured on Darwin 25.5/arm64, both in C and through `zest-pty`: a first read
+  at 590ms gets all 23 bytes, one at 610ms gets none, deterministically at each
+  point; a reader already *parked* in `read` still had them 3s later. Linux
+  keeps the data, so this is one more thing that only ever fails on one of the
+  three CI platforms, under load, once in fifty runs. `UnixPty::spawn` now
+  parks its drain thread in `read` before it forks the child, which removes the
+  deadline rather than shortening it. (`zest-pty/src/unix.rs`, sharp edge 6;
+  issue #54.)
+- **A buffered frame reader is state, and a handoff that drops it drops
+  messages.** `DaemonClient::recv` reads up to 64 KiB and returns the *first*
+  whole frame; the daemon batches its replies and flushes once, so anything
+  else it wrote is already in userspace and lives only in that buffer. Handing
+  a streaming reader a fresh `FrameReader` therefore silently deletes whatever
+  the socket happened to coalesce — and since the seal's nonce is an implicit
+  per-direction counter, that is not one lost update: every later frame is then
+  opened under the wrong nonce, the reader thread dies, and the window is
+  blank for ever with one `warn!` as the only trace. No timeout can recover it,
+  which is why the bug reads as "raise the deadline" and is not. `into_halves`
+  returns the buffer; `DaemonClient::pending()` exists so a handoff can assert
+  it carried it. (`zest-daemon/src/client.rs`, `zest-app/src/remote.rs`;
+  issue #54.)
 - **macOS's `/bin/sh` does not pass `SIGINT` on when non-interactive**, so a
   `sh -c 'sleep 30'` test child survives a `^C` that a working pty delivered
   correctly. It makes a correct implementation look broken; spawn the binary

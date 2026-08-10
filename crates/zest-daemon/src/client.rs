@@ -32,6 +32,54 @@ use zest_proto::{
 
 use crate::DaemonError;
 
+/// A host message a request/reply loop had to step over to reach its answer.
+///
+/// Loud, because stepping over it *loses* it — this is the second half of issue
+/// #54's shape, and the half that is not fixed. `into_halves` now carries every
+/// frame the client has not yet decoded, but a frame these loops decode and do
+/// not match on is gone, and the sealed channel's counter has already advanced
+/// past it so no retry exists.
+///
+/// It is a log rather than a queue because today it cannot fire: nothing on
+/// this path subscribes to anything until `Attach`, and `Attach`'s own reply is
+/// the first frame the host writes back. Plumbing a deferred queue through the
+/// streaming reader for a case that cannot occur would add shape to the exact
+/// loop this issue was about. If this line ever appears, that trade is off.
+fn discarded(waiting_for: &str, msg: &HostMessage) {
+    let kind = match msg {
+        HostMessage::Welcome { .. } => "Welcome",
+        HostMessage::Challenge { .. } => "Challenge",
+        HostMessage::AuthPending { .. } => "AuthPending",
+        HostMessage::AuthFailed { .. } => "AuthFailed",
+        HostMessage::PairingRequested { .. } => "PairingRequested",
+        HostMessage::Sessions { .. } => "Sessions",
+        HostMessage::Keyframe { .. } => "Keyframe",
+        HostMessage::Update { .. } => "Update",
+        HostMessage::Scrollback { .. } => "Scrollback",
+        HostMessage::Exited { .. } => "Exited",
+        HostMessage::Error { .. } => "Error",
+    };
+    tracing::warn!(
+        message = kind,
+        %waiting_for,
+        "discarded a host message while waiting for a reply; it is unrecoverable"
+    );
+}
+
+/// A connection taken apart, so the caller can stream it from its own threads.
+///
+/// A struct rather than a tuple because `frames` is the field people forget:
+/// named, a caller that ignores it is doing so visibly.
+pub struct Halves {
+    pub read: Box<dyn Read + Send>,
+    pub write: Box<dyn Write + Send>,
+    pub channel: Option<SecureChannel>,
+    /// Whole frames the client already pulled off the socket and has not
+    /// consumed. Feed this to the streaming reader; see
+    /// [`DaemonClient::into_halves`].
+    pub frames: FrameReader,
+}
+
 /// An authenticated connection to one daemon.
 pub struct DaemonClient {
     read: Box<dyn Read + Send>,
@@ -181,7 +229,7 @@ impl DaemonClient {
             match self.recv()? {
                 HostMessage::Sessions { sessions, .. } => return Ok(sessions),
                 HostMessage::Error { message, .. } => return Err(DaemonError::Refused(message)),
-                _ => {}
+                other => discarded("Sessions", &other),
             }
         }
     }
@@ -214,7 +262,7 @@ impl DaemonClient {
                     return Ok(newest.addr);
                 }
                 HostMessage::Error { message, .. } => return Err(DaemonError::Refused(message)),
-                _ => {}
+                other => discarded("Sessions", &other),
             }
         }
     }
@@ -281,7 +329,7 @@ impl DaemonClient {
                     ));
                 }
                 HostMessage::Error { message, .. } => return Err(DaemonError::Refused(message)),
-                _ => {}
+                other => discarded("Keyframe", &other),
             }
         }
     }
@@ -303,17 +351,35 @@ impl DaemonClient {
         self.recv()
     }
 
+    /// Bytes already taken off the socket and not yet turned into messages.
+    ///
+    /// Non-zero whenever the host's last write carried more than the reply this
+    /// client was waiting for, which a batching daemon and a stream socket make
+    /// ordinary rather than exceptional. Exposed so a caller can assert the
+    /// handoff in [`into_halves`](Self::into_halves) did not lose them.
+    #[must_use]
+    pub fn pending(&self) -> usize {
+        self.frames.pending()
+    }
+
     /// Surrender the transport, for a caller that now wants to stream.
     ///
     /// The channel goes with it, and must: the counters are per connection, so
     /// a streaming caller that started a fresh channel would seal under nonces
     /// the daemon has already seen. It is `Option` only because the field is —
     /// after a successful `connect` it is always present.
+    ///
+    /// **The `FrameReader` goes with it too, and that is the load-bearing
+    /// part.** `recv` reads up to 64 KiB and returns the *first* whole frame in
+    /// it; anything else the host had already written is left in the buffer.
+    /// Leaving it behind here is issue #54: the frames are already in
+    /// userspace, so no timeout and no retry can bring them back, and since the
+    /// seal's nonce is an implicit per-direction counter, the very next frame
+    /// is then opened under the wrong nonce and the connection is over. It cost
+    /// an empty window that never filled in.
     #[must_use]
-    pub fn into_halves(
-        self,
-    ) -> (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<SecureChannel>) {
-        (self.read, self.write, self.channel)
+    pub fn into_halves(self) -> Halves {
+        Halves { read: self.read, write: self.write, channel: self.channel, frames: self.frames }
     }
 
     fn send(&mut self, msg: &ClientMessage) -> Result<(), DaemonError> {

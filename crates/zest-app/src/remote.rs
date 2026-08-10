@@ -27,7 +27,7 @@ use zest_core::Terminal;
 use zest_mesh::identity::ClientIdentity;
 use zest_mesh::secure::Sealer;
 use zest_proto::{
-    frame, Applied, Applier, ClientMessage, FrameReader, HostMessage, SessionAddr, Seq,
+    frame, Applied, Applier, ClientMessage, HostMessage, SessionAddr, Seq,
 };
 
 use zest_daemon::client::DaemonClient;
@@ -276,7 +276,13 @@ impl RemoteSession {
         };
         let (keyframe_seq, keyframe) = conn.attach(addr, cols, rows)?;
         let host_label = conn.host_label().to_string();
-        let (mut reader, writer, channel) = conn.into_halves();
+        let halves = conn.into_halves();
+        let (mut reader, writer, channel) = (halves.read, halves.write, halves.channel);
+        // The handshake's leftovers, not a fresh buffer. Everything the host
+        // wrote behind the attach keyframe is already off the socket and lives
+        // only here; starting the streaming reader empty discards it, and a
+        // sealed channel does not survive a discarded frame. Issue #54.
+        let carried = halves.frames;
         // Split rather than shared: the two directions have separate keys and
         // separate counters, so the reader thread and the writer thread need no
         // lock between them. See `SecureChannel::split`.
@@ -367,7 +373,7 @@ impl RemoteSession {
             std::thread::Builder::new()
                 .name("zest-remote-reader".into())
                 .spawn(move || {
-                    let mut frames = FrameReader::new();
+                    let mut frames = carried;
                     let mut buf = vec![0u8; 64 * 1024];
                     let mut last_ack = Instant::now();
                     let mut pending_ack: Option<u64> = None;
@@ -378,7 +384,7 @@ impl RemoteSession {
                     let mut addr = addr;
 
                     'supervise: loop {
-                    loop {
+                    'link: loop {
                         let n = match reader.read(&mut buf) {
                             Ok(0) | Err(_) => break,
                             Ok(n) => n,
@@ -390,21 +396,39 @@ impl RemoteSession {
                                 Ok(Some(b)) => b,
                                 Ok(None) => break,
                                 // Framing is lost, so the stream position is no
-                                // longer trustworthy. Nothing to do but drop it.
-                                Err(_) => return finish(&wake),
+                                // longer trustworthy. Nothing to resume from --
+                                // but a fresh connection has nothing to resume,
+                                // so redial rather than give up. See below.
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "framing is lost; redialling");
+                                    break 'link;
+                                }
                             };
 
                             // Opened here, where the frame stops being opaque.
-                            // A frame that will not open ends the connection:
-                            // the counter has already advanced, so there is no
-                            // position to resume from, and continuing would
-                            // read every later frame under the wrong nonce.
+                            // A frame that will not open finishes *this
+                            // connection*: the counter has already advanced, so
+                            // there is no position to resume from, and
+                            // continuing would read every later frame under the
+                            // wrong nonce.
+                            //
+                            // Redialling rather than returning, because the two
+                            // are not the same admission. There is no way to
+                            // repair this channel, and no reason a fresh one
+                            // should inherit its problem: a redial is a new
+                            // handshake with new keys and counters from zero,
+                            // which is exactly what the loop below already does
+                            // for a link that dropped. Returning here instead
+                            // left a window that is alive, repaints, accepts
+                            // typing and is deaf for ever, with one `warn!` as
+                            // the only trace it ever happened -- which is how
+                            // issue #54 presented.
                             let body = match opener.as_mut() {
                                 Some(o) => match o.open(&body) {
                                     Ok(plain) => plain,
                                     Err(e) => {
-                                        tracing::warn!(error = %e, "a sealed frame did not open; closing");
-                                        return finish(&wake);
+                                        tracing::warn!(error = %e, "a sealed frame did not open; redialling");
+                                        break 'link;
                                     }
                                 },
                                 None => body,
@@ -500,9 +524,13 @@ impl RemoteSession {
                         std::thread::yield_now();
                     }
 
-                    // The link died with the shell still running. Tell the
-                    // window -- it keeps showing the last state that was true --
-                    // and start dialling.
+                    // The link ended with the shell still running -- the socket
+                    // went away, or the channel did. `Detached`, never
+                    // `Exited`: the `Exited` arm returns rather than breaking,
+                    // which is what makes that distinction structural instead
+                    // of a judgement made here. Tell the window -- it keeps
+                    // showing the last state that was true -- and start
+                    // dialling.
                     wake(Wakeup::Detached);
 
                     let mut wait = REDIAL_MIN;
@@ -553,7 +581,11 @@ impl RemoteSession {
                         };
                         let Ok((seq, keyframe)) = attached else { continue };
 
-                        let (r, w, channel) = conn.into_halves();
+                        let halves = conn.into_halves();
+                        let (r, w, channel) = (halves.read, halves.write, halves.channel);
+                        // Same reason as the first attach: a redial coalesces
+                        // exactly as readily as a first connection does.
+                        let carried = halves.frames;
                         let (new_sealer, new_opener) = match channel {
                             Some(c) => {
                                 let (s, o) = c.split();
@@ -570,7 +602,7 @@ impl RemoteSession {
                             applier.apply_keyframe(&mut term, &keyframe, seq);
                         }
                         pending_ack = Some(seq);
-                        frames = FrameReader::new();
+                        frames = carried;
                         reader = r;
                         tracing::info!(%addr, "reattached");
                         needs_redraw.store(true, Ordering::Release);
@@ -636,15 +668,6 @@ fn mark(needs_redraw: &Arc<AtomicBool>, wake: &impl Fn(Wakeup)) {
     if !needs_redraw.swap(true, Ordering::AcqRel) {
         wake(Wakeup::Redraw);
     }
-}
-
-/// The read loop ended without the child having exited.
-///
-/// Only reachable when the *link* died: the `Exited` arm returns rather than
-/// breaking, so reaching here means the connection went away while the shell
-/// kept running. `Detached`, never `Exited`.
-fn finish(wake: &impl Fn(Wakeup)) {
-    wake(Wakeup::Detached);
 }
 
 impl SessionSource for RemoteSession {
@@ -747,6 +770,60 @@ mod tests {
         path: String,
         registry: Arc<zest_daemon::Registry>,
         host_identity: Arc<zest_mesh::identity::HostIdentity>,
+    }
+
+    /// A read half that sleeps before every read.
+    ///
+    /// What it stands in for is a client thread that is not scheduled between
+    /// sending `Attach` and reading the reply — a loaded CI runner, a laptop
+    /// waking up, a GC-sized pause anywhere in the process. The daemon writes a
+    /// whole batch back to back and flushes once (`server.rs`, the writer
+    /// loop), so by the time the late read finally runs, several of the host's
+    /// frames are sitting in the socket together and one `read` takes them all.
+    ///
+    /// That is the *normal* behaviour of a stream socket, not a fault being
+    /// injected: the stall only makes coalescing happen every time instead of
+    /// once in a thousand runs. Anything the client does not consume from that
+    /// one read has to survive, or it is gone — and because the channel's
+    /// nonces are an implicit per-direction counter, gone means the connection
+    /// never opens another frame either.
+    struct StalledRead<R: Read> {
+        inner: R,
+        stall: Duration,
+    }
+
+    impl<R: Read> Read for StalledRead<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            std::thread::sleep(self.stall);
+            self.inner.read(buf)
+        }
+    }
+
+    /// Long enough that the host has flushed more than once into the socket
+    /// before the client's next read runs, short enough that a handshake made
+    /// of a handful of round trips still finishes in a few seconds.
+    const STALL: Duration = Duration::from_millis(700);
+
+    /// Flips one byte of one read, when the test says so.
+    ///
+    /// Enough to break a sealed record: the AEAD tag covers the whole thing, so
+    /// a single flipped bit anywhere in it makes `open` fail. Armed from the
+    /// test rather than after a byte count, because the handshake happens on
+    /// this same socket and corrupting *that* fails the dial instead of the
+    /// thing under test.
+    struct CorruptWhenArmed<R: Read> {
+        inner: R,
+        armed: Arc<AtomicBool>,
+    }
+
+    impl<R: Read> Read for CorruptWhenArmed<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            if n > 0 && self.armed.swap(false, Ordering::AcqRel) {
+                buf[n - 1] ^= 0xff;
+            }
+            Ok(n)
+        }
     }
 
     /// A cuttable link between the client and the daemon.
@@ -885,11 +962,35 @@ mod tests {
             self.attach_dialling(&self.path.clone(), command, adopt, wake)
         }
 
+        /// Attach with every read on the client's half delayed by `stall`.
+        ///
+        /// See [`StalledRead`] for what this is simulating and why the delay is
+        /// what makes the bug deterministic rather than a coin toss.
+        fn attach_stalled(
+            &self,
+            command: &str,
+            stall: Duration,
+            wake: impl Fn(Wakeup) + Send + 'static,
+        ) -> RemoteSession {
+            self.attach_dialling_stalled(&self.path.clone(), command, false, stall, wake)
+        }
+
         fn attach_dialling(
             &self,
             socket: &str,
             command: &str,
             adopt: bool,
+            wake: impl Fn(Wakeup) + Send + 'static,
+        ) -> RemoteSession {
+            self.attach_dialling_stalled(socket, command, adopt, Duration::ZERO, wake)
+        }
+
+        fn attach_dialling_stalled(
+            &self,
+            socket: &str,
+            command: &str,
+            adopt: bool,
+            stall: Duration,
             wake: impl Fn(Wakeup) + Send + 'static,
         ) -> RemoteSession {
             let identity = Arc::new(ClientIdentity::generate().expect("client key"));
@@ -900,7 +1001,12 @@ mod tests {
                 let stream = zest_daemon::connect(&path)
                     .map_err(|e| RemoteError::Io(e.to_string()))?;
                 let write = stream.try_clone().map_err(|e| RemoteError::Io(e.to_string()))?;
-                Ok((Box::new(stream) as Box<dyn Read + Send>, Box::new(write) as Box<dyn Write + Send>))
+                let read: Box<dyn Read + Send> = if stall.is_zero() {
+                    Box::new(stream)
+                } else {
+                    Box::new(StalledRead { inner: stream, stall })
+                };
+                Ok((read, Box::new(write) as Box<dyn Write + Send>))
             });
             RemoteSession::attach(
                 dial,
@@ -962,6 +1068,158 @@ mod tests {
         assert!(
             wait_for(|| s.terminal().lock().screen_text().contains("hello-from-the-daemon")),
             "output never arrived; grid was:\n{}",
+            s.terminal().lock().screen_text()
+        );
+    }
+
+    /// A command that prints twenty lines over two seconds and then a marker.
+    ///
+    /// The drip is what makes the stalled-attach tests deterministic instead of
+    /// lucky: with output every 100ms and a read that takes 700ms, the host has
+    /// certainly flushed at least one `Update` behind the attach `Keyframe` by
+    /// the time that one read runs. A single `echo` would have to land inside a
+    /// window the test cannot control.
+    fn dripping(marker: &str) -> String {
+        format!(
+            "/bin/sh -c 'i=0; while [ $i -lt 20 ]; do echo drip-$i; sleep 0.1; \
+             i=$((i+1)); done; echo {marker}'"
+        )
+    }
+
+    /// Frames that arrive in the same read as the attach keyframe must not be lost.
+    ///
+    /// This is issue #54. The daemon batches, the socket coalesces, and the
+    /// client's `recv` returns one message per call while keeping the rest in
+    /// its `FrameReader` — so whatever else landed in that read exists only in
+    /// that buffer. Handing the streaming reader a *fresh* `FrameReader` threw
+    /// those frames away, and because the seal's nonce is an implicit counter,
+    /// throwing them away is not "one lost update": every later frame is then
+    /// opened under the wrong nonce and the connection is finished. The user
+    /// sees a window that never shows anything.
+    #[test]
+    fn output_survives_a_stalled_attach() {
+        let h = Harness::start("stalled");
+        let s = h.attach_stalled(&dripping("tail-of-the-stalled-attach"), STALL, |_| {});
+
+        assert!(
+            wait_for(|| s.terminal().lock().screen_text().contains("tail-of-the-stalled-attach")),
+            "output written after the attach keyframe never arrived, which is what \
+             a user reports as 'the command ran but the window is empty'; grid was:\n{}",
+            s.terminal().lock().screen_text()
+        );
+    }
+
+    /// The handoff must not be able to lose a byte, and says so at the seam.
+    ///
+    /// Ten seconds of blank grid is a terrible way to learn that frames were
+    /// dropped. This asserts the same invariant where it is cheap and named:
+    /// after a deliberately stalled attach there really are unread bytes
+    /// buffered, and they really do reach the streaming reader.
+    #[test]
+    fn a_stalled_attach_leaves_buffered_frames_for_the_streaming_reader() {
+        let h = Harness::start("buffered");
+        let identity = Arc::new(ClientIdentity::generate().expect("client key"));
+        let stream = zest_daemon::connect(&h.path).expect("connect");
+        let write = stream.try_clone().expect("clone");
+        let mut conn = DaemonClient::connect(
+            Box::new(StalledRead { inner: stream, stall: STALL }) as Box<dyn Read + Send>,
+            Box::new(write) as Box<dyn Write + Send>,
+            &identity,
+            "test",
+            None,
+            false,
+        )
+        .expect("handshake");
+        let addr = conn.create(&dripping("tail"), "", 40, 6).expect("create");
+        let _ = conn.attach(addr, 40, 6).expect("attach");
+
+        let pending = conn.pending();
+        let halves = conn.into_halves();
+        assert!(
+            pending > 0,
+            "the stall did not coalesce anything, so this test is not exercising \
+             the handoff at all -- raise STALL or lengthen the drip"
+        );
+        assert_eq!(
+            halves.frames.pending(),
+            pending,
+            "into_halves dropped the frames the client had already read off the \
+             socket; that is issue #54 and it costs the whole connection"
+        );
+    }
+
+    /// A frame that will not open must cost a reconnect, not the window.
+    ///
+    /// Defence in depth for the above: whatever desynchronizes a sealed channel
+    /// -- a bug like #54, a truncating middlebox, a hostile injection -- the
+    /// honest recovery is a fresh handshake, which is exactly what the redial
+    /// loop already does for a dropped link. Returning out of the reader thread
+    /// instead leaves a window that is alive, repaints, accepts typing, and is
+    /// deaf forever, with one `warn!` as the only trace.
+    #[test]
+    fn a_frame_that_will_not_open_redials_rather_than_going_deaf() {
+        let h = Harness::start("desync");
+        let armed = Arc::new(AtomicBool::new(false));
+        let for_dialer = Arc::clone(&armed);
+        let back = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&back);
+        let identity = Arc::new(ClientIdentity::generate().expect("client key"));
+        let path = h.path.clone();
+        let dial: Dialer = Box::new(move || {
+            let stream = zest_daemon::connect(&path).map_err(|e| RemoteError::Io(e.to_string()))?;
+            let write = stream.try_clone().map_err(|e| RemoteError::Io(e.to_string()))?;
+            let read = CorruptWhenArmed { inner: stream, armed: Arc::clone(&for_dialer) };
+            Ok((
+                Box::new(read) as Box<dyn Read + Send>,
+                Box::new(write) as Box<dyn Write + Send>,
+            ))
+        });
+        let s = RemoteSession::attach(
+            dial,
+            &AttachOptions {
+                identity: &identity,
+                label: "test",
+                command: "/bin/sh",
+                cols: 40,
+                rows: 6,
+                scrollback: 100,
+                adopt: false,
+                local: true,
+                expect_host: None,
+            },
+            move |w| {
+                if w == Wakeup::Reattached {
+                    seen.fetch_add(1, Ordering::Release);
+                }
+            },
+        )
+        .expect("attach");
+
+        std::thread::sleep(Duration::from_millis(300));
+        s.write(b"echo before-the-desync\n".to_vec());
+        assert!(
+            wait_for(|| s.terminal().lock().screen_text().contains("before-the-desync")),
+            "the shell never echoed before the corruption, so nothing below is \
+             testing what it claims to; grid:\n{}",
+            s.terminal().lock().screen_text()
+        );
+
+        // One byte, once. The next frame the client pulls off this socket will
+        // not open -- the AEAD tag covers the whole record.
+        armed.store(true, Ordering::Release);
+        s.write(b"echo after-the-desync\n".to_vec());
+
+        assert!(
+            wait_up_to(Duration::from_secs(30), || back.load(Ordering::Acquire) > 0),
+            "one unopenable frame ended the reader thread for good: the window is \
+             alive, repaints and accepts typing, and will never show another byte"
+        );
+
+        // And the link is genuinely usable again, not merely re-dialled.
+        s.write(b"echo recovered-from-the-desync\n".to_vec());
+        assert!(
+            wait_for(|| s.terminal().lock().screen_text().contains("recovered-from-the-desync")),
+            "reattached, but nothing typed afterwards comes back; grid:\n{}",
             s.terminal().lock().screen_text()
         );
     }

@@ -24,7 +24,8 @@
 //!    returning a zero-length read. A caller that only treats `Ok(0)` as EOF
 //!    still terminates, but logs an I/O error on every clean shell exit — which
 //!    looks exactly like a bug and is the single most likely thing to be
-//!    misdiagnosed here. [`PtyReader`] maps it to `Ok(0)`, mirroring what the
+//!    misdiagnosed here. The drain thread (sharp edge 6) treats it as EOF, so
+//!    what reaches [`PtyReader`] is a plain `Ok(0)` — mirroring what the
 //!    Windows reader does with `ERROR_BROKEN_PIPE`.
 //!
 //! 3. **On macOS, `TIOCSWINSZ` on the master fails with `ENOTTY` until the
@@ -53,6 +54,32 @@
 //!    [`UnixPty::hangup`](PtyTransport::hangup) signals the child's process
 //!    group instead of waiting for a close that can never come.
 //!
+//! 6. **macOS destroys a dead pty's queued output about 0.6s after the last
+//!    slave closes.** A child that prints and exits — `echo`, `git status`, any
+//!    one-shot command — leaves its bytes in the kernel's output queue, and if
+//!    nobody has read the master by then they are gone: `read` returns 0, as if
+//!    the child had printed nothing. Measured on Darwin 25.5/arm64, with a
+//!    fork/exec reference in C and through this module: a first read at 590ms
+//!    gets all 23 bytes, one at 610ms gets none, deterministically. Reaping the
+//!    child destroys them *immediately*, which is the same trap with a shorter
+//!    fuse. Linux keeps the data. Nothing reports an error on either.
+//!
+//!    That deadline is only reachable by a reader that has not started. A
+//!    reader already parked in `read` is handed the bytes as they are written
+//!    and still had them three seconds later in the same experiment — so
+//!    [`UnixPty::spawn`] starts its drain thread and waits for it to reach its
+//!    first `read` **before** the child is forked, and hands the caller a
+//!    [`PtyReader`] over the drained bytes rather than over the fd. The window
+//!    is not narrowed, it is removed: whenever the owner gets round to reading,
+//!    the bytes are already out of the kernel.
+//!
+//!    This also fixes the ordering that made it silent. EOF used to be able to
+//!    arrive *instead of* the data; now it is a `Vec` queued behind it, so a
+//!    caller doing the usual `Ok(0) => break` cannot break before consuming
+//!    what the child wrote. (Issue #54. Keeping a slave fd open in the parent
+//!    also preserves the data — measured — and is rejected because it destroys
+//!    EOF entirely, which is sharp edge 1.)
+//!
 //! Unlike `ResizePseudoConsole`, [`UnixPty::resize`] does *not* cause the screen
 //! to be re-emitted. It updates the kernel's `winsize` and raises `SIGWINCH`;
 //! whether anything is redrawn is the child's decision.
@@ -69,16 +96,49 @@ use rustix::termios::Winsize;
 
 use crate::{ChildStatus, CommandSpec, PtyError, PtySize, PtyTransport};
 
+/// How much the drain thread lifts out of the kernel at a time.
+const DRAIN_CHUNK: usize = 64 * 1024;
+
+/// How many chunks may sit between the kernel and the parser.
+///
+/// Bounded, and that bound is the whole design. The pty's own output queue is
+/// what makes a runaway `cat /dev/urandom` block its producer instead of eating
+/// the machine; an unbounded hand-off in front of it would quietly replace that
+/// backpressure with unbounded memory. Sixteen chunks is a megabyte in flight —
+/// far more than a parser that is keeping up ever holds, and a hard ceiling for
+/// one that is not.
+const DRAIN_DEPTH: usize = 16;
+
 /// The read half of the pty. Blocking.
-pub struct PtyReader(File);
+///
+/// Reads from the drain thread rather than from the fd — sharp edge 6. By the
+/// time a byte is offered here it is already out of the kernel, so how long the
+/// owner takes to ask for it no longer decides whether it exists.
+pub struct PtyReader {
+    rx: crossbeam_channel::Receiver<Vec<u8>>,
+    /// The chunk being handed out, and how much of it has gone. A caller's
+    /// buffer is smaller than `DRAIN_CHUNK` often enough that this is the
+    /// normal path, not an edge case.
+    chunk: Vec<u8>,
+    at: usize,
+}
 
 impl Read for PtyReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self.0.read(buf) {
-            // Gotcha 2: the child exiting is EOF, not a failure.
-            Err(e) if e.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error()) => Ok(0),
-            other => other,
+        if self.at == self.chunk.len() {
+            let Ok(next) = self.rx.recv() else {
+                // The drain thread is gone, which it only becomes at EOF — and
+                // it sends before it goes, so everything the child wrote has
+                // already been handed over above.
+                return Ok(0);
+            };
+            self.chunk = next;
+            self.at = 0;
         }
+        let n = (self.chunk.len() - self.at).min(buf.len());
+        buf[..n].copy_from_slice(&self.chunk[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
     }
 }
 
@@ -118,6 +178,15 @@ impl UnixPty {
         // Gotcha 3: on the slave, and only once it exists. Set before the child
         // is created so it never observes a bogus 0x0 size.
         set_winsize(&slave, size).map_err(PtyError::Create)?;
+
+        // Sharp edge 6: the drain starts, and is proven to be *inside* `read`,
+        // before the child exists. Once the child can exit, a clock starts on
+        // its output that this process cannot see and cannot restart; being
+        // parked in `read` first is the only state from which that clock is
+        // unreachable. Everything between here and the caller's first read --
+        // fork, exec, allocating a Terminal, spawning threads, whatever the
+        // scheduler does with a loaded machine -- stops mattering.
+        let reader = spawn_drain(&master)?;
 
         let mut command = build_command(cmd).ok_or_else(|| PtyError::Spawn {
             command: cmd.command_line.clone(),
@@ -164,8 +233,6 @@ impl UnixPty {
         // Gotcha 1. Explicit rather than incidental: this is what lets the
         // reader ever see EOF.
         drop(slave);
-
-        let reader = PtyReader(File::from(master.try_clone().map_err(PtyError::Create)?));
 
         Ok(Self { master: Arc::new(master), reader: Some(reader), child: Mutex::new(child) })
     }
@@ -307,8 +374,8 @@ impl PtyTransport for UnixPty {
 
 // Dropping the last master fd hangs up the pty, which sends SIGHUP to the
 // child's session — so there is no explicit kill in `Drop`, and none is wanted:
-// a shell asked to hang up gets to run its exit traps. The reader and writer
-// hold their own duplicates, so the hangup lands when the last of them is
+// a shell asked to hang up gets to run its exit traps. The writer and the drain
+// thread hold their own duplicates, so the hangup lands when the last of them is
 // dropped, not when `UnixPty` is.
 //
 // Sharp edge 5: that is enough for a *short-lived* owner, which is why it went
@@ -318,6 +385,75 @@ impl PtyTransport for UnixPty {
 // shell is idle keeps the shell, the thread, and the whole terminal with its
 // scrollback, forever. `hangup` breaks the cycle by signalling instead of
 // waiting for a close that can never come.
+//
+// Since sharp edge 6 that parked reader is the drain thread, and it is parked
+// unconditionally rather than only when someone took the reader. Nothing
+// changes for the caller — `hangup` was already the only teardown that works
+// and is what both session layers call — but it does mean a `UnixPty` dropped
+// without `hangup`, while its child is alive, leaves that thread parked. The
+// consumer's own reader thread was already in exactly that state, so this
+// leaks nothing new; it just no longer depends on a consumer existing.
+
+/// Start the thread that lifts this pty's output out of the kernel.
+///
+/// Returns once that thread is at its first `read`, not merely once it has been
+/// created: a thread that exists but has not been scheduled is exactly the
+/// state sharp edge 6 punishes, so `spawn` would be back to hoping. The
+/// rendezvous is a zero-capacity channel, whose `send` completes only when the
+/// far side has taken the value.
+///
+/// Called before `Command::spawn`, which forks. That is safe for the same
+/// reason `pre_exec` is: the child runs only async-signal-safe code before
+/// `exec`, and it inherits no lock this thread could be holding — the drain
+/// thread is blocked in a syscall on a `CLOEXEC` fd it does not share.
+fn spawn_drain(master: &OwnedFd) -> Result<PtyReader, PtyError> {
+    let fd = master.try_clone().map_err(PtyError::Create)?;
+    let (tx, rx) = crossbeam_channel::bounded::<Vec<u8>>(DRAIN_DEPTH);
+    let (ready_tx, ready_rx) = crossbeam_channel::bounded::<()>(0);
+
+    std::thread::Builder::new()
+        .name("zest-pty-drain".into())
+        .spawn(move || {
+            let mut master = File::from(fd);
+            let mut buf = vec![0u8; DRAIN_CHUNK];
+            // Last statement before the read, so what the caller waited for is
+            // true rather than nearly true.
+            let _ = ready_tx.send(());
+            loop {
+                let n = match master.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    // Gotcha 2: the child exiting is EOF, not a failure. Kept
+                    // here rather than in `PtyReader` because this is now the
+                    // only place an fd is read.
+                    Err(e)
+                        if e.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error()) =>
+                    {
+                        break
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "pty master read failed; treating as EOF");
+                        break;
+                    }
+                };
+                // Blocks when the parser is behind, which is the point: it
+                // stops here, the kernel's queue fills, and the child blocks on
+                // its own write, exactly as it did when the parser read the fd
+                // directly. An error means the `PtyReader` was dropped and
+                // nobody wants these bytes.
+                if tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        })
+        .map_err(PtyError::Create)?;
+
+    // If the thread died before signalling there is nothing to wait for, and
+    // `recv` says so rather than hanging.
+    let _ = ready_rx.recv();
+    Ok(PtyReader { rx, chunk: Vec::new(), at: 0 })
+}
 
 fn open_master() -> io::Result<OwnedFd> {
     use rustix::pty::OpenptFlags;
@@ -491,6 +627,52 @@ mod tests {
         assert!(
             matches!(pty.wait_for_child(None), ChildStatus::Exited(0)),
             "a successful echo exits 0"
+        );
+    }
+
+    /// A child that prints and exits must not lose its output to a late reader.
+    ///
+    /// Sharp edge 6, and issue #54's macOS half. `/bin/echo` writes 23 bytes
+    /// and is gone in microseconds; the owner is still building a `Terminal`,
+    /// two channels and a writer thread, and its reader thread has not been
+    /// scheduled yet. On macOS the kernel discards a dead pty's queued output
+    /// roughly 0.6s after the last slave closes — measured on Darwin 25.5,
+    /// arm64: a first read at 550ms gets all 23 bytes, one at 610ms gets
+    /// `read() == 0` and the bytes are simply gone. A loaded CI runner losing
+    /// 0.6s between spawning a thread and running it is not exotic, and the
+    /// result is a window that shows nothing, for ever, with no error anywhere.
+    ///
+    /// 1200ms so the assertion is on the far side of that deadline with margin.
+    /// Linux keeps the data indefinitely and passes either way, which is
+    /// exactly why this is stated as an invariant rather than left to macOS: it
+    /// is the *contract* that a spawned pty starts draining immediately, and
+    /// only one platform is currently rude enough to punish breaking it.
+    #[test]
+    fn output_survives_a_reader_that_arrives_late() {
+        let spec = CommandSpec {
+            command_line: "/bin/echo hello".into(),
+            cwd: None,
+            env: crate::terminal_env(),
+        };
+        let mut pty = UnixPty::spawn(&spec, PtySize::new(80, 24)).expect("spawn /bin/echo");
+
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+
+        let mut reader = pty.take_reader().expect("a fresh pty always has a reader");
+        let mut out = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+            }
+        }
+
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            text.contains("hello"),
+            "a command that ran and exited lost its output because nobody was \
+             reading yet -- the user sees an empty window and no error: {text:?}"
         );
     }
 
