@@ -52,9 +52,14 @@ let repo;
 let checks = [];
 let dryRun = false;
 let approvals = 1; // required approving reviews; 0 = PR required but owner may self-merge
+// Off by default: see the `strict_required_status_checks_policy` comment below
+// for why requiring an up-to-date branch costs more than it protects once more
+// than one branch is in flight.
+let strict = false;
 for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--dry-run') dryRun = true;
+    else if (a === '--strict') strict = true;
     else if (a === '--checks') {
         const v = argv[++i];
         // Reject a missing value or a following flag (e.g. `--checks --dry-run`)
@@ -72,9 +77,12 @@ for (let i = 0; i < argv.length; i++) {
     else die(`Unexpected argument: ${a}`);
 }
 if (!repo || !/^[^/]+\/[^/]+$/.test(repo)) {
-    die('Usage: node scripts/apply-branch-protection.mjs <owner/repo> [--checks "a; b"] [--approvals N] [--dry-run]\n' +
+    die('Usage: node scripts/apply-branch-protection.mjs <owner/repo> [--checks "a; b"] [--approvals N] [--strict] [--dry-run]\n' +
         '  --checks  semicolon-separated check-run names (repeatable). Use ";" not "," —\n' +
         '            matrix names contain commas, e.g. "test (ubuntu-latest, 22); verify-pack".\n' +
+        '  --strict       → also require the branch to be up to date with the base before\n' +
+        '                   merging. Off by default: with slow CI it makes merging a race\n' +
+        '                   against every other branch, and auto-merge cannot win it.\n' +
         '  --approvals 0  → PR required (plus any --checks), but the author/owner may merge\n' +
         '                   without a separate approval (for solo/small repos where Copilot\n' +
         '                   reviews but can\'t formally approve)');
@@ -109,6 +117,14 @@ const [owner, name] = repo.split('/');
 // ── 1. repo merge settings (squash-only + auto-delete) ───────────────────────
 const repoSettings = {
     allow_squash_merge: true,
+    // Auto-merge (`gh pr merge --auto`), so landing a PR is not a race the author
+    // has to win by hand. Without it, the only way to merge is to catch the
+    // window between "checks went green" and "someone else pushed to main" —
+    // which, with CI in the minutes, is a window you lose more often than not.
+    allow_auto_merge: true,
+    // The "Update branch" button. Not required by anything here; it is the
+    // manual escape hatch for the rare PR that genuinely does need rebasing.
+    allow_update_branch: true,
     allow_merge_commit: false,
     allow_rebase_merge: false,
     delete_branch_on_merge: true,
@@ -142,7 +158,22 @@ if (checks.length) {
     rules.push({
         type: 'required_status_checks',
         parameters: {
-            strict_required_status_checks_policy: true, // branch must be up to date
+            // Requiring an up-to-date branch sounds strictly safer and is not,
+            // once CI takes minutes and more than one branch is in flight: every
+            // merge to `main` invalidates every open PR, so each one rebases,
+            // waits out CI again, and usually loses the race again. Auto-merge
+            // cannot rescue it either — a stale branch never becomes mergeable
+            // on its own.
+            //
+            // What it buys, and what turning it off costs: a PR is tested
+            // against the `main` it branched from rather than the one it lands
+            // on. Textual conflicts are still blocked; a *semantic* one is not
+            // — rename a function in one PR, add a caller in another, both
+            // green alone, `main` broken together. A merge queue is the way to
+            // have both (it tests the real post-merge state and merges in
+            // order), and it needs every required workflow to trigger on
+            // `merge_group:` or PRs enqueue and never complete.
+            strict_required_status_checks_policy: strict,
             required_status_checks: checks.map((context) => ({ context })),
         },
     });
@@ -164,7 +195,8 @@ console.log(`Repo:   ${repo}`);
 console.log(`Branch: ${DEFAULT_BRANCH}`);
 console.log(`Checks: ${checks.length ? checks.join(', ') : '(none — pass --checks to require CI green)'}`);
 console.log(`Reviews: ${approvals} approving review(s)${approvals === 0 ? ' — PR required, owner may self-merge' : ', CODEOWNERS enforced'}`);
-console.log(`Merges: squash-only, message = PR title + body, auto-delete branch on merge`);
+console.log(`Merges: squash-only, message = PR title + body, auto-delete branch on merge, auto-merge allowed`);
+console.log(`Up-to-date: ${strict ? 'required (--strict)' : 'not required — a green PR does not go stale when main moves'}`);
 
 if (dryRun) {
     console.log('\n--dry-run — would PATCH repo settings:');

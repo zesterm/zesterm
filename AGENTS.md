@@ -151,20 +151,33 @@ Never commit straight to `main`.**
      resolveReviewThread(input:{threadId:$t}){ thread { isResolved } } }' -f t="<thread-id>"
    ```
 
-6. **Merge it yourself.** Once Copilot's feedback is resolved and CI is green,
-   merge (squash — repo rules block merge commits) and clean up:
+6. **Merge it yourself — with `--auto`.** Once Copilot's feedback is resolved,
+   queue the merge (squash — repo rules block merge commits) and clean up:
    ```sh
    pr=123                                     # your PR number (digits only)
-   gh pr checks "$pr"                         # must be all green first
-   gh pr merge "$pr" --squash --delete-branch \
+   gh pr merge "$pr" --squash --auto --delete-branch \
      --subject "$(gh pr view "$pr" --json title -q .title) (#$pr)" \
      --body "$(gh pr view "$pr" --json body -q .body)"
    ```
+   `--auto` merges as soon as the requirements are met, so you do not have to
+   sit and watch `gh pr checks`. Drop it only when you want to merge *now* and
+   the checks are already green.
+
    Pass `--subject`/`--body` explicitly, exactly as above — GitHub appends
    `Co-authored-by:` trailers to every message it generates itself (in **all**
    squash-message modes, even PR_TITLE/PR_BODY) whenever a branch-commit author
    differs from the merging account; an explicit message is used verbatim, so
    no trailers. Then remove the worktree: `pnpm wt rm <name>`.
+
+   **You do not need to rebase onto the latest `main` first.** The ruleset
+   deliberately does *not* require an up-to-date branch: with CI in the minutes
+   and several branches in flight, every merge invalidates every open PR, and
+   the author spends the day rebasing and losing the race again. The cost is
+   real and worth knowing — your PR is tested against the `main` it branched
+   from, not the one it lands on, so a *semantic* conflict (one PR renames a
+   function, another adds a caller) can break `main` even though both were
+   green alone. Textual conflicts are still blocked. Rebase by hand when your
+   change and a freshly-landed one plausibly interact.
 
 ### `main` protection
 
@@ -172,7 +185,8 @@ The ruleset **"sigx-standard: protect main"** (id `20627800`) is active on
 `zesterm/zesterm`: no direct pushes, no force-push, no deletion, squash-only
 merges, review threads must resolve, zero approving reviews required so the
 owner may self-merge once Copilot has reviewed. Every one of this repo's
-check-runs must be green and the branch must be up to date:
+check-runs must be green — but the branch is **not** required to be up to date
+(`--strict` is off; see step 6 for the trade-off that buys):
 
 ```
 test (windows-latest)  test (macos-latest)  test (ubuntu-latest)
@@ -195,6 +209,11 @@ pnpm branch-protection zesterm/zesterm --approvals 0 \
   --checks "test (windows-latest); test (macos-latest); test (ubuntu-latest); \
             invariants; web client; cloud workers"
 ```
+
+Adding `--strict` puts the up-to-date requirement back. Don't, without reading
+step 6 first — it was on until #56 and it made a green PR go stale every time
+any other branch landed, which cost #50 two full CI cycles with all six checks
+passing both times.
 
 Those names are real and confirmed reporting — the first five on PR #25,
 `cloud workers` on #32. Requiring a name that never reports blocks every merge
