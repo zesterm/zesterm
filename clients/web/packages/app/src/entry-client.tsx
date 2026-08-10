@@ -1,31 +1,28 @@
 /**
- * The browser entry. Two planes, wired once:
+ * The browser entry. Three things wired once:
  *
- * - **Control**: `actorsPlugin` over `socketTransport` to the sidecar's
- *   `/_sigx/socket` — the session list, live. Same-origin in production; the
- *   vite dev server reaches it through the proxy in `vite.config.ts`.
- * - **Data**: the daemon's binary WebSocket, dialled per session by
- *   `TerminalView`, its address learned *from* the control plane.
+ * - **Which world**: `/api/bootstrap` decides whether the sidecar or the edge
+ *   is answering, before anything mounts. One `vite build` serves both.
+ * - **Control plane** (local only): `actorsPlugin` over `socketTransport` to
+ *   the sidecar's `/_sigx/socket`. There is no sidecar at the edge, so the
+ *   plugin is not installed there — an actors socket that cannot connect would
+ *   spin forever and read as a broken daemon.
+ * - **Routes**: `@sigx/router`, with the login gate as a `beforeEnter`.
  *
- * No SSR in v1: the sidecar serves static files, `useActorState` simply has
- * nothing to hydrate from and fetches on mount — one round trip on a
- * loopback socket.
- *
- * Both of those describe the **local** path, and this one build also serves the
- * edge, where neither is true: there is no sidecar to host the actors, and an
- * `https://` page cannot reach a `ws://` daemon on the LAN at all. So the first
- * thing it does is ask which world it is in — see `bootstrap.ts`.
+ * The data plane is unchanged: the daemon's binary WebSocket, dialled per
+ * session by `TerminalView` at an address learned from the control plane.
  */
 
 import { defineApp } from 'sigx';
 import { actorsPlugin } from '@sigx/actors/app';
 import { socketTransport } from '@sigx/actors-ws/client';
+import { RouterView } from '@sigx/router';
+import { component } from 'sigx';
 import { applyCssVars, obsidian, themeById } from '@zesterm/theme';
 
 import { fetchBootstrap } from './bootstrap.ts';
 import { deviceIdentity } from './identity.ts';
-import { Shell } from './components/Shell.tsx';
-import { Unavailable } from './components/Unavailable.tsx';
+import { routerPlugin } from './routes.tsx';
 import './style.css';
 
 // The mockup's client-side state list says themeId is the client's to keep.
@@ -34,33 +31,27 @@ const theme = themeById(themeId) ?? obsidian;
 applyCssVars(theme.ui, document.documentElement);
 
 // Cache the resolved background for the next load's first paint. index.html
-// replays it before this bundle exists, so someone on a light theme does not
-// get a dark flash every time. Written after applyCssVars, so it only ever
-// records a background that was actually used.
+// replays it before this bundle exists, so a light theme does not flash dark.
 try {
   localStorage.setItem('zesterm.boot-bg', theme.ui.bg);
 } catch {
-  // Private modes throw on write. The inline fallback stands; nothing else here
-  // depends on this succeeding.
+  // Private modes throw on write; the inline fallback stands.
 }
 
 const socketUrl =
   (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/_sigx/socket';
 
-const mount = document.getElementById('app')!;
+const Root = component(() => () => <RouterView />);
 
 void fetchBootstrap().then((bootstrap) => {
-  if (bootstrap.mode === 'cloud') {
-    // Deliberately not the Shell. Reaching a shell from here needs the relay,
-    // and until it exists every path the session list could take is broken:
-    // there is no sidecar hosting `SessionDirectory`, and mixed content
-    // forbids dialling a LAN daemon from an https page. Rendering the real UI
-    // would spin on a socket that cannot connect and blame the daemon.
-    defineApp(Unavailable({ theme })).mount(mount);
-    return;
+  const identity = deviceIdentity();
+  const app = defineApp(Root({})).use(routerPlugin({ bootstrap, identity, theme }));
+
+  // Only where something hosts the actors. Installing it at the edge would
+  // dial a socket that is not there.
+  if (bootstrap.mode === 'local') {
+    app.use(actorsPlugin({ transport: socketTransport({ url: socketUrl }) }));
   }
 
-  defineApp(Shell({ identity: deviceIdentity(), theme }))
-    .use(actorsPlugin({ transport: socketTransport({ url: socketUrl }) }))
-    .mount(mount);
+  app.mount(document.getElementById('app')!);
 });

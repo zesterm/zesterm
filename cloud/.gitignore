@@ -2,3 +2,7 @@ node_modules/
 # `wrangler dev`'s local state, and --dry-run's bundle output.
 .wrangler/
 dist/
+
+# `wrangler dev` loads this automatically. It holds the dev OAuth app's secret,
+# so it is never committed — `.dev.vars.example` is the committed shape.
+.dev.vars

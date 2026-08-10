@@ -259,39 +259,134 @@ body {
   color: var(--zt-dim);
 }
 
-/* The hosted client, before the relay exists — see components/Unavailable.tsx. */
-.unavailable {
+
+/* Accounts: the login screen, the account menu, and the shared card. */
+.centered {
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 24px;
 }
 
-.unavailable-card {
-  max-width: 44ch;
+.grow {
+  flex: 1;
+}
+
+.card {
+  max-width: 46ch;
   padding: 24px 28px;
   border: 1px solid var(--zt-line);
   border-radius: 10px;
   background: var(--zt-panel);
 }
 
-.unavailable-card h1 {
+.card h1 {
   margin: 0 0 12px;
   font-size: 18px;
   font-weight: 600;
   color: var(--zt-accent);
 }
 
-.unavailable-card p {
-  margin: 0 0 10px;
+.card p {
+  margin: 0 0 12px;
+}
+
+.card p:last-child {
+  margin-bottom: 0;
+}
+
+.muted {
   color: var(--zt-dim);
 }
 
-.unavailable-note {
+.fineprint {
   color: var(--zt-faint);
+  font-size: 12px;
 }
 
-.unavailable-note code {
+.fineprint code,
+.card code {
   font-family: ui-monospace, monospace;
   color: var(--zt-fg);
+}
+
+.error {
+  color: var(--zt-danger);
+}
+
+.error.inline {
+  font-size: 12px;
+  margin-left: 8px;
+}
+
+.button {
+  display: inline-block;
+  padding: 8px 14px;
+  border: 1px solid var(--zt-line);
+  border-radius: 6px;
+  background: var(--zt-chrome);
+  color: var(--zt-fg);
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.card .button {
+  /* The anchor is inline-block, so without this the paragraph after it sits on
+     the button's baseline and the text collides with it. */
+  margin: 4px 0 16px;
+}
+
+.button.primary {
+  background: var(--zt-accent);
+  border-color: var(--zt-accent);
+  color: var(--zt-accent-text);
+  font-weight: 600;
+}
+
+.button.subtle {
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--zt-dim);
+}
+
+.button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--zt-line);
+  background: var(--zt-chrome);
+}
+
+.brand {
+  font-weight: 600;
+  color: var(--zt-accent);
+}
+
+.account {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.account-name {
+  color: var(--zt-dim);
+  font-size: 12px;
+}
+
+.avatar {
+  border-radius: 50%;
+  display: block;
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;
 }

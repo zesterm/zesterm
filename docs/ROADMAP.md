@@ -1095,6 +1095,18 @@ is now unblocked and building.
       surfaces as a 401 far from the expired code that caused it.
       Google is prepared for: one file, one registry entry, one secret.
       → the login gate and the account menu are the client half, next.
+- [x] **You can sign in, and sign out** — `@sigx/router` with the login gate as
+      a `beforeEnter`, a `/login` screen, and an account menu. The gate
+      **redirects** rather than returning `false`: on a direct page load `from`
+      is `null`, and `false` merely blocks the navigation while leaving the
+      protected component on screen, so a gate that returns it is bypassed by
+      pasting a URL.
+      Nothing gates the **local** path — reaching `127.0.0.1:7350` *is* the
+      authority, and the daemon still challenges the device key underneath. One
+      `vite build` serves both, so the session list is unchanged there.
+      Sign-out is a `POST` with `content-type: application/json`, because that
+      is exactly what the CSRF rule requires; a link or a form is refused 403.
+      Verified in a browser on both paths, signed out and in.
 - [ ] Local echo prediction for high-latency links (mosh's other trick): predict
       printable-char echo when not in alt-screen, render dim, reconcile on delta
       arrival. The largest perceived-latency win available.
