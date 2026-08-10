@@ -8,7 +8,7 @@
  * control plane's traffic shaped like control traffic.
  */
 
-import type { ClientIdentity } from '@zesterm/auth';
+import type { ClientSigner } from '@zesterm/auth';
 import {
   decode,
   encodeClientMessage,
@@ -34,7 +34,8 @@ export interface ConnectionEvents {
 
 export interface ConnectionClientOptions {
   readonly dial: Dial;
-  readonly identity: ClientIdentity;
+  /** Seed-backed or WebCrypto-backed; this layer cannot tell and must not care. */
+  readonly signer: ClientSigner;
   readonly label: string;
   readonly events?: ConnectionEvents;
   readonly clock?: Clock;
@@ -53,6 +54,18 @@ export class ConnectionClient {
   #closed = false;
   #redialAttempt = 0;
   #redialTimer: TimerHandle | null = null;
+
+  /**
+   * Handshake frames held behind an in-flight signature, and which dial they
+   * belong to. Same two hazards `SessionClient` documents at length: a host
+   * that pipelines two handshake messages must not have the second handled
+   * while the first is still signing, and a `crypto.subtle` signature that
+   * settles after its connection dropped must not be replayed onto the next
+   * one, where it answers a challenge that was never asked.
+   */
+  #stalled: Uint8Array[] = [];
+  #signing = false;
+  #dialSeq = 0;
 
   constructor(options: ConnectionClientOptions) {
     this.#options = options;
@@ -90,8 +103,9 @@ export class ConnectionClient {
   #dial(): void {
     if (this.#closed) return;
     this.#frames = new FrameReader();
+    this.#dialSeq += 1;
     this.#handshake = new HandshakeDriver({
-      identity: this.#options.identity,
+      signer: this.#options.signer,
       label: this.#options.label,
       // The entire point of this connection: pushes when anyone, anywhere,
       // changes the list.
@@ -118,6 +132,8 @@ export class ConnectionClient {
   #onClose(): void {
     this.#connected = false;
     this.#link = null;
+    this.#stalled.length = 0;
+    this.#signing = false;
     if (this.#closed) return;
     const state = this.#handshake?.state;
     if (state?.phase === 'failed' && !state.retryable) {
@@ -149,6 +165,16 @@ export class ConnectionClient {
         return;
       }
       if (body === undefined) return;
+      if (this.#signing) this.#stalled.push(body);
+      else this.#onMessage(body);
+    }
+  }
+
+  /** Resume the frames a pending signature held up, one handshake at a time. */
+  #drainStalled(): void {
+    while (!this.#signing && this.#stalled.length > 0) {
+      const body = this.#stalled.shift();
+      if (body === undefined) return;
       this.#onMessage(body);
     }
   }
@@ -161,19 +187,26 @@ export class ConnectionClient {
     // narrows repeated property reads, and `onMessage` moving the state is
     // exactly what the narrowing cannot see.
     if (!this.#connected && handshake) {
-      for (const reply of handshake.onMessage(msg)) this.#send(reply);
-      const state: HandshakeState = handshake.state;
-      if (state.phase === 'welcomed') {
-        this.#connected = true;
-        this.#redialAttempt = 0;
-        this.#events.onConnection?.({ phase: 'connected' });
-        // Prime the list; pushes keep it fresh from here.
-        this.#send({ t: 'list_sessions' });
-      } else if (state.phase === 'awaiting-approval') {
-        this.#events.onConnection?.({ phase: 'awaiting-approval', code: state.code });
-      } else if (state.phase === 'failed') {
-        this.#link?.close();
-      }
+      const seq = this.#dialSeq;
+      this.#signing = true;
+      void handshake.onMessage(msg).then((replies) => {
+        if (seq !== this.#dialSeq) return; // this signature outlived its connection
+        this.#signing = false;
+        for (const reply of replies) this.#send(reply);
+        const state: HandshakeState = handshake.state;
+        if (state.phase === 'welcomed') {
+          this.#connected = true;
+          this.#redialAttempt = 0;
+          this.#events.onConnection?.({ phase: 'connected' });
+          // Prime the list; pushes keep it fresh from here.
+          this.#send({ t: 'list_sessions' });
+        } else if (state.phase === 'awaiting-approval') {
+          this.#events.onConnection?.({ phase: 'awaiting-approval', code: state.code });
+        } else if (state.phase === 'failed') {
+          this.#link?.close();
+        }
+        this.#drainStalled();
+      });
       return;
     }
 

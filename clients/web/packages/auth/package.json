@@ -5,7 +5,8 @@
   "type": "module",
   "description": "The Ed25519 handshake: preimages, the auth transcript, pairing codes.",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./webcrypto": "./src/webcrypto.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

@@ -15,12 +15,27 @@ import {
   type ConnectionState,
   REDIAL_MAX_MS,
 } from '../src/index.ts';
-import { ADDR, FakeClock, FakeDaemon, keyframe, testIdentity, update } from './harness.ts';
+import {
+  ADDR,
+  FakeClock,
+  FakeDaemon,
+  flush,
+  gatedSigner,
+  keyframe,
+  testSigner,
+  update,
+} from './harness.ts';
+import type { ClientSigner } from '@zesterm/auth';
 
-function client(daemon: FakeDaemon, clock: FakeClock, states: ConnectionState[] = []) {
+function client(
+  daemon: FakeDaemon,
+  clock: FakeClock,
+  states: ConnectionState[] = [],
+  signer: ClientSigner = testSigner(),
+) {
   const c = new SessionClient({
     dial: daemon.dial,
-    identity: testIdentity(),
+    signer,
     label: 'test',
     session: ADDR,
     cols: 20,
@@ -35,13 +50,13 @@ function client(daemon: FakeDaemon, clock: FakeClock, states: ConnectionState[] 
   return c;
 }
 
-test('the handshake completes and attach names the client dimensions', () => {
+test('the handshake completes and attach names the client dimensions', async () => {
   const daemon = new FakeDaemon();
   const clock = new FakeClock();
   const states: ConnectionState[] = [];
   client(daemon, clock, states);
 
-  daemon.completeHandshake();
+  await daemon.completeHandshake();
 
   const attach = daemon.current.lastOfType('attach');
   assert.ok(attach, 'a welcomed client attaches without being asked');
@@ -50,11 +65,11 @@ test('the handshake completes and attach names the client dimensions', () => {
   assert.deepEqual(states.at(-1), { phase: 'connected' });
 });
 
-test('a keyframe applies and is acknowledged', () => {
+test('a keyframe applies and is acknowledged', async () => {
   const daemon = new FakeDaemon();
   const clock = new FakeClock();
   const c = client(daemon, clock);
-  daemon.completeHandshake();
+  await daemon.completeHandshake();
 
   daemon.current.deliver(keyframe(5, ['hello world']));
   assert.equal(c.grid.rows[0]?.runs[0]?.text, 'hello world');
@@ -62,11 +77,11 @@ test('a keyframe applies and is acknowledged', () => {
   assert.equal(ack?.['seq'], 5, 'the keyframe sequence must be acknowledged');
 });
 
-test('acks coalesce on the 16ms cadence and carry the highest seq', () => {
+test('acks coalesce on the 16ms cadence and carry the highest seq', async () => {
   const daemon = new FakeDaemon();
   const clock = new FakeClock();
   client(daemon, clock);
-  daemon.completeHandshake();
+  await daemon.completeHandshake();
   const link = daemon.current;
 
   link.deliver(keyframe(1));
@@ -87,11 +102,11 @@ test('acks coalesce on the 16ms cadence and carry the highest seq', () => {
   assert.equal(link.lastOfType('ack')?.['seq'], 4, 'the ack names the highest applied seq');
 });
 
-test('an update whose base is not held asks for a keyframe, once', () => {
+test('an update whose base is not held asks for a keyframe, once', async () => {
   const daemon = new FakeDaemon();
   const clock = new FakeClock();
   const c = client(daemon, clock);
-  daemon.completeHandshake();
+  await daemon.completeHandshake();
   const link = daemon.current;
 
   link.deliver(keyframe(1, ['start']));
@@ -112,18 +127,18 @@ test('an update whose base is not held asks for a keyframe, once', () => {
   assert.equal(c.grid.rows[0]?.runs[0]?.text, 'onwards');
 });
 
-test('input while disconnected is dropped, never queued', () => {
+test('input while disconnected is dropped, never queued', async () => {
   const daemon = new FakeDaemon();
   const clock = new FakeClock();
   const c = client(daemon, clock);
-  daemon.completeHandshake();
+  await daemon.completeHandshake();
   daemon.current.deliver(keyframe(1));
 
   daemon.current.close();
   c.input(Uint8Array.of(0x6c, 0x73, 0x0d)); // "ls\n" into the void
 
   clock.advance(REDIAL_MAX_MS);
-  daemon.completeHandshake();
+  await daemon.completeHandshake();
   assert.equal(
     daemon.current.ofType('input').length,
     0,
@@ -131,29 +146,29 @@ test('input while disconnected is dropped, never queued', () => {
   );
 });
 
-test('only the newest resize survives a disconnect, via the re-attach', () => {
+test('only the newest resize survives a disconnect, via the re-attach', async () => {
   const daemon = new FakeDaemon();
   const clock = new FakeClock();
   const c = client(daemon, clock);
-  daemon.completeHandshake();
+  await daemon.completeHandshake();
 
   daemon.current.close();
   c.resize(100, 30);
   c.resize(120, 40); // newer; the only one that may matter
 
   clock.advance(REDIAL_MAX_MS);
-  daemon.completeHandshake();
+  await daemon.completeHandshake();
   const attach = daemon.current.lastOfType('attach');
   assert.equal(attach?.['cols'], 120, 'the re-attach carries the newest size');
   assert.equal(attach?.['rows'], 40);
   assert.equal(daemon.current.ofType('resize').length, 0, 'no stale resizes are replayed');
 });
 
-test('the redial backoff doubles from 200ms to the 5s ceiling', () => {
+test('the redial backoff doubles from 200ms to the 5s ceiling', async () => {
   const daemon = new FakeDaemon();
   const clock = new FakeClock();
   client(daemon, clock);
-  daemon.completeHandshake();
+  await daemon.completeHandshake();
 
   // A daemon that stays down: every redial is refused on arrival, so the
   // ladder climbs. Five unlucky dials must not add up to minutes of waiting.
@@ -173,22 +188,22 @@ test('the redial backoff doubles from 200ms to the 5s ceiling', () => {
   const delay = clock.nextTimerIn();
   assert.ok(delay !== undefined);
   clock.advance(delay);
-  daemon.completeHandshake();
+  await daemon.completeHandshake();
   daemon.current.close();
   assert.equal(clock.nextTimerIn(), 200, 'a successful reconnect resets the backoff');
 });
 
-test('reconnect adopts the same session and the grid survives in place', () => {
+test('reconnect adopts the same session and the grid survives in place', async () => {
   const daemon = new FakeDaemon();
   const clock = new FakeClock();
   const c = client(daemon, clock);
-  daemon.completeHandshake();
+  await daemon.completeHandshake();
   daemon.current.deliver(keyframe(1, ['before the drop']));
   const gridBefore = c.grid;
 
   daemon.current.close();
   clock.advance(200);
-  daemon.completeHandshake();
+  await daemon.completeHandshake();
 
   assert.equal(daemon.links.length, 2, 'a fresh dial, not a resurrected socket');
   const attach = daemon.current.lastOfType('attach');
@@ -203,7 +218,7 @@ test('reconnect adopts the same session and the grid survives in place', () => {
   assert.equal(c.grid.rows[0]?.runs[0]?.text, 'and onwards');
 });
 
-test('a denied device stops redialling', () => {
+test('a denied device stops redialling', async () => {
   const daemon = new FakeDaemon();
   const clock = new FakeClock();
   const states: ConnectionState[] = [];
@@ -215,13 +230,14 @@ test('a denied device stops redialling', () => {
     reason: 'denied',
     message: 'the person at the machine said no',
   });
+  await flush();
 
   assert.deepEqual(states.at(-1)?.phase, 'failed');
   clock.advance(60_000);
   assert.equal(daemon.links.length, 1, 'a device told no must not hammer the rate limiter');
 });
 
-test('an approval prompt surfaces the six-digit code and does not retry over it', () => {
+test('an approval prompt surfaces the six-digit code and does not retry over it', async () => {
   const daemon = new FakeDaemon();
   const clock = new FakeClock();
   const states: ConnectionState[] = [];
@@ -229,6 +245,7 @@ test('an approval prompt surfaces the six-digit code and does not retry over it'
 
   daemon.current.open();
   daemon.current.deliver({ t: 'auth_pending', code: '123456', expires_in_secs: 120 });
+  await flush();
   assert.deepEqual(states.at(-1), { phase: 'awaiting-approval', code: '123456' });
   clock.advance(10_000);
   assert.equal(daemon.links.length, 1, 'waiting for a person is not a reason to redial');
@@ -249,4 +266,117 @@ test('dirtyRowsOf is conservative where it cannot be exact', () => {
     'all',
     'a screen switch invalidates everything on it',
   );
+});
+
+// ---------------------------------------------------------------------------
+// The handshake stopped being synchronous when the device key stopped being
+// readable. These three hold the consequences.
+
+test('a host that pipelines two handshake messages is handled one at a time', async () => {
+  // The concrete bug this prevents: with the challenge still signing, a
+  // `welcome` in the same task moves the state machine, `attach` goes out
+  // first, and the daemon sees a client attaching to a session before it ever
+  // authenticated. Verified by removing the queue — the order flips and this
+  // fails.
+  const daemon = new FakeDaemon();
+  const clock = new FakeClock();
+  const signer = gatedSigner();
+  client(daemon, clock, [], signer);
+
+  const link = daemon.current;
+  link.open();
+  await flush();
+
+  // Both host messages in one task, as one TCP segment would deliver them.
+  link.deliver(daemon.challengeFor(link));
+  link.deliver(daemon.welcome);
+  await flush();
+
+  assert.equal(signer.asked, 1, 'exactly one signature is outstanding');
+  assert.deepEqual(
+    link.sent.map((m) => m['t']),
+    ['hello'],
+    'nothing else may go out while the challenge is unanswered',
+  );
+
+  signer.release();
+  await flush();
+
+  assert.deepEqual(
+    link.sent.map((m) => m['t']),
+    ['hello', 'auth', 'attach'],
+    'auth strictly before attach — a client must not attach before it has proved itself',
+  );
+});
+
+test('a signature that outlives its connection is never replayed onto the next', async () => {
+  // `crypto.subtle` settles on a later task, so a dropped socket can beat it.
+  // The stale answer covers the *previous* challenge's nonce; sending it on a
+  // fresh connection is a signature the host reads as a device that failed to
+  // prove itself, and the redial ladder then punishes a working key.
+  const daemon = new FakeDaemon();
+  const clock = new FakeClock();
+  const signer = gatedSigner();
+  client(daemon, clock, [], signer);
+
+  const first = daemon.current;
+  first.open();
+  await flush();
+  first.deliver(daemon.challengeFor(first));
+  await flush();
+  first.close(); // the daemon goes away mid-signature
+
+  clock.advance(200);
+  await flush();
+  const second = daemon.current;
+  assert.notEqual(second, first, 'the client redialled');
+  second.open();
+  await flush();
+
+  signer.release(); // the first connection's signature, arriving far too late
+  await flush();
+
+  assert.deepEqual(
+    second.sent.map((m) => m['t']),
+    ['hello'],
+    'the second connection has said nothing but hello — its own challenge is still to come',
+  );
+
+  // And when that challenge does arrive, it is answered exactly once.
+  second.deliver(daemon.challengeFor(second));
+  await flush();
+  signer.release();
+  await flush();
+  assert.equal(second.ofType('auth').length, 1, 'one connection, one answer');
+});
+
+test('a device that cannot sign says so, and does not blame the host', async () => {
+  // A key the browser evicted, or a crypto.subtle that will not sign after
+  // all. Reporting this as `host-unproven` sends someone to inspect a daemon
+  // that did nothing wrong; and retrying reaches the same broken key.
+  const daemon = new FakeDaemon();
+  const clock = new FakeClock();
+  const signer = gatedSigner();
+  const states: ConnectionState[] = [];
+  client(daemon, clock, states, signer);
+
+  const link = daemon.current;
+  link.open();
+  await flush();
+  link.deliver(daemon.challengeFor(link));
+  await flush();
+  signer.fail(new Error('the key is gone'));
+  await flush();
+
+  const last = states.at(-1);
+  assert.equal(last?.phase, 'failed');
+  assert.equal(
+    last?.phase === 'failed' ? last.reason : '',
+    'signer-failed',
+    'this device is the one that failed, not the host',
+  );
+  assert.equal(link.ofType('auth').length, 0, 'nothing was sent that could not be signed');
+  clock.advance(60_000);
+  await flush();
+  assert.equal(daemon.links.length, 1, 'a key that cannot sign will not sign on the next try');
 });

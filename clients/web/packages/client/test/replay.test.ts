@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import { SessionClient } from '../src/index.ts';
-import { FakeClock, FakeDaemon, testIdentity } from './harness.ts';
+import { FakeClock, FakeDaemon, testSigner } from './harness.ts';
 
 const FIXTURES = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -32,7 +32,7 @@ function hexToBytes(hex: string): Uint8Array {
   return out;
 }
 
-test('blocks-zsh replays through the full client, blocks and all', () => {
+test('blocks-zsh replays through the full client, blocks and all', async () => {
   const fixture = JSON.parse(
     readFileSync(join(FIXTURES, 'blocks-zsh.json'), 'utf8'),
   ) as FixtureFile;
@@ -42,7 +42,7 @@ test('blocks-zsh replays through the full client, blocks and all', () => {
   let blockEvents = 0;
   const c = new SessionClient({
     dial: daemon.dial,
-    identity: testIdentity(),
+    signer: testSigner(),
     label: 'replay',
     // The fixture's frames name host 0x2e..; the session addr only matters
     // for what this client *sends*, and the fixture host never answers.
@@ -53,7 +53,7 @@ test('blocks-zsh replays through the full client, blocks and all', () => {
     events: { onBlocksChanged: () => blockEvents++ },
   });
   c.connect();
-  daemon.completeHandshake();
+  await daemon.completeHandshake();
 
   for (const frame of fixture.frames) {
     // Raw framed bytes straight into the link, exactly as a WebSocket would

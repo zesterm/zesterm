@@ -13,22 +13,22 @@
  */
 
 import { component } from 'sigx';
-import type { ClientIdentity } from '@zesterm/auth';
 import type { Theme } from '@zesterm/theme';
 
 import type { Bootstrap, User } from '../bootstrap.ts';
+import type { DeviceKey } from '../device-key.ts';
 import { AccountMenu } from './AccountMenu.tsx';
 import { Shell } from './Shell.tsx';
 
 export const Fleet = component<{
   bootstrap: Bootstrap;
-  identity: ClientIdentity;
+  device: DeviceKey;
   theme: Theme;
 }>((ctx) => () => {
-  const { bootstrap, identity, theme } = ctx.props;
+  const { bootstrap, device, theme } = ctx.props;
 
   if (bootstrap.mode === 'local') {
-    return <Shell identity={identity} theme={theme} />;
+    return <Shell device={device} theme={theme} />;
   }
 
   const user = bootstrap.user as User;

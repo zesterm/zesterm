@@ -26,7 +26,17 @@ export type Role = 'host' | 'client';
  */
 export type Purpose = 'auth' | 'enrollment' | 'attach-ticket';
 
-export function preimage(role: Role, purpose: Purpose, message: Uint8Array): Uint8Array {
+/**
+ * The buffer is `ArrayBuffer`-backed rather than plain `Uint8Array` because
+ * `crypto.subtle.sign` takes a `BufferSource`, which excludes a view that
+ * might sit on a `SharedArrayBuffer`. Stating the narrower type here is what
+ * keeps a cast out of every caller.
+ */
+export function preimage(
+  role: Role,
+  purpose: Purpose,
+  message: Uint8Array,
+): Uint8Array<ArrayBuffer> {
   const head = TEXT.encode(`${SIGNING_DOMAIN}\0${role}\0${purpose}\0`);
   const out = new Uint8Array(head.length + message.length);
   out.set(head, 0);

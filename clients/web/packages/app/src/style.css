@@ -72,6 +72,14 @@ body {
   color: var(--zt-warn);
 }
 
+/* Dim in both states on purpose: which key backs the device is worth saying
+   and not worth a green tick — a reassuring colour on the seed path would be
+   the untrue half of the message. */
+.key-state {
+  font-size: 12px;
+  color: var(--zt-dim);
+}
+
 .sessions {
   list-style: none;
   margin: 16px 0;

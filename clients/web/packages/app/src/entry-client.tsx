@@ -21,7 +21,7 @@ import { component } from 'sigx';
 import { applyCssVars, obsidian, themeById } from '@zesterm/theme';
 
 import { fetchBootstrap } from './bootstrap.ts';
-import { deviceIdentity } from './identity.ts';
+import { deviceKey } from './device-key.ts';
 import { routerPlugin } from './routes.tsx';
 import './style.css';
 
@@ -43,9 +43,11 @@ const socketUrl =
 
 const Root = component(() => () => <RouterView />);
 
-void fetchBootstrap().then((bootstrap) => {
-  const identity = deviceIdentity();
-  const app = defineApp(Root({})).use(routerPlugin({ bootstrap, identity, theme }));
+// The device key is awaited beside the bootstrap rather than after it: both
+// are prerequisites for the first route, and IndexedDB plus a key generation
+// are not free on a cold visit.
+void Promise.all([fetchBootstrap(), deviceKey()]).then(([bootstrap, device]) => {
+  const app = defineApp(Root({})).use(routerPlugin({ bootstrap, device, theme }));
 
   // Only where something hosts the actors. Installing it at the edge would
   // dial a socket that is not there.

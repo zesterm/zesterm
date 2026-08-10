@@ -1,7 +1,12 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "types": ["node"]
+    "types": ["node"],
+    // `src/webcrypto.ts` is the only reason: `CryptoKey` and `CryptoKeyPair`
+    // are types under this lib and values-only under @types/node. It is a
+    // separate entry point precisely so the packages above -- which compile
+    // without the DOM on purpose -- never have to follow suit.
+    "lib": ["ES2023", "DOM"]
   },
   "include": ["src/**/*.ts", "test/**/*.ts"]
 }

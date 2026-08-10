@@ -4,13 +4,15 @@
  * session layer owns encoding and transport; this owns the *order* — and the
  * order is the security property: the host proves itself first, and nothing
  * is signed for a host that failed to.
+ *
+ * `onMessage` is async because a non-extractable device key signs through
+ * `crypto.subtle` and cannot do otherwise — see `@zesterm/auth`'s
+ * `ClientSigner`. Verification stays synchronous, so the ordering above is
+ * unchanged: everything that can refuse a host has already refused it by the
+ * time this returns a promise at all.
  */
 
-import {
-  answerChallenge,
-  ChallengeError,
-  type ClientIdentity,
-} from '@zesterm/auth';
+import { answerChallenge, ChallengeError, type ClientSigner } from '@zesterm/auth';
 import {
   bytesToHex,
   type ClientMessage,
@@ -30,7 +32,7 @@ export type HandshakeState =
   | { readonly phase: 'failed'; readonly reason: string; readonly message: string; readonly retryable: boolean };
 
 export interface HandshakeOptions {
-  readonly identity: ClientIdentity;
+  readonly signer: ClientSigner;
   readonly label: string;
   readonly watchSessions: boolean;
   /** Pin the host id an advertisement or directory claimed; omit for a hand-typed address. */
@@ -68,7 +70,7 @@ export class HandshakeDriver {
     return {
       t: 'hello',
       version: PROTOCOL_VERSION,
-      client: this.#options.identity.clientId,
+      client: this.#options.signer.clientId,
       label: this.#options.label,
       nonce: this.#nonce,
       watch_sessions: this.#options.watchSessions,
@@ -76,20 +78,26 @@ export class HandshakeDriver {
   }
 
   /**
-   * Feed one host message. Returns messages to send, if any. Messages that
-   * are not the handshake's business (a keyframe racing the welcome cannot
-   * happen, but session pushes after `welcomed` can) return nothing and are
-   * the caller's to route.
+   * Feed one host message. Resolves with the messages to send, if any.
+   * Messages that are not the handshake's business (a keyframe racing the
+   * welcome cannot happen, but session pushes after `welcomed` can) return
+   * nothing and are the caller's to route.
+   *
+   * **Callers must await one call before making the next**, and must send the
+   * replies in that order. Only the challenge actually suspends, but a caller
+   * that fires two of these off in parallel can have the state machine move
+   * under a pending signature — and would then attach before authenticating.
+   * `SessionClient` and `ConnectionClient` queue their frames for this reason.
    */
-  onMessage(msg: HostMessage): ClientMessage[] {
+  async onMessage(msg: HostMessage): Promise<ClientMessage[]> {
     if (isChallenge(msg)) {
       try {
-        const signature = answerChallenge({
-          identity: this.#options.identity,
+        const signature = await answerChallenge({
+          signer: this.#options.signer,
           transcript: {
             version: msg.version,
             host: msg.host,
-            client: this.#options.identity.clientId,
+            client: this.#options.signer.clientId,
             hostNonce: msg.nonce,
             clientNonce: this.#nonce,
             hostLabel: msg.label,
@@ -104,10 +112,17 @@ export class HandshakeDriver {
       } catch (e) {
         // A host that cannot prove itself is not a host to keep talking to —
         // and crucially, nothing was signed for it.
+        //
+        // The await also puts a *signer* failure here: a device key the
+        // browser has evicted, or a `crypto.subtle` that will not sign after
+        // all. Not retryable either — redialling reaches the same broken
+        // key — but named separately, because reporting it as `host-unproven`
+        // sends someone to inspect a daemon that did nothing wrong.
+        const unproven = e instanceof ChallengeError;
         this.#state = {
           phase: 'failed',
-          reason: 'host-unproven',
-          message: e instanceof ChallengeError ? e.message : String(e),
+          reason: unproven ? 'host-unproven' : 'signer-failed',
+          message: unproven ? e.message : `this device could not sign: ${String(e)}`,
           retryable: false,
         };
         return [];

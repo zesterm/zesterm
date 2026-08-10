@@ -11,7 +11,7 @@
  */
 
 import type { Host } from '@sigx/actors/host';
-import { generateIdentity } from '@zesterm/auth';
+import { generateIdentity, seedSigner } from '@zesterm/auth';
 import { ConnectionClient, type Dial } from '@zesterm/client';
 import {
   LOCAL_DIRECTORY_KEY,
@@ -54,7 +54,7 @@ export function startFeed(options: FeedOptions): () => void {
     // Ephemeral by design: the sidecar is not a device, and it should not
     // accumulate a pairing on every machine it runs on. Loopback's
     // AlwaysTrusted store welcomes it; the proof still runs.
-    identity: generateIdentity(),
+    signer: seedSigner(generateIdentity()),
     label: options.label ?? 'zesterm-sidecar',
     events: {
       onSessions: (sessions, created) => {

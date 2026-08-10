@@ -23,10 +23,17 @@ import {
   isAbsentNonce,
   pairingCode,
   preimage,
+  seedSigner,
   signAsClient,
   verifyClientSignature,
   type Transcript,
 } from '../src/index.ts';
+import {
+  clientIdOf,
+  generateWebCryptoKey,
+  webCryptoEd25519Available,
+  webCryptoSigner,
+} from '../src/webcrypto.ts';
 
 /** Inputs fed to the Rust when the goldens were printed. */
 const GOLDEN_TRANSCRIPT: Transcript = {
@@ -119,7 +126,7 @@ test('purposes do not cross either', () => {
   );
 });
 
-test('answerChallenge verifies the host before proving anything', () => {
+test('answerChallenge verifies the host before proving anything', async () => {
   // Simulate the host: sign the transcript with the host role over a known key.
   const host = generateIdentity('7a'.repeat(32));
   const transcript: Transcript = { ...GOLDEN_TRANSCRIPT, host: host.clientId, client: GOLDEN.clientId };
@@ -129,47 +136,142 @@ test('answerChallenge verifies the host before proving anything', () => {
   const hostSig = signHostForTest(host.seed, bytes);
 
   const me = generateIdentity(GOLDEN.seed);
-  const answer = answerChallenge({
-    identity: me,
+  const answer = await answerChallenge({
+    signer: seedSigner(me),
     transcript,
     hostSignature: hostSig,
     expectedHost: host.clientId,
   });
   assert.ok(verifyClientSignature(me.clientId, 'auth', bytes, answer));
 
-  assert.throws(
-    () =>
-      answerChallenge({
-        identity: me,
-        transcript,
-        hostSignature: hostSig,
-        expectedHost: 'ee'.repeat(32),
-      }),
+  await assert.rejects(
+    answerChallenge({
+      signer: seedSigner(me),
+      transcript,
+      hostSignature: hostSig,
+      expectedHost: 'ee'.repeat(32),
+    }),
     ChallengeError,
     'a host that is not the one dialled must be refused before any proof is sent',
   );
 
-  assert.throws(
-    () =>
-      answerChallenge({
-        identity: me,
-        transcript: { ...transcript, hostNonce: '00'.repeat(32) },
-        hostSignature: hostSig,
-      }),
+  await assert.rejects(
+    answerChallenge({
+      signer: seedSigner(me),
+      transcript: { ...transcript, hostNonce: '00'.repeat(32) },
+      hostSignature: hostSig,
+    }),
     ChallengeError,
     'an absent nonce makes every signature a replay and must be refused',
   );
 
-  assert.throws(
-    () =>
-      answerChallenge({
-        identity: me,
-        transcript,
-        hostSignature: hostSig.replace(/^../, hostSig.startsWith('00') ? '01' : '00'),
-      }),
+  await assert.rejects(
+    answerChallenge({
+      signer: seedSigner(me),
+      transcript,
+      hostSignature: hostSig.replace(/^../, hostSig.startsWith('00') ? '01' : '00'),
+    }),
     ChallengeError,
     'a corrupt host signature must not be answered',
   );
+});
+
+test('every refusal lands before the signer is ever asked', async () => {
+  // The ordering property, made testable: a signer that records being called.
+  // `answerChallenge` is async now, and an `await` moved above these checks
+  // would still produce correct answers for every honest host — so nothing
+  // else in this suite would notice. This is the test that would.
+  const host = generateIdentity('7a'.repeat(32));
+  const me = generateIdentity(GOLDEN.seed);
+  const transcript: Transcript = { ...GOLDEN_TRANSCRIPT, host: host.clientId, client: me.clientId };
+  const hostSig = signHostForTest(host.seed, authTranscript(transcript));
+
+  let asked = 0;
+  const inner = seedSigner(me);
+  const counting = {
+    clientId: inner.clientId,
+    sign: (purpose: 'auth' | 'enrollment' | 'attach-ticket', message: Uint8Array) => {
+      asked += 1;
+      return inner.sign(purpose, message);
+    },
+  };
+
+  const attempts: Array<Parameters<typeof answerChallenge>[0]> = [
+    { signer: counting, transcript, hostSignature: hostSig, expectedHost: 'ee'.repeat(32) },
+    { signer: counting, transcript: { ...transcript, hostNonce: '00'.repeat(32) }, hostSignature: hostSig },
+    { signer: counting, transcript: { ...transcript, client: '11'.repeat(32) }, hostSignature: hostSig },
+    { signer: counting, transcript, hostSignature: '00'.repeat(64) },
+  ];
+  for (const attempt of attempts) {
+    await assert.rejects(answerChallenge(attempt), ChallengeError);
+  }
+  assert.equal(asked, 0, 'nothing may be signed for a host that has not proved itself');
+
+  await answerChallenge({ signer: counting, transcript, hostSignature: hostSig });
+  assert.equal(asked, 1, 'a proven host is answered exactly once');
+});
+
+test('a seed signer and a WebCrypto signer are indistinguishable on the wire', async (t) => {
+  // The whole point of the seam: the handshake cannot tell which kind of key
+  // it holds, and the host cannot either — both produce a 128-hex Ed25519
+  // signature over the same preimage, verified here by the *other* library.
+  if (!(await webCryptoEd25519Available())) {
+    t.skip('this runtime has no crypto.subtle Ed25519');
+    return;
+  }
+  const { clientId, keyPair } = await generateWebCryptoKey();
+  const signer = webCryptoSigner(clientId, keyPair.privateKey);
+  const message = authTranscript(GOLDEN_TRANSCRIPT);
+
+  const signature = await signer.sign('auth', message);
+  assert.equal(signature.length, 128, 'an Ed25519 signature is 64 bytes of hex');
+  assert.ok(
+    verifyClientSignature(clientId, 'auth', message, signature),
+    'noble must verify what subtle signed — this is the seam actually holding',
+  );
+  assert.ok(
+    !verifyClientSignature(clientId, 'enrollment', message, signature),
+    'the purpose is inside the signed bytes on this path too',
+  );
+});
+
+test('a non-extractable device key cannot be turned back into a seed', async (t) => {
+  // Stated as a test because it is the reason the seam exists at all: if the
+  // scalar could be read out, @noble could sign and none of the async plumbing
+  // above would be necessary. It cannot, by construction.
+  if (!(await webCryptoEd25519Available())) {
+    t.skip('this runtime has no crypto.subtle Ed25519');
+    return;
+  }
+  const { keyPair } = await generateWebCryptoKey();
+  assert.equal(keyPair.privateKey.extractable, false, 'the private half must not be exportable');
+  await assert.rejects(
+    crypto.subtle.exportKey('raw', keyPair.privateKey),
+    'a script on this origin must not be able to read the device key',
+  );
+});
+
+test('the id a WebCrypto key claims is the public key itself', async (t) => {
+  if (!(await webCryptoEd25519Available())) {
+    t.skip('this runtime has no crypto.subtle Ed25519');
+    return;
+  }
+  const { clientId, keyPair } = await generateWebCryptoKey();
+  assert.equal(clientId, await clientIdOf(keyPair.publicKey), 'ADR-006: the id IS the key');
+  assert.match(clientId, /^[0-9a-f]{64}$/);
+});
+
+test('a signer refuses the public half and a malformed id', async (t) => {
+  // Both mistakes otherwise surface as a signature the host rejects, which
+  // reads as "this device was denied" rather than "this code stored the wrong
+  // key" — a failure that names nothing is worth one cheap check.
+  if (!(await webCryptoEd25519Available())) {
+    t.skip('this runtime has no crypto.subtle Ed25519');
+    return;
+  }
+  const { clientId, keyPair } = await generateWebCryptoKey();
+  assert.throws(() => webCryptoSigner(clientId, keyPair.publicKey), /private key/);
+  assert.throws(() => webCryptoSigner('nope', keyPair.privateKey), /64 lowercase hex/);
 });
 
 test('an all-zero nonce reads as absent', () => {
