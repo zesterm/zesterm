@@ -63,6 +63,18 @@ impl Default for TextTuning {
     }
 }
 
+/// A scene colour as a clear value for the offscreen pass.
+///
+/// A straight widening, deliberately: the offscreen is linear and every colour
+/// reaching it is premultiplied (ADR-003), which is exactly what a `LinearRgba`
+/// already holds. Converting here — encoding, or dividing the alpha back out —
+/// would make the cleared pixels a different colour from an instance filled with
+/// the same value, which is the one property this has to preserve.
+fn clear_color(c: LinearRgba) -> wgpu::Color {
+    let [r, g, b, a] = c.0;
+    wgpu::Color { r: f64::from(r), g: f64::from(g), b: f64::from(b), a: f64::from(a) }
+}
+
 pub struct Renderer {
     rect_pipeline: wgpu::RenderPipeline,
     glyph_pipeline: wgpu::RenderPipeline,
@@ -408,9 +420,14 @@ impl Renderer {
                     view: offscreen_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        // Transparent clear. Opacity is expressed by the
-                        // instances themselves, so the target starts empty.
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        // The window's backdrop, not an empty target: the
+                        // padding, the gaps around the chrome bars and the
+                        // split gutter are covered by no instance at all, and
+                        // a transparent clear leaves them black on an opaque
+                        // surface. Opacity is still expressed by the colour
+                        // rather than by the pass — `scene.backdrop` carries
+                        // it, premultiplied like every instance (ADR-003).
+                        load: wgpu::LoadOp::Clear(clear_color(scene.backdrop)),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -698,6 +715,22 @@ mod tests {
         assert!(
             src.contains(&expected),
             "glyph.wgsl LAYER_SIZE is out of sync with atlas::LAYER_SIZE; expected `{expected}`"
+        );
+    }
+
+    #[test]
+    fn the_clear_value_matches_an_instance_of_the_same_colour() {
+        // The padding is cleared to the backdrop while the grid is an instance
+        // filled with it. Any conversion here — encoding to sRGB, or dividing
+        // the alpha back out — would make the two different colours, and the
+        // seam would land exactly where the old black border used to be.
+        let c = super::LinearRgba::from_srgb(0x0b, 0x0f, 0x1a, 0.8);
+        let got = super::clear_color(c);
+        let [r, g, b, a] = c.0;
+        assert_eq!(
+            (got.r, got.g, got.b, got.a),
+            (f64::from(r), f64::from(g), f64::from(b), f64::from(a)),
+            "the clear must be the instance colour verbatim, premultiplied and linear"
         );
     }
 

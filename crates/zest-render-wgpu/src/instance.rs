@@ -8,7 +8,10 @@
 use bytemuck::{Pod, Zeroable};
 
 /// A linear premultiplied colour, as the shaders consume it.
-#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+///
+/// `Default` is [`Self::TRANSPARENT`] — the only sensible zero for a
+/// premultiplied colour, and what `Zeroable` already produces.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Pod, Zeroable)]
 #[repr(C)]
 pub struct LinearRgba(pub [f32; 4]);
 

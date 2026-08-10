@@ -11,15 +11,21 @@
 //! ```text
 //! cargo run -p zest-render-wgpu --example render_dump
 //! cargo run -p zest-render-wgpu --example render_dump -- --preedit にほんご
+//! cargo run -p zest-render-wgpu --example render_dump -- --padding 16
 //! ```
 //!
 //! `--preedit` draws composing text over the cursor, which is otherwise only
 //! reachable by holding down an input method in a live window — the one part of
 //! IME that is a rendering question rather than an event-plumbing one.
+//!
+//! `--padding` insets the viewport inside a larger target the way the window's
+//! `window.padding` does. Without it every pixel of the dump belongs to the
+//! grid, so the band around it — the one place a missing backdrop shows up as a
+//! black frame — is the one thing this tool could not reproduce.
 
 use zest_core::Terminal;
 use zest_font::{Fonts, Typography};
-use zest_render_wgpu::{Chrome, Preedit, Renderer, Scene, Viewport};
+use zest_render_wgpu::{Chrome, LinearRgba, Preedit, Renderer, Scene, Viewport};
 
 /// Non-sRGB on purpose: the resolve pass performs the sRGB encode itself, so an
 /// sRGB target would encode twice and wash everything out.
@@ -109,10 +115,11 @@ async fn run() {
     let resolved = zest_theme::resolve(&theme);
     term.set_palette(to_core_palette(&resolved));
 
-    let width = cols as u32 * metrics.cell_w;
-    let height = rows as u32 * metrics.cell_h;
+    let padding = opt("--padding").map_or(0, |p| p.parse::<u32>().expect("--padding takes pixels"));
+    let width = cols as u32 * metrics.cell_w + padding * 2;
+    let height = rows as u32 * metrics.cell_h + padding * 2;
     eprintln!(
-        "[render_dump] cell {}x{}, target {width}x{height}",
+        "[render_dump] cell {}x{}, padding {padding}, target {width}x{height}",
         metrics.cell_w, metrics.cell_h
     );
 
@@ -139,8 +146,19 @@ async fn run() {
         &mut renderer.atlas,
         &mut fonts,
         metrics,
+        // The same background the app would clear the window to, so a dump is
+        // comparable with a screenshot rather than merely similar to one.
+        {
+            let bg = term.palette().background;
+            LinearRgba::from_srgb(bg.r, bg.g, bg.b, 1.0)
+        },
         &[Viewport {
-            rect: [0.0, 0.0, width as f32, height as f32],
+            rect: [
+                padding as f32,
+                padding as f32,
+                (width - padding * 2) as f32,
+                (height - padding * 2) as f32,
+            ],
             grid: term.grid(),
             palette: term.palette(),
             scroll_px: 0.0,

@@ -3340,6 +3340,14 @@ impl App {
             let term = term.lock();
             block_actions::fold_row_map(&term, folds)
         });
+        // What the window is painted with outside every viewport: the padding,
+        // the gaps around the chrome bars, the split gutter. Taken from the
+        // app's palette rather than a session's, because those pixels belong to
+        // no session -- and computed here, before the borrows below.
+        let backdrop = {
+            let bg = self.palette.background;
+            zest_render_wgpu::LinearRgba::from_srgb(bg.r, bg.g, bg.b, self.config.opacity)
+        };
         let (Some(gpu), Some(fonts), Some(session), Some(window)) = (
             self.gpu.as_mut(),
             self.fonts.as_mut(),
@@ -3523,6 +3531,7 @@ impl App {
                         &mut gpu.renderer.atlas,
                         fonts,
                         metrics,
+                        backdrop,
                         &viewports,
                         &chrome,
                     );
@@ -3535,6 +3544,7 @@ impl App {
                         &mut gpu.renderer.atlas,
                         fonts,
                         metrics,
+                        backdrop,
                         &[Viewport {
                             rect: area,
                             grid: term.grid(),
