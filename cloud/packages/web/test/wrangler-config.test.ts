@@ -53,9 +53,13 @@ test('migrations_dir points at a directory that exists and has migrations in it'
     'migrations_dir at the top level is ignored by wrangler — it belongs on the d1_databases entry',
   );
 
-  const dbs = config['d1_databases'] as Array<Record<string, unknown>> | undefined;
-  assert.ok(dbs && dbs.length > 0, 'no d1_databases binding');
-  const rel = dbs[0]?.['migrations_dir'];
+  // Selected by binding name, not by position: reordering the array does not
+  // change what wrangler does, so a positional lookup would fail spuriously
+  // the first time a second database is added above this one.
+  const dbs = (config['d1_databases'] ?? []) as Array<Record<string, unknown>>;
+  const db = dbs.find((d) => d['binding'] === 'DB');
+  assert.ok(db, 'no d1_databases entry bound as DB');
+  const rel = db['migrations_dir'];
   assert.equal(typeof rel, 'string', 'migrations_dir must be set — the default is wrong here');
 
   // Resolved against the config file, which is the whole point: wrangler does
@@ -67,13 +71,24 @@ test('migrations_dir points at a directory that exists and has migrations in it'
   const sql = readdirSync(dir).filter((f) => f.endsWith('.sql'));
   assert.ok(sql.length > 0, `no .sql files in ${dir}`);
 
-  // Wrangler applies them in lexical order and records what it has run, so a
-  // file that sorts before one already applied is silently skipped in
-  // production while working perfectly on a fresh local database.
+  // Wrangler applies them in lexical order and records by name what it has
+  // run, so a file that sorts *before* one already applied is silently skipped
+  // in production while working perfectly on a fresh local database.
   for (const name of sql) {
     assert.match(name, /^\d{4}_/, `${name} must start with a four-digit sequence`);
   }
-  assert.deepEqual([...sql].sort(), sql.slice().sort(), 'listing is stable');
+
+  // Duplicate prefixes are the realistic version of that: two branches both
+  // add `0002_`, and after the merge whichever sorts second is applied only
+  // where the database is new. An earlier version of this test compared two
+  // sorted copies of the same array, which is a tautology and asserted
+  // nothing at all.
+  const prefixes = sql.map((n) => n.slice(0, 4));
+  assert.equal(
+    new Set(prefixes).size,
+    prefixes.length,
+    `two migrations share a sequence number: ${prefixes.join(', ')}`,
+  );
 });
 
 test('the asset directory points at the app the Worker is meant to serve', () => {
