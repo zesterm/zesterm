@@ -216,6 +216,11 @@ mod imp {
     use super::{Arc, DaemonConfig, DaemonError, Registry};
     use std::ffi::OsStr;
     use std::io;
+    // `Read`/`Write` are implemented for `PipeStream` below, so this import is
+    // load-bearing here and nowhere else in the file -- the unix backend gets
+    // them from `UnixStream`. A tidy-up that deletes it because macOS says
+    // "unused" breaks only Windows, and only in CI.
+    use std::io::{Read, Write};
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
 
@@ -522,9 +527,6 @@ fn test_authenticator() -> std::sync::Arc<crate::auth::Authenticator> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Imported here rather than at module level: the unix backend needs neither,
-    // so a module-level import is an unused-import error on macOS and Linux and
-    // invisible on Windows, where the pipe implementation happens to use both.
     use std::time::{Duration, Instant};
     use zest_proto::HostId;
 
