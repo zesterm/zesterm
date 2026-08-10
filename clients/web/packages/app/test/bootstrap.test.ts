@@ -1,7 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { fetchBootstrap, parseBootstrap, FALLBACK, type Bootstrap } from '../src/bootstrap.ts';
+import {
+  fetchBootstrap,
+  parseBootstrap,
+  parseUser,
+  FALLBACK,
+  type Bootstrap,
+} from '../src/bootstrap.ts';
 
 /** A `fetch` that answers once with this body, so no server is needed. */
 const serving = (body: unknown, status = 200): typeof fetch =>
@@ -83,4 +89,74 @@ test('the fallback is local, because that is the path that still works', () => {
   // Assuming cloud would show a signed-out screen to someone on loopback,
   // where there is nothing to sign in to.
   assert.equal(FALLBACK.mode, 'local');
+});
+
+// --- the signed-in user ------------------------------------------------------
+
+const USER = {
+  id: 'u-1',
+  displayName: 'Andy',
+  email: 'andy@example.com',
+  avatarUrl: 'https://example.com/a.png',
+};
+
+test('a signed-in user parses through the bootstrap envelope', () => {
+  assert.deepEqual(parseBootstrap({ mode: 'cloud', user: USER }), {
+    mode: 'cloud',
+    user: USER,
+  } satisfies Bootstrap);
+});
+
+test('the optional fields are allowed to be absent', () => {
+  // GitHub accounts with a private email have no address, and not everyone has
+  // an avatar. Neither is a reason to refuse the user.
+  assert.deepEqual(parseUser({ id: 'u-1', displayName: 'Andy' }), {
+    id: 'u-1',
+    displayName: 'Andy',
+    email: null,
+    avatarUrl: null,
+  });
+  assert.deepEqual(parseUser({ ...USER, email: null, avatarUrl: null }), {
+    ...USER,
+    email: null,
+    avatarUrl: null,
+  });
+});
+
+test('a user missing its identifying fields is nobody, not a half-rendered one', () => {
+  // The consequence is the point: `null` gates to /login. Accepting a partial
+  // user would render an account menu with an undefined name and let the app
+  // behave as though someone were signed in when the server did not say so.
+  for (const bad of [
+    null,
+    undefined,
+    'andy',
+    42,
+    {},
+    { id: 'u-1' },
+    { displayName: 'Andy' },
+    { id: 1, displayName: 'Andy' },
+    { id: 'u-1', displayName: 42 },
+  ]) {
+    assert.equal(parseUser(bad), null, `${JSON.stringify(bad)} should not be a user`);
+  }
+});
+
+test('a cloud envelope carrying a malformed user is signed out, not rejected', () => {
+  // The envelope is still understood -- this is the edge, and the app must
+  // render /login rather than fall back to `local` and dial a daemon that is
+  // not there.
+  const got = parseBootstrap({ mode: 'cloud', user: { id: 'u-1' } });
+  assert.deepEqual(got, { mode: 'cloud', user: null });
+});
+
+test('wrong-typed fields do not leak through as undefined', () => {
+  // `email: 42` must become null rather than reaching the UI as a number that
+  // renders as "42" next to the account name.
+  assert.deepEqual(parseUser({ id: 'u-1', displayName: 'Andy', email: 42, avatarUrl: {} }), {
+    id: 'u-1',
+    displayName: 'Andy',
+    email: null,
+    avatarUrl: null,
+  });
 });
