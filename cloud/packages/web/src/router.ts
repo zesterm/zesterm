@@ -1,52 +1,58 @@
 /**
- * The `/api` surface, as a pure function.
+ * The `/api` and `/auth` surface.
  *
- * Pure — `(Request) => Response | null` — so the whole routing table is
- * testable under `node --test` with no workerd, no miniflare and no bindings.
- * `null` means "not mine": the entrypoint then hands the request to the asset
- * binding, which is what serves the app.
+ * Everything that decides *what* to answer lives here; `index.ts` keeps only
+ * what genuinely needs the runtime. `null` means "not mine" — the entrypoint
+ * then hands the request to the asset binding, which is what serves the app.
  *
- * The split matters more than it looks. Everything that decides *what* to
- * answer lives here and is covered by ordinary tests; `index.ts` keeps only the
- * part that genuinely needs the runtime. When this grows an auth flow, the
- * cookie parsing and the state check belong on this side of that line too.
+ * It takes `fetchImpl` and `now` so the whole OAuth round trip is testable
+ * against a stubbed provider under `node --test`, with no workerd and no
+ * network. Security code that can only be exercised by deploying is security
+ * code that is exercised rarely.
  */
 
-import { cloudBootstrap } from './bootstrap.ts';
+import { readCookie, SESSION_COOKIE } from '@zesterm/cloud-shared';
 
-/** JSON, with caching refused. */
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      'content-type': 'application/json; charset=utf-8',
-      // `/api/*` answers are per-user the moment accounts land, and a response
-      // cached at the edge before that is a response served to the wrong
-      // person after it. Refusing from the start costs nothing and means the
-      // day this matters is not the day someone remembers.
-      'cache-control': 'no-store',
-    },
-  });
-}
+import { finishLogin, logout, startLogin } from './auth/routes.ts';
+import { resolveSession } from './db/sessions.ts';
+import type { Env } from './env.ts';
+import { csrfOk, json } from './http.ts';
 
-/**
- * Answer an `/api/*` request, or `null` to let the assets handle it.
- *
- * Deliberately not a framework. Five routes do not need one, and a Worker's
- * cold start is a real number that a router dependency spends for you.
- */
-export function routeApi(request: Request): Response | null {
+export async function routeApi(
+  request: Request,
+  env: Env,
+  fetchImpl: typeof fetch = fetch,
+  now = Date.now(),
+): Promise<Response | null> {
   const url = new URL(request.url);
-  if (!url.pathname.startsWith('/api/')) return null;
+  const path = url.pathname;
 
-  if (url.pathname === '/api/bootstrap') {
-    if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
-    return json(cloudBootstrap());
+  if (!path.startsWith('/api/') && !path.startsWith('/auth/')) return null;
+
+  // Checked once, before any handler, so a route cannot be added that forgets.
+  if (!csrfOk(request, env.APP_ORIGIN)) return json({ error: 'forbidden' }, 403);
+
+  if (path === '/auth/login') return startLogin(request, env, now);
+  if (path.startsWith('/auth/callback/')) return finishLogin(request, env, fetchImpl, now);
+  if (path === '/auth/logout') {
+    if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+    return logout(request, env);
   }
 
-  // An unknown `/api/*` path is 404 JSON, never the SPA's index.html. A fetch
-  // for a route that does not exist should fail as a fetch — falling through to
-  // the app would hand JavaScript a 200 full of HTML, which surfaces as a JSON
-  // parse error naming a line of markup and tells you nothing.
+  if (path === '/api/bootstrap' || path === '/api/me') {
+    if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+    const user = await resolveSession(
+      env.DB,
+      readCookie(request.headers.get('cookie'), SESSION_COOKIE),
+      now,
+    );
+    // `/api/me` is the same answer without the envelope -- one source of truth
+    // for "who is this", so the two can never disagree about it.
+    return path === '/api/me' ? json({ user }) : json({ mode: 'cloud', user });
+  }
+
+  // An unknown path under either prefix is JSON, never the SPA fallback:
+  // falling through would hand JavaScript a 200 full of HTML, which surfaces
+  // as a parse error naming a line of markup and points nowhere near the cause.
   return json({ error: 'not_found' }, 404);
 }

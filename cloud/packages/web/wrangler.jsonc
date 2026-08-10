@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "zesterm-web",
+  "name": "zesterm",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-01",
 
@@ -28,10 +28,24 @@
   },
 
   "vars": {
-    // Placeholder. Replaced with the real *.workers.dev subdomain once the
-    // account exists -- and again if a custom domain ever lands, which is not
-    // free: every `__Host-` cookie is host-scoped, so moving origin signs
-    // everybody out.
-    "APP_ORIGIN": "https://zesterm-web.example.workers.dev"
-  }
+    // The `workers.dev` subdomain is per *account* and this one is shared with
+    // sigx, so `zesterm.workers.dev` was never available without moving every
+    // sigx Worker; the Worker's own name carries the identity instead.
+    //
+    // Changing this later is not free: every `__Host-` cookie is host-scoped,
+    // so moving origin signs everybody out. Worth settling on a custom domain
+    // before there are people to sign out.
+    "APP_ORIGIN": "https://zesterm.sigx.workers.dev"
+  },
+
+  "d1_databases": [
+    {
+      // `DB`, not the database's own name: the binding is how *this* Worker
+      // refers to it, and a second database later should read as DB vs
+      // SOMETHING_ELSE rather than two proper nouns.
+      "binding": "DB",
+      "database_name": "zesterm",
+      "database_id": "bfd5939a-05bf-4c69-9c02-6eedfc43e247"
+    }
+  ]
 }

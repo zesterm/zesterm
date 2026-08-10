@@ -1,0 +1,38 @@
+/**
+ * `@zesterm/cloud-shared` — the pure half of the cloud Workers.
+ *
+ * Everything here is standard JS plus WebCrypto: no bindings, no runtime
+ * globals beyond what Node and workerd both have. That is what lets the
+ * security-shaped code — cookie signing, constant-time compare, token
+ * hashing — be covered by `node --test` rather than only exercised through a
+ * deployed Worker.
+ */
+
+export {
+  toBase64Url,
+  fromBase64Url,
+  utf8,
+  hex,
+  timingSafeEqual,
+  randomBytes,
+} from './bytes.ts';
+
+export {
+  SESSION_TOKEN_BYTES,
+  newSessionToken,
+  sessionIdOf,
+  looksLikeSessionToken,
+} from './tokens.ts';
+
+export {
+  SESSION_COOKIE,
+  OAUTH_COOKIE,
+  readCookie,
+  setCookie,
+  clearCookie,
+  sign,
+  unsign,
+  oauthStateCookie,
+  type CookieOptions,
+  type OAuthState,
+} from './cookies.ts';

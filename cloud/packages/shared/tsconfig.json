@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Neither DOM nor Workers types: everything here is WebCrypto and standard
+    // JS, which both runtimes have. Keeping the lib narrow is what stops a
+    // Node-only or Worker-only API creeping into code both sides import.
+    "lib": ["ES2023"],
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}
