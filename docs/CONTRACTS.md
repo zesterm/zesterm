@@ -294,3 +294,36 @@ both platforms now, and on Windows it fails without the job.
 
 A related gap closed with it: `PtyTransport::watch_exit`, whose default no-op meant a shell that
 exited *on its own* was never noticed on Windows at all. → #18.
+
+---
+
+### Changed once, to close a hole: `DaemonClient::into_halves` returns `Halves`
+
+It returned the tuple `(read, write, channel)` and dropped `self.frames` on the floor. That field
+is not spare capacity: `recv` reads up to 64 KiB and returns **one** message, keeping the rest, and
+the daemon's writer loop batches a whole wake into back-to-back writes with a single `flush`. So a
+socket that coalesces the attach reply with what follows leaves real messages in that buffer, and
+the handoff deleted them.
+
+Under the sealed channel that is not "one lost update". The nonce is an implicit per-direction
+counter (ADR-008), so a dropped frame puts the two sides permanently out of step and every later
+frame fails to open. The window is blank and stays blank — issue #54.
+
+`into_halves` now returns a named `Halves { read, write, channel, frames }`. A **struct rather than
+a tuple, because `frames` is the field a caller forgets**: destructuring a tuple by position made
+dropping it invisible, and a named field that is ignored is at least ignored in writing. Both attach
+paths in `zest-app/src/remote.rs` seed their streaming `FrameReader` from it.
+
+**Carrying the buffer is only half of it**, which is worth stating because the first fix stopped
+there and passed its own test. The reader loop blocked on `read()` before draining what it had been
+handed, so a session that goes quiet after the coalesced burst — a command that prints and exits,
+which is not exotic — still lost everything. The carried frames are drained *before* the first
+blocking read.
+
+The test that pins it asserts on `Wakeup::Exited`, not on the grid, and that choice is load-bearing:
+a command short enough to finish during a stalled attach has its output in the *keyframe*, so the
+carried `Update` is redundant and losing it is invisible. `Exited` exists in exactly one frame with
+no understudy. The test fails if the carry is reverted **and** if the drain is reverted.
+
+Consumers: `zest-app` only. Still draft — WS-A and WS-F may move it — but the shape now has a reason
+that should survive the next change.

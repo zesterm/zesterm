@@ -28,3 +28,7 @@ windows-sys = { workspace = true, features = [
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["pty", "process", "termios", "stdio"] }
+# For the drain thread's hand-off (unix.rs sharp edge 6). `std::sync::mpsc`
+# would do the job except that its `Receiver` is not `Sync`, and `UnixPty` has
+# to be — the daemon shares one pty behind an `Arc<dyn PtyTransport + Sync>`.
+crossbeam-channel.workspace = true
