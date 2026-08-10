@@ -171,7 +171,7 @@ Never commit straight to `main`.**
 The ruleset **"sigx-standard: protect main"** (id `20627800`) is active on
 `zesterm/zesterm`: no direct pushes, no force-push, no deletion, squash-only
 merges, review threads must resolve, zero approving reviews required so the
-owner may self-merge once Copilot has reviewed. All five of this repo's
+owner may self-merge once Copilot has reviewed. Every one of this repo's
 check-runs must be green and the branch must be up to date:
 
 ```
