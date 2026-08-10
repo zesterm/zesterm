@@ -11,6 +11,12 @@
   // not have.
 
   "workers_dev": true,
+  // Preview URLs stay on, but know what they are: each deployment also gets its
+  // own hostname, and those are *different origins*. Every cookie here is
+  // `__Host-` prefixed and therefore pinned to one host, so signing in simply
+  // does not work on a preview URL -- the Set-Cookie is issued and the browser
+  // drops it. Useful for eyeballing a build, not for testing auth. Set
+  // `preview_urls: false` to turn them off.
   "observability": { "enabled": true },
 
   "assets": {
@@ -35,7 +41,17 @@
     // Changing this later is not free: every `__Host-` cookie is host-scoped,
     // so moving origin signs everybody out. Worth settling on a custom domain
     // before there are people to sign out.
-    "APP_ORIGIN": "https://zesterm.sigx.workers.dev"
+    "APP_ORIGIN": "https://zesterm.sigx.workers.dev",
+
+    // Public, and deliberately committed: the client id identifies the OAuth
+    // app to GitHub and appears in every authorize URL a browser follows. The
+    // *secret* is `wrangler secret put GITHUB_CLIENT_SECRET` and never lands
+    // in this file.
+    //
+    // Owned by the `zesterm` org rather than a personal account, so the
+    // consent screen names the project and the credentials outlive any one
+    // person's account.
+    "GITHUB_CLIENT_ID": "Ov23liTt8aOk9TURcT1h"
   },
 
   "d1_databases": [
@@ -45,7 +61,17 @@
       // SOMETHING_ELSE rather than two proper nouns.
       "binding": "DB",
       "database_name": "zesterm",
-      "database_id": "bfd5939a-05bf-4c69-9c02-6eedfc43e247"
+      "database_id": "bfd5939a-05bf-4c69-9c02-6eedfc43e247",
+      // A property of the *database*, not a top-level field -- wrangler rejects
+      // it at the top level with "Unexpected fields found", which is only a
+      // warning, so the run continues and then fails with "No migrations
+      // present" pointing at the default path instead.
+      //
+      // Resolved relative to this file, so `migrations/` alone would mean
+      // `packages/web/migrations/`. They live at `cloud/migrations/` on
+      // purpose: they are the database's schema, and the relay Worker will
+      // bind the same database.
+      "migrations_dir": "../../migrations"
     }
   ]
 }
