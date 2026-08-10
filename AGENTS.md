@@ -171,11 +171,12 @@ Never commit straight to `main`.**
 The ruleset **"sigx-standard: protect main"** (id `20627800`) is active on
 `zesterm/zesterm`: no direct pushes, no force-push, no deletion, squash-only
 merges, review threads must resolve, zero approving reviews required so the
-owner may self-merge once Copilot has reviewed. All five of this repo's
+owner may self-merge once Copilot has reviewed. Every one of this repo's
 check-runs must be green and the branch must be up to date:
 
 ```
-test (windows-latest)  test (macos-latest)  test (ubuntu-latest)  invariants  web client
+test (windows-latest)  test (macos-latest)  test (ubuntu-latest)
+invariants  web client  cloud workers
 ```
 
 **Read the live state, never this paragraph** — a disabled ruleset that the
@@ -191,13 +192,22 @@ Reconcile drift, or restore it after a deliberate pause, with the whole command
 
 ```sh
 pnpm branch-protection zesterm/zesterm --approvals 0 \
-  --checks "test (windows-latest); test (macos-latest); test (ubuntu-latest); invariants; web client"
+  --checks "test (windows-latest); test (macos-latest); test (ubuntu-latest); \
+            invariants; web client; cloud workers"
 ```
 
-Those names are real, confirmed reporting on PR #25. Requiring a name that
-never reports blocks every merge forever, which is why the script makes checks
-opt-in rather than guessing — so if CI ever grows or renames a job, this list
-and `.github/workflows/ci.yml` move together or merges stop.
+Those names are real and confirmed reporting — the first five on PR #25,
+`cloud workers` on #32. Requiring a name that never reports blocks every merge
+forever, which is why the script makes checks opt-in rather than guessing — so
+if CI ever grows or renames a job, this list and `.github/workflows/ci.yml`
+move together or merges stop.
+
+**Both directions.** A new job has to report on a real PR *before* it is added
+here, so adding it is a follow-up commit rather than part of the PR that
+introduced it. And because the command above replaces the ruleset wholesale, a
+name missing from this list is silently *removed* from enforcement the next
+time anyone runs it to reconcile drift — a restore command that quietly reduces
+protection, which is worse than one that is merely out of date.
 
 To pause enforcement without losing the configuration (what "turn protection
 off while the in-flight work lands" means), set `enforcement` to `disabled`
