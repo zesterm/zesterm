@@ -25,9 +25,18 @@ import { fetchRegistry, revoke, type Device, type Host } from '../registry.ts';
 import { AccountMenu } from './AccountMenu.tsx';
 import { Shell } from './Shell.tsx';
 
-/** Rough, and deliberately so — an exact age is not a thing anyone reads. */
-function ago(at: number | null, now: number): string {
+/**
+ * Rough, and deliberately so — an exact age is not a thing anyone reads.
+ *
+ * Reads the clock itself rather than taking a snapshot. Capturing `Date.now()`
+ * once at setup froze every age at the moment the screen mounted, so a tab left
+ * open all afternoon still said `5h ago` — wrong rather than merely stale,
+ * which is the worse of the two. It is still only as fresh as the last render,
+ * which is honest for a list that reloads on revoke.
+ */
+function ago(at: number | null): string {
   if (at === null) return 'never';
+  const now = Date.now();
   const mins = Math.floor((now - at) / 60_000);
   if (mins < 1) return 'just now';
   if (mins < 60) return `${mins}m ago`;
@@ -84,7 +93,6 @@ export const Fleet = component<{
       });
   };
 
-  const now = Date.now();
   const user = bootstrap.user as User;
 
   return () => (
@@ -118,7 +126,7 @@ export const Fleet = component<{
                     <li class="row">
                       <span class="row-name">{h.label}</span>
                       <span class="row-meta">
-                        {h.platform !== '' ? `${h.platform} · ` : ''}last seen {ago(h.lastSeenAt, now)}
+                        {h.platform !== '' ? `${h.platform} · ` : ''}last seen {ago(h.lastSeenAt)}
                       </span>
                       <button
                         class="button subtle"
@@ -154,7 +162,7 @@ export const Fleet = component<{
                     <li class="row">
                       <span class="row-name">{d.label}</span>
                       <span class="row-meta">
-                        {d.kind} · last seen {ago(d.lastSeenAt, now)}
+                        {d.kind} · last seen {ago(d.lastSeenAt)}
                         {d.extractable ? (
                           // Said out loud rather than shown as a tick: this key
                           // is readable by any script on the origin, which is
