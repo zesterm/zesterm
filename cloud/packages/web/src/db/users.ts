@@ -70,6 +70,8 @@ export async function upsertUser(db: Db, provider: string, profile: Profile, now
   }
 
   let userId: string | null = null;
+  /** Non-null only when this call is the one that inserted a fresh `users` row. */
+  let createdUserId: string | null = null;
 
   if (profile.emailVerified && profile.email !== null) {
     const linkable = await db
@@ -85,6 +87,7 @@ export async function upsertUser(db: Db, provider: string, profile: Profile, now
 
   if (userId === null) {
     userId = newUserId();
+    createdUserId = userId;
     await db
       .prepare(
         `INSERT INTO users (id, email, display_name, avatar_url, created_at, updated_at)
@@ -94,11 +97,22 @@ export async function upsertUser(db: Db, provider: string, profile: Profile, now
       .run();
   }
 
+  // `DO NOTHING`, then read back what is actually there.
+  //
+  // Two first sign-ins for the same (provider, subject) can race -- one person,
+  // two tabs, or a retried callback. A plain INSERT means the loser throws a
+  // primary-key conflict out of the OAuth callback as a 500, *and* leaves the
+  // `users` row it had already created behind with nothing pointing at it.
+  //
+  // Whoever wrote the identity first decides which account this is. That is
+  // arbitrary between two racers and it is the only property that matters:
+  // both requests must end up on the same account.
   await db
     .prepare(
       `INSERT INTO oauth_identities
          (provider, subject, user_id, email, email_verified, created_at, last_login_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (provider, subject) DO NOTHING`,
     )
     .bind(
       provider,
@@ -111,7 +125,20 @@ export async function upsertUser(db: Db, provider: string, profile: Profile, now
     )
     .run();
 
-  return userId;
+  const settled = await db
+    .prepare(`SELECT user_id FROM oauth_identities WHERE provider = ? AND subject = ?`)
+    .bind(provider, profile.subject)
+    .first<{ user_id: string }>();
+  const winner = settled?.user_id ?? userId;
+
+  if (winner !== createdUserId && createdUserId !== null) {
+    // We lost, and the account we made has no identity pointing at it. Left
+    // alone it is an orphan that a later verified-email link could attach to,
+    // which would silently split one person across two accounts.
+    await db.prepare(`DELETE FROM users WHERE id = ?`).bind(createdUserId).run();
+  }
+
+  return winner;
 }
 
 export async function findUser(db: Db, id: string): Promise<UserRow | null> {

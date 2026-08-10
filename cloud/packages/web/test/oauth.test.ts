@@ -255,3 +255,33 @@ test('safeNext refuses everything that leaves the site', () => {
   assert.equal(safeNext('/\\evil.example'), '/', 'backslash, which some browsers normalise');
   assert.equal(safeNext('javascript:alert(1)'), '/');
 });
+
+test('PKCE offers S256, never plain', async () => {
+  // GitHub ignores PKCE, so this is currently dead on the live path -- which is
+  // exactly why it matters. Shipping `plain` means whoever wires Google (or any
+  // other provider) inherits a challenge that *is* the verifier, so anything
+  // able to see the authorize request can complete the exchange. Google also
+  // rejects `plain` outright, but that is the lesser reason.
+  const db = testDb();
+  const { PROVIDERS } = await import('../src/auth/routes.ts');
+  const original = PROVIDERS['github']!;
+  PROVIDERS['pkce-test'] = { ...original, id: 'pkce-test', usePkce: true };
+
+  try {
+    const res = await routeApi(
+      new Request(`${ORIGIN}/auth/login?provider=pkce-test`),
+      env(db),
+      fetch,
+      NOW,
+    );
+    const location = new URL(res!.headers.get('location')!);
+    assert.equal(location.searchParams.get('code_challenge_method'), 'S256');
+
+    const challenge = location.searchParams.get('code_challenge')!;
+    assert.match(challenge, /^[A-Za-z0-9_-]{43}$/, 'base64url sha256, unpadded');
+    assert.notEqual(challenge, location.searchParams.get('code_verifier'));
+  } finally {
+    delete PROVIDERS['pkce-test'];
+    db.close();
+  }
+});

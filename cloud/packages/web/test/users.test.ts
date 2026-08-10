@@ -158,3 +158,73 @@ test('last_login_at moves on every sign-in', async () => {
   assert.equal(row.last_login_at, NOW + 5_000);
   db.close();
 });
+
+test('a lost race lands on one account and leaves no orphan', async () => {
+  // One person, two tabs: both callbacks find no identity, both mint a `users`
+  // row, and only one identity insert can win. Before `ON CONFLICT DO NOTHING`
+  // the loser threw a primary-key conflict out of the OAuth callback as a 500
+  // *and* left its `users` row behind with nothing pointing at it.
+  //
+  // Staged rather than genuinely concurrent: the window is between this call's
+  // "no identity yet" lookup and its insert, so the rival's identity is written
+  // exactly there, by wrapping the statement the loser is about to run.
+  const db = testDb();
+  const rival = 'rival-account';
+  db.raw
+    .prepare(
+      `INSERT INTO users (id, email, display_name, avatar_url, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(rival, 'andy@example.com', 'Andy', null, NOW, NOW);
+
+  let raced = false;
+  const racing = {
+    ...db,
+    prepare(sql: string) {
+      if (sql.includes('INSERT INTO oauth_identities') && !raced) {
+        raced = true;
+        // The other tab gets there first.
+        db.raw
+          .prepare(
+            `INSERT INTO oauth_identities
+               (provider, subject, user_id, email, email_verified, created_at, last_login_at)
+             VALUES ('github', '12345', ?, 'andy@example.com', 1, ?, ?)`,
+          )
+          .run(rival, NOW, NOW);
+      }
+      return db.prepare(sql);
+    },
+  };
+
+  const settled = await upsertUser(racing, 'github', profile(), NOW);
+
+  assert.ok(raced, 'the interleaving must actually have been staged');
+  assert.equal(settled, rival, 'the identity that landed first decides the account');
+
+  const users = db.raw.prepare('SELECT id FROM users').all() as Array<{ id: string }>;
+  assert.deepEqual(
+    users.map((u) => u.id),
+    [rival],
+    'the account this call created must not be left orphaned',
+  );
+  assert.equal(
+    (db.raw.prepare('SELECT COUNT(*) AS n FROM oauth_identities').get() as { n: number }).n,
+    1,
+  );
+  db.close();
+});
+
+test('a duplicate identity insert does not throw', async () => {
+  // The direct form of the same thing: whatever the interleaving, a second
+  // insert for a subject that already exists must be a no-op rather than a 500
+  // out of the callback.
+  const db = testDb();
+  const first = await upsertUser(db, 'github', profile(), NOW);
+  const again = await upsertUser(db, 'github', profile(), NOW + 1);
+  const third = await upsertUser(db, 'github', profile(), NOW + 2);
+
+  assert.equal(again, first);
+  assert.equal(third, first);
+  assert.equal((db.raw.prepare('SELECT COUNT(*) AS n FROM users').get() as { n: number }).n, 1);
+  db.close();
+});

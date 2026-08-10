@@ -66,3 +66,17 @@ export function timingSafeEqual(a: string, b: string): boolean {
 export function randomBytes(n: number): Uint8Array {
   return crypto.getRandomValues(new Uint8Array(n));
 }
+
+/**
+ * `base64url(sha256(input))` — PKCE's `S256` challenge, and nothing else needs it.
+ *
+ * Lives here rather than in the OAuth route because it is a byte operation and
+ * the route should read as policy. `plain` is the other method the spec allows
+ * and it is not offered: it sends the verifier itself, so anything that can see
+ * the authorize request can complete the exchange, which is the entire attack
+ * PKCE exists to stop.
+ */
+export async function sha256Base64Url(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', utf8(input));
+  return toBase64Url(new Uint8Array(digest));
+}

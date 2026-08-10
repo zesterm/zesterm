@@ -13,6 +13,7 @@ import {
   readCookie,
   SESSION_COOKIE,
   setCookie,
+  sha256Base64Url,
   timingSafeEqual,
   toBase64Url,
   unsign,
@@ -85,8 +86,13 @@ export async function startLogin(request: Request, env: Env, now = Date.now()): 
   // Nobody should be creating an account by accident on a terminal's sign-in.
   authorize.searchParams.set('allow_signup', 'false');
   if (provider.usePkce) {
-    authorize.searchParams.set('code_challenge', state.v);
-    authorize.searchParams.set('code_challenge_method', 'plain');
+    // S256, never `plain`. `plain` sends the verifier itself, so anything that
+    // can see the authorize request can complete the exchange -- the whole
+    // attack PKCE exists to stop. Google rejects `plain` outright, and the
+    // reason it is right here is not that Google asks: shipping the weak
+    // method now means whoever wires the next provider inherits it.
+    authorize.searchParams.set('code_challenge', await sha256Base64Url(state.v));
+    authorize.searchParams.set('code_challenge_method', 'S256');
   }
 
   return redirect(authorize.toString(), [

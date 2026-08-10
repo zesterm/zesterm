@@ -15,6 +15,7 @@ export {
   hex,
   timingSafeEqual,
   randomBytes,
+  sha256Base64Url,
 } from './bytes.ts';
 
 export {
