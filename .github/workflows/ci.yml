@@ -127,9 +127,10 @@ jobs:
       # `package_json_file` is not optional here. The action reads its version
       # from `packageManager`, and it looks in the *repository root* by default —
       # `defaults.run.working-directory` applies to `run:` steps, not to an
-      # action's inputs. There is no root package.json, so it failed with "No
-      # pnpm version is specified", which reads like a missing field in a file
-      # where the field is in fact present.
+      # action's inputs. The root package.json that exists today is the repo
+      # tooling one and does not carry this workspace's pnpm version, so
+      # without this the action fails with "No pnpm version is specified" —
+      # which reads like a missing field in a file where the field is present.
       - uses: pnpm/action-setup@v4
         with:
           package_json_file: clients/web/package.json
@@ -148,3 +149,50 @@ jobs:
 
       # The corpus, replayed against the host terminal's own cells.
       - run: pnpm -r test
+
+  # Third project, third lockfile — see cloud/README.md for why it is not part
+  # of the clients/web workspace. Ubuntu only: a Worker's runtime is workerd,
+  # so a three-OS matrix would prove nothing the one run does not.
+  cloud:
+    name: cloud workers
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloud
+    steps:
+      - uses: actions/checkout@v4
+      # Same `package_json_file` trap the web job documents above: the action
+      # reads `packageManager` from the repository root by default, and
+      # `defaults.run.working-directory` does not apply to an action's inputs.
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: cloud/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: cloud/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm -r typecheck
+
+      # The routing is a pure function over Request, so this needs no workerd.
+      - run: pnpm -r test
+
+      # The Worker serves this directory, so `--dry-run` cannot validate the
+      # config without it. Building here also proves the two trees still agree:
+      # cloud/ names a path into clients/web, and a path is the one kind of
+      # dependency no type checker follows.
+      - name: Build the web client the Worker serves
+        working-directory: clients/web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @zesterm/app build
+
+      # Bundles and validates wrangler.jsonc with no credentials and no
+      # network. It is what catches a binding whose class is never exported, a
+      # renamed entrypoint, or a Durable Object with no migration — all of
+      # which are otherwise only wrong at deploy time, which is the worst
+      # possible moment to find out.
+      - run: pnpm -r dry-run

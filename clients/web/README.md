@@ -37,14 +37,36 @@ particular used to be hand-copied hex, and the transcription had no gate —
 drift meant the native window and this client disagreed about what `obsidian`
 looks like, with nothing to catch it.
 
+## Where this runs
+
+Two servers can serve this build, and it asks which at runtime — `GET
+/api/bootstrap` returns `{"mode":"local"}` from the sidecar and
+`{"mode":"cloud"}` from the Worker in `cloud/`. One `vite build` therefore
+serves both; a `VITE_*` variable would have made them different bundles.
+
+**The hosted client cannot use the LAN, ever.** An `https://` page may not open
+`ws://192.168.1.5:7718` — mixed content, no workaround short of a certificate
+on every daemon. So the deployed app routes every session through the relay,
+including to the machine you are sitting at, and until that relay exists it
+renders a card saying so rather than a session list that spins forever.
+
+That makes the sidecar path **not** a subset of the cloud path: it is the one
+that survives Cloudflare being unreachable, which ADR-005 requires of a local
+terminal.
+
 ## Running the experience
 
 ```
 zest-daemon --listen-ws                        # the data plane (port 7718)
 pnpm --filter @zesterm/app build               # once, or after app changes
-pnpm --filter @zesterm/sidecar start -- --static packages/app/dist
+pnpm --filter @zesterm/sidecar start -- --static ../app/dist
 open http://127.0.0.1:7350
 ```
+
+`../app/dist`, not `packages/app/dist`: `pnpm --filter` runs the script from
+the *package* directory, so a workspace-relative path resolves inside
+`packages/sidecar/` and every file 404s while `/api/bootstrap` keeps working —
+which reads as a broken build rather than a wrong flag.
 
 Dev loop for the app itself: `pnpm --filter @zesterm/app dev` (vite, port
 5173), with the sidecar started as

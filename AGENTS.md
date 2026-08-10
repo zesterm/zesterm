@@ -28,9 +28,11 @@ A GPU-accelerated, themable terminal, and a **fleet**: every machine runs a
 daemon and can be reached from every device. The Mac's shell in a window on
 Windows; a Linux build watched from a phone.
 
-Rust workspace under `crates/`, plus `xtask/` for the gates and `clients/web/`
-(a pnpm workspace, Node 24, `node --test`) for the browser client. The repo is
-`zesterm/zesterm`, base branch `main`.
+Rust workspace under `crates/`, plus `xtask/` for the gates, `clients/web/`
+(a pnpm workspace, Node 24, `node --test`) for the browser client, and `cloud/`
+(a *second*, separate pnpm workspace) for the Cloudflare Workers that host it.
+Three projects, three lockfiles — `cloud/README.md` says why the last two are
+not one. The repo is `zesterm/zesterm`, base branch `main`.
 
 ### Read these first
 
@@ -258,6 +260,18 @@ pnpm -C clients/web -r typecheck
 pnpm -C clients/web -r test
 ```
 
+And if you touched `cloud/`, that project too. `dry-run` is the one worth
+knowing about: it bundles and validates `wrangler.jsonc` with no credentials
+and no network, which is what catches a binding whose class is never exported
+or a renamed entrypoint — otherwise only ever wrong at deploy time.
+
+```
+pnpm -C cloud install
+pnpm -C cloud -r typecheck
+pnpm -C cloud -r test
+pnpm -C cloud -r dry-run        # needs clients/web/packages/app/dist built first
+```
+
 CI runs all of it on Windows, macOS and Linux plus the wasm32 build — see
 `.github/workflows/ci.yml`.
 
@@ -360,6 +374,9 @@ zest-daemon --ephemeral                        # throwaway key, for the edit-run
 cargo run -p zest-daemon --example attach      # drive a daemon session, no GUI
 cargo run -p zest-mesh   --example mesh_probe  # advertise and browse the fleet
 cargo run -p zest-daemon --example pair -- --addr <host:port>   # pair with a host
+
+pnpm -C cloud -r dry-run                       # validate the Worker configs, no credentials needed
+pnpm -C cloud --filter @zesterm/web dev        # the hosted client under workerd, port 8787
 
 pnpm wt new <N-slug>                           # a worktree for issue #N
 pnpm wt list

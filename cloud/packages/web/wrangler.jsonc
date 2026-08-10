@@ -1,0 +1,37 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "zesterm-web",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+
+  // No compatibility_flags, and that is a decision rather than an omission. In
+  // particular no `nodejs_als`: that is what `@sigx/actors/host` needs to run,
+  // and ADR-005 says session actors run on the user's machine and never at the
+  // edge. If this list ever grows an ALS flag, something crept in that should
+  // not have.
+
+  "workers_dev": true,
+  "observability": { "enabled": true },
+
+  "assets": {
+    // The one thing cloud/ and clients/web share is this directory. A path,
+    // deliberately, and not a package dependency -- see cloud/README.md.
+    "directory": "../../../clients/web/packages/app/dist",
+    "binding": "ASSETS",
+    // The app owns /hosts, /settings, /h/:id/... client-side. An unknown path
+    // must return index.html so a deep link or a refresh works.
+    "not_found_handling": "single-page-application",
+    // ...but that fallback would otherwise swallow the API: a fetch to a
+    // mistyped /api/ path would get 200 and a page of HTML. These prefixes run
+    // the Worker before the asset layer ever sees the request.
+    "run_worker_first": ["/api/*", "/auth/*"]
+  },
+
+  "vars": {
+    // Placeholder. Replaced with the real *.workers.dev subdomain once the
+    // account exists -- and again if a custom domain ever lands, which is not
+    // free: every `__Host-` cookie is host-scoped, so moving origin signs
+    // everybody out.
+    "APP_ORIGIN": "https://zesterm-web.example.workers.dev"
+  }
+}

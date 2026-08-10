@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    // No "lib" here. Each package sets its own, because the two runtimes differ:
+    // a Worker has no DOM and no Node globals, and letting it see either is how
+    // a `process.env` or a `setTimeout` return type compiles locally and fails
+    // at the edge.
+    "module": "preserve",
+    "moduleResolution": "bundler",
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+
+    // Matching clients/web: the tests run under Node's type stripping rather
+    // than a bundler, so anything needing a transform has to fail at compile
+    // time instead of at `node --test`.
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "allowImportingTsExtensions": true,
+
+    "noEmit": true,
+    "skipLibCheck": true
+  }
+}

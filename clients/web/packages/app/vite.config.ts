@@ -20,6 +20,11 @@ export default defineConfig({
   server: {
     proxy: {
       '/_sigx/socket': { target: 'ws://127.0.0.1:7350', ws: true },
+      // `/api/bootstrap` too, so dev takes the same path as production rather
+      // than 404ing and letting the client's fallback quietly paper over it.
+      // A fallback that is exercised every day is a fallback nobody notices
+      // has stopped agreeing with the server.
+      '/api': { target: 'http://127.0.0.1:7350' },
     },
   },
   plugins: [sigxPlugin()],

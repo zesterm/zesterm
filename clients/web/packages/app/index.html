@@ -4,6 +4,50 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>zesterm</title>
+
+    <!--
+      The first paint, and it has to be here rather than on #app.
+
+      Boot waits on `/api/bootstrap` — which of the two servers is answering —
+      and the app's own stylesheet is a separate <link> that has to download
+      before `#app` has any height at all. So a background on that div paints
+      nothing on a cold connection: it is a zero-height element until the CSS
+      lands, and the page reads as broken white.
+
+      On `html` instead, and inline, so it is the first thing the parser can
+      act on. `--zt-bg` takes over the moment `applyCssVars` runs.
+    -->
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      html {
+        background: var(--zt-bg, #0b0f1a);
+      }
+    </style>
+    <script>
+      // The fallback above is obsidian's. Someone on a light theme would get a
+      // dark flash every load, so the resolved background is cached on the way
+      // out (see entry-client.tsx) and replayed here before the bundle exists.
+      //
+      // Seeds the *variable*, never `style.background`. Setting the property
+      // directly writes an inline style, which outranks the rule above — so
+      // `applyCssVars` would update `--zt-bg` and the page would keep painting
+      // the stale boot colour forever. Measured, not guessed: with the theme
+      // switched to `paper`, html stayed rgb(11,15,26) after the bundle ran.
+      // Writing the variable means applyCssVars simply overwrites it.
+      //
+      // Wrapped because localStorage throws outright in some privacy modes, and
+      // a boot script that can throw is a blank page.
+      try {
+        var bg = localStorage.getItem('zesterm.boot-bg');
+        if (bg) document.documentElement.style.setProperty('--zt-bg', bg);
+      } catch (e) {
+        /* the CSS fallback stands */
+      }
+    </script>
   </head>
   <body>
     <div id="app"></div>

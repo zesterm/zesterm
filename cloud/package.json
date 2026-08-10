@@ -1,0 +1,21 @@
+{
+  "name": "@zesterm/cloud",
+  "private": true,
+  "type": "module",
+  "description": "zesterm's Cloudflare Workers: the hosted web client, and later the accounts API and the relay. A third project beside the Cargo workspace and clients/web, with its own lockfile on purpose.",
+  "packageManager": "pnpm@10.28.2",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "dry-run": "pnpm -r dry-run"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "workerd"
+    ]
+  }
+}
