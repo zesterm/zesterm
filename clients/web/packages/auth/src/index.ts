@@ -18,8 +18,13 @@ export {
 export {
   generateIdentity,
   signAsClient,
+  seedSigner,
   answerChallenge,
   verifyClientSignature,
   ChallengeError,
   type ClientIdentity,
 } from './identity.ts';
+export { type ClientSigner } from './signer.ts';
+// The WebCrypto implementation is `@zesterm/auth/webcrypto`, deliberately not
+// re-exported here: it needs the DOM's `CryptoKey` type, and the packages
+// that consume this entry point compile without the DOM.

@@ -17,17 +17,17 @@ import {
   type NavigationGuard,
 } from '@sigx/router';
 import { component } from 'sigx';
-import type { ClientIdentity } from '@zesterm/auth';
 import type { Theme } from '@zesterm/theme';
 
 import type { Bootstrap } from './bootstrap.ts';
+import type { DeviceKey } from './device-key.ts';
 import { Login } from './components/Login.tsx';
 import { Fleet } from './components/Fleet.tsx';
 import { NotFound } from './components/NotFound.tsx';
 
 export interface AppContext {
   readonly bootstrap: Bootstrap;
-  readonly identity: ClientIdentity;
+  readonly device: DeviceKey;
   readonly theme: Theme;
 }
 
@@ -74,7 +74,7 @@ export function routerPlugin(ctx: AppContext) {
   ));
 
   const FleetRoute = component(() => () => (
-    <Fleet bootstrap={ctx.bootstrap} identity={ctx.identity} theme={ctx.theme} />
+    <Fleet bootstrap={ctx.bootstrap} device={ctx.device} theme={ctx.theme} />
   ));
 
   return createRouterPlugin({

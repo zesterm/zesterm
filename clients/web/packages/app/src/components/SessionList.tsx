@@ -16,12 +16,22 @@ import {
   type SessionEntry,
 } from '@zesterm/control';
 
+import { describeDeviceKey, type DeviceKeyKind } from '../device-key.ts';
+
 export interface OpenTarget {
   readonly entry: SessionEntry;
   readonly dataPlaneUrl: string;
 }
 
 export const SessionList = component<{
+  /**
+   * Which kind of key this device signs with, said out loud.
+   *
+   * A browser that fell back to the seed is working, not secure, and the two
+   * look identical from here — a screen that showed the same reassurance
+   * either way would be lying on exactly the device where it matters.
+   */
+  deviceKind?: DeviceKeyKind;
   onOpen?: (target: OpenTarget) => void;
   onCreate?: (dataPlaneUrl: string) => void;
 }>((ctx) => {
@@ -58,6 +68,9 @@ export const SessionList = component<{
               <span class="link-state degraded">daemon unreachable — reconnecting</span>
             ),
         })}
+        {ctx.props.deviceKind === undefined ? null : (
+          <span class="key-state">{describeDeviceKey(ctx.props.deviceKind)}</span>
+        )}
       </header>
 
       {directory.match({

@@ -9,7 +9,7 @@
  */
 
 import { component, onMounted, onUnmounted, signal } from 'sigx';
-import type { ClientIdentity } from '@zesterm/auth';
+import type { ClientSigner } from '@zesterm/auth';
 import {
   SessionClient,
   type ConnectionState,
@@ -36,11 +36,11 @@ const FONT_SIZE = 13;
 export const TerminalView = component<{
   entry: SessionEntry;
   dataPlaneUrl: string;
-  identity: ClientIdentity;
+  signer: ClientSigner;
   theme: Theme;
   onBack?: () => void;
 }>((ctx) => {
-  const { entry, dataPlaneUrl, identity, theme } = ctx.props;
+  const { entry, dataPlaneUrl, signer, theme } = ctx.props;
 
   const status = signal<{ state: ConnectionState; exited: number | null | false; title: string }>({
     state: { phase: 'connecting' },
@@ -116,7 +116,7 @@ export const TerminalView = component<{
     const { cols, rows } = sizeToWrapper();
     client = new SessionClient({
       dial: wsDial(dataPlaneUrl),
-      identity,
+      signer,
       label: 'zesterm-web',
       session: { host: entry.host, session: BigInt(entry.session) },
       cols,

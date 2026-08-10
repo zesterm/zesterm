@@ -9,7 +9,7 @@
  * "created" and "listed" resolves in the daemon's favour by construction.
  */
 
-import type { ClientIdentity } from '@zesterm/auth';
+import type { ClientSigner } from '@zesterm/auth';
 import { ConnectionClient } from '@zesterm/client';
 import type { SessionAddr } from '@zesterm/proto';
 
@@ -17,11 +17,11 @@ import { wsDial } from './ws-dial.ts';
 
 export function createSessionOverDataPlane(args: {
   url: string;
-  identity: ClientIdentity;
+  signer: ClientSigner;
   cols: number;
   rows: number;
 }): Promise<SessionAddr> {
-  const { url, identity, cols, rows } = args;
+  const { url, signer, cols, rows } = args;
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       client.close();
@@ -30,7 +30,7 @@ export function createSessionOverDataPlane(args: {
 
     const client: ConnectionClient = new ConnectionClient({
       dial: wsDial(url),
-      identity,
+      signer,
       label: 'zesterm-web',
       events: {
         onConnection: (state) => {

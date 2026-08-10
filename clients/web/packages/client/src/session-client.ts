@@ -33,7 +33,7 @@ import {
   type ClientMessage,
   type SessionAddr,
 } from '@zesterm/proto';
-import type { ClientIdentity } from '@zesterm/auth';
+import type { ClientSigner } from '@zesterm/auth';
 
 import { type Clock, systemClock, type TimerHandle } from './clock.ts';
 import type { ByteLink, Dial } from './link.ts';
@@ -67,7 +67,8 @@ export interface SessionEvents {
 
 export interface SessionClientOptions {
   readonly dial: Dial;
-  readonly identity: ClientIdentity;
+  /** Seed-backed or WebCrypto-backed; this layer cannot tell and must not care. */
+  readonly signer: ClientSigner;
   readonly label: string;
   readonly session: SessionAddr;
   readonly cols: number;
@@ -89,6 +90,33 @@ export class SessionClient {
   #frames = new FrameReader();
   #connected = false;
   #closed = false;
+
+  /**
+   * Handshake frames that arrived while a signature was in flight.
+   *
+   * Signing became asynchronous when the device key stopped being something
+   * this process can read (`@zesterm/auth`'s `ClientSigner`). A host is free
+   * to pipeline — `auth_pending` and `welcome` can share one TCP segment, and
+   * a WebSocket delivers them as two callbacks in the same task — so without
+   * a queue the second would be handled while the first's promise was still
+   * pending, and the client would `attach` before its `auth` reached the
+   * wire. One outstanding handshake message at a time, in arrival order.
+   *
+   * Only the handshake pays for this. Once welcomed, deltas take the
+   * synchronous path they always did.
+   */
+  #stalled: Uint8Array[] = [];
+  #signing = false;
+  /**
+   * Which dial a pending signature belongs to.
+   *
+   * `crypto.subtle` settles on a later task rather than a microtask, so a
+   * signature can outlive the connection it was computed for. Replaying it
+   * onto the next one would send a signature over the *previous* challenge's
+   * nonce — which the host reads as a device that failed to prove itself,
+   * not as a client that reconnected.
+   */
+  #dialSeq = 0;
 
   /** The last sequence applied — the truth `Update.base` is checked against. */
   #appliedSeq = -1n;
@@ -167,8 +195,9 @@ export class SessionClient {
   #dial(): void {
     if (this.#closed) return;
     this.#frames = new FrameReader();
+    this.#dialSeq += 1;
     this.#handshake = new HandshakeDriver({
-      identity: this.#options.identity,
+      signer: this.#options.signer,
       label: this.#options.label,
       watchSessions: false,
       ...(this.#options.expectedHost === undefined
@@ -194,6 +223,10 @@ export class SessionClient {
   #onClose(): void {
     this.#connected = false;
     this.#link = null;
+    // Frames queued behind a signature belong to the connection that died
+    // with them; the next dial gets its own challenge and its own nonce.
+    this.#stalled.length = 0;
+    this.#signing = false;
     if (this.#closed) return;
 
     const state = this.#handshake?.state;
@@ -227,6 +260,16 @@ export class SessionClient {
         return;
       }
       if (body === undefined) return;
+      if (this.#signing) this.#stalled.push(body);
+      else this.#onMessage(body);
+    }
+  }
+
+  /** Resume the frames a pending signature held up, one handshake at a time. */
+  #drainStalled(): void {
+    while (!this.#signing && this.#stalled.length > 0) {
+      const body = this.#stalled.shift();
+      if (body === undefined) return;
       this.#onMessage(body);
     }
   }
@@ -239,22 +282,53 @@ export class SessionClient {
     // narrows repeated property reads, and `onMessage` moving the state is
     // exactly what the narrowing cannot see.
     if (!this.#connected && handshake) {
-      for (const reply of handshake.onMessage(msg)) this.#send(reply);
-      const state: HandshakeState = handshake.state;
-      switch (state.phase) {
-        case 'awaiting-approval':
-          this.#emitConnection({ phase: 'awaiting-approval', code: state.code });
+      const seq = this.#dialSeq;
+      this.#signing = true;
+      void handshake.onMessage(msg).then((replies) => {
+        // Three ways this continuation can be stale, and only one of them used
+        // to be checked. A redial bumps the seq; `close()` does not, and nor
+        // does a link that has already been torn down -- so a `welcome` in
+        // flight when the caller closed would still emit a connection event
+        // and write into a null link. Structurally impossible while the
+        // handshake was synchronous, which is why the guard was written for
+        // the redial case alone.
+        //
+        // `#signing` is cleared on every path out, or the stall queue never
+        // drains again and every later frame waits forever, silently.
+        //
+        // Deliberately untested, and worth saying why rather than shipping a
+        // green test that proves nothing: the close case has no observable
+        // effect today. `#send` is already `#link?.send(...)`, so a write after
+        // close is a silent no-op, and no connection event is emitted on this
+        // path. What is left is `#signing` and `#stalled` on an object nobody
+        // holds. This is defence-in-depth against a future path that re-dials
+        // without closing — at which point a stuck `#signing` stalls every
+        // frame forever, and the failure is silent.
+        if (seq !== this.#dialSeq || this.#closed || this.#link === null) {
+          this.#signing = false;
+          this.#stalled.length = 0;
           return;
-        case 'welcomed':
-          this.#afterWelcome();
-          return;
-        case 'failed':
-          // The link will close (either end); #onClose decides on retry.
-          this.#link?.close();
-          return;
-        default:
-          return;
-      }
+        }
+        this.#signing = false;
+        for (const reply of replies) this.#send(reply);
+        const state: HandshakeState = handshake.state;
+        switch (state.phase) {
+          case 'awaiting-approval':
+            this.#emitConnection({ phase: 'awaiting-approval', code: state.code });
+            break;
+          case 'welcomed':
+            this.#afterWelcome();
+            break;
+          case 'failed':
+            // The link will close (either end); #onClose decides on retry.
+            this.#link?.close();
+            break;
+          default:
+            break;
+        }
+        this.#drainStalled();
+      });
+      return;
     }
 
     if (isKeyframe(msg)) {

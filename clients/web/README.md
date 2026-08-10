@@ -10,7 +10,9 @@ speaking the same `zest-proto` messages. → [ADR-004](../../docs/ARCHITECTURE.m
 packages/proto/    the wire protocol: framing, MessagePack en/decode, the delta
                    decoder, blocks — zero runtime deps, byte-golden to the Rust
 packages/auth/     the Ed25519 handshake: transcript, pairing code, sign/verify
-                   (@noble/ed25519 — the crypto is quarantined here)
+                   (@noble/ed25519 — the crypto is quarantined here), plus the
+                   ClientSigner seam and, at ./webcrypto, the non-extractable
+                   CryptoKey implementation of it
 packages/client/   the data-plane session client: handshake driver, ack
                    cadence, resync, reconnect — remote.rs's lessons, ported
 packages/input/    key/paste/focus → terminal bytes, a port of zest-input
@@ -28,6 +30,18 @@ packages/app/      the sigx web app: session list, terminal view, input
 Dependency policy: `proto`, `theme`, `input` and `settings` stay
 dependency-free; crypto lives only in `auth`; sigx packages appear only in
 `control`/`sidecar`/`app`.
+
+**Two entry points in `auth`, and the split is deliberate.** `@zesterm/auth`
+compiles under `lib: ES2023` alone, so `client` and `sidecar` stay
+platform-blind — `client` says so in its own module doc, and `sidecar` is a
+Node process. `@zesterm/auth/webcrypto` needs the DOM's `CryptoKey`, so only
+the browser app imports it. Everything above the seam takes a `ClientSigner`
+and cannot tell which kind of key it holds, which is the point:
+`@noble/ed25519` **cannot** sign with a non-extractable key — it needs the raw
+scalar, and never getting one is what the flag is for — so that path signs
+through `crypto.subtle` and is asynchronous. Verification stays synchronous on
+`@noble`, because the host must prove itself *before* the client signs
+anything and an async verify makes the two interleavable.
 
 **Generated, not written.** `packages/settings/generated/` and
 `packages/theme/src/builtin.generated.ts` come out of `cargo xtask export-web`

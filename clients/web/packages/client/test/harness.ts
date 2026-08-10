@@ -9,7 +9,14 @@
 
 import * as ed from '@noble/ed25519';
 import { sha512 } from '@noble/hashes/sha2.js';
-import { generateIdentity, preimage, authTranscript, type ClientIdentity } from '@zesterm/auth';
+import {
+  generateIdentity,
+  preimage,
+  authTranscript,
+  seedSigner,
+  type ClientIdentity,
+  type ClientSigner,
+} from '@zesterm/auth';
 import {
   decode,
   encode,
@@ -139,10 +146,37 @@ export class FakeDaemon {
     return link;
   }
 
-  /** Run the host's half of the handshake over the newest link. */
-  completeHandshake(): void {
+  /**
+   * Run the host's half of the handshake over the newest link.
+   *
+   * Async because the client's is: a device key that cannot be read out signs
+   * through `crypto.subtle`, so the answer to a challenge arrives a
+   * microtask later even when the seed path resolves immediately. Every
+   * settling point below is a place a real daemon would also have waited.
+   */
+  async completeHandshake(): Promise<void> {
     const link = this.current;
     link.open();
+    await flush();
+    link.deliver(this.challengeFor(link));
+    await flush();
+    const auth = link.lastOfType('auth');
+    if (!auth) throw new Error('the client did not answer the challenge');
+    // The FakeDaemon does not re-verify the client: what these tests hold to
+    // account is the client's behaviour, and the signature's correctness is
+    // the auth package's golden-pinned business.
+    link.deliver(this.welcome);
+    await flush();
+  }
+
+  /**
+   * The signed challenge this daemon answers a hello with.
+   *
+   * Separate from `completeHandshake` so a test can deliver it and the
+   * welcome in the *same task*, which is what a host pipelining two handshake
+   * messages into one segment looks like from here.
+   */
+  challengeFor(link: FakeLink): Record<string, unknown> {
     const hello = link.lastOfType('hello');
     if (!hello) throw new Error('the client did not say hello');
     const transcript = {
@@ -155,28 +189,75 @@ export class FakeDaemon {
       clientLabel: hello['label'] as string,
     };
     const bytes = authTranscript(transcript);
-    const signature = bytesToHex(ed.sign(preimage('host', 'auth', bytes), hexToBytes(HOST_SEED)));
-    link.deliver({
+    return {
       t: 'challenge',
       version: 2,
       host: this.host.clientId,
       label: 'fake-daemon',
       nonce: this.hostNonce,
-      signature,
-    });
-    const auth = link.lastOfType('auth');
-    if (!auth) throw new Error('the client did not answer the challenge');
-    // The FakeDaemon does not re-verify the client: what these tests hold to
-    // account is the client's behaviour, and the signature's correctness is
-    // the auth package's golden-pinned business.
-    link.deliver({ t: 'welcome', version: 2, host: this.host.clientId, label: 'fake-daemon' });
+      signature: bytesToHex(ed.sign(preimage('host', 'auth', bytes), hexToBytes(HOST_SEED))),
+    };
   }
+
+  get welcome(): Record<string, unknown> {
+    return { t: 'welcome', version: 2, host: this.host.clientId, label: 'fake-daemon' };
+  }
+}
+
+/**
+ * Let every pending microtask settle.
+ *
+ * `setImmediate` rather than `Promise.resolve()`: the handshake awaits
+ * through several promises, and one microtask tick would drain only the
+ * first. A macrotask boundary drains the whole queue however deep it got.
+ */
+export function flush(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 export const CLIENT_SEED = '5e'.repeat(32);
 
 export function testIdentity(): ClientIdentity {
   return generateIdentity(CLIENT_SEED);
+}
+
+export function testSigner(): ClientSigner {
+  return seedSigner(testIdentity());
+}
+
+/**
+ * A signer that will not answer until the test says so.
+ *
+ * Stands in for `crypto.subtle`, whose promise settles on a later task rather
+ * than a microtask — long enough for a second host message, or a dropped
+ * connection, to land first. The seed path is too fast to expose either.
+ */
+export function gatedSigner(): ClientSigner & {
+  release(): void;
+  fail(reason: Error): void;
+  readonly asked: number;
+} {
+  const inner = testSigner();
+  const waiting: Array<{ resolve: (sig: string) => void; reject: (e: Error) => void; work: Promise<string> }> = [];
+  let asked = 0;
+  return {
+    clientId: inner.clientId,
+    sign(purpose, message) {
+      asked += 1;
+      return new Promise<string>((resolve, reject) => {
+        waiting.push({ resolve, reject, work: inner.sign(purpose, message) });
+      });
+    },
+    release(): void {
+      for (const w of waiting.splice(0)) void w.work.then(w.resolve, w.reject);
+    },
+    fail(reason: Error): void {
+      for (const w of waiting.splice(0)) w.reject(reason);
+    },
+    get asked(): number {
+      return asked;
+    },
+  };
 }
 
 export const ADDR = { host: '2e'.repeat(32), session: 1n };

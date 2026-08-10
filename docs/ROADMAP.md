@@ -1352,6 +1352,32 @@ on each host. → ADR-005, ADR-006.
       daemon, length-prefixed msgpack over stdio. Never in the PTY hot path.
 - [ ] Device enrollment: non-extractable Ed25519 key, desktop approval modal
       with a matching code.
+
+      **The browser's half of the key has landed.** A `ClientSigner` seam in
+      `@zesterm/auth` — `seedSigner` over a seed this process holds, or
+      `webCryptoSigner` over a non-extractable `CryptoKey` in IndexedDB, and
+      the handshake cannot tell which. It could not be a wrapper: `@noble`
+      needs the raw 32-byte scalar and a non-extractable key will never yield
+      one, so signing goes through `crypto.subtle` and is **async**, which
+      made `answerChallenge`, `HandshakeDriver.onMessage` and both clients
+      async with it. *Verification* stayed synchronous on `@noble` on
+      purpose — it touches only public keys, and that is what preserves the
+      ordering the whole handshake rests on: the host proves itself before
+      anything is signed. Two hazards the async path introduced are guarded
+      and tested: a host that pipelines two handshake messages must not be
+      served out of order (it would `attach` before its `auth` reached the
+      wire), and a `subtle` signature that settles after its connection
+      dropped must not be replayed onto the next one.
+
+      **No silent rotation**: a device that already has
+      `zesterm.device-seed.v1` keeps it. A new key means a new `ClientId`
+      means every daemon in the fleet re-prompts a device the person already
+      approved, which is exactly how people learn to approve without reading.
+      Migration needs enrolment to carry the old key's blessing to the new
+      one. Ed25519 support is feature-detected by *generating and signing*,
+      not by name, and the kind of key backing the device is surfaced to the
+      UI — a browser on the fallback is working, not secure, and the screen
+      says so.
 - [ ] Attach tickets (30s TTL, single use) minted by the actor.
 
 ## M5 — phone, AI, end-to-end encryption
