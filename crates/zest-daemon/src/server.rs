@@ -34,6 +34,23 @@ enum Gate {
     Refused,
 }
 
+/// This connection's channel, and where the switch to it stands.
+///
+/// The seal switch is *positional* — the `Challenge` is the last plaintext
+/// frame in each direction — and the two directions therefore flip at two
+/// different moments. Incoming flips when the `Challenge` is **produced**, so a
+/// client that pipelines its `Auth` behind the `Hello` is still read correctly.
+/// Outgoing flips when the `Challenge` is **written**, because that frame
+/// carries the host's DH key and sealing it under a key derived from itself
+/// would be unopenable.
+///
+/// One flag rather than two channels because a `SecureChannel` holds both
+/// directions: `Some(_)` means incoming is sealed, and `out` means outgoing is.
+struct Seal {
+    channel: zest_mesh::secure::SecureChannel,
+    out: bool,
+}
+
 /// A trust store that trusts everyone, for the loopback path.
 ///
 /// Not a bypass in the handshake -- the proof still runs, and the wire is
@@ -326,6 +343,8 @@ pub struct Connection {
     watch_token: Option<u64>,
     /// The registry generation this connection last told its client about.
     seen_generation: u64,
+    /// This connection's encryption, from the `Challenge` onwards. See [`Seal`].
+    seal: Option<Seal>,
 }
 
 impl Drop for Connection {
@@ -391,6 +410,7 @@ impl Connection {
             watch_sessions: false,
             watch_token: None,
             seen_generation: 0,
+            seal: None,
         }
     }
 
@@ -440,6 +460,24 @@ impl Connection {
                 // trustworthy, so the caller must drop the connection rather
                 // than try to continue reading past it.
                 Err(e) => return Err(DaemonError::Transport(e.to_string())),
+            };
+
+            // Since protocol 3 the bytes behind the prefix are ciphertext from
+            // the `Auth` onwards, so this is where they stop being opaque. A
+            // frame that will not open is fatal in a way an unparseable one is
+            // not: the counter has already advanced, so there is no position to
+            // resume from, and it means either tampering or a key disagreement
+            // -- neither of which gets better by reading the next frame.
+            let body = match &mut self.seal {
+                Some(s) => match s.channel.open(&body) {
+                    Ok(plain) => plain,
+                    Err(e) => {
+                        return Err(DaemonError::Transport(format!(
+                            "a frame did not open: {e}"
+                        )))
+                    }
+                },
+                None => body,
             };
 
             match frame::decode::<ClientMessage>(&body) {
@@ -515,6 +553,37 @@ impl Connection {
         out
     }
 
+    /// Serialize one outgoing message, sealed if this connection is past the
+    /// `Challenge`.
+    ///
+    /// On `Connection` rather than free-standing because the nonce counter
+    /// lives here and advances once per call, which makes call order part of
+    /// the wire format: two frames sealed in one order and written in the other
+    /// are two frames the peer cannot open. One writer thread is what keeps
+    /// that true, and it is the reason this returns bytes instead of taking the
+    /// writer -- holding the connection lock across a blocking `write_all` is
+    /// the deadlock `ws.rs` documents.
+    pub fn encode(&mut self, msg: &HostMessage) -> Result<Vec<u8>, DaemonError> {
+        let body = frame::encode_body(msg).map_err(|e| DaemonError::Transport(e.to_string()))?;
+        let body = match &mut self.seal {
+            Some(s) if s.out => {
+                s.channel.seal(&body).map_err(|e| DaemonError::Transport(e.to_string()))?
+            }
+            _ => body,
+        };
+        let out = frame::frame_bytes(&body).map_err(|e| DaemonError::Transport(e.to_string()))?;
+        // The positional switch, on the way out: this frame carries the host's
+        // DH key, so it is the last plaintext one. Flipped after sealing rather
+        // than before, or the `Challenge` would be encrypted under a key the
+        // client cannot have yet.
+        if matches!(msg, HostMessage::Challenge { .. }) {
+            if let Some(s) = &mut self.seal {
+                s.out = true;
+            }
+        }
+        Ok(out)
+    }
+
     fn handle(&mut self, msg: ClientMessage) -> Vec<HostMessage> {
         // Nothing is served before the handshake completes. Not "has said
         // hello" -- has *proved* it may be here.
@@ -547,7 +616,7 @@ impl Connection {
         }
 
         match msg {
-            ClientMessage::Hello { version, client, label, nonce, watch_sessions } => {
+            ClientMessage::Hello { version, client, label, nonce, dh, watch_sessions } => {
                 self.watch_sessions = watch_sessions;
                 let Some(h) = self.handshake_mut() else {
                     return vec![HostMessage::Error {
@@ -560,9 +629,10 @@ impl Connection {
                     client,
                     &label,
                     zest_mesh::identity::Nonce::from_bytes(nonce.0),
+                    zest_mesh::secure::DhPublic(dh.0),
                 );
                 match step {
-                    zest_mesh::pairing::HostStep::Challenge { nonce, signature } => {
+                    zest_mesh::pairing::HostStep::Challenge { nonce, dh, signature } => {
                         tracing::debug!(client = %client.short(), %label, "challenging");
                         // The host id and label come from the *transcript*, not
                         // from `config`. They are inside the signature, so a
@@ -571,13 +641,44 @@ impl Connection {
                         // identity" and sends whoever is debugging it looking
                         // at the crypto rather than at the two fields.
                         let t = h.transcript().expect("challenged");
-                        vec![HostMessage::Challenge {
+                        let challenge = HostMessage::Challenge {
                             version: t.version,
                             host: t.host,
                             label: t.host_label.clone(),
                             nonce: zest_proto::Nonce32::from_bytes(*nonce.as_bytes()),
+                            dh: zest_proto::Pub32::from_bytes(dh.0),
                             signature: zest_proto::Sig64::from_bytes(signature.to_bytes()),
-                        }]
+                        };
+
+                        // Derived here, not on `Welcome`: the client's `Auth` is
+                        // already sealed, so the host needs the key before it
+                        // can read the very signature that decides whether to
+                        // serve. That is not trust granted early -- opening the
+                        // `Auth` proves only that whoever completed the DH sent
+                        // it, and `on_auth` still decides who gets a shell.
+                        let channel = h.channel();
+                        match channel {
+                            Some(Ok(channel)) => self.seal = Some(Seal { channel, out: false }),
+                            Some(Err(e)) => {
+                                // The transcript was signed and the key still
+                                // would not agree, which is not a peer problem.
+                                // Serving on would mean serving in plaintext
+                                // while both sides believe otherwise.
+                                tracing::error!(error = %e, "could not derive this connection's key");
+                                return self.refuse(
+                                    zest_mesh::pairing::Refusal::Signature,
+                                    client,
+                                );
+                            }
+                            None => {
+                                tracing::error!("a challenged handshake with no channel");
+                                return self.refuse(
+                                    zest_mesh::pairing::Refusal::Signature,
+                                    client,
+                                );
+                            }
+                        }
+                        vec![challenge]
                     }
                     zest_mesh::pairing::HostStep::Refused(r) => self.refuse(r, client),
                     // `on_hello` answers with a challenge or a refusal and
@@ -1131,7 +1232,11 @@ where
         }
 
         for msg in outgoing {
-            let bytes = frame::encode(&msg).map_err(|e| DaemonError::Transport(e.to_string()))?;
+            // The lock is taken per message and released before the write:
+            // sealing must be ordered with respect to the wire, and holding it
+            // across a blocking `write_all` is the deadlock `ws.rs` documents.
+            // One writer thread is what makes per-message locking sufficient.
+            let bytes = { conn.lock().expect("connection lock").encode(&msg)? };
             // Logged, not swallowed. A write failure treated as a clean
             // disconnect is indistinguishable from a client that left, and the
             // difference is the whole diagnosis when nothing arrives.
@@ -1256,39 +1361,55 @@ mod tests {
     /// The tests below are about what happens *after* authentication, so each
     /// needs a connection that has been through it -- which is itself the
     /// clearest statement that nothing is served before then.
-    fn authenticate(c: &mut Connection) -> zest_proto::ClientId {
+    fn authenticate(c: &mut Connection) -> Peer {
         authenticate_with(c, false)
     }
 
-    fn authenticate_with(c: &mut Connection, watch_sessions: bool) -> zest_proto::ClientId {
-        let client = zest_mesh::identity::ClientIdentity::generate().expect("client key");
+    fn authenticate_with(c: &mut Connection, watch_sessions: bool) -> Peer {
+        let client =
+            std::sync::Arc::new(zest_mesh::identity::ClientIdentity::generate().expect("client key"));
+        // The shared client handshake, not a hand-rolled one: a test peer that
+        // derived its key differently would fail every frame *after* the
+        // handshake, which reads as a broken daemon rather than a broken test.
+        let mut hs = zest_mesh::pairing::ClientHandshake::new(
+            std::sync::Arc::clone(&client),
+            "test",
+        )
+        .expect("client handshake");
+
         let out = send(
             c,
             &ClientMessage::Hello {
                 version: PROTOCOL_VERSION,
                 client: client.client_id(),
                 label: "test".into(),
-                nonce: zest_proto::Nonce32::from_bytes([0x5c; 32]),
+                nonce: zest_proto::Nonce32::from_bytes(*hs.nonce().as_bytes()),
+                dh: zest_proto::Pub32::from_bytes(hs.dh().0),
                 watch_sessions,
             },
         );
-        let [HostMessage::Challenge { nonce, host, label, version, .. }] = &out[..] else {
+        let [HostMessage::Challenge { nonce, host, label, version, dh, signature }] = &out[..]
+        else {
             panic!("expected a challenge, got {out:?}");
         };
-        let transcript = zest_mesh::pairing::Transcript {
-            version: *version,
-            host: *host,
-            client: client.client_id(),
-            host_nonce: zest_mesh::identity::Nonce::from_bytes(nonce.0),
-            client_nonce: zest_mesh::identity::Nonce::from_bytes([0x5c; 32]),
-            host_label: label.clone(),
-            client_label: "test".into(),
-        };
-        let sig = client.sign(
-            zest_mesh::identity::Purpose::Auth,
-            &zest_mesh::pairing::auth_transcript(&transcript),
-        );
-        let out = send(
+        let host_sig =
+            zest_mesh::identity::Signature::from_slice(&signature.0).expect("a 64-byte signature");
+        let (sig, _, channel) = hs
+            .on_challenge(
+                None,
+                &zest_mesh::pairing::Challenge {
+                    version: *version,
+                    host: *host,
+                    label: label.clone(),
+                    nonce: zest_mesh::identity::Nonce::from_bytes(nonce.0),
+                    dh: zest_mesh::secure::DhPublic(dh.0),
+                    signature: host_sig,
+                },
+            )
+            .expect("the host must prove itself");
+
+        let mut peer = Peer { channel };
+        let out = peer.send(
             c,
             &ClientMessage::Auth { signature: zest_proto::Sig64::from_bytes(sig.to_bytes()) },
         );
@@ -1296,7 +1417,7 @@ mod tests {
             matches!(&out[..], [HostMessage::Welcome { .. }]),
             "loopback must welcome any proved client, got {out:?}"
         );
-        client.client_id()
+        peer
     }
 
     fn config() -> DaemonConfig {
@@ -1343,7 +1464,7 @@ mod tests {
                 woken.store(true, std::sync::atomic::Ordering::Release);
             }));
         }
-        authenticate_with(&mut watcher, true);
+        let _watcher_peer = authenticate_with(&mut watcher, true);
 
         let mut creator = Connection::new(
             config(),
@@ -1351,8 +1472,8 @@ mod tests {
             crate::auth::Auth::Transport(test_authenticator()),
             "test2",
         );
-        authenticate(&mut creator);
-        let out = send(
+        let mut creator_peer = authenticate(&mut creator);
+        let out = creator_peer.send(
             &mut creator,
             &ClientMessage::CreateSession {
                 command: sleep_cmd(),
@@ -1393,8 +1514,8 @@ mod tests {
         // Push is opt-in: an old client would mistake an unsolicited
         // Sessions for the reply to a request it is about to make.
         let (mut c, registry) = conn();
-        authenticate(&mut c);
-        let out = send(
+        let mut peer = authenticate(&mut c);
+        let out = peer.send(
             &mut c,
             &ClientMessage::CreateSession {
                 command: sleep_cmd(),
@@ -1414,9 +1535,90 @@ mod tests {
         registry.close(id);
     }
 
+    /// Feed one message in as plaintext.
+    ///
+    /// Correct only before the `Challenge`. After it the daemon expects sealed
+    /// frames, which is what [`Peer`] is for -- and the tests that still use
+    /// this are exactly the ones about refusing a connection before it ever
+    /// gets a channel.
     fn send(c: &mut Connection, msg: &ClientMessage) -> Vec<HostMessage> {
         let bytes = frame::encode(msg).expect("encode");
         c.on_bytes(&bytes).expect("handled")
+    }
+
+    /// An authenticated client, holding the channel its frames are sealed with.
+    ///
+    /// These tests drive `Connection` in memory, so they exercise the *inbound*
+    /// seal only -- `Connection::encode` is the outbound half and is covered
+    /// over real sockets in `tests/lan.rs` and `tests/ws.rs`. Worth knowing
+    /// before trusting a green run here to mean the wire is right.
+    struct Peer {
+        channel: zest_mesh::secure::SecureChannel,
+    }
+
+    impl Peer {
+        fn send(&mut self, c: &mut Connection, msg: &ClientMessage) -> Vec<HostMessage> {
+            let body = frame::encode_body(msg).expect("encode");
+            let sealed = self.channel.seal(&body).expect("seal");
+            let bytes = frame::frame_bytes(&sealed).expect("frame");
+            c.on_bytes(&bytes).expect("handled")
+        }
+
+        /// Seal bytes that are not a `ClientMessage`.
+        ///
+        /// For the one case that needs it: a message this build cannot parse
+        /// but whose sender does hold the key.
+        fn send_body(
+            &mut self,
+            c: &mut Connection,
+            body: &[u8],
+        ) -> Result<Vec<HostMessage>, DaemonError> {
+            let sealed = self.channel.seal(body).expect("seal");
+            c.on_bytes(&frame::frame_bytes(&sealed).expect("frame"))
+        }
+    }
+
+    /// Get as far as a channel without proving anything.
+    ///
+    /// For tests about a *failed* `Auth`: the channel exists from the
+    /// `Challenge` onwards, so a peer that signs badly still has to seal.
+    fn challenge_only(c: &mut Connection) -> Peer {
+        let client =
+            std::sync::Arc::new(zest_mesh::identity::ClientIdentity::generate().expect("client key"));
+        let mut hs =
+            zest_mesh::pairing::ClientHandshake::new(std::sync::Arc::clone(&client), "test")
+                .expect("client handshake");
+        let out = send(
+            c,
+            &ClientMessage::Hello {
+                version: PROTOCOL_VERSION,
+                client: client.client_id(),
+                label: "test".into(),
+                nonce: zest_proto::Nonce32::from_bytes(*hs.nonce().as_bytes()),
+                dh: zest_proto::Pub32::from_bytes(hs.dh().0),
+                watch_sessions: false,
+            },
+        );
+        let [HostMessage::Challenge { nonce, host, label, version, dh, signature }] = &out[..]
+        else {
+            panic!("expected a challenge, got {out:?}");
+        };
+        let host_sig =
+            zest_mesh::identity::Signature::from_slice(&signature.0).expect("a 64-byte signature");
+        let (_, _, channel) = hs
+            .on_challenge(
+                None,
+                &zest_mesh::pairing::Challenge {
+                    version: *version,
+                    host: *host,
+                    label: label.clone(),
+                    nonce: zest_mesh::identity::Nonce::from_bytes(nonce.0),
+                    dh: zest_mesh::secure::DhPublic(dh.0),
+                    signature: host_sig,
+                },
+            )
+            .expect("the host must prove itself");
+        Peer { channel }
     }
 
     fn hello() -> ClientMessage {
@@ -1425,6 +1627,7 @@ mod tests {
             client: ClientId::from_bytes([1; 32]),
             label: "test".into(),
             nonce: zest_proto::Nonce32::from_bytes([6; 32]),
+            dh: zest_proto::Pub32::from_bytes([8; 32]),
             watch_sessions: false,
         }
     }
@@ -1471,8 +1674,8 @@ mod tests {
     #[test]
     fn a_proved_client_is_welcomed_by_this_host() {
         let (mut c, _) = conn();
-        authenticate(&mut c);
-        let out = send(&mut c, &ClientMessage::ListSessions);
+        let mut peer = authenticate(&mut c);
+        let out = peer.send(&mut c, &ClientMessage::ListSessions);
         assert!(matches!(&out[..], [HostMessage::Sessions { .. }]), "{out:?}");
     }
 
@@ -1480,11 +1683,15 @@ mod tests {
     fn an_unsigned_client_is_never_served() {
         // Answering the challenge with noise must not get anywhere, and must
         // say why in a form a client can branch on.
+        // A *sealed* bad signature, which is the case that still has to be
+        // answered by name. Since protocol 3 the `Auth` is encrypted, so a peer
+        // that completed the DH and then signed wrongly is a different failure
+        // from one that could not seal at all -- and only the first can be told
+        // anything, because the second's bytes never became a message.
         let (mut c, _) = conn();
-        let out = send(&mut c, &hello());
-        assert!(matches!(&out[..], [HostMessage::Challenge { .. }]), "{out:?}");
+        let mut peer = challenge_only(&mut c);
 
-        let out = send(
+        let out = peer.send(
             &mut c,
             &ClientMessage::Auth { signature: zest_proto::Sig64::from_bytes([0; 64]) },
         );
@@ -1497,8 +1704,30 @@ mod tests {
         );
 
         // And it stays refused rather than being served the next message.
-        let out = send(&mut c, &ClientMessage::ListSessions);
+        let out = peer.send(&mut c, &ClientMessage::ListSessions);
         assert!(matches!(&out[..], [HostMessage::Error { .. }]), "{out:?}");
+    }
+
+    #[test]
+    fn an_auth_that_was_not_sealed_ends_the_connection() {
+        // The other half, and the reason the one above had to change. The seal
+        // switch is positional: the `Auth` is the first sealed frame, so a
+        // plaintext one is not a client with a bad signature -- it is a peer
+        // that does not hold the key, or bytes something on the path rewrote.
+        // There is nothing to reply to it, and replying anyway would be a
+        // decryption oracle answering questions about frames it could not read.
+        let (mut c, _) = conn();
+        let out = send(&mut c, &hello());
+        assert!(matches!(&out[..], [HostMessage::Challenge { .. }]), "{out:?}");
+
+        let bytes = frame::encode(&ClientMessage::Auth {
+            signature: zest_proto::Sig64::from_bytes([0; 64]),
+        })
+        .expect("encode");
+        assert!(
+            c.on_bytes(&bytes).is_err(),
+            "a plaintext frame after the Challenge must end the connection, not be answered"
+        );
     }
 
     #[test]
@@ -1511,17 +1740,17 @@ mod tests {
         // every byte the shell printed. It still *updated*, which is exactly
         // why nothing noticed.
         let (mut c, _) = conn();
-        authenticate(&mut c);
-        send(&mut c, &ClientMessage::CreateSession {
+        let mut peer = authenticate(&mut c);
+        peer.send(&mut c, &ClientMessage::CreateSession {
             command: echo_cmd(),
             cwd: String::new(),
             cols: 80,
             rows: 24,
         });
         let addr = SessionAddr::new(config().host, SessionId(1));
-        send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+        peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
 
-        let out = send(&mut c, &ClientMessage::RequestKeyframe { session: addr });
+        let out = peer.send(&mut c, &ClientMessage::RequestKeyframe { session: addr });
         let [HostMessage::Keyframe { seq, .. }] = &out[..] else {
             panic!("expected a keyframe, got {out:?}");
         };
@@ -1566,6 +1795,7 @@ mod tests {
                 client: ClientId::from_bytes([1; 32]),
                 label: "future".into(),
                 nonce: zest_proto::Nonce32::from_bytes([7; 32]),
+                dh: zest_proto::Pub32::from_bytes([8; 32]),
                 watch_sessions: false,
             },
         );
@@ -1590,25 +1820,45 @@ mod tests {
         // A newer client may send something this build has never heard of.
         // Dropping the connection would make every upgrade a hard cutover.
         let (mut c, _) = conn();
-        authenticate(&mut c);
+        let mut peer = authenticate(&mut c);
+
+        // Sealed junk, not raw junk -- and the distinction is the point. A
+        // newer client's unknown message arrives *encrypted correctly*, because
+        // it holds the key; only its contents are unfamiliar. Raw junk means
+        // something that does not hold the key is writing to this socket, which
+        // is the case below and is fatal.
+        let out = peer.send_body(&mut c, b"junk").expect("an unknown message is not fatal");
+        assert!(matches!(&out[..], [HostMessage::Error { .. }]), "{out:?}");
+
+        // ...and the connection still works.
+        let after = peer.send(&mut c, &ClientMessage::ListSessions);
+        assert!(matches!(&after[..], [HostMessage::Sessions { .. }]), "{after:?}");
+    }
+
+    #[test]
+    fn a_frame_that_does_not_open_is_fatal() {
+        // The counterpart to the test above, and the line between them: an
+        // unparseable *plaintext* is a client this build is older than, while a
+        // body that will not open is tampering or a key disagreement. The
+        // counter has already advanced by the time it is known, so there is no
+        // position to resume from -- reading on would decrypt every later frame
+        // under the wrong nonce and report the damage several frames away from
+        // its cause.
+        let (mut c, _) = conn();
+        let _peer = authenticate(&mut c);
 
         let mut junk = Vec::new();
         junk.extend_from_slice(&(4u32).to_le_bytes());
         junk.extend_from_slice(b"junk");
-        let out = c.on_bytes(&junk).expect("not fatal");
-        assert!(matches!(&out[..], [HostMessage::Error { .. }]));
-
-        // ...and the connection still works.
-        let after = send(&mut c, &ClientMessage::ListSessions);
-        assert!(matches!(&after[..], [HostMessage::Sessions { .. }]), "{after:?}");
+        assert!(c.on_bytes(&junk).is_err(), "a frame that does not open must end the connection");
     }
 
     #[test]
     fn creating_a_session_lists_it() {
         let (mut c, registry) = conn();
-        authenticate(&mut c);
+        let mut peer = authenticate(&mut c);
 
-        let out = send(
+        let out = peer.send(
             &mut c,
             &ClientMessage::CreateSession {
                 command: echo_cmd(),
@@ -1624,8 +1874,8 @@ mod tests {
     #[test]
     fn attaching_returns_a_keyframe_and_then_output() {
         let (mut c, registry) = conn();
-        authenticate(&mut c);
-        send(
+        let mut peer = authenticate(&mut c);
+        peer.send(
             &mut c,
             &ClientMessage::CreateSession {
                 command: echo_cmd(),
@@ -1636,7 +1886,7 @@ mod tests {
         );
         let addr = registry.list(config().host)[0].addr;
 
-        let out = send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+        let out = peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
         assert!(matches!(&out[..], [HostMessage::Keyframe { .. }]), "{out:?}");
 
         assert!(
@@ -1649,8 +1899,8 @@ mod tests {
     fn detaching_leaves_the_session_in_the_registry() {
         // The property ADR-007 exists for: a client leaving must not end a shell.
         let (mut c, registry) = conn();
-        authenticate(&mut c);
-        send(
+        let mut peer = authenticate(&mut c);
+        peer.send(
             &mut c,
             &ClientMessage::CreateSession {
                 command: echo_cmd(),
@@ -1660,9 +1910,9 @@ mod tests {
             },
         );
         let addr = registry.list(config().host)[0].addr;
-        send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+        peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
 
-        send(&mut c, &ClientMessage::Detach { session: addr });
+        peer.send(&mut c, &ClientMessage::Detach { session: addr });
         assert_eq!(registry.len(), 1, "detaching removed the session");
         assert!(registry.get(addr.session).is_some());
     }
@@ -1670,8 +1920,8 @@ mod tests {
     #[test]
     fn closing_a_session_removes_it() {
         let (mut c, registry) = conn();
-        authenticate(&mut c);
-        send(
+        let mut peer = authenticate(&mut c);
+        peer.send(
             &mut c,
             &ClientMessage::CreateSession {
                 command: echo_cmd(),
@@ -1682,7 +1932,7 @@ mod tests {
         );
         let addr = registry.list(config().host)[0].addr;
 
-        send(&mut c, &ClientMessage::CloseSession { session: addr });
+        peer.send(&mut c, &ClientMessage::CloseSession { session: addr });
         assert_eq!(registry.len(), 0);
     }
 
@@ -1697,8 +1947,8 @@ mod tests {
     #[test]
     fn closing_a_session_ends_its_child() {
         let (mut c, registry) = conn();
-        authenticate(&mut c);
-        send(
+        let mut peer = authenticate(&mut c);
+        peer.send(
             &mut c,
             &ClientMessage::CreateSession {
                 command: sleep_cmd(),
@@ -1711,7 +1961,7 @@ mod tests {
         let session = registry.get(addr.session).expect("the session was just created");
         assert!(!session.has_exited(), "the child should still be running");
 
-        send(&mut c, &ClientMessage::CloseSession { session: addr });
+        peer.send(&mut c, &ClientMessage::CloseSession { session: addr });
 
         assert!(
             wait_for(|| session.has_exited()),
@@ -1738,8 +1988,8 @@ mod tests {
     #[test]
     fn an_exited_session_is_kept_until_nobody_is_watching() {
         let (mut c, registry) = conn();
-        authenticate(&mut c);
-        send(
+        let mut peer = authenticate(&mut c);
+        peer.send(
             &mut c,
             &ClientMessage::CreateSession {
                 command: echo_cmd(),
@@ -1749,7 +1999,7 @@ mod tests {
             },
         );
         let addr = registry.list(config().host)[0].addr;
-        send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+        peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
 
         assert!(
             wait_for(|| c
@@ -1765,7 +2015,7 @@ mod tests {
              session that no longer exists"
         );
 
-        send(&mut c, &ClientMessage::Detach { session: addr });
+        peer.send(&mut c, &ClientMessage::Detach { session: addr });
         c.poll();
         assert_eq!(
             registry.len(),
@@ -1788,8 +2038,8 @@ mod tests {
     #[test]
     fn a_session_is_not_swept_before_anyone_has_attached() {
         let (mut c, registry) = conn();
-        authenticate(&mut c);
-        send(
+        let mut peer = authenticate(&mut c);
+        peer.send(
             &mut c,
             &ClientMessage::CreateSession {
                 command: echo_cmd(),
@@ -1811,7 +2061,7 @@ mod tests {
             "swept before the client that created it could attach; that client \
              now gets \"no session\" for a shell it asked for and that ran"
         );
-        let out = send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+        let out = peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
         assert!(
             matches!(&out[..], [HostMessage::Keyframe { .. }]),
             "attach must still succeed, and carry what the command printed: {out:?}"
@@ -1829,8 +2079,8 @@ mod tests {
                 crate::auth::Auth::Transport(test_authenticator()),
                 "test",
             );
-            authenticate(&mut c);
-            send(
+            let mut peer = authenticate(&mut c);
+            peer.send(
                 &mut c,
                 &ClientMessage::CreateSession {
                     command: sleep_cmd(),
@@ -1840,7 +2090,7 @@ mod tests {
                 },
             );
             let addr = registry.list(config().host)[0].addr;
-            send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+            peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
             let s = registry.get(addr.session).expect("just created");
             assert!(s.attached(), "the attach did not register a subscriber");
             s
@@ -1858,9 +2108,9 @@ mod tests {
     #[test]
     fn input_for_an_unknown_session_is_an_error_not_a_panic() {
         let (mut c, _) = conn();
-        authenticate(&mut c);
+        let mut peer = authenticate(&mut c);
         let addr = SessionAddr::new(config().host, SessionId(999));
-        let out = send(&mut c, &ClientMessage::Input { session: addr, bytes: vec![b'x'] });
+        let out = peer.send(&mut c, &ClientMessage::Input { session: addr, bytes: vec![b'x'] });
         assert!(matches!(&out[..], [HostMessage::Error { .. }]), "{out:?}");
     }
 
@@ -1868,9 +2118,9 @@ mod tests {
     fn a_listing_keeps_a_stable_order() {
         // A list that reshuffles between polls is unusable on a phone.
         let (mut c, registry) = conn();
-        authenticate(&mut c);
+        let mut peer = authenticate(&mut c);
         for _ in 0..4 {
-            send(
+            peer.send(
                 &mut c,
                 &ClientMessage::CreateSession {
                     command: echo_cmd(),
@@ -1893,8 +2143,8 @@ mod tests {
         // The fleet property. A session named without its host is unreachable
         // from a client holding sessions from several machines.
         let (mut c, registry) = conn();
-        authenticate(&mut c);
-        send(
+        let mut peer = authenticate(&mut c);
+        peer.send(
             &mut c,
             &ClientMessage::CreateSession {
                 command: echo_cmd(),

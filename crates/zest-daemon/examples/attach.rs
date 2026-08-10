@@ -110,17 +110,31 @@ fn run<R: Read + Send + 'static, W: Write + Send + 'static>(
     close: bool,
     ping: usize,
 ) {
+    // Beside the writer rather than inside it, and always locked *after* it:
+    // sealing advances a counter, so two threads that sealed in one order and
+    // wrote in the other would produce frames the host cannot open. The
+    // deadline thread writes through this same closure, which is why it is a
+    // lock at all and not a plain local.
+    let sealer: Arc<Mutex<Option<zest_mesh::secure::Sealer>>> = Arc::new(Mutex::new(None));
     let send = |writer: &Arc<Mutex<W>>, msg: &ClientMessage| {
-        let bytes = frame::encode(msg).expect("encode");
+        let body = frame::encode_body(msg).expect("encode");
         let mut w = writer.lock().expect("writer");
+        let body = match sealer.lock().expect("sealer").as_mut() {
+            Some(s) => s.seal(&body).expect("seal"),
+            None => body,
+        };
+        let bytes = frame::frame_bytes(&body).expect("frame");
         Write::write_all(&mut *w, &bytes).expect("write");
         Write::flush(&mut *w).expect("flush");
     };
 
     // A throwaway key. This is a diagnostic, not a device: it should not
     // accumulate a pairing on every host it is pointed at.
-    let identity = zest_mesh::identity::ClientIdentity::generate().expect("client key");
-    let client_nonce = zest_mesh::identity::Nonce::random().expect("nonce");
+    let identity =
+        Arc::new(zest_mesh::identity::ClientIdentity::generate().expect("client key"));
+    let mut hs = zest_mesh::pairing::ClientHandshake::new(Arc::clone(&identity), "attach")
+        .expect("client handshake");
+    let mut opener: Option<zest_mesh::secure::Opener> = None;
     eprintln!("[attach] client {}", identity.client_id().short());
 
     send(
@@ -129,7 +143,8 @@ fn run<R: Read + Send + 'static, W: Write + Send + 'static>(
             version: PROTOCOL_VERSION,
             client: identity.client_id(),
             label: "attach".into(),
-            nonce: zest_proto::Nonce32::from_bytes(*client_nonce.as_bytes()),
+            nonce: zest_proto::Nonce32::from_bytes(*hs.nonce().as_bytes()),
+            dh: zest_proto::Pub32::from_bytes(hs.dh().0),
             watch_sessions: false,
         },
     );
@@ -197,6 +212,16 @@ fn run<R: Read + Send + 'static, W: Write + Send + 'static>(
         reader.feed(&buf[..n]);
 
         while let Some(body) = reader.next_frame().expect("framing") {
+            let body = match opener.as_mut() {
+                Some(o) => match o.open(&body) {
+                    Ok(plain) => plain,
+                    Err(e) => {
+                        eprintln!("[attach] a sealed frame did not open: {e}");
+                        std::process::exit(1);
+                    }
+                },
+                None => body,
+            };
             match frame::decode::<HostMessage>(&body).expect("decode") {
                 HostMessage::Welcome { host, label, .. } => {
                     eprintln!("[attach] authenticated to {} ({label})", host.short());
@@ -299,31 +324,32 @@ fn run<R: Read + Send + 'static, W: Write + Send + 'static>(
                 HostMessage::Error { message, .. } => eprintln!("[attach] error: {message}"),
                 HostMessage::Scrollback { .. } => {}
 
-                HostMessage::Challenge { host, label, nonce, signature, version } => {
+                HostMessage::Challenge { host, label, nonce, dh, signature, version } => {
                     eprintln!("[attach] host {} ({label}) challenged", host.short());
-                    let transcript = zest_mesh::pairing::Transcript {
-                        version,
-                        host,
-                        client: identity.client_id(),
-                        host_nonce: zest_mesh::identity::Nonce::from_bytes(nonce.0),
-                        client_nonce,
-                        host_label: label,
-                        client_label: "attach".into(),
-                    };
                     let host_sig = zest_mesh::identity::Signature::from_slice(&signature.0)
                         .expect("signature");
                     // No expected host: this example is pointed at a socket by
                     // hand, so there is no advertisement to have been misled by.
-                    if let Err(e) =
-                        zest_mesh::pairing::verify_challenge(None, &transcript, &host_sig)
-                    {
-                        eprintln!("[attach] the host did not prove itself: {e}");
-                        std::process::exit(1);
-                    }
-                    let sig = identity.sign(
-                        zest_mesh::identity::Purpose::Auth,
-                        &zest_mesh::pairing::auth_transcript(&transcript),
-                    );
+                    let (sig, _, channel) = match hs.on_challenge(
+                        None,
+                        &zest_mesh::pairing::Challenge {
+                            version,
+                            host,
+                            label,
+                            nonce: zest_mesh::identity::Nonce::from_bytes(nonce.0),
+                            dh: zest_mesh::secure::DhPublic(dh.0),
+                            signature: host_sig,
+                        },
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("[attach] the host did not prove itself: {e}");
+                            std::process::exit(1);
+                        }
+                    };
+                    let (s, o) = channel.split();
+                    *sealer.lock().expect("sealer") = Some(s);
+                    opener = Some(o);
                     send(
                         &writer,
                         &ClientMessage::Auth {

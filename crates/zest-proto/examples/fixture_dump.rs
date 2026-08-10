@@ -705,6 +705,7 @@ fn write_client_messages(path: &Path) {
                 client: ClientId::from_bytes([0xab; 32]),
                 label: "golden".into(),
                 nonce: Nonce32::from_bytes([0x5c; 32]),
+                dh: zest_proto::Pub32::from_bytes([0x2d; 32]),
                 watch_sessions: true,
             },
         ),

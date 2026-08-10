@@ -217,19 +217,7 @@ pub struct SecureChannel {
 impl SecureChannel {
     /// Seal one frame's body.
     pub fn seal(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, MeshError> {
-        if plaintext.len() > MAX_PLAINTEXT {
-            return Err(MeshError::Identity(format!(
-                "{} bytes is more than a frame can carry once sealed",
-                plaintext.len()
-            )));
-        }
-        let out = self
-            .send
-            .cipher
-            .encrypt(&self.send.nonce(), Payload { msg: plaintext, aad: &[] })
-            .map_err(|_| MeshError::Identity("sealing failed".into()))?;
-        self.send.advance()?;
-        Ok(out)
+        Self::seal_with(&mut self.send, plaintext)
     }
 
     /// Open one frame's body.
@@ -239,13 +227,46 @@ impl SecureChannel {
     /// record, and skipping past it would desynchronise the two sides in a way
     /// that looks like corruption several frames later.
     pub fn open(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, MeshError> {
-        let out = self
-            .recv
+        Self::open_with(&mut self.recv, ciphertext)
+    }
+
+    /// The one implementation, so a split channel and a joined one cannot
+    /// drift. A second copy of this is a second nonce schedule.
+    fn seal_with(d: &mut Direction, plaintext: &[u8]) -> Result<Vec<u8>, MeshError> {
+        if plaintext.len() > MAX_PLAINTEXT {
+            return Err(MeshError::Identity(format!(
+                "{} bytes is more than a frame can carry once sealed",
+                plaintext.len()
+            )));
+        }
+        let out = d
             .cipher
-            .decrypt(&self.recv.nonce(), Payload { msg: ciphertext, aad: &[] })
-            .map_err(|_| MeshError::BadSignature("a sealed frame did not open".into()))?;
-        self.recv.advance()?;
+            .encrypt(&d.nonce(), Payload { msg: plaintext, aad: &[] })
+            .map_err(|_| MeshError::Identity("sealing failed".into()))?;
+        d.advance()?;
         Ok(out)
+    }
+
+    fn open_with(d: &mut Direction, ciphertext: &[u8]) -> Result<Vec<u8>, MeshError> {
+        let out = d
+            .cipher
+            .decrypt(&d.nonce(), Payload { msg: ciphertext, aad: &[] })
+            .map_err(|_| MeshError::BadSignature("a sealed frame did not open".into()))?;
+        d.advance()?;
+        Ok(out)
+    }
+
+    /// Split into the two halves, for a reader thread and a writer thread.
+    ///
+    /// The two directions have separate keys and separate counters and share no
+    /// state, so this needs no lock — which is the point. The alternative, one
+    /// `Mutex<SecureChannel>` held by both threads, is the deadlock `ws.rs`
+    /// documents in a new hat: the reader sits in a blocking read while holding
+    /// it, which is exactly what a client does while it is quiet, and the
+    /// writer never gets in.
+    #[must_use]
+    pub fn split(self) -> (Sealer, Opener) {
+        (Sealer(self.send), Opener(self.recv))
     }
 
     /// For tests and for the fixture dump; never used on a live link.
@@ -253,6 +274,26 @@ impl SecureChannel {
     #[must_use]
     pub fn counters(&self) -> ((u32, u64), (u32, u64)) {
         ((self.send.epoch, self.send.counter), (self.recv.epoch, self.recv.counter))
+    }
+}
+
+/// The outgoing half of a split channel.
+pub struct Sealer(Direction);
+
+impl Sealer {
+    /// Seal one frame's body. See [`SecureChannel::seal`].
+    pub fn seal(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, MeshError> {
+        SecureChannel::seal_with(&mut self.0, plaintext)
+    }
+}
+
+/// The incoming half of a split channel.
+pub struct Opener(Direction);
+
+impl Opener {
+    /// Open one frame's body. See [`SecureChannel::open`].
+    pub fn open(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, MeshError> {
+        SecureChannel::open_with(&mut self.0, ciphertext)
     }
 }
 
@@ -401,6 +442,22 @@ mod tests {
         let (mut host, _client) = pair();
         assert!(host.seal(&vec![0u8; MAX_PLAINTEXT]).is_ok(), "exactly at the limit is fine");
         assert!(host.seal(&vec![0u8; MAX_PLAINTEXT + 1]).is_err(), "one byte over is refused");
+    }
+
+    #[test]
+    fn a_split_channel_is_the_same_channel() {
+        // The two halves go to two threads, so nothing forces them through the
+        // same code path any more. If `split` gave either half a fresh counter
+        // -- or if a second copy of the nonce schedule ever drifted from this
+        // one -- a redial would look identical and every frame after the first
+        // would fail to open.
+        let (mut host, client) = pair();
+        let a = host.seal(b"one").expect("seal");
+        let b = host.seal(b"two").expect("seal");
+
+        let (_, mut opener) = client.split();
+        assert_eq!(opener.open(&a).expect("first"), b"one");
+        assert_eq!(opener.open(&b).expect("second"), b"two", "the counter did not carry over");
     }
 
     #[test]

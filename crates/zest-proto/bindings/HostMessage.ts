@@ -7,6 +7,7 @@ import type { CursorState } from "./CursorState";
 import type { Delta } from "./Delta";
 import type { HostId } from "./HostId";
 import type { Nonce32 } from "./Nonce32";
+import type { Pub32 } from "./Pub32";
 import type { RowPayload } from "./RowPayload";
 import type { Seq } from "./Seq";
 import type { SessionAddr } from "./SessionAddr";
@@ -17,7 +18,18 @@ import type { Sig64 } from "./Sig64";
 /**
  * What a host sends.
  */
-export type HostMessage = { "t": "welcome", version: number, host: HostId, label: string, } | { "t": "challenge", version: number, host: HostId, label: string, nonce: Nonce32, signature: Sig64, } | { "t": "auth_pending", code: string, expires_in_secs: number, } | { "t": "auth_failed", reason: AuthFailure, message: string, } | { "t": "pairing_requested", client: ClientId, label: string, code: string, remote: string, } | { "t": "sessions", sessions: Array<SessionInfo>, 
+export type HostMessage = { "t": "welcome", version: number, host: HostId, label: string, } | { "t": "challenge", version: number, host: HostId, label: string, nonce: Nonce32, 
+/**
+ * The host's ephemeral X25519 public key. See `Hello::dh`.
+ *
+ * **This message is the switch.** Everything after a Challenge is
+ * sealed, in both directions; everything up to and including it is
+ * plaintext. Positional rather than per-message-type, because a table
+ * of which variants are encrypted is a table two independent
+ * implementations can disagree about — and the set of refusals that
+ * happen *before* a Challenge is exactly "the host never sent one".
+ */
+dh: Pub32, signature: Sig64, } | { "t": "auth_pending", code: string, expires_in_secs: number, } | { "t": "auth_failed", reason: AuthFailure, message: string, } | { "t": "pairing_requested", client: ClientId, label: string, code: string, remote: string, } | { "t": "sessions", sessions: Array<SessionInfo>, 
 /**
  * The session this reply's `CreateSession` produced, when it did.
  *

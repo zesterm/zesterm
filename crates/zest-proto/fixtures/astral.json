@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "protocol": 2,
+  "protocol": 3,
   "recording": "astral",
   "source": "synthetic",
   "cols": 40,

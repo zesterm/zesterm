@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "protocol": 2,
+  "protocol": 3,
   "recording": "dir-colors-short",
   "source": "vtrec",
   "cols": 80,

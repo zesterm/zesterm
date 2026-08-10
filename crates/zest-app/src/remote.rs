@@ -25,11 +25,12 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender};
 use zest_core::Terminal;
 use zest_mesh::identity::ClientIdentity;
+use zest_mesh::secure::Sealer;
 use zest_proto::{
     frame, Applied, Applier, ClientMessage, FrameReader, HostMessage, SessionAddr, Seq,
 };
 
-use crate::daemon_client::DaemonClient;
+use zest_daemon::client::DaemonClient;
 use crate::fair_mutex::FairMutex;
 use crate::session::Wakeup;
 use crate::source::{Origin, SessionSource};
@@ -45,7 +46,13 @@ const ACK_INTERVAL: Duration = Duration::from_millis(16);
 enum Outbound {
     Msg(ClientMessage),
     /// The link came back. Write to this from now on.
-    Stream(Box<dyn Write + Send>),
+    ///
+    /// The sealer rides with the sink, and must: a redial is a fresh handshake
+    /// with fresh keys and counters starting at zero (`remote.rs` has always
+    /// redialled rather than resumed, which is exactly what makes that safe).
+    /// A sealer that outlived its socket would encrypt under the old key and
+    /// the new daemon connection would refuse every frame.
+    Stream(Box<dyn Write + Send>, Option<Sealer>),
     Shutdown,
 }
 
@@ -269,7 +276,17 @@ impl RemoteSession {
         };
         let (keyframe_seq, keyframe) = conn.attach(addr, cols, rows)?;
         let host_label = conn.host_label().to_string();
-        let (mut reader, writer) = conn.into_halves();
+        let (mut reader, writer, channel) = conn.into_halves();
+        // Split rather than shared: the two directions have separate keys and
+        // separate counters, so the reader thread and the writer thread need no
+        // lock between them. See `SecureChannel::split`.
+        let (mut sealer, mut opener) = match channel {
+            Some(c) => {
+                let (s, o) = c.split();
+                (Some(s), Some(o))
+            }
+            None => (None, None),
+        };
         let addr_cell = Arc::new(parking_lot::Mutex::new(addr));
 
         let terminal = Arc::new(FairMutex::new(Terminal::new(
@@ -288,6 +305,7 @@ impl RemoteSession {
         // --- writer thread ---
         let writer_thread = {
             let mut sink: Option<Box<dyn Write + Send>> = Some(writer);
+            let mut sealer = sealer.take();
             // The newest resize seen while disconnected, replayed on reconnect.
             //
             // Only the newest, and only resizes. Replaying queued *keystrokes*
@@ -302,10 +320,11 @@ impl RemoteSession {
                 .spawn(move || {
                     while let Ok(item) = rx.recv() {
                         match item {
-                            Outbound::Stream(new_sink) => {
+                            Outbound::Stream(new_sink, new_sealer) => {
                                 sink = Some(new_sink);
+                                sealer = new_sealer;
                                 if let Some(msg) = pending_resize.take() {
-                                    write_msg(&mut sink, &msg);
+                                    write_msg(&mut sink, sealer.as_mut(), &msg);
                                 }
                             }
                             Outbound::Msg(msg) => {
@@ -316,7 +335,7 @@ impl RemoteSession {
                                     }
                                     continue;
                                 };
-                                let Ok(bytes) = frame::encode(&msg) else { continue };
+                                let Some(bytes) = seal_msg(sealer.as_mut(), &msg) else { continue };
                                 if s.write_all(&bytes).is_err() || s.flush().is_err() {
                                     // The reader is the supervisor and will
                                     // notice the same break. Dropping the sink
@@ -373,6 +392,22 @@ impl RemoteSession {
                                 // Framing is lost, so the stream position is no
                                 // longer trustworthy. Nothing to do but drop it.
                                 Err(_) => return finish(&wake),
+                            };
+
+                            // Opened here, where the frame stops being opaque.
+                            // A frame that will not open ends the connection:
+                            // the counter has already advanced, so there is no
+                            // position to resume from, and continuing would
+                            // read every later frame under the wrong nonce.
+                            let body = match opener.as_mut() {
+                                Some(o) => match o.open(&body) {
+                                    Ok(plain) => plain,
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "a sealed frame did not open; closing");
+                                        return finish(&wake);
+                                    }
+                                },
+                                None => body,
                             };
 
                             let Ok(msg) = frame::decode::<HostMessage>(&body) else {
@@ -506,7 +541,7 @@ impl RemoteSession {
                                     // session is gone, not the link. A pinned
                                     // tab reports that and stops, rather than
                                     // guessing at a replacement.
-                                    RemoteError::Refused(_) => {
+                                    zest_daemon::DaemonError::Refused(_) => {
                                         wake(Wakeup::SessionGone(addr));
                                         return;
                                     }
@@ -518,10 +553,18 @@ impl RemoteSession {
                         };
                         let Ok((seq, keyframe)) = attached else { continue };
 
-                        let (r, w) = conn.into_halves();
-                        if tx.send(Outbound::Stream(w)).is_err() {
+                        let (r, w, channel) = conn.into_halves();
+                        let (new_sealer, new_opener) = match channel {
+                            Some(c) => {
+                                let (s, o) = c.split();
+                                (Some(s), Some(o))
+                            }
+                            None => (None, None),
+                        };
+                        if tx.send(Outbound::Stream(w, new_sealer)).is_err() {
                             return;
                         }
+                        opener = new_opener;
                         {
                             let mut term = terminal.lock_unfair();
                             applier.apply_keyframe(&mut term, &keyframe, seq);
@@ -552,12 +595,39 @@ impl RemoteSession {
 }
 
 /// Write one message to the current sink, dropping it if the link is gone.
-fn write_msg(sink: &mut Option<Box<dyn Write + Send>>, msg: &ClientMessage) {
+fn write_msg(
+    sink: &mut Option<Box<dyn Write + Send>>,
+    sealer: Option<&mut Sealer>,
+    msg: &ClientMessage,
+) {
     let Some(s) = sink.as_mut() else { return };
-    let Ok(bytes) = frame::encode(msg) else { return };
+    let Some(bytes) = seal_msg(sealer, msg) else { return };
     if s.write_all(&bytes).is_err() || s.flush().is_err() {
         *sink = None;
     }
+}
+
+/// Serialize one message, sealed if this link has a channel.
+///
+/// `None` on failure rather than an error, matching what the two callers
+/// already did with an encoding failure: there is nowhere to report it from a
+/// writer thread, and a message that cannot be built is one the daemon simply
+/// never hears. Sealing failure is different in kind — it means the counter
+/// wrapped past what the epoch can carry — but it is equally unreportable here,
+/// so it is logged rather than swallowed silently.
+fn seal_msg(sealer: Option<&mut Sealer>, msg: &ClientMessage) -> Option<Vec<u8>> {
+    let body = frame::encode_body(msg).ok()?;
+    let body = match sealer {
+        Some(s) => match s.seal(&body) {
+            Ok(sealed) => sealed,
+            Err(e) => {
+                tracing::error!(error = %e, "could not seal a message");
+                return None;
+            }
+        },
+        None => body,
+    };
+    frame::frame_bytes(&body).ok()
 }
 
 fn mark(needs_redraw: &Arc<AtomicBool>, wake: &impl Fn(Wakeup)) {
@@ -641,6 +711,26 @@ pub enum RemoteError {
     Io(String),
     #[error("could not start a thread: {0}")]
     Thread(String),
+}
+
+/// The client half now lives in `zest-daemon`, so its errors arrive as
+/// `DaemonError`.
+///
+/// Mapped variant by variant rather than collapsed into one string, because
+/// `Refused` is load-bearing: the redial loop at `supervise` stops on a refusal
+/// and keeps dialling on anything else. Flattening these would turn "this
+/// device is not paired" into an infinite reconnect against a host that will
+/// never say yes.
+impl From<zest_daemon::DaemonError> for RemoteError {
+    fn from(e: zest_daemon::DaemonError) -> Self {
+        use zest_daemon::DaemonError as D;
+        match e {
+            D::Version { ours, theirs } => Self::Version { ours, theirs },
+            D::Refused(m) => Self::Refused(m),
+            D::Closed => Self::Closed,
+            other => Self::Io(other.to_string()),
+        }
+    }
 }
 
 #[cfg(all(test, unix))]

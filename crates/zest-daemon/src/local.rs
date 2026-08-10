@@ -214,7 +214,6 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     use super::{Arc, DaemonConfig, DaemonError, Registry};
-    use std::io::{Read, Write};
     use std::ffi::OsStr;
     use std::io;
     use std::os::windows::ffi::OsStrExt;
@@ -526,9 +525,8 @@ mod tests {
     // Imported here rather than at module level: the unix backend needs neither,
     // so a module-level import is an unused-import error on macOS and Linux and
     // invisible on Windows, where the pipe implementation happens to use both.
-    use std::io::{Read, Write};
     use std::time::{Duration, Instant};
-    use zest_proto::{frame, ClientMessage, HostId, HostMessage, PROTOCOL_VERSION};
+    use zest_proto::HostId;
 
     fn config(path: &str) -> DaemonConfig {
         DaemonConfig {
@@ -596,7 +594,7 @@ mod tests {
 
         // Wait for the listener rather than sleeping a fixed time.
         let deadline = Instant::now() + Duration::from_secs(10);
-        let mut stream = loop {
+        let stream = loop {
             match connect(&path) {
                 Ok(s) => break s,
                 Err(_) if Instant::now() < deadline => {
@@ -606,92 +604,33 @@ mod tests {
             }
         };
 
-        // The handshake, over the real socket. A client that only says hello
-        // is no longer served, which is the point of this stage -- so this test
-        // has to hold a key and answer a challenge like any other client.
-        let client = zest_mesh::identity::ClientIdentity::generate().expect("client key");
-        let client_nonce = [5u8; 32];
-        let hello = ClientMessage::Hello {
-            version: PROTOCOL_VERSION,
-            client: client.client_id(),
-            label: "test-client".into(),
-            nonce: zest_proto::Nonce32::from_bytes(client_nonce),
-            watch_sessions: false,
-        };
-        stream.write_all(&frame::encode(&hello).expect("encode")).expect("write");
-        stream.flush().expect("flush");
+        // The handshake, over the real socket, through the *same* client the
+        // app uses. It was hand-rolled here until protocol 3, which was
+        // survivable while a wrong peer failed at the signature; now the same
+        // steps derive the key every later frame is encrypted under, and a
+        // second implementation is a second key schedule to keep in step.
+        let client = Arc::new(zest_mesh::identity::ClientIdentity::generate().expect("client key"));
+        let reader = stream.try_clone().expect("clone the socket");
+        let mut conn = crate::client::DaemonClient::connect(
+            Box::new(reader),
+            Box::new(stream),
+            &client,
+            "test-client",
+            None,
+            false,
+        )
+        .expect("the daemon must serve a loopback client");
 
-        let mut handshake = zest_proto::FrameReader::new();
-        let mut scratch = vec![0u8; 64 * 1024];
-        let challenge = loop {
-            if let Ok(Some(body)) = handshake.next_frame() {
-                match frame::decode::<HostMessage>(&body).expect("decode") {
-                    HostMessage::Challenge { host, label, nonce, version, .. } => {
-                        break (host, label, nonce, version);
-                    }
-                    other => panic!("expected a challenge, got {other:?}"),
-                }
-            }
-            let n = Read::read(&mut stream, &mut scratch).expect("read");
-            assert!(n > 0, "the daemon closed during the handshake");
-            handshake.feed(&scratch[..n]);
-        };
-        let (host, host_label, host_nonce, version) = challenge;
-        let transcript = zest_mesh::pairing::Transcript {
-            version,
-            host,
-            client: client.client_id(),
-            host_nonce: zest_mesh::identity::Nonce::from_bytes(host_nonce.0),
-            client_nonce: zest_mesh::identity::Nonce::from_bytes(client_nonce),
-            host_label,
-            client_label: "test-client".into(),
-        };
-        let sig = client.sign(
-            zest_mesh::identity::Purpose::Auth,
-            &zest_mesh::pairing::auth_transcript(&transcript),
-        );
-        let auth_msg =
-            ClientMessage::Auth { signature: zest_proto::Sig64::from_bytes(sig.to_bytes()) };
-        stream.write_all(&frame::encode(&auth_msg).expect("encode")).expect("write");
-        stream.flush().expect("flush");
+        assert_eq!(conn.host(), cfg.host, "the daemon reported another host's identity");
 
         let cmd = if cfg!(windows) {
             "cmd.exe /c echo over-the-socket".to_string()
         } else {
             "/bin/echo over-the-socket".to_string()
         };
-        let create = ClientMessage::CreateSession { command: cmd, cwd: String::new(), cols: 80, rows: 24 };
-        stream.write_all(&frame::encode(&create).expect("encode")).expect("write");
-        stream.flush().expect("flush");
+        conn.create(&cmd, "", 80, 24).expect("create a session over the socket");
+        let sessions = conn.list().expect("list sessions");
 
-        // Read until the welcome and the session listing have both arrived.
-        // Continues from the handshake's reader, which may already hold the
-        // start of the next frame.
-        let mut reader = handshake;
-        let mut buf = vec![0u8; 64 * 1024];
-        let mut saw_welcome = false;
-        let mut sessions = Vec::new();
-
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline && (!saw_welcome || sessions.is_empty()) {
-            let n = stream.read(&mut buf).expect("read");
-            if n == 0 {
-                break;
-            }
-            reader.feed(&buf[..n]);
-            while let Some(body) = reader.next_frame().expect("framing") {
-                match frame::decode::<HostMessage>(&body).expect("decode") {
-                    HostMessage::Welcome { host, .. } => {
-                        assert_eq!(host, cfg.host, "the daemon reported another host's identity");
-                        saw_welcome = true;
-                    }
-                    HostMessage::Sessions { sessions: s, .. } => sessions = s,
-                    _ => {}
-                }
-            }
-        }
-
-        assert!(saw_welcome, "no Welcome arrived over the socket");
         assert_eq!(sessions.len(), 1, "the session was not created");
         assert_eq!(
             sessions[0].addr.host, cfg.host,

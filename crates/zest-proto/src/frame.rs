@@ -45,17 +45,37 @@ pub enum FrameError {
 
 /// Encode one message, length prefix included.
 pub fn encode<T: Serialize>(msg: &T) -> Result<Vec<u8>, FrameError> {
+    frame_bytes(&encode_body(msg)?)
+}
+
+/// Serialize one message to a frame body, without the length prefix.
+///
+/// Split out from [`encode`] so encryption has somewhere to stand. Since v3 the
+/// bytes behind the prefix are ciphertext, and the prefix therefore has to be
+/// written *after* sealing rather than around the plaintext. Callers that do
+/// not encrypt keep using `encode` and see no difference.
+pub fn encode_body<T: Serialize>(msg: &T) -> Result<Vec<u8>, FrameError> {
     // `named` so field names travel with the data. The unnamed form is smaller
     // and turns every field addition into a breaking change, which a fleet whose
     // parts upgrade independently cannot afford.
-    let body = rmp_serde::to_vec_named(msg).map_err(|e| FrameError::Encode(e.to_string()))?;
+    rmp_serde::to_vec_named(msg).map_err(|e| FrameError::Encode(e.to_string()))
+}
+
+/// Put the length prefix on a body that is already bytes.
+///
+/// The bound is checked here rather than in [`encode_body`], because what must
+/// fit in a frame is whatever actually goes on the wire — which for a sealed
+/// connection is the ciphertext, 16 bytes longer than the plaintext. Checking
+/// the plaintext instead would let a maximal keyframe pass every local check
+/// and fail only on very large grids.
+pub fn frame_bytes(body: &[u8]) -> Result<Vec<u8>, FrameError> {
     if body.len() > MAX_FRAME {
         return Err(FrameError::TooLarge(body.len()));
     }
 
     let mut out = Vec::with_capacity(body.len() + 4);
     out.extend_from_slice(&u32::try_from(body.len()).unwrap_or(u32::MAX).to_le_bytes());
-    out.extend_from_slice(&body);
+    out.extend_from_slice(body);
     Ok(out)
 }
 
@@ -126,6 +146,7 @@ mod tests {
             client: ClientId::from_bytes([3; 32]),
             label: "phone".into(),
             nonce: crate::Nonce32::from_bytes([9; 32]),
+            dh: crate::Pub32::from_bytes([7; 32]),
             watch_sessions: false,
         }
     }
