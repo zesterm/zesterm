@@ -357,6 +357,18 @@ fn main() -> std::process::ExitCode {
         }
     }
 
+    // Validated here, before anything is built: a contradiction between flags
+    // is knowable from the arguments alone, and finding it out after a config
+    // load, an event loop and an `App` have been constructed means unwinding
+    // all of it to say something that was true before any of it started.
+    let shot = match screenshot_from(shot_path, shot_delay, shot_size) {
+        Ok(shot) => shot,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+
     // Kept, not consumed: a config file save re-runs the cascade, and the flags
     // have to be replayed on top or `--size 20` would vanish the first time the
     // user edits anything.
@@ -399,13 +411,6 @@ fn main() -> std::process::ExitCode {
     if new_session {
         app = app.with_new_session();
     }
-    let shot = match screenshot_from(shot_path, shot_delay, shot_size) {
-        Ok(shot) => shot,
-        Err(msg) => {
-            eprintln!("{msg}");
-            std::process::exit(2);
-        }
-    };
     if let Some(shot) = shot {
         // In-process by default, and not as a shortcut: on macOS the daemon
         // blocks on a Keychain prompt after every rebuild and the app falls
@@ -424,7 +429,7 @@ fn main() -> std::process::ExitCode {
         // produces a window whose shell is on the wrong machine.
         if no_daemon {
             eprintln!("--attach and --no-daemon contradict each other");
-            std::process::exit(2);
+            return std::process::ExitCode::from(2);
         }
         app = app.with_attach_addr(addr);
     }

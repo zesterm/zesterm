@@ -48,7 +48,7 @@ pub use ui_text::{emit_ui_run, measure_ui_run};
 /// Float, so blending has headroom and the resolve can un-premultiply without
 /// quantization damage. 8-bit would lose precision exactly where text
 /// antialiasing needs it.
-const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+pub const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// Text rendering knobs, applied once at resolve rather than baked per glyph.
 #[derive(Debug, Clone, Copy)]

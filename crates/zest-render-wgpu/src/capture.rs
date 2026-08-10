@@ -22,8 +22,17 @@
 ///
 /// # Panics
 ///
-/// If the copy cannot be mapped. There is no useful recovery: the caller asked
-/// for pixels and there are none.
+/// If `format` is not an 8-bit four-channel one, loudly and before touching the
+/// GPU. Every size here is `width * 4`, so a 16-bit format would read half the
+/// image and compact the halves into noise — and [`OFFSCREEN_FORMAT`] is
+/// `Rgba16Float`, two modules away, which makes that the *likely* mistake
+/// rather than a hypothetical one. Failing on the signature is worth more than
+/// a plausible-looking wrong picture.
+///
+/// Also if the copy cannot be mapped. There is no useful recovery: the caller
+/// asked for pixels and there are none.
+///
+/// [`OFFSCREEN_FORMAT`]: crate::OFFSCREEN_FORMAT
 pub fn read_rgba(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -32,6 +41,14 @@ pub fn read_rgba(
     height: u32,
     format: wgpu::TextureFormat,
 ) -> Vec<u8> {
+    let bgra = channel_swap(format).unwrap_or_else(|| {
+        panic!(
+            "read_rgba handles 8-bit RGBA/BGRA only, not {format:?}. Every stride \
+             here is width*4, so a wider format would be read as half an image \
+             and compacted into noise."
+        )
+    });
+
     let unpadded = width * 4;
     let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     let padded = unpadded.div_ceil(align) * align;
@@ -69,16 +86,26 @@ pub fn read_rgba(
     rx.recv().expect("map").expect("map failed");
 
     let view = slice.get_mapped_range().expect("mapped range");
-    let out = compact_rows(&view, width, height, padded, is_bgra(format));
+    let out = compact_rows(&view, width, height, padded, bgra);
     drop(view);
     buffer.unmap();
     out
 }
 
-/// Whether a format stores blue in the first channel.
+/// Whether a format needs its first and third channels swapped to become RGBA —
+/// or `None` when it is not an 8-bit four-channel format at all.
+///
+/// The `None` arm is the load-bearing one: it is what turns "someone passed the
+/// offscreen's `Rgba16Float`" from a picture that looks subtly wrong into a
+/// panic naming the format.
 #[must_use]
-pub fn is_bgra(format: wgpu::TextureFormat) -> bool {
-    matches!(format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb)
+pub fn channel_swap(format: wgpu::TextureFormat) -> Option<bool> {
+    use wgpu::TextureFormat as F;
+    match format {
+        F::Rgba8Unorm | F::Rgba8UnormSrgb => Some(false),
+        F::Bgra8Unorm | F::Bgra8UnormSrgb => Some(true),
+        _ => None,
+    }
 }
 
 /// Drop the row padding, and swap R and B when the source is BGRA.
@@ -141,7 +168,20 @@ mod tests {
 
     #[test]
     fn only_bgra_formats_are_swapped() {
-        assert!(is_bgra(wgpu::TextureFormat::Bgra8Unorm));
-        assert!(!is_bgra(wgpu::TextureFormat::Rgba8Unorm));
+        assert_eq!(channel_swap(wgpu::TextureFormat::Bgra8Unorm), Some(true));
+        assert_eq!(channel_swap(wgpu::TextureFormat::Bgra8UnormSrgb), Some(true));
+        assert_eq!(channel_swap(wgpu::TextureFormat::Rgba8Unorm), Some(false));
+        assert_eq!(channel_swap(wgpu::TextureFormat::Rgba8UnormSrgb), Some(false));
+    }
+
+    #[test]
+    fn a_format_this_cannot_read_is_refused_rather_than_guessed() {
+        // `OFFSCREEN_FORMAT` is `Rgba16Float` and lives two modules away, so
+        // handing it to a function whose every stride is `width * 4` is the
+        // mistake actually available to make. Reading half the image and
+        // compacting the halves would produce a plausible-looking wrong
+        // picture; `None` here is what makes it a panic naming the format.
+        assert_eq!(channel_swap(crate::OFFSCREEN_FORMAT), None, "the offscreen is not readable here");
+        assert_eq!(channel_swap(wgpu::TextureFormat::R8Unorm), None, "nor is a one-channel format");
     }
 }
