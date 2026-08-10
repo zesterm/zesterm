@@ -68,40 +68,47 @@ Never commit straight to `main`.**
    any type on the wire. Stage specific files (`git add <path>`), never
    `git add -A`. No co-author trailers.
 
-4. **Open a PR with Copilot as the reviewer.** Reference the issue so it auto-closes
-   on merge:
+4. **Open a PR, then request Copilot over GraphQL.** Two commands, in this
+   order. Reference the issue so it auto-closes on merge:
    ```sh
    gh pr create --base main --title "<title>" \
-     --body "Closes #N. <short summary of the change>" --reviewer @copilot
-   ```
-   The PR description becomes the squash commit **body** verbatim, and the PR
-   title (with ` (#<pr>)` appended) becomes its subject — see step 6. Write the
-   description as the commit body you want on `main`.
-   (On an already-open PR: `gh pr edit <pr> --add-reviewer @copilot`.) The bot
-   `copilot-pull-request-reviewer` posts its review within a minute or two.
+     --body "Closes #N. <short summary of the change>"
 
-   **`@copilot` does not resolve here** (`gh` 2.87.2 fails the whole
-   `gh pr create` with `could not request reviewer: '@copilot' not found` —
-   note it aborts *before* creating the PR, so create it without the flag and
-   request the review afterwards). **And the REST fallback the sigx template
-   documents silently does nothing on this repo**: `POST
-   /pulls/<pr>/requested_reviewers` with `reviewers[]=copilot-pull-request-reviewer[bot]`
-   returns 200 and a PR object whose `requested_reviewers` is still empty. No
-   error, no reviewer, and a PR that then waits forever for a review nobody
-   asked for. Use GraphQL, which does work:
-   ```sh
    pr_id=$(gh pr view <pr> --repo zesterm/zesterm --json id -q .id)
    gh api graphql -f query='mutation($pr:ID!,$b:ID!){
      requestReviews(input:{pullRequestId:$pr, botIds:[$b], union:true}) {
        pullRequest { reviewRequests(first:5){ nodes {
          requestedReviewer { ... on Bot { login } } } } } } }' \
-     -f pr="$pr_id" -f b="BOT_kgDOCnlnWA"
+     -f pr="$pr_id" -f b="BOT_kgDOCnlnWA" \
+     --jq '.data.requestReviews.pullRequest.reviewRequests.nodes[].requestedReviewer.login'
    ```
-   `BOT_kgDOCnlnWA` is `copilot-pull-request-reviewer`'s node id. Always read
-   the mutation's response back — an empty `reviewRequests` means it didn't
-   take, whatever the HTTP status said. (The REST route takes the
-   `[bot]`-suffixed slug; the review author login in `.reviews[].author.login`
-   appears *without* the suffix.)
+   `BOT_kgDOCnlnWA` is `copilot-pull-request-reviewer`'s node id. The `--jq` is
+   not decoration: **read the response back**, because the one thing that goes
+   wrong here goes wrong silently. It should print
+   `copilot-pull-request-reviewer`; anything else, including nothing, means no
+   review was requested and the PR will sit there waiting for one forever. The
+   bot posts within a minute or two.
+
+   The PR description becomes the squash commit **body** verbatim, and the PR
+   title (with ` (#<pr>)` appended) becomes its subject — see step 6. Write the
+   description as the commit body you want on `main`.
+
+   **Do not reach for `--reviewer @copilot` or the REST route.** Both are in the
+   sigx template and neither works on this box, in the two different ways that
+   are hardest to diagnose:
+   - `gh` 2.87.2 cannot resolve `@copilot` and fails
+     `gh pr create --reviewer @copilot` with `could not request reviewer:
+     '@copilot' not found` — *aborting before the PR is created*, so the error
+     reads like a reviewer problem while the actual damage is that you have no
+     PR. Same for `gh pr edit <pr> --add-reviewer @copilot`.
+   - `POST /pulls/<pr>/requested_reviewers` with
+     `reviewers[]=copilot-pull-request-reviewer[bot]` returns **200** and a PR
+     object whose `requested_reviewers` is still `[]`. No error, no reviewer,
+     nothing in the timeline. This is the one that costs an afternoon.
+
+   (The REST route takes the `[bot]`-suffixed slug; the review author login in
+   `.reviews[].author.login` appears *without* the suffix. Neither spelling
+   makes it work.)
 
 5. **Wait for Copilot's review, then fix.** Do not merge before it has reviewed. Poll
    until a review by the bot appears, then read it:
@@ -110,7 +117,9 @@ Never commit straight to `main`.**
    gh pr view <pr> --json reviews,comments
    ```
    Address every actionable comment with follow-up commits and push. If the review
-   doesn't re-trigger on its own, re-request it: `gh pr edit <pr> --add-reviewer @copilot`.
+   doesn't re-trigger on its own, re-request it by re-running the GraphQL mutation
+   from step 4 — `union:true` makes it idempotent, and `--add-reviewer @copilot`
+   fails here for the reason given there.
    Repeat until Copilot has no remaining actionable feedback.
 
    **Then resolve the threads.** The ruleset sets
