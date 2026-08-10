@@ -34,7 +34,7 @@ parking_lot = { workspace = true }
 # root manifest registers no crypto and no networking, and it is shared with
 # every other stream -- extending it would put a conflict in the one file that
 # must not conflict. Adding a dependency to your own crate's manifest is the
-# sanctioned alternative. -> CLAUDE.md.
+# sanctioned alternative. -> AGENTS.md.
 
 # Default features kept deliberately: `zeroize` is what makes `SigningKey` scrub
 # itself on drop, and `fast` is the precomputed-tables backend.

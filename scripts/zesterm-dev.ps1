@@ -8,7 +8,7 @@
 # The Windows half of `scripts/zesterm-dev`. Same contract, different shell:
 # Git Bash cannot run the sh one usefully here anyway -- MSYS rewrites paths
 # that look unix-ish, which is exactly what a pipe path and a `--cmd` bound for
-# another machine look like (CLAUDE.md, #20).
+# another machine look like (AGENTS.md, #20).
 #
 # Two things this exists to get right, both of which have cost time already:
 #
