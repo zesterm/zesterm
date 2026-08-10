@@ -1723,25 +1723,18 @@ mod tests {
 
     /// A shell that exits on its own must not be kept forever.
     ///
-    /// **Unix only, and that is a known gap rather than a platform quirk.**
-    /// `has_exited` is driven by the reader thread ending, which on Windows
-    /// cannot happen: ConPTY holds the output pipe's write end until the
-    /// pseudoconsole is closed, so a blocked `ReadFile` stays blocked after the
-    /// shell is gone (windows.rs gotcha 2b). No `Exited` is sent there and
-    /// nothing is swept. → #18.
+    /// **This ran on unix only until `ConPty::watch_exit` landed**, and the
+    /// gap it was covering for was real: `has_exited` is driven by the reader
+    /// thread ending, which on Windows cannot happen, because ConPTY holds the
+    /// output pipe's write end until the pseudoconsole closes and a blocked
+    /// `ReadFile` stays blocked after the shell is gone (windows.rs gotcha
+    /// 2b). No `Exited` was sent there and nothing was ever swept. → #18.
     ///
-    /// An attempt to close that gap by waiting on the process handle and
-    /// flagging exit from there deadlocked Windows CI outright — `cargo test`
-    /// ran for over an hour against a normal nine minutes. Backed out rather
-    /// than iterated on blind, because the API involved has a documented
-    /// deadlock and this machine cannot run it.
-    ///
-    /// It was: `Exited` was reported to whoever was attached and the session
-    /// stayed in the registry with its whole terminal and scrollback, listed as
-    /// though it were alive. Both halves are asserted, because sweeping too
-    /// eagerly is its own bug — a client that never learns its shell exited
-    /// waits for output that is not coming.
-    #[cfg(unix)]
+    /// It is now a cross-platform test, and on Windows it is the acceptance
+    /// criterion for the watcher: it fails if the exit is never reported, and
+    /// it fails if the session is swept too eagerly. Sweeping early is its own
+    /// bug — a client that never learns its shell exited waits for output that
+    /// is not coming.
     #[test]
     fn an_exited_session_is_kept_until_nobody_is_watching() {
         let (mut c, registry) = conn();
@@ -1789,7 +1782,9 @@ mod tests {
     /// session" error for a shell that ran perfectly — which is exactly what
     /// happened on CI, and read at first like a flaky test rather than a lost
     /// session.
-    #[cfg(unix)]
+    ///
+    /// Cross-platform since `ConPty::watch_exit`: it was unix-only for the
+    /// same reason as the test above, not because the race is unix's.
     #[test]
     fn a_session_is_not_swept_before_anyone_has_attached() {
         let (mut c, registry) = conn();

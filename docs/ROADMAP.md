@@ -914,6 +914,36 @@ and the palette's block rows are specified in
       blame for the first hung CI run, but the two runs after its backout hung
       the same way. `wait_for` now sets a read timeout, so this class of bug is
       red in ten seconds instead of cancelled after an hour.
+- [x] **A shell that exits is noticed on Windows, and takes its children with
+      it.** Two gaps with one root: on ConPTY nothing tells the reader the child
+      is gone — the output pipe's write end is held until the pseudoconsole
+      closes — and `TerminateProcess` reaches one process where unix's `SIGHUP`
+      reaches a group.
+      `ConPty::watch_exit` waits on a duplicate of the process handle (the OS's
+      own wait, never a poll) and then **waits for the output to go quiet**
+      before reporting. That second part is what the backed-out attempt was
+      missing, and why re-landing it verbatim would still have been wrong:
+      `exited` going true is what eventually reaches `ClosePseudoConsole` via
+      the registry sweep, so reporting it the instant the wait returns cuts off
+      the tail ConPTY had not painted yet (gotcha 2c). The watcher never touches
+      the HPCON, so the reader is still draining when the close happens (gotcha
+      1). `an_exited_session_is_kept_until_nobody_is_watching` and
+      `a_session_is_not_swept_before_anyone_has_attached` are no longer
+      `#[cfg(unix)]`, and they are the acceptance criteria.
+      A job object with `KILL_ON_JOB_CLOSE`, assigned atomically through the
+      same `CreateProcessW` attribute list the pseudoconsole already uses, gives
+      `hangup` a process *tree* to end. The test found a bug in the first cut:
+      `hangup` returned early when the shell exited politely, so a well-behaved
+      shell's detached `ping` survived — `ClosePseudoConsole` signals the
+      console's clients and says nothing to anything started detached. The job
+      goes regardless now. Nested-job refusal (VS Code's terminal, some CI
+      runners) falls back to no job with a warning, because a leaky process tree
+      beats a terminal that will not open.
+      The app's in-process fallback pty never called `watch_exit` at all, so
+      `exit` in a `--no-daemon` tab was doubly dead; it does now, and both
+      reporters are gated on one `swap` so one shell cannot close two tabs.
+      Verified at the machine: `exit` closed the window in 0.5s, the daemon
+      survived it, and no shell was left behind.
 - [x] **Reconnect happens in place.** `RemoteSession` supervises its own link:
       it redials, re-proves its key, and reattaches to *the same session*,
       applying the keyframe into the `Terminal` already on screen — so the

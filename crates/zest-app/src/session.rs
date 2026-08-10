@@ -114,11 +114,14 @@ impl Session {
         cmd: &CommandSpec,
         size: PtySize,
         scrollback: usize,
-        wake: impl Fn(Wakeup) + Send + 'static,
+        wake: impl Fn(Wakeup) + Send + Sync + 'static,
     ) -> Result<Self, zest_pty::PtyError> {
         let mut pty = zest_pty::NativePty::spawn(cmd, size)?;
         let mut reader = pty.take_reader().expect("a fresh pty always has a reader");
         let mut writer = pty.writer();
+        // Shared, because on Windows two threads report the exit and whichever
+        // gets there first wins — see the watcher below.
+        let wake = Arc::new(wake);
 
         let terminal = Arc::new(FairMutex::new(Terminal::new(
             size.cols as usize,
@@ -152,6 +155,7 @@ impl Session {
             let needs_redraw = Arc::clone(&needs_redraw);
             let exited = Arc::clone(&exited);
             let reply_tx = pty_tx.clone();
+            let wake = Arc::clone(&wake);
 
             std::thread::Builder::new()
                 .name("zest-pty-reader".into())
@@ -200,11 +204,40 @@ impl Session {
                         std::thread::yield_now();
                     }
 
-                    exited.store(true, Ordering::Release);
-                    needs_redraw.store(true, Ordering::Release);
-                    wake(Wakeup::Exited);
+                    // Exactly once, whoever gets here first. On Windows the
+                    // watcher below normally reports the exit long before this
+                    // loop ends -- the read only returns when the
+                    // pseudoconsole closes -- and two `Exited` wakeups for one
+                    // shell would close two tabs.
+                    if !exited.swap(true, Ordering::AcqRel) {
+                        needs_redraw.store(true, Ordering::Release);
+                        wake(Wakeup::Exited);
+                    }
                 })
                 .expect("spawn reader thread");
+        }
+
+        // --- exit watcher ---
+        //
+        // On unix this does nothing: the reader above reaches EOF when the
+        // last process holding the slave goes, and that is the signal.
+        //
+        // On Windows the reader *cannot* be the signal — ConPTY holds the
+        // output pipe's write end until the pseudoconsole closes, so the read
+        // above stays blocked after the shell is gone. Without this, typing
+        // `exit` in a `--no-daemon` tab did nothing at all: no `Exited`, so the
+        // tab stayed open around a dead shell. The daemon path has had this
+        // call since it was written; this one was simply missed.
+        {
+            let needs_redraw = Arc::clone(&needs_redraw);
+            let exited = Arc::clone(&exited);
+            let wake = Arc::clone(&wake);
+            pty.watch_exit(Box::new(move || {
+                if !exited.swap(true, Ordering::AcqRel) {
+                    needs_redraw.store(true, Ordering::Release);
+                    wake(Wakeup::Exited);
+                }
+            }));
         }
 
         Ok(Self {

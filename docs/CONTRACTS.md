@@ -236,5 +236,14 @@ exit traps; a program that declines to leave still goes.
 **`hangup` is not called on `Detach`,** and that asymmetry is the whole of ADR-007. Consumers at
 the time: `zest-daemon` only — `zest-app` reaches a pty exclusively through `SessionSource`.
 
-*The Windows half is written to the protocol already documented in `windows.rs` and has not been
-run.* → issue #13.
+*The Windows half has been run, and then made to mean the same thing as the unix one.* It was first
+exercised by hand (#18): `attach --close` ended the child and the daemon survived
+`ClosePseudoConsole`, while the same attach without `--close` left the shell running — so ADR-007's
+asymmetry holds on ConPTY. What that did **not** cover is now fixed rather than merely noted: the
+escalation terminated a *job object* instead of the bare process, because `TerminateProcess` reaches
+the process it names and nothing else, so a shell's detached grandchildren used to survive a hangup
+that unix's `SIGHUP`-to-the-process-group reaps. `hangup_ends_everything_the_shell_started` exists on
+both platforms now, and on Windows it fails without the job.
+
+A related gap closed with it: `PtyTransport::watch_exit`, whose default no-op meant a shell that
+exited *on its own* was never noticed on Windows at all. → #18.

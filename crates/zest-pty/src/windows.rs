@@ -141,8 +141,40 @@ impl Drop for OwnedHandle {
     }
 }
 
+/// When the reader last saw a byte, so the exit watcher can tell "the child
+/// is gone" from "the child is gone *and* its output has been painted".
+///
+/// ConPTY renders the console buffer to VT on its own schedule (gotcha 2c), so
+/// a command can exit before its last line reaches the pipe. Only the reader
+/// knows when that stopped happening.
+#[derive(Debug)]
+struct LastRead {
+    started: std::time::Instant,
+    at_ms: std::sync::atomic::AtomicU64,
+}
+
+impl LastRead {
+    fn new() -> Self {
+        Self { started: std::time::Instant::now(), at_ms: std::sync::atomic::AtomicU64::new(0) }
+    }
+
+    fn touch(&self) {
+        let ms = self.started.elapsed().as_millis() as u64;
+        self.at_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// How long the stream has been silent.
+    fn quiet_for(&self) -> std::time::Duration {
+        let now = self.started.elapsed().as_millis() as u64;
+        std::time::Duration::from_millis(now.saturating_sub(self.at_ms.load(Ordering::Relaxed)))
+    }
+}
+
 /// The read half of the pty. Blocking.
-pub struct PtyReader(OwnedHandle);
+pub struct PtyReader {
+    handle: OwnedHandle,
+    last: Arc<LastRead>,
+}
 
 impl Read for PtyReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -152,7 +184,8 @@ impl Read for PtyReader {
         let mut read = 0u32;
         let len = buf.len().min(u32::MAX as usize) as u32;
         // SAFETY: handle is live; buf is valid for `len` bytes.
-        let ok = unsafe { ReadFile(self.0.raw(), buf.as_mut_ptr(), len, &mut read, ptr::null_mut()) };
+        let ok =
+            unsafe { ReadFile(self.handle.raw(), buf.as_mut_ptr(), len, &mut read, ptr::null_mut()) };
         if ok == 0 {
             let err = io::Error::last_os_error();
             // The child exiting closes its end. That is EOF, not a failure --
@@ -162,6 +195,9 @@ impl Read for PtyReader {
                 return Ok(0);
             }
             return Err(err);
+        }
+        if read > 0 {
+            self.last.touch();
         }
         Ok(read as usize)
     }
@@ -240,6 +276,14 @@ pub struct ConPty {
     writer: OwnedHandle,
     process: OwnedHandle,
     _thread: OwnedHandle,
+    /// Shared with the reader; read by [`PtyTransport::watch_exit`].
+    last_read: Arc<LastRead>,
+    /// The child's process tree. **Declared last on purpose**: it carries
+    /// `KILL_ON_JOB_CLOSE`, so dropping it is a kill, and it must not fire
+    /// until `pcon` above has closed and flushed (gotcha 1). Putting this
+    /// first would kill the shell mid-flush — a new route into the documented
+    /// deadlock.
+    _job: Option<OwnedHandle>,
 }
 
 impl ConPty {
@@ -263,10 +307,37 @@ impl ConPty {
         }
         let pcon = Arc::new(Pseudoconsole { handle: hpcon, closed: AtomicBool::new(false) });
 
-        let process = spawn_child(cmd, hpcon).map_err(|source| PtyError::Spawn {
-            command: cmd.command_line.clone(),
-            source,
-        })?;
+        // Everything the shell starts joins this, so `hangup` can reap the
+        // tree rather than just the shell.
+        let mut job = create_job()
+            .map_err(|e| tracing::warn!(error = %e, "no job object; a hangup will leak grandchildren"))
+            .ok();
+
+        let process = match spawn_child(cmd, hpcon, job.as_ref()) {
+            Ok(p) => p,
+            // A daemon that is itself inside a job — VS Code's terminal does
+            // this, and so do some CI runners — can have nested assignment
+            // refused outright. A shell with a leaky process tree beats a
+            // terminal that will not open, so drop the job and try once more.
+            //
+            // `job` is cleared as well as unused: keeping a job the child is
+            // not in would make `hangup` terminate an empty one and believe it
+            // had done something.
+            Err(e) if job.is_some() => {
+                tracing::warn!(
+                    error = %e,
+                    "spawning into a job failed; retrying without one (a hangup will leak grandchildren)"
+                );
+                job = None;
+                spawn_child(cmd, hpcon, None).map_err(|source| PtyError::Spawn {
+                    command: cmd.command_line.clone(),
+                    source,
+                })?
+            }
+            Err(source) => {
+                return Err(PtyError::Spawn { command: cmd.command_line.clone(), source })
+            }
+        };
 
         // Close our copies of the child's ends NOW. ConPTY duplicated what it
         // needs, and the child inherited its own. If these stay open, the read
@@ -275,12 +346,15 @@ impl ConPty {
         drop(child_read);
         drop(child_write);
 
+        let last_read = Arc::new(LastRead::new());
         Ok(Self {
             pcon,
-            reader: Some(PtyReader(our_read)),
+            reader: Some(PtyReader { handle: our_read, last: Arc::clone(&last_read) }),
             writer: our_write,
             process: process.0,
             _thread: process.1,
+            last_read,
+            _job: job,
         })
     }
 
@@ -362,14 +436,124 @@ impl PtyTransport for ConPty {
         // escalation mirrors the unix backend's SIGHUP → SIGKILL: a program that
         // declines to exit still has to, since the user asked for this session
         // to end and something must reach the child that ignores the close.
-        if matches!(self.wait_for_child(Some(HANGUP_GRACE)), ChildStatus::Exited(_)) {
+        let left_politely = matches!(self.wait_for_child(Some(HANGUP_GRACE)), ChildStatus::Exited(_));
+
+        // The job goes regardless of whether the *shell* left politely, and
+        // that distinction is the whole point of having one.
+        //
+        // `ClosePseudoConsole` signals the console's attached clients — the
+        // shell. It says nothing to anything the shell started detached, so a
+        // well-behaved shell exits on cue and its background `ping` keeps
+        // running. Returning early there is what made this leak: unix does not
+        // have the choice, because `SIGHUP` goes to the process *group*.
+        //
+        // conhost is deliberately not in the job: `CreatePseudoConsole` starts
+        // it from *this* process before `CreateProcessW`, so only the shell and
+        // its descendants were ever assigned. Killing conhost out from under
+        // `ClosePseudoConsole` is precisely gotcha 1 — and the close above has
+        // already returned by here, so its flush is done either way.
+        if let Some(job) = self._job.as_ref() {
+            // SAFETY: a live job handle we own.
+            unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(job.raw(), 1) };
+            return;
+        }
+        if left_politely {
             return;
         }
         tracing::info!("child outlived the pseudoconsole closing; terminating");
         // SAFETY: the process handle is live for as long as `self` is.
         unsafe { windows_sys::Win32::System::Threading::TerminateProcess(self.process.raw(), 1) };
     }
+
+    /// Notice a shell that exits on its own.
+    ///
+    /// Without this the reader never learns anything: ConPTY holds the output
+    /// pipe's write end until the pseudoconsole closes (gotcha 2b), so EOF
+    /// cannot be the signal, and until now no `Exited` ever reached a client on
+    /// Windows — a tab whose shell had exited simply stayed, and the daemon
+    /// kept the session with its whole scrollback forever.
+    ///
+    /// # The three constraints, and how each is met
+    ///
+    /// A previous attempt at this hung Windows CI for over an hour and was
+    /// backed out. It was later established that the hang was something else
+    /// entirely — a test asking for `/bin/echo` behind a decorative timeout —
+    /// so the code was never shown wrong. It was, however, incomplete, and
+    /// re-landing it verbatim would have been wrong for a reason nobody had
+    /// stated. All three of these have to hold at once:
+    ///
+    /// 1. **The signal has to arrive.** `WaitForSingleObject` on a duplicate of
+    ///    the process handle, on its own thread: the OS's own wait, never a
+    ///    poll, so an idle session costs one parked thread and no wakeups.
+    ///    Two waiters on one Windows process handle is legal and free — which
+    ///    is exactly why unix keeps the no-op default, where a second waiter
+    ///    would need the same child mutex `hangup` holds.
+    ///
+    /// 2. **The reader must still be draining when the pseudoconsole closes**
+    ///    (gotcha 1). This function *never touches the HPCON*. The only closers
+    ///    stay what they were: [`ConPty::hangup`], called from the session
+    ///    layer's thread, and `Pseudoconsole::drop`. The watcher's entire job
+    ///    is to set a flag and call a waker. **A future edit that closes
+    ///    anything from here reintroduces the documented deadlock.**
+    ///
+    /// 3. **Closing on process exit alone truncates the tail** (gotcha 2c) —
+    ///    ConPTY paints the console buffer to VT on its own schedule, so a
+    ///    command can be gone before its last line is in the pipe. This is the
+    ///    part the earlier attempt was missing: `exited` going true is what
+    ///    eventually reaches `ClosePseudoConsole` through the registry sweep,
+    ///    so reporting it early cuts off the output. The watcher waits for the
+    ///    stream to go quiet first.
+    ///
+    /// The quiet wait *is* a poll, and [`PtyTransport::watch_exit`]'s contract
+    /// says not to poll. The contract means "do not run a per-session timer" —
+    /// that is what costs the 0%-idle guarantee. This loop runs **once**, only
+    /// **after** the child is already dead, is bounded at
+    /// [`EXIT_DRAIN_MAX`], and then the thread exits. A session that lives for
+    /// eight hours polls zero times.
+    fn watch_exit(&self, on_exit: Box<dyn FnOnce() + Send>) {
+        let process = match self.process.try_clone() {
+            Ok(h) => h,
+            Err(e) => {
+                // Not fatal: the session simply keeps the pre-existing
+                // behaviour of never noticing. Saying so beats a silent
+                // regression to it.
+                tracing::warn!(error = %e, "cannot watch for child exit; the session will not self-close");
+                return;
+            }
+        };
+        let last = Arc::clone(&self.last_read);
+        let spawned = std::thread::Builder::new()
+            .name("zest-pty-exit".into())
+            .spawn(move || {
+                use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
+                // SAFETY: our own duplicate of a live process handle, owned by
+                // this closure for the whole wait.
+                unsafe { WaitForSingleObject(process.raw(), INFINITE) };
+
+                // The child is gone; its output may not all be here yet.
+                let deadline = std::time::Instant::now() + EXIT_DRAIN_MAX;
+                while last.quiet_for() < EXIT_QUIET && std::time::Instant::now() < deadline {
+                    std::thread::sleep(EXIT_DRAIN_TICK);
+                }
+                on_exit();
+            });
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "cannot spawn the exit watcher; the session will not self-close");
+        }
+    }
 }
+
+/// How long the output must be silent before an exited child is reported.
+///
+/// Matches [`HANGUP_GRACE`], for the same reason: it is how long ConPTY is
+/// given to finish saying what it had to say.
+const EXIT_QUIET: std::time::Duration = std::time::Duration::from_millis(150);
+/// The ceiling on that wait, so a chatty program that exits while still being
+/// painted cannot hold a session open indefinitely.
+const EXIT_DRAIN_MAX: std::time::Duration = std::time::Duration::from_secs(2);
+/// Granularity of the drain wait. Coarse on purpose — it runs once, after the
+/// child is dead, and nothing is waiting on the difference.
+const EXIT_DRAIN_TICK: std::time::Duration = std::time::Duration::from_millis(25);
 
 /// How long a child gets to leave on its own before it is terminated.
 ///
@@ -390,13 +574,69 @@ fn create_pipe() -> io::Result<(OwnedHandle, OwnedHandle)> {
     Ok((OwnedHandle(read), OwnedHandle(write)))
 }
 
+/// A job object the child and everything it starts belong to.
+///
+/// `TerminateProcess` reaches the process it names and nothing else, so without
+/// this a `hangup` killed the shell and left its grandchildren running — where
+/// the unix backend's `kill_process_group` reaps the lot. That asymmetry is why
+/// `hangup_ends_everything_the_shell_started` had no Windows counterpart.
+///
+/// `KILL_ON_JOB_CLOSE` means the handle dropping is itself the kill, which is
+/// why `ConPty`'s field order puts this **last**: it must not fire until
+/// `ClosePseudoConsole` has flushed its final frame (gotcha 1).
+fn create_job() -> io::Result<OwnedHandle> {
+    use windows_sys::Win32::System::JobObjects::{
+        CreateJobObjectW, JobObjectExtendedLimitInformation,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        SetInformationJobObject,
+    };
+
+    // SAFETY: null attributes and no name is the documented anonymous form.
+    let job = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
+    if job.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let job = OwnedHandle(job);
+
+    // SAFETY: a zeroed limit struct is valid; we set exactly one flag.
+    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // SAFETY: live job handle; `info` is correctly sized for the class.
+    let ok = unsafe {
+        SetInformationJobObject(
+            job.raw(),
+            JobObjectExtendedLimitInformation,
+            std::ptr::addr_of!(info).cast(),
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(job)
+}
+
+/// `PROC_THREAD_ATTRIBUTE_JOB_LIST`, absent from windows-sys.
+const PROC_THREAD_ATTRIBUTE_JOB_LIST: usize = 0x0002_000D;
+
 /// `CreateProcessW` with the pseudoconsole attached via the extended startup info.
-fn spawn_child(cmd: &CommandSpec, hpcon: HPCON) -> io::Result<(OwnedHandle, OwnedHandle)> {
+///
+/// `job`, when present, is applied through the same attribute list rather than
+/// by `AssignProcessToJobObject` after the fact: assignment is then atomic with
+/// creation, so the child cannot spawn a grandchild in the gap. The
+/// `CREATE_SUSPENDED` + assign + `ResumeThread` alternative has exactly that
+/// race, and leaks a suspended process on any error path between the two calls.
+fn spawn_child(
+    cmd: &CommandSpec,
+    hpcon: HPCON,
+    job: Option<&OwnedHandle>,
+) -> io::Result<(OwnedHandle, OwnedHandle)> {
     // Size the attribute list, then allocate. The first call is expected to
     // fail with ERROR_INSUFFICIENT_BUFFER; it reports the size through `bytes`.
+    let count = if job.is_some() { 2 } else { 1 };
     let mut bytes: usize = 0;
-    // SAFETY: passing null with count 1 is the documented sizing call.
-    unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &mut bytes) };
+    // SAFETY: passing null is the documented sizing call.
+    unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), count, 0, &mut bytes) };
     if bytes == 0 {
         return Err(io::Error::last_os_error());
     }
@@ -416,7 +656,7 @@ fn spawn_child(cmd: &CommandSpec, hpcon: HPCON) -> io::Result<(OwnedHandle, Owne
     let attr_list = attr_buf.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
 
     // SAFETY: attr_list points at `bytes` writable bytes, as just sized.
-    if unsafe { InitializeProcThreadAttributeList(attr_list, 1, 0, &mut bytes) } == 0 {
+    if unsafe { InitializeProcThreadAttributeList(attr_list, count, 0, &mut bytes) } == 0 {
         return Err(io::Error::last_os_error());
     }
     // From here on the list must be deleted before returning. `AttrListGuard`
@@ -439,6 +679,30 @@ fn spawn_child(cmd: &CommandSpec, hpcon: HPCON) -> io::Result<(OwnedHandle, Owne
     };
     if ok == 0 {
         return Err(io::Error::last_os_error());
+    }
+
+    // The job list takes a *pointer to an array* of handles, unlike the
+    // pseudoconsole attribute above which takes its handle by value. The array
+    // must outlive `CreateProcessW`, which is why it is bound here rather than
+    // written inline — the same class of lifetime trap as the alignment one.
+    let job_handles: [HANDLE; 1] = [job.map_or(ptr::null_mut(), OwnedHandle::raw)];
+    if job.is_some() {
+        // SAFETY: attr_list is initialized with room for two; `job_handles`
+        // lives until after CreateProcessW below.
+        let ok = unsafe {
+            UpdateProcThreadAttribute(
+                attr_list,
+                0,
+                PROC_THREAD_ATTRIBUTE_JOB_LIST,
+                job_handles.as_ptr() as *mut core::ffi::c_void,
+                std::mem::size_of::<HANDLE>(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
     }
 
     let mut si: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
@@ -688,6 +952,204 @@ mod tests {
                    reader never reached EOF.\n\
                  See the shutdown protocol in this module's docs."
             ),
+        }
+    }
+
+    /// The gap that made `exit` do nothing on Windows.
+    ///
+    /// The reader cannot report this — ConPTY holds the pipe's write end until
+    /// the pseudoconsole closes (gotcha 2b) — so without `watch_exit` no
+    /// `Exited` ever reached a client here and the daemon kept the session
+    /// forever. Written through a channel with a deadline, like everything else
+    /// in this module: a regression here is a deadlock, and a deadlock that
+    /// fails a `join()` tells you nothing at all.
+    #[test]
+    fn a_child_that_exits_on_its_own_is_noticed() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            let cmd = CommandSpec {
+                command_line: "cmd.exe /c echo watch-probe".into(),
+                cwd: None,
+                env: Vec::new(),
+            };
+            let mut pty = match ConPty::spawn(&cmd, PtySize::new(80, 24)) {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = tx.send(Err(format!("spawn failed: {e}")));
+                    return;
+                }
+            };
+            let mut reader = pty.take_reader().expect("reader is available exactly once");
+            let seen = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+            let seen_writer = Arc::clone(&seen);
+            // The reader must keep draining throughout: that is the
+            // precondition `watch_exit` promises not to break.
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = reader.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    seen_writer.lock().unwrap().extend_from_slice(&buf[..n]);
+                }
+            });
+
+            let seen_at_exit = Arc::clone(&seen);
+            pty.watch_exit(Box::new(move || {
+                // Snapshot at the instant the exit is *reported*, which is what
+                // the tail assertion below is about.
+                let out = seen_at_exit.lock().unwrap().clone();
+                let _ = done_tx.send(out);
+            }));
+
+            match done_rx.recv_timeout(Duration::from_secs(20)) {
+                Ok(at_exit) => {
+                    drop(pty);
+                    let _ = tx.send(Ok(at_exit));
+                }
+                Err(_) => {
+                    let _ = tx.send(Err("watch_exit never fired".into()));
+                }
+            }
+        });
+
+        match rx.recv_timeout(Duration::from_secs(45)) {
+            Ok(Ok(at_exit)) => {
+                let text = String::from_utf8_lossy(&at_exit);
+                // Gotcha 2c, as an assertion: the child is dead well before
+                // ConPTY has painted its output, so an exit reported the
+                // instant `WaitForSingleObject` returns truncates the tail.
+                // The quiet-drain is what makes this hold, and without it this
+                // assertion is what fails.
+                assert!(
+                    text.contains("watch-probe"),
+                    "the exit was reported before the output was painted -- the tail is being \
+                     truncated (gotcha 2c). Got {} bytes:\n{}",
+                    at_exit.len(),
+                    visible(&at_exit)
+                );
+            }
+            Ok(Err(e)) => panic!("{e}"),
+            Err(_) => panic!(
+                "watch_exit never reported, and the session never finished. Either the wait on \
+                 the process handle is not firing, or something in the watcher is holding the \
+                 shutdown protocol up -- the watcher must never touch the HPCON."
+            ),
+        }
+    }
+
+    /// The Windows counterpart of `unix.rs`'s
+    /// `hangup_ends_everything_the_shell_started`, and unlike that one it
+    /// genuinely discriminates: before the job object, `TerminateProcess`
+    /// killed the shell and left its children running, so closing a session
+    /// leaked a process per background command for the life of the machine.
+    #[test]
+    fn hangup_ends_everything_the_shell_started() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        const STILL_ACTIVE: u32 = 259;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // A grandchild that would outlive its parent: pwsh starts a
+            // detached `ping` and prints its pid, then sleeps.
+            let cmd = CommandSpec {
+                command_line: "powershell.exe -NoProfile -Command \"$p = Start-Process -PassThru \
+                               ping -ArgumentList '-n','120','127.0.0.1'; \
+                               Write-Host GRANDCHILD=$($p.Id); Start-Sleep 120\""
+                    .into(),
+                cwd: None,
+                env: Vec::new(),
+            };
+            let mut pty = match ConPty::spawn(&cmd, PtySize::new(120, 24)) {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = tx.send(Err(format!("spawn failed: {e}")));
+                    return;
+                }
+            };
+            let mut reader = pty.take_reader().expect("reader");
+            let seen = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+            let seen_writer = Arc::clone(&seen);
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = reader.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    seen_writer.lock().unwrap().extend_from_slice(&buf[..n]);
+                }
+            });
+
+            // Read the pid off the pty. ConPTY wraps lines at the window
+            // width, hence the wide pty above.
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            let mut pid: Option<u32> = None;
+            while std::time::Instant::now() < deadline && pid.is_none() {
+                let text = String::from_utf8_lossy(&seen.lock().unwrap()).into_owned();
+                if let Some(at) = text.find("GRANDCHILD=") {
+                    let digits: String = text[at + "GRANDCHILD=".len()..]
+                        .chars()
+                        .take_while(char::is_ascii_digit)
+                        .collect();
+                    if !digits.is_empty() {
+                        // Wait for the line to be complete rather than racing
+                        // a half-painted number.
+                        if text[at..].contains('\n') || digits.len() >= 3 {
+                            pid = digits.parse().ok();
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let Some(pid) = pid else {
+                let _ = tx.send(Err(format!(
+                    "never saw the grandchild's pid:\n{}",
+                    visible(&seen.lock().unwrap())
+                )));
+                return;
+            };
+
+            pty.hangup();
+
+            // Poll for the grandchild to be gone.
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let alive = |pid: u32| -> bool {
+                // SAFETY: query-only access to a pid that may already be gone;
+                // a null handle means it is.
+                unsafe {
+                    let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+                    if h.is_null() {
+                        return false;
+                    }
+                    let mut code = 0u32;
+                    let ok = GetExitCodeProcess(h, &mut code);
+                    CloseHandle(h);
+                    ok != 0 && code == STILL_ACTIVE
+                }
+            };
+            while std::time::Instant::now() < deadline && alive(pid) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let _ = tx.send(if alive(pid) {
+                Err(format!("grandchild {pid} outlived the hangup"))
+            } else {
+                Ok(())
+            });
+            drop(pty);
+        });
+
+        match rx.recv_timeout(Duration::from_secs(60)) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => panic!(
+                "{e}\nA hangup must end the shell's whole tree. `TerminateProcess` reaches only \
+                 the process it names, so this needs the job object in `ConPty::spawn`."
+            ),
+            Err(_) => panic!("the hangup test never finished"),
         }
     }
 
