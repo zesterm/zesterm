@@ -67,6 +67,14 @@ on a fallback adapter so it runs in CI:
 cargo run -p zest-render-wgpu --example render_dump
 ```
 
+And the app itself renders one real frame — real padding, chrome, theme and scale
+factor — to a PNG without ever showing a window, which needs no screen-recording
+permission and works over SSH:
+
+```
+zesterm --screenshot shot.png [--screenshot-size 1200x800] [--screenshot-delay 400]
+```
+
 ## Layout
 
 | Crate | Responsibility |

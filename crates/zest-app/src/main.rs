@@ -51,6 +51,17 @@ fn join_command(parts: &[String]) -> String {
         .join(" ")
 }
 
+/// `<width>x<height>` in logical pixels, as `--screenshot-size` takes it.
+///
+/// Rejects zero and negatives rather than clamping them: a window of no size
+/// produces a valid, empty PNG, and a silently-corrected typo is a screenshot
+/// of something other than what was asked for.
+fn parse_size(s: &str) -> Option<(f64, f64)> {
+    let (w, h) = s.split_once(['x', 'X'])?;
+    let (w, h) = (w.trim().parse::<f64>().ok()?, h.trim().parse::<f64>().ok()?);
+    (w >= 1.0 && h >= 1.0 && w.is_finite() && h.is_finite()).then_some((w, h))
+}
+
 /// Command-line flags, collected as a settings layer.
 ///
 /// Built as a `toml::Table` rather than by mutating the resolved config, so a
@@ -125,6 +136,7 @@ fn main() {
     let mut attach_probe = false;
     let mut new_session = false;
     let mut attach_addr: Option<String> = None;
+    let mut shot: Option<crate::app::Screenshot> = None;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -189,6 +201,31 @@ fn main() {
             "--scroll-on-output" => {
                 cli.set_bool("scrolling.scroll_on_output", true);
                 i += 1;
+            }
+            "--screenshot" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("--screenshot needs a path");
+                    std::process::exit(2);
+                };
+                shot.get_or_insert_with(Default::default).path = v.into();
+                i += 2;
+            }
+            "--screenshot-delay" => {
+                let Some(v) = args.get(i + 1).and_then(|s| s.parse::<u64>().ok()) else {
+                    eprintln!("--screenshot-delay needs milliseconds");
+                    std::process::exit(2);
+                };
+                shot.get_or_insert_with(Default::default).delay =
+                    std::time::Duration::from_millis(v);
+                i += 2;
+            }
+            "--screenshot-size" => {
+                let Some(size) = args.get(i + 1).and_then(|s| parse_size(s)) else {
+                    eprintln!("--screenshot-size needs <width>x<height> in logical pixels");
+                    std::process::exit(2);
+                };
+                shot.get_or_insert_with(Default::default).size = size;
+                i += 2;
             }
             "--config" => {
                 match zest_config::paths::config_file() {
@@ -264,6 +301,13 @@ fn main() {
                      --attach-probe    report what attaching to the daemon cost, then exit\n\
                      --no-daemon       own the pty in this process, do not attach\n\
                      --new-session     start a fresh shell instead of restoring your tabs\n\
+                     --screenshot <path>\n\
+                     \x20                 render one frame to a PNG and exit, without ever\n\
+                     \x20                 showing the window (no screen-capture permission)\n\
+                     --screenshot-delay <ms>\n\
+                     \x20                 let the shell settle first (default 400)\n\
+                     --screenshot-size <WxH>\n\
+                     \x20                 window size in logical pixels (default 960x600)\n\
                      --attach <host:port>\n\
                      \x20                 another machine's daemon; its shell in this window\n\
                      \x20                 (the host approves this device on first contact)\n\
@@ -322,6 +366,18 @@ fn main() {
     if new_session {
         app = app.with_new_session();
     }
+    if let Some(shot) = shot {
+        // In-process by default, and not as a shortcut: on macOS the daemon
+        // blocks on a Keychain prompt after every rebuild and the app falls
+        // back silently after 2s (see "Traps already paid for"). A screenshot
+        // that sometimes waits two seconds and sometimes photographs a
+        // half-attached session is not a measurement of anything. `--attach`
+        // still wins, for the case where the remote session *is* the subject.
+        if attach_addr.is_none() {
+            app = app.with_no_daemon();
+        }
+        app = app.with_screenshot(shot);
+    }
     if let Some(addr) = attach_addr {
         // Contradiction, not precedence: one flag says "no daemon anywhere",
         // the other names one to attach to. Guessing which the user meant
@@ -337,10 +393,27 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::join_command;
+    use super::{join_command, parse_size};
 
     fn v(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn screenshot_sizes_parse_both_spellings() {
+        assert_eq!(parse_size("1200x800"), Some((1200.0, 800.0)));
+        assert_eq!(parse_size("1200X800"), Some((1200.0, 800.0)), "capital X too");
+        assert_eq!(parse_size(" 640 x 480 "), Some((640.0, 480.0)), "spaces are forgiven");
+    }
+
+    #[test]
+    fn a_degenerate_screenshot_size_is_refused_not_clamped() {
+        // Clamping would hand back a PNG of *something*, and a screenshot of
+        // something other than what was asked for is worse than an error.
+        assert_eq!(parse_size("0x600"), None);
+        assert_eq!(parse_size("-100x600"), None);
+        assert_eq!(parse_size("1200"), None, "no separator at all");
+        assert_eq!(parse_size("widexhigh"), None);
     }
 
     #[test]

@@ -27,6 +27,7 @@
 #![forbid(unsafe_code)]
 
 pub mod atlas;
+pub mod capture;
 pub mod instance;
 pub mod scene;
 pub mod ui_text;
@@ -34,6 +35,7 @@ pub mod ui_text;
 use wgpu::util::DeviceExt;
 
 pub use atlas::{Atlas, AtlasEntry, Cached};
+pub use capture::read_rgba;
 pub use instance::{
     glyph_flags, DecorInstance, DecorKind, GlyphInstance, Globals, LinearRgba, RectInstance,
     RectShape,

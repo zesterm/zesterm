@@ -192,7 +192,8 @@ async fn run() {
     renderer.render(&device, &queue, &mut encoder, &target_view, &scene);
     queue.submit([encoder.finish()]);
 
-    let pixels = read_back(&device, &queue, &target, width, height).await;
+    let pixels =
+        zest_render_wgpu::read_rgba(&device, &queue, &target, width, height, TARGET_FORMAT);
     let out = std::env::args()
         .skip_while(|a| a != "--out")
         .nth(1)
@@ -217,61 +218,4 @@ fn to_core_palette(r: &zest_theme::ResolvedPalette) -> zest_core::PaletteSnapsho
         background: conv(r.background),
         cursor: conv(r.cursor),
     }
-}
-
-/// Copy the render target back to the CPU.
-async fn read_back(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    texture: &wgpu::Texture,
-    width: u32,
-    height: u32,
-) -> Vec<u8> {
-    // Rows in a mapped buffer must be aligned to 256 bytes, so the readback is
-    // padded and then compacted.
-    let unpadded = width * 4;
-    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-    let padded = unpadded.div_ceil(align) * align;
-
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("readback"),
-        size: u64::from(padded) * u64::from(height),
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-
-    let mut encoder = device.create_command_encoder(&Default::default());
-    encoder.copy_texture_to_buffer(
-        texture.as_image_copy(),
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buffer,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded),
-                rows_per_image: Some(height),
-            },
-        },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-    );
-    queue.submit([encoder.finish()]);
-
-    let slice = buffer.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
-    device
-        .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
-        .expect("poll");
-    rx.recv().expect("map").expect("map failed");
-
-    let view = slice.get_mapped_range().expect("mapped range");
-    let mut out = Vec::with_capacity((unpadded * height) as usize);
-    for row in 0..height {
-        let start = (row * padded) as usize;
-        out.extend_from_slice(&view[start..start + unpadded as usize]);
-    }
-    drop(view);
-    buffer.unmap();
-    out
 }
