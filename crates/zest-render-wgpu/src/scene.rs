@@ -110,6 +110,15 @@ pub struct Scene {
     pub rects: Vec<RectInstance>,
     pub glyphs: Vec<GlyphInstance>,
     pub decors: Vec<DecorInstance>,
+    /// What every pixel no instance covers is painted with.
+    ///
+    /// The grid does not own the window — `window.padding`, the gap between the
+    /// tab strip and the grid, and the gutter between split panes all lie
+    /// outside every viewport rect. Nothing draws there, so without a backdrop
+    /// those pixels stay `(0,0,0,0)`, and an opaque surface discards the alpha
+    /// and composites them as black: a black frame around the terminal, whatever
+    /// the theme.
+    pub backdrop: LinearRgba,
     /// Sub-pixel grid translation, applied in the vertex shader.
     pub grid_origin: [f32; 2],
     /// Index in `rects` where the chrome's instances begin.
@@ -134,6 +143,7 @@ impl Scene {
         self.rects.clear();
         self.glyphs.clear();
         self.decors.clear();
+        self.backdrop = LinearRgba::TRANSPARENT;
         self.grid_origin = [0.0, 0.0];
         self.chrome_rects_at = 0;
         self.chrome_glyphs_at = 0;
@@ -145,6 +155,10 @@ impl Scene {
     ///
     /// Rasterizes any glyph the atlas is missing, which is why this needs
     /// `Fonts` and the GPU queue. In steady state there are no misses at all.
+    ///
+    /// `backdrop` is what the window is painted with everywhere the viewports do
+    /// not reach — see [`Scene::backdrop`]. Linear premultiplied like every other
+    /// colour here (ADR-003).
     #[allow(clippy::too_many_arguments)]
     pub fn build(
         &mut self,
@@ -153,10 +167,12 @@ impl Scene {
         atlas: &mut Atlas,
         fonts: &mut Fonts,
         metrics: CellMetrics,
+        backdrop: LinearRgba,
         viewports: &[Viewport<'_>],
         chrome: &Chrome,
     ) {
         self.clear();
+        self.backdrop = backdrop;
 
         for vp in viewports {
             self.build_viewport(device, queue, atlas, fonts, metrics, vp);
@@ -178,6 +194,23 @@ impl Scene {
         self.glyphs.extend_from_slice(&chrome.glyphs);
     }
 
+    /// The viewport's own background, when the backdrop is not already it.
+    ///
+    /// One instance rather than one per blank cell — and none at all in the
+    /// everyday case, where this viewport's background *is* what the offscreen
+    /// was cleared to. Skipping it is not thrift: at `opacity < 1` a second
+    /// translucent rect over the backdrop composites to `1-(1-o)²`, so the grid
+    /// would come out visibly less transparent than the padding around it. The
+    /// instance still goes in when a session set its own background (OSC 11), or
+    /// when two split panes are on different palettes and only one of them can
+    /// be the backdrop.
+    fn push_window_background(&mut self, vp: &Viewport<'_>) {
+        let window = window_bg(vp.palette, vp.opacity);
+        if window != self.backdrop {
+            self.rects.push(RectInstance::filled(vp.rect, window, vp.rect));
+        }
+    }
+
     fn build_viewport(
         &mut self,
         device: &wgpu::Device,
@@ -195,8 +228,7 @@ impl Scene {
 
         self.grid_origin = [0.0, -vp.scroll_px];
 
-        // The window background. One instance rather than one per blank cell.
-        self.rects.push(RectInstance::filled(vp.rect, window_bg(vp.palette, vp.opacity), clip));
+        self.push_window_background(vp);
 
         for row in 0..grid.rows() {
             let y = oy + row as f32 * ch;
@@ -742,6 +774,70 @@ mod tests {
             (0, 0, 0, 0),
             "a cleared scene must not carry last frame's boundary into this one"
         );
+    }
+
+    fn viewport<'a>(grid: &'a Grid, palette: &'a PaletteSnapshot, opacity: f32) -> Viewport<'a> {
+        Viewport {
+            rect: [8.0, 8.0, 200.0, 100.0],
+            grid,
+            palette,
+            scroll_px: 0.0,
+            focused: true,
+            opacity,
+            selection: None,
+            selection_bg: Rgb::new(0x33, 0x44, 0x55),
+            preedit: None,
+            cursor_on: true,
+            row_map: None,
+        }
+    }
+
+    #[test]
+    fn a_cleared_scene_carries_no_backdrop() {
+        // The backdrop is what every pixel outside the viewports gets. Left
+        // over from last frame it would paint the padding in the *previous*
+        // theme's background for one frame after a theme switch.
+        let mut scene = Scene::default();
+        assert_eq!(scene.backdrop, LinearRgba::TRANSPARENT, "a fresh scene has none");
+        scene.backdrop = LinearRgba::opaque(1, 2, 3);
+        scene.clear();
+        assert_eq!(scene.backdrop, LinearRgba::TRANSPARENT);
+    }
+
+    #[test]
+    fn the_backdrop_alone_paints_a_viewport_on_the_same_background() {
+        // The regression this guards is the black frame around the terminal:
+        // `window.padding` is outside every viewport rect, so the backdrop is
+        // the *only* thing that paints it. If the viewport still emitted its own
+        // window-background rect on top, `opacity < 1` would composite it twice
+        // and the grid would end up less transparent than its own padding.
+        let p = palette();
+        let grid = Grid::new(4, 2, 0);
+        let mut scene = Scene { backdrop: window_bg(&p, 0.8), ..Default::default() };
+
+        scene.push_window_background(&viewport(&grid, &p, 0.8));
+        assert!(
+            scene.rects.is_empty(),
+            "the backdrop already is this background; a second rect would double-blend"
+        );
+    }
+
+    #[test]
+    fn a_viewport_on_its_own_background_still_paints_it() {
+        // OSC 11 changes one session's default background, and a split can put
+        // two palettes on screen at once — only one of them can be the backdrop.
+        let p = palette();
+        let mut other = palette();
+        other.background = Rgb::new(0x2a, 0x00, 0x00);
+
+        let grid = Grid::new(4, 2, 0);
+        let mut scene = Scene { backdrop: window_bg(&p, 1.0), ..Default::default() };
+
+        let vp = viewport(&grid, &other, 1.0);
+        scene.push_window_background(&vp);
+        assert_eq!(scene.rects.len(), 1, "a background the backdrop does not supply must be drawn");
+        assert_eq!(scene.rects[0].rect, vp.rect, "and it covers the viewport, not the window");
+        assert_eq!(scene.rects[0].fill, window_bg(&other, 1.0));
     }
 
     #[test]
