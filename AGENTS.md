@@ -154,36 +154,68 @@ Never commit straight to `main`.**
    differs from the merging account; an explicit message is used verbatim, so
    no trailers. Then remove the worktree: `pnpm wt rm <name>`.
 
-### `main` protection — configured, currently **off**
+### `main` protection
 
-The ruleset **"sigx-standard: protect main"** exists on `zesterm/zesterm` (id
-`20627800`) — no direct pushes, no force-push, no deletion, squash-only merges,
-review threads must resolve — and is **`enforcement: disabled` while the work
-in flight when this landed finishes**. `gh api repos/zesterm/zesterm/rules/branches/main`
-returns `[]` today; that is the state to check, not the ruleset's existence.
+The ruleset **"sigx-standard: protect main"** (id `20627800`) is active on
+`zesterm/zesterm`: no direct pushes, no force-push, no deletion, squash-only
+merges, review threads must resolve, zero approving reviews required so the
+owner may self-merge once Copilot has reviewed. All five of this repo's
+check-runs must be green and the branch must be up to date:
 
-**The workflow above is not suspended.** It is exactly as mandatory as when the
-ruleset was on; it is simply held up by discipline rather than by GitHub for the
-moment, which is the weaker of the two and the reason this is temporary. Branch
-first anyway.
-
-Turn it back on once the in-flight work has landed (this is the whole command —
-the script is idempotent and reconciles drift):
-
-```sh
-pnpm branch-protection zesterm/zesterm --approvals 0
+```
+test (windows-latest)  test (macos-latest)  test (ubuntu-latest)  invariants  web client
 ```
 
-Then, and only once a PR has actually reported them, require CI:
+**Read the live state, never this paragraph** — a disabled ruleset that the
+guide calls active is the worse of the two failures, and this file has already
+been wrong in both directions:
+
+```sh
+gh api repos/zesterm/zesterm/rules/branches/main   # [] means nothing is enforced
+```
+
+Reconcile drift, or restore it after a deliberate pause, with the whole command
+— the script is idempotent:
 
 ```sh
 pnpm branch-protection zesterm/zesterm --approvals 0 \
   --checks "test (windows-latest); test (macos-latest); test (ubuntu-latest); invariants; web client"
 ```
 
-Those five names are this repo's real check-run names, confirmed on PR #25.
-Requiring a name that never reports blocks every merge forever, which is why
-the script makes checks opt-in rather than guessing.
+Those names are real, confirmed reporting on PR #25. Requiring a name that
+never reports blocks every merge forever, which is why the script makes checks
+opt-in rather than guessing — so if CI ever grows or renames a job, this list
+and `.github/workflows/ci.yml` move together or merges stop.
+
+To pause enforcement without losing the configuration (what "turn protection
+off while the in-flight work lands" means), set `enforcement` to `disabled`
+rather than deleting the ruleset — then re-run the command above to restore it:
+
+```sh
+gh api -X PUT repos/zesterm/zesterm/rulesets/20627800 --input - <<'EOF'
+{ "name": "sigx-standard: protect main", "target": "branch", "enforcement": "disabled",
+  "conditions": { "ref_name": { "include": ["refs/heads/main"], "exclude": [] } },
+  "rules": [
+    { "type": "deletion" },
+    { "type": "non_fast_forward" },
+    { "type": "pull_request", "parameters": {
+        "required_approving_review_count": 0, "dismiss_stale_reviews_on_push": true,
+        "require_code_owner_review": false, "require_last_push_approval": false,
+        "required_review_thread_resolution": true } }
+  ],
+  "bypass_actors": [] }
+EOF
+```
+
+The `rules` array is repeated because a `PUT` replaces the ruleset wholesale —
+omit it and you have silently emptied the thing you meant to pause. It matters
+less than it looks, since the restore command rebuilds the whole ruleset from
+the script, but a half-erased ruleset that still reports as existing is exactly
+the state that makes people trust the name over the contents.
+
+While it is off the workflow above is **not** suspended — it is merely held up
+by discipline instead of by GitHub, which is the weaker of the two and the
+reason a pause should be short. Branch first anyway.
 
 ## The gates
 
@@ -505,6 +537,11 @@ Each of these cost real time and is documented where it bites:
   runs after the shell. Use PowerShell for anything carrying pipe paths or
   paths destined for another machine, or set `MSYS_NO_PATHCONV=1`. Both halves
   of this bit on the same day, over the same feature. (#20.)
+- **Git Bash on the Windows box has no `jq`**, though `gh` embeds one. Shelling
+  out to `jq` dies with `command not found` — harmless in a one-shot command,
+  quietly fatal inside a polling loop, where the empty result is
+  indistinguishable from "the job hasn't finished yet" and the loop waits out
+  its timeout reporting nothing. Use `gh … --jq` / `-q`, which is gh's own.
 
 ## Related work on this machine
 
