@@ -78,15 +78,30 @@ Never commit straight to `main`.**
    title (with ` (#<pr>)` appended) becomes its subject — see step 6. Write the
    description as the commit body you want on `main`.
    (On an already-open PR: `gh pr edit <pr> --add-reviewer @copilot`.) The bot
-   `copilot-pull-request-reviewer` posts its review within a minute or two. If your
-   `gh` is too old to resolve `@copilot` (error: `'@copilot' not found`), request it
-   via the API instead — don't skip it:
+   `copilot-pull-request-reviewer` posts its review within a minute or two.
+
+   **`@copilot` does not resolve here** (`gh` 2.87.2 fails the whole
+   `gh pr create` with `could not request reviewer: '@copilot' not found` —
+   note it aborts *before* creating the PR, so create it without the flag and
+   request the review afterwards). **And the REST fallback the sigx template
+   documents silently does nothing on this repo**: `POST
+   /pulls/<pr>/requested_reviewers` with `reviewers[]=copilot-pull-request-reviewer[bot]`
+   returns 200 and a PR object whose `requested_reviewers` is still empty. No
+   error, no reviewer, and a PR that then waits forever for a review nobody
+   asked for. Use GraphQL, which does work:
    ```sh
-   gh api --method POST repos/zesterm/zesterm/pulls/<pr>/requested_reviewers \
-     -f 'reviewers[]=copilot-pull-request-reviewer[bot]'
+   pr_id=$(gh pr view <pr> --repo zesterm/zesterm --json id -q .id)
+   gh api graphql -f query='mutation($pr:ID!,$b:ID!){
+     requestReviews(input:{pullRequestId:$pr, botIds:[$b], union:true}) {
+       pullRequest { reviewRequests(first:5){ nodes {
+         requestedReviewer { ... on Bot { login } } } } } } }' \
+     -f pr="$pr_id" -f b="BOT_kgDOCnlnWA"
    ```
-   (The reviewer-request API takes the `[bot]`-suffixed slug; the review author
-   login in `.reviews[].author.login` appears *without* the suffix.)
+   `BOT_kgDOCnlnWA` is `copilot-pull-request-reviewer`'s node id. Always read
+   the mutation's response back — an empty `reviewRequests` means it didn't
+   take, whatever the HTTP status said. (The REST route takes the
+   `[bot]`-suffixed slug; the review author login in `.reviews[].author.login`
+   appears *without* the suffix.)
 
 5. **Wait for Copilot's review, then fix.** Do not merge before it has reviewed. Poll
    until a review by the bot appears, then read it:
