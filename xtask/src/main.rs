@@ -412,12 +412,15 @@ fn check_generated(dir: &str, ext: &str, generators: &[&[&str]], fix: &str) -> E
         let status = std::process::Command::new(env!("CARGO")).args(*cargo_args).status();
         match status {
             Ok(s) if s.success() => {}
+            // Named, not just counted: with more than one generator writing
+            // this directory, "regenerating failed" leaves whoever is reading
+            // CI to guess which one.
             Ok(s) => {
-                eprintln!("regenerating {dir} failed ({s})");
+                eprintln!("regenerating {dir} failed ({s}): cargo {}", cargo_args.join(" "));
                 return ExitCode::FAILURE;
             }
             Err(e) => {
-                eprintln!("could not run cargo: {e}");
+                eprintln!("could not run `cargo {}`: {e}", cargo_args.join(" "));
                 return ExitCode::FAILURE;
             }
         }

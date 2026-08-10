@@ -174,12 +174,16 @@ fn main() {
     // happens with nothing on the wire to announce it. An implementation that
     // never ratchets passes every test until 16 million frames into a long
     // session, which is a bug reported as "it dies after a few hours".
+    //
+    // Sought rather than sealed 16.7 million times: doing it honestly took 5.3
+    // seconds on every run of `cargo xtask fixtures` and `check-fixtures`, and
+    // produces byte-identical output. `seek_send_for_fixture` still ratchets
+    // the key the real number of times, so what it skips is the counting, not
+    // the derivation.
     let mut far = EphemeralDh::from_seed(CLIENT_DH_SEED)
         .agree(DhPublic(host_dh_public()), &th, Role::Client)
         .expect("agree");
-    for _ in 0..(zest_mesh::secure::REKEY_AFTER - 1) {
-        far.seal(b"").expect("seal");
-    }
+    far.seek_send_for_fixture(0, zest_mesh::secure::REKEY_AFTER - 1).expect("seek");
     push("client", &mut far, b"last-of-epoch-0", "counter = REKEY_AFTER - 1");
     push("client", &mut far, b"first-of-epoch-1", "the ratchet: epoch 1, counter 0, a new key, no message on the wire");
 

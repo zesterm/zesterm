@@ -293,6 +293,31 @@ impl SecureChannel {
         (*self.send.key, *self.recv.key)
     }
 
+    /// Jump the *send* direction to a point in the schedule.
+    ///
+    /// **For the golden fixture only**, and it exists for a boring reason:
+    /// reaching the ratchet honestly means sealing `REKEY_AFTER` records, which
+    /// is 16.7 million ChaCha operations and took 5.3 seconds on every run of
+    /// `cargo xtask fixtures` and `check-fixtures` -- a gate that runs
+    /// constantly. The fixture it produces is byte-identical either way.
+    ///
+    /// Ratchets `epoch` times rather than jumping the key, so the derivation
+    /// this skips past is still the derivation being exercised. The TypeScript
+    /// port has the same seam, named the same way, for the same reason.
+    #[doc(hidden)]
+    pub fn seek_send_for_fixture(&mut self, epoch: u32, counter: u64) -> Result<(), MeshError> {
+        for _ in 0..epoch {
+            let hk = Hkdf::<Sha256>::from_prk(self.send.key.as_ref())
+                .map_err(|e| MeshError::Identity(format!("rekey failed: {e}")))?;
+            let next = expand(&hk, b"zesterm-rekey-v1")?;
+            self.send.cipher = ChaCha20Poly1305::new(Key::from_slice(next.as_ref()));
+            self.send.key = next;
+        }
+        self.send.epoch = epoch;
+        self.send.counter = counter;
+        Ok(())
+    }
+
     /// For tests and for the fixture dump; never used on a live link.
     #[doc(hidden)]
     #[must_use]
