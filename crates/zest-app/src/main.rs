@@ -51,6 +51,67 @@ fn join_command(parts: &[String]) -> String {
         .join(" ")
 }
 
+/// The longest `--screenshot-delay` worth honouring — five minutes.
+///
+/// Not arbitrary caution: the delay becomes `Instant::now() + delay`, and
+/// `u64::MAX` milliseconds is a deadline half a billion years out. The process
+/// then sits there forever having shown no window, captured nothing and exited
+/// with nothing — which is a worse answer to a typo than an error is. (On some
+/// platforms that addition panics instead; neither is a good outcome.) Anything
+/// under the cap cannot overflow.
+const MAX_SCREENSHOT_DELAY_MS: u64 = 5 * 60 * 1000;
+
+/// Milliseconds for `--screenshot-delay`, rejected if past the cap.
+///
+/// Rejected rather than clamped, for the same reason as `parse_size`: silently
+/// doing something other than what was asked is worse than saying no.
+fn parse_delay(s: &str) -> Option<std::time::Duration> {
+    match s.trim().parse::<u64>().ok()? {
+        ms if ms <= MAX_SCREENSHOT_DELAY_MS => Some(std::time::Duration::from_millis(ms)),
+        _ => None,
+    }
+}
+
+/// `<width>x<height>` in logical pixels, as `--screenshot-size` takes it.
+///
+/// Rejects zero and negatives rather than clamping them: a window of no size
+/// produces a valid, empty PNG, and a silently-corrected typo is a screenshot
+/// of something other than what was asked for.
+fn parse_size(s: &str) -> Option<(f64, f64)> {
+    let (w, h) = s.split_once(['x', 'X'])?;
+    let (w, h) = (w.trim().parse::<f64>().ok()?, h.trim().parse::<f64>().ok()?);
+    (w >= 1.0 && h >= 1.0 && w.is_finite() && h.is_finite()).then_some((w, h))
+}
+
+/// Assemble the screenshot flags, or say why they do not make sense together.
+///
+/// `--screenshot <path>` is the opt-in; the other two only modify it. Without
+/// this check they each defaulted the whole struct into existence, so
+/// `zesterm --screenshot-delay 400` entered screenshot mode and wrote
+/// `zesterm.png` into the working directory — a flag that silently did
+/// something entirely different from what it says, and wrote a file to do it.
+fn screenshot_from(
+    path: Option<std::path::PathBuf>,
+    delay: Option<std::time::Duration>,
+    size: Option<(f64, f64)>,
+) -> Result<Option<app::Screenshot>, &'static str> {
+    match path {
+        Some(path) => {
+            let d = app::Screenshot::default();
+            Ok(Some(app::Screenshot {
+                path,
+                delay: delay.unwrap_or(d.delay),
+                size: size.unwrap_or(d.size),
+            }))
+        }
+        None if delay.is_some() || size.is_some() => Err(
+            "--screenshot-delay and --screenshot-size only mean something \
+             alongside --screenshot <path>",
+        ),
+        None => Ok(None),
+    }
+}
+
 /// Command-line flags, collected as a settings layer.
 ///
 /// Built as a `toml::Table` rather than by mutating the resolved config, so a
@@ -104,7 +165,7 @@ impl CliLayer {
     }
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     console::attach_to_parent();
 
     tracing_subscriber::fmt()
@@ -125,6 +186,12 @@ fn main() {
     let mut attach_probe = false;
     let mut new_session = false;
     let mut attach_addr: Option<String> = None;
+    // Collected separately and assembled after the loop, so the modifiers do
+    // not depend on argument order and cannot conjure screenshot mode on their
+    // own — `--screenshot-delay 400` alone used to write `zesterm.png`.
+    let mut shot_path: Option<std::path::PathBuf> = None;
+    let mut shot_delay: Option<std::time::Duration> = None;
+    let mut shot_size: Option<(f64, f64)> = None;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -190,6 +257,33 @@ fn main() {
                 cli.set_bool("scrolling.scroll_on_output", true);
                 i += 1;
             }
+            "--screenshot" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("--screenshot needs a path");
+                    std::process::exit(2);
+                };
+                shot_path = Some(v.into());
+                i += 2;
+            }
+            "--screenshot-delay" => {
+                let Some(d) = args.get(i + 1).and_then(|s| parse_delay(s)) else {
+                    eprintln!(
+                        "--screenshot-delay needs milliseconds, at most \
+                         {MAX_SCREENSHOT_DELAY_MS}"
+                    );
+                    std::process::exit(2);
+                };
+                shot_delay = Some(d);
+                i += 2;
+            }
+            "--screenshot-size" => {
+                let Some(size) = args.get(i + 1).and_then(|s| parse_size(s)) else {
+                    eprintln!("--screenshot-size needs <width>x<height> in logical pixels");
+                    std::process::exit(2);
+                };
+                shot_size = Some(size);
+                i += 2;
+            }
             "--config" => {
                 match zest_config::paths::config_file() {
                     Some(p) => println!("{}", p.display()),
@@ -198,11 +292,11 @@ fn main() {
                         None => println!("no config directory available"),
                     },
                 }
-                return;
+                return std::process::ExitCode::SUCCESS;
             }
             "--schema" => {
                 println!("{}", zest_config::schema::json_schema_string());
-                return;
+                return std::process::ExitCode::SUCCESS;
             }
             // Everything after -e is the command, as xterm and alacritty do.
             //
@@ -223,7 +317,7 @@ fn main() {
                 for t in zest_theme::builtin::all() {
                     println!("{:<10} {}", t.id, t.name);
                 }
-                return;
+                return std::process::ExitCode::SUCCESS;
             }
             // The escape hatch for everything injection cannot reach: ssh,
             // tmux, a container, a shell started inside another shell. Prints
@@ -241,7 +335,7 @@ fn main() {
                         std::process::exit(2);
                     }
                 }
-                return;
+                return std::process::ExitCode::SUCCESS;
             }
             "--help" | "-h" => {
                 println!(
@@ -264,6 +358,13 @@ fn main() {
                      --attach-probe    report what attaching to the daemon cost, then exit\n\
                      --no-daemon       own the pty in this process, do not attach\n\
                      --new-session     start a fresh shell instead of restoring your tabs\n\
+                     --screenshot <path>\n\
+                     \x20                 render one frame to a PNG and exit, without ever\n\
+                     \x20                 showing the window (no screen-capture permission)\n\
+                     --screenshot-delay <ms>\n\
+                     \x20                 let the shell settle first (default 400)\n\
+                     --screenshot-size <WxH>\n\
+                     \x20                 window size in logical pixels (default 960x600)\n\
                      --attach <host:port>\n\
                      \x20                 another machine's daemon; its shell in this window\n\
                      \x20                 (the host approves this device on first contact)\n\
@@ -271,7 +372,7 @@ fn main() {
                      Flags are the strongest layer of the settings cascade;\n\
                      everything else lives in the config file."
                 );
-                return;
+                return std::process::ExitCode::SUCCESS;
             }
             other => {
                 eprintln!("unknown argument: {other}\ntry --help");
@@ -279,6 +380,18 @@ fn main() {
             }
         }
     }
+
+    // Validated here, before anything is built: a contradiction between flags
+    // is knowable from the arguments alone, and finding it out after a config
+    // load, an event loop and an `App` have been constructed means unwinding
+    // all of it to say something that was true before any of it started.
+    let shot = match screenshot_from(shot_path, shot_delay, shot_size) {
+        Ok(shot) => shot,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return std::process::ExitCode::from(2);
+        }
+    };
 
     // Kept, not consumed: a config file save re-runs the cascade, and the flags
     // have to be replayed on top or `--size 20` would vanish the first time the
@@ -322,25 +435,108 @@ fn main() {
     if new_session {
         app = app.with_new_session();
     }
+    if let Some(shot) = shot {
+        // In-process by default, and not as a shortcut: on macOS the daemon
+        // blocks on a Keychain prompt after every rebuild and the app falls
+        // back silently after 2s (see "Traps already paid for"). A screenshot
+        // that sometimes waits two seconds and sometimes photographs a
+        // half-attached session is not a measurement of anything. `--attach`
+        // still wins, for the case where the remote session *is* the subject.
+        if attach_addr.is_none() {
+            app = app.with_no_daemon();
+        }
+        app = app.with_screenshot(shot);
+    }
     if let Some(addr) = attach_addr {
         // Contradiction, not precedence: one flag says "no daemon anywhere",
         // the other names one to attach to. Guessing which the user meant
         // produces a window whose shell is on the wrong machine.
         if no_daemon {
             eprintln!("--attach and --no-daemon contradict each other");
-            std::process::exit(2);
+            return std::process::ExitCode::from(2);
         }
         app = app.with_attach_addr(addr);
     }
     event_loop.run_app(&mut app).expect("run");
+
+    // The screenshot's exit code, carried out of the event loop rather than
+    // taken by `process::exit` from inside it: the pty, the clipboard and the
+    // saved tab state all want their `Drop`, and `main` returning is the only
+    // way they get it. A screenshot that silently did not happen is exactly
+    // the failure a caller needs to see, so it must survive the trip.
+    let code = app.exit_code();
+    drop(app);
+    std::process::ExitCode::from(code)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::join_command;
+    use super::{app, join_command, parse_delay, parse_size, screenshot_from};
+    use std::time::Duration;
+
+    #[test]
+    fn the_modifiers_cannot_turn_screenshot_mode_on_by_themselves() {
+        // `--screenshot-delay 400` used to default the whole struct into
+        // existence, so a flag that says "wait a bit" instead started
+        // screenshot mode and wrote `zesterm.png` into the working directory.
+        assert!(screenshot_from(None, Some(Duration::from_millis(400)), None).is_err());
+        assert!(screenshot_from(None, None, Some((800.0, 600.0))).is_err());
+        assert!(
+            matches!(screenshot_from(None, None, None), Ok(None)),
+            "no screenshot flags at all is not an error, it is an ordinary run"
+        );
+    }
+
+    #[test]
+    fn an_absurd_screenshot_delay_is_refused_rather_than_waited_out() {
+        // `u64::MAX` parses fine as milliseconds and becomes a deadline half a
+        // billion years out, so the process showed no window, captured nothing
+        // and never exited -- measured, not theorised: it sat there for the
+        // full three minutes it was given before being killed. The cap is what
+        // makes a typo an error instead of a hang.
+        assert_eq!(parse_delay(&u64::MAX.to_string()), None);
+        assert_eq!(parse_delay(&(super::MAX_SCREENSHOT_DELAY_MS + 1).to_string()), None);
+        assert_eq!(
+            parse_delay(&super::MAX_SCREENSHOT_DELAY_MS.to_string()),
+            Some(Duration::from_millis(super::MAX_SCREENSHOT_DELAY_MS)),
+            "the cap itself is allowed; it is a ceiling, not a wall just below one"
+        );
+        assert_eq!(parse_delay("400"), Some(Duration::from_millis(400)));
+        assert_eq!(parse_delay("not-a-number"), None);
+    }
+
+    #[test]
+    fn the_modifiers_apply_whichever_order_they_arrive_in() {
+        // They are collected and assembled after the parse loop precisely so
+        // `--screenshot-size 800x600 --screenshot out.png` works as well as the
+        // other order -- argument order is not something a caller should have
+        // to know.
+        let shot = screenshot_from(Some("out.png".into()), None, Some((800.0, 600.0)))
+            .expect("valid")
+            .expect("screenshot mode");
+        assert_eq!(shot.size, (800.0, 600.0));
+        assert_eq!(shot.delay, app::Screenshot::default().delay, "unset keeps the default");
+    }
 
     fn v(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn screenshot_sizes_parse_both_spellings() {
+        assert_eq!(parse_size("1200x800"), Some((1200.0, 800.0)));
+        assert_eq!(parse_size("1200X800"), Some((1200.0, 800.0)), "capital X too");
+        assert_eq!(parse_size(" 640 x 480 "), Some((640.0, 480.0)), "spaces are forgiven");
+    }
+
+    #[test]
+    fn a_degenerate_screenshot_size_is_refused_not_clamped() {
+        // Clamping would hand back a PNG of *something*, and a screenshot of
+        // something other than what was asked for is worse than an error.
+        assert_eq!(parse_size("0x600"), None);
+        assert_eq!(parse_size("-100x600"), None);
+        assert_eq!(parse_size("1200"), None, "no separator at all");
+        assert_eq!(parse_size("widexhigh"), None);
     }
 
     #[test]

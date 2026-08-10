@@ -27,6 +27,7 @@
 #![forbid(unsafe_code)]
 
 pub mod atlas;
+pub mod capture;
 pub mod instance;
 pub mod scene;
 pub mod ui_text;
@@ -34,6 +35,7 @@ pub mod ui_text;
 use wgpu::util::DeviceExt;
 
 pub use atlas::{Atlas, AtlasEntry, Cached};
+pub use capture::read_rgba;
 pub use instance::{
     glyph_flags, DecorInstance, DecorKind, GlyphInstance, Globals, LinearRgba, RectInstance,
     RectShape,
@@ -46,7 +48,7 @@ pub use ui_text::{emit_ui_run, measure_ui_run};
 /// Float, so blending has headroom and the resolve can un-premultiply without
 /// quantization damage. 8-bit would lose precision exactly where text
 /// antialiasing needs it.
-const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+pub const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// Text rendering knobs, applied once at resolve rather than baked per glyph.
 #[derive(Debug, Clone, Copy)]

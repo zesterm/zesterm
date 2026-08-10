@@ -419,8 +419,42 @@ pub struct App {
     /// machine's socket. The M3 win condition's last mile: the same window,
     /// the same protocol, a different machine's shell.
     attach_addr: Option<String>,
+    /// `--screenshot`: render one frame to a PNG, then exit.
+    screenshot: Option<Screenshot>,
+    /// When that frame may be taken. Armed once the window exists.
+    screenshot_at: Option<std::time::Instant>,
+    /// Set once the PNG is written (or has failed to write); the event loop
+    /// exits at the next opportunity and `main` returns this.
+    exit_code: Option<u8>,
 }
 
+/// What `--screenshot` was asked for.
+///
+/// A whole struct for three fields because they only ever travel together, and
+/// because `Option<Screenshot>` says "screenshot mode" in the type rather than
+/// leaving three loosely-related fields that have to agree.
+#[derive(Debug, Clone)]
+pub struct Screenshot {
+    pub path: std::path::PathBuf,
+    /// How long to let the shell draw a prompt before capturing.
+    pub delay: std::time::Duration,
+    /// Window size in *logical* pixels; the PNG comes out this times the
+    /// display's scale factor.
+    pub size: (f64, f64),
+}
+
+impl Default for Screenshot {
+    fn default() -> Self {
+        Self {
+            path: "zesterm.png".into(),
+            // Enough for a local shell to spawn and print a prompt, measured on
+            // this machine at ~120ms. Long enough to be boring, short enough
+            // that taking several while iterating is not a wait.
+            delay: std::time::Duration::from_millis(400),
+            size: (960.0, 600.0),
+        }
+    }
+}
 
 impl App {
     pub fn new(
@@ -505,7 +539,28 @@ impl App {
             attach_probe: false,
             new_session: false,
             attach_addr: None,
+            screenshot: None,
+            screenshot_at: None,
+            exit_code: None,
         }
+    }
+
+    /// Render one frame to a PNG and exit, without ever showing the window.
+    ///
+    /// The point of doing this in the app rather than in `render_dump` is that
+    /// this is the *real* path: real `Insets`, real chrome, real theme, real
+    /// fonts, real scale factor. A dump that agreed with the renderer but not
+    /// with the window would be worse than none — #44 was invisible to the
+    /// renderer-level tool precisely because the padding is not the renderer's
+    /// business.
+    ///
+    /// And nothing is ever presented, so this needs no screen-capture
+    /// permission, disturbs nothing on screen, and works over SSH or in CI —
+    /// none of which is true of asking the OS for a screenshot.
+    #[must_use]
+    pub fn with_screenshot(mut self, shot: Screenshot) -> Self {
+        self.screenshot = Some(shot);
+        self
     }
 
     /// Measure time to first paint, print it, and exit.
@@ -524,6 +579,16 @@ impl App {
     pub fn with_no_daemon(mut self) -> Self {
         self.no_daemon = true;
         self
+    }
+
+    /// What the process should exit with, once the event loop has returned.
+    ///
+    /// Zero for every ordinary run; non-zero only when `--screenshot` could not
+    /// write its file. Read by `main` rather than acted on here, so the exit
+    /// runs every destructor on the way out.
+    #[must_use]
+    pub fn exit_code(&self) -> u8 {
+        self.exit_code.unwrap_or(0)
     }
 
     /// Always start a new session, never adopt an idle one.
@@ -3566,6 +3631,18 @@ impl App {
             }
         } // locks released before any GPU work
 
+        // `--screenshot`, once the shell has had its settling time: this frame
+        // goes to a texture we own instead of to the swapchain. Everything
+        // above is untouched — the same scene, built from the same insets,
+        // chrome and palette — because a capture that took its own path would
+        // eventually disagree with the window and be worth nothing.
+        if self.screenshot_at.is_some_and(|at| std::time::Instant::now() >= at) {
+            let shot = self.screenshot.clone().expect("a deadline implies a screenshot");
+            self.exit_code = Some(capture_frame(gpu, &self.scene, &shot.path));
+            self.screenshot_at = None;
+            return;
+        }
+
         let frame = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -3801,11 +3878,12 @@ impl ApplicationHandler<Wakeup> for App {
         // compilation, font resolution, then spawning a shell. Painting nothing
         // into a visible window is what produces the white flash; the fix is to
         // not be visible until there is something to show.
+        let (win_w, win_h) = self.screenshot.as_ref().map_or((960.0, 600.0), |s| s.size);
         let attrs = Window::default_attributes()
             .with_title("zesterm")
             .with_transparent(self.config.opacity < 1.0)
             .with_visible(false)
-            .with_inner_size(winit::dpi::LogicalSize::new(960.0, 600.0));
+            .with_inner_size(winit::dpi::LogicalSize::new(win_w, win_h));
         // Not borderless (ROADMAP, WS-C2: borderless costs traffic lights,
         // native fullscreen, Sequoia tiling and accessibility). A transparent
         // full-size titlebar keeps all of that, and the tab strip is what
@@ -3859,7 +3937,14 @@ impl ApplicationHandler<Wakeup> for App {
         // and then appears — the same handover the brush exists to make
         // invisible, and not a bug however much it looks like one.
         platform::set_backdrop(&window, self.config.backdrop);
-        window.set_visible(true);
+        // Screenshot mode never shows it. The frame goes to a texture we own,
+        // so there is nothing to present and no reason to put a window on
+        // someone's screen — which is what makes this usable while they are
+        // working, and usable at all where there is no screen.
+        match self.screenshot.as_ref() {
+            Some(shot) => self.screenshot_at = Some(std::time::Instant::now() + shot.delay),
+            None => window.set_visible(true),
+        }
         let first_paint = t0.elapsed();
 
         // After the paint, deliberately. Without this no `Ime` event is ever
@@ -4976,16 +5061,103 @@ impl ApplicationHandler<Wakeup> for App {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        // The PNG is written; leave through the front door so the pty, the
+        // clipboard and the tab state all get their `Drop` rather than being
+        // cut off by `process::exit`. The code travels back to `main` in the
+        // field, which is the whole reason it is a field.
+        if self.exit_code.is_some() {
+            el.exit();
+            return;
+        }
         // Wait for something to happen rather than polling — unless something
         // on screen is animating, in which case the clock names the *one*
         // deadline it needs. A resting window schedules nothing (the 0%-idle
         // guarantee); a blinking cursor costs exactly its two frames a
         // second, which is the price of the setting being on.
-        match self.anim_deadline() {
-            Some(delay) => {
-                el.set_control_flow(ControlFlow::WaitUntil(std::time::Instant::now() + delay));
-            }
+        // The screenshot deadline is one more thing that wants waking for, and
+        // the earlier of the two wins — a blinking cursor must not push the
+        // capture past its delay, and the capture must not stop the cursor
+        // blinking in the frame it captures.
+        let now = std::time::Instant::now();
+        let shot = self.screenshot_at.map(|at| at.saturating_duration_since(now));
+        match [self.anim_deadline(), shot].into_iter().flatten().min() {
+            Some(delay) => el.set_control_flow(ControlFlow::WaitUntil(now + delay)),
             None => el.set_control_flow(ControlFlow::Wait),
+        }
+    }
+}
+
+/// Render `scene` into a texture of our own and write it out as a PNG.
+///
+/// Returns the process exit code: a screenshot that silently did not happen is
+/// the failure mode worth spending an exit code on, because the caller is
+/// usually a script that goes on to read the file.
+///
+/// The texture takes the *surface's* format rather than a convenient one — the
+/// render pipelines were built for it, and matching it is what makes this the
+/// same frame the window would have shown rather than a re-render under
+/// different rules.
+fn capture_frame(gpu: &mut Gpu, scene: &zest_render_wgpu::Scene, path: &std::path::Path) -> u8 {
+    // Checked here rather than left to `read_rgba`'s assertion, because this is
+    // not a programmer error: the surface format is whatever the adapter
+    // offered (the first non-sRGB entry in `caps.formats`), and an HDR or
+    // 10-bit display can hand back one this cannot encode. The library keeps
+    // its invariant; the app owes the user a sentence and an exit code rather
+    // than a panic and a backtrace.
+    if zest_render_wgpu::capture::channel_swap(gpu.config.format).is_none() {
+        eprintln!(
+            "[screenshot] this adapter's surface is {:?}, which is not 8-bit RGBA or BGRA \
+             and cannot be written as a PNG. Nothing was captured.",
+            gpu.config.format
+        );
+        return 1;
+    }
+
+    let (width, height) = (gpu.config.width, gpu.config.height);
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("zest screenshot"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: gpu.config.format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    gpu.renderer.render(&gpu.device, &gpu.queue, &mut encoder, &view, scene);
+    gpu.queue.submit([encoder.finish()]);
+
+    let pixels = zest_render_wgpu::read_rgba(
+        &gpu.device,
+        &gpu.queue,
+        &texture,
+        width,
+        height,
+        gpu.config.format,
+    );
+    // PNG explicitly, not inferred from the extension. `save_buffer` picks the
+    // encoder from the path, so `--screenshot shot.jpg` would quietly write a
+    // JPEG -- lossy, which for a screenshot used to compare exact pixels is a
+    // wrong answer rather than a different one -- and an extensionless path
+    // would fail outright. The flag says PNG, so it writes PNG.
+    match image::save_buffer_with_format(
+        path,
+        &pixels,
+        width,
+        height,
+        image::ColorType::Rgba8,
+        image::ImageFormat::Png,
+    ) {
+        Ok(()) => {
+            println!("[screenshot] {width}x{height} -> {}", path.display());
+            0
+        }
+        Err(e) => {
+            eprintln!("[screenshot] could not write {}: {e}", path.display());
+            1
         }
     }
 }

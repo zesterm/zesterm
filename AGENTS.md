@@ -368,6 +368,8 @@ zesterm-dev --no-build --attach-probe          # probe flags stay in the foregro
 .\scripts\zesterm-dev.ps1                      # the same thing, in PowerShell on Windows
 cargo run --profile fast -p zest-app           # the terminal, quick rebuild
 ./target/fast/zesterm --startup-probe          # time to first paint; fails over 100ms
+./target/fast/zesterm --screenshot out.png     # one real frame to a PNG; no window is ever shown
+./target/fast/zesterm --theme paper --screenshot-size 1200x800 --screenshot out.png
 cargo build --release && ./target/release/zesterm   # the shipping build
 cargo run -p zest-app  --example headless      # a terminal with no window
 cargo run -p zest-font --example font_dump     # font sample sheet as a PNG
@@ -403,6 +405,28 @@ says whether the daemon or the renderer is at fault, with no window, GPU or font
 involved. `mesh_probe` is the two-machine check no unit test can perform — it
 reports **self-visible** separately from **peers**, so "my multicast is not
 leaving this box" and "nothing else is advertising" are distinguishable.
+
+`--screenshot` is the one to reach for when the question is *how it looks*.
+It renders one real frame — real insets, real chrome, real theme, real scale
+factor — into a texture and writes a PNG, without ever showing the window. That
+matters in three ways a screen capture does not: it needs no screen-recording
+permission (which the OS grants to the *hosting terminal*, not to zesterm, and
+which fails by silently returning black frames rather than erroring), it puts
+nothing on anyone's screen, and it works over SSH and in CI. It composes with
+`--theme`, `--font`, `--size`, `--opacity` and `-e`, so a layout question can be
+asked of every theme in one loop:
+
+```sh
+for t in obsidian nord gum classic paper; do
+  ./target/fast/zesterm --theme "$t" --screenshot "/tmp/$t.png"
+done
+```
+
+Prefer asserting pixels over eyeballing where you can — a corner pixel equal to a
+blank cell's is what proves #44 stays fixed, in every theme, without a human
+looking. `render_dump` remains the layer *below* it: it knows nothing about
+`Insets`, the tab strip or the status bar, so it answers "is the renderer wrong"
+rather than "is the window wrong".
 
 ## Conventions & working principles
 

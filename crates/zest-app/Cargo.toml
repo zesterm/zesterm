@@ -37,6 +37,9 @@ wgpu.workspace = true
 parking_lot.workspace = true
 crossbeam-channel.workspace = true
 arboard.workspace = true
+# `--screenshot` writes a PNG. Already compiled into this binary via arboard's
+# clipboard-image support, so naming it here costs nothing new.
+image.workspace = true
 raw-window-handle.workspace = true
 directories.workspace = true
 pollster = "0.4"
