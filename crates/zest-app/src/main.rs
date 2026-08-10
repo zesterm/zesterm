@@ -51,6 +51,27 @@ fn join_command(parts: &[String]) -> String {
         .join(" ")
 }
 
+/// The longest `--screenshot-delay` worth honouring — five minutes.
+///
+/// Not arbitrary caution: the delay becomes `Instant::now() + delay`, and
+/// `u64::MAX` milliseconds is a deadline half a billion years out. The process
+/// then sits there forever having shown no window, captured nothing and exited
+/// with nothing — which is a worse answer to a typo than an error is. (On some
+/// platforms that addition panics instead; neither is a good outcome.) Anything
+/// under the cap cannot overflow.
+const MAX_SCREENSHOT_DELAY_MS: u64 = 5 * 60 * 1000;
+
+/// Milliseconds for `--screenshot-delay`, rejected if past the cap.
+///
+/// Rejected rather than clamped, for the same reason as `parse_size`: silently
+/// doing something other than what was asked is worse than saying no.
+fn parse_delay(s: &str) -> Option<std::time::Duration> {
+    match s.trim().parse::<u64>().ok()? {
+        ms if ms <= MAX_SCREENSHOT_DELAY_MS => Some(std::time::Duration::from_millis(ms)),
+        _ => None,
+    }
+}
+
 /// `<width>x<height>` in logical pixels, as `--screenshot-size` takes it.
 ///
 /// Rejects zero and negatives rather than clamping them: a window of no size
@@ -245,11 +266,14 @@ fn main() -> std::process::ExitCode {
                 i += 2;
             }
             "--screenshot-delay" => {
-                let Some(v) = args.get(i + 1).and_then(|s| s.parse::<u64>().ok()) else {
-                    eprintln!("--screenshot-delay needs milliseconds");
+                let Some(d) = args.get(i + 1).and_then(|s| parse_delay(s)) else {
+                    eprintln!(
+                        "--screenshot-delay needs milliseconds, at most \
+                         {MAX_SCREENSHOT_DELAY_MS}"
+                    );
                     std::process::exit(2);
                 };
-                shot_delay = Some(std::time::Duration::from_millis(v));
+                shot_delay = Some(d);
                 i += 2;
             }
             "--screenshot-size" => {
@@ -447,7 +471,7 @@ fn main() -> std::process::ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{app, join_command, parse_size, screenshot_from};
+    use super::{app, join_command, parse_delay, parse_size, screenshot_from};
     use std::time::Duration;
 
     #[test]
@@ -461,6 +485,24 @@ mod tests {
             matches!(screenshot_from(None, None, None), Ok(None)),
             "no screenshot flags at all is not an error, it is an ordinary run"
         );
+    }
+
+    #[test]
+    fn an_absurd_screenshot_delay_is_refused_rather_than_waited_out() {
+        // `u64::MAX` parses fine as milliseconds and becomes a deadline half a
+        // billion years out, so the process showed no window, captured nothing
+        // and never exited -- measured, not theorised: it sat there for the
+        // full three minutes it was given before being killed. The cap is what
+        // makes a typo an error instead of a hang.
+        assert_eq!(parse_delay(&u64::MAX.to_string()), None);
+        assert_eq!(parse_delay(&(super::MAX_SCREENSHOT_DELAY_MS + 1).to_string()), None);
+        assert_eq!(
+            parse_delay(&super::MAX_SCREENSHOT_DELAY_MS.to_string()),
+            Some(Duration::from_millis(super::MAX_SCREENSHOT_DELAY_MS)),
+            "the cap itself is allowed; it is a ceiling, not a wall just below one"
+        );
+        assert_eq!(parse_delay("400"), Some(Duration::from_millis(400)));
+        assert_eq!(parse_delay("not-a-number"), None);
     }
 
     #[test]

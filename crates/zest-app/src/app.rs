@@ -5098,6 +5098,21 @@ impl ApplicationHandler<Wakeup> for App {
 /// same frame the window would have shown rather than a re-render under
 /// different rules.
 fn capture_frame(gpu: &mut Gpu, scene: &zest_render_wgpu::Scene, path: &std::path::Path) -> u8 {
+    // Checked here rather than left to `read_rgba`'s assertion, because this is
+    // not a programmer error: the surface format is whatever the adapter
+    // offered (the first non-sRGB entry in `caps.formats`), and an HDR or
+    // 10-bit display can hand back one this cannot encode. The library keeps
+    // its invariant; the app owes the user a sentence and an exit code rather
+    // than a panic and a backtrace.
+    if zest_render_wgpu::capture::channel_swap(gpu.config.format).is_none() {
+        eprintln!(
+            "[screenshot] this adapter's surface is {:?}, which is not 8-bit RGBA or BGRA \
+             and cannot be written as a PNG. Nothing was captured.",
+            gpu.config.format
+        );
+        return 1;
+    }
+
     let (width, height) = (gpu.config.width, gpu.config.height);
     let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("zest screenshot"),
