@@ -36,7 +36,7 @@ const BOUNDARIES: &[Boundary] = &[
         forbidden: &[&["wgpu", "tokio", "zest-pty", "zest-render-wgpu"], TLS_AND_HTTP],
         args: &[],
     },
-    Boundary { krate: "zest-render-wgpu", forbidden: &[&["winit"]], args: &[] },
+    Boundary { krate: "zest-render-wgpu", forbidden: &[&["winit"], TLS_AND_HTTP], args: &[] },
     // Settings cross to the web and phone clients as data, so the types and the
     // schema must build without touching a filesystem. Checked with default
     // features off, because with them on the crate legitimately watches files --
@@ -83,8 +83,17 @@ const BOUNDARIES: &[Boundary] = &[
     },
 ];
 
-/// TLS and HTTP, in the spellings the ecosystem actually offers, forbidden
-/// everywhere except `zest-cloud`.
+/// TLS and HTTP, in the spellings the ecosystem actually offers, forbidden in
+/// every crate that carries a boundary except `zest-cloud`.
+///
+/// The qualifier is exact and worth keeping exact, because "everywhere except
+/// `zest-cloud`" is what this comment said first and it was false: a deny-list
+/// reaches only the crates named in it, and `zest-pty`, `zest-daemon`,
+/// `zest-app` and `xtask` carry no boundary at all. Four crates therefore do
+/// not forbid TLS and only one of them is the owner — which is the intended
+/// design, stated below, rather than a gap. A comment that overstates a check's
+/// reach is worse than no comment: it is the reason someone later trusts the
+/// fence instead of reading it.
 ///
 /// The point is **not** "keep TLS out of the app" — that would be false, and
 /// believing it is the way this rule gets misread. `zest-daemon` will depend on
