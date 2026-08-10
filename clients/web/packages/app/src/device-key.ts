@@ -87,7 +87,16 @@ export async function deviceKey(env: Partial<DeviceKeyEnv> = {}): Promise<Device
 
   // Checked first, and it wins: see the module doc on why an existing device
   // must not be quietly given a new identity.
-  const seed = seeds.getItem(SEED_KEY);
+  // localStorage throws outright in some privacy modes -- `SecurityError` on
+  // the *access*, not a null return. Unwrapped, that rejection propagates out
+  // of `deviceKey()`, and since this now gates `app.mount()` the result is a
+  // blank page rather than a degraded one. `fetchBootstrap` has an explicit
+  // "never throws whatever the network does" guarantee; this had none.
+  //
+  // Degrading to an in-memory identity is the honest outcome: the device works
+  // for this session, pairs again next time, and nothing is silently lost --
+  // there was nothing readable to lose.
+  const seed = readSeed(seeds);
   if (seed !== null) {
     try {
       return { signer: seedSigner(generateIdentity(seed)), kind: 'seed' };
@@ -144,9 +153,32 @@ export async function deviceKey(env: Partial<DeviceKeyEnv> = {}): Promise<Device
     // After an unreadable store this device is deliberately EPHEMERAL: it
     // pairs again this session, which is a nuisance, but the next load can
     // still find the real key. Writing here would make the loss permanent.
-    seeds.setItem(SEED_KEY, identity.seed);
+    writeSeed(seeds, identity.seed);
   }
   return { signer: seedSigner(identity), kind: 'seed', ephemeral: unreadable };
+}
+
+/** `null` when there is no seed *or* the store cannot be read at all. */
+function readSeed(seeds: Pick<Storage, 'getItem' | 'setItem'>): string | null {
+  try {
+    return seeds.getItem(SEED_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Best-effort. A failed write means this identity is not persisted, which is
+ * the same position an unreadable key store leaves us in: usable now, paired
+ * again next time.
+ */
+function writeSeed(seeds: Pick<Storage, 'getItem' | 'setItem'>, seed: string): void {
+  try {
+    seeds.setItem(SEED_KEY, seed);
+  } catch {
+    // Nothing to do and nothing to report: the caller already has a working
+    // signer, and there is no state to roll back.
+  }
 }
 
 /**

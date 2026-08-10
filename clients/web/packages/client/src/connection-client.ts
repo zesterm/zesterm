@@ -190,7 +190,30 @@ export class ConnectionClient {
       const seq = this.#dialSeq;
       this.#signing = true;
       void handshake.onMessage(msg).then((replies) => {
-        if (seq !== this.#dialSeq) return; // this signature outlived its connection
+        // Three ways this continuation can be stale, and only one of them used
+        // to be checked. A redial bumps the seq; `close()` does not, and nor
+        // does a link that has already been torn down -- so a `welcome` in
+        // flight when the caller closed would still emit a connection event
+        // and write into a null link. Structurally impossible while the
+        // handshake was synchronous, which is why the guard was written for
+        // the redial case alone.
+        //
+        // `#signing` is cleared on every path out, or the stall queue never
+        // drains again and every later frame waits forever, silently.
+        //
+        // Deliberately untested, and worth saying why rather than shipping a
+        // green test that proves nothing: the close case has no observable
+        // effect today. `#send` is already `#link?.send(...)`, so a write after
+        // close is a silent no-op, and no connection event is emitted on this
+        // path. What is left is `#signing` and `#stalled` on an object nobody
+        // holds. This is defence-in-depth against a future path that re-dials
+        // without closing — at which point a stuck `#signing` stalls every
+        // frame forever, and the failure is silent.
+        if (seq !== this.#dialSeq || this.#closed || this.#link === null) {
+          this.#signing = false;
+          this.#stalled.length = 0;
+          return;
+        }
         this.#signing = false;
         for (const reply of replies) this.#send(reply);
         const state: HandshakeState = handshake.state;

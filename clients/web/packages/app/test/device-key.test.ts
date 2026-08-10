@@ -177,3 +177,26 @@ test('a transient read failure does not permanently downgrade a real key', async
   assert.equal(after.kind, 'webcrypto', 'the real key is found again once the store recovers');
   assert.equal(after.signer.clientId, first.signer.clientId, 'and it is the same device');
 });
+
+test('a localStorage that throws yields a device rather than a blank page', async () => {
+  // Some privacy modes throw `SecurityError` on the *access*, not return null.
+  // Unwrapped, that rejection propagates out of deviceKey() -- and since this
+  // gates app.mount(), the result is a blank page rather than a degraded one.
+  const hostile: Pick<Storage, 'getItem' | 'setItem'> = {
+    getItem: () => {
+      throw new DOMException('denied', 'SecurityError');
+    },
+    setItem: () => {
+      throw new DOMException('denied', 'SecurityError');
+    },
+  };
+  const store: DeviceKeyStore = {
+    load: () => Promise.reject(new Error('no IndexedDB either')),
+    save: () => Promise.reject(new Error('no IndexedDB either')),
+  };
+
+  const device = await deviceKey({ seeds: hostile, store });
+  assert.ok(device.signer, 'a usable signer, not a rejected promise');
+  assert.equal(device.kind, 'seed');
+  assert.match(device.signer.clientId, /^[0-9a-f]{64}$/);
+});
