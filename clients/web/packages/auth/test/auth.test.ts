@@ -245,8 +245,13 @@ test('a non-extractable device key cannot be turned back into a seed', async (t)
   }
   const { keyPair } = await generateWebCryptoKey();
   assert.equal(keyPair.privateKey.extractable, false, 'the private half must not be exportable');
+  // `pkcs8`, not `raw`. WebCrypto has no `raw` format for Ed25519 *private*
+  // keys at all, so exporting one rejects whatever `extractable` says -- the
+  // assertion looked like the proof and was decoration. `pkcs8` succeeds on an
+  // extractable key and throws InvalidAccessError on a non-extractable one,
+  // which is the property being claimed.
   await assert.rejects(
-    crypto.subtle.exportKey('raw', keyPair.privateKey),
+    crypto.subtle.exportKey('pkcs8', keyPair.privateKey),
     'a script on this origin must not be able to read the device key',
   );
 });
@@ -257,7 +262,18 @@ test('the id a WebCrypto key claims is the public key itself', async (t) => {
     return;
   }
   const { clientId, keyPair } = await generateWebCryptoKey();
-  assert.equal(clientId, await clientIdOf(keyPair.publicKey), 'ADR-006: the id IS the key');
+
+  // Against the raw public key, not against `clientIdOf` again.
+  //
+  // `generateWebCryptoKey` computes the id by calling `clientIdOf`, so
+  // comparing the two was the same function on both sides of the equals: it
+  // could not fail unless `clientIdOf` were nondeterministic. Reversing
+  // `clientIdOf`'s output left it green. Exporting the public half and hexing
+  // it independently is what actually pins ADR-006's claim that the id IS the
+  // key.
+  const raw = new Uint8Array(await crypto.subtle.exportKey('raw', keyPair.publicKey));
+  const expected = [...raw].map((b) => b.toString(16).padStart(2, '0')).join('');
+  assert.equal(clientId, expected, 'ADR-006: the id IS the public key, byte for byte');
   assert.match(clientId, /^[0-9a-f]{64}$/);
 });
 

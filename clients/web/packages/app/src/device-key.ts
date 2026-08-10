@@ -45,6 +45,12 @@ const RECORD = 'v1';
 export type DeviceKeyKind = 'webcrypto' | 'seed';
 
 export interface DeviceKey {
+  /**
+   * True when this identity was minted because the store could not be *read*,
+   * and so was deliberately not persisted. The device pairs again next visit,
+   * and the real key — if there is one — is still recoverable.
+   */
+  readonly ephemeral?: boolean;
   readonly signer: ClientSigner;
   readonly kind: DeviceKeyKind;
 }
@@ -91,27 +97,56 @@ export async function deviceKey(env: Partial<DeviceKeyEnv> = {}): Promise<Device
     }
   }
 
+  // Whether the read *failed*, as opposed to succeeding and finding nothing.
+  //
+  // The distinction is the whole of this function's correctness. A rejected
+  // read means we do not know whether a key exists — and one bad read used to
+  // mint a seed and persist it, after which the seed check at the top of this
+  // function wins forever. A single transient IndexedDB hiccup therefore gave
+  // the device a new ClientId (every daemon in the fleet re-prompts) *and*
+  // silently downgraded it from a non-extractable key to a page-readable one.
+  // That is exactly what the module doc exists to prevent, arriving through
+  // the back door.
+  let unreadable = false;
+  let stored: StoredDeviceKey | null = null;
   try {
-    const stored = await store.load();
-    if (stored !== null) {
-      return { signer: webCryptoSigner(stored.clientId, stored.privateKey), kind: 'webcrypto' };
-    }
-    if (await available()) {
-      const { clientId, keyPair } = await generateWebCryptoKey();
-      await store.save({ clientId, privateKey: keyPair.privateKey });
-      return { signer: webCryptoSigner(clientId, keyPair.privateKey), kind: 'webcrypto' };
-    }
+    stored = await store.load();
   } catch {
-    // IndexedDB is absent or refusing (private windows have historically done
-    // both), or a stored key will not build a signer. Falling through mints a
-    // new identity, which does mean a pairing prompt — but a device that
-    // cannot sign at all cannot be paired either, so there is nothing to
-    // preserve. The seed path is the one that always works.
+    unreadable = true;
+  }
+
+  if (stored !== null) {
+    try {
+      return { signer: webCryptoSigner(stored.clientId, stored.privateKey), kind: 'webcrypto' };
+    } catch {
+      // A record that will not build a signer is not a key we can use, but it
+      // is also not nothing: writing over it is the same mistake as above.
+      unreadable = true;
+    }
+  }
+
+  if (!unreadable) {
+    try {
+      if (await available()) {
+        const { clientId, keyPair } = await generateWebCryptoKey();
+        await store.save({ clientId, privateKey: keyPair.privateKey });
+        return { signer: webCryptoSigner(clientId, keyPair.privateKey), kind: 'webcrypto' };
+      }
+    } catch {
+      // Generation or the write failed. The seed path below still works, and
+      // the read succeeded, so persisting a seed overwrites nothing.
+    }
   }
 
   const identity = generateIdentity();
-  seeds.setItem(SEED_KEY, identity.seed);
-  return { signer: seedSigner(identity), kind: 'seed' };
+  if (!unreadable) {
+    // Persisted only when the read succeeded and genuinely found nothing.
+    // After an unreadable store this device is deliberately EPHEMERAL: it
+    // pairs again this session, which is a nuisance, but the next load can
+    // still find the real key. Writing here would make the loss permanent.
+    seeds.setItem(SEED_KEY, identity.seed);
+  }
+  return { signer: seedSigner(identity), kind: 'seed', ephemeral: unreadable };
 }
 
 /**

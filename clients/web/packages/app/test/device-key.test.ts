@@ -113,10 +113,15 @@ test('a browser without Ed25519 falls back to the seed rather than to nothing', 
   assert.equal(again.signer.clientId, device.signer.clientId, 'the fallback is stable too');
 });
 
-test('a storage layer that refuses still yields a usable device', async () => {
-  // Private windows have historically had IndexedDB present and throwing.
-  // There is no identity to preserve in that case — there is nothing stored —
-  // so the honest outcome is a working seed-backed device.
+test('a storage layer that refuses still yields a usable device, without persisting it', async () => {
+  // Private windows have historically had IndexedDB present and throwing, so a
+  // working device still has to come out of this.
+  //
+  // What changed is the last assertion. This used to require that a seed was
+  // *written*, on the reasoning that "there is nothing stored" — but a
+  // rejected read cannot tell "nothing is stored" from "cannot read what is",
+  // and persisting made the wrong guess permanent. So the device is usable and
+  // deliberately ephemeral: it pairs again, and the real key stays findable.
   const seeds = fakeSeeds();
   const store: DeviceKeyStore = {
     load: () => Promise.reject(new Error('IndexedDB is not available')),
@@ -124,8 +129,9 @@ test('a storage layer that refuses still yields a usable device', async () => {
   };
 
   const device = await deviceKey({ seeds, store });
-  assert.equal(device.kind, 'seed');
-  assert.notEqual(seeds.value, null);
+  assert.equal(device.kind, 'seed', 'the seed path is the one that always works');
+  assert.equal(device.ephemeral, true, 'and it says so');
+  assert.equal(seeds.value, null, 'nothing is written over a key that might exist');
 });
 
 test('a corrupt seed is a fresh device, not a broken app', async () => {
@@ -138,4 +144,36 @@ test('the two kinds are described differently', () => {
   // The point of returning the kind at all: a seed-backed device must not be
   // shown whatever reassurance a WebCrypto-backed one is shown.
   assert.notEqual(describeDeviceKey('webcrypto'), describeDeviceKey('seed'));
+});
+
+test('a transient read failure does not permanently downgrade a real key', async () => {
+  // The bug: one rejected `load()` minted a seed AND persisted it, after which
+  // the seed check at the top of deviceKey() won forever. A single IndexedDB
+  // hiccup gave the device a new ClientId -- every daemon in the fleet
+  // re-prompts -- and silently downgraded it from a non-extractable key to a
+  // page-readable one. Exactly what the module doc exists to prevent.
+  const seeds = fakeSeeds();
+  let record: unknown = null;
+  let failNextLoad = false;
+  const store = {
+    load: () => (failNextLoad ? Promise.reject(new Error('hiccup')) : Promise.resolve(record)),
+    save: (k: unknown) => {
+      record = k;
+      return Promise.resolve();
+    },
+  } as never;
+
+  const first = await deviceKey({ seeds, store });
+  assert.equal(first.kind, 'webcrypto', 'a healthy first visit stores a real key');
+
+  failNextLoad = true;
+  const during = await deviceKey({ seeds, store });
+  assert.equal(during.kind, 'seed', 'an unreadable store still yields a usable device');
+  assert.equal(during.ephemeral, true, 'and says the identity was not persisted');
+  assert.equal(seeds.getItem('zesterm.device-seed.v1'), null, 'nothing was written over the key');
+
+  failNextLoad = false;
+  const after = await deviceKey({ seeds, store });
+  assert.equal(after.kind, 'webcrypto', 'the real key is found again once the store recovers');
+  assert.equal(after.signer.clientId, first.signer.clientId, 'and it is the same device');
 });
