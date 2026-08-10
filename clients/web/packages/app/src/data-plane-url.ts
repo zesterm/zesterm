@@ -28,8 +28,19 @@ export function dataPlaneUrl(dataPlane: DataPlane | null): string | null {
       // A third kind must not fall through to a default that silently dials
       // the wrong thing — this makes adding one a compile error here, which
       // is the only place that can answer the question.
+      //
+      // The binding is the guard; the *return* is deliberately `null` and not
+      // `unreachable`. Returning the binding would hand a `DataPlane` object
+      // back through a `string | null` signature, and every caller tests
+      // `url === null` — an object passes that test, so the row would be
+      // enabled and `wsDial` would get `new WebSocket("[object Object]")`.
+      // A kind the compiler never saw can still arrive at runtime:
+      // `SessionDirectory` is `allowAnonymous: true` and its write methods are
+      // wire-callable, and a stale bundle can meet a newer sidecar. Unknown
+      // means not dialable, which is what `null` already says.
       const unreachable: never = dataPlane;
-      return unreachable;
+      void unreachable;
+      return null;
     }
   }
 }
