@@ -384,12 +384,32 @@ impl RemoteSession {
                     let mut addr = addr;
 
                     'supervise: loop {
+                    // The handshake's reader hands this loop frames it has
+                    // already lifted off the socket: the daemon writes a whole
+                    // attach batch back to back and flushes once, so one `read`
+                    // in `DaemonClient::recv` can take the Keyframe and
+                    // everything queued behind it. `Halves::frames` carries
+                    // those across the handoff.
+                    //
+                    // They must be drained *before* blocking on the socket.
+                    // Reading first works only while the session keeps talking:
+                    // a command that prints and exits sends nothing more, so
+                    // the carried frames would wait for a read that never
+                    // comes, and the output would be lost exactly as it was
+                    // before the handoff carried it -- the same blank window,
+                    // one layer further in. Carrying them and not draining them
+                    // is not half a fix, it is none.
+                    let mut drain_carried = frames.pending() > 0;
                     'link: loop {
-                        let n = match reader.read(&mut buf) {
-                            Ok(0) | Err(_) => break,
-                            Ok(n) => n,
-                        };
-                        frames.feed(&buf[..n]);
+                        if drain_carried {
+                            drain_carried = false;
+                        } else {
+                            let n = match reader.read(&mut buf) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => n,
+                            };
+                            frames.feed(&buf[..n]);
+                        }
 
                         loop {
                             let body = match frames.next_frame() {
@@ -1106,6 +1126,45 @@ mod tests {
             "output written after the attach keyframe never arrived, which is what \
              a user reports as 'the command ran but the window is empty'; grid was:\n{}",
             s.terminal().lock().screen_text()
+        );
+    }
+
+    /// A command that prints once and exits is the case carrying alone misses.
+    ///
+    /// `dripping` cannot catch this, and that is the point of having both:
+    /// because it keeps printing, some later read always arrives and flushes
+    /// the carried buffer as a side effect, so the test passes whether or not
+    /// the buffer is drained on its own account. A command that prints and
+    /// exits sends nothing more. The frames sit in the buffer the handoff just
+    /// rescued, the reader blocks on a socket that will never speak again, and
+    /// the window is blank forever — the same symptom as #54, one layer
+    /// further in. Carrying frames without draining them is not half a fix.
+    ///
+    /// It asserts on `Exited` rather than on the grid, and that is the whole
+    /// trick. Two earlier attempts at this test passed with the drain reverted,
+    /// because a command short enough to be finished by attach time has its
+    /// output *in* the keyframe — the carried `Update` is then redundant and
+    /// losing it changes nothing visible. `Exited` has no such understudy: it
+    /// exists in exactly one frame, that frame is behind the keyframe in the
+    /// same read, and nothing is ever sent after it. If it is stranded, the
+    /// window never learns the command finished and the tab never closes.
+    #[test]
+    fn a_command_that_exits_during_a_stalled_attach_is_still_reported() {
+        let seen: Arc<std::sync::Mutex<Vec<Wakeup>>> = Arc::default();
+        let sink = Arc::clone(&seen);
+
+        let h = Harness::start("quiet");
+        let _s = h.attach_stalled("/bin/echo a-quiet-command", STALL, move |w| {
+            sink.lock().expect("lock").push(w);
+        });
+
+        assert!(
+            wait_for(|| seen.lock().expect("lock").contains(&Wakeup::Exited)),
+            "the command exited and the client was never told. Its `Exited` \
+             frame arrived in the same read as the attach keyframe, was carried \
+             across the handoff, and then sat in a buffer nobody drained while \
+             the reader blocked on a socket with nothing left to send. Saw: {:?}",
+            seen.lock().expect("lock")
         );
     }
 
