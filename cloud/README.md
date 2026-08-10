@@ -13,7 +13,29 @@ thing, the built app, and that is a **directory path** rather than a package
 dependency.
 
 ```
-packages/web/   the Worker that serves the built app and /api/*
+packages/shared/  cookie signing, opaque tokens, constant-time compare —
+                  zero deps, and no runtime globals beyond what Node and
+                  workerd both have, so it is testable under `node --test`
+packages/web/     the Worker: the built app, /api/*, /auth/*, D1
+```
+
+## Accounts
+
+GitHub OAuth, hand-rolled. The session cookie is `__Host-zt_session`, an opaque
+48-byte token; what the database stores is `sha256(token)`, so a dump of
+`sessions` is a list of hashes rather than a set of usable cookies.
+
+The tests run the **real** migration against `node:sqlite` — D1 is SQLite, and
+Node 24 ships one — so the foreign keys, the primary keys and the
+`email_verified = 1` filter behind account linking are exercised rather than
+mocked. The whole OAuth round trip runs against a stubbed GitHub, including the
+failures nobody clicks on purpose: a mismatched state, an expired one, and
+GitHub's 200-with-an-error-body.
+
+Migrations are applied by hand for now:
+
+```sh
+wrangler d1 migrations apply zesterm --remote     # or --local for wrangler dev
 ```
 
 ## One build, two worlds
@@ -63,6 +85,10 @@ pnpm -C cloud -r typecheck
 pnpm -C cloud -r test        # node --test; no workerd needed, the routing is pure
 pnpm -C cloud -r dry-run     # wrangler bundles and validates the config
 ```
+
+`test` covers the security-shaped code — cookies, sessions, the OAuth flow —
+without deploying anything, which is the point: security code that can only be
+exercised by a person signing in is security code that is exercised rarely.
 
 `dry-run` is the one that earns its keep. It validates `wrangler.jsonc` with no
 credentials and no network — a binding with no matching migration, a missing

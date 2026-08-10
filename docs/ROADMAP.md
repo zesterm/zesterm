@@ -1073,6 +1073,28 @@ is now unblocked and building.
       dialling `ws://` on the LAN at all** — so the deployed client will route
       *every* session through the relay, including to the machine in front of
       you. Verified under real `workerd` and in a browser, both paths.
+- [x] **An account exists, and the Worker knows who you are** — GitHub OAuth
+      hand-rolled on the Worker, D1 for users, identities and sessions.
+      `/api/bootstrap` stops saying `user: null`.
+      The session cookie is opaque and `__Host-` prefixed; what is *stored* is
+      `sha256(token)`, so a dump of `sessions` is a list of hashes rather than
+      a set of usable cookies. CSRF is `Origin` **and** `content-type:
+      application/json` with no CORS headers anywhere on `/api/*` — a form POST
+      cannot set the header and a `fetch` that does triggers a preflight the
+      Worker never answers. No tokens, no double-submit.
+      Identities key on the provider's **numeric** id: GitHub logins are
+      renameable and reusable, so an account keyed on one is inherited by
+      whoever claims the name next. Two identities merge into one account only
+      when **both** assert a verified address — linking on an unverified one is
+      a complete account-takeover primitive, and it has a test that names it.
+      Tested against real SQL: `node:sqlite` runs the actual migration, so the
+      foreign keys and the `email_verified = 1` filter are exercised rather
+      than mocked. The OAuth round trip runs against a stubbed GitHub including
+      the failures nobody clicks on purpose — mismatched state, expired state,
+      and GitHub's 200-with-an-error-body, which is the one that otherwise
+      surfaces as a 401 far from the expired code that caused it.
+      Google is prepared for: one file, one registry entry, one secret.
+      → the login gate and the account menu are the client half, next.
 - [ ] Local echo prediction for high-latency links (mosh's other trick): predict
       printable-char echo when not in alt-screen, render dim, reconcile on delta
       arrival. The largest perceived-latency win available.

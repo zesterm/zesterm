@@ -1,0 +1,18 @@
+{
+  "name": "@zesterm/cloud-shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pure helpers shared by the cloud Workers: cookie signing, opaque tokens, constant-time compare. No runtime dependencies and no bindings, so every one of them is testable without workerd.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3"
+  }
+}
