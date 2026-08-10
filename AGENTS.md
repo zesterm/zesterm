@@ -362,9 +362,11 @@ commit as the work — not as a follow-up.
 | change the workflow / process itself | this file — and, since it is the shared sigx standard, upstream the same change to [`signalxjs/repo-template`](https://github.com/signalxjs/repo-template) |
 | pay for a new trap | "Traps already paid for" below, plus a comment where it bites |
 
-**Never edit the root `Cargo.toml` or `Cargo.lock` by hand.** Every crate the
-project will have is registered already, including the skeletons. Adding a
-*dependency* to your own crate's manifest is fine.
+**Never edit `Cargo.lock` by hand** — let cargo write it. The root
+`Cargo.toml` registers most crates already, including the skeletons; if yours
+is genuinely new, add it to `members` and `[workspace.dependencies]` in the
+same commit that creates it. Adding a *dependency* to your own crate's manifest
+is fine.
 
 ## Commands
 

@@ -12,31 +12,41 @@ use std::process::{Command, ExitCode};
 const BOUNDARIES: &[Boundary] = &[
     Boundary {
         krate: "zest-core",
-        forbidden: &["wgpu", "winit", "windows", "windows-sys", "tokio", "raw-window-handle"],
+        forbidden: &[
+            &["wgpu", "winit", "windows", "windows-sys", "tokio", "raw-window-handle"],
+            TLS_AND_HTTP,
+        ],
         args: &[],
     },
     Boundary {
         krate: "zest-theme",
-        forbidden: &["wgpu", "winit", "windows", "windows-sys", "tokio"],
+        forbidden: &[&["wgpu", "winit", "windows", "windows-sys", "tokio"], TLS_AND_HTTP],
         args: &[],
     },
-    Boundary { krate: "zest-font", forbidden: &["wgpu", "winit", "tokio"], args: &[] },
+    Boundary {
+        krate: "zest-font",
+        forbidden: &[&["wgpu", "winit", "tokio"], TLS_AND_HTTP],
+        args: &[],
+    },
     // Encoding a keystroke needs to know what key was pressed, so `winit` is
     // allowed and a translation layer would serve nobody. Owning a pty or a
     // renderer is not: input turns events into bytes and hands them on.
     Boundary {
         krate: "zest-input",
-        forbidden: &["wgpu", "tokio", "zest-pty", "zest-render-wgpu"],
+        forbidden: &[&["wgpu", "tokio", "zest-pty", "zest-render-wgpu"], TLS_AND_HTTP],
         args: &[],
     },
-    Boundary { krate: "zest-render-wgpu", forbidden: &["winit"], args: &[] },
+    Boundary { krate: "zest-render-wgpu", forbidden: &[&["winit"]], args: &[] },
     // Settings cross to the web and phone clients as data, so the types and the
     // schema must build without touching a filesystem. Checked with default
     // features off, because with them on the crate legitimately watches files --
     // and a rule that had to allow `windows-sys` would stop meaning anything.
     Boundary {
         krate: "zest-config",
-        forbidden: &["wgpu", "winit", "windows", "windows-sys", "tokio", "notify", "directories"],
+        forbidden: &[
+            &["wgpu", "winit", "windows", "windows-sys", "tokio", "notify", "directories"],
+            TLS_AND_HTTP,
+        ],
         args: &["--no-default-features"],
     },
     // The wire types are read by the daemon, the desktop app acting as a
@@ -45,7 +55,10 @@ const BOUNDARIES: &[Boundary] = &[
     // implementation, which is how a protocol stops being a protocol.
     Boundary {
         krate: "zest-proto",
-        forbidden: &["wgpu", "winit", "windows", "windows-sys", "tokio", "zest-pty"],
+        forbidden: &[
+            &["wgpu", "winit", "windows", "windows-sys", "tokio", "zest-pty"],
+            TLS_AND_HTTP,
+        ],
         args: &[],
     },
     // Discovery and transport selection decide *how* to reach a host, never
@@ -54,15 +67,59 @@ const BOUNDARIES: &[Boundary] = &[
     // that can start a shell has stopped being routing.
     Boundary {
         krate: "zest-mesh",
-        forbidden: &["wgpu", "winit", "zest-pty", "zest-app", "zest-render-wgpu"],
+        forbidden: &[&["wgpu", "winit", "zest-pty", "zest-app", "zest-render-wgpu"], TLS_AND_HTTP],
+        args: &[],
+    },
+    // The TLS and HTTP owner is a transport, and a transport that can reach a
+    // pty or a window has stopped being one -- same rule as `zest-mesh`, for the
+    // same reason. It is deliberately not forbidden `tokio`: whether the dialler
+    // is blocking or async is an open question in ADR-009's implementation, and
+    // a boundary that pre-decides it would be a design choice wearing a check's
+    // clothing.
+    Boundary {
+        krate: "zest-cloud",
+        forbidden: &[&["wgpu", "winit", "zest-pty", "zest-app", "zest-render-wgpu"]],
         args: &[],
     },
 ];
 
+/// TLS and HTTP, in the spellings the ecosystem actually offers, forbidden
+/// everywhere except `zest-cloud`.
+///
+/// The point is **not** "keep TLS out of the app" — that would be false, and
+/// believing it is the way this rule gets misread. `zest-daemon` will depend on
+/// `zest-cloud`, and `zest-app` already depends on `zest-daemon`, so rustls
+/// reaches the desktop binary by design; a rule naming either would be red the
+/// day the relay dialler lands.
+///
+/// It buys two things instead. rustls and an HTTP client get exactly **one**
+/// owner, so a second cannot creep in beside it — two TLS stacks in one binary
+/// is a cost paid quietly and noticed by nobody. And the crates whose smallness
+/// is a documented property, the ones that cross to wasm and to the browser and
+/// phone clients, stay small.
+///
+/// `check_deps` matches on the crate-name field only and is a pure deny-list:
+/// there is no "allowed only here" form, and `zest-cloud` needs none — being
+/// absent from every list is what permits it.
+const TLS_AND_HTTP: &[&str] = &[
+    "rustls",
+    "rustls-platform-verifier",
+    "webpki-roots",
+    "ureq",
+    "reqwest",
+    "hyper",
+    "native-tls",
+    "openssl",
+    "openssl-sys",
+];
+
 /// A crate, the dependencies it must not have, and the feature set to check.
+///
+/// `forbidden` is a list of *groups* purely so shared sets like [`TLS_AND_HTTP`]
+/// appear once by name rather than transcribed into eight lists that then drift.
 struct Boundary {
     krate: &'static str,
-    forbidden: &'static [&'static str],
+    forbidden: &'static [&'static [&'static str]],
     args: &'static [&'static str],
 }
 
@@ -536,7 +593,7 @@ fn check_deps() -> ExitCode {
             if name == *krate {
                 continue;
             }
-            if forbidden.contains(&name) {
+            if forbidden.iter().any(|group| group.contains(&name)) {
                 violations.push(format!("{krate} depends on {name}"));
             }
         }
@@ -562,6 +619,46 @@ fn check_deps() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_portable_crates_still_forbid_tls_and_http() {
+        // `zest-mesh` stands in for the set: it is the crate most likely to
+        // grow a "just one small HTTP call" for the relay, and the whole family
+        // is one grouped slice, so losing it here means losing it everywhere.
+        //
+        // The failure this guards against is a tidy-up, not a bug: the names
+        // forbid dependencies nothing in the workspace has yet, so every entry
+        // reads as dead weight until the day one of them would have fired.
+        let mesh = BOUNDARIES
+            .iter()
+            .find(|b| b.krate == "zest-mesh")
+            .expect("zest-mesh has a boundary and the fleet is what would reach for HTTP");
+        for name in TLS_AND_HTTP {
+            assert!(
+                mesh.forbidden.iter().any(|group| group.contains(name)),
+                "zest-mesh no longer forbids `{name}`; TLS and HTTP have exactly one owner",
+            );
+        }
+    }
+
+    #[test]
+    fn the_tls_owner_is_not_fenced_out_of_its_own_job() {
+        // The deny-list has no "allowed only here" form, so `zest-cloud` is
+        // permitted TLS by being absent from every list -- including its own.
+        // Adding it there would fence the crate out of the reason it exists,
+        // and the check would still pass today, when the crate has no
+        // dependencies at all.
+        let cloud = BOUNDARIES
+            .iter()
+            .find(|b| b.krate == "zest-cloud")
+            .expect("zest-cloud has a boundary of its own");
+        for name in TLS_AND_HTTP {
+            assert!(
+                !cloud.forbidden.iter().any(|group| group.contains(name)),
+                "zest-cloud forbids `{name}`, which is the one crate meant to have it",
+            );
+        }
+    }
 
     #[test]
     fn a_quote_or_backslash_in_a_theme_name_is_escaped_not_emitted_raw() {

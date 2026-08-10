@@ -67,7 +67,7 @@ and its number (48ms) is reported rather than gated.
 | `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), restore-on-launch — runs on Windows *and* macOS (Metal, transparent titlebar) — ⬜ Windows chrome, motion |
 | `zest-proto` | ✅ protocol 2, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, cell-for-cell conformance, chaos-resync, command blocks |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store, sealed channel |
-| `zest-cloud` | ⬜ not yet a crate. The relay dialler's TLS and HTTP, and the only crate allowed either (M6) |
+| `zest-cloud` | ⬜ the crate and its fence exist and nothing else does: `check-deps` forbids rustls and every HTTP client in the seven portable crates, so the PR that adds one is the one that proves the boundary — ⬜ TLS, the relay dialler, HTTP (M6) |
 | `zest-daemon` | ✅ session ownership *and* lifecycle, protocol loop, loopback *and* LAN transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing |
 
 ### What works end to end today
@@ -1520,6 +1520,15 @@ three facts about Cloudflare that changed after #59 was written.
 - [ ] **`zest-cloud`, and the workspace's first TLS stack.** The one crate that
       owns rustls and HTTP, with `cargo xtask check-deps` growing a boundary
       that keeps them out of every crate that crosses to wasm or to a client.
+
+      **The crate and the fence landed first, empty** (#65): a module doc, no
+      dependency, no function, and nine names added to seven forbidden lists.
+      The fence is only worth having if it predates the thing it fences, so the
+      commit that adds rustls is the one that proves it works rather than the
+      one that discovers it does not. Note what it does *not* claim —
+      `zest-app` depends on `zest-daemon` which will depend on `zest-cloud`, so
+      rustls reaches the desktop binary by design; the property is one owner,
+      and none in the portable crates.
 
       **The hard part is not TLS, it is splitting it.** `serve()` needs two
       independently owned halves and a `rustls::StreamOwned` can be neither

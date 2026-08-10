@@ -1,12 +1,13 @@
 [workspace]
 resolver = "2"
-# Every crate the project will have is registered here up front, including the
-# ones that are still skeletons.
+# Most of the crates the project will have are registered here up front,
+# including the ones that are still skeletons.
 #
-# This looks like premature structure and is the opposite: parallel workstreams
-# each adding a crate would each edit this list and `Cargo.lock`, which is the
-# one file guaranteed to conflict between them. Registering the whole set once
-# means a stream only ever touches files inside its own crate.
+# The original reason was parallel workstreams: each adding a crate would edit
+# this list and `Cargo.lock`, the one pair of files guaranteed to conflict
+# between them. Work now lands one lane at a time, so that has expired — a new
+# crate is added here by the change that introduces it, and the skeletons below
+# stay because deleting a registration to re-add it later is churn, not tidying.
 members = [
     "crates/zest-core",
     "crates/zest-pty",
@@ -17,6 +18,7 @@ members = [
     "crates/zest-config",
     "crates/zest-proto",
     "crates/zest-mesh",
+    "crates/zest-cloud",
     "crates/zest-daemon",
     "crates/zest-app",
     "xtask",
@@ -41,6 +43,7 @@ zest-input = { path = "crates/zest-input" }
 zest-config = { path = "crates/zest-config" }
 zest-proto = { path = "crates/zest-proto" }
 zest-mesh = { path = "crates/zest-mesh" }
+zest-cloud = { path = "crates/zest-cloud" }
 zest-daemon = { path = "crates/zest-daemon" }
 
 # --- graphics: these three MUST move together. Version skew between wgpu,
