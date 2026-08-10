@@ -258,3 +258,40 @@ body {
 .block-chip.finished .verdict {
   color: var(--zt-dim);
 }
+
+/* The hosted client, before the relay exists — see components/Unavailable.tsx. */
+.unavailable {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.unavailable-card {
+  max-width: 44ch;
+  padding: 24px 28px;
+  border: 1px solid var(--zt-line);
+  border-radius: 10px;
+  background: var(--zt-panel);
+}
+
+.unavailable-card h1 {
+  margin: 0 0 12px;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--zt-accent);
+}
+
+.unavailable-card p {
+  margin: 0 0 10px;
+  color: var(--zt-dim);
+}
+
+.unavailable-note {
+  color: var(--zt-faint);
+}
+
+.unavailable-note code {
+  font-family: ui-monospace, monospace;
+  color: var(--zt-fg);
+}

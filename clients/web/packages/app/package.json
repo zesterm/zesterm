@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "test": "vite build --logLevel error"
+    "test": "node --test \"test/**/*.test.ts\" && vite build --logLevel error"
   },
   "dependencies": {
     "@sigx/actors": "^0.7.0",

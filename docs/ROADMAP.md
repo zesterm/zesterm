@@ -1055,6 +1055,24 @@ is now unblocked and building.
       as source rather than JSON so `tsc` fails when the Rust grows a field the
       TypeScript `Theme` does not have. New `@zesterm/settings` package
       (zero runtime deps) is where a generated settings form will be built.
+- [x] **The client becomes deployable, and learns which world it woke up in** —
+      `cloud/`, the directory WS-H's row has claimed since the start and which
+      did not exist. A Worker with static assets (not Pages: same-origin is
+      what lets Phase 2's `__Host-` cookie cover the app and the API with no
+      configuration) serving the built app and `/api/*`. One `vite build` now
+      serves loopback *and* the edge, because the app asks `/api/bootstrap` at
+      runtime instead of reading a `VITE_*` baked in at build time — the
+      sidecar answers `local`, the Worker answers `cloud`.
+      A third pnpm workspace with its own lockfile, deliberately: `clients/web`
+      has no build tooling but vite and its dependency policy is a feature, so
+      `wrangler` stays out of that tree. The two share one thing, the built
+      app, and share it as a *path*.
+      Hosted, it renders an honest "cannot reach your machines yet" card rather
+      than the real session list: there is no sidecar at the edge to host
+      `SessionDirectory`, and **mixed content forbids an https page from
+      dialling `ws://` on the LAN at all** — so the deployed client will route
+      *every* session through the relay, including to the machine in front of
+      you. Verified under real `workerd` and in a browser, both paths.
 - [ ] Local echo prediction for high-latency links (mosh's other trick): predict
       printable-char echo when not in alt-screen, render dim, reconcile on delta
       arrival. The largest perceived-latency win available.

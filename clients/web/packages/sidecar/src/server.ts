@@ -47,11 +47,30 @@ export async function startServer(options: SidecarServerOptions): Promise<Server
 
   const server = createServer((req, res) => {
     void (async () => {
+      const url = new URL(req.url ?? '/', 'http://localhost');
+
+      // The one thing the app asks before it renders: which of the two servers
+      // is answering. The edge Worker answers `cloud` at the same path
+      // (cloud/packages/web/src/router.ts); one `vite build` then serves both,
+      // instead of a VITE_* variable making them different bundles.
+      //
+      // Answered above the dev-mode branch below, not beside the static files,
+      // for two reasons: it is not a file, so falling through to the SPA
+      // fallback would hand a fetch expecting JSON a page of markup; and the
+      // vite dev server proxies `/api` here, so the dev loop exercises this
+      // path rather than relying on the client's fallback to paper over a 404.
+      if (url.pathname === '/api/bootstrap') {
+        res
+          .writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+          .end(JSON.stringify({ mode: 'local' }));
+        return;
+      }
+
       if (staticDir === undefined) {
         res.writeHead(404).end('sidecar: no static dir; dev mode serves the app from vite');
         return;
       }
-      const url = new URL(req.url ?? '/', 'http://localhost');
+
       // Normalize, then refuse anything that still climbs: the classic
       // traversal guard, kept boring.
       const rel = normalize(url.pathname).replace(/^([/\\])+/, '');

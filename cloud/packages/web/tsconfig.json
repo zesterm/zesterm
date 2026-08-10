@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // The Worker runtime: no DOM, no Node. `@cloudflare/workers-types` supplies
+    // fetch, Request/Response and the bindings. `node` is here only because the
+    // test files run under `node --test`; the src/ files must not use it, which
+    // is what the router being a pure function over Request keeps honest.
+    "lib": ["ES2023"],
+    "types": ["@cloudflare/workers-types", "node"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

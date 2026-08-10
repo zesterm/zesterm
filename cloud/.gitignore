@@ -1,0 +1,4 @@
+node_modules/
+# `wrangler dev`'s local state, and --dry-run's bundle output.
+.wrangler/
+dist/

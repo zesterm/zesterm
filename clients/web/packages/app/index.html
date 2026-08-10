@@ -6,7 +6,15 @@
     <title>zesterm</title>
   </head>
   <body>
-    <div id="app"></div>
+    <!--
+      Painted before any JavaScript runs, and replaced when the app mounts.
+      Boot waits on `/api/bootstrap` -- which of the two servers is answering --
+      and on a cold mobile connection that is long enough that an empty <div>
+      reads as a broken page. The theme's own background is not available yet
+      either, so this hard-codes obsidian's `bg`; a flash of the wrong colour is
+      worse than a flash of no content.
+    -->
+    <div id="app" style="background: #0b0f1a"></div>
     <script type="module" src="/src/entry-client.tsx"></script>
   </body>
 </html>
