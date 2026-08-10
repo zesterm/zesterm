@@ -62,6 +62,35 @@ fn parse_size(s: &str) -> Option<(f64, f64)> {
     (w >= 1.0 && h >= 1.0 && w.is_finite() && h.is_finite()).then_some((w, h))
 }
 
+/// Assemble the screenshot flags, or say why they do not make sense together.
+///
+/// `--screenshot <path>` is the opt-in; the other two only modify it. Without
+/// this check they each defaulted the whole struct into existence, so
+/// `zesterm --screenshot-delay 400` entered screenshot mode and wrote
+/// `zesterm.png` into the working directory — a flag that silently did
+/// something entirely different from what it says, and wrote a file to do it.
+fn screenshot_from(
+    path: Option<std::path::PathBuf>,
+    delay: Option<std::time::Duration>,
+    size: Option<(f64, f64)>,
+) -> Result<Option<app::Screenshot>, &'static str> {
+    match path {
+        Some(path) => {
+            let d = app::Screenshot::default();
+            Ok(Some(app::Screenshot {
+                path,
+                delay: delay.unwrap_or(d.delay),
+                size: size.unwrap_or(d.size),
+            }))
+        }
+        None if delay.is_some() || size.is_some() => Err(
+            "--screenshot-delay and --screenshot-size only mean something \
+             alongside --screenshot <path>",
+        ),
+        None => Ok(None),
+    }
+}
+
 /// Command-line flags, collected as a settings layer.
 ///
 /// Built as a `toml::Table` rather than by mutating the resolved config, so a
@@ -115,7 +144,7 @@ impl CliLayer {
     }
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     console::attach_to_parent();
 
     tracing_subscriber::fmt()
@@ -136,7 +165,12 @@ fn main() {
     let mut attach_probe = false;
     let mut new_session = false;
     let mut attach_addr: Option<String> = None;
-    let mut shot: Option<crate::app::Screenshot> = None;
+    // Collected separately and assembled after the loop, so the modifiers do
+    // not depend on argument order and cannot conjure screenshot mode on their
+    // own — `--screenshot-delay 400` alone used to write `zesterm.png`.
+    let mut shot_path: Option<std::path::PathBuf> = None;
+    let mut shot_delay: Option<std::time::Duration> = None;
+    let mut shot_size: Option<(f64, f64)> = None;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -207,7 +241,7 @@ fn main() {
                     eprintln!("--screenshot needs a path");
                     std::process::exit(2);
                 };
-                shot.get_or_insert_with(Default::default).path = v.into();
+                shot_path = Some(v.into());
                 i += 2;
             }
             "--screenshot-delay" => {
@@ -215,8 +249,7 @@ fn main() {
                     eprintln!("--screenshot-delay needs milliseconds");
                     std::process::exit(2);
                 };
-                shot.get_or_insert_with(Default::default).delay =
-                    std::time::Duration::from_millis(v);
+                shot_delay = Some(std::time::Duration::from_millis(v));
                 i += 2;
             }
             "--screenshot-size" => {
@@ -224,7 +257,7 @@ fn main() {
                     eprintln!("--screenshot-size needs <width>x<height> in logical pixels");
                     std::process::exit(2);
                 };
-                shot.get_or_insert_with(Default::default).size = size;
+                shot_size = Some(size);
                 i += 2;
             }
             "--config" => {
@@ -235,11 +268,11 @@ fn main() {
                         None => println!("no config directory available"),
                     },
                 }
-                return;
+                return std::process::ExitCode::SUCCESS;
             }
             "--schema" => {
                 println!("{}", zest_config::schema::json_schema_string());
-                return;
+                return std::process::ExitCode::SUCCESS;
             }
             // Everything after -e is the command, as xterm and alacritty do.
             //
@@ -260,7 +293,7 @@ fn main() {
                 for t in zest_theme::builtin::all() {
                     println!("{:<10} {}", t.id, t.name);
                 }
-                return;
+                return std::process::ExitCode::SUCCESS;
             }
             // The escape hatch for everything injection cannot reach: ssh,
             // tmux, a container, a shell started inside another shell. Prints
@@ -278,7 +311,7 @@ fn main() {
                         std::process::exit(2);
                     }
                 }
-                return;
+                return std::process::ExitCode::SUCCESS;
             }
             "--help" | "-h" => {
                 println!(
@@ -315,7 +348,7 @@ fn main() {
                      Flags are the strongest layer of the settings cascade;\n\
                      everything else lives in the config file."
                 );
-                return;
+                return std::process::ExitCode::SUCCESS;
             }
             other => {
                 eprintln!("unknown argument: {other}\ntry --help");
@@ -366,6 +399,13 @@ fn main() {
     if new_session {
         app = app.with_new_session();
     }
+    let shot = match screenshot_from(shot_path, shot_delay, shot_size) {
+        Ok(shot) => shot,
+        Err(msg) => {
+            eprintln!("{msg}");
+            std::process::exit(2);
+        }
+    };
     if let Some(shot) = shot {
         // In-process by default, and not as a shortcut: on macOS the daemon
         // blocks on a Keychain prompt after every rebuild and the app falls
@@ -389,11 +429,47 @@ fn main() {
         app = app.with_attach_addr(addr);
     }
     event_loop.run_app(&mut app).expect("run");
+
+    // The screenshot's exit code, carried out of the event loop rather than
+    // taken by `process::exit` from inside it: the pty, the clipboard and the
+    // saved tab state all want their `Drop`, and `main` returning is the only
+    // way they get it. A screenshot that silently did not happen is exactly
+    // the failure a caller needs to see, so it must survive the trip.
+    let code = app.exit_code();
+    drop(app);
+    std::process::ExitCode::from(code)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{join_command, parse_size};
+    use super::{app, join_command, parse_size, screenshot_from};
+    use std::time::Duration;
+
+    #[test]
+    fn the_modifiers_cannot_turn_screenshot_mode_on_by_themselves() {
+        // `--screenshot-delay 400` used to default the whole struct into
+        // existence, so a flag that says "wait a bit" instead started
+        // screenshot mode and wrote `zesterm.png` into the working directory.
+        assert!(screenshot_from(None, Some(Duration::from_millis(400)), None).is_err());
+        assert!(screenshot_from(None, None, Some((800.0, 600.0))).is_err());
+        assert!(
+            matches!(screenshot_from(None, None, None), Ok(None)),
+            "no screenshot flags at all is not an error, it is an ordinary run"
+        );
+    }
+
+    #[test]
+    fn the_modifiers_apply_whichever_order_they_arrive_in() {
+        // They are collected and assembled after the parse loop precisely so
+        // `--screenshot-size 800x600 --screenshot out.png` works as well as the
+        // other order -- argument order is not something a caller should have
+        // to know.
+        let shot = screenshot_from(Some("out.png".into()), None, Some((800.0, 600.0)))
+            .expect("valid")
+            .expect("screenshot mode");
+        assert_eq!(shot.size, (800.0, 600.0));
+        assert_eq!(shot.delay, app::Screenshot::default().delay, "unset keeps the default");
+    }
 
     fn v(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| (*s).to_string()).collect()

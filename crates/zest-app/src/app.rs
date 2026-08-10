@@ -424,8 +424,8 @@ pub struct App {
     /// When that frame may be taken. Armed once the window exists.
     screenshot_at: Option<std::time::Instant>,
     /// Set once the PNG is written (or has failed to write); the event loop
-    /// exits with this code at the next opportunity.
-    exit_code: Option<i32>,
+    /// exits at the next opportunity and `main` returns this.
+    exit_code: Option<u8>,
 }
 
 /// What `--screenshot` was asked for.
@@ -579,6 +579,16 @@ impl App {
     pub fn with_no_daemon(mut self) -> Self {
         self.no_daemon = true;
         self
+    }
+
+    /// What the process should exit with, once the event loop has returned.
+    ///
+    /// Zero for every ordinary run; non-zero only when `--screenshot` could not
+    /// write its file. Read by `main` rather than acted on here, so the exit
+    /// runs every destructor on the way out.
+    #[must_use]
+    pub fn exit_code(&self) -> u8 {
+        self.exit_code.unwrap_or(0)
     }
 
     /// Always start a new session, never adopt an idle one.
@@ -5053,12 +5063,10 @@ impl ApplicationHandler<Wakeup> for App {
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         // The PNG is written; leave through the front door so the pty, the
         // clipboard and the tab state all get their `Drop` rather than being
-        // cut off by `process::exit`.
-        if let Some(code) = self.exit_code {
+        // cut off by `process::exit`. The code travels back to `main` in the
+        // field, which is the whole reason it is a field.
+        if self.exit_code.is_some() {
             el.exit();
-            if code != 0 {
-                std::process::exit(code);
-            }
             return;
         }
         // Wait for something to happen rather than polling — unless something
@@ -5089,7 +5097,7 @@ impl ApplicationHandler<Wakeup> for App {
 /// render pipelines were built for it, and matching it is what makes this the
 /// same frame the window would have shown rather than a re-render under
 /// different rules.
-fn capture_frame(gpu: &mut Gpu, scene: &zest_render_wgpu::Scene, path: &std::path::Path) -> i32 {
+fn capture_frame(gpu: &mut Gpu, scene: &zest_render_wgpu::Scene, path: &std::path::Path) -> u8 {
     let (width, height) = (gpu.config.width, gpu.config.height);
     let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("zest screenshot"),
@@ -5115,7 +5123,19 @@ fn capture_frame(gpu: &mut Gpu, scene: &zest_render_wgpu::Scene, path: &std::pat
         height,
         gpu.config.format,
     );
-    match image::save_buffer(path, &pixels, width, height, image::ColorType::Rgba8) {
+    // PNG explicitly, not inferred from the extension. `save_buffer` picks the
+    // encoder from the path, so `--screenshot shot.jpg` would quietly write a
+    // JPEG -- lossy, which for a screenshot used to compare exact pixels is a
+    // wrong answer rather than a different one -- and an extensionless path
+    // would fail outright. The flag says PNG, so it writes PNG.
+    match image::save_buffer_with_format(
+        path,
+        &pixels,
+        width,
+        height,
+        image::ColorType::Rgba8,
+        image::ImageFormat::Png,
+    ) {
         Ok(()) => {
             println!("[screenshot] {width}x{height} -> {}", path.display());
             0
