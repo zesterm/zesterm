@@ -17,6 +17,37 @@ packages/shared/  cookie signing, opaque tokens, constant-time compare —
                   zero deps, and no runtime globals beyond what Node and
                   workerd both have, so it is testable under `node --test`
 packages/web/     the Worker: the built app, /api/*, /auth/*, D1
+packages/relay/   the *second* Worker: the dial-back pipe and the Durable
+                  Object a daemon and a browser meet inside
+```
+
+## Two Workers, and the deploy order that matters
+
+`packages/web` and `packages/relay` are separate Workers with separate
+`wrangler.jsonc` files and separate deploy cadences. That is not tidiness.
+
+**Deploying a Worker that owns a Durable Object class evicts every live
+instance of that class.** One Worker serving both jobs would therefore drop
+every terminal in the fleet every time anyone changed a stylesheet. So the web
+app is deployed freely and the relay deliberately. → ADR-009.
+
+The split is only real while this stays true, and two things can quietly undo
+it: giving both Workers the same `name` (two names for one Worker), or pointing
+the relay's `durable_objects` binding at another script with `script_name`
+(the object then lives on that script's deploys). `packages/relay/test/wrangler-config.test.ts`
+asserts against both, because wrangler is happy with either.
+
+What they *do* share is the D1 database, and therefore `cloud/migrations/` —
+which is why migrations sit at the project root rather than under a package,
+and why `migrations_dir` on each D1 binding points back up at it.
+
+The order, once there is an account to deploy to:
+
+```sh
+pnpm -C clients/web --filter @zesterm/app build     # the web Worker serves this directory
+pnpm exec wrangler d1 migrations apply zesterm --remote
+pnpm -C cloud --filter @zesterm/web-worker run deploy
+pnpm -C cloud --filter @zesterm/relay-worker run deploy   # last, and least often
 ```
 
 ## Accounts
@@ -133,12 +164,8 @@ exactly one callback URL, so production cannot also serve `localhost`.
 ## Deploying
 
 Nothing here deploys yet: there is no Cloudflare account wired up and
-`APP_ORIGIN` is a placeholder. When there is, the order matters —
-
-```sh
-pnpm -C clients/web --filter @zesterm/app build   # the Worker serves this directory
-pnpm -C cloud --filter @zesterm/web run deploy
-```
+`APP_ORIGIN` is a placeholder. When there is, the order matters — see "Two
+Workers, and the deploy order that matters" above.
 
 ## Gates
 
@@ -152,6 +179,12 @@ pnpm -C cloud -r dry-run     # wrangler bundles and validates the config
 `test` covers the security-shaped code — cookies, sessions, the OAuth flow —
 without deploying anything, which is the point: security code that can only be
 exercised by a person signing in is security code that is exercised rarely.
+
+The relay needs no workerd either, for a different reason: its room is written
+against the narrow interfaces in `packages/relay/src/room/state.ts`, so
+`packages/relay/test/fake-platform.ts` can stand in for the Durable Object
+runtime — including its limits, which it enforces, and its eviction, which it
+simulates by handing out a fresh state over the same durable data.
 
 `dry-run` is the one that earns its keep. It validates `wrangler.jsonc` with no
 credentials and no network — a binding with no matching migration, a missing

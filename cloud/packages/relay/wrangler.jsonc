@@ -1,0 +1,72 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+
+  // **Not `zesterm`.** A second Worker, and not a preference: deploying a
+  // Worker that owns a Durable Object class evicts every live instance of that
+  // class. Serving the relay from the web app's Worker would therefore drop
+  // every terminal in the fleet every time anyone changed a stylesheet. Two
+  // Workers, two deploy cadences — the web app freely, this one deliberately.
+  // → ADR-009.
+  "name": "zesterm-relay",
+  "main": "src/index.ts",
+
+  // Deliberately the same date as packages/web. The two Workers share a
+  // database and will share wire types; a runtime that differs between them is
+  // a difference nobody would think to look for.
+  "compatibility_date": "2026-08-01",
+
+  // No compatibility_flags, and that is a decision rather than an omission —
+  // the same one packages/web records. In particular no `nodejs_als`: that is
+  // what `@sigx/actors/host` needs to run, and ADR-005 says session actors run
+  // on the user's machine and never at the edge. ADR-009 names adding it here
+  // as rejected in so many words, because "the relay needs a coordination
+  // point" is exactly the argument that would reach for it. If this list ever
+  // grows an ALS flag, something crept in that should not have.
+
+  "workers_dev": true,
+  "observability": { "enabled": true },
+
+  // No `assets` block. The built web client is served by the *other* Worker,
+  // and binding it here would be the beginning of one Worker doing both jobs —
+  // which is the thing the split above exists to prevent.
+
+  "durable_objects": {
+    "bindings": [
+      {
+        // One object per host: `idFromName('host:' + hostId)`. Not per user (a
+        // five-host user would funnel every stream through one colo) and not
+        // per session (a control link per session is what dial-back avoids).
+        // → ADR-009.
+        "name": "RELAY_ROOM",
+        "class_name": "RelayRoom"
+      }
+    ]
+  },
+
+  // `new_sqlite_classes`, not `new_classes`. The SQLite-backed storage backend
+  // is the only one new namespaces can use, and it is not the default for the
+  // key-value spelling — a class declared with `new_classes` deploys and then
+  // fails on the first `storage` call. The migration tag is append-only: `v1`
+  // stays `v1` forever, and a later change adds `v2` beside it.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RelayRoom"] }],
+
+  "d1_databases": [
+    {
+      // The same database packages/web owns, bound read-mostly here. ADR-009
+      // deliberately adds no migration of its own: `hosts` already carries
+      // every column, and the attach ticket's replay set belongs in the
+      // object's own storage rather than in D1, because it is on the attach
+      // path.
+      "binding": "DB",
+      "database_name": "zesterm",
+      "database_id": "bfd5939a-05bf-4c69-9c02-6eedfc43e247",
+      // A property of the *database*, not a top-level field -- wrangler rejects
+      // it at the top level with "Unexpected fields found", which is only a
+      // warning, so the run continues and then fails with "No migrations
+      // present" pointing at the default path instead. Resolved relative to
+      // this file. `test/wrangler-config.test.ts` pins it, because
+      // `--dry-run` never reads it.
+      "migrations_dir": "../../migrations"
+    }
+  ]
+}

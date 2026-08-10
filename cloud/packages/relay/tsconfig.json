@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // The Worker runtime, as in packages/web: no DOM, no Node. `node` is here
+    // only for the test files. The src/ split that keeps that honest is
+    // `src/room/state.ts` — the room's logic is written against the narrow
+    // interfaces declared there, so the tests drive it with a plain object and
+    // never reach for a Node or a workerd global.
+    "lib": ["ES2023"],
+    "types": ["@cloudflare/workers-types", "node"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

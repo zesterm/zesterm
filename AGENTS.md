@@ -410,7 +410,7 @@ cargo run -p zest-mesh   --example mesh_probe  # advertise and browse the fleet
 cargo run -p zest-daemon --example pair -- --addr <host:port>   # pair with a host
 
 pnpm -C cloud -r dry-run                       # validate the Worker configs, no credentials needed
-pnpm -C cloud --filter @zesterm/web dev        # the hosted client under workerd, port 8787
+pnpm -C cloud --filter @zesterm/web-worker dev # the hosted client under workerd, port 8787
 
 pnpm wt new <N-slug>                           # a worktree for issue #N
 pnpm wt list
