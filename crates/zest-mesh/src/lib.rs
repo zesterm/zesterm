@@ -30,6 +30,7 @@ use std::fmt;
 use zest_proto::HostId;
 
 pub mod discovery;
+pub mod enroll;
 pub mod identity;
 pub mod keystore;
 pub mod pairing;
