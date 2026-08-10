@@ -31,6 +31,13 @@ export type ClientMessage =
       readonly label: string;
       /** 64 lowercase hex characters; all zeroes reads as absent and is refused. */
       readonly nonce: string;
+      /**
+       * 64 lowercase hex characters — this connection's ephemeral X25519
+       * public key. Signed into the transcript, so the Ed25519 signatures
+       * already being exchanged certify it. All zeroes reads as absent and is
+       * refused rather than agreed with.
+       */
+      readonly dh: string;
       readonly watch_sessions: boolean;
     }
   | {
@@ -92,6 +99,17 @@ export type { SessionAddr };
  * not a wire format.
  */
 export function encodeClientMessage(msg: ClientMessage): Uint8Array {
+  return encodeFrame(encodeClientMessageBody(msg));
+}
+
+/**
+ * The MessagePack body, without the length prefix.
+ *
+ * Split out because since protocol 3 the bytes behind the prefix are
+ * ciphertext, so the prefix has to be written *after* sealing — and it must
+ * describe the ciphertext, which is 16 bytes longer than this.
+ */
+export function encodeClientMessageBody(msg: ClientMessage): Uint8Array {
   let wire: Record<string, unknown>;
   switch (msg.t) {
     case 'hello':
@@ -101,6 +119,7 @@ export function encodeClientMessage(msg: ClientMessage): Uint8Array {
         client: msg.client,
         label: msg.label,
         nonce: msg.nonce,
+        dh: msg.dh,
         watch_sessions: msg.watch_sessions,
       };
       break;
@@ -146,7 +165,7 @@ export function encodeClientMessage(msg: ClientMessage): Uint8Array {
       wire = { t: msg.t, session: addr(msg.session) };
       break;
   }
-  return encodeFrame(encode(wire));
+  return encode(wire);
 }
 
 // ---------------------------------------------------------------------------

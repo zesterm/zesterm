@@ -19,6 +19,7 @@ export {
   type SessionAddrLike,
   type IntLike,
   encodeClientMessage,
+  encodeClientMessageBody,
   bytesToHex,
   hexToBytes,
 } from './wire-client.ts';

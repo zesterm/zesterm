@@ -98,3 +98,11 @@ mdns-sd = { version = "0.20.3", default-features = false, optional = true }
 [[example]]
 name = "mesh_probe"
 required-features = ["lan"]
+
+[dev-dependencies]
+# For `handshake_dump` only. A dev-dependency rather than a real one because
+# `zest-mesh` itself never writes JSON -- the golden does.
+serde_json = { workspace = true }
+
+[[example]]
+name = "handshake_dump"

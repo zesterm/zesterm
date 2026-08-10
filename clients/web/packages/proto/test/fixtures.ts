@@ -113,10 +113,23 @@ export function loadFixture(name: string): Fixture {
   return f;
 }
 
-/** Every recording on disk, so a new one is picked up without editing a list. */
+/**
+ * Every *recording* on disk, so a new one is picked up without editing a list.
+ *
+ * Selected by shape — a recording has `frames` — rather than by naming the
+ * files that are not recordings. That list was `bits.json` and
+ * `client-messages.json`; `handshake.json` arrived with protocol 3 and was
+ * promptly loaded as a recording, which failed as "handshake decodes cell for
+ * cell" and named nothing useful. A denylist has to be remembered, and the
+ * moment to remember it is the moment nobody is thinking about this file.
+ */
 export function fixtureNames(): string[] {
   return readdirSync(FIXTURES_DIR)
-    .filter((f) => f.endsWith('.json') && f !== 'bits.json' && f !== 'client-messages.json')
+    .filter((f) => f.endsWith('.json'))
+    .filter((f) => {
+      const parsed: unknown = JSON.parse(readFileSync(join(FIXTURES_DIR, f), 'utf8'));
+      return typeof parsed === 'object' && parsed !== null && Array.isArray((parsed as { frames?: unknown }).frames);
+    })
     .map((f) => f.replace(/\.json$/, ''))
     .sort();
 }

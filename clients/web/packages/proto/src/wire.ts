@@ -373,6 +373,15 @@ export interface Challenge {
   readonly label: string;
   /** 64 hex characters; all zeroes reads as absent and must be refused. */
   readonly nonce: string;
+  /**
+   * 64 hex characters — the host's ephemeral X25519 public key.
+   *
+   * **This message is the switch.** Everything after a challenge is sealed, in
+   * both directions; everything up to and including it is plaintext. Positional
+   * rather than per-message-type, because a table of which variants are
+   * encrypted is a table two implementations can disagree about.
+   */
+  readonly dh: string;
   /** 128 hex characters — the host signing first is what lets a client pin. */
   readonly signature: string;
 }
@@ -540,6 +549,7 @@ export function parseHostMessage(v: unknown): HostMessage {
         host: str(o['host'], 'challenge.host'),
         label: str(o['label'], 'challenge.label'),
         nonce: str(o['nonce'], 'challenge.nonce'),
+        dh: str(o['dh'], 'challenge.dh'),
         signature: str(o['signature'], 'challenge.signature'),
       };
     case 'auth_pending':

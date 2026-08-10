@@ -10,6 +10,8 @@ import * as ed from '@noble/ed25519';
 import { sha512 } from '@noble/hashes/sha2.js';
 import { createHost, memoryStorage } from '@sigx/actors/host';
 import { authTranscript, generateIdentity, preimage } from '@zesterm/auth';
+import { ephemeralFromSeed, type SecureChannel } from '@zesterm/auth/secure';
+import { PROTOCOL_VERSION } from '@zesterm/client';
 import type { ByteLink, ByteLinkHandlers } from '@zesterm/client';
 import { LOCAL_DIRECTORY_KEY, SessionDirectory } from '@zesterm/control';
 import { bytesToHex, decode, encode, encodeFrame, FrameReader, hexToBytes } from '@zesterm/proto';
@@ -31,6 +33,11 @@ class ScriptedDaemon {
 
   readonly identity = generateIdentity(HOST_SEED);
 
+  /** The host's half of the channel, from the challenge onwards. */
+  #channel: SecureChannel | null = null;
+  /** Outgoing seals only once the challenge itself has gone out. */
+  #sealOut = false;
+
   get dial() {
     return (handlers: ByteLinkHandlers): ByteLink => {
       const frames = new FrameReader();
@@ -38,7 +45,16 @@ class ScriptedDaemon {
       this.link = {
         handlers,
         sent,
-        deliver: (shape) => handlers.onMessage(encodeFrame(encode(shape))),
+        deliver: (shape) => {
+          // Sealed exactly as the real daemon seals: the challenge is the last
+          // plaintext frame out, everything after it is encrypted. A scripted
+          // daemon that stayed in plaintext would let the feed's own sealing
+          // break without a single test noticing.
+          const body = encode(shape);
+          const out = this.#sealOut && this.#channel ? this.#channel.seal(body) : body;
+          handlers.onMessage(encodeFrame(out));
+          if (shape['t'] === 'challenge') this.#sealOut = true;
+        },
       };
       return {
         send: (bytes) => {
@@ -46,7 +62,7 @@ class ScriptedDaemon {
           for (;;) {
             const body = frames.next();
             if (!body) return;
-            sent.push(decode(body) as Record<string, unknown>);
+            sent.push(decode(this.#channel ? this.#channel.open(body) : body) as Record<string, unknown>);
           }
         },
         close: () => handlers.onClose(),
@@ -61,7 +77,8 @@ class ScriptedDaemon {
     const hello = link.sent.find((m) => m['t'] === 'hello');
     assert.ok(hello, 'the feed must say hello');
     assert.equal(hello['watch_sessions'], true, 'the feed exists to watch the list');
-    const bytes = authTranscript({
+    const ephemeral = ephemeralFromSeed(hexToBytes('4d'.repeat(32)));
+    const transcript = {
       version: hello['version'] as number,
       host: this.identity.clientId,
       client: hello['client'] as string,
@@ -69,16 +86,23 @@ class ScriptedDaemon {
       clientNonce: hello['nonce'] as string,
       hostLabel: 'scripted',
       clientLabel: hello['label'] as string,
-    });
+      hostDh: ephemeral.publicKey,
+      clientDh: hello['dh'] as string,
+    };
+    const bytes = authTranscript(transcript);
+    // Armed before the challenge goes out: the feed's `auth` answers it
+    // sealed, so the receiving half has to be ready first.
+    this.#channel = ephemeral.agree(hello['dh'] as string, transcript, 'host');
     link.deliver({
       t: 'challenge',
-      version: 2,
+      version: PROTOCOL_VERSION,
       host: this.identity.clientId,
       label: 'scripted',
       nonce: '9b'.repeat(32),
+      dh: ephemeral.publicKey,
       signature: bytesToHex(ed.sign(preimage('host', 'auth', bytes), hexToBytes(HOST_SEED))),
     });
-    link.deliver({ t: 'welcome', version: 2, host: this.identity.clientId, label: 'scripted' });
+    link.deliver({ t: 'welcome', version: PROTOCOL_VERSION, host: this.identity.clientId, label: 'scripted' });
   }
 
   push(sessions: Array<{ id: number; title: string }>): void {

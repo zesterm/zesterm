@@ -97,6 +97,18 @@ impl EphemeralDh {
         Ok(Self { secret: StaticSecret::from(*seed) })
     }
 
+    /// A key from a fixed seed, for the golden fixtures and nothing else.
+    ///
+    /// `#[doc(hidden)]` rather than `#[cfg(test)]`: `handshake_dump` is an
+    /// example, not a test, and the whole point of that file is that the
+    /// TypeScript implementation can be held to the same key schedule -- which
+    /// is impossible if every run produces different keys.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_seed(seed: [u8; 32]) -> Self {
+        Self { secret: StaticSecret::from(seed) }
+    }
+
     #[must_use]
     pub fn public(&self) -> DhPublic {
         DhPublic(PublicKey::from(&self.secret).to_bytes())
@@ -267,6 +279,18 @@ impl SecureChannel {
     #[must_use]
     pub fn split(self) -> (Sealer, Opener) {
         (Sealer(self.send), Opener(self.recv))
+    }
+
+    /// The two directional keys, for the golden fixture only.
+    ///
+    /// Exposed so `handshake.json` can pin the *key schedule* and not merely
+    /// its output: a TypeScript peer whose HKDF info strings differ produces
+    /// different keys, and comparing only sealed records would say "it did not
+    /// open" without naming which step diverged.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn keys(&self) -> ([u8; 32], [u8; 32]) {
+        (*self.send.key, *self.recv.key)
     }
 
     /// For tests and for the fixture dump; never used on a live link.

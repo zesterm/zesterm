@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "notes": [
+    "The session keys use HKDF (Extract with salt = transcript_hash, then Expand).              The ratchet uses HKDF-Expand ALONE -- the current key already is the PRK. Full              HKDF with an empty salt is a different function: `@noble/hashes/hkdf` exports              both `hkdf` and `expand`, and taking the wrong one is undetectable until 2^24              records into a session. Record 4 below is the only thing that catches it.",
+    "The `v2` in the transcript's domain separator counts transcript layouts, not              protocol versions. The protocol here is 3. Do not derive one from the other.",
+    "The frame's u32 LE prefix describes the CIPHERTEXT, which is the plaintext plus              a 16-byte tag. A sealer that bounds the plaintext against MAX_FRAME passes every              small test and fails only on a maximal keyframe.",
+    "Nonce is epoch:u32 BE || counter:u64 BE, twelve bytes. Both counters start at 0              per direction, and the two directions have different keys."
+  ],
+  "protocol": 3,
+  "inputs": {
+    "host_seed": "1111111111111111111111111111111111111111111111111111111111111111",
+    "client_seed": "2222222222222222222222222222222222222222222222222222222222222222",
+    "host": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+    "client": "a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0",
+    "host_label": "andy-mac",
+    "client_label": "web 😀",
+    "host_nonce": "5555555555555555555555555555555555555555555555555555555555555555",
+    "client_nonce": "6666666666666666666666666666666666666666666666666666666666666666",
+    "host_dh": "7b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14",
+    "client_dh": "ff2ee45601ec1b67310c7790404585ae697331eee1c1f8cf2419731c1fff3e6b"
+  },
+  "transcript": "7a65737465726d2d617574682d76320003d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0555555555555555555555555555555555555555555555555555555555555555566666666666666666666666666666666666666666666666666666666666666667b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14ff2ee45601ec1b67310c7790404585ae697331eee1c1f8cf2419731c1fff3e6b0008616e64792d6d6163000877656220f09f9880",
+  "transcript_hash": "a46c11c465aaef06eca9a132c2d016c9803d34c3f64b8d622e2769a53d5e1038",
+  "host_signature": "f28e70170f5a7832f1bad09dd0003f827136362802f8d655864fad2f7e62bcd659330af55c0a28f7c81e77dc4f1016ca2ef47efb4333d5688f85142648b31e0e",
+  "client_signature": "dab51cf01ceb18cc3832e9c78ab8e7ea0a56d1f757af4f10d4ddc052ac41cb86b8944289f0d23441218e4df2ad4cc9f806fffec2f345b34d18cb6a958e2ccb03",
+  "pairing_code": "154335",
+  "key_host_to_client": "0d6e896ed3edf705aa2eb3be2be51064474d558f447923f1c96c765a71cc77c7",
+  "key_client_to_host": "93d5357fe2e12d94825863dedc39b0d6950770ad5a66d444f686ba372249b593",
+  "records": [
+    {
+      "from": "client",
+      "epoch": 0,
+      "counter": 0,
+      "plaintext": "",
+      "frame": "100000005ada8a4422365c6c9a08679fce36efde",
+      "note": "an empty body still seals -- ciphertext is the 16-byte tag alone"
+    },
+    {
+      "from": "client",
+      "epoch": 0,
+      "counter": 1,
+      "plaintext": "010203",
+      "frame": "1300000059d14e3f5617eb43814041f32ba7305bb1c5cf",
+      "note": "the second record, so the counter is seen to move"
+    },
+    {
+      "from": "host",
+      "epoch": 0,
+      "counter": 0,
+      "plaintext": "77656c636f6d65",
+      "frame": "1700000096f14ced131ab032a80bf8d0d554cf8b14224ca137ebcf",
+      "note": "the other direction, under the other key"
+    },
+    {
+      "from": "client",
+      "epoch": 0,
+      "counter": 16777215,
+      "plaintext": "6c6173742d6f662d65706f63682d30",
+      "frame": "1f0000009cd82dc532dab8e3401b27fb0b226142acf06c4432a567a76a46f208976e9b",
+      "note": "counter = REKEY_AFTER - 1"
+    },
+    {
+      "from": "client",
+      "epoch": 1,
+      "counter": 0,
+      "plaintext": "66697273742d6f662d65706f63682d31",
+      "frame": "20000000702c344844997f8b411f22d181673588104be47510487a1b1f0cb1e99022a435",
+      "note": "the ratchet: epoch 1, counter 0, a new key, no message on the wire"
+    }
+  ]
+}

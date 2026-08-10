@@ -6,13 +6,16 @@
   "description": "The Ed25519 handshake: preimages, the auth transcript, pairing codes.",
   "exports": {
     ".": "./src/index.ts",
-    "./webcrypto": "./src/webcrypto.ts"
+    "./webcrypto": "./src/webcrypto.ts",
+    "./secure": "./src/secure.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test \"test/**/*.test.ts\""
   },
   "dependencies": {
+    "@noble/ciphers": "^2.0.0",
+    "@noble/curves": "^2.0.0",
     "@noble/ed25519": "^3.0.0",
     "@noble/hashes": "^2.0.0",
     "@zesterm/proto": "workspace:*"

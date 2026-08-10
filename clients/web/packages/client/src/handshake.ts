@@ -13,6 +13,7 @@
  */
 
 import { answerChallenge, ChallengeError, type ClientSigner } from '@zesterm/auth';
+import { generateEphemeral, type Ephemeral, type SecureChannel } from '@zesterm/auth/secure';
 import {
   bytesToHex,
   type ClientMessage,
@@ -23,7 +24,7 @@ import {
   isWelcome,
 } from '@zesterm/proto';
 
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 export type HandshakeState =
   | { readonly phase: 'connecting' }
@@ -39,6 +40,8 @@ export interface HandshakeOptions {
   readonly expectedHost?: string;
   /** For tests: a fixed nonce instead of a random one. */
   readonly nonce?: Uint8Array;
+  /** For tests and fixtures: a fixed ephemeral instead of a fresh one. */
+  readonly ephemeral?: Ephemeral;
 }
 
 /**
@@ -51,6 +54,8 @@ const NEVER_RETRY = new Set(['denied', 'version']);
 export class HandshakeDriver {
   #options: HandshakeOptions;
   #nonce: string;
+  #ephemeral: Ephemeral;
+  #channel: SecureChannel | null = null;
   #state: HandshakeState = { phase: 'connecting' };
 
   constructor(options: HandshakeOptions) {
@@ -59,10 +64,25 @@ export class HandshakeDriver {
     // connection; reusing one would make a captured challenge replayable.
     const nonce = options.nonce ?? crypto.getRandomValues(new Uint8Array(32));
     this.#nonce = bytesToHex(nonce);
+    // Likewise fresh per dial, and for a second reason: the ephemeral dying
+    // with the connection is what makes the traffic forward-secret. A redial
+    // is a whole new handshake, never a resumption, so there is nothing for a
+    // relay to preserve across a drop.
+    this.#ephemeral = options.ephemeral ?? generateEphemeral();
   }
 
   get state(): HandshakeState {
     return this.#state;
+  }
+
+  /**
+   * This connection's channel, once the challenge has been answered.
+   *
+   * `null` before then, which is exactly the positional seal switch: the
+   * caller seals nothing until it has this, and everything once it does.
+   */
+  get channel(): SecureChannel | null {
+    return this.#channel;
   }
 
   /** The first message on the wire. */
@@ -73,6 +93,7 @@ export class HandshakeDriver {
       client: this.#options.signer.clientId,
       label: this.#options.label,
       nonce: this.#nonce,
+      dh: this.#ephemeral.publicKey,
       watch_sessions: this.#options.watchSessions,
     };
   }
@@ -92,22 +113,30 @@ export class HandshakeDriver {
   async onMessage(msg: HostMessage): Promise<ClientMessage[]> {
     if (isChallenge(msg)) {
       try {
+        const transcript = {
+          version: msg.version,
+          host: msg.host,
+          client: this.#options.signer.clientId,
+          hostNonce: msg.nonce,
+          clientNonce: this.#nonce,
+          hostLabel: msg.label,
+          clientLabel: this.#options.label,
+          hostDh: msg.dh,
+          clientDh: this.#ephemeral.publicKey,
+        };
         const signature = await answerChallenge({
           signer: this.#options.signer,
-          transcript: {
-            version: msg.version,
-            host: msg.host,
-            client: this.#options.signer.clientId,
-            hostNonce: msg.nonce,
-            clientNonce: this.#nonce,
-            hostLabel: msg.label,
-            clientLabel: this.#options.label,
-          },
+          transcript,
           hostSignature: msg.signature,
           ...(this.#options.expectedHost === undefined
             ? {}
             : { expectedHost: this.#options.expectedHost }),
         });
+        // **After** `answerChallenge`, which verifies the host. Deriving first
+        // would be harmless in itself, but it would put the key's existence
+        // before the proof in the reader's eye — and this ordering is the
+        // security property the whole file is arranged around.
+        this.#channel = this.#ephemeral.agree(msg.dh, transcript, 'client');
         return [{ t: 'auth', signature }];
       } catch (e) {
         // A host that cannot prove itself is not a host to keep talking to —

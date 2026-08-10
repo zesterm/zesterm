@@ -1,16 +1,27 @@
 /**
  * The handshake crypto, pinned to the Rust.
  *
- * The GOLDEN vectors below were printed by `zest-mesh` itself (a throwaway
- * example calling `auth_transcript`, `pairing_code` and
- * `ClientIdentity::sign` with the fixed inputs shown) — so these tests
- * compare implementations, not this package with itself. If any of them
- * fails, one side changed a byte layout, and the Rust's own warning applies:
- * changing it unpairs every device in the field.
+ * The transcript and pairing-code vectors come from
+ * `crates/zest-proto/fixtures/handshake.json`, written by
+ * `cargo run -p zest-mesh --example handshake_dump` and gated by
+ * `cargo xtask check-fixtures` — so these tests compare implementations, not
+ * this package with itself, and the Rust cannot move them without the gate
+ * saying so. They used to be hex copied by hand out of a throwaway example,
+ * which is the same arrangement with nothing keeping it honest.
+ *
+ * The remaining hand-written vectors (a seed, its client id, a signature) are
+ * about Ed25519 alone and predate the fixture; they are unaffected by anything
+ * the handshake does.
+ *
+ * If any of these fails, one side changed a byte layout, and the Rust's own
+ * warning applies: changing it unpairs every device in the field.
  */
 
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import * as ed from '@noble/ed25519';
 import { bytesToHex, hexToBytes } from '@zesterm/proto';
@@ -35,34 +46,48 @@ import {
   webCryptoSigner,
 } from '../src/webcrypto.ts';
 
-/** Inputs fed to the Rust when the goldens were printed. */
+const HANDSHAKE = JSON.parse(
+  readFileSync(
+    join(fileURLToPath(new URL('.', import.meta.url)), '../../../../../crates/zest-proto/fixtures/handshake.json'),
+    'utf8',
+  ),
+) as {
+  protocol: number;
+  inputs: Record<string, string>;
+  transcript: string;
+  pairing_code: string;
+  client_signature: string;
+};
+
+/**
+ * The same inputs the Rust used, read from the fixture rather than retyped.
+ *
+ * Its `client_label` is astral on purpose: the label is length-prefixed in
+ * *bytes*, and an emoji is exactly where a JavaScript implementation's
+ * `.length` — UTF-16 code units — disagrees with the byte count.
+ */
 const GOLDEN_TRANSCRIPT: Transcript = {
-  version: 2,
-  host: '11'.repeat(32),
-  client: '22'.repeat(32),
-  hostNonce: '33'.repeat(32),
-  clientNonce: '44'.repeat(32),
-  hostLabel: 'andy-mac',
-  // Astral on purpose: the label is length-prefixed in *bytes*, and an emoji
-  // is where byte length and code-unit length disagree.
-  clientLabel: 'web \u{1F600}',
+  version: HANDSHAKE.protocol,
+  host: HANDSHAKE.inputs.host!,
+  client: HANDSHAKE.inputs.client!,
+  hostNonce: HANDSHAKE.inputs.host_nonce!,
+  clientNonce: HANDSHAKE.inputs.client_nonce!,
+  hostLabel: HANDSHAKE.inputs.host_label!,
+  clientLabel: HANDSHAKE.inputs.client_label!,
+  hostDh: HANDSHAKE.inputs.host_dh!,
+  clientDh: HANDSHAKE.inputs.client_dh!,
 };
 
 const GOLDEN = {
-  transcript:
-    '7a65737465726d2d617574682d76310002' +
-    '11'.repeat(32) +
-    '22'.repeat(32) +
-    '33'.repeat(32) +
-    '44'.repeat(32) +
-    '0008616e64792d6d6163' +
-    '000877656220f09f9880',
-  pairingCode: '896844',
-  seed: '5e'.repeat(32),
-  clientId: '8146640f02493af4fbc54fe33388e75dc2c937ae0b7727cc2b2afb1b75199a3e',
-  signature:
-    '3a26185999cac72b335411ef7a7c1bb51faab48ee56bb761425e7bcb5aca000d' +
-    '2f27474bd91ba9ed03262b31caa608561a3c7f2d4b1c3203de6c4448706fce04',
+  transcript: HANDSHAKE.transcript,
+  pairingCode: HANDSHAKE.pairing_code,
+  // From the fixture too, so the seed, the id it derives and the signature it
+  // produces are all the *same* triple the Rust used. They were three
+  // separately-copied constants, which is three things to update by hand and
+  // one of them will eventually be missed.
+  seed: HANDSHAKE.inputs.client_seed!,
+  clientId: HANDSHAKE.inputs.client!,
+  signature: HANDSHAKE.client_signature,
 };
 
 test('the transcript layout matches the Rust byte for byte', () => {

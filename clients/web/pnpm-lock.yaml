@@ -72,6 +72,12 @@ importers:
 
   packages/auth:
     dependencies:
+      '@noble/ciphers':
+        specifier: ^2.0.0
+        version: 2.3.0
+      '@noble/curves':
+        specifier: ^2.0.0
+        version: 2.3.0
       '@noble/ed25519':
         specifier: ^3.0.0
         version: 3.1.0
@@ -221,6 +227,14 @@ importers:
         version: 5.9.3
 
 packages:
+
+  '@noble/ciphers@2.3.0':
+    resolution: {integrity: sha512-Clu/xdfgVTf9o7ngLOURaxePwR0j8sjclKEtVij10/jGulwFsPWCvvRgG/XjUVf8Nei+jLG6uwyXzUTGY1DQrw==}
+    engines: {node: '>= 20.19.0'}
+
+  '@noble/curves@2.3.0':
+    resolution: {integrity: sha512-v7cY+4oWYPQszRj6ZFGzTVL7uP2TaLo1xMhWHzYC5wj0ZhOXQ5x+sBre8rF3hi8cAoi0bh1qXoovoOkdFtvqEg==}
+    engines: {node: '>= 20.19.0'}
 
   '@noble/ed25519@3.1.0':
     resolution: {integrity: sha512-pfcObRY3CtvwfaG9Mt5XqZdKmAQppl37tHUeuBhDUbiwJBCVY4/A4lbMvb1xKhMDx96AqAqZpMWuBX1HulhX4g==}
@@ -595,6 +609,12 @@ packages:
         optional: true
 
 snapshots:
+
+  '@noble/ciphers@2.3.0': {}
+
+  '@noble/curves@2.3.0':
+    dependencies:
+      '@noble/hashes': 2.3.0
 
   '@noble/ed25519@3.1.0': {}
 
