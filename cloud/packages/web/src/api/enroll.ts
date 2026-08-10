@@ -141,8 +141,22 @@ export async function claimEnrollCode(request: Request, env: Env, now: number): 
     return json({ error: 'bad_request', detail: 'deviceKind' }, 400);
   }
 
+  // One answer for a dead code and for a bad signature, and it is deliberate.
+  //
+  // Answering `invalid_code` here and `bad_signature` below told an
+  // unauthenticated caller whether a code was live, for free and without
+  // spending it. That matters more than it first looks: the signature proves
+  // only that the claimant holds the key it names, not that they were meant to
+  // have the code — so anyone holding a live code can enrol *their own*
+  // machine into the account that minted it. The code is the bearer token, and
+  // a free liveness oracle is a free search for one.
+  //
+  // A legitimate daemon loses nothing: both outcomes mean "this enrolment did
+  // not take, get a fresh code", which is the same next step either way.
+  const refused = () => json({ error: 'invalid_code' }, 400);
+
   const codeRow = await findLiveEnrollCode(env.DB, code, now);
-  if (codeRow === null) return json({ error: 'invalid_code' }, 400);
+  if (codeRow === null) return refused();
 
   // The role is taken from the code the *account* minted, never from the
   // request. It lives inside the signing prefix, so a signature made to enrol a
@@ -150,7 +164,8 @@ export async function claimEnrollCode(request: Request, env: Env, now: number): 
   // claimant name the role would hand that separation straight back.
   const role = codeRow.kind === 'host' ? 'host' : 'client';
   if (!(await verifyEnrollment({ role, code, key, label, signature }))) {
-    return json({ error: 'bad_signature' }, 401);
+    // Same answer as an unknown code -- see `refused` above.
+    return refused();
   }
 
   const id = hex(key);
@@ -172,7 +187,7 @@ export async function claimEnrollCode(request: Request, env: Env, now: number): 
   if ((await spendEnrollCode(env.DB, code, id, now)) === null) {
     // Live a moment ago, gone now: another claim won the race. Same answer as
     // an unknown code, because it is the same fact — this code is spent.
-    return json({ error: 'invalid_code' }, 400);
+    return refused();
   }
 
   const enrolled =

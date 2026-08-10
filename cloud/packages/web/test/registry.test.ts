@@ -234,17 +234,30 @@ test('a device revoke does not reach a host with the same id', async () => {
   db.close();
 });
 
-test('an id that is not 32 bytes of lowercase hex is a 404, not a round trip', async () => {
+test('an id that is not 32 bytes of lowercase hex is refused without a round trip', async () => {
+  // The 'not a round trip' half of the old name was never asserted, and the
+  // uppercase case would have 404'd anyway -- there is no such row -- so it
+  // never exercised the case-strictness it was named for.
+  //
+  // Counting queries is what distinguishes "refused on shape" from "looked up
+  // and not found", which both answer 404. It is also the property worth
+  // having: a malformed id must not cost a database round trip.
   const db = testDb();
   const cookie = await signedIn(db, 'user-a');
+
   for (const id of ['abc', MAC.toUpperCase(), `${MAC}ff`, "'; DROP TABLE hosts; --"]) {
+    let queries = 0;
+    const counting = { ...db, prepare: (sql: string) => (queries++, db.prepare(sql)) };
     const res = await routeApi(
       revoke(`/api/hosts/${encodeURIComponent(id)}/revoke`, cookie),
-      env(db),
+      env(counting),
       fetch,
       NOW,
     );
     assert.equal(res?.status, 404, id);
+    // The session lookup is one query; anything beyond it means the id reached
+    // the registry.
+    assert.ok(queries <= 1, `${id}: reached the database (${queries} queries)`);
   }
   db.close();
 });

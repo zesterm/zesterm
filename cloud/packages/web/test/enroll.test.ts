@@ -78,11 +78,28 @@ test('a minted code is short, unambiguous, and short-lived', async () => {
   const { code, expiresAt } = await mint(db, cookie, 'host');
 
   assert.equal(code.length, ENROLL_CODE_LENGTH);
-  for (const c of code) {
+
+  // The alphabet itself, deterministically.
+  //
+  // Asserting only that each *generated* character is safe catches a bad
+  // alphabet just 73% of the time -- eight draws from thirty-five characters
+  // miss any given five about a quarter of the time -- so a regression would
+  // land as an intermittent failure someone reruns away. The constant is what
+  // is actually being claimed, and checking it cannot flake.
+  for (const c of '0O1Il') {
     assert.ok(
-      ENROLL_CODE_ALPHABET.includes(c),
-      `${c} is not in the alphabet; the code is read aloud, so 0/O and 1/I/l must not appear`,
+      !ENROLL_CODE_ALPHABET.includes(c),
+      `${c} is confusable and must not be in the alphabet: the code is read off \
+       one screen and typed into another`,
     );
+  }
+
+  // And the generated code is drawn from it. Membership in the alphabet is a
+  // tautology on its own -- `newEnrollCode()` builds the code by indexing that
+  // same constant -- but paired with the check above it is the half that says
+  // the generator uses the alphabet it was given.
+  for (const c of code) {
+    assert.ok(ENROLL_CODE_ALPHABET.includes(c), `${c} is not from the alphabet`);
   }
   assert.equal(
     expiresAt,
@@ -164,11 +181,31 @@ test('a wrong signature does not burn the code', async () => {
     fetch,
     NOW,
   );
-  assert.equal(forged?.status, 401);
-  assert.deepEqual(await forged!.json(), { error: 'bad_signature' });
+  // The same answer an unknown code gets, deliberately: telling these apart
+  // let an unauthenticated caller confirm a code was live for free and without
+  // spending it, and the signature proves only key possession -- so a live
+  // code found that way enrols the finder's own machine.
+  assert.equal(forged?.status, 400);
+  assert.deepEqual(await forged!.json(), { error: 'invalid_code' });
 
   const still = rowOf(db, `SELECT used_at FROM enroll_codes WHERE code = ?`, code);
   assert.deepEqual(still, { used_at: null }, 'a rejected claim must leave the code usable');
+
+  // And a code that never existed answers identically, byte for byte -- which
+  // is what makes the pair useless as a liveness oracle.
+  const unknown = await routeApi(
+    daemonPost('/api/enroll/claim', {
+      code: 'ZZZZZZZZ',
+      hostId: real.id,
+      label: 'andy-mac',
+      sig: await signEnrollment({ key: real, code: 'ZZZZZZZZ', label: 'andy-mac' }),
+    }),
+    env(db),
+    fetch,
+    NOW,
+  );
+  assert.equal(unknown?.status, forged?.status, 'a dead code and a bad signature must not differ');
+  assert.deepEqual(await unknown!.json(), { error: 'invalid_code' });
 
   const good = await routeApi(
     daemonPost('/api/enroll/claim', {
@@ -325,7 +362,9 @@ test('a device code demands a client-role signature', async () => {
     fetch,
     NOW,
   );
-  assert.equal(wrongRole?.status, 401, 'a host proof must not enrol a client key');
+  // 400 rather than 401: a failed signature is answered exactly as an unknown
+  // code is, so the pair cannot be used to probe whether a code is live.
+  assert.equal(wrongRole?.status, 400, 'a host proof must not enrol a client key');
 
   const res = await routeApi(
     daemonPost('/api/enroll/claim', {
@@ -483,20 +522,36 @@ test('re-enrolling the same machine renames it and keeps the date it joined', as
 
 // --- what the claim refuses before it touches the database -----------------
 
-test('a malformed claim never reaches D1', async () => {
+test('a malformed claim is refused on shape, before the code is even looked up', async () => {
+  // Two earlier versions of this test could not fail, and the second is the
+  // more instructive.
+  //
+  // The first built every case from a code that was never minted, so all of
+  // them 400'd at the lookup regardless of the guards they named.
+  //
+  // The second used a *live* code — and still could not fail, because a
+  // malformed code that reaches the lookup is `invalid_code`, which is also
+  // 400. Asserting the status can never distinguish "rejected on shape" from
+  // "rejected on lookup" when both answer the same way.
+  //
+  // So it asserts the thing the name actually claims: that no query is built
+  // at all. That is also the property worth having — an unauthenticated
+  // endpoint must not let a malformed body cost a database round trip.
   const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  const { code } = await mint(db, cookie, 'host');
   const key = await testKey(7);
-  const ok = {
-    code: 'ABCD2345',
-    hostId: key.id,
-    label: 'andy-mac',
-    sig: 'a'.repeat(128),
-  };
+  const sig = await signEnrollment({ key, code, label: 'andy-mac' });
+  const ok = { code, hostId: key.id, label: 'andy-mac', sig };
+
   const cases: Array<[string, Record<string, unknown>]> = [
     ['a code outside the alphabet', { ...ok, code: 'ABCD0OI1' }],
     ['a code of the wrong length', { ...ok, code: 'ABCD' }],
     ['a key that is not 32 bytes of hex', { ...ok, hostId: `${key.id}ff` }],
-    ['an uppercase key -- a different primary key, not the same machine', { ...ok, hostId: key.id.toUpperCase() }],
+    [
+      'an uppercase key -- a different primary key, not the same machine',
+      { ...ok, hostId: key.id.toUpperCase() },
+    ],
     ['a signature that is not 64 bytes of hex', { ...ok, sig: 'a'.repeat(127) }],
     ['an empty label', { ...ok, label: '' }],
     ['a label carrying control characters', { ...ok, label: 'andy\u001b[2Jmac' }],
@@ -504,9 +559,17 @@ test('a malformed claim never reaches D1', async () => {
   ];
 
   for (const [why, body] of cases) {
-    const res = await routeApi(daemonPost('/api/enroll/claim', body), env(db), fetch, NOW);
+    let queries = 0;
+    const counting = { ...db, prepare: (sql: string) => (queries++, db.prepare(sql)) };
+    const res = await routeApi(daemonPost('/api/enroll/claim', body), env(counting), fetch, NOW);
     assert.equal(res?.status, 400, why);
+    assert.equal(queries, 0, `${why}: the body was rejected only after a query`);
   }
+
+  // The control, last: unmutated, the same body enrols — so a 400 above can
+  // only have come from the field that was changed, and the setup is sound.
+  const good = await routeApi(daemonPost('/api/enroll/claim', ok), env(db), fetch, NOW);
+  assert.equal(good?.status, 200, 'the unmutated body must actually enrol');
   db.close();
 });
 
