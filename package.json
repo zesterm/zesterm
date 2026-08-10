@@ -1,0 +1,10 @@
+{
+  "name": "zesterm-repo",
+  "private": true,
+  "description": "Repo tooling only. zesterm itself is a Rust workspace under crates/; the web client is its own pnpm workspace under clients/web. This file exists so the sigx-standard helpers are reachable as `pnpm wt` / `pnpm branch-protection`, exactly as in signalxjs/repo-template.",
+  "packageManager": "pnpm@10.28.2",
+  "scripts": {
+    "wt": "node scripts/worktree.mjs",
+    "branch-protection": "node scripts/apply-branch-protection.mjs"
+  }
+}
