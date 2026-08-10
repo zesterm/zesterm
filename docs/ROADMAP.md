@@ -324,13 +324,50 @@ theme screens. Colours, sizes and spacing come from there, not from this file.
       `!` on US and `!"#¤%&/()` on the Swedish layout this was built on; that
       fixes ⌘1 on a French Mac on the way past. `@ ^ _` are guarded so
       Ctrl+Shift+6 stays vim's `CTRL-^` on the layouts where it is one.
-- [ ] Borderless window, GPU-drawn titlebar and tab strip through the SDF rect
-      pipeline. `WM_NCCALCSIZE` returning 0 with `top` untouched removes the
-      caption while keeping frame, shadow and snap — **but when maximized you
-      must also inset `top`** by `SM_CYSIZEFRAME + SM_CXPADDEDBORDER` or the tab
-      bar hangs off the monitor. `HTMAXBUTTON` over the maximize rect is what
-      enables Snap Layouts, and it suppresses ordinary mouse messages over that
-      rect, so hover comes from `WM_NCMOUSEMOVE`.
+- [x] **Borderless window, GPU-drawn titlebar and caption buttons.** The window
+      wore *two* titlebars on Windows until now — the OS caption above our own
+      tab strip — because only the macOS branch hid one.
+      **Most of this bullet was wrong about the mechanism, and it is worth
+      correcting rather than deleting.** It called for a hand-rolled
+      `WM_NCCALCSIZE` and warned that a maximized window needs `top` inset by
+      `SM_CYSIZEFRAME + SM_CXPADDEDBORDER` or the tab bar hangs off the
+      monitor. winit 0.30 already does both jobs and does the second one
+      differently: its own `WM_NCCALCSIZE` handler clamps the maximized client
+      rect to the monitor's `rcWork` via `MonitorFromRect`, so no inset exists
+      to get wrong. Measured here: maximized client is exactly 1920×1032 on a
+      1920×1080 screen, taskbar intact. `with_decorations(false)` +
+      `with_undecorated_shadow(true)` is the whole of it, and
+      `with_system_backdrop`'s existence means Mica needs no unsafe code
+      either — though `window.backdrop` is written against
+      `DwmSetWindowAttribute` anyway, because winit discards the `HRESULT` and
+      a setting that does nothing on Windows 10 while saying nothing is what
+      ADR-003 forbids.
+      **What borderless actually costs is the resize edges.** winit has no
+      `WM_NCHITTEST` handler, so with the frame gone `DefWindowProc` never
+      answers `HTLEFT`/`HTTOP` and the edges silently stop working — while
+      maximize and snap keep going, which is what makes it easy to ship
+      broken. They come back out of the chrome's own layout pass as
+      `HitRegion::Resize`, pushed last so the window edge outranks even a modal
+      scrim, and turned into `Window::drag_resize_window`. The caption buttons
+      come out of that same pass, glyphs drawn from primitives rather than
+      `Segoe MDL2 Assets` — those are Private Use Area, which script-based
+      fallback structurally cannot reach.
+      Behind `window.custom_chrome`, which became a tri-state (`auto`/`on`/
+      `off`) rather than a bool: `schemars` derives the schema default from
+      `Window::default`, so a `cfg!(windows)` default would make the *schema*
+      platform-dependent and fail `check-schema` on two of three CI legs.
+      `auto` is one value everywhere and resolves per platform where it is
+      read.
+      Verified at the machine: one titlebar, close/maximize/minimize hover and
+      act, maximize swaps to the restore glyph, dragging the right edge moved
+      it 960→1080, and `--startup-probe` reports 26–30ms against a 100ms
+      budget.
+- [ ] Snap Layouts: `HTMAXBUTTON` over the maximize rect is what enables the
+      Win11 hover flyout, and it needs a real window-proc subclass —
+      `WM_NCHITTEST` is *sent*, not posted, so winit's `with_msg_hook` (which
+      hooks the message queue) cannot see it. It also suppresses ordinary mouse
+      messages over that rect, so hover has to come from `WM_NCMOUSEMOVE`.
+      Deliberately separate: the chrome above is usable without it.
 - [x] `ChromeHitMap` produced by the layout pass and consumed by **both** the
       renderer and the input path, so visuals and hit regions cannot drift.
       Landed with #23's chrome: `chrome::layout` is the pure pass issue #5

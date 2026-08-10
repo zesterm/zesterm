@@ -140,6 +140,23 @@
         }
       ]
     },
+    "CustomChrome": {
+      "description": "Who draws the titlebar.\n\nThree states rather than a bool, because the right answer differs by\nplatform and the schema may not: `schemars` derives the default from\n[`Window::default`], so a `cfg!(windows)` default would make\n`schemas/zesterm.schema.json` itself platform-dependent and\n`cargo xtask check-schema` would fail on two of the three CI legs. `Auto`\nis one value everywhere and resolves per platform where it is read.",
+      "oneOf": [
+        {
+          "enum": [
+            "on",
+            "off"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "auto",
+          "description": "The platform's own answer: borderless on Windows, where the OS caption\notherwise sits above our tab strip and the window wears two titlebars;\na transparent full-size titlebar on macOS, which keeps the traffic\nlights, native fullscreen and Sequoia tiling (WS-C2); system chrome on\nLinux until WS-D says otherwise.",
+          "type": "string"
+        }
+      ]
+    },
     "Motion": {
       "properties": {
         "enabled": {
@@ -414,12 +431,12 @@
           "x_zest_widget": "number"
         },
         "custom_chrome": {
-          "default": false,
+          "$ref": "#/$defs/CustomChrome",
+          "default": "auto",
           "description": "Draw our own titlebar and tab strip instead of the system's.",
-          "type": "boolean",
           "x_zest_group": "Window",
           "x_zest_restart": true,
-          "x_zest_widget": "toggle"
+          "x_zest_widget": "select"
         },
         "opacity": {
           "default": 1.0,
@@ -557,7 +574,7 @@
         "backdrop": "none",
         "chrome_opacity": 1.0,
         "columns": 100,
-        "custom_chrome": false,
+        "custom_chrome": "auto",
         "opacity": 1.0,
         "padding": 8,
         "rows": 30

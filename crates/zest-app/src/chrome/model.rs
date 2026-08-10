@@ -349,6 +349,33 @@ impl Default for AnimPhase {
 }
 
 /// Everything `layout` needs to draw the chrome once.
+/// What the window's own controls take out of the chrome, whoever draws them.
+///
+/// The asymmetry between the two platforms is the point, not an accident.
+/// macOS injects a *measurement*, because AppKit is the only authority on
+/// where the traffic lights are — they move with OS version and localization.
+/// Windows injects only a *flag*, because we draw the buttons ourselves and
+/// their width is a layout constant the layout pass already knows. One
+/// `Option` and one `bool`, rather than a third concept for each edge.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct WindowControls {
+    /// Physical px the *OS* draws over our chrome at the leading edge, and the
+    /// bar height it wants: `[width, height]`. The macOS traffic lights.
+    /// `None` in fullscreen, where they auto-hide, and on every other platform.
+    pub native_leading: Option<[f32; 2]>,
+    /// We draw minimise / maximise / close ourselves at the trailing edge.
+    pub drawn_caption: bool,
+    /// The maximise affordance shows the restore glyph instead.
+    pub maximized: bool,
+    /// The window can be resized by dragging its edges.
+    ///
+    /// False when maximized, in fullscreen, and on the native-frame path where
+    /// the OS owns them — a borderless window has no non-client area left for
+    /// `DefWindowProc` to answer `HTLEFT` from, so the edges have to come out
+    /// of our own hit map or they do not exist at all.
+    pub resizable_edges: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChromeModel {
     pub tabs: Vec<TabModel>,
@@ -361,10 +388,8 @@ pub struct ChromeModel {
     /// What the pointer is over, from last frame's hit map. Only used for
     /// hover fills, so one frame of lag is invisible.
     pub hover: Option<HitRegion>,
-    /// Size of the macOS traffic-light cluster in physical pixels, when the
-    /// buttons overlap the chrome. `None` in fullscreen (they auto-hide) and
-    /// on every other platform.
-    pub traffic_inset: Option<[f32; 2]>,
+    /// What the window's own controls take out of the chrome.
+    pub controls: WindowControls,
     pub focused: bool,
     /// The status bar; `None` only when the window is too small to spare it.
     pub status: Option<StatusModel>,

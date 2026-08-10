@@ -15,9 +15,11 @@ use zest_render_wgpu::{Chrome, Renderer, Scene, Viewport};
 use zest_input::{key, mouse, select, MouseState};
 use crate::block_actions;
 use crate::pipeline_cache;
-use crate::chrome::hit::HitRegion;
+use crate::chrome::hit::{CaptionButton, HitRegion};
 use crate::chrome::layout::ChromeLayout;
-use crate::chrome::model::{ChromeMetrics, ChromeModel, TabModel, TabOrigin, TabPresence};
+use crate::chrome::model::{
+    ChromeMetrics, ChromeModel, TabModel, TabOrigin, TabPresence, WindowControls,
+};
 use crate::chrome::theme::ChromeColors;
 use crate::chrome::Insets;
 use crate::keymap;
@@ -51,6 +53,12 @@ pub struct Config {
     pub padding: u32,
     /// The strip's own alpha, independent of the grid's (ADR-003).
     pub chrome_opacity: f32,
+    /// Draw our own titlebar: no OS caption, caption buttons and resize edges
+    /// out of the chrome's own layout pass. Resolved from the tri-state
+    /// setting here, so nothing downstream has to know what `Auto` means.
+    pub custom_chrome: bool,
+    /// What the compositor puts behind the window (Mica and friends).
+    pub backdrop: zest_config::settings::Backdrop,
     /// The tab strip's knobs, taken whole — the chrome reads all of them.
     pub tabs: zest_config::settings::Tabs,
     pub shell: Option<String>,
@@ -90,6 +98,16 @@ impl From<&zest_config::Settings> for Config {
             opacity: s.window.opacity.clamp(0.0, 1.0),
             padding: s.window.padding.min(64),
             chrome_opacity: s.window.chrome_opacity.clamp(0.0, 1.0),
+            // `Auto` means borderless on Windows and nowhere else. macOS
+            // already gets its integrated look from the transparent
+            // full-size titlebar, which is strictly better than borderless
+            // there (WS-C2); Linux has no implementation yet.
+            custom_chrome: match s.window.custom_chrome {
+                zest_config::settings::CustomChrome::On => true,
+                zest_config::settings::CustomChrome::Off => false,
+                zest_config::settings::CustomChrome::Auto => cfg!(windows),
+            },
+            backdrop: s.window.backdrop,
             tabs: s.tabs.clone(),
             shell: (!s.shell.command.is_empty()).then(|| s.shell.command.clone()),
             cursor_blink: s.cursor.blink,
@@ -351,6 +369,9 @@ pub struct App {
     chrome_dirty: bool,
     /// What the pointer was last over, for hover fills.
     chrome_hover: Option<HitRegion>,
+    /// The cursor currently set on the window, so a mouse-move that does not
+    /// change it costs no Win32 call.
+    cursor: winit::window::CursorIcon,
     /// Tab strip scroll offset, physical pixels; layout clamps it.
     strip_scroll: f32,
     /// Pointer position in physical pixels, for chrome hit tests.
@@ -457,6 +478,7 @@ impl App {
             chrome_layout: None,
             chrome_dirty: true,
             chrome_hover: None,
+            cursor: winit::window::CursorIcon::Default,
             strip_scroll: 0.0,
             pointer_pos: (0.0, 0.0),
             last_drag_click: None,
@@ -1737,8 +1759,13 @@ impl App {
     }
 
     /// Whether the strip is drawn at all.
+    ///
+    /// `custom_chrome` forces it, and that is load-bearing rather than a
+    /// preference: with `show_single_tab` off and one tab open, a borderless
+    /// window would have no titlebar, no caption buttons and nothing to drag —
+    /// an undecorated rectangle with no way to move, maximize or close it.
     fn strip_shown(&self) -> bool {
-        self.config.tabs.show_single_tab || self.tabs.len() > 1
+        self.config.custom_chrome || self.config.tabs.show_single_tab || self.tabs.len() > 1
     }
 
     fn mark_chrome_dirty(&mut self) {
@@ -1890,11 +1917,24 @@ impl App {
         // In fullscreen the traffic lights auto-hide, so the strip reclaims
         // their reserve; everywhere else the answer comes from AppKit fresh,
         // because the inset is not a constant.
-        let traffic = if window.fullscreen().is_some() {
-            None
-        } else {
-            platform::traffic_light_inset(window)
-                .map(|(x, y)| [x as f32 * scale, y as f32 * scale])
+        //
+        // Fullscreen also takes the caption buttons and the resize edges: the
+        // OS owns the frame there, and drawing our own close button over a
+        // fullscreen window would be offering to do something the window is
+        // not currently able to do.
+        let fullscreen = window.fullscreen().is_some();
+        let controls = WindowControls {
+            native_leading: (!fullscreen)
+                .then(|| platform::native_control_inset(window))
+                .flatten()
+                .map(|(x, y)| [x as f32 * scale, y as f32 * scale]),
+            drawn_caption: self.config.custom_chrome && !fullscreen,
+            maximized: window.is_maximized(),
+            // A maximized window that resized from its edge would un-maximize
+            // under the pointer, which is not what the drag meant.
+            resizable_edges: self.config.custom_chrome
+                && !fullscreen
+                && !window.is_maximized(),
         };
 
         let local_label = fleet_hosts
@@ -2027,7 +2067,7 @@ impl App {
             position: self.config.tabs.position,
             strip_scroll: self.strip_scroll,
             hover: self.chrome_hover,
-            traffic_inset: traffic,
+            controls,
             focused: self.focused,
             status,
             sidebar,
@@ -2233,8 +2273,37 @@ impl App {
                     }
                 }
             }
+            (HitRegion::CaptionButton(which), MouseButton::Left) => {
+                if let Some(w) = self.window.as_ref().map(Arc::clone) {
+                    match which {
+                        CaptionButton::Minimize => w.set_minimized(true),
+                        CaptionButton::Maximize => w.set_maximized(!w.is_maximized()),
+                        // Through the same path the window manager's own close
+                        // takes. Anything else and the drawn button quietly
+                        // skips `persist_tabs`, so every launch would forget
+                        // the tab set — a bug that only appears next time.
+                        CaptionButton::Close => self.request_close(el),
+                    }
+                }
+            }
+            (HitRegion::Resize(edge), MouseButton::Left) => {
+                if let Some(w) = self.window.as_ref() {
+                    if let Err(e) = w.drag_resize_window(edge.into()) {
+                        tracing::debug!(error = %e, "window resize unavailable");
+                    }
+                }
+            }
             _ => {}
         }
+    }
+
+    /// End the session set and exit, exactly as `CloseRequested` does.
+    fn request_close(&mut self, el: &ActiveEventLoop) {
+        // Remember the set first: dropping is the detach, and what was open is
+        // what the next launch reopens.
+        self.persist_tabs();
+        self.tabs.clear();
+        el.exit();
     }
 
     /// Remember what this window is showing, so the next launch can pick it
@@ -3575,6 +3644,10 @@ impl App {
                 if let (Some(gpu), Some(w)) = (self.gpu.as_ref(), self.window.as_ref()) {
                     let size = w.inner_size();
                     let _ = gpu;
+                    // The backdrop is a window attribute, not a surface one,
+                    // but it shares this class because both change what is
+                    // behind the pixels.
+                    platform::set_backdrop(w, self.config.backdrop);
                     self.resize_surface(size.width, size.height);
                 }
             }
@@ -3736,6 +3809,28 @@ impl ApplicationHandler<Wakeup> for App {
                 .with_title_hidden(true)
                 .with_fullsize_content_view(true)
         };
+        // Borderless, so the OS caption stops sitting *above* our own tab
+        // strip — two titlebars was the state of this window until now.
+        //
+        // Not a hand-rolled `WM_NCCALCSIZE`, which is what WS-A assumed this
+        // would take: winit already returns 0 with the client area covering
+        // the frame when decorations are off, and clamps the maximized rect to
+        // the monitor work area, which is the thing that keeps the strip on
+        // screen. `undecorated_shadow` is what keeps the drop shadow, the snap
+        // animation and the rounded corners; it costs one black pixel row
+        // along the top, per winit's own comment, and that reads as the
+        // window's top border against every theme in the gallery.
+        //
+        // What it does cost: winit has no `WM_NCHITTEST` handler, so the
+        // resize edges vanish with the frame. They come back out of the chrome
+        // layout pass as `HitRegion::Resize`.
+        #[cfg(windows)]
+        let attrs = if self.config.custom_chrome {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attrs.with_decorations(false).with_undecorated_shadow(true)
+        } else {
+            attrs
+        };
         let window = Arc::new(el.create_window(attrs).expect("create window"));
 
         // Show it NOW, painted by the OS in the theme colour.
@@ -3748,6 +3843,12 @@ impl ApplicationHandler<Wakeup> for App {
         // so the handover is invisible.
         let bg = self.palette.background;
         platform::set_background_color(&window, bg.r, bg.g, bg.b);
+        // Before the window is shown, so a backdrop never appears as a second
+        // frame after an opaque one. Note the class brush above paints opaque
+        // until the first GPU frame lands, so Mica is hidden for that ~700ms
+        // and then appears — the same handover the brush exists to make
+        // invisible, and not a bug however much it looks like one.
+        platform::set_backdrop(&window, self.config.backdrop);
         window.set_visible(true);
         let first_paint = t0.elapsed();
 
@@ -4082,13 +4183,7 @@ impl ApplicationHandler<Wakeup> for App {
             // Dropping the session is what sends the Detach: a destructor
             // covers every way this process can end, including the ones no
             // `CloseRequested` arm would see.
-            WindowEvent::CloseRequested => {
-                // Remember the set first: dropping is the detach, and what
-                // was open is what the next launch reopens.
-                self.persist_tabs();
-                self.tabs.clear();
-                el.exit();
-            }
+            WindowEvent::CloseRequested => self.request_close(el),
 
             WindowEvent::Resized(size) => self.resize_surface(size.width, size.height),
 
@@ -4578,6 +4673,21 @@ impl ApplicationHandler<Wakeup> for App {
                     if over != self.chrome_hover {
                         self.chrome_hover = over;
                         self.mark_chrome_dirty();
+                    }
+                    // The resize edges are the one hit region with no visible
+                    // affordance, so the cursor is the whole of it: without
+                    // this the window is resizable and looks like it is not.
+                    // Set only on change — this runs per mouse-move, and a
+                    // Win32 call per move is not free.
+                    let want = match over {
+                        Some(HitRegion::Resize(edge)) => edge.into(),
+                        _ => winit::window::CursorIcon::Default,
+                    };
+                    if want != self.cursor {
+                        self.cursor = want;
+                        if let Some(w) = self.window.as_ref() {
+                            w.set_cursor(want);
+                        }
                     }
                     if over.is_some() {
                         return;

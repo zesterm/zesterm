@@ -13,7 +13,7 @@
 use zest_config::settings::TabsPosition;
 use zest_render_wgpu::{LinearRgba, RectInstance};
 
-use super::hit::{ChromeHitMap, HitRegion};
+use super::hit::{CaptionButton, ChromeHitMap, HitRegion, ResizeEdge};
 use super::model::{ChromeMetrics, ChromeModel, TabModel, TabOrigin, TabPresence};
 use super::theme::ChromeColors;
 
@@ -93,6 +93,18 @@ const HAIRLINE: f32 = 1.0;
 const EDGE_PAD: f32 = 8.0;
 const BAR_PAD: f32 = 12.0;
 const TRAFFIC_PAD: f32 = 14.0;
+/// Caption button width. Windows' own metric, so the Snap Layouts flyout —
+/// which points at whatever rect answers `HTMAXBUTTON` — lands where the user
+/// expects rather than beside it.
+const CAPTION_W: f32 = 46.0;
+/// The minimise bar and the maximise square, both this wide.
+const CAPTION_GLYPH: f32 = 10.0;
+/// Type size for the close `×`.
+const CAPTION_X: f32 = 15.0;
+/// How wide a band along the window edge starts a resize. Windows' own frame
+/// is ~8 physical px at 100%; 5 logical scales with DPI and stays inside the
+/// default `window.padding` of 8, so it never eats a column of grid text.
+const RESIZE_BAND: f32 = 5.0;
 const ROW_HPAD: f32 = 8.0;
 // Sidebar (design screen 2).
 const SIDEBAR_HEADER: f32 = 44.0;
@@ -205,7 +217,132 @@ pub fn layout(
     if let Some(settings) = &model.settings {
         settings_overlay(settings, colors, m, measure, &mut out);
     }
+    // Dead last, after the modals, and that ordering is the feature: lookups
+    // walk the map backwards, so the window's own edge outranks a palette
+    // scrim. A window you cannot resize while an overlay is open would be a
+    // strange thing to ship, and it is exactly what pushing these earlier
+    // would produce.
+    resize_edges(model, m, &mut out);
     out
+}
+
+/// The window's resize bands, when we own the frame.
+///
+/// A borderless window has no non-client area left, so `DefWindowProc` never
+/// answers `HTLEFT`/`HTTOP` and the edges simply stop working — silently,
+/// while maximise and snap keep going, which is what makes it easy to ship
+/// broken. These bands are the replacement; the app turns each into
+/// `Window::drag_resize_window`.
+fn resize_edges(model: &ChromeModel, m: &ChromeMetrics, out: &mut ChromeLayout) {
+    if !model.controls.resizable_edges {
+        return;
+    }
+    let b = RESIZE_BAND * m.scale;
+    let (w, h) = (m.width, m.height);
+    // Edges first, then corners, so a corner wins where they overlap — a
+    // 5px band means the corner is otherwise unhittable in the 5×5 square
+    // where both apply, which is precisely where people aim for it.
+    for (rect, edge) in [
+        ([0.0, 0.0, w, b], ResizeEdge::N),
+        ([0.0, h - b, w, b], ResizeEdge::S),
+        ([0.0, 0.0, b, h], ResizeEdge::W),
+        ([w - b, 0.0, b, h], ResizeEdge::E),
+        ([0.0, 0.0, b * 2.0, b * 2.0], ResizeEdge::Nw),
+        ([w - b * 2.0, 0.0, b * 2.0, b * 2.0], ResizeEdge::Ne),
+        ([0.0, h - b * 2.0, b * 2.0, b * 2.0], ResizeEdge::Sw),
+        ([w - b * 2.0, h - b * 2.0, b * 2.0, b * 2.0], ResizeEdge::Se),
+    ] {
+        out.hit.push(rect, HitRegion::Resize(edge));
+    }
+}
+
+/// Lay the caption cluster into the right edge of `bar` (`[x, y, w, h]`),
+/// returning the x that the rest of the bar may use.
+///
+/// Called from both the horizontal strip and the sidebar's slim bar, so Close
+/// cannot end up in two different places depending on the tab position.
+fn caption_cluster(
+    out: &mut ChromeLayout,
+    colors: &ChromeColors,
+    model: &ChromeModel,
+    bar: [f32; 4],
+    s: f32,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+) -> f32 {
+    let right = bar[0] + bar[2];
+    if !model.controls.drawn_caption {
+        return right;
+    }
+    let w = CAPTION_W * s;
+    let (y, h) = (bar[1], bar[3]);
+    let clip = [bar[0], y, bar[2], h];
+    // Right to left: close is outermost, which is where every Windows window
+    // has put it and therefore where the pointer is already going.
+    for (i, which) in
+        [CaptionButton::Close, CaptionButton::Maximize, CaptionButton::Minimize].iter().enumerate()
+    {
+        let x = right - w * (i as f32 + 1.0);
+        let rect = [x, y, w, h];
+        let hovered = model.hover == Some(HitRegion::CaptionButton(*which));
+        if hovered {
+            // Red for close is the Windows convention, and worth following
+            // exactly: it is the one button whose mis-click costs a session.
+            let fill =
+                if *which == CaptionButton::Close { colors.danger } else { colors.tab_hover_bg };
+            out.rects.push(RectInstance::filled(rect, fill, clip));
+        }
+        let fg = if hovered && *which == CaptionButton::Close {
+            colors.text_active
+        } else {
+            colors.text_faint
+        };
+        let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+        let g = CAPTION_GLYPH * s;
+        // Glyphs from primitives rather than from `Segoe MDL2 Assets`: those
+        // codepoints are Private Use Area, and PUA structurally cannot be
+        // reached by script-based font fallback — the trap the Nerd Font work
+        // already paid for once. A hairline square needs no font at all.
+        let outline = |r: [f32; 4]| RectInstance {
+            border: fg,
+            border_width: HAIRLINE * s,
+            ..RectInstance::filled(r, LinearRgba::TRANSPARENT, clip)
+        };
+        match which {
+            CaptionButton::Minimize => {
+                out.rects.push(RectInstance::filled(
+                    [cx - g / 2.0, cy.round(), g, HAIRLINE * s],
+                    fg,
+                    clip,
+                ));
+            }
+            CaptionButton::Maximize => {
+                let square = |o: f32| [cx - g / 2.0 + o, cy - g / 2.0 - o, g, g];
+                if model.controls.maximized {
+                    // Restore is two offset outlines, the way Windows draws it.
+                    out.rects.push(outline(square(2.0 * s)));
+                }
+                out.rects.push(outline(square(0.0)));
+            }
+            CaptionButton::Close => {
+                // The same `×` the tab close button uses: Latin-1, present in
+                // every face we could plausibly be shaping with.
+                let px = CAPTION_X * s;
+                let glyph_w = measure("\u{d7}", px, false, 0.0);
+                out.texts.push(TextRun {
+                    text: "\u{d7}".into(),
+                    pos: [cx - glyph_w / 2.0, baseline_in(y, h, px)],
+                    max_width: w,
+                    color: fg,
+                    clip,
+                    px,
+                    bold: false,
+                    tracking: 0.0,
+                });
+            }
+        }
+        out.hit.push(rect, HitRegion::CaptionButton(*which));
+    }
+    right - w * 3.0
 }
 
 /// The split tab's frames and headers (design screen 5): focused pane gets
@@ -1377,14 +1514,19 @@ fn horizontal(
     // the reserve keeps tabs from being drawn *under* them, and behaves as
     // window drag like the rest of the empty strip. 14px of air after the
     // cluster, per the design.
-    let reserve = model.traffic_inset.map_or(BAR_PAD * s, |t| t[0] + TRAFFIC_PAD * s);
+    let reserve = model.controls.native_leading.map_or(BAR_PAD * s, |t| t[0] + TRAFFIC_PAD * s);
     out.hit.push([0.0, 0.0, reserve, sh], HitRegion::Drag);
 
     // Right side first: the pills have intrinsic widths, the tabs take what
     // remains. Two pills — "(chord) Vertical" and the palette's "(chord)" —
     // 26px tall, hairline border that turns accent under the pointer.
+    //
+    // The caption cluster, when we draw one, is further right still and the
+    // pills start from where it ends. Both are right-aligned, so laying them
+    // out independently is how they would come to overlap.
     let pill_y = (sh - PILL_H * s) / 2.0;
-    let mut right = m.width - BAR_PAD * s;
+    let caption_left = caption_cluster(&mut out, colors, model, [0.0, 0.0, m.width, sh], s, measure);
+    let mut right = caption_left - BAR_PAD * s;
     {
         let w = measure(&model.palette_chord, UI_CHORD * s, false, 0.0) + 2.0 * PILL_PAD * s;
         let rect = [right - w, pill_y, w, PILL_H * s];
@@ -1783,7 +1925,7 @@ fn vertical(
     // The header band exists so the traffic lights have chrome under them
     // and the window keeps a place to grab; the sidebar being wider than the
     // button cluster is what lets the grid run full height beside it.
-    let header_h = model.traffic_inset.map_or(SIDEBAR_HEADER * s, |t| t[1].max(SIDEBAR_HEADER * s));
+    let header_h = model.controls.native_leading.map_or(SIDEBAR_HEADER * s, |t| t[1].max(SIDEBAR_HEADER * s));
     out.hit.push([0.0, 0.0, sw, header_h], HitRegion::Drag);
 
     // The search affordance: looks like an input, acts like a button.
@@ -2120,11 +2262,16 @@ fn vertical(
             });
         }
 
+        // The caption cluster lives in this bar too, at the same size and in
+        // the same order as the horizontal strip's — one helper, so the two
+        // tab positions cannot put Close in two different places.
+        let caption_left = caption_cluster(&mut out, colors, model, bar, s, measure);
+
         // The way back: same pill, same region, other word.
         let label = "Horizontal tabs";
         let label_w = measure(label, UI_SMALL * s, false, 0.0);
         let w = label_w + 2.0 * PILL_PAD * s;
-        let rect = [m.width - BAR_PAD * s - w, (bar[3] - PILL_H * s) / 2.0, w, PILL_H * s];
+        let rect = [caption_left - BAR_PAD * s - w, (bar[3] - PILL_H * s) / 2.0, w, PILL_H * s];
         let hovered = model.hover == Some(HitRegion::LayoutPill);
         pill_button(&mut out.rects, colors, rect, PILL_RADIUS * s, hovered, no_clip);
         out.hit.push(rect, HitRegion::LayoutPill);
@@ -2154,6 +2301,7 @@ fn text_baseline(m: &ChromeMetrics, y: f32, h: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::model::WindowControls;
     use super::*;
     use zest_proto::{HostId, SessionAddr, SessionId};
 
@@ -2207,7 +2355,7 @@ mod tests {
             position,
             strip_scroll: 0.0,
             hover: None,
-            traffic_inset: None,
+            controls: WindowControls::default(),
             focused: true,
             status: Some(super::super::model::StatusModel {
                 cwd: "~/dev/zesterm".into(),
@@ -2329,13 +2477,13 @@ mod tests {
     }
 
     #[test]
-    fn the_traffic_light_reserve_is_drag_not_tabs() {
+    fn the_leading_control_reserve_is_drag_not_tabs() {
         // Tabs drawn under the native buttons would be unclickable pixels;
         // the reserve keeps them out and stays a drag handle.
         let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
         let m = metrics(1200.0, 800.0, 2.0);
         let mut mo = model(tabs, TabsPosition::Top);
-        mo.traffic_inset = Some([140.0, 56.0]);
+        mo.controls.native_leading = Some([140.0, 56.0]);
         let l = layout(&mo, &colors(), &m, &mut measure);
         for x in [5.0, 70.0, 139.0] {
             assert_eq!(
@@ -2346,12 +2494,183 @@ mod tests {
         }
     }
 
+    /// A model with the borderless chrome on, for the caption/resize tests.
+    fn borderless(tabs: Vec<TabModel>, position: TabsPosition) -> ChromeModel {
+        let mut mo = model(tabs, position);
+        mo.controls = WindowControls {
+            native_leading: None,
+            drawn_caption: true,
+            maximized: false,
+            resizable_edges: true,
+        };
+        mo
+    }
+
+    /// Sweep the bar at `y` and report each caption button and where it first
+    /// answers. Found by sweeping rather than by index, because the point of
+    /// the hit map is that a drawn button answers where it was drawn.
+    ///
+    /// `y` must be below the resize band: the window's top edge outranks
+    /// everything, caption buttons included, which is what Windows' own frame
+    /// does too.
+    fn caption_rects(l: &ChromeLayout, m: &ChromeMetrics, y: f32) -> Vec<(f32, CaptionButton)> {
+        let mut found: Vec<(f32, CaptionButton)> = Vec::new();
+        let mut x = 0.0;
+        while x < m.width {
+            if let Some(HitRegion::CaptionButton(b)) = l.hit.hit(x, y) {
+                if !found.iter().any(|(_, seen)| *seen == b) {
+                    found.push((x, b));
+                }
+            }
+            x += 1.0;
+        }
+        found
+    }
+
+    #[test]
+    fn the_caption_cluster_answers_at_every_button_in_both_layouts() {
+        // The property the whole hit-map design exists for, applied to the
+        // three buttons that close and resize the window.
+        for position in [TabsPosition::Top, TabsPosition::Left] {
+            let m = metrics(1200.0, 800.0, 2.0);
+            let mo = borderless(vec![tab(1, TabOrigin::Local, TabPresence::Online)], position);
+            let l = layout(&mo, &colors(), &m, &mut measure);
+            // Below the resize band, which owns the topmost pixels.
+            let found = caption_rects(&l, &m, 30.0);
+            assert_eq!(
+                found.len(),
+                3,
+                "{position:?}: all three caption buttons must be hittable, found {found:?}"
+            );
+            let order: Vec<CaptionButton> = found.iter().map(|(_, b)| *b).collect();
+            assert_eq!(
+                order,
+                vec![CaptionButton::Minimize, CaptionButton::Maximize, CaptionButton::Close],
+                "{position:?}: close is rightmost, as it is in every Windows window"
+            );
+        }
+    }
+
+    #[test]
+    fn the_caption_cluster_pushes_the_pills_out_of_its_way() {
+        // Both are right-aligned, so laying them out independently is exactly
+        // how they would come to overlap — and the overlap would be a pill
+        // drawn under the close button, i.e. a click that closes the window
+        // when the user meant to open the palette.
+        let m = metrics(1200.0, 800.0, 2.0);
+        let mo = borderless(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+        let l = layout(&mo, &colors(), &m, &mut measure);
+        let leftmost_caption = caption_rects(&l, &m, 30.0)
+            .first()
+            .map(|(x, _)| *x)
+            .expect("the cluster is drawn");
+        let mut x = leftmost_caption;
+        while x < m.width {
+            assert!(
+                !matches!(
+                    l.hit.hit(x, 30.0),
+                    Some(HitRegion::PalettePill | HitRegion::LayoutPill)
+                ),
+                "a pill reaches into the caption cluster at x={x}"
+            );
+            x += 1.0;
+        }
+    }
+
+    #[test]
+    fn the_window_edge_outranks_everything_drawn_over_it() {
+        // Including a modal scrim: a window must stay resizable while the
+        // palette is open, and the hit map's last-pushed-wins rule is the
+        // only thing that makes that true.
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut mo =
+            borderless(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+        mo.palette = Some(super::super::model::PaletteModel {
+            filter: String::new(),
+            rows: Vec::new(),
+            selected: 0,
+            scroll: 0.0,
+            ensure_visible: false,
+        });
+        let l = layout(&mo, &colors(), &m, &mut measure);
+        assert_eq!(l.hit.hit(1.0, 1.0), Some(HitRegion::Resize(ResizeEdge::Nw)));
+        assert_eq!(l.hit.hit(m.width - 1.0, m.height / 2.0), Some(HitRegion::Resize(ResizeEdge::E)));
+        assert_eq!(l.hit.hit(m.width / 2.0, m.height - 1.0), Some(HitRegion::Resize(ResizeEdge::S)));
+    }
+
+    #[test]
+    fn the_top_edge_outranks_the_caption_buttons_it_crosses() {
+        // Not an accident to be fixed: Windows' own frame reserves its top
+        // border for resizing even where it crosses the caption buttons, and
+        // a borderless window that did not would be one you cannot resize
+        // from the top-right corner at all. The buttons stay comfortably
+        // clickable — the band is 5 logical px of a 44px bar.
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mo = borderless(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+        let l = layout(&mo, &colors(), &m, &mut measure);
+        let close_x = caption_rects(&l, &m, 30.0)
+            .into_iter()
+            .find(|(_, b)| *b == CaptionButton::Close)
+            .map(|(x, _)| x)
+            .expect("close is drawn");
+        assert!(
+            matches!(l.hit.hit(close_x + 2.0, 1.0), Some(HitRegion::Resize(_))),
+            "the top band resizes even over the close button"
+        );
+        assert_eq!(
+            l.hit.hit(close_x + 2.0, 30.0),
+            Some(HitRegion::CaptionButton(CaptionButton::Close)),
+            "…and two thirds of the way down it is the button again"
+        );
+    }
+
+    #[test]
+    fn corners_beat_edges() {
+        // The corner band is where people actually aim to resize both axes;
+        // an edge winning there makes the diagonal drag unreachable.
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mo = borderless(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+        let l = layout(&mo, &colors(), &m, &mut measure);
+        assert_eq!(l.hit.hit(7.0, 7.0), Some(HitRegion::Resize(ResizeEdge::Nw)));
+        assert_eq!(l.hit.hit(m.width - 7.0, m.height - 7.0), Some(HitRegion::Resize(ResizeEdge::Se)));
+    }
+
+    #[test]
+    fn a_maximized_window_has_no_resize_edges() {
+        // Resizing from the edge of a maximized window would un-maximize it
+        // under the pointer, which is not what the drag meant.
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut mo =
+            borderless(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+        mo.controls.resizable_edges = false;
+        mo.controls.maximized = true;
+        let l = layout(&mo, &colors(), &m, &mut measure);
+        assert!(
+            !matches!(l.hit.hit(1.0, 1.0), Some(HitRegion::Resize(_))),
+            "a maximized window offers no edge to drag"
+        );
+    }
+
+    #[test]
+    fn the_native_frame_draws_no_caption_of_its_own() {
+        // The default everywhere but Windows, and what `custom_chrome = off`
+        // must still produce: the OS owns the buttons and the edges.
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mo = model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+        let l = layout(&mo, &colors(), &m, &mut measure);
+        assert!(caption_rects(&l, &m, 30.0).is_empty(), "no caption buttons without custom chrome");
+        assert!(
+            !matches!(l.hit.hit(1.0, 1.0), Some(HitRegion::Resize(_))),
+            "and no resize bands: DefWindowProc still answers for the frame"
+        );
+    }
+
     #[test]
     fn the_sidebar_header_drags_and_rows_start_below_it() {
         let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
         let m = metrics(1200.0, 800.0, 1.0);
         let mut mo = model(tabs, TabsPosition::Left);
-        mo.traffic_inset = Some([70.0, 40.0]);
+        mo.controls.native_leading = Some([70.0, 40.0]);
         let l = layout(&mo, &colors(), &m, &mut measure);
         assert_eq!(l.hit.hit(30.0, 20.0), Some(HitRegion::Drag), "header band drags");
         // Below the header: the search affordance, then the first session

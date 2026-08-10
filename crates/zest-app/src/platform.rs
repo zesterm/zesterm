@@ -49,6 +49,69 @@ pub fn set_background_color(window: &winit::window::Window, r: u8, g: u8, b: u8)
     }
 }
 
+/// Ask the compositor for a backdrop material behind the window.
+///
+/// Written against `DwmSetWindowAttribute` rather than winit's
+/// `set_system_backdrop`, which wraps the same call: winit discards the
+/// `HRESULT`, and `DWMWA_SYSTEMBACKDROP_TYPE` is Windows 11 22H2+ — so on
+/// Windows 10 the setting would do nothing and say nothing, which is the
+/// failure mode ADR-003 exists to forbid. Same constants as
+/// `zest-render-wgpu`'s `alpha_probe`, which is where they were first proven.
+///
+/// **Mica is drawn *behind* the window**, so it is visible only through
+/// pixels we leave transparent — that means `window.opacity < 1.0` *and* an
+/// adapter that reports `PreMultiplied` composite alpha, which per ADR-003 is
+/// Vulkan and not DX12. Setting a backdrop on an opaque window is legal and
+/// invisible, and that is not this function's business to refuse.
+#[cfg(windows)]
+pub fn set_backdrop(window: &winit::window::Window, backdrop: zest_config::settings::Backdrop) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
+    use zest_config::settings::Backdrop;
+
+    const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
+    // `None` maps to DWMSBT_NONE and *not* to DWMSBT_AUTO (0): auto lets DWM
+    // pick, which would make "none" mean "whatever it feels like".
+    let value: i32 = match backdrop {
+        Backdrop::None => 1,
+        Backdrop::Mica => 2,
+        Backdrop::Acrylic => 3,
+        Backdrop::MicaAlt => 4,
+        // A macOS material. Nothing to ask DWM for, and warning about it on
+        // every launch of a config shared between two machines would be noise.
+        Backdrop::Vibrancy => return,
+    };
+
+    let Ok(handle) = window.window_handle() else { return };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else { return };
+    let hwnd = win32.hwnd.get() as *mut core::ffi::c_void;
+
+    // SAFETY: a live window we own, and a 4-byte value whose length we pass.
+    let hr = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            std::ptr::addr_of!(value).cast(),
+            size_of::<i32>() as u32,
+        )
+    };
+    if hr != 0 {
+        tracing::warn!(
+            hr = format!("0x{hr:08x}"),
+            "this Windows build has no system backdrop (needs 11 22H2+); window.backdrop ignored"
+        );
+    }
+}
+
+#[cfg(not(windows))]
+pub fn set_backdrop(_window: &winit::window::Window, backdrop: zest_config::settings::Backdrop) {
+    // macOS vibrancy is WS-C2 and Linux is WS-D; saying so beats doing
+    // nothing quietly.
+    if backdrop != zest_config::settings::Backdrop::None {
+        tracing::warn!(?backdrop, "window.backdrop is not implemented on this platform yet");
+    }
+}
+
 #[cfg(not(windows))]
 pub fn set_background_color(_window: &winit::window::Window, _r: u8, _g: u8, _b: u8) {
     // X11 and Wayland have no equivalent that is worth the complexity: the
@@ -65,7 +128,7 @@ pub fn set_background_color(_window: &winit::window::Window, _r: u8, _g: u8, _b:
 /// where the buttons auto-hide (the caller checks fullscreen; here `None`
 /// just means the question could not be answered).
 #[cfg(target_os = "macos")]
-pub fn traffic_light_inset(window: &winit::window::Window) -> Option<(f64, f64)> {
+pub fn native_control_inset(window: &winit::window::Window) -> Option<(f64, f64)> {
     use objc2_app_kit::{NSView, NSWindow, NSWindowButton};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -91,6 +154,6 @@ pub fn traffic_light_inset(window: &winit::window::Window) -> Option<(f64, f64)>
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn traffic_light_inset(_window: &winit::window::Window) -> Option<(f64, f64)> {
+pub fn native_control_inset(_window: &winit::window::Window) -> Option<(f64, f64)> {
     None
 }

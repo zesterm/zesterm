@@ -59,9 +59,7 @@ pub const NOT_YET_WIRED: &[&str] = &[
     "shell.env",
     "typography.features",
     "typography.ligatures",
-    "window.backdrop",
     "window.columns",
-    "window.custom_chrome",
     "window.rows",
 ];
 

@@ -7,6 +7,51 @@
 
 use zest_proto::SessionAddr;
 
+/// One of the window's own caption buttons, when the chrome draws them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptionButton {
+    Minimize,
+    /// Maximise *or* restore — which one is a matter of `WindowControls`, not
+    /// of a separate region, because it is one button in one place.
+    Maximize,
+    Close,
+}
+
+/// Which edge or corner a drag resizes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeEdge {
+    N,
+    S,
+    E,
+    W,
+    Ne,
+    Nw,
+    Se,
+    Sw,
+}
+
+impl From<ResizeEdge> for winit::window::ResizeDirection {
+    fn from(e: ResizeEdge) -> Self {
+        use winit::window::ResizeDirection as D;
+        match e {
+            ResizeEdge::N => D::North,
+            ResizeEdge::S => D::South,
+            ResizeEdge::E => D::East,
+            ResizeEdge::W => D::West,
+            ResizeEdge::Ne => D::NorthEast,
+            ResizeEdge::Nw => D::NorthWest,
+            ResizeEdge::Se => D::SouthEast,
+            ResizeEdge::Sw => D::SouthWest,
+        }
+    }
+}
+
+impl From<ResizeEdge> for winit::window::CursorIcon {
+    fn from(e: ResizeEdge) -> Self {
+        winit::window::ResizeDirection::from(e).into()
+    }
+}
+
 /// What a point in the chrome means.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HitRegion {
@@ -77,6 +122,11 @@ pub enum HitRegion {
     SettingsPanel,
     /// The dimmed backdrop behind the settings overlay; clicking dismisses.
     SettingsScrim,
+    /// A caption button we drew ourselves, on the borderless path.
+    CaptionButton(CaptionButton),
+    /// The window's own edge. Pushed last of everything, so it outranks even
+    /// a modal scrim: a window must stay resizable while the palette is open.
+    Resize(ResizeEdge),
 }
 
 /// Rectangles to meanings, in draw order.

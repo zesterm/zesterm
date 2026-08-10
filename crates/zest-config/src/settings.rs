@@ -195,6 +195,27 @@ pub enum Backdrop {
     Vibrancy,
 }
 
+/// Who draws the titlebar.
+///
+/// Three states rather than a bool, because the right answer differs by
+/// platform and the schema may not: `schemars` derives the default from
+/// [`Window::default`], so a `cfg!(windows)` default would make
+/// `schemas/zesterm.schema.json` itself platform-dependent and
+/// `cargo xtask check-schema` would fail on two of the three CI legs. `Auto`
+/// is one value everywhere and resolves per platform where it is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum CustomChrome {
+    /// The platform's own answer: borderless on Windows, where the OS caption
+    /// otherwise sits above our tab strip and the window wears two titlebars;
+    /// a transparent full-size titlebar on macOS, which keeps the traffic
+    /// lights, native fullscreen and Sequoia tiling (WS-C2); system chrome on
+    /// Linux until WS-D says otherwise.
+    Auto,
+    On,
+    Off,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Window {
@@ -220,10 +241,10 @@ pub struct Window {
     /// Draw our own titlebar and tab strip instead of the system's.
     #[schemars(extend(
         "x_zest_group" = "Window",
-        "x_zest_widget" = "toggle",
+        "x_zest_widget" = "select",
         "x_zest_restart" = true
     ))]
-    pub custom_chrome: bool,
+    pub custom_chrome: CustomChrome,
     /// Initial size in cells.
     #[schemars(extend("x_zest_group" = "Window", "x_zest_widget" = "number"))]
     pub columns: u16,
@@ -239,7 +260,7 @@ impl Default for Window {
             chrome_opacity: 1.0,
             backdrop: Backdrop::None,
             padding: 8,
-            custom_chrome: false,
+            custom_chrome: CustomChrome::Auto,
             columns: 100,
             rows: 30,
         }
