@@ -1378,6 +1378,20 @@ on each host. → ADR-005, ADR-006.
       not by name, and the kind of key backing the device is surfaced to the
       UI — a browser on the fallback is working, not secure, and the screen
       says so.
+- [ ] Host enrollment: `zest-daemon --enroll <code>` signs a code carried from
+      the account's devices screen with the host key, and keeps the token it is
+      given beside the private key in the OS credential store — `--logout`
+      forgets it, `--account` says what is held. Foreground flags, because a
+      detached daemon has no terminal to be handed a one-shot code on.
+
+      **What is missing is deliberate: the HTTP call.** The workspace has no
+      HTTP client and no TLS stack, and choosing one settles by accident what
+      the `zest-cloud` crate the relay needs will be built on. So the request
+      goes through an injected `ControlPlane` seam, tested against a fake, and
+      `NoHttpClient` fills the hole with an error that names the missing
+      dependency rather than a stub that returns success. The signing, the JSON,
+      what counts as a refusal and where the token goes are the parts that are
+      wrong in ways nobody notices; those are done.
 - [ ] Attach tickets (30s TTL, single use) minted by the actor.
 
 ## M5 — phone, AI, end-to-end encryption

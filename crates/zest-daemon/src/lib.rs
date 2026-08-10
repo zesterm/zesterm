@@ -32,6 +32,7 @@
 
 pub mod audit;
 pub mod auth;
+pub mod enroll;
 pub mod history;
 pub mod lan;
 pub mod local;

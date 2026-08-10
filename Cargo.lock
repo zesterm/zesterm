@@ -5133,6 +5133,7 @@ dependencies = [
  "rusqlite",
  "rustix 1.1.4",
  "serde",
+ "serde_json",
  "sha1",
  "thiserror 2.0.19",
  "tracing",

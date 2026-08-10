@@ -7,9 +7,10 @@
 
 use std::sync::Arc;
 
+use zest_daemon::enroll::{self, NoHttpClient};
 use zest_daemon::{default_socket_path, listen, Authenticator, DaemonConfig, Registry};
 use zest_mesh::identity::HostIdentity;
-use zest_mesh::keystore::{KeyStore, MemoryKeyStore};
+use zest_mesh::keystore::{CredentialStore, MemoryKeyStore};
 use zest_mesh::pairing::{Decision, PairingQueue};
 use zest_mesh::trust::{FileTrustStore, MemoryTrustStore, TrustStore};
 use zest_proto::ClientId;
@@ -36,6 +37,12 @@ fn main() {
              --socket-path       print the default socket path and exit\n\
              --identity          print this host's id and exit\n\
              --ephemeral         use a throwaway key, not the OS keychain\n\
+             --enroll <code>     join this machine to an account, using a code\n\
+             \x20                   from its devices screen, and exit\n\
+             --logout            forget the account token this machine holds\n\
+             --account           print what this machine has stored, and exit\n\
+             --control-plane <url>\n\
+             \x20                   where the accounts API lives\n\
              --trust <hex>       trust a client id without a prompt\n\
              --forget <hex>      remove a trusted client\n\
              --trusted           list trusted clients and exit\n\
@@ -70,7 +77,7 @@ fn main() {
     // small-order point that `verifying_key` already rejects, so nothing signed
     // under it could ever have verified.
     let ephemeral = flag("--ephemeral");
-    let store: Box<dyn KeyStore> = if ephemeral {
+    let store: Box<dyn CredentialStore> = if ephemeral {
         // For the edit-run loop. `keyring` keys access to the *binary*, so on
         // macOS every rebuild re-prompts for the keychain -- and the outcome of
         // that is a developer who turns authentication off to get work done.
@@ -104,6 +111,92 @@ fn main() {
         return;
     }
 
+    // --- the account ------------------------------------------------------
+    //
+    // Foreground, and then exit, exactly like --trust and --trusted below. A
+    // detached daemon has no terminal a one-shot code can be handed to, and the
+    // two places it could read one from — a config file, an environment
+    // variable — are both places a credential should never be written down. The
+    // running daemon picks the token up from the credential store next time it
+    // starts. → enroll.rs.
+    //
+    // The label is settled here rather than further down because enrolment
+    // signs it: whatever this machine calls itself in a fleet listing is what
+    // the account's devices screen will call it, and the two disagreeing would
+    // be a name that changes depending on where you look.
+    let label = opt("--label").unwrap_or_else(machine_label);
+
+    if let Some(code) = opt("--enroll") {
+        if ephemeral {
+            // Refused rather than warned. The key dies with this process, so
+            // the account would gain a host row nothing can ever answer for —
+            // and the code is one-shot, so it is spent either way and the
+            // mistake costs a trip back to the browser.
+            eprintln!(
+                "zest-daemon: --enroll claims this machine's lasting identity, and\n\
+                 --ephemeral is a key that dies with the process. Enrolling one would\n\
+                 leave the account listing a host nobody can reach."
+            );
+            std::process::exit(1);
+        }
+        let base =
+            opt("--control-plane").unwrap_or_else(|| enroll::DEFAULT_CONTROL_PLANE.to_string());
+        match enroll::enroll(&identity, &code, &label, &base, &NoHttpClient, store.as_ref()) {
+            Ok(enrolled) => {
+                let account = enrolled.account.unwrap_or_else(|| "this account".into());
+                println!(
+                    "enrolled \"{label}\" ({}) with {account}",
+                    identity.host_id().short()
+                );
+                println!("the token is kept in {}", store.describe_secret_store());
+            }
+            Err(e) => {
+                eprintln!("zest-daemon: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if flag("--logout") {
+        match enroll::forget_token(store.as_ref()) {
+            Ok(true) => {
+                println!("forgot the token kept in {}", store.describe_secret_store());
+                // Said plainly, because the comfortable reading is the wrong
+                // one: this drops *this machine's* copy and nothing else. The
+                // account keeps listing the host until it is revoked there.
+                println!("the account still lists this host until it is revoked there");
+            }
+            Ok(false) => println!("no token was stored in {}", store.describe_secret_store()),
+            Err(e) => {
+                eprintln!("zest-daemon: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if flag("--account") {
+        println!("host   {}", hex(&identity.host_id().0));
+        println!("label  {label}");
+        match enroll::stored_token(store.as_ref()) {
+            // Presence, never the token. It is a bearer credential — whoever
+            // holds it is this machine as far as the control plane is
+            // concerned — and a terminal's scrollback is one of the places
+            // people copy from without reading.
+            Ok(Some(_)) => println!("token  stored in {}", store.describe_secret_store()),
+            Ok(None) => println!(
+                "token  none. This machine has not enrolled; run --enroll <code> with a \
+                 code from the account's devices screen"
+            ),
+            Err(e) => {
+                eprintln!("zest-daemon: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // --- trust ------------------------------------------------------------
 
     let trust: Arc<dyn TrustStore> = if ephemeral {
@@ -131,7 +224,6 @@ fn main() {
     };
 
     let queue = PairingQueue::new();
-    let label = opt("--label").unwrap_or_else(machine_label);
     let auth = Arc::new(Authenticator::new(
         Arc::clone(&identity),
         Arc::clone(&trust),

@@ -23,6 +23,10 @@ zest-pty.workspace = true
 zest-proto.workspace = true
 zest-mesh.workspace = true
 serde = { workspace = true }
+# Enrolment only. The daemon's own wire is MessagePack; the control plane is a
+# Worker, and JSON is what it speaks -- so this is the boundary's format rather
+# than a second protocol creeping in. Already in the tree via zest-config.
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
