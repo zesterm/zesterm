@@ -770,7 +770,7 @@ fn machine_label_from(env: impl Fn(&str) -> Option<String>) -> String {
 
 #[cfg(test)]
 mod label_tests {
-    use super::{machine_label, machine_label_from};
+    use super::machine_label_from;
 
     #[test]
     fn a_machine_knows_its_own_name_without_help_from_the_environment() {
@@ -809,8 +809,20 @@ mod label_tests {
     #[test]
     fn an_empty_variable_is_not_a_name() {
         // An exported-but-empty HOSTNAME is common in stripped environments and
-        // must not win over uname().
+        // must not win over the OS.
+        //
+        // Compared against the *injected* empty environment, not against
+        // `machine_label()`. That reads the real process environment, so on any
+        // machine where `COMPUTERNAME` or `HOSTNAME` is genuinely set the two
+        // sides differ and the test fails for a reason that has nothing to do
+        // with what it is checking. It passes on CI only because neither
+        // variable is set there -- a test whose result depends on the
+        // environment of whoever runs it.
         assert_ne!(machine_label_from(|_| Some(String::new())), "");
-        assert_eq!(machine_label_from(|_| Some(String::new())), machine_label());
+        assert_eq!(
+            machine_label_from(|_| Some(String::new())),
+            machine_label_from(|_| None),
+            "an empty variable must fall through exactly as an absent one does"
+        );
     }
 }
