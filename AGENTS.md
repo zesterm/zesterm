@@ -64,7 +64,7 @@ Never commit straight to `main`.**
 3. **Implement & verify.** For a **bug fix, write a failing test that reproduces
    the bug *first*** (red), then make the fix so that test passes (green) — see
    "Test-first bug fixes" under Conventions. Either way, prove the change: the
-   six gates below, plus the TypeScript suite if you touched `clients/web/` or
+   seven gates below, plus the TypeScript suite if you touched `clients/web/` or
    any type on the wire. Stage specific files (`git add <path>`), never
    `git add -A`. No co-author trailers.
 
