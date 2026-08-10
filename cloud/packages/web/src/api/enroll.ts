@@ -55,6 +55,22 @@ function labelOk(label: string): boolean {
 }
 
 /**
+ * Same screening as a label, and for the same reason.
+ *
+ * `platform` is attacker-controlled — it is *not* covered by the enrolment
+ * signature — and it lands in the same devices screen and the same log lines a
+ * label does. Length-checking it while screening the label was an
+ * inconsistency an attacker only has to notice once: an ESC here smuggles the
+ * terminal control sequence the label guard exists to stop.
+ *
+ * Empty is allowed, unlike a label: a daemon that does not know its platform
+ * omits the field, and that is not an error.
+ */
+function platformOk(platform: string): boolean {
+  return [...platform].length <= PLATFORM_MAX && !CONTROL.test(platform);
+}
+
+/**
  * `POST /api/enroll/code` — mint a code for the signed-in person to carry.
  *
  * The response is the *only* time the code exists outside the database in a
@@ -133,7 +149,7 @@ export async function claimEnrollCode(request: Request, env: Env, now: number): 
   // invalidating the signature. Bounded so they cannot be used as storage.
   if (
     platform !== undefined &&
-    (typeof platform !== 'string' || [...platform].length > PLATFORM_MAX)
+    (typeof platform !== 'string' || !platformOk(platform))
   ) {
     return json({ error: 'bad_request', detail: 'platform' }, 400);
   }

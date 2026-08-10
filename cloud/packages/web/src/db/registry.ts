@@ -41,16 +41,32 @@ export async function createEnrollCode(
   kind: EnrollKind,
   now: number,
 ): Promise<MintedCode> {
-  const code = newEnrollCode();
+  let code = newEnrollCode();
   const expiresAt = now + ENROLL_CODE_TTL_MS;
-  await db
-    .prepare(
-      `INSERT INTO enroll_codes (code, user_id, kind, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?)`,
-    )
-    .bind(code, userId, kind, now, expiresAt)
-    .run();
-  return { code, expiresAt };
+
+  // `code` is the primary key, and spent codes are kept rather than deleted --
+  // deliberately, so "why can this not enrol" has an answer. That means the
+  // space fills, slowly, and a collision is an `INSERT` that throws. Left
+  // alone it surfaces as a 500 on a request that did nothing wrong.
+  //
+  // Retried rather than made collision-proof: at ~39 bits a second attempt is
+  // overwhelmingly likely to land, and a longer code is paid for by the person
+  // retyping it. Three attempts, then the failure is real and propagates.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await db
+        .prepare(
+          `INSERT INTO enroll_codes (code, user_id, kind, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .bind(code, userId, kind, now, expiresAt)
+        .run();
+      return { code, expiresAt };
+    } catch (e) {
+      if (attempt >= 2) throw e;
+      code = newEnrollCode();
+    }
+  }
 }
 
 /**

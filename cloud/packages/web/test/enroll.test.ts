@@ -657,3 +657,76 @@ test('the enrolment routes are POST-only', async () => {
   }
   db.close();
 });
+
+test('a code collision is retried rather than answered with a 500', async () => {
+  // `code` is the primary key and spent codes are kept, not deleted, so the
+  // space fills and a collision is an INSERT that throws. Left alone that is a
+  // 500 on a request that did nothing wrong. Forced here rather than waited
+  // for, by failing the first insert.
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+
+  let inserts = 0;
+  const colliding = {
+    ...db,
+    prepare(sql: string) {
+      const stmt = db.prepare(sql);
+      if (!sql.includes('INSERT INTO enroll_codes')) return stmt;
+      return {
+        ...stmt,
+        bind: (...args: unknown[]) => {
+          const bound = stmt.bind(...args);
+          return {
+            ...bound,
+            run: async () => {
+              if (inserts++ === 0) throw new Error('UNIQUE constraint failed: enroll_codes.code');
+              return bound.run();
+            },
+          };
+        },
+      };
+    },
+  };
+
+  const res = await routeApi(
+    post('/api/enroll/code', { kind: 'host' }, cookie),
+    env(colliding as never),
+    fetch,
+    NOW,
+  );
+  assert.equal(res?.status, 200, 'the second attempt must land, not surface as a 500');
+  assert.equal(inserts, 2, 'and it must actually have retried');
+  db.close();
+});
+
+test('platform is screened for control characters, exactly as label is', async () => {
+  // `platform` is not covered by the enrolment signature, so it is
+  // attacker-controlled, and it lands in the same devices screen and the same
+  // log lines a label does. Screening one and only length-checking the other
+  // is an inconsistency an attacker has to notice once.
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  const { code } = await mint(db, cookie, 'host');
+  const key = await testKey(11);
+  const sig = await signEnrollment({ key, code, label: 'andy-mac' });
+
+  const res = await routeApi(
+    daemonPost('/api/enroll/claim', {
+      code,
+      hostId: key.id,
+      label: 'andy-mac',
+      sig,
+      // An ESC and a clear-screen, the same shape the label guard exists for.
+      platform: 'macos\u001b[2Jsonoma',
+    }),
+    env(db),
+    fetch,
+    NOW,
+  );
+  assert.equal(res?.status, 400, 'an escape sequence in platform must be refused');
+  assert.deepEqual(await res!.json(), { error: 'bad_request', detail: 'platform' });
+
+  const still = rowOf(db, `SELECT used_at FROM enroll_codes WHERE code = ?`, code);
+  assert.deepEqual(still, { used_at: null }, 'and a refused claim leaves the code usable');
+  db.close();
+});
