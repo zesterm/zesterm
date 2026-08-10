@@ -449,9 +449,17 @@ fn spawn_drain(master: &OwnedFd) -> Result<PtyReader, PtyError> {
         })
         .map_err(PtyError::Create)?;
 
-    // If the thread died before signalling there is nothing to wait for, and
-    // `recv` says so rather than hanging.
-    let _ = ready_rx.recv();
+    // The drain thread must be *reading* before this returns, or the window
+    // this whole thread exists to close is still open.
+    //
+    // A disconnected channel means it died before signalling, and that has to
+    // be an error rather than a shrug: returning `Ok` here hands back a reader
+    // that will EOF immediately, which is indistinguishable from a child that
+    // printed nothing — the exact silent-loss shape this file is fixing. Fail
+    // where the cause is still named.
+    ready_rx
+        .recv()
+        .map_err(|_| PtyError::Create(io::Error::other("the pty drain thread died before it read")))?;
     Ok(PtyReader { rx, chunk: Vec::new(), at: 0 })
 }
 
@@ -656,7 +664,15 @@ mod tests {
         };
         let mut pty = UnixPty::spawn(&spec, PtySize::new(80, 24)).expect("spawn /bin/echo");
 
-        std::thread::sleep(std::time::Duration::from_millis(1200));
+        // Past macOS's ~0.6s discard, measured: the cliff sits between 590ms
+        // and 610ms and does not move under load. Only macOS is rude enough to
+        // punish a late reader, so only macOS pays the wait — on Linux the
+        // queued bytes survive indefinitely and a 1.2s sleep would buy nothing
+        // but a slower test run on every CI job. The short sleep still keeps
+        // the test meaningful there: it proves the drain hands over what it
+        // buffered rather than racing the handover.
+        let late = if cfg!(target_os = "macos") { 1200 } else { 100 };
+        std::thread::sleep(std::time::Duration::from_millis(late));
 
         let mut reader = pty.take_reader().expect("a fresh pty always has a reader");
         let mut out = Vec::new();

@@ -405,7 +405,16 @@ impl RemoteSession {
                             drain_carried = false;
                         } else {
                             let n = match reader.read(&mut buf) {
-                                Ok(0) | Err(_) => break,
+                                Ok(0) => break,
+                                // A signal is not a dropped link. `Interrupted`
+                                // means the read was cut short by the process
+                                // receiving one, and the socket is untouched --
+                                // treating it as a break costs a redial, a
+                                // fresh handshake and a keyframe for nothing,
+                                // and does it at whatever moment a signal
+                                // happens to land.
+                                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                                Err(_) => break,
                                 Ok(n) => n,
                             };
                             frames.feed(&buf[..n]);
