@@ -99,6 +99,13 @@ jobs:
         # check-bindings and fails here.
         run: cargo run -p xtask -- check-fixtures
 
+      - name: The web client's generated schema, fields and themes match the Rust
+        # zest-config says the settings UIs are *generated* from the schema, and
+        # zest-theme's builtins used to reach the browser as hand-copied hex
+        # with nothing checking the transcription. Drift here means the native
+        # window and the browser disagree about what a theme looks like.
+        run: cargo run -p xtask -- check-export-web
+
       # The invariant that broke. `zest-core` and `zest-proto` cross to the
       # clients, so they must build without std and without a platform.
       - name: zest-core builds for wasm32

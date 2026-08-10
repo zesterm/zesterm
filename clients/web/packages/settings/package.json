@@ -1,0 +1,18 @@
+{
+  "name": "@zesterm/settings",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "zest-config's settings schema and its walked UI fields, generated from the Rust: what a settings form is rendered from, rather than hand-listed.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3"
+  }
+}

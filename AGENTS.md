@@ -64,7 +64,7 @@ Never commit straight to `main`.**
 3. **Implement & verify.** For a **bug fix, write a failing test that reproduces
    the bug *first*** (red), then make the fix so that test passes (green) — see
    "Test-first bug fixes" under Conventions. Either way, prove the change: the
-   six gates below, plus the TypeScript suite if you touched `clients/web/` or
+   seven gates below, plus the TypeScript suite if you touched `clients/web/` or
    any type on the wire. Stage specific files (`git add <path>`), never
    `git add -A`. No co-author trailers.
 
@@ -229,7 +229,7 @@ reason a pause should be short. Branch first anyway.
 
 ## The gates
 
-All six must pass before you call something done:
+All seven must pass before you call something done:
 
 ```
 cargo test --workspace
@@ -238,7 +238,14 @@ cargo xtask check-deps
 cargo xtask check-schema
 cargo xtask check-bindings
 cargo xtask check-fixtures
+cargo xtask check-export-web
 ```
+
+`check-export-web` is in this list, unlike the TypeScript suite below, for the
+reason that keeps them apart: a **Rust-only** change to `zest-config` or
+`zest-theme` breaks it. The settings schema, the walked UI fields and the
+built-in themes are generated into `clients/web/`, so editing a theme's hex or
+adding a setting leaves them stale with nothing else to notice.
 
 And, **if you touched `clients/web/` or any type on the wire**, the TypeScript
 suite too. It is not in the list above on purpose: a Rust-only change that passes
@@ -328,6 +335,7 @@ cargo build -p zest-core --no-default-features --target wasm32-unknown-unknown
 cargo xtask schema                             # regenerate the settings JSON Schema
 cargo test -p zest-proto --features ts         # regenerate the TypeScript bindings
 cargo xtask fixtures                           # regenerate the conformance fixtures
+cargo xtask export-web                         # regenerate the web client's schema, UI fields and themes
 cargo run -p zest-proto --example fixture_dump -- --only vim-macos --print 7
                                                # one fixture frame, decoded, to stdout
 

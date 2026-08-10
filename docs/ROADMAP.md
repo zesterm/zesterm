@@ -1041,6 +1041,20 @@ is now unblocked and building.
       received nothing, so composed-text input landed — a hidden textarea
       whose composition commits ride `encodeComposedText`, un-bracketed
       because a commit is typing, not a paste.)
+- [x] **The client stops transcribing the Rust** — `cargo xtask export-web`,
+      gated by `check-export-web` and now the seventh gate. It writes the
+      settings JSON Schema, `zest_config::ui`'s walked `UiField`s, and the
+      built-in themes as a typed TypeScript module. Two claims the tree had
+      been making and not keeping: `schema.rs` says settings UIs are
+      *generated* from the schema, and `ui.rs` keeps the walk outside the `fs`
+      feature so a browser can run it — yet no TypeScript read either, and
+      `builtin.ts` carried hand-copied hex whose own doc comment named this
+      exporter as the fix. The port is proven faithful the only way that
+      counts: the 18 existing theme tests, written against the hand-copied
+      values, pass unchanged against the generated ones. The themes are emitted
+      as source rather than JSON so `tsc` fails when the Rust grows a field the
+      TypeScript `Theme` does not have. New `@zesterm/settings` package
+      (zero runtime deps) is where a generated settings form will be built.
 - [ ] Local echo prediction for high-latency links (mosh's other trick): predict
       printable-char echo when not in alt-screen, render dim, reconcile on delta
       arrival. The largest perceived-latency win available.

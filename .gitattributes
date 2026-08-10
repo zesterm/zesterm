@@ -7,3 +7,5 @@
 crates/zest-proto/bindings/** text eol=lf
 crates/zest-proto/fixtures/** text eol=lf
 schemas/** text eol=lf
+clients/web/packages/settings/generated/** text eol=lf
+clients/web/packages/theme/src/builtin.generated.ts text eol=lf

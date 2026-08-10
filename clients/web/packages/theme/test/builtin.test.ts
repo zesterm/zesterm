@@ -16,10 +16,12 @@ test('every builtin resolves by id and ids are unique', () => {
 });
 
 test('obsidian matches builtin.rs value for value', () => {
-  // Hand-copied from crates/zest-theme/src/builtin.rs; drift means the native
-  // window and the web client disagree about what the default theme looks
-  // like. The whole record is authored there (obsidian is the one builtin
-  // whose ui is not derived), so spot-check across every token group.
+  // These literals predate `cargo xtask export-web` and are kept deliberately:
+  // the generator now writes builtin.generated.ts, so this is the one place
+  // that still states the expected values *independently* of it. A generator
+  // bug that produced self-consistent nonsense would pass check-export-web and
+  // fail here. The whole record is authored in builtin.rs (obsidian is the one
+  // builtin whose ui is not derived), so spot-check every token group.
   const ui = obsidian.ui;
   assert.equal(ui.bg, '#0b0f1a');
   assert.equal(ui.panel, '#121829');

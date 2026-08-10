@@ -9,3 +9,11 @@ publish = false
 
 [dependencies]
 zest-config = { workspace = true }
+# `export-web` writes the built-in themes out as TypeScript, so the browser
+# stops carrying a hand-copied transcription of them.
+zest-theme = { workspace = true }
+# The settings walk and the theme records are serialized here rather than by
+# an example binary: xtask can already link both crates, and shelling out to
+# `cargo run` would add ~500ms of workspace resolution to a gate that CI runs
+# on every push.
+serde_json = { workspace = true }
