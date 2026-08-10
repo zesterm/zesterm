@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    // The generated schema and field list are imported as modules, so tsc has
+    // to be willing to read them. `resolveJsonModule` alone is not enough with
+    // `module: preserve` -- the import needs an explicit type attribute, which
+    // is what `fields.ts` uses.
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "generated/*.json"]
+}

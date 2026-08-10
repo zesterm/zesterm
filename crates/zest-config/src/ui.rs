@@ -10,10 +10,16 @@
 //! Nothing here knows how to *draw* a widget; [`Widget`] is a vocabulary,
 //! and each client maps it to whatever it has.
 
+use serde::Serialize;
+
 use crate::schema::{self, resolve_ref};
 
 /// How a field asks to be edited (`x_zest_widget`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serialized kebab-case to match `x_zest_widget`'s own spelling in the schema,
+/// so a client reading either source sees the same string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Widget {
     Toggle,
     Number,
@@ -30,7 +36,7 @@ pub enum Widget {
 }
 
 /// One option of a [`Widget::Select`] field.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UiVariant {
     /// The kebab-case wire value, exactly as serde writes it.
     pub value: String,
@@ -39,7 +45,13 @@ pub struct UiVariant {
 }
 
 /// One settings field, as a UI should render it.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `camelCase` on the wire because the only consumer that reads it as data is
+/// the browser, whose other generated record — `UiTokens` — is camelCase too;
+/// one convention across the generated surface beats matching Rust's spelling
+/// in a file no Rust ever parses.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UiField {
     /// Dotted key, e.g. `typography.size_pt`.
     pub key: String,

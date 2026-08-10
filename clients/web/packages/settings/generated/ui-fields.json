@@ -1,0 +1,550 @@
+[
+  {
+    "key": "appearance.follow_system_theme",
+    "group": "Appearance",
+    "widget": "toggle",
+    "description": "Follow the OS light/dark setting.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": false,
+    "restartHint": false
+  },
+  {
+    "key": "appearance.light_theme",
+    "group": "Appearance",
+    "widget": "theme-picker",
+    "description": "Theme used when the OS reports a light appearance.\n\nEmpty means \"follow `theme` regardless\", which is what someone who has\ndeliberately chosen a dark theme expects.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": "",
+    "restartHint": false
+  },
+  {
+    "key": "appearance.text_contrast",
+    "group": "Appearance",
+    "widget": "number",
+    "description": "Additional contrast applied at resolve time.",
+    "range": [
+      0.0,
+      1.0
+    ],
+    "integer": false,
+    "variants": [],
+    "default": 0.0,
+    "restartHint": false
+  },
+  {
+    "key": "appearance.text_gamma",
+    "group": "Appearance",
+    "widget": "number",
+    "description": "Stem darkening for text on dark backgrounds.\n\nApplied once in the resolve pass rather than baked into the atlas, so\ntuning it is a repaint rather than a re-rasterization.",
+    "range": [
+      0.5,
+      2.5
+    ],
+    "integer": false,
+    "variants": [],
+    "default": 1.0,
+    "restartHint": false
+  },
+  {
+    "key": "appearance.theme",
+    "group": "Appearance",
+    "widget": "theme-picker",
+    "description": "Theme id, from the built-ins or the user's theme directory.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": "obsidian",
+    "restartHint": false
+  },
+  {
+    "key": "cursor.blink",
+    "group": "Cursor",
+    "widget": "toggle",
+    "description": "Blink the cursor.\n\nBlinking is the most common way a terminal loses its 0%-idle claim: it\nmust stop on focus loss and wake on a timer, never spin.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": true,
+    "restartHint": false
+  },
+  {
+    "key": "cursor.blink_interval_ms",
+    "group": "Cursor",
+    "widget": "number",
+    "description": "Blink interval in milliseconds.",
+    "range": [
+      100.0,
+      5000.0
+    ],
+    "integer": true,
+    "variants": [],
+    "default": 530,
+    "restartHint": false
+  },
+  {
+    "key": "cursor.shape",
+    "group": "Cursor",
+    "widget": "select",
+    "description": "Shape, unless the program sets one with DECSCUSR.",
+    "range": null,
+    "integer": false,
+    "variants": [
+      {
+        "value": "block",
+        "description": ""
+      },
+      {
+        "value": "underline",
+        "description": ""
+      },
+      {
+        "value": "bar",
+        "description": ""
+      }
+    ],
+    "default": "block",
+    "restartHint": false
+  },
+  {
+    "key": "cursor.trail",
+    "group": "Cursor",
+    "widget": "select",
+    "description": "Motion between cells.",
+    "range": null,
+    "integer": false,
+    "variants": [
+      {
+        "value": "none",
+        "description": "Jump straight to the target."
+      },
+      {
+        "value": "smooth",
+        "description": "Spring the cursor rect toward the target."
+      },
+      {
+        "value": "smear",
+        "description": "The Neovide-style tapered smear. Deliberately not the default."
+      }
+    ],
+    "default": "none",
+    "restartHint": false
+  },
+  {
+    "key": "motion.enabled",
+    "group": "Motion",
+    "widget": "toggle",
+    "description": "Animate at all. The OS accessibility setting can still override this.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": true,
+    "restartHint": false
+  },
+  {
+    "key": "motion.respect_system_reduce_motion",
+    "group": "Motion",
+    "widget": "toggle",
+    "description": "Honour the OS \"reduce motion\" setting.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": true,
+    "restartHint": false
+  },
+  {
+    "key": "motion.smooth_scroll",
+    "group": "Motion",
+    "widget": "toggle",
+    "description": "Smooth scrolling as a fractional row offset.\n\nSuppressed in the alternate screen regardless: `vim` and `less` scroll by\ndesign, and animating that fights the program.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": true,
+    "restartHint": false
+  },
+  {
+    "key": "motion.spring_damping",
+    "group": "Motion",
+    "widget": "number",
+    "description": "Spring damping ratio. 1.0 is critically damped; below that overshoots.",
+    "range": [
+      0.1,
+      2.0
+    ],
+    "integer": false,
+    "variants": [],
+    "default": 1.0,
+    "restartHint": false
+  },
+  {
+    "key": "motion.spring_response",
+    "group": "Motion",
+    "widget": "number",
+    "description": "Spring response in seconds — roughly, time to reach the target.",
+    "range": [
+      0.01,
+      2.0
+    ],
+    "integer": false,
+    "variants": [],
+    "default": 0.1599999964237213,
+    "restartHint": false
+  },
+  {
+    "key": "scrolling.lines_per_notch",
+    "group": "Scrolling",
+    "widget": "number",
+    "description": "Lines moved per wheel notch.",
+    "range": [
+      1.0,
+      50.0
+    ],
+    "integer": true,
+    "variants": [],
+    "default": 3,
+    "restartHint": false
+  },
+  {
+    "key": "scrolling.scroll_on_keypress",
+    "group": "Scrolling",
+    "widget": "toggle",
+    "description": "Jump to the bottom when a key is pressed. On by default, as everywhere.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": true,
+    "restartHint": false
+  },
+  {
+    "key": "scrolling.scroll_on_output",
+    "group": "Scrolling",
+    "widget": "toggle",
+    "description": "Jump to the bottom whenever the program writes.\n\nOff by default: with it on, scrollback cannot be read while anything is\nrunning, because every emitted line yanks the view away.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": false,
+    "restartHint": false
+  },
+  {
+    "key": "scrolling.scrollback",
+    "group": "Scrolling",
+    "widget": "number",
+    "description": "Lines of history retained per session.",
+    "range": [
+      0.0,
+      10000000.0
+    ],
+    "integer": true,
+    "variants": [],
+    "default": 10000,
+    "restartHint": false
+  },
+  {
+    "key": "shell.command",
+    "group": "Shell",
+    "widget": "text",
+    "description": "Command line to run. Empty means the platform's default shell.\n\nThis is why a workspace-local config file cannot be trusted\nautomatically: it is remote code execution wearing a settings hat.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": "",
+    "restartHint": false
+  },
+  {
+    "key": "shell.cwd",
+    "group": "Shell",
+    "widget": "path",
+    "description": "Working directory. Empty inherits.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": "",
+    "restartHint": false
+  },
+  {
+    "key": "shell.env",
+    "group": "Shell",
+    "widget": "key-value",
+    "description": "Extra environment entries. An empty value *unsets* the variable.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": {},
+    "restartHint": false
+  },
+  {
+    "key": "tabs.position",
+    "group": "Tabs",
+    "widget": "select",
+    "description": "Where the tab strip lives: a horizontal strip at the top, or a vertical\nsidebar on the left.",
+    "range": null,
+    "integer": false,
+    "variants": [
+      {
+        "value": "top",
+        "description": "A horizontal strip along the top of the window."
+      },
+      {
+        "value": "left",
+        "description": "A vertical sidebar on the left, wide enough to show each tab's host."
+      }
+    ],
+    "default": "top",
+    "restartHint": false
+  },
+  {
+    "key": "tabs.restore",
+    "group": "Tabs",
+    "widget": "toggle",
+    "description": "Reattach this window's tabs on the next launch.\n\nWhen off, every launch starts with one fresh local shell and existing\nsessions are reachable only through the picker.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": true,
+    "restartHint": false
+  },
+  {
+    "key": "tabs.show_single_tab",
+    "group": "Tabs",
+    "widget": "toggle",
+    "description": "Show the tab strip when only one tab is open.\n\nOn by default: the strip doubles as the titlebar, and a window whose\nchrome appears and disappears as tabs come and go is unsettling.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": true,
+    "restartHint": false
+  },
+  {
+    "key": "tabs.sidebar_width",
+    "group": "Tabs",
+    "widget": "number",
+    "description": "Width of the vertical tab sidebar, in logical pixels.",
+    "range": [
+      120.0,
+      400.0
+    ],
+    "integer": true,
+    "variants": [],
+    "default": 262,
+    "restartHint": false
+  },
+  {
+    "key": "tabs.strip_height",
+    "group": "Tabs",
+    "widget": "number",
+    "description": "Height of the horizontal tab strip, in logical pixels.",
+    "range": [
+      24.0,
+      64.0
+    ],
+    "integer": true,
+    "variants": [],
+    "default": 46,
+    "restartHint": false
+  },
+  {
+    "key": "typography.families",
+    "group": "Text",
+    "widget": "font-list",
+    "description": "Font families in preference order; the first one with a glyph wins.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": [
+      "Cascadia Mono",
+      "Consolas",
+      "JetBrainsMono Nerd Font",
+      "Menlo",
+      "DejaVu Sans Mono",
+      "monospace"
+    ],
+    "restartHint": false
+  },
+  {
+    "key": "typography.features",
+    "group": "Text",
+    "widget": "tag-list",
+    "description": "OpenType features, `liga`-style. Prefix with `-` to disable.\n\nPart of the shaped-run cache key — a stale entry here produces glyphs\nthat are correct for the previous setting and maddening to debug.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": [],
+    "restartHint": false
+  },
+  {
+    "key": "typography.letter_spacing",
+    "group": "Text",
+    "widget": "number",
+    "description": "Extra space between cells, in pixels. Also geometry.",
+    "range": [
+      -5.0,
+      20.0
+    ],
+    "integer": false,
+    "variants": [],
+    "default": 0.0,
+    "restartHint": false
+  },
+  {
+    "key": "typography.ligatures",
+    "group": "Text",
+    "widget": "toggle",
+    "description": "Programming ligatures. Off by default; it is a per-run decision, so\nturning it on later costs nothing.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": false,
+    "restartHint": false
+  },
+  {
+    "key": "typography.line_height",
+    "group": "Text",
+    "widget": "number",
+    "description": "Line height as a multiple of the font's natural height.\n\nThis is a *geometry* setting: changing it changes the cell height, which\nchanges how many rows fit, which must resize the pty.",
+    "range": [
+      0.5,
+      3.0
+    ],
+    "integer": false,
+    "variants": [],
+    "default": 1.25,
+    "restartHint": false
+  },
+  {
+    "key": "typography.size_pt",
+    "group": "Text",
+    "widget": "number",
+    "description": "Font size in points.",
+    "range": [
+      4.0,
+      144.0
+    ],
+    "integer": false,
+    "variants": [],
+    "default": 13.0,
+    "restartHint": false
+  },
+  {
+    "key": "window.backdrop",
+    "group": "Window",
+    "widget": "select",
+    "description": "Platform backdrop material.",
+    "range": null,
+    "integer": false,
+    "variants": [
+      {
+        "value": "none",
+        "description": "No platform backdrop; `opacity` alone decides."
+      },
+      {
+        "value": "mica",
+        "description": "Windows 11 Mica."
+      },
+      {
+        "value": "mica-alt",
+        "description": "Windows 11 Mica Alt, the tabbed-app variant."
+      },
+      {
+        "value": "acrylic",
+        "description": "Acrylic blur. Undocumented on Windows; best-effort on Linux."
+      },
+      {
+        "value": "vibrancy",
+        "description": "macOS `NSVisualEffectView` vibrancy."
+      }
+    ],
+    "default": "none",
+    "restartHint": false
+  },
+  {
+    "key": "window.chrome_opacity",
+    "group": "Window",
+    "widget": "slider",
+    "description": "Chrome opacity, independent of the grid's.",
+    "range": [
+      0.0,
+      1.0
+    ],
+    "integer": false,
+    "variants": [],
+    "default": 1.0,
+    "restartHint": false
+  },
+  {
+    "key": "window.columns",
+    "group": "Window",
+    "widget": "number",
+    "description": "Initial size in cells.",
+    "range": [
+      0.0,
+      65535.0
+    ],
+    "integer": true,
+    "variants": [],
+    "default": 100,
+    "restartHint": false
+  },
+  {
+    "key": "window.custom_chrome",
+    "group": "Window",
+    "widget": "select",
+    "description": "Draw our own titlebar and tab strip instead of the system's.",
+    "range": null,
+    "integer": false,
+    "variants": [
+      {
+        "value": "auto",
+        "description": "The platform's own answer: borderless on Windows, where the OS caption\notherwise sits above our tab strip and the window wears two titlebars;\na transparent full-size titlebar on macOS, which keeps the traffic\nlights, native fullscreen and Sequoia tiling (WS-C2); system chrome on\nLinux until WS-D says otherwise."
+      }
+    ],
+    "default": "auto",
+    "restartHint": true
+  },
+  {
+    "key": "window.opacity",
+    "group": "Window",
+    "widget": "slider",
+    "description": "Background opacity, applied *only* to cells with a default background.\n\nApplying it to explicit backgrounds too would double-darken and make\n`ls` colours and TUI panels see-through, which is the single most common\ntransparency bug.",
+    "range": [
+      0.0,
+      1.0
+    ],
+    "integer": false,
+    "variants": [],
+    "default": 1.0,
+    "restartHint": false
+  },
+  {
+    "key": "window.padding",
+    "group": "Window",
+    "widget": "number",
+    "description": "Padding between the window edge and the grid, in logical pixels.",
+    "range": [
+      0.0,
+      64.0
+    ],
+    "integer": true,
+    "variants": [],
+    "default": 8,
+    "restartHint": false
+  },
+  {
+    "key": "window.rows",
+    "group": "Window",
+    "widget": "number",
+    "description": "Initial size in cells.",
+    "range": [
+      0.0,
+      65535.0
+    ],
+    "integer": true,
+    "variants": [],
+    "default": 30,
+    "restartHint": false
+  }
+]

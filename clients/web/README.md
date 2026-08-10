@@ -16,6 +16,8 @@ packages/client/   the data-plane session client: handshake driver, ack
 packages/input/    key/paste/focus → terminal bytes, a port of zest-input
 packages/theme/    the 24 UiTokens, builtins, --zt-* CSS vars, the terminal
                    palette — zero runtime deps
+packages/settings/ the settings schema and its walked UI fields, generated
+                   from zest-config — zero runtime deps
 packages/render/   the Canvas 2D grid painter, (grid, dirtyRows) → paint
 packages/control/  the control-plane actors (SessionDirectory) — @sigx/actors
 packages/sidecar/  the Node process hosting them: daemon feed in, actors
@@ -23,8 +25,17 @@ packages/sidecar/  the Node process hosting them: daemon feed in, actors
 packages/app/      the sigx web app: session list, terminal view, input
 ```
 
-Dependency policy: `proto`, `theme` and `input` stay dependency-free; crypto
-lives only in `auth`; sigx packages appear only in `control`/`sidecar`/`app`.
+Dependency policy: `proto`, `theme`, `input` and `settings` stay
+dependency-free; crypto lives only in `auth`; sigx packages appear only in
+`control`/`sidecar`/`app`.
+
+**Generated, not written.** `packages/settings/generated/` and
+`packages/theme/src/builtin.generated.ts` come out of `cargo xtask export-web`
+and are gated by `cargo xtask check-export-web`. Edit the Rust and rerun it;
+editing them directly is undone by the next person who does. The themes in
+particular used to be hand-copied hex, and the transcription had no gate —
+drift meant the native window and this client disagreed about what `obsidian`
+looks like, with nothing to catch it.
 
 ## Running the experience
 

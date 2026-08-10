@@ -39,16 +39,27 @@ paragraph of justification attached.
 | `DaemonConfig`, `SessionHandle`, `SessionState` | `zest-daemon/src/lib.rs` | draft — WS-F may change freely | WS-F only |
 | TypeScript bindings | `crates/zest-proto/bindings/` | **generated** — `cargo xtask check-bindings` | WS-G, WS-H |
 | Conformance fixtures | `crates/zest-proto/fixtures/` | **generated** — `cargo xtask check-fixtures` | WS-G, WS-H |
+| Settings schema + walked UI fields | `clients/web/packages/settings/generated/` | **generated** — `cargo xtask check-export-web` | WS-G |
+| Built-in themes, as TypeScript | `clients/web/packages/theme/src/builtin.generated.ts` | **generated** — `cargo xtask check-export-web` | WS-G |
 
 "Draft" means one stream owns it and nobody else has built on it yet. It freezes when a second
 stream starts consuming it.
 
 ### Generated artifacts are contracts too
 
-The last two rows are not hand-written and are still seams: they are what a client outside this
+The last four rows are not hand-written and are still seams: they are what a client outside this
 repository is *checked against*, which is exactly the property the rest of this table protects.
-Both carry a `protocol` version, so a `PROTOCOL_VERSION` bump rewrites every fixture and the
-change is impossible to miss in review rather than something to remember.
+The bindings and fixtures both carry a `protocol` version, so a `PROTOCOL_VERSION` bump rewrites
+every fixture and the change is impossible to miss in review rather than something to remember.
+
+The last two rows are the same idea applied to the things a client *renders* rather than decodes.
+`zest-config`'s schema module states the contract in its own words — the settings UIs are
+generated from the schema, not hand-listed — and `zest-config::ui` keeps the walk outside the `fs`
+feature so a browser can run it. Until `export-web` existed neither actually happened: no
+TypeScript read the schema, and the built-in themes reached the browser as hand-copied hex whose
+own doc comment named this generator as the fix. A transcription nothing checks is a
+transcription that drifts, and the symptom — the native window and the browser disagreeing about
+what `obsidian` looks like — is invisible until someone puts them side by side.
 
 They are also where this file stops being aspirational about the web client. The rule above —
 land a contract change with every consumer in one commit — now has an in-repo consumer that will
