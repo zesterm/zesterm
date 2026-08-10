@@ -64,4 +64,7 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Pipes",
     "Win32_System_Threading",
     "Win32_System_IO",
+    # GetComputerNameExW: a machine has to be able to name itself without help
+    # from the environment, on every platform. See `machine_label`.
+    "Win32_System_SystemInformation",
 ] }

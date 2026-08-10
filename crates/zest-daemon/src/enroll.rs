@@ -49,7 +49,13 @@ use zest_proto::HostId;
 pub const DEFAULT_CONTROL_PLANE: &str = "https://zesterm.sigx.workers.dev";
 
 /// The one route this module knows.
-pub const ENROLL_PATH: &str = "/api/enroll";
+/// Where a claim is posted.
+///
+/// `/api/enroll/claim`, not `/api/enroll` — the control plane also serves
+/// `/api/enroll/code`, which is the *minting* half a browser calls while signed
+/// in. Posting to the parent path 404s, and a 404 here reads as "that code was
+/// not accepted", so the symptom is every valid code looking expired.
+pub const ENROLL_PATH: &str = "/api/enroll/claim";
 
 /// What came back from the control plane.
 ///
@@ -379,6 +385,20 @@ mod tests {
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn the_path_is_the_one_the_control_plane_serves() {
+        // Pinned as a literal because the two ends are separate projects: this
+        // is Rust, the route is TypeScript in `cloud/`, and nothing compiles
+        // both. The first version of this constant was `/api/enroll`, which is
+        // the parent of the two real routes -- so every claim 404'd, and a 404
+        // here reads as "that code was not accepted", making valid codes look
+        // expired.
+        assert_eq!(
+            ENROLL_PATH, "/api/enroll/claim",
+            "must match the Worker's route in cloud/packages/web/src/router.ts"
+        );
     }
 
     #[test]

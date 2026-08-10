@@ -708,6 +708,39 @@ fn machine_label() -> String {
     machine_label_from(|k| std::env::var(k).ok())
 }
 
+/// What the operating system calls this machine, asked directly.
+///
+/// Both arms exist because the test that matters runs with no environment at
+/// all, and a platform that could only answer from `COMPUTERNAME` would fail
+/// it — which is how the original bug got in: Windows genuinely does export
+/// that variable, so the unix hole was invisible from there.
+#[cfg(unix)]
+fn os_hostname() -> Option<String> {
+    Some(rustix::system::uname().nodename().to_string_lossy().into_owned())
+}
+
+#[cfg(windows)]
+fn os_hostname() -> Option<String> {
+    use windows_sys::Win32::System::SystemInformation::{
+        ComputerNameDnsHostname, GetComputerNameExW,
+    };
+
+    let mut len: u32 = 0;
+    // First call sizes the buffer; it is expected to fail with the length set.
+    unsafe { GetComputerNameExW(ComputerNameDnsHostname, std::ptr::null_mut(), &mut len) };
+    if len == 0 {
+        return None;
+    }
+
+    let mut buf = vec![0u16; len as usize];
+    let ok = unsafe { GetComputerNameExW(ComputerNameDnsHostname, buf.as_mut_ptr(), &mut len) };
+    if ok == 0 {
+        return None;
+    }
+    buf.truncate(len as usize);
+    Some(String::from_utf16_lossy(&buf))
+}
+
 /// The lookup, with the environment injected.
 ///
 /// Split so the fallback can be tested against the environment a daemon
@@ -723,13 +756,10 @@ fn machine_label_from(env: impl Fn(&str) -> Option<String>) -> String {
         }
     }
 
-    #[cfg(unix)]
-    {
-        let uname = rustix::system::uname();
-        let node = uname.nodename().to_string_lossy();
+    if let Some(name) = os_hostname() {
         // Trim the domain: `andy-mac.local` is the mDNS form, and the label is
         // for a person reading a list rather than for resolution.
-        let short = node.split('.').next().unwrap_or("");
+        let short = name.split('.').next().unwrap_or("");
         if !short.is_empty() {
             return short.to_string();
         }
