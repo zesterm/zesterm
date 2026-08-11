@@ -1,0 +1,15 @@
+[package]
+name = "zest-cloud"
+description = "The workspace's one owner of TLS and HTTP: the relay dialler and the control-plane client."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Deliberately empty. The crate exists before the dependency it is here to own,
+# so `cargo xtask check-deps` fences rustls and every HTTP client out of the
+# rest of the workspace *first* -- the PR that adds rustls is then the one that
+# proves the fence works, rather than the one that discovers it does not.
+[dependencies]
