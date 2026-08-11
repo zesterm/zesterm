@@ -19,6 +19,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod boxdraw;
 pub mod metrics;
 
 use rustc_hash::FxHashMap;
@@ -49,6 +50,18 @@ impl Style {
 /// dominate the frame's CPU cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FontId(pub u16);
+
+impl FontId {
+    /// Not a face: the marker for glyphs [`boxdraw`] generates at cell size.
+    ///
+    /// Sentinel rather than a variant so [`GlyphKey`] stays a plain `Copy`
+    /// struct that hashes in one go — it is hashed once per cell per frame, and
+    /// that cost is the reason for the interning above.
+    ///
+    /// `u16::MAX` can never collide with a real face: `faces` is a `Vec` indexed
+    /// by this, so a face at that index would need 65535 loaded before it.
+    pub const BOXDRAW: Self = Self(u16::MAX);
+}
 
 /// Identifies one rasterized glyph bitmap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -131,6 +144,8 @@ pub struct Fonts {
     fallback_cache: FxHashMap<char, Option<FontId>>,
     typo: Typography,
     cell: CellMetrics,
+    /// Draw U+2500–U+259F at cell size instead of taking the font's glyphs.
+    builtin_box_drawing: bool,
     requested: Vec<String>,
     /// Families to try for Private Use Area codepoints, best first.
     symbol_families: Vec<String>,
@@ -160,6 +175,7 @@ impl Fonts {
             scale_cx: ScaleContext::new(),
             shape_cx: ShapeContext::new(),
             typo,
+            builtin_box_drawing: true,
             cell: CellMetrics {
                 cell_w: 1,
                 cell_h: 1,
@@ -294,6 +310,21 @@ impl Fonts {
         self.cell
     }
 
+    /// Whether box drawing and block elements are generated at cell size.
+    ///
+    /// On by default, because the alternative has gaps in it. Off is for the
+    /// person who has chosen a font whose box drawing they specifically want —
+    /// the caller must clear the atlas after changing this, since it changes
+    /// what every affected key rasterizes to.
+    pub fn set_builtin_box_drawing(&mut self, on: bool) {
+        self.builtin_box_drawing = on;
+    }
+
+    #[must_use]
+    pub fn builtin_box_drawing(&self) -> bool {
+        self.builtin_box_drawing
+    }
+
     #[must_use]
     pub fn typography(&self) -> Typography {
         self.typo
@@ -336,6 +367,17 @@ impl Fonts {
     /// which case the renderer should draw a visible replacement rather than
     /// silently nothing.
     pub fn glyph_for(&mut self, ch: char, style: Style) -> Option<(FontId, GlyphId)> {
+        // Before the primary face, not after: on Windows the primary face
+        // *does* carry these, so a fallback-shaped hook would never fire and
+        // the gaps would stay. See `boxdraw` for why the font's own glyph is
+        // the wrong shape however good the font is.
+        //
+        // The codepoint doubles as the glyph id, which the ranges make safe --
+        // U+2500..=U+259F fits a `GlyphId` with room to spare.
+        if self.builtin_box_drawing && boxdraw::covers(ch) {
+            return Some((FontId::BOXDRAW, ch as GlyphId));
+        }
+
         let primary = self.font_for(style);
         if let Some(face) = self.faces.get(primary.0 as usize) {
             if let Some(font) = face.font_ref() {
@@ -504,6 +546,17 @@ impl Fonts {
     /// Segoe UI Emoji is COLR, Apple Color Emoji is sbix, and a terminal that
     /// only handles outlines renders both as blank boxes.
     pub fn rasterize(&mut self, key: GlyphKey) -> Option<GlyphImage> {
+        if key.font == FontId::BOXDRAW {
+            // Cell geometry is not in the key, so this relies on the caller
+            // clearing the atlas whenever `set_typography` changes the cell --
+            // which it must do anyway, since every cached bitmap is the wrong
+            // size after that. `line_height` is the case to keep in mind: it
+            // changes `cell_h` without changing `px`, so the key alone would
+            // not notice.
+            let ch = char::from_u32(u32::from(key.glyph))?;
+            return boxdraw::render(ch, self.cell);
+        }
+
         let face = self.faces.get(key.font.0 as usize)?;
         let font = face.font_ref()?;
         let px = f32::from(key.px) / 256.0;
@@ -997,6 +1050,12 @@ mod tests {
         #[test]
         fn box_drawing_resolves_without_any_nerd_font() {
             let Some(mut f) = fonts() else { return };
+            // Without this the assertion is vacuous for everything but the
+            // arrow: `glyph_for` answers U+2500..=U+259F from `boxdraw` before
+            // it consults a face at all, so the fallback chain this test exists
+            // to guard would never run and the test would pass with that chain
+            // deleted.
+            f.set_builtin_box_drawing(false);
             f.set_symbol_families(Vec::new());
             for ch in ['─', '│', '█', '←'] {
                 assert!(
@@ -1007,6 +1066,46 @@ mod tests {
                      Courier, which has none of these"
                 );
             }
+        }
+
+        /// The bug, at the layer where it was actually visible.
+        ///
+        /// `boxdraw`'s own tests prove the generated mask tiles; this proves the
+        /// *font system* hands that mask to the renderer instead of a glyph.
+        /// Flip `set_builtin_box_drawing(false)` and the second half of this
+        /// test fails on any real font — which is what a run of `█` looked like
+        /// before: a picket fence, because the font's advance is not the
+        /// rounded cell.
+        #[test]
+        fn a_full_block_is_rasterized_at_cell_size() {
+            let Some(mut f) = fonts() else { return };
+            let cell = f.cell_metrics();
+
+            let (font, glyph) = f.glyph_for('█', Style::default()).expect("U+2588 must resolve");
+            let key = f.key(font, glyph);
+            let img = f.rasterize(key).expect("and it must rasterize");
+
+            // Size first, deliberately: this is the assertion that fails the way
+            // the bug looked, and its message carries the numbers.
+            assert_eq!(
+                (img.width, img.height),
+                (cell.cell_w, cell.cell_h),
+                "a full block must be exactly one cell, or a run of them has seams"
+            );
+            assert!(
+                img.data.iter().all(|&v| v == 255),
+                "and solid, or the seams are inside the glyph instead of between them"
+            );
+            assert_eq!(font, FontId::BOXDRAW, "the grid must not take this from a face");
+        }
+
+        /// Turning the feature off has to actually reach the font.
+        #[test]
+        fn the_font_path_is_still_reachable() {
+            let Some(mut f) = fonts() else { return };
+            f.set_builtin_box_drawing(false);
+            let (font, _) = f.glyph_for('█', Style::default()).expect("U+2588 must still resolve");
+            assert_ne!(font, FontId::BOXDRAW, "the setting must take a real face");
         }
 
         /// Shell prompts are made of Private Use Area glyphs.

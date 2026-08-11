@@ -104,6 +104,16 @@ pub struct Typography {
     /// turning it on later costs nothing.
     #[schemars(extend("x_zest_group" = "Text", "x_zest_widget" = "toggle"))]
     pub ligatures: bool,
+    /// Draw box-drawing and block characters at cell size instead of taking the
+    /// font's glyphs.
+    ///
+    /// On by default because the font's are the wrong shape: a glyph is as wide
+    /// as the font's advance, the cell is that advance *rounded*, and the
+    /// difference is a gap at every cell boundary — a run of `█` renders as a
+    /// picket fence. Turn it off only to get a specific font's own box drawing
+    /// back, and expect the seams with it.
+    #[schemars(extend("x_zest_group" = "Text", "x_zest_widget" = "toggle"))]
+    pub builtin_box_drawing: bool,
 }
 
 impl Default for Typography {
@@ -131,6 +141,7 @@ impl Default for Typography {
             letter_spacing: 0.0,
             features: Vec::new(),
             ligatures: false,
+            builtin_box_drawing: true,
         }
     }
 }
