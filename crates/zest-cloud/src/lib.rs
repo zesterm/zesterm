@@ -2,9 +2,9 @@
 //!
 //! Two callers, one stack. `zest-daemon` parks a long-lived outbound control
 //! link at the relay and dials a fresh socket per pipe (ADR-009), and
-//! `--enroll` posts a signed code to the control plane — `NoHttpClient` is the
-//! hole this crate fills. Both need TLS to a Cloudflare hostname and nothing
-//! else needs it at all.
+//! `--enroll` posts a signed code to the control plane — the second of those is
+//! live, through `zest_daemon::enroll::HttpsControlPlane`. Both need TLS to a
+//! Cloudflare hostname and nothing else needs it at all.
 //!
 //! # Why this is a crate and not a module in `zest-daemon`
 //!
@@ -16,9 +16,10 @@
 //! and phone clients — stay small: `cargo xtask check-deps` forbids the whole
 //! family by name in each of them.
 //!
-//! Note what the fence does **not** claim. `zest-daemon` will depend on this
-//! crate and `zest-app` depends on `zest-daemon`, so rustls reaches the desktop
-//! binary and is meant to. "Keeps TLS out of the app" would be false; "TLS has
+//! Note what the fence does **not** claim. `zest-daemon` depends on this crate
+//! and `zest-app` depends on `zest-daemon`, so rustls reaches the desktop
+//! binary — `cargo tree -p zest-app -e normal -i rustls` shows exactly that one
+//! path — and is meant to. "Keeps TLS out of the app" would be false; "TLS has
 //! one owner, and the portable crates have none" is the property.
 //!
 //! # What is here

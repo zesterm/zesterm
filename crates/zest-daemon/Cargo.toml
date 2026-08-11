@@ -22,6 +22,17 @@ zest-core.workspace = true
 zest-pty.workspace = true
 zest-proto.workspace = true
 zest-mesh.workspace = true
+# The workspace's one owner of TLS and HTTP, and the first crate to depend on
+# it — `--enroll` posts through it. rustls therefore reaches this binary and,
+# through it, `zest-app`, which is what #68's boundary says should happen: TLS
+# has one owner, and the crates that cross to wasm and to the browser have none.
+#
+# Note which half of that `check-deps` holds. This crate carries no boundary of
+# its own, so nothing would stop a second HTTP client being added to this very
+# table; what the check enforces is that the portable crates never gain one.
+# The rule here is read, not enforced: anything needing TLS goes into
+# `zest-cloud` and comes back through this line.
+zest-cloud.workspace = true
 serde = { workspace = true }
 # Enrolment only. The daemon's own wire is MessagePack; the control plane is a
 # Worker, and JSON is what it speaks -- so this is the boundary's format rather

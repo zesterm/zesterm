@@ -96,10 +96,10 @@ const BOUNDARIES: &[Boundary] = &[
 /// fence instead of reading it.
 ///
 /// The point is **not** "keep TLS out of the app" — that would be false, and
-/// believing it is the way this rule gets misread. `zest-daemon` will depend on
-/// `zest-cloud`, and `zest-app` already depends on `zest-daemon`, so rustls
-/// reaches the desktop binary by design; a rule naming either would be red the
-/// day the relay dialler lands.
+/// believing it is the way this rule gets misread. `zest-daemon` depends on
+/// `zest-cloud` for `--enroll`'s POST, and `zest-app` depends on `zest-daemon`,
+/// so rustls reaches the desktop binary by design; a rule naming either of
+/// those two would be red today.
 ///
 /// It buys two things instead. rustls and an HTTP client get exactly **one**
 /// owner, so a second cannot creep in beside it — two TLS stacks in one binary

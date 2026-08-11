@@ -7,7 +7,8 @@
 
 use std::sync::Arc;
 
-use zest_daemon::enroll::{self, NoHttpClient};
+use zest_cloud::tls::Roots;
+use zest_daemon::enroll;
 use zest_daemon::{default_socket_path, listen, Authenticator, DaemonConfig, Registry};
 use zest_mesh::identity::HostIdentity;
 use zest_mesh::keystore::{CredentialStore, MemoryKeyStore};
@@ -146,7 +147,12 @@ fn main() {
         }
         let base =
             opt("--control-plane").unwrap_or_else(|| enroll::DEFAULT_CONTROL_PLANE.to_string());
-        match enroll::enroll(&identity, &code, &label, &base, &NoHttpClient, store.as_ref()) {
+        // The operating system's trust store, which is the only thing that
+        // accepts a corporate middlebox's re-signed certificate. Nothing here
+        // chooses the bundled list yet; a machine with no trust store at all —
+        // a minimal container — is the case that will need a flag for it.
+        let http = enroll::HttpsControlPlane::new(Roots::Platform);
+        match enroll::enroll(&identity, &code, &label, &base, &http, store.as_ref()) {
             Ok(enrolled) => {
                 let account = enrolled.account.unwrap_or_else(|| "this account".into());
                 println!(
