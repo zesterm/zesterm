@@ -998,6 +998,20 @@ pub mod client {
         if !is_field_value(host_header) || !is_field_value(path) {
             return Err(protocol_error("the request line would be split"));
         }
+        // CR, LF and NUL are not the only ways to ruin a request line. Both of
+        // these are interpolated into it, where the separators are spaces, so
+        // an empty or space-bearing value produces `GET  HTTP/1.1` or
+        // `GET /bad path HTTP/1.1` — a malformed line the peer answers with a
+        // 400 that names nothing, rather than something a caller can debug.
+        // Rejecting here keeps "caller-supplied, reaches the wire verbatim"
+        // safe to say.
+        if host_header.is_empty()
+            || path.is_empty()
+            || host_header.bytes().any(|b| b == b' ' || b == b'\t')
+            || path.bytes().any(|b| b == b' ' || b == b'\t')
+        {
+            return Err(protocol_error("a request line needs a host and a path with no spaces"));
+        }
         let nonce = zest_mesh::identity::Nonce::random()
             .map_err(|e| io::Error::other(e.to_string()))?;
         let key = base64(&nonce.as_bytes()[..16]);
@@ -1588,6 +1602,27 @@ mod tests {
         assert!(request.starts_with("GET /host/abc?v=1 HTTP/1.1\r\n"));
         assert!(request.contains("\r\nHost: relay.example\r\n"));
         assert!(request.contains("\r\nAuthorization: Bearer token\r\n"));
+    }
+
+    #[test]
+    fn a_request_line_needs_a_host_and_a_path_that_cannot_mangle_it() {
+        // CR/LF/NUL are covered next door; these are the quieter ones. Both
+        // values sit between spaces in the request line, so an empty or
+        // space-bearing one yields `GET  HTTP/1.1` or `GET /a b HTTP/1.1` --
+        // malformed, and answered with a 400 that names nothing.
+        for (host, path) in
+            [("", "/"), ("h", ""), ("h ost", "/"), ("h", "/a b"), ("h\tost", "/"), ("h", "/a\tb")]
+        {
+            let (reader, writer, sent) = scripted(accepted);
+            assert!(
+                client::connect_to(reader, writer, host, path, &[], None).is_err(),
+                "host {host:?} path {path:?} was accepted into a request line it would mangle"
+            );
+            assert!(
+                sent.lock().expect("lock").is_empty(),
+                "host {host:?} path {path:?} reached the wire before it was checked"
+            );
+        }
     }
 
     #[test]

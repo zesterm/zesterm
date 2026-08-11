@@ -286,10 +286,17 @@ impl Gate {
         if let Some(wait) = self.limiter.blocked(key) {
             return Err(Refused::Cooling(wait));
         }
-        if self.unauthenticated.load(Ordering::Acquire) >= MAX_UNAUTHENTICATED {
-            return Err(Refused::Busy);
-        }
-        self.unauthenticated.fetch_add(1, Ordering::AcqRel);
+        // One bounded increment, not load-then-add. The separate check was
+        // inherited from the per-listener version and was already racy there;
+        // it matters more now that one budget of 32 is shared by every
+        // transport, because the threads that oversubscribe it are precisely
+        // the ones a flood creates — every racer sees 31 and every racer adds.
+        // `fetch_update` refuses at the boundary instead, so the cap is a cap.
+        self.unauthenticated
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < MAX_UNAUTHENTICATED).then_some(n + 1)
+            })
+            .map_err(|_| Refused::Busy)?;
         Ok(Countdown(Some(Arc::clone(&self.unauthenticated))))
     }
 
