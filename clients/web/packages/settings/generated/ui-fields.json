@@ -351,7 +351,7 @@
     "key": "typography.builtin_box_drawing",
     "group": "Text",
     "widget": "toggle",
-    "description": "Draw box-drawing and block characters at cell size instead of taking the\nfont's glyphs.\n\nOn by default because the font's are the wrong shape: a glyph is as wide\nas the font's advance, the cell is that advance *rounded*, and the\ndifference is a gap at every cell boundary — a run of `█` renders as a\npicket fence. Turn it off only to get a specific font's own box drawing\nback, and expect the seams with it.",
+    "description": "Draw box-drawing and block characters at cell size instead of taking the\nfont's glyphs.\n\nOn by default because the font's glyphs are the wrong shape: one is as wide\nas the font's advance, the cell is that advance *rounded*, and the\ndifference is a gap at every cell boundary — a run of `█` renders as a\npicket fence. Turn it off only to get a specific font's own box drawing\nback, and expect the seams with it.",
     "range": null,
     "integer": false,
     "variants": [],

@@ -374,7 +374,13 @@ impl Fonts {
         //
         // The codepoint doubles as the glyph id, which the ranges make safe --
         // U+2500..=U+259F fits a `GlyphId` with room to spare.
-        if self.builtin_box_drawing && boxdraw::covers(ch) {
+        //
+        // Grid only, hence the `ui_px` check. A generated mask is *cell*-sized,
+        // which is the one thing chrome text is not: it is proportional, freely
+        // positioned, and drawn at the UI type scale rather than the grid's. It
+        // would also measure as zero-width, because `advance_of` asks the face
+        // and there is no face behind this id.
+        if self.builtin_box_drawing && self.ui_px.is_none() && boxdraw::covers(ch) {
             return Some((FontId::BOXDRAW, ch as GlyphId));
         }
 
@@ -1097,6 +1103,27 @@ mod tests {
                 "and solid, or the seams are inside the glyph instead of between them"
             );
             assert_eq!(font, FontId::BOXDRAW, "the grid must not take this from a face");
+        }
+
+        /// Chrome text must keep taking these from the font.
+        ///
+        /// A generated mask is cell-sized, and UI text is neither cell-sized nor
+        /// cell-positioned. Worse, it would measure as **zero width**:
+        /// `advance_of` asks the face for an advance and `FontId::BOXDRAW` has
+        /// no face, so a status-bar string containing one box character would
+        /// silently lay out as if that character were not there.
+        #[test]
+        fn ui_text_does_not_get_cell_sized_glyphs() {
+            let Some(mut f) = fonts() else { return };
+            f.set_ui_px(Some(11.0));
+            let (font, glyph) = f.glyph_for('█', Style::default()).expect("U+2588 must resolve");
+            assert_ne!(font, FontId::BOXDRAW, "chrome text takes the font's glyph");
+            assert!(f.advance_of(font, glyph) > 0.0, "and it must measure as something");
+
+            // And the grid still does, once the override is cleared.
+            f.set_ui_px(None);
+            let (font, _) = f.glyph_for('█', Style::default()).unwrap();
+            assert_eq!(font, FontId::BOXDRAW, "the grid is still generated");
         }
 
         /// Turning the feature off has to actually reach the font.

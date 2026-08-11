@@ -107,7 +107,7 @@ pub struct Typography {
     /// Draw box-drawing and block characters at cell size instead of taking the
     /// font's glyphs.
     ///
-    /// On by default because the font's are the wrong shape: a glyph is as wide
+    /// On by default because the font's glyphs are the wrong shape: one is as wide
     /// as the font's advance, the cell is that advance *rounded*, and the
     /// difference is a gap at every cell boundary — a run of `█` renders as a
     /// picket fence. Turn it off only to get a specific font's own box drawing
