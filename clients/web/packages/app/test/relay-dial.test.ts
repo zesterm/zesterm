@@ -171,11 +171,16 @@ test('closing an open link closes its socket, and reports gone once', async (t) 
   );
 });
 
-test('send reaches the socket once it exists', async (t) => {
+test('send reaches the socket once it exists, and is dropped rather than queued before', async (t) => {
   const sockets = installFakeWebSocket();
   t.after(() => sockets.restore());
 
   const link = relayDial('https://relay.example.com', HOST, async () => 't')(recorder());
+  // Nothing above sends before `onOpen()`, so this cannot happen — but if it
+  // ever does, dropping is what keeps the shell a pass-through: a queue here
+  // would be the state machine the synchronous seam exists to avoid.
+  link.send(new Uint8Array([1]));
+
   await flush();
   sockets.latest().onopen?.();
   link.send(new Uint8Array([7, 7]));
@@ -183,6 +188,6 @@ test('send reaches the socket once it exists', async (t) => {
   assert.deepEqual(
     sockets.latest().sent,
     [new Uint8Array([7, 7])],
-    'bytes go out verbatim; the shell is a pass-through and not a queue',
+    'bytes go out verbatim, and the pre-open byte was neither replayed nor buffered',
   );
 });
