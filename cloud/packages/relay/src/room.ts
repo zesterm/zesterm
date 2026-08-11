@@ -360,7 +360,19 @@ export class RelayRoom {
     // dial can land before this method's next line runs. A host leg that
     // arrived first would otherwise find a pipe with one end.
     this.#state.acceptWebSocket(ws, [pipeTag(id), ROLE_CLIENT]);
-    control.send(openMessage({ pipe: id, exp: now + timeoutMs }));
+    // Guarded, because `getWebSockets` can hand back a socket the platform has
+    // not finished closing — this file's own tests model that state, and
+    // `control.ts` refuses to rest the "is a host present" answer on a close
+    // handshake with a peer that may be gone. An uncaught throw here rejects
+    // `openAttach`, so the browser gets a 500 instead of a close code, and a
+    // 500 is the one answer it cannot read.
+    try {
+      control.send(openMessage({ pipe: id, exp: now + timeoutMs }));
+    } catch {
+      this.#dialling.delete(id);
+      ws.close(CLOSE_HOST_ABSENT, 'no control link for this host');
+      return;
+    }
 
     if (!(await this.#dialBack(id, timeoutMs))) {
       ws.close(CLOSE_PIPE_DIAL_TIMEOUT, 'the host did not dial back');
@@ -445,7 +457,16 @@ export class RelayRoom {
     // edge ceiling, and billing is per message — splitting an 8 MiB scrollback
     // response into 32 would multiply its cost by 32 on exactly the responses a
     // split was meant to protect. → ADR-009.
-    peer.send(message);
+    try {
+      peer.send(message);
+    } catch {
+      // A peer that is closing but still listed is the same thing to this
+      // pipe as a peer that is gone, and it must be *this* -- an uncaught
+      // throw on the data path rejects the message handler, which strands the
+      // other leg holding a pipe with nothing at the far end.
+      this.#endPipe(member, null);
+      ws.close(CLOSE_PIPE_PEER_GONE, 'the other end of this pipe is gone');
+    }
   }
 
   /** The survivor is told, and the pipe's buckets go with it. */

@@ -307,11 +307,17 @@ export class PipeBudgets {
   }
 }
 
+/**
+ * Reused rather than constructed per message: this is the data path, and a
+ * fresh encoder per frame is allocation the pump does not need to make.
+ */
+const UTF8 = new TextEncoder();
+
 /** How many bytes a relayed message costs its budget. */
 export function messageSize(message: string | ArrayBuffer): number {
   // A string's cost is its UTF-8 length, not its code-unit count — the pipes
   // carry binary `zest-proto` frames, so this only ever runs for a peer that is
   // speaking something unexpected, and undercounting there is the wrong way to
   // be wrong.
-  return typeof message === 'string' ? new TextEncoder().encode(message).byteLength : message.byteLength;
+  return typeof message === 'string' ? UTF8.encode(message).byteLength : message.byteLength;
 }

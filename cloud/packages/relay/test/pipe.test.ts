@@ -100,6 +100,42 @@ function suite(mode: string, evicting: boolean): void {
   };
   const relay = (): Relay => new Relay(evicting, hex(RELAY_SEED));
 
+  it('a control link that is closing but still listed refuses the attach with a code', async () => {
+    const r = relay();
+    const control = await parked(r);
+    // `getWebSockets` can hand back a socket the platform has not finished
+    // closing -- `control.ts` refuses to rest "is a host present" on a close
+    // handshake with a peer that may be gone, and the fake models it by never
+    // removing. An unguarded `send` throws there, `openAttach` rejects, and the
+    // browser gets a 500: the one answer it cannot read, where every other
+    // refusal on this path is a close code it can.
+    control.close(1001, 'going away');
+
+    const ws = await r.attach('browser', 20);
+    assert.deepEqual(
+      ws.closed,
+      { code: CLOSE_HOST_ABSENT, reason: 'no control link for this host' },
+      'a host whose link is on its way out is a host that is not there, and the browser is told so',
+    );
+  });
+
+  it('a peer that is closing but still listed ends the pipe rather than the request', async () => {
+    const r = relay();
+    const control = await parked(r);
+    const p = await r.pipe(control);
+    p.host.close(1001, 'going away');
+
+    // The throw lands on the *data* path, so an uncaught one rejects the
+    // message handler and strands this leg holding a pipe with nothing at the
+    // far end -- worse than the close it is standing in for.
+    await r.say(p.client, 'into the void');
+    assert.equal(
+      p.client.closed?.code,
+      CLOSE_PIPE_PEER_GONE,
+      'the surviving leg must be told its pipe is over, not left waiting on a peer that cannot receive',
+    );
+  });
+
   it('a browser attaches, the host dials back, and bytes cross both ways', async () => {
     const r = relay();
     const control = await parked(r);
