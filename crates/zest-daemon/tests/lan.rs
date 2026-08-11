@@ -11,7 +11,7 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use zest_daemon::{Authenticator, DaemonConfig, LanListener, Registry};
+use zest_daemon::{Authenticator, DaemonConfig, Gate, LanListener, Registry};
 use zest_mesh::identity::{ClientIdentity, HostIdentity, Nonce};
 use zest_mesh::pairing::{PairingQueue, Transcript};
 use zest_mesh::trust::{MemoryTrustStore, TrustRecord, TrustStore};
@@ -58,7 +58,7 @@ fn host() -> Host {
     };
     let registry = Arc::new(Registry::new());
     std::thread::spawn(move || {
-        let _ = listener.serve_forever(config, registry, auth);
+        let _ = listener.serve_forever(config, registry, auth, Arc::new(Gate::new()));
     });
 
     Host { addr, trust, host_id }

@@ -72,7 +72,7 @@ use std::time::Duration;
 use sha1::{Digest, Sha1};
 
 use crate::auth::{Auth, Authenticator};
-use crate::lan::{accept_hardened, LanListener};
+use crate::lan::{accept_hardened, Gate, LanListener};
 use crate::server::{serve_lan, Registry};
 use crate::{DaemonConfig, DaemonError};
 
@@ -100,6 +100,15 @@ const MAX_CONTROL_PAYLOAD: u64 = 125;
 /// a peer may take to send it; this bounds how much memory it costs while it
 /// does.
 const MAX_UPGRADE_HEADER: usize = 16 * 1024;
+
+/// The most a reassembled [`WsMessage`] may weigh.
+///
+/// Only the message-oriented reader needs a bound at all, because it is the
+/// only one that reassembles: the byte-oriented [`WsReader`] streams payload
+/// through and `FrameReader`'s own `MAX_FRAME` bounds what is built out of it.
+/// 64 KiB is enormous for the small JSON a control link carries, and a peer
+/// sending more is broken or hostile either way.
+const MAX_CONTROL_MESSAGE: usize = 64 * 1024;
 
 /// Which end of the connection this codec is.
 ///
@@ -173,21 +182,27 @@ fn write_frame(
     w.flush()
 }
 
-/// The read half: WebSocket frames in, a plain byte stream out.
+/// One data frame's header, once the control frames ahead of it are answered.
+struct DataFrame {
+    /// `OP_BINARY`, `OP_TEXT` or `OP_CONTINUATION`. Which of those are legal
+    /// is the reader's policy, not this layer's.
+    opcode: u8,
+    fin: bool,
+    len: u64,
+}
+
+/// The frame layer both readers stand on: header parsing, unmasking, and the
+/// control frames neither of them wants to see.
 ///
-/// Data-frame payloads stream through in arrival order — no per-message
-/// reassembly, because the zest-proto layer's own length prefix means
-/// [`FrameReader`](zest_proto::frame::FrameReader) does the assembly and
-/// enforces `MAX_FRAME`. That is also why a hostile 2⁶³ declared length
-/// allocates nothing here: payload is consumed incrementally in bounded reads.
+/// Split out of [`WsReader`] when the relay's control link needed a
+/// *message*-oriented reader beside the byte-oriented one. Everything here is
+/// RFC 6455 and is written once; reassembly, and which opcodes a link accepts,
+/// belong to whoever is reading.
 ///
-/// Control frames are handled inline: a ping is answered under the shared
-/// write lock, a close is echoed once and reported as EOF, and anything
-/// malformed — a text frame on this binary protocol, an unmasked client
-/// frame, reserved bits with no extension negotiated — returns `Err`, which
-/// `serve`'s reader treats as "framing lost; closing": exactly the RFC's
-/// fail-the-connection.
-struct WsReader<R: Read, W: Write> {
+/// A hostile 2⁶³ declared length allocates nothing at this level: payload is
+/// consumed incrementally in bounded reads, and only a reader that chooses to
+/// reassemble has anything to bound.
+struct FrameSource<R: Read, W: Write> {
     stream: R,
     /// For pong and close replies only; data frames go out through
     /// [`WsWriter`] on the same lock.
@@ -210,7 +225,22 @@ struct WsReader<R: Read, W: Write> {
     closed: bool,
 }
 
-impl<R: Read, W: Write> WsReader<R, W> {
+impl<R: Read, W: Write> FrameSource<R, W> {
+    fn new(stream: R, replies: Arc<Mutex<W>>, role: Role, leftover: Vec<u8>) -> Self {
+        Self {
+            stream,
+            replies,
+            role,
+            buf: leftover,
+            pos: 0,
+            remaining: 0,
+            mask: [0; 4],
+            mask_at: 0,
+            in_message: false,
+            closed: false,
+        }
+    }
+
     fn refill(&mut self) -> io::Result<()> {
         // Cheap and bounded: at a refill the unconsumed tail is at most one
         // frame header or one control payload, so this drain is a memmove of
@@ -243,10 +273,13 @@ impl<R: Read, W: Write> WsReader<R, W> {
         Ok(())
     }
 
-    /// Parse frames until a data frame's payload begins or the connection
-    /// closes. Control frames never reach the caller.
-    fn next_data_frame(&mut self) -> io::Result<()> {
+    /// Parse frames until a data frame's payload begins, answering control
+    /// frames inline. `Ok(None)` once the peer has closed.
+    fn next_data_frame(&mut self) -> io::Result<Option<DataFrame>> {
         loop {
+            if self.closed {
+                return Ok(None);
+            }
             self.need(2)?;
             let b0 = self.buf[self.pos];
             let b1 = self.buf[self.pos + 1];
@@ -310,7 +343,9 @@ impl<R: Read, W: Write> WsReader<R, W> {
 
             let fin = b0 & FIN != 0;
             match b0 & 0x0f {
-                OP_BINARY => {
+                // Whether text is acceptable is the reader's business; whether
+                // a message may begin here is this layer's.
+                op @ (OP_BINARY | OP_TEXT) => {
                     if self.in_message {
                         return Err(protocol_error("a new message began inside a fragmented one"));
                     }
@@ -318,7 +353,7 @@ impl<R: Read, W: Write> WsReader<R, W> {
                     self.remaining = len;
                     self.mask = key;
                     self.mask_at = 0;
-                    return Ok(());
+                    return Ok(Some(DataFrame { opcode: op, fin, len }));
                 }
                 OP_CONTINUATION => {
                     if !self.in_message {
@@ -330,13 +365,7 @@ impl<R: Read, W: Write> WsReader<R, W> {
                     self.remaining = len;
                     self.mask = key;
                     self.mask_at = 0;
-                    return Ok(());
-                }
-                OP_TEXT => {
-                    // The protocol is MessagePack; a text frame is a client
-                    // that dialled the wrong thing, and pretending to cope
-                    // would corrupt the byte stream.
-                    return Err(protocol_error("a text frame on a binary protocol"));
+                    return Ok(Some(DataFrame { opcode: OP_CONTINUATION, fin, len }));
                 }
                 op @ (OP_CLOSE | OP_PING | OP_PONG) => {
                     if !fin {
@@ -370,7 +399,7 @@ impl<R: Read, W: Write> WsReader<R, W> {
                                 let _ = write_frame(&mut *w, OP_CLOSE, &payload, mask);
                             }
                             self.closed = true;
-                            return Ok(());
+                            return Ok(None);
                         }
                     }
                 }
@@ -378,6 +407,45 @@ impl<R: Read, W: Write> WsReader<R, W> {
             }
         }
     }
+
+    /// Copy out some of the current data frame's payload, unmasked. `Ok(0)`
+    /// once that frame is spent — never EOF, which only `next_data_frame`
+    /// reports.
+    fn read_payload(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if self.remaining == 0 || out.is_empty() {
+            return Ok(0);
+        }
+        if self.available() == 0 {
+            self.refill()?;
+        }
+        let have = self.available() as u64;
+        let n = self.remaining.min(have).min(out.len() as u64) as usize;
+        for (i, slot) in out[..n].iter_mut().enumerate() {
+            *slot = self.buf[self.pos + i] ^ self.mask[(self.mask_at + i) & 3];
+        }
+        self.pos += n;
+        self.mask_at = (self.mask_at + n) & 3;
+        self.remaining -= n as u64;
+        Ok(n)
+    }
+}
+
+/// The read half: WebSocket frames in, a plain byte stream out.
+///
+/// Data-frame payloads stream through in arrival order — no per-message
+/// reassembly, because the zest-proto layer's own length prefix means
+/// [`FrameReader`](zest_proto::frame::FrameReader) does the assembly and
+/// enforces `MAX_FRAME`. That is also why a hostile 2⁶³ declared length
+/// allocates nothing here: payload is consumed incrementally in bounded reads.
+///
+/// Control frames are handled inline by [`FrameSource`]: a ping is answered
+/// under the shared write lock, a close is echoed once and reported as EOF, and
+/// anything malformed — a text frame on this binary protocol, an unmasked
+/// client frame, reserved bits with no extension negotiated — returns `Err`,
+/// which `serve`'s reader treats as "framing lost; closing": exactly the RFC's
+/// fail-the-connection.
+pub struct WsReader<R: Read, W: Write> {
+    src: FrameSource<R, W>,
 }
 
 impl<R: Read, W: Write> Read for WsReader<R, W> {
@@ -386,25 +454,17 @@ impl<R: Read, W: Write> Read for WsReader<R, W> {
             return Ok(0);
         }
         loop {
-            if self.closed {
-                return Ok(0);
-            }
-            if self.remaining == 0 {
-                self.next_data_frame()?;
+            if self.src.remaining == 0 {
+                let Some(frame) = self.src.next_data_frame()? else { return Ok(0) };
+                if frame.opcode == OP_TEXT {
+                    // The protocol is MessagePack; a text frame is a client
+                    // that dialled the wrong thing, and pretending to cope
+                    // would corrupt the byte stream.
+                    return Err(protocol_error("a text frame on a binary protocol"));
+                }
                 continue;
             }
-            if self.available() == 0 {
-                self.refill()?;
-            }
-            let have = self.available() as u64;
-            let n = self.remaining.min(have).min(out.len() as u64) as usize;
-            for (i, slot) in out[..n].iter_mut().enumerate() {
-                *slot = self.buf[self.pos + i] ^ self.mask[(self.mask_at + i) & 3];
-            }
-            self.pos += n;
-            self.mask_at = (self.mask_at + n) & 3;
-            self.remaining -= n as u64;
-            return Ok(n);
+            return self.src.read_payload(out);
         }
     }
 }
@@ -419,7 +479,7 @@ impl<R: Read, W: Write> Read for WsReader<R, W> {
 /// batch. A comment beside `serve`'s flush points back here; if that write
 /// pattern ever changes, this coupling is the thing to re-examine, and the
 /// `one_ws_message_per_flush` test is the thing that goes red.
-struct WsWriter<W: Write> {
+pub struct WsWriter<W: Write> {
     shared: Arc<Mutex<W>>,
     buf: Vec<u8>,
     role: Role,
@@ -448,6 +508,119 @@ impl<W: Write> Drop for WsWriter<W> {
         // Best-effort 1000 "normal closure": a browser told goodbye reports a
         // clean close instead of an abnormal one. Nothing to do if the peer is
         // already gone.
+        if let (Ok(mask), Ok(mut w)) = (self.role.send_mask(), self.shared.lock()) {
+            let _ = write_frame(&mut *w, OP_CLOSE, &1000u16.to_be_bytes(), mask);
+        }
+    }
+}
+
+/// One whole WebSocket message.
+///
+/// The binary transport has no use for this — `serve` wants a byte stream and
+/// gets one from [`WsReader`]. The relay's **control link** does: it carries
+/// JSON, and it carries it as text because Cloudflare's free keepalive
+/// (`WebSocketRequestResponsePair('ping','pong')`, which answers without waking
+/// the Durable Object at all) is defined over string members. ADR-009's cost
+/// model rests on that keepalive, so text frames are not a style choice.
+pub enum WsMessage {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
+/// The read half for a link that speaks messages rather than bytes.
+///
+/// The reassembly [`WsReader`] deliberately omits, bounded by
+/// [`MAX_CONTROL_MESSAGE`] — a byte stream has a length prefix inside it and a
+/// message does not, so the bound has to live here.
+pub struct WsMessageReader<R: Read, W: Write> {
+    src: FrameSource<R, W>,
+    /// The opcode the message under construction began with. Continuations do
+    /// not repeat it.
+    kind: u8,
+    partial: Vec<u8>,
+}
+
+impl<R: Read, W: Write> WsMessageReader<R, W> {
+    /// The next whole message. `Ok(None)` once the peer has closed.
+    ///
+    /// Not an `Iterator`: end-of-stream and a protocol failure are different
+    /// answers here and a caller has to act differently on each, which
+    /// `Option<Result<_>>` invites it not to.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> io::Result<Option<WsMessage>> {
+        loop {
+            let Some(frame) = self.src.next_data_frame()? else { return Ok(None) };
+            if frame.opcode == OP_CONTINUATION {
+                // Room is checked against what is already held, so a message
+                // fragmented into a thousand small frames costs no more than
+                // one sent whole.
+                if frame.len > (MAX_CONTROL_MESSAGE - self.partial.len()) as u64 {
+                    return Err(protocol_error("an oversized message"));
+                }
+            } else {
+                if frame.len > MAX_CONTROL_MESSAGE as u64 {
+                    return Err(protocol_error("an oversized message"));
+                }
+                self.kind = frame.opcode;
+                // Belt and braces, and deliberately not covered by a test
+                // because nothing can currently observe it: a completed message
+                // leaves through `mem::take` below, and the only path that
+                // leaves bytes here returns `Err`, which fails the connection —
+                // `serve`'s reader treats any error as fatal, so there is no
+                // "next message" to contaminate. It stays because that is a
+                // property of the *callers*, not of this loop, and a future
+                // error that is recoverable would silently prepend the
+                // abandoned fragment to whatever came next.
+                self.partial.clear();
+            }
+
+            let mut chunk = [0u8; 4096];
+            while self.src.remaining > 0 {
+                let n = self.src.read_payload(&mut chunk)?;
+                self.partial.extend_from_slice(&chunk[..n]);
+            }
+            if !frame.fin {
+                continue;
+            }
+
+            let bytes = std::mem::take(&mut self.partial);
+            return if self.kind == OP_TEXT {
+                // §8.1: a text message that is not valid UTF-8 fails the
+                // connection. Lossy decoding would hand the layer above
+                // replacement characters where a signature or an id used to be.
+                String::from_utf8(bytes)
+                    .map(|s| Some(WsMessage::Text(s)))
+                    .map_err(|_| protocol_error("a text message that was not UTF-8"))
+            } else {
+                Ok(Some(WsMessage::Binary(bytes)))
+            };
+        }
+    }
+}
+
+/// The write half for a link that speaks messages rather than bytes.
+///
+/// Shares the write lock with its reader for the same reason [`WsWriter`] does:
+/// an auto-pong must never interleave with a message already going out.
+pub struct WsMessageWriter<W: Write> {
+    shared: Arc<Mutex<W>>,
+    role: Role,
+}
+
+impl<W: Write> WsMessageWriter<W> {
+    /// Send one whole text message.
+    pub fn send_text(&mut self, s: &str) -> io::Result<()> {
+        let mask = self.role.send_mask()?;
+        let mut w = self.shared.lock().expect("ws write lock");
+        write_frame(&mut *w, OP_TEXT, s.as_bytes(), mask)
+    }
+}
+
+impl<W: Write> Drop for WsMessageWriter<W> {
+    fn drop(&mut self) {
+        // Same best-effort 1000 as [`WsWriter`]: a control link that vanishes
+        // without a close leaves the far end waiting out a timeout instead of
+        // learning at once that the host is gone.
         if let (Ok(mask), Ok(mut w)) = (self.role.send_mask(), self.shared.lock()) {
             let _ = write_frame(&mut *w, OP_CLOSE, &1000u16.to_be_bytes(), mask);
         }
@@ -590,29 +763,53 @@ fn accept_upgrade(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
     Ok(leftover)
 }
 
-/// Split an upgraded stream into the halves `serve` wants.
+/// Wrap halves that are **already split** in the codec `serve` wants.
+///
+/// The `Arc<Mutex<W>>` is the whole point and survives every generalisation of
+/// this function: the reader holds it so an auto-pong cannot interleave
+/// mid-frame with a keyframe the writer is emitting. Splitting is the caller's
+/// problem — a `TcpStream` clones, and the TLS stream this signature exists for
+/// does not — and deliberately not a trait, because there is nothing to be
+/// generic over once the halves exist.
+fn split_halves<R: Read, W: Write>(
+    reader: R,
+    writer: W,
+    role: Role,
+    leftover: Vec<u8>,
+) -> (WsReader<R, W>, WsWriter<W>) {
+    let shared = Arc::new(Mutex::new(writer));
+    (
+        WsReader { src: FrameSource::new(reader, Arc::clone(&shared), role, leftover) },
+        WsWriter { shared, buf: Vec::new(), role },
+    )
+}
+
+/// [`split_halves`], for a link that speaks whole messages.
+fn split_message_halves<R: Read, W: Write>(
+    reader: R,
+    writer: W,
+    role: Role,
+    leftover: Vec<u8>,
+) -> (WsMessageReader<R, W>, WsMessageWriter<W>) {
+    let shared = Arc::new(Mutex::new(writer));
+    (
+        WsMessageReader {
+            src: FrameSource::new(reader, Arc::clone(&shared), role, leftover),
+            kind: OP_BINARY,
+            partial: Vec::new(),
+        },
+        WsMessageWriter { shared, role },
+    )
+}
+
+/// Split an upgraded `TcpStream` into the halves `serve` wants.
 fn split(
     stream: TcpStream,
     role: Role,
     leftover: Vec<u8>,
 ) -> io::Result<(WsReader<TcpStream, TcpStream>, WsWriter<TcpStream>)> {
     let write_half = stream.try_clone()?;
-    let shared = Arc::new(Mutex::new(write_half));
-    Ok((
-        WsReader {
-            stream,
-            replies: Arc::clone(&shared),
-            role,
-            buf: leftover,
-            pos: 0,
-            remaining: 0,
-            mask: [0; 4],
-            mask_at: 0,
-            in_message: false,
-            closed: false,
-        },
-        WsWriter { shared, buf: Vec::new(), role },
-    ))
+    Ok(split_halves(stream, write_half, role, leftover))
 }
 
 /// A bound WebSocket port, not yet serving.
@@ -654,10 +851,11 @@ impl WsListener {
         config: DaemonConfig,
         registry: Arc<Registry>,
         auth: Arc<Authenticator>,
+        gate: Arc<Gate>,
     ) -> Result<(), DaemonError> {
         tracing::info!(addr = %self.local_addr(), "serving WebSocket clients");
         let (listener, handshake_timeout) = self.inner.into_parts();
-        accept_hardened(listener, handshake_timeout, move |mut stream, peer, watchdog, slot| {
+        accept_hardened(listener, handshake_timeout, gate, move |mut stream, peer, watchdog, slot| {
             let leftover = accept_upgrade(&mut stream)
                 .map_err(|e| DaemonError::Transport(format!("upgrade failed: {e}")))?;
             let (reader, writer) = split(stream, Role::Server, leftover)
@@ -684,33 +882,168 @@ impl WsListener {
 /// bring their own implementation; nothing here is for them.
 pub mod client {
     use super::{
-        accept_key, base64, protocol_error, read_header_block, split, Role, WsReader, WsWriter,
+        accept_key, base64, protocol_error, read_header_block, split_halves,
+        split_message_halves, Role, WsMessageReader, WsMessageWriter, WsReader, WsWriter,
     };
     use std::io::{self, Read, Write};
     use std::net::TcpStream;
 
-    /// Dial the daemon's WebSocket port: perform the HTTP upgrade, verify the
-    /// accept digest, and hand back the two halves a protocol loop wants.
+    /// Dial the daemon's WebSocket port on a socket that is already connected.
+    ///
+    /// The one-argument shape the diagnostics tools want, and a thin wrapper
+    /// over [`connect_to`]: `GET /` at the peer's own address, no extra
+    /// headers, no subprotocol — byte for byte the request this function sent
+    /// before it had a general form underneath it.
     pub fn connect(
-        mut stream: TcpStream,
+        stream: TcpStream,
     ) -> io::Result<(impl Read + Send + 'static, impl Write + Send + 'static)> {
         let host = stream
             .peer_addr()
             .map_or_else(|_| "unknown".to_string(), |a| a.to_string());
+        let write_half = stream.try_clone()?;
+        connect_to(stream, write_half, &host, "/", &[], None)
+    }
+
+    /// Dial *something else* that speaks WebSocket, over halves already split.
+    ///
+    /// Three things separate this from [`connect`], and each is something the
+    /// relay needs and a daemon port does not: the request line and `Host` are
+    /// the endpoint's rather than the socket's, a caller may send its own
+    /// headers, and a subprotocol may be negotiated — which is where the attach
+    /// ticket travels, `Sec-WebSocket-Protocol` being the only header a browser
+    /// can set on a WebSocket and the only place a secret does not end up in
+    /// referrers, edge logs and history.
+    ///
+    /// Halves rather than a stream because the TLS stream underneath this can
+    /// be neither cloned nor split; whoever owns it says how.
+    pub fn connect_to<R, W>(
+        mut reader: R,
+        mut writer: W,
+        host_header: &str,
+        path: &str,
+        extra_headers: &[(&str, &str)],
+        want_protocol: Option<&str>,
+    ) -> io::Result<(WsReader<R, W>, WsWriter<W>)>
+    where
+        R: Read + Send + 'static,
+        W: Write + Send + 'static,
+    {
+        let leftover = upgrade(
+            &mut reader,
+            &mut writer,
+            host_header,
+            path,
+            extra_headers,
+            want_protocol,
+        )?;
+        Ok(split_halves(reader, writer, Role::Client, leftover))
+    }
+
+    /// [`connect_to`], for a link whose traffic is whole messages rather than a
+    /// byte stream — the relay's control link, which carries JSON as text.
+    pub fn connect_messages_to<R, W>(
+        mut reader: R,
+        mut writer: W,
+        host_header: &str,
+        path: &str,
+        extra_headers: &[(&str, &str)],
+        want_protocol: Option<&str>,
+    ) -> io::Result<(WsMessageReader<R, W>, WsMessageWriter<W>)>
+    where
+        R: Read + Send + 'static,
+        W: Write + Send + 'static,
+    {
+        let leftover = upgrade(
+            &mut reader,
+            &mut writer,
+            host_header,
+            path,
+            extra_headers,
+            want_protocol,
+        )?;
+        Ok(split_message_halves(reader, writer, Role::Client, leftover))
+    }
+
+    /// An HTTP field name: RFC 9110 §5.6.2 `token`.
+    fn is_token(name: &str) -> bool {
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+    }
+
+    /// A field value with nothing in it that ends a line — or a header block.
+    ///
+    /// Caller-supplied headers reach the wire verbatim, and an attach ticket
+    /// arrives from a control plane rather than from this process. A value
+    /// carrying CR, LF or NUL is not a malformed header, it is a second request
+    /// smuggled inside the first.
+    fn is_field_value(value: &str) -> bool {
+        !value.bytes().any(|b| matches!(b, b'\r' | b'\n' | b'\0'))
+    }
+
+    /// The client half of the upgrade: write the request, check the response.
+    ///
+    /// Returns whatever arrived behind the response headers, which must seed
+    /// the frame parser — a server that pipelines its first frame behind the
+    /// `101` is entirely legal.
+    fn upgrade(
+        reader: &mut impl Read,
+        writer: &mut impl Write,
+        host_header: &str,
+        path: &str,
+        extra_headers: &[(&str, &str)],
+        want_protocol: Option<&str>,
+    ) -> io::Result<Vec<u8>> {
+        if !is_field_value(host_header) || !is_field_value(path) {
+            return Err(protocol_error("the request line would be split"));
+        }
+        // CR, LF and NUL are not the only ways to ruin a request line. Both of
+        // these are interpolated into it, where the separators are spaces, so
+        // an empty or space-bearing value produces `GET  HTTP/1.1` or
+        // `GET /bad path HTTP/1.1` — a malformed line the peer answers with a
+        // 400 that names nothing, rather than something a caller can debug.
+        // Rejecting here keeps "caller-supplied, reaches the wire verbatim"
+        // safe to say.
+        if host_header.is_empty()
+            || path.is_empty()
+            || host_header.bytes().any(|b| b == b' ' || b == b'\t')
+            || path.bytes().any(|b| b == b' ' || b == b'\t')
+        {
+            return Err(protocol_error("a request line needs a host and a path with no spaces"));
+        }
         let nonce = zest_mesh::identity::Nonce::random()
             .map_err(|e| io::Error::other(e.to_string()))?;
         let key = base64(&nonce.as_bytes()[..16]);
-        let request = format!(
-            "GET / HTTP/1.1\r\n\
-             Host: {host}\r\n\
+        let mut request = format!(
+            "GET {path} HTTP/1.1\r\n\
+             Host: {host_header}\r\n\
              Upgrade: websocket\r\n\
              Connection: Upgrade\r\n\
              Sec-WebSocket-Key: {key}\r\n\
-             Sec-WebSocket-Version: 13\r\n\r\n"
+             Sec-WebSocket-Version: 13\r\n"
         );
-        stream.write_all(request.as_bytes())?;
+        if let Some(protocol) = want_protocol {
+            if !is_token(protocol) {
+                return Err(protocol_error("a subprotocol that is not a token"));
+            }
+            request.push_str(&format!("Sec-WebSocket-Protocol: {protocol}\r\n"));
+        }
+        for (name, value) in extra_headers {
+            if !is_token(name) || !is_field_value(value) {
+                return Err(protocol_error("a header that would split the request"));
+            }
+            request.push_str(&format!("{name}: {value}\r\n"));
+        }
+        request.push_str("\r\n");
+        writer.write_all(request.as_bytes())?;
+        // Nothing has reached the peer until this. A `TcpStream` flushes on
+        // every write and forgives the omission; the TLS writer this signature
+        // exists for emits nothing until a record is closed, so without it the
+        // dial waits forever for an answer to a request that was never sent.
+        writer.flush()?;
 
-        let (head, leftover) = read_header_block(&mut stream)?;
+        let (head, leftover) = read_header_block(reader)?;
         let text = std::str::from_utf8(&head)
             .map_err(|_| protocol_error("the HTTP response was not UTF-8"))?;
         let mut lines = text.split("\r\n");
@@ -718,20 +1051,36 @@ pub mod client {
         if !status.starts_with("HTTP/1.1 101") {
             return Err(protocol_error(&format!("the upgrade was refused: {status}")));
         }
-        let accept = lines
-            .filter_map(|l| l.split_once(':'))
-            .find(|(name, _)| name.trim().eq_ignore_ascii_case("sec-websocket-accept"))
-            .map(|(_, v)| v.trim().to_string())
-            .ok_or_else(|| protocol_error("no Sec-WebSocket-Accept in the response"))?;
+
+        let mut accept = None;
+        let mut protocol = None;
+        for (name, value) in lines.filter_map(|l| l.split_once(':')) {
+            match name.trim().to_ascii_lowercase().as_str() {
+                "sec-websocket-accept" => accept = Some(value.trim().to_string()),
+                "sec-websocket-protocol" => protocol = Some(value.trim().to_string()),
+                _ => {}
+            }
+        }
+
+        let accept = accept.ok_or_else(|| protocol_error("no Sec-WebSocket-Accept in the response"))?;
         // A wrong digest means something between us and the daemon answered
         // the HTTP request without speaking WebSocket — a proxy, usually.
         if accept != accept_key(&key) {
             return Err(protocol_error("the accept digest is wrong"));
         }
+        // §4.1: a server may name at most one of the subprotocols the client
+        // offered, and naming anything else — including naming one when none
+        // were offered — must fail the connection. Letting it pass would mean
+        // agreeing to a framing this side has no implementation of.
+        if protocol.as_deref() != want_protocol {
+            return Err(protocol_error(match (&protocol, want_protocol) {
+                (Some(_), None) => "the server named a subprotocol that was not offered",
+                (None, Some(_)) => "the server did not accept the subprotocol",
+                _ => "the server named a different subprotocol",
+            }));
+        }
 
-        let (reader, writer): (WsReader<TcpStream, TcpStream>, WsWriter<TcpStream>) =
-            split(stream, Role::Client, leftover)?;
-        Ok((reader, writer))
+        Ok(leftover)
     }
 }
 
@@ -741,22 +1090,30 @@ mod tests {
     use std::io::Cursor;
 
     type TestReader = WsReader<Cursor<Vec<u8>>, Vec<u8>>;
+    type TestMessageReader = WsMessageReader<Cursor<Vec<u8>>, Vec<u8>>;
 
     /// A reader over canned bytes, with replies captured in memory.
     fn reader_over(role: Role, bytes: Vec<u8>) -> (TestReader, Arc<Mutex<Vec<u8>>>) {
         let replies = Arc::new(Mutex::new(Vec::new()));
         (
             WsReader {
-                stream: Cursor::new(bytes),
-                replies: Arc::clone(&replies),
-                role,
-                buf: Vec::new(),
-                pos: 0,
-                remaining: 0,
-                mask: [0; 4],
-                mask_at: 0,
-                in_message: false,
-                closed: false,
+                src: FrameSource::new(Cursor::new(bytes), Arc::clone(&replies), role, Vec::new()),
+            },
+            replies,
+        )
+    }
+
+    /// The same, message-oriented. No writer half: these tests read.
+    fn messages_over(
+        role: Role,
+        bytes: Vec<u8>,
+    ) -> (TestMessageReader, Arc<Mutex<Vec<u8>>>) {
+        let replies = Arc::new(Mutex::new(Vec::new()));
+        (
+            WsMessageReader {
+                src: FrameSource::new(Cursor::new(bytes), Arc::clone(&replies), role, Vec::new()),
+                kind: OP_BINARY,
+                partial: Vec::new(),
             },
             replies,
         )
@@ -998,5 +1355,364 @@ mod tests {
         assert!(has_token("keep-alive, Upgrade", "upgrade"));
         assert!(has_token("WEBSOCKET", "websocket"));
         assert!(!has_token("keep-alive", "upgrade"));
+    }
+
+    // --- the message-oriented reader -------------------------------------
+
+    #[test]
+    fn a_text_message_arrives_whole_and_decoded() {
+        let frame = masked_frame(OP_TEXT, true, [7, 7, 7, 7], br#"{"t":"open"}"#);
+        let (mut r, _) = messages_over(Role::Server, frame);
+        match r.next().expect("read") {
+            Some(WsMessage::Text(s)) => assert_eq!(s, r#"{"t":"open"}"#),
+            _ => panic!("the control link's JSON must arrive as text"),
+        }
+    }
+
+    #[test]
+    fn a_fragmented_text_message_is_reassembled() {
+        // The reassembly `WsReader` deliberately omits: a message reader has no
+        // length prefix inside the payload to lean on, so a caller handed half
+        // a JSON object has no way to notice.
+        let mut bytes = masked_frame(OP_TEXT, false, [1, 2, 3, 4], b"{\"t\":");
+        bytes.extend(masked_frame(OP_CONTINUATION, true, [5, 6, 7, 8], b"\"open\"}"));
+        let (mut r, _) = messages_over(Role::Server, bytes);
+        match r.next().expect("read") {
+            Some(WsMessage::Text(s)) => assert_eq!(s, r#"{"t":"open"}"#),
+            _ => panic!("a fragmented message must not surface as two"),
+        }
+    }
+
+    #[test]
+    fn two_messages_in_one_read_come_out_separately() {
+        // The state that has to reset between messages: `kind` and the partial
+        // buffer. Reusing either turns the second message into the first's tail.
+        let mut bytes = masked_frame(OP_TEXT, true, [1, 1, 1, 1], b"one");
+        bytes.extend(masked_frame(OP_BINARY, true, [2, 2, 2, 2], b"two"));
+        let (mut r, _) = messages_over(Role::Server, bytes);
+        assert!(matches!(r.next().expect("read"), Some(WsMessage::Text(s)) if s == "one"));
+        assert!(matches!(r.next().expect("read"), Some(WsMessage::Binary(b)) if b == b"two"));
+    }
+
+    #[test]
+    fn a_ping_between_message_fragments_is_answered_by_the_shared_frame_layer() {
+        // The point of factoring `FrameSource` out: control-frame handling is
+        // written once, so the free keepalive works on this reader too.
+        let mut bytes = masked_frame(OP_TEXT, false, [9, 9, 9, 9], b"half ");
+        bytes.extend(masked_frame(OP_PING, true, [2, 2, 2, 2], b"ping"));
+        bytes.extend(masked_frame(OP_CONTINUATION, true, [3, 3, 3, 3], b"half"));
+        let (mut r, replies) = messages_over(Role::Server, bytes);
+        assert!(matches!(r.next().expect("read"), Some(WsMessage::Text(s)) if s == "half half"));
+        let sent = replies.lock().expect("lock").clone();
+        assert_eq!(sent[0], FIN | OP_PONG, "the pong must still go out");
+        assert_eq!(&sent[2..], b"ping");
+    }
+
+    #[test]
+    fn a_close_ends_the_message_stream() {
+        let bytes = masked_frame(OP_CLOSE, true, [5, 5, 5, 5], &1000u16.to_be_bytes());
+        let (mut r, _) = messages_over(Role::Server, bytes);
+        assert!(r.next().expect("read").is_none(), "a clean close is end-of-stream, not an error");
+    }
+
+    #[test]
+    fn a_message_larger_than_the_bound_is_refused() {
+        // The payload really is present, so without the bound this message
+        // reassembles perfectly — a frame that merely *declares* too much
+        // fails on end-of-input either way and would prove nothing.
+        let payload = vec![b'x'; MAX_CONTROL_MESSAGE + 1];
+        let mut frame = vec![FIN | OP_TEXT, 127];
+        frame.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+        frame.extend_from_slice(&payload);
+        let (mut r, _) = messages_over(Role::Client, frame);
+        assert!(r.next().is_err(), "an oversized message must fail the connection");
+    }
+
+    #[test]
+    fn fragments_that_add_up_past_the_bound_are_refused_too() {
+        // Checking each frame against the bound in isolation is the mistake
+        // this catches: a thousand legal fragments are one illegal message.
+        let payload = vec![b'x'; 100];
+        let mut bytes = masked_frame(OP_TEXT, false, [1, 1, 1, 1], &payload);
+        for _ in 0..(MAX_CONTROL_MESSAGE / 100 + 2) {
+            bytes.extend(masked_frame(OP_CONTINUATION, false, [1, 1, 1, 1], &payload));
+        }
+        bytes.extend(masked_frame(OP_CONTINUATION, true, [1, 1, 1, 1], b"end"));
+        let (mut r, _) = messages_over(Role::Server, bytes);
+        assert!(r.next().is_err(), "fragmentation must not be a way around the bound");
+    }
+
+    #[test]
+    fn a_text_message_that_is_not_utf8_fails_the_connection() {
+        // §8.1. Decoding lossily would hand the layer above replacement
+        // characters where a ticket or an id used to be.
+        let frame = masked_frame(OP_TEXT, true, [4, 4, 4, 4], &[0xff, 0xfe]);
+        let (mut r, _) = messages_over(Role::Server, frame);
+        assert!(r.next().is_err());
+    }
+
+    #[test]
+    fn send_text_writes_one_text_frame_and_a_close_on_drop() {
+        let shared = Arc::new(Mutex::new(Vec::new()));
+        {
+            let mut w = WsMessageWriter { shared: Arc::clone(&shared), role: Role::Server };
+            w.send_text("hi").expect("send");
+        }
+        let sent = shared.lock().expect("lock").clone();
+        assert_eq!(sent[0], FIN | OP_TEXT, "a control link's JSON travels as text");
+        assert_eq!(sent[1], 2);
+        assert_eq!(&sent[2..4], b"hi");
+        assert_eq!(sent[4], FIN | OP_CLOSE, "the far end should learn at once that we are gone");
+    }
+
+    // --- the client upgrade ----------------------------------------------
+
+    /// A writer that emits nothing until `flush`, like the TLS writer
+    /// [`client::connect_to`] exists for.
+    struct Buffered {
+        pending: Vec<u8>,
+        sent: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for Buffered {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.pending.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.sent.lock().expect("lock").extend(self.pending.drain(..));
+            Ok(())
+        }
+    }
+
+    /// A peer that answers whatever request was **flushed** to it.
+    ///
+    /// It has to compute the response from the request because the nonce is
+    /// random: a canned `Sec-WebSocket-Accept` could only ever be wrong.
+    struct Scripted {
+        sent: Arc<Mutex<Vec<u8>>>,
+        reply: fn(&str) -> String,
+        out: Vec<u8>,
+        pos: usize,
+    }
+
+    impl Read for Scripted {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            if self.out.is_empty() {
+                let sent = self.sent.lock().expect("lock").clone();
+                if sent.is_empty() {
+                    // Not a contrived failure: this is exactly what a daemon
+                    // does when the request never left the TLS writer.
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "the request was never flushed",
+                    ));
+                }
+                let text = String::from_utf8(sent).expect("the request must be UTF-8");
+                let key = text
+                    .lines()
+                    .find_map(|l| l.strip_prefix("Sec-WebSocket-Key: "))
+                    .expect("every request carries a key")
+                    .to_string();
+                self.out = (self.reply)(&key).into_bytes();
+            }
+            let n = (self.out.len() - self.pos).min(out.len());
+            out[..n].copy_from_slice(&self.out[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    /// The scripted peer, its captured request, and a response builder.
+    fn scripted(reply: fn(&str) -> String) -> (Scripted, Buffered, Arc<Mutex<Vec<u8>>>) {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        (
+            Scripted { sent: Arc::clone(&sent), reply, out: Vec::new(), pos: 0 },
+            Buffered { pending: Vec::new(), sent: Arc::clone(&sent) },
+            sent,
+        )
+    }
+
+    fn accepted(key: &str) -> String {
+        format!(
+            "HTTP/1.1 101 Switching Protocols\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Accept: {}\r\n\r\n",
+            accept_key(key)
+        )
+    }
+
+    #[test]
+    fn the_default_dial_is_byte_identical_to_the_request_that_shipped() {
+        // `examples/attach.rs --ws` and the end-to-end tungstenite tests both
+        // dial through `connect`, which is now a wrapper: the generalisation
+        // has to be invisible on the wire.
+        let (reader, writer, sent) = scripted(accepted);
+        // Held open: dropping the write half sends a close frame, which would
+        // land in the same capture as the request.
+        let _halves = client::connect_to(reader, writer, "1.2.3.4:7718", "/", &[], None)
+            .expect("upgrade");
+
+        let request = String::from_utf8(sent.lock().expect("lock").clone()).expect("utf-8");
+        let key = request
+            .lines()
+            .find_map(|l| l.strip_prefix("Sec-WebSocket-Key: "))
+            .expect("key");
+        assert_eq!(
+            request,
+            format!(
+                "GET / HTTP/1.1\r\n\
+                 Host: 1.2.3.4:7718\r\n\
+                 Upgrade: websocket\r\n\
+                 Connection: Upgrade\r\n\
+                 Sec-WebSocket-Key: {key}\r\n\
+                 Sec-WebSocket-Version: 13\r\n\r\n"
+            )
+        );
+    }
+
+    #[test]
+    fn the_request_is_flushed_before_the_response_is_awaited() {
+        // The single easiest bug to write here, and it does not show up on TCP:
+        // the scripted peer refuses to answer bytes that only ever reached the
+        // writer's own buffer, which is what a TLS record does.
+        let (reader, writer, sent) = scripted(accepted);
+        let _halves = client::connect_to(reader, writer, "h", "/", &[], None).expect("upgrade");
+        assert!(
+            !sent.lock().expect("lock").is_empty(),
+            "the peer must have seen the request before we waited for its answer"
+        );
+    }
+
+    #[test]
+    fn a_path_and_extra_headers_reach_the_wire() {
+        let (reader, writer, sent) = scripted(accepted);
+        let _halves = client::connect_to(
+            reader,
+            writer,
+            "relay.example",
+            "/host/abc?v=1",
+            &[("Authorization", "Bearer token")],
+            None,
+        )
+        .expect("upgrade");
+        let request = String::from_utf8(sent.lock().expect("lock").clone()).expect("utf-8");
+        assert!(request.starts_with("GET /host/abc?v=1 HTTP/1.1\r\n"));
+        assert!(request.contains("\r\nHost: relay.example\r\n"));
+        assert!(request.contains("\r\nAuthorization: Bearer token\r\n"));
+    }
+
+    #[test]
+    fn a_request_line_needs_a_host_and_a_path_that_cannot_mangle_it() {
+        // CR/LF/NUL are covered next door; these are the quieter ones. Both
+        // values sit between spaces in the request line, so an empty or
+        // space-bearing one yields `GET  HTTP/1.1` or `GET /a b HTTP/1.1` --
+        // malformed, and answered with a 400 that names nothing.
+        for (host, path) in
+            [("", "/"), ("h", ""), ("h ost", "/"), ("h", "/a b"), ("h\tost", "/"), ("h", "/a\tb")]
+        {
+            let (reader, writer, sent) = scripted(accepted);
+            assert!(
+                client::connect_to(reader, writer, host, path, &[], None).is_err(),
+                "host {host:?} path {path:?} was accepted into a request line it would mangle"
+            );
+            assert!(
+                sent.lock().expect("lock").is_empty(),
+                "host {host:?} path {path:?} reached the wire before it was checked"
+            );
+        }
+    }
+
+    #[test]
+    fn a_header_that_would_split_the_request_is_refused() {
+        // Caller-supplied headers carry things that came from elsewhere — an
+        // attach ticket comes from a control plane — so CRLF in one is a second
+        // request smuggled inside the first.
+        for header in [("X-Ticket", "abc\r\nX-Evil: yes"), ("Bad Name", "fine"), ("", "fine")] {
+            let (reader, writer, sent) = scripted(accepted);
+            assert!(
+                client::connect_to(reader, writer, "h", "/", &[header], None).is_err(),
+                "{header:?} must be refused, not sent"
+            );
+            assert!(
+                sent.lock().expect("lock").is_empty(),
+                "{header:?} reached the wire before it was checked"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrong_accept_digest_fails_the_upgrade() {
+        // Something answered the HTTP request without speaking WebSocket — a
+        // proxy, usually.
+        fn wrong(_key: &str) -> String {
+            "HTTP/1.1 101 Switching Protocols\r\n\
+             Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"
+                .to_string()
+        }
+        let (reader, writer, _) = scripted(wrong);
+        assert!(client::connect_to(reader, writer, "h", "/", &[], None).is_err());
+    }
+
+    #[test]
+    fn the_offered_subprotocol_must_come_back_exactly() {
+        fn echoes(key: &str) -> String {
+            format!(
+                "HTTP/1.1 101 Switching Protocols\r\n\
+                 Sec-WebSocket-Accept: {}\r\n\
+                 Sec-WebSocket-Protocol: zesterm.relay.v1\r\n\r\n",
+                accept_key(key)
+            )
+        }
+        let (reader, writer, sent) = scripted(echoes);
+        let _halves = client::connect_to(reader, writer, "h", "/", &[], Some("zesterm.relay.v1"))
+            .expect("the offered subprotocol was accepted");
+        let request = String::from_utf8(sent.lock().expect("lock").clone()).expect("utf-8");
+        assert!(request.contains("\r\nSec-WebSocket-Protocol: zesterm.relay.v1\r\n"));
+
+        // §4.1: a server naming a *different* subprotocol has agreed to a
+        // framing this side has no implementation of.
+        let (reader, writer, _) = scripted(echoes);
+        assert!(client::connect_to(reader, writer, "h", "/", &[], Some("zesterm.relay.v2")).is_err());
+
+        // And one that names none has not accepted what was asked for.
+        let (reader, writer, _) = scripted(accepted);
+        assert!(client::connect_to(reader, writer, "h", "/", &[], Some("zesterm.relay.v1")).is_err());
+    }
+
+    #[test]
+    fn a_subprotocol_nobody_offered_fails_the_connection() {
+        // The asymmetric half of §4.1, and the one an implementation forgets:
+        // a response header with no request header behind it.
+        fn unsolicited(key: &str) -> String {
+            format!(
+                "HTTP/1.1 101 Switching Protocols\r\n\
+                 Sec-WebSocket-Accept: {}\r\n\
+                 Sec-WebSocket-Protocol: something.else\r\n\r\n",
+                accept_key(key)
+            )
+        }
+        let (reader, writer, _) = scripted(unsolicited);
+        assert!(client::connect_to(reader, writer, "h", "/", &[], None).is_err());
+    }
+
+    #[test]
+    fn bytes_pipelined_behind_the_101_seed_the_frame_parser() {
+        // A server may put its first frame in the same packet as the response.
+        // Dropping those is the classic first-frame bug, and it survives the
+        // split into `upgrade` + `split_halves` only if the leftover is carried.
+        fn eager(key: &str) -> String {
+            let mut out = accepted(key);
+            // Server frames are unmasked: opcode, length, payload.
+            out.push_str("\u{2}\u{5}hello");
+            out
+        }
+        let (reader, writer, _) = scripted(eager);
+        let (mut r, _w) = client::connect_to(reader, writer, "h", "/", &[], None).expect("upgrade");
+        let mut out = [0u8; 8];
+        let n = r.read(&mut out).expect("read");
+        assert_eq!(&out[..n], b"hello");
     }
 }

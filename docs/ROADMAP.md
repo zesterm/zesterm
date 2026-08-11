@@ -1502,6 +1502,31 @@ The design is settled and the arithmetic is checked; see ADR-009 for dial-back
 versus a mux, one object per host, why the relay is a second Worker, and the
 three facts about Cloudflare that changed after #59 was written.
 
+- [x] **The daemon's WebSocket client can dial something that is not a daemon.**
+      `client::connect_to` takes halves that are **already split** — a TLS
+      stream can be neither cloned nor split, so whoever owns it says how — plus
+      a path and `Host` of its own, caller-supplied headers, and a subprotocol.
+      Each of the last three is something the relay needs and a daemon port does
+      not; the ticket travels on `Sec-WebSocket-Protocol`, so the header values
+      come from a control plane and are validated against the HTTP token charset
+      rather than trusted. Beside it a *message*-oriented reader, because the
+      object's free keepalive is defined over string members and that puts text
+      frames on the control link. `connect` is now a wrapper over it and the
+      request it sends is byte-identical.
+- [x] **The public-port hardening is one object, and it can key on more than an
+      address.** `Gate` — the mid-handshake cap and the per-peer failure limit —
+      is built once by the process and handed to every transport, where each
+      accept loop used to make its own. That is a **behaviour change**: the LAN
+      port and the WebSocket port had 32 mid-handshake slots each and now share
+      32, which is what ADR-009 needs (a relay stream is a socket, and must
+      count) and what the resource actually is (threads), at the cost that a LAN
+      flood can now crowd out a relay attach.
+
+      The limiter is keyed on an opaque `PeerKey` rather than a string, because
+      behind a relay every connection carries the relay's address and five
+      failures would let one hostile peer deny the whole fleet for a minute at a
+      time. And the watchdog cuts through a `Cut` rather than a `TcpStream`,
+      since a TLS stream is not one and cannot be cloned into one.
 - [ ] **The relay Worker and its Durable Object.** A control link the daemon
       parks, an attach ticket the browser carries on `Sec-WebSocket-Protocol`
       (not the query string — a secret in a URL lands in referrers, edge logs
