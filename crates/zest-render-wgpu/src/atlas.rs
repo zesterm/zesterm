@@ -96,6 +96,9 @@ pub struct Atlas {
     /// Scratch for widening a one-byte mask to four channels, reused so the
     /// box-drawing path allocates nothing per glyph.
     widen: Vec<u8>,
+    /// Set once a format mismatch has been reported, so a broken configuration
+    /// does not emit one line per glyph per frame.
+    warned_format_drift: bool,
 }
 
 /// The mask texture's format for a given antialiasing mode.
@@ -151,6 +154,7 @@ impl Atlas {
             layers: INITIAL_LAYERS,
             antialias,
             widen: Vec::new(),
+            warned_format_drift: false,
         }
     }
 
@@ -250,6 +254,32 @@ impl Atlas {
             && !is_color;
         if widened {
             widen_mask(&image.data, &mut self.widen);
+        }
+
+        // The rasterizer and this atlas must agree about how wide a texel is.
+        //
+        // They can only disagree one way -- a subpixel mask arriving while the
+        // mask texture is `R8Unorm` -- and that happens exactly on the fallback
+        // path, where the renderer refused subpixel because the device cannot
+        // blend per channel and the `Fonts` was left asking for it anyway. The
+        // caller's job is to keep them in step; this is the backstop, because
+        // the failure it prevents is a validation error or three columns of
+        // garbage on machines the dev box cannot reproduce.
+        if image.format == GlyphFormat::SubpixelMask && self.antialias != TextAntialias::Subpixel {
+            debug_assert!(
+                false,
+                "a subpixel mask reached a grayscale atlas: the rasterizer's mode and \
+                 this generation's have drifted apart"
+            );
+            if !self.warned_format_drift {
+                self.warned_format_drift = true;
+                tracing::error!(
+                    "the rasterizer produced subpixel coverage while the atlas is \
+                     grayscale; dropping the glyph rather than uploading it at the \
+                     wrong stride"
+                );
+            }
+            return None;
         }
 
         let (texture, bytes_per_pixel, data) = if is_color {

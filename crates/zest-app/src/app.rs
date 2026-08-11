@@ -3844,14 +3844,34 @@ impl App {
                 return;
             }
         }
-        if let (Some(gpu), Some(w)) = (self.gpu.as_mut(), self.window.as_ref()) {
+        if let Some(gpu) = self.gpu.as_mut() {
             // Before the clear, not after: switching mode recreates the mask
             // texture and starts its own generation, and the rasterizer and the
             // atlas must never disagree about how wide a texel is.
             gpu.renderer.set_text_antialias(&gpu.device, antialias);
+        }
+        self.sync_antialias();
+        if let (Some(gpu), Some(w)) = (self.gpu.as_mut(), self.window.as_ref()) {
             gpu.renderer.clear_atlas();
             let size = w.inner_size();
             self.resize_surface(size.width, size.height);
+        }
+    }
+
+    /// Make the rasterizer agree with the renderer about coverage.
+    ///
+    /// The renderer has the last word, and it is not the same word: it refuses
+    /// subpixel outright on a device that cannot blend per channel. Asking the
+    /// config alone would leave `Fonts` emitting four-byte masks into a
+    /// one-byte texture — a validation error or three columns of garbage, on
+    /// exactly the machines the fallback exists to serve and never on one that
+    /// has the feature. So read the answer back rather than predicting it.
+    fn sync_antialias(&mut self) {
+        let Some(effective) = self.gpu.as_ref().map(|g| g.renderer.text_antialias()) else {
+            return;
+        };
+        if let Some(fonts) = self.fonts.as_mut() {
+            fonts.set_text_antialias(effective);
         }
     }
 
@@ -4161,6 +4181,10 @@ impl ApplicationHandler<Wakeup> for App {
             self.effective_antialias(),
         ));
         tracing::debug!(elapsed_ms = t0.elapsed().as_millis(), "gpu ready");
+        // The renderer may have refused subpixel because the device cannot
+        // blend per channel. The rasterizer follows it, never the config —
+        // see `sync_antialias` for what going the other way costs.
+        fonts.set_text_antialias(gpu.renderer.text_antialias());
 
         // The surface may have landed on a slightly different size than the
         // window reported, so reconcile before the first frame.

@@ -1076,6 +1076,36 @@ mod tests {
     }
 
     #[test]
+    fn a_device_without_dual_source_reports_grayscale_so_the_rasterizer_can_follow() {
+        // The bug this pins, which Copilot found and no machine with the
+        // feature can reproduce: callers set `Fonts` from the *config* while
+        // the renderer had already refused subpixel, so four-byte masks were
+        // uploaded into a one-byte texture. `text_antialias()` is the answer
+        // every caller must read back, so it has to be the effective mode and
+        // never the requested one.
+        let Some((device, _queue)) = headless() else { return };
+        let r = Renderer::new(
+            &device,
+            wgpu::TextureFormat::Rgba8Unorm,
+            zest_font::TextAntialias::Subpixel,
+        );
+        if r.supports_subpixel_text() {
+            assert_eq!(r.text_antialias(), zest_font::TextAntialias::Subpixel);
+        } else {
+            assert_eq!(
+                r.text_antialias(),
+                zest_font::TextAntialias::Grayscale,
+                "a device without DUAL_SOURCE_BLENDING must report the mode it actually                  has, or every caller that trusts it uploads at the wrong stride"
+            );
+        }
+        assert_eq!(
+            r.atlas.text_antialias(),
+            r.text_antialias(),
+            "the atlas and the renderer must never disagree about coverage"
+        );
+    }
+
+    #[test]
     fn the_subpixel_module_enables_the_extension_before_anything_else() {
         // `enable` must precede every declaration. If it ever drifts below one,
         // the module stops compiling on every machine at once, at startup --

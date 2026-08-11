@@ -137,6 +137,10 @@ async fn run() {
         zest_font::TextAntialias::Subpixel
     };
     let mut renderer = Renderer::new(&device, TARGET_FORMAT, antialias);
+    // The renderer decides, not the flag: a fallback adapter may have no
+    // dual-source blending. Left unsynced, the rasterizer would emit four-byte
+    // subpixel masks into a one-byte texture.
+    fonts.set_text_antialias(renderer.text_antialias());
     eprintln!("[render_dump] antialias: {:?}", renderer.text_antialias());
     renderer.resize(&device, width, height);
 
