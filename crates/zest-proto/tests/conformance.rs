@@ -25,8 +25,15 @@ use zest_proto::decode::GridView;
 use zest_proto::delta::{BlockPayload, CursorState};
 use zest_proto::encode::Encoder;
 
-const CORPUS: &[&str] =
-    &["basic-echo", "dir-colors", "git-log", "unicode-wide", "vim-macos", "blocks-zsh"];
+const CORPUS: &[&str] = &[
+    "basic-echo",
+    "dir-colors",
+    "git-log",
+    "unicode-wide",
+    "vim-macos",
+    "blocks-zsh",
+    "blocks-pwsh",
+];
 
 fn corpus_path(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

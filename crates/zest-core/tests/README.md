@@ -35,9 +35,10 @@ VTREC1\n
 
 ### Record neutrally
 
-`blocks-zsh.vtrec` is a real interactive `zsh` with zesterm's shell integration
-injected — the recording that makes the command-block assertions mean something,
-since the other five predate shell integration and carry no OSC 133 at all.
+`blocks-zsh.vtrec` and `blocks-pwsh.vtrec` are real interactive shells with
+zesterm's shell integration injected — the recordings that make the command-block
+assertions mean something, since the other five predate shell integration and
+carry no OSC 133 at all.
 
 It was captured with `HOME`, `HOST` and the working directory pointed at
 throwaway values, and **that is the rule for anything committed here**: a
@@ -51,6 +52,23 @@ cd /tmp/zestdemo && HOST=zesterm-demo HOME=/tmp/zestdemo/home \
   ZDOTDIR=<config>/shell-integration/zsh ZESTERM_USER_ZDOTDIR=/tmp/zestdemo/home \
   pty_dump --cmd "/bin/zsh -i" --record blocks-zsh.vtrec --idle-exit-ms 2500 < commands.txt
 ```
+
+`blocks-pwsh.vtrec` is the same thing on Windows: PowerShell 7 with the hook
+dot-sourced by the command line `install` builds, run from `C:\zestdemo` and with
+the default prompt, which prints the path and nothing else.
+
+Two things about it are not obvious. **Do not pipe the commands in.** PSReadLine
+reads whatever is already buffered as one paste, so the whole script arrives as a
+single mangled command line; drive stdin with real pauses between lines and write
+`\r` alone, since a stray `\n` ends up inside the *next* recorded command. And
+**set the child's working directory explicitly** — `Set-Location` moves
+PowerShell's `$PWD` but not the process's CWD, which is what the pty inherits, so
+a recording made this way otherwise carries the directory the shell was launched
+from rather than the one it appears to be in.
+
+The prediction repaints PSReadLine does are in the recording on purpose: they are
+why the hook states the command with `633;E` instead of leaving zesterm to read it
+back off the grid.
 
 ### Recording more
 

@@ -5,38 +5,61 @@
 //!
 //! # Injection, not installation
 //!
-//! zesterm sets environment variables at spawn so the shell loads the hook
-//! itself. **No file of the user's is read for modification, written, or
-//! appended to.** This is what kitty, Ghostty and VS Code all default to, and
-//! kitty states the property directly: *"No files are added or modified."*
-//! Appending `eval "$(...)"` to `~/.zshrc` — iTerm2's older model — is the
-//! alternative, and it is the one that needs a consent prompt, a fingerprint of
-//! the file, and a story for what happens when the user edits it afterwards.
+//! zesterm arranges the *spawn* so the shell loads the hook itself. **No file of
+//! the user's is read for modification, written, or appended to.** This is what
+//! kitty, Ghostty and VS Code all default to, and kitty states the property
+//! directly: *"No files are added or modified."* Appending `eval "$(...)"` to
+//! `~/.zshrc` — iTerm2's older model — is the alternative, and it is the one
+//! that needs a consent prompt, a fingerprint of the file, and a story for what
+//! happens when the user edits it afterwards.
+//!
+//! Which knob the spawn turns is the shell's business, not ours, which is why
+//! [`install`] returns an [`Injection`] rather than a list of variables: zsh is
+//! hooked purely through the environment (`ZDOTDIR`), PowerShell purely through
+//! the command line (`-Command`), and WSL — when it arrives — needs both, since
+//! `WSLENV` is the only way a variable crosses into the distro and the inner
+//! shell still has to be named on the command line.
 //!
 //! # Why it can only reach the first shell
 //!
-//! Environment manipulation applies to the process zesterm starts. A shell
-//! started *inside* that one — `ssh`, `tmux`, `nix-shell`, a container, a bare
-//! `zsh` — is not touched, and no amount of cleverness changes that. The escape
-//! hatch is [`hook`], which prints the same script for a person to `eval` by
-//! hand on the far side.
+//! Injection applies to the process zesterm starts. A shell started *inside*
+//! that one — `ssh`, `tmux`, `nix-shell`, a container, a bare `zsh` — is not
+//! touched, and no amount of cleverness changes that. The escape hatch is
+//! [`hook`], which prints the same script for a person to load by hand on the
+//! far side.
 //!
-//! # zsh only, for now
+//! # Which shells, and why not the others
 //!
-//! Not an oversight. bash, fish and PowerShell each have a documented injection
-//! mechanism, and none of the three can be *seen working* on the machine this
-//! was written on: there is no fish and no pwsh here, and `/bin/bash` is
-//! Apple's patched 3.2.57, where the `ENV`-based startup path the technique
-//! depends on is disabled — which is why Ghostty excludes `/bin/bash` on Darwin
-//! outright rather than shipping something that silently does nothing.
+//! zsh and PowerShell. The absences are not an oversight:
+//!
+//! - **bash and fish** each have a documented mechanism, and neither can be
+//!   *seen working* on the machines this has been written on. `/bin/bash` on
+//!   macOS is Apple's patched 3.2.57, where the `ENV`-based startup path the
+//!   technique depends on is disabled — which is why Ghostty excludes
+//!   `/bin/bash` on Darwin outright rather than shipping something that silently
+//!   does nothing. Writing them blind is how the attach path nearly shipped
+//!   compiled and unseen.
+//! - **`cmd.exe`** has no prompt-function mechanism at all. There is no hook to
+//!   write, so a `cmd` window has no command blocks and never will. Said out
+//!   loud here, and logged at `info` by [`crate::CommandSpec::enable_shell_integration`],
+//!   because a silent zero is what made the PowerShell gap take a screenshot to
+//!   notice (#83).
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 /// A shell zesterm knows how to hook.
+///
+/// A variant names a **hook dialect, not a program**. `Pwsh` covers both
+/// `pwsh.exe` and `powershell.exe` because one script serves both, and a future
+/// `Bash` would cover bash-in-WSL and bash-on-macOS alike. Which executable a
+/// profile actually launches is the profile layer's business; splitting this
+/// enum by executable would only mean writing every hook twice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shell {
     Zsh,
+    /// PowerShell — Core (`pwsh`) and Windows PowerShell 5.1 alike.
+    Pwsh,
 }
 
 impl Shell {
@@ -45,26 +68,58 @@ impl Shell {
     /// Matches the *executable* only. A trailing argument that happens to
     /// contain `zsh` — `vim zsh-notes.md` — is not a zsh, and neither is a
     /// login shell spelled `-zsh`, which is why the leading `-` is stripped.
+    ///
+    /// The first token is parsed quote-aware rather than split on whitespace:
+    /// Windows' default shell lives at `"C:\Program Files\PowerShell\7\pwsh.exe"`,
+    /// and splitting on whitespace makes its executable `C:\Program` — a name
+    /// that matches nothing, so *every* Windows shell silently went unhooked
+    /// (#83). It is also the seam a launcher-aware pass hangs off later:
+    /// `wsl.exe -d Ubuntu -- bash` needs the shell named *after* the first
+    /// token, which a one-line match has nowhere to grow into.
     #[must_use]
     pub fn detect(command_line: &str) -> Option<Self> {
-        let exe = command_line.split_whitespace().next()?;
-        let exe = exe.trim_matches('"');
-        let name = Path::new(exe).file_name()?.to_str()?;
-        match name.strip_prefix('-').unwrap_or(name) {
-            "zsh" => Some(Self::Zsh),
-            _ => None,
+        let name = Path::new(first_token(command_line)?).file_name()?.to_str()?;
+        let name = name.strip_prefix('-').unwrap_or(name);
+        // zsh is matched exactly and the PowerShells case-insensitively, which
+        // is not inconsistency but the two filesystems: a `ZSH` next to a `zsh`
+        // on unix is a different file, and `PWSH.EXE` on Windows is not.
+        if name == "zsh" {
+            return Some(Self::Zsh);
         }
+        if ["pwsh", "pwsh.exe", "powershell", "powershell.exe"]
+            .iter()
+            .any(|c| name.eq_ignore_ascii_case(c))
+        {
+            return Some(Self::Pwsh);
+        }
+        None
     }
 
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::Zsh => "zsh",
+            Self::Pwsh => "pwsh",
         }
     }
 }
 
-/// The hook script, for a person to `eval` by hand.
+/// The executable a command line runs, with a quoted path kept whole.
+///
+/// Not a shell-grade parser — no escapes, no single quotes, because neither
+/// `CreateProcessW` nor [`crate::CommandSpec`] promises them for the program
+/// name. It only has to keep `"C:\Program Files\..."` in one piece.
+fn first_token(command_line: &str) -> Option<&str> {
+    let line = command_line.trim_start();
+    if let Some(rest) = line.strip_prefix('"') {
+        // An unterminated quote takes the rest of the line, which is what
+        // `CreateProcessW` does with it too.
+        return Some(rest.split('"').next().unwrap_or(rest)).filter(|s| !s.is_empty());
+    }
+    line.split_whitespace().next()
+}
+
+/// The hook script, for a person to load by hand.
 ///
 /// This is the documented path for everything injection cannot reach — ssh,
 /// tmux, subshells — and it is the *same* script the shim loads, so the two
@@ -73,12 +128,52 @@ impl Shell {
 /// ```text
 /// # ~/.zshrc, on a machine you ssh into
 /// eval "$(zesterm --shell-integration zsh)"
+///
+/// # $PROFILE, on a Windows box you ssh into
+/// zesterm --shell-integration pwsh | Out-String | Invoke-Expression
 /// ```
 #[must_use]
 pub fn hook(shell: Shell) -> &'static str {
     match shell {
         Shell::Zsh => include_str!("../shell-integration/zsh/zesterm.zsh"),
+        Shell::Pwsh => include_str!("../shell-integration/pwsh/zesterm.ps1"),
     }
+}
+
+/// The PowerShell hook's file name, and the marker that says a command line
+/// already carries it.
+///
+/// The name is load-bearing rather than cosmetic: PowerShell's injection lands
+/// *in the command line*, and a command line is the one part of a spawn that
+/// travels — the app hands one to the daemon, which would otherwise detect a
+/// PowerShell and inject a second time. See
+/// [`already_injected`].
+pub const SHIM_PWSH: &str = "zesterm.ps1";
+
+/// Whether this command line already loads a hook.
+///
+/// Injecting twice is not merely redundant: every marker is emitted twice, which
+/// the parser reads as an empty block between each real one. Cheap to check and
+/// impossible to notice going wrong.
+#[must_use]
+pub fn already_injected(command_line: &str) -> bool {
+    command_line.contains(SHIM_PWSH)
+}
+
+/// What a shell needs at spawn in order to load the hook.
+///
+/// Two halves because the shells disagree about where the knob is. zsh takes
+/// `env` only; PowerShell takes `args` only, having no `ZDOTDIR` analogue —
+/// the one place to say "load this file first" is the command line itself. A
+/// bare `Vec<(String, String)>` could express neither the second case nor the
+/// WSL one, which needs both at once.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Injection {
+    /// Environment entries layered over the child's. An empty *value* unsets.
+    pub env: Vec<(String, String)>,
+    /// Appended to the command line verbatim, leading space included. Empty for
+    /// a shell hooked purely through the environment.
+    pub args: String,
 }
 
 const ZSH_ZSHENV: &str = include_str!("../shell-integration/zsh/.zshenv");
@@ -102,13 +197,77 @@ const ZSH_ZLOGIN: &str = include_str!("../shell-integration/zsh/.zlogin");
 /// If the shim cannot be written. The caller should spawn *without* integration
 /// rather than refuse to open a terminal: a shell with no command blocks is a
 /// working shell, and a terminal that will not start is not.
-pub fn install(shell: Shell, dir: &Path) -> io::Result<Vec<(String, String)>> {
+pub fn install(shell: Shell, command_line: &str, dir: &Path) -> io::Result<Injection> {
     match shell {
         Shell::Zsh => install_zsh(dir),
+        Shell::Pwsh => install_pwsh(command_line, dir),
     }
 }
 
-fn install_zsh(dir: &Path) -> io::Result<Vec<(String, String)>> {
+/// PowerShell: dot-source the hook from the command line.
+///
+/// There is no `ZDOTDIR` analogue and no per-invocation rc file — `$PROFILE` is
+/// a fixed path belonging to the user, and this module does not write those. So
+/// the injection is `-NoExit -Command ". '<shim>'"`, which runs the hook and
+/// then drops into the interactive shell as if nothing had happened.
+fn install_pwsh(command_line: &str, dir: &Path) -> io::Result<Injection> {
+    // `-Command` consumes the whole rest of the line, so appending ours after a
+    // command line that already has one does not add a second `-Command`: it
+    // silently becomes *text inside the user's command*, breaking their shell
+    // outright rather than merely failing to hook it. Declining is the only
+    // safe move, and it is why this function needs the command line at all.
+    if !accepts_appended_args(command_line) {
+        tracing::info!(
+            command = %command_line,
+            "this PowerShell already runs a command of its own; no command blocks"
+        );
+        return Ok(Injection::default());
+    }
+
+    let shim_dir = dir.join("pwsh");
+    std::fs::create_dir_all(&shim_dir)?;
+    let shim = shim_dir.join(SHIM_PWSH);
+    std::fs::write(&shim, hook(Shell::Pwsh))?;
+
+    let Some(shim) = shim.to_str() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "shell integration directory is not valid UTF-8",
+        ));
+    };
+
+    // Single quotes so a `$` in the path is not expanded; PowerShell escapes a
+    // literal quote inside them by doubling it. The outer double quotes are for
+    // `CreateProcessW`, which parses the line before PowerShell ever sees it --
+    // and the character before the closing one is `'`, never a backslash, so
+    // the trailing-backslash hazard of quoting a bare Windows path does not
+    // arise here.
+    Ok(Injection {
+        env: Vec::new(),
+        args: format!(" -NoExit -Command \". '{}'\"", shim.replace('\'', "''")),
+    })
+}
+
+/// Whether appending arguments to this command line is safe.
+///
+/// False once PowerShell has been given something to run, since `-Command`,
+/// `-File` and their abbreviations all swallow everything after them.
+fn accepts_appended_args(command_line: &str) -> bool {
+    // PowerShell accepts any unambiguous prefix of a parameter name, so `-c`,
+    // `-com` and `-Command` are the same switch; `-f` likewise for `-File`.
+    // Matching the full names only would let `pwsh -c foo` through, which is
+    // the spelling people actually type.
+    !command_line.split_whitespace().skip(1).any(|arg| {
+        let Some(name) = arg.strip_prefix('-').or_else(|| arg.strip_prefix('/')) else {
+            return false;
+        };
+        let name = name.to_ascii_lowercase();
+        !name.is_empty()
+            && ["command", "file", "encodedcommand"].iter().any(|full| full.starts_with(&name))
+    })
+}
+
+fn install_zsh(dir: &Path) -> io::Result<Injection> {
     let zdotdir: PathBuf = dir.join("zsh");
     std::fs::create_dir_all(&zdotdir)?;
     for (name, body) in [
@@ -138,10 +297,13 @@ fn install_zsh(dir: &Path) -> io::Result<Vec<(String, String)>> {
         .or_else(|| std::env::var("HOME").ok())
         .unwrap_or_default();
 
-    Ok(vec![
-        ("ZDOTDIR".to_string(), zdotdir.to_string()),
-        ("ZESTERM_USER_ZDOTDIR".to_string(), user_zdotdir),
-    ])
+    Ok(Injection {
+        env: vec![
+            ("ZDOTDIR".to_string(), zdotdir.to_string()),
+            ("ZESTERM_USER_ZDOTDIR".to_string(), user_zdotdir),
+        ],
+        args: String::new(),
+    })
 }
 
 #[cfg(test)]
@@ -162,6 +324,137 @@ mod tests {
         assert_eq!(Shell::detect("vim zsh-notes.md"), None);
         assert_eq!(Shell::detect("/bin/bash"), None);
         assert_eq!(Shell::detect(""), None);
+    }
+
+    #[test]
+    fn a_quoted_executable_path_survives_the_space_in_program_files() {
+        // The bug behind #83, and the reason a `Pwsh` variant alone would have
+        // changed nothing: Windows' own default shell is quoted because its
+        // path has a space, and splitting the line on whitespace made the
+        // executable `C:\Program`. Every Windows shell went unhooked, and the
+        // only trace was a status bar reading `0 blocks`.
+        assert_eq!(
+            Shell::detect(r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo"#),
+            Some(Shell::Pwsh)
+        );
+        assert_eq!(Shell::detect(r#""C:\Program Files\Git\bin\zsh.exe""#), None);
+    }
+
+    #[test]
+    fn every_spelling_of_powershell_is_recognised() {
+        // One variant, four executables. Windows paths are case-insensitive, so
+        // the case a launcher happens to use is not a signal.
+        for line in [
+            "pwsh",
+            "pwsh.exe",
+            "PWSH.EXE",
+            "powershell",
+            "powershell.exe",
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoLogo",
+            r"C:\Users\andy\scoop\shims\pwsh.exe -NoLogo",
+            "/usr/local/bin/pwsh -Login",
+        ] {
+            assert_eq!(Shell::detect(line), Some(Shell::Pwsh), "{line} is a PowerShell");
+        }
+
+        // The argument names a PowerShell; the program is Notepad.
+        assert_eq!(Shell::detect("notepad pwsh.ps1"), None);
+        assert_eq!(Shell::detect("powershell-notes"), None);
+    }
+
+    #[test]
+    fn a_powershell_that_already_runs_something_is_left_alone() {
+        // `-Command` swallows the rest of the line, so appending after one does
+        // not produce a second `-Command` -- it produces text inside the user's
+        // command. That breaks their shell outright, which is strictly worse
+        // than the missing command blocks it was meant to fix.
+        for line in [
+            "pwsh -Command Get-Date",
+            "pwsh -c Get-Date",
+            "pwsh -NoLogo -File C:\\bootstrap.ps1",
+            "pwsh -f C:\\bootstrap.ps1",
+            "pwsh -EncodedCommand RwBlAHQA",
+        ] {
+            assert!(!accepts_appended_args(line), "{line} already runs a command of its own");
+        }
+
+        for line in ["pwsh", "pwsh -NoLogo", "pwsh -NoLogo -NoProfile", "pwsh -Login"] {
+            assert!(accepts_appended_args(line), "{line} drops into an interactive shell");
+        }
+    }
+
+    #[test]
+    fn powershell_is_hooked_through_the_command_line_because_it_has_no_zdotdir() {
+        let dir = std::env::temp_dir().join(format!("zesterm-si-pwsh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let injection = install(Shell::Pwsh, "pwsh -NoLogo", &dir).expect("install");
+        let shim = dir.join("pwsh").join(SHIM_PWSH);
+        assert!(shim.exists(), "the hook was not written");
+
+        assert!(injection.env.is_empty(), "PowerShell needs no environment to find the hook");
+        assert!(
+            injection.args.contains("-NoExit") && injection.args.contains("-Command"),
+            "the hook has to be dot-sourced from the command line: {:?}",
+            injection.args
+        );
+        assert!(
+            injection.args.contains(shim.to_str().expect("utf-8 shim path")),
+            "the amendment does not name the file it was just written to: {:?}",
+            injection.args
+        );
+
+        // The whole amendment is one `CreateProcessW` argument, so the shim path
+        // must sit inside the quotes rather than end them early.
+        let amended = format!("pwsh -NoLogo{}", injection.args);
+        assert!(
+            already_injected(&amended),
+            "an amended command line must be recognisable, or the daemon injects a second time"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_already_injected_command_line_is_recognised() {
+        // The app hands its command line to the daemon, which detects a
+        // PowerShell and would inject again. Two hooks emit every marker twice,
+        // which the parser reads as an empty block between each real one.
+        assert!(already_injected(r#"pwsh -NoExit -Command ". 'C:\x\pwsh\zesterm.ps1'""#));
+        assert!(!already_injected("pwsh -NoLogo"));
+        assert!(!already_injected("/bin/zsh"));
+    }
+
+    #[test]
+    fn the_powershell_hook_is_safe_to_load_twice() {
+        // Someone with the `Invoke-Expression` line in their $PROFILE *and*
+        // injection active loads it twice.
+        assert!(hook(Shell::Pwsh).contains("Test-Path variable:global:__zesterm"));
+    }
+
+    #[test]
+    fn the_powershell_hook_chains_the_users_prompt_rather_than_replacing_it() {
+        // The property that makes injection safe to do without asking. A prompt
+        // that silently loses oh-my-posh or starship to a terminal is a failure
+        // nobody suspects the terminal for.
+        let hook = hook(Shell::Pwsh);
+        assert!(hook.contains("OriginalPrompt   = $function:prompt"), "the prompt is not saved");
+        assert!(
+            hook.contains("$Global:__zesterm.OriginalPrompt.Invoke()"),
+            "the saved prompt is never called"
+        );
+    }
+
+    #[test]
+    fn the_powershell_hook_reports_the_cwd_before_it_opens_the_block() {
+        // Ordering, not decoration: `133;A` opens a block and stamps it with the
+        // working directory known at that moment. A `Cwd` emitted afterwards
+        // lands on the *next* block, so every path shown is one command stale --
+        // a wrong answer that looks like a plausible one.
+        let hook = hook(Shell::Pwsh);
+        let cwd = hook.find("633;P;Cwd=").expect("reports a working directory");
+        let open = hook.find("'133;A'").expect("opens a block");
+        assert!(cwd < open, "the working directory is reported after the block opens");
     }
 
     #[test]
@@ -207,13 +500,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("zesterm-si-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
-        let env = install(Shell::Zsh, &dir).expect("install");
+        let injection = install(Shell::Zsh, "/bin/zsh", &dir).expect("install");
         let zdotdir = dir.join("zsh");
         for name in [".zshenv", ".zprofile", ".zshrc", ".zlogin", "zesterm.zsh"] {
             assert!(zdotdir.join(name).exists(), "{name} was not written");
         }
 
-        let vars: std::collections::HashMap<_, _> = env.into_iter().collect();
+        assert!(
+            injection.args.is_empty(),
+            "zsh is hooked through the environment; amending its command line would be a bug"
+        );
+        let vars: std::collections::HashMap<_, _> = injection.env.into_iter().collect();
         assert_eq!(vars.get("ZDOTDIR").map(String::as_str), zdotdir.to_str());
         assert!(
             vars.contains_key("ZESTERM_USER_ZDOTDIR"),

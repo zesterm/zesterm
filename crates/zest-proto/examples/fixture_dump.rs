@@ -75,11 +75,17 @@ const CORPUS: &[(&str, usize, usize, Source)] = &[
     ("git-log", 100, 30, Source::Vtrec("git-log")),
     ("unicode-wide", 80, 24, Source::Vtrec("unicode-wide")),
     ("vim-macos", 80, 24, Source::Vtrec("vim-macos")),
-    // The only recording with command blocks in it, and therefore the only
-    // fixture that holds a TypeScript client to `Delta::blocks`. Without it a
-    // client could ignore the field entirely and pass every fixture here — the
+    // The fixture that holds a TypeScript client to `Delta::blocks`. Without it
+    // a client could ignore the field entirely and pass every fixture here — the
     // same gap `combining-marks` exists to close, and for the same reason: the
     // other recordings predate the thing being tested.
+    //
+    // `blocks-pwsh` is deliberately *not* a second one. It exists in the corpus
+    // and `conformance.rs` replays it, but what it adds over this — a command
+    // taken from `633;E` instead of read back off the grid, a real native exit
+    // code, an escaped Windows cwd — is all host-side parsing. Blocks reach a
+    // client already parsed, so the wire shape is identical and a second fixture
+    // would be a second thing to regenerate for no coverage.
     ("blocks-zsh", 120, 30, Source::Vtrec("blocks-zsh")),
     // The same recordings at a viewport short enough to force heavy scrolling,
     // mirroring `conformance.rs::every_recording_survives_a_short_viewport`.

@@ -622,9 +622,12 @@ impl App {
     /// has to handle**: a terminal that refuses to open because a helper binary
     /// is missing has failed at the only job it has, and both paths already
     /// exist behind `SessionSource`.
+    /// Takes no `CommandSpec`: what the daemon is told to run is the *user's*
+    /// configured shell, not the one `build_spec` built for an in-process pty.
+    /// The two differ once a shell hook has been injected, and the daemon does
+    /// its own injecting.
     fn attach_to_daemon(
         &mut self,
-        spec: &CommandSpec,
         cols: u16,
         rows: u16,
         proxy: &EventLoopProxy<Wakeup>,
@@ -702,7 +705,15 @@ impl App {
         let opts = crate::remote::AttachOptions {
             identity: &identity,
             label: "zesterm",
-            command: &spec.command_line,
+            // What the *user* asked for, not what `build_spec` made of it —
+            // empty meaning the host's own default shell, exactly as `new_tab`
+            // and `split_right` already send it. Forwarding the built command
+            // line would send the daemon a line with this process's shell hook
+            // already dot-sourced into it, so the daemon would inject a second
+            // one and `--no-shell-integration` would quietly stop meaning
+            // anything. The daemon is better placed to choose anyway: it is the
+            // process that will do the spawning.
+            command: self.config.shell.as_deref().unwrap_or_default(),
             cols,
             rows,
             scrollback: self.config.scrollback,
@@ -4045,7 +4056,7 @@ impl ApplicationHandler<Wakeup> for App {
             None => (None, Vec::new()),
         };
 
-        let mut tab: Tab = match self.attach_to_daemon(&spec, cols, rows, &proxy, restore_active) {
+        let mut tab: Tab = match self.attach_to_daemon(cols, rows, &proxy, restore_active) {
             Some(tab) => tab,
             None => {
                 self.next_placeholder += 1;
