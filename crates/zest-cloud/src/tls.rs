@@ -126,6 +126,9 @@ impl TlsDuplex {
         })?;
 
         let sock_r = sock.try_clone()?;
+        // The read timeout is armed *before* the reader can ever block, and
+        // that ordering is the whole point — see `READ_POLL`.
+        sock_r.set_read_timeout(Some(READ_POLL))?;
         let cut = sock.try_clone()?;
         let shared = Arc::new(Shared {
             conn: Mutex::new(conn),
@@ -171,12 +174,27 @@ impl TlsDuplex {
 
 /// What both halves share: the TLS state, the write end of the socket, and the
 /// one error that ends the connection for both of them.
-/// How often a severed connection's parked reader checks that it was severed.
+/// How often a parked reader surfaces to ask whether the connection still
+/// exists — and the only reason a cut works on Windows at all.
 ///
-/// Short because it is only ever reached after the connection is over, and the
-/// cost of the delay is a thread that has nothing left to do sitting there for
-/// up to this long.
-const SEVER_POLL: Duration = Duration::from_millis(20);
+/// **Two rounds of Windows CI paid for this constant, so it is worth the
+/// paragraph.** A cut has to unpark a reader sitting in `read`. On POSIX
+/// `shutdown` does that. On Winsock it does not, and neither does setting
+/// `SO_RCVTIMEO` at cut time: a socket timeout applies to calls made *after*
+/// it is set, never to one already in flight. So a reader that parked before
+/// the cut stayed parked, and `TlsHandle::cut` — which exists for the
+/// handshake watchdog — did nothing on this project's primary platform, with
+/// every call involved reporting success.
+///
+/// Arming the timeout up front is what makes it portable: the reader is never
+/// blocked for longer than this, so it always comes back to check `severed`.
+/// It is a poll, and that is a real cost stated rather than hidden — one
+/// syscall per second per connection, against a watchdog that measures in tens
+/// of seconds. The alternative on Windows is overlapped I/O, which is what
+/// `zest-daemon`'s named pipes had to do for the same class of reason
+/// (AGENTS.md, "Windows serializes I/O per handle"), and it is a great deal
+/// more machinery than a second of latency is worth here.
+const READ_POLL: Duration = Duration::from_secs(1);
 
 struct Shared {
     conn: Mutex<ClientConnection>,
@@ -221,14 +239,11 @@ impl Shared {
     /// the reader stayed parked and the watchdog this exists to serve would
     /// have done nothing on the project's primary platform.
     ///
-    /// The read timeout is what makes it portable, and it also closes a race no
-    /// caller can avoid: `cut` may run *before* the reader reaches its `read`,
-    /// and a timeout applies to a call that has not started yet where a
-    /// shutdown may not. `severed` is what lets the reader tell the resulting
-    /// `TimedOut` from one a caller asked for with `set_read_timeout`.
+    /// The `shutdown` still earns its place: on POSIX it makes the cut
+    /// immediate rather than costing up to a [`READ_POLL`]. What it cannot be
+    /// is the only mechanism.
     fn sever(&self) {
         self.severed.store(true, Ordering::Release);
-        let _ = self.cut.set_read_timeout(Some(SEVER_POLL));
         let _ = self.cut.shutdown(Shutdown::Both);
     }
 
@@ -343,17 +358,16 @@ impl Read for TlsReader {
                 // A signal, not a failure. `write_all` retries this for the
                 // writer; nothing retries it here.
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                // The timeout `sever` set, not one a caller asked for: this
-                // connection is over, so report it as the end of the stream
-                // (or as whatever failed first), exactly as a POSIX shutdown
-                // would have.
+                // A `READ_POLL` elapsing. If the connection was severed while
+                // this was parked, that is the end of the stream (or whatever
+                // failed first); otherwise it is simply nothing to read yet,
+                // and the loop asks again.
                 Err(e)
-                    if self.shared.severed.load(Ordering::Acquire)
-                        && matches!(
-                            e.kind(),
-                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                        ) =>
+                    if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) =>
                 {
+                    if !self.shared.severed.load(Ordering::Acquire) {
+                        continue;
+                    }
                     return match self.shared.latched() {
                         Some(e) => Err(e),
                         None => Ok(0),
