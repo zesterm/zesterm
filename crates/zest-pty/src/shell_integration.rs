@@ -336,37 +336,64 @@ mod tests {
     #[test]
     fn a_quoted_executable_path_survives_the_space_in_program_files() {
         // The bug behind #83, and the reason a `Pwsh` variant alone would have
-        // changed nothing: Windows' own default shell is quoted because its
-        // path has a space, and splitting the line on whitespace made the
-        // executable `C:\Program`. Every Windows shell went unhooked, and the
-        // only trace was a status bar reading `0 blocks`.
+        // changed nothing: Windows' own default shell is quoted because its path
+        // has a space, and splitting the line on whitespace made the executable
+        // `C:\Program`. Every Windows shell went unhooked, and the only trace was
+        // a status bar reading `0 blocks`.
+        //
+        // Asserted on `first_token` rather than through `detect`, so it runs on
+        // every platform: `detect` finishes the job with `Path::file_name`, which
+        // only treats `\` as a separator on Windows, and the quoting half of the
+        // bug is not Windows-specific.
         assert_eq!(
-            Shell::detect(r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo"#),
-            Some(Shell::Pwsh)
+            first_token(r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo"#),
+            Some(r"C:\Program Files\PowerShell\7\pwsh.exe")
         );
-        assert_eq!(Shell::detect(r#""C:\Program Files\Git\bin\zsh.exe""#), None);
+        assert_eq!(first_token("  /bin/zsh -l"), Some("/bin/zsh"));
+        assert_eq!(first_token(r#""/opt/my shells/zsh""#), Some("/opt/my shells/zsh"));
+        // An unterminated quote takes the rest, which is what `CreateProcessW`
+        // does with it too.
+        assert_eq!(first_token(r#""C:\Program Files\pwsh.exe"#), Some(r"C:\Program Files\pwsh.exe"));
+        assert_eq!(first_token(""), None);
+        assert_eq!(first_token(r#""""#), None);
     }
 
     #[test]
     fn every_spelling_of_powershell_is_recognised() {
         // One variant, four executables. Windows paths are case-insensitive, so
         // the case a launcher happens to use is not a signal.
-        for line in [
-            "pwsh",
-            "pwsh.exe",
-            "PWSH.EXE",
-            "powershell",
-            "powershell.exe",
-            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoLogo",
-            r"C:\Users\andy\scoop\shims\pwsh.exe -NoLogo",
-            "/usr/local/bin/pwsh -Login",
-        ] {
+        for line in ["pwsh", "pwsh.exe", "PWSH.EXE", "powershell", "powershell.exe"] {
             assert_eq!(Shell::detect(line), Some(Shell::Pwsh), "{line} is a PowerShell");
         }
+        // pwsh runs on macOS and Linux too, so this one is not Windows-only.
+        assert_eq!(Shell::detect("/usr/local/bin/pwsh -Login"), Some(Shell::Pwsh));
 
         // The argument names a PowerShell; the program is Notepad.
         assert_eq!(Shell::detect("notepad pwsh.ps1"), None);
         assert_eq!(Shell::detect("powershell-notes"), None);
+    }
+
+    /// The whole command line, on the platform whose paths these are.
+    ///
+    /// Windows-only because `detect` ends in `Path::file_name`, which treats `\`
+    /// as a separator only on Windows — deliberately, since a command line is
+    /// interpreted by the machine that will run it, and `\` is a legal character
+    /// in a unix file name rather than a separator.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_command_line_is_detected_whole() {
+        for line in [
+            r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo"#,
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoLogo",
+            r"C:\Users\someone\scoop\shims\pwsh.exe -NoLogo",
+        ] {
+            assert_eq!(Shell::detect(line), Some(Shell::Pwsh), "{line} is a PowerShell");
+        }
+
+        // `zsh.exe` under Git for Windows is not zsh: the variant is matched
+        // exactly, and `.exe` is part of the name.
+        assert_eq!(Shell::detect(r#""C:\Program Files\Git\bin\zsh.exe""#), None);
+        assert_eq!(Shell::detect(r"C:\Windows\System32\cmd.exe"), None);
     }
 
     #[test]
