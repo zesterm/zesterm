@@ -98,22 +98,41 @@ pub trait ControlPlane {
 /// behind a middlebox needs [`Roots::Platform`], a minimal container has no
 /// platform store to find — and a caller that did not think about it is a
 /// caller that will meet the other one as an unexplained certificate error.
-#[derive(Debug, Clone, Copy)]
+/// What actually goes to the network, behind a seam so a test can watch it.
+///
+/// The seam exists for one line — the call below — and that line is the only
+/// production code here the shipping CLI runs which nothing else covers.
+/// Without it, four separate mutations of it survived the whole suite:
+/// dropping the parsed port for 443, posting to `/` instead of the parsed
+/// path, sending an empty body, and ignoring the configured roots. The first
+/// is the exact failure `Endpoint`'s doc comment says this design exists to
+/// prevent — wrong on the first day anyone runs a control plane on 8443, and
+/// `--control-plane https://127.0.0.1:8787` is in the README.
+type Post = fn(&str, u16, &str, &str, Roots) -> std::io::Result<zest_cloud::http::Response>;
+
+#[derive(Clone, Copy)]
 pub struct HttpsControlPlane {
     roots: Roots,
+    post: Post,
 }
 
 impl HttpsControlPlane {
     /// Verifying the control plane against `roots`.
     pub fn new(roots: Roots) -> Self {
-        Self { roots }
+        Self { roots, post: zest_cloud::http::post_json }
+    }
+
+    /// The same, over a stand-in that records what it was asked for.
+    #[cfg(test)]
+    fn posting_with(roots: Roots, post: Post) -> Self {
+        Self { roots, post }
     }
 }
 
 impl ControlPlane for HttpsControlPlane {
     fn post_json(&self, url: &str, body: &str) -> Result<Response, EnrollError> {
         let to = addressed(url)?;
-        received(url, zest_cloud::http::post_json(&to.host, to.port, &to.path, body, self.roots))
+        received(url, (self.post)(&to.host, to.port, &to.path, body, self.roots))
     }
 }
 
@@ -340,6 +359,91 @@ fn clip(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// What `HttpsControlPlane` hands the transport, which nothing else checks.
+    ///
+    /// Four mutations of that one line survived the entire suite before this
+    /// existed: the parsed port replaced by 443, the parsed path by `/`, the
+    /// signed body by `""`, and the configured roots by `Bundled`. Every one
+    /// is silent — the daemon dials *something* and reports whatever comes
+    /// back — and the port one is the failure `Endpoint`'s doc comment says
+    /// the parsing exists to prevent.
+    ///
+    /// A `fn` pointer rather than a closure so `HttpsControlPlane` stays
+    /// `Copy`; the recording goes through a thread-local because a `fn` cannot
+    /// capture.
+    #[test]
+    fn what_reaches_the_transport_is_what_the_url_said() {
+        use std::cell::RefCell;
+        /// What the transport was handed: host, port, path, body, roots.
+        struct Asked {
+            host: String,
+            port: u16,
+            path: String,
+            body: String,
+        }
+        thread_local! {
+            static SEEN: RefCell<Option<Asked>> = const { RefCell::new(None) };
+        }
+        fn record(
+            host: &str,
+            port: u16,
+            path: &str,
+            body: &str,
+            roots: Roots,
+        ) -> std::io::Result<zest_cloud::http::Response> {
+            let _ = roots;
+            SEEN.with(|s| {
+                *s.borrow_mut() = Some(Asked {
+                    host: host.to_string(),
+                    port,
+                    path: path.to_string(),
+                    body: body.to_string(),
+                });
+            });
+            Ok(zest_cloud::http::Response { status: 200, body: "{}".into() })
+        }
+
+        let plane = HttpsControlPlane::posting_with(Roots::Bundled, record);
+        let _ = plane.post_json("https://127.0.0.1:8787/api/enroll/claim", "{\"code\":\"abc\"}");
+
+        let seen = SEEN.with(|s| s.borrow_mut().take()).expect("the transport was never called");
+        assert_eq!(seen.host, "127.0.0.1", "the host in the URL is the host dialled");
+        assert_eq!(
+            seen.port, 8787,
+            "the port was parsed and then thrown away, so every control plane not on 443 is \
+             unreachable -- the one day this is wrong is the first day anyone runs one"
+        );
+        assert_eq!(seen.path, "/api/enroll/claim", "the path was parsed and then not used");
+        assert_eq!(seen.body, "{\"code\":\"abc\"}", "the signed claim never reached the wire");
+    }
+
+    /// The roots a caller chose are the roots that verify the certificate.
+    #[test]
+    fn the_configured_roots_reach_the_transport() {
+        use std::cell::RefCell;
+        thread_local! {
+            static ROOTS: RefCell<Option<Roots>> = const { RefCell::new(None) };
+        }
+        fn record(
+            _h: &str,
+            _p: u16,
+            _path: &str,
+            _b: &str,
+            roots: Roots,
+        ) -> std::io::Result<zest_cloud::http::Response> {
+            ROOTS.with(|s| *s.borrow_mut() = Some(roots));
+            Ok(zest_cloud::http::Response { status: 200, body: "{}".into() })
+        }
+
+        let plane = HttpsControlPlane::posting_with(Roots::Platform, record);
+        let _ = plane.post_json("https://example.test/api/enroll/claim", "{}");
+        assert!(
+            matches!(ROOTS.with(|s| s.borrow_mut().take()), Some(Roots::Platform)),
+            "a caller that asked for the OS trust store got something else, which is a \
+             certificate error nobody can explain on the machine it happens to"
+        );
+    }
     use super::*;
     use std::cell::RefCell;
     use zest_mesh::enroll::verify_enrollment;
