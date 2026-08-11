@@ -167,11 +167,17 @@ pub struct Appearance {
     /// Follow the OS light/dark setting.
     #[schemars(extend("x_zest_group" = "Appearance", "x_zest_widget" = "toggle"))]
     pub follow_system_theme: bool,
-    /// Stem darkening for text.
+    /// Stem darkening for text. 1.0 leaves coverage alone.
     ///
     /// Applied to glyph coverage each frame rather than baked into the atlas, so
     /// tuning it is a repaint rather than a re-rasterization. It affects text
     /// only — backgrounds and chrome come out exactly as the theme specifies.
+    ///
+    /// The default was 1.3, which was compensating for a bug rather than for
+    /// anything about fonts: coverage was multiplied into a *linear* target and
+    /// then sRGB-encoded, so a fifth-covered pixel emerged half lit and every
+    /// glyph read fat. Coverage is linearized properly now, and this went back
+    /// to being what it says it is — a taste knob, off by default.
     ///
     /// The default must stay equal to `zest_render_wgpu::TextTuning::DEFAULT_GAMMA`.
     /// It cannot reference it — `zest-config` does not depend on the renderer —
@@ -219,7 +225,7 @@ impl Default for Appearance {
             theme: "obsidian".to_string(),
             light_theme: String::new(),
             follow_system_theme: false,
-            text_gamma: 1.3,
+            text_gamma: 1.0,
             text_contrast: 0.0,
             text_antialias: TextAntialias::Subpixel,
         }

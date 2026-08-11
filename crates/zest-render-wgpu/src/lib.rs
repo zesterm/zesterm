@@ -73,7 +73,7 @@ impl TextTuning {
     ///
     /// Whether 1.3 is *right* is still open: ROADMAP asks for a side-by-side
     /// against Windows Terminal, and that is a measurement, not a guess.
-    pub const DEFAULT_GAMMA: f32 = 1.3;
+    pub const DEFAULT_GAMMA: f32 = 1.0;
     pub const DEFAULT_CONTRAST: f32 = 0.0;
 }
 

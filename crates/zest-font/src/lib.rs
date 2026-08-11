@@ -138,63 +138,6 @@ impl GlyphFormat {
     }
 }
 
-/// Smear subpixel coverage across neighbouring samples, to kill colour fringes.
-///
-/// A row of a subpixel mask is `3 * width` independent coverage samples, each a
-/// third of a pixel apart. Rasterizing them and stopping there is what makes a
-/// stem's left edge orange and its right edge blue: the three channels of one
-/// pixel disagree completely, and the eye reads that disagreement as colour
-/// rather than as position.
-///
-/// The five-tap filter is the step zeno does not do. It trades a little edge
-/// contrast for a lot less colour.
-///
-/// Done here rather than in the shader on purpose: this is a property of the
-/// coverage, not of the frame, so baking it into the atlas costs nothing per
-/// frame and keeps the fragment stage a plain sample. (Unlike `text_gamma`,
-/// which is a taste knob and therefore stays a uniform.)
-fn filter_subpixel(data: &mut [u8], width: u32, height: u32) {
-    // FreeType's default LCD filter, not the textbook [1,2,3,2,1]/9. The
-    // textbook one puts an eighth of the energy two subpixels out, which
-    // removes the colour and visibly softens the stem with it; this keeps the
-    // weight on the immediate neighbours and barely touches ±2, which is the
-    // trade that reads as "neutral" rather than as "blurred".
-    const TAP: [u32; 5] = [0x08, 0x4D, 0x56, 0x4D, 0x08];
-    const DIV: u32 = 256;
-
-    let w = width as usize;
-    if w == 0 {
-        return;
-    }
-    // One row of samples at a time, so the scratch is a row rather than a copy
-    // of the whole glyph.
-    let n = w * 3;
-    let mut row_in = vec![0u8; n];
-    for y in 0..height as usize {
-        let base = y * w * 4;
-        for x in 0..w {
-            for c in 0..3 {
-                row_in[x * 3 + c] = data[base + x * 4 + c];
-            }
-        }
-        for i in 0..n {
-            let mut acc = 0u32;
-            for (k, tap) in TAP.iter().enumerate() {
-                // Clamp at the ends rather than wrapping: a glyph's first and
-                // last subpixel have no neighbour, and borrowing the opposite
-                // edge's would smear ink across the whole cell.
-                let j = i as isize + k as isize - 2;
-                if j < 0 || j >= n as isize {
-                    continue;
-                }
-                acc += tap * u32::from(row_in[j as usize]);
-            }
-            let (x, c) = (i / 3, i % 3);
-            data[base + x * 4 + c] = (acc / DIV).min(255) as u8;
-        }
-    }
-}
-
 /// A rasterized glyph.
 #[derive(Debug, Clone)]
 pub struct GlyphImage {
@@ -753,17 +696,12 @@ impl Fonts {
             swash::scale::image::Content::Color => GlyphFormat::Color,
         };
 
-        let mut data = image.data;
-        if format == GlyphFormat::SubpixelMask {
-            filter_subpixel(&mut data, image.placement.width, image.placement.height);
-        }
-
         Some(GlyphImage {
             width: image.placement.width,
             height: image.placement.height,
             left: image.placement.left,
             top: image.placement.top,
-            data,
+            data: image.data,
             format,
         })
     }

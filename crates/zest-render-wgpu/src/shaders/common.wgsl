@@ -39,3 +39,25 @@ fn clipped_out(p: vec2<f32>, clip: vec4<f32>) -> bool {
     return p.x < clip.x || p.y < clip.y
         || p.x > clip.x + clip.z || p.y > clip.y + clip.w;
 }
+
+// Coverage is a *perceptual* quantity, and the target it lands in is linear.
+//
+// A glyph's antialiased edge says "this pixel is 20% covered", meaning it
+// should end up looking 20% of the way from the background to the text colour.
+// But the offscreen is linear and the resolve encodes sRGB on the way out, so
+// multiplying the colour by 0.2 there emerges at pow(0.2, 1/2.2) = 0.48 -- a
+// fifth-covered pixel arrives half lit. Every edge is inflated, counters fill
+// in, and the result reads exactly as "fatter and blurrier" beside a terminal
+// that composites text in gamma space, which is what GDI and DirectWrite do.
+//
+// Measured against Windows Terminal on the same string: a stem's edge pixel sat
+// at 83/255 where Windows Terminal had 0, and no pixel inside a `d` ever
+// reached the background at all.
+//
+// So linearize the coverage before it is used as a weight. This is the sRGB
+// transfer, not a tunable -- `text_gamma` is the taste knob and sits on top.
+fn linearize_coverage(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((max(c, vec3<f32>(0.0)) + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
