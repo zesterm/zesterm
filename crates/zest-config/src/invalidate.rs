@@ -65,6 +65,9 @@ pub const KEYS: &[(&str, Invalidation)] = &[
     // Features change which glyphs are chosen, not how large a cell is.
     ("typography.features", Invalidation::AtlasBump),
     ("typography.ligatures", Invalidation::AtlasBump),
+    // Changes what U+2500..=U+259F rasterizes to, not how large a cell is --
+    // the generated mask is already cell-sized either way.
+    ("typography.builtin_box_drawing", Invalidation::AtlasBump),
     ("appearance.theme", Invalidation::Free),
     ("appearance.light_theme", Invalidation::Free),
     ("appearance.follow_system_theme", Invalidation::Free),

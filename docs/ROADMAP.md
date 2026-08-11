@@ -566,8 +566,18 @@ theme screens. Colours, sizes and spacing come from there, not from this file.
 - [ ] `reduce_motion`, honouring `SPI_GETCLIENTAREAANIMATION`.
 - [ ] Per-OS backdrop: Mica via `DWMWA_SYSTEMBACKDROP_TYPE`.
 - [ ] Polish: OSC 0/2 title, DECSCUSR cursor styles, font zoom, DPI changes.
+- [x] Box drawing and block elements are generated at cell size (`zest-font`'s
+      `boxdraw`), not taken from the font. A font's glyph is as wide as the
+      font's advance and the cell is that advance *rounded*, so a run of `█`
+      rendered as a picket fence and every table border had seams — measured at
+      8×17 in an 8×18 cell. `typography.builtin_box_drawing` turns it off for
+      anyone who wants a particular font's own. Found on Windows (#81), but the
+      arithmetic was never platform-specific.
 - [ ] Validate gamma side-by-side against Windows Terminal. **Do not defer** —
-      it ships broken constantly and reads as "looks slightly off".
+      it ships broken constantly and reads as "looks slightly off". Now known to
+      be worse than it looked: `text_gamma`/`text_contrast` are never wired to
+      the renderer at all, and the pass runs on the whole framebuffer rather
+      than on glyph coverage (#82).
 - [ ] Perf validation: vtebench, >500 MB/s, <2ms CPU frame, <10ms keypress→pixel.
 
 ✅ **Every animator provably settles** — assert zero frames 250ms after the last

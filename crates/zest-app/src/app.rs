@@ -46,6 +46,11 @@ const DAEMON_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 pub struct Config {
     pub font_families: Vec<String>,
     pub typography: Typography,
+    /// Generate U+2500–U+259F at cell size rather than taking the font's.
+    ///
+    /// Not part of [`Typography`] because it changes what a glyph *is*, not how
+    /// large a cell is — an atlas bump, never a pty resize.
+    pub builtin_box_drawing: bool,
     pub theme: String,
     pub scrollback: usize,
     pub opacity: f32,
@@ -93,6 +98,7 @@ impl From<&zest_config::Settings> for Config {
                 letter_spacing: s.typography.letter_spacing.clamp(-5.0, 20.0),
                 ..Default::default()
             },
+            builtin_box_drawing: s.typography.builtin_box_drawing,
             theme: s.appearance.theme.clone(),
             scrollback: s.scrolling.scrollback,
             opacity: s.window.opacity.clamp(0.0, 1.0),
@@ -3789,7 +3795,10 @@ impl App {
         let scale = self.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
         let typo = Typography { scale_factor: scale, ..self.config.typography };
         match Fonts::new(&self.config.font_families, typo) {
-            Ok(fonts) => self.fonts = Some(fonts),
+            Ok(mut fonts) => {
+                fonts.set_builtin_box_drawing(self.config.builtin_box_drawing);
+                self.fonts = Some(fonts);
+            }
             Err(e) => {
                 // Keeping the old fonts is the only safe answer: there is no
                 // such thing as a terminal with no font.
@@ -3982,7 +3991,8 @@ impl ApplicationHandler<Wakeup> for App {
 
         let scale = window.scale_factor() as f32;
         let typo = Typography { scale_factor: scale, ..self.config.typography };
-        let fonts = Fonts::new(&self.config.font_families, typo).expect("no usable font");
+        let mut fonts = Fonts::new(&self.config.font_families, typo).expect("no usable font");
+        fonts.set_builtin_box_drawing(self.config.builtin_box_drawing);
         let metrics = fonts.cell_metrics();
         tracing::debug!(elapsed_ms = t0.elapsed().as_millis(), "fonts ready");
 
