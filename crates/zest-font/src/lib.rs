@@ -138,6 +138,62 @@ impl GlyphFormat {
     }
 }
 
+/// Smear subpixel coverage across neighbouring samples, to tame colour fringes.
+///
+/// A row of a subpixel mask is `3 * width` coverage samples a third of a pixel
+/// apart. Rasterizing them and stopping there is what puts saturated orange on
+/// a stem's left edge and blue on its right: the three channels of one pixel
+/// disagree completely, and the eye reads that disagreement as colour rather
+/// than as position. Measured against Windows Terminal on the same glyphs at
+/// the same size, that colour was the whole remaining difference once weight
+/// was matched — its `d` is neutral grey, ours was orange and blue.
+///
+/// The taps are FreeType's default rather than the textbook `[1,2,3,2,1]/9`,
+/// which puts an eighth of the energy two subpixels out and visibly softens the
+/// stem along with the colour.
+///
+/// **This was tried once against the wrong baseline.** With coverage still
+/// applied in linear space every glyph was already too fat, so the filter's
+/// small softening landed on top of that and read as unacceptable. Coverage is
+/// linearized now, and the same filter costs far less — which is the argument
+/// for judging a change against a fixed baseline rather than a broken one.
+///
+/// Applied at rasterization, so it is baked into the atlas and costs nothing
+/// per frame. Unlike `text_gamma`, which is a taste knob and stays a uniform.
+fn filter_subpixel(data: &mut [u8], width: u32, height: u32) {
+    const TAP: [u32; 5] = [0x08, 0x4D, 0x56, 0x4D, 0x08];
+    const DIV: u32 = 0x100;
+
+    let w = width as usize;
+    if w == 0 {
+        return;
+    }
+    let n = w * 3;
+    let mut row = vec![0u8; n];
+    for y in 0..height as usize {
+        let base = y * w * 4;
+        for x in 0..w {
+            for c in 0..3 {
+                row[x * 3 + c] = data[base + x * 4 + c];
+            }
+        }
+        for i in 0..n {
+            let mut acc = 0u32;
+            for (k, tap) in TAP.iter().enumerate() {
+                // Clamped at the ends, not wrapped: the first and last subpixel
+                // of a glyph have no neighbour, and borrowing the opposite
+                // edge's would drag ink across the whole cell.
+                let j = i as isize + k as isize - 2;
+                if j < 0 || j >= n as isize {
+                    continue;
+                }
+                acc += tap * u32::from(row[j as usize]);
+            }
+            data[base + (i / 3) * 4 + (i % 3)] = (acc / DIV).min(255) as u8;
+        }
+    }
+}
+
 /// A rasterized glyph.
 #[derive(Debug, Clone)]
 pub struct GlyphImage {
@@ -696,12 +752,17 @@ impl Fonts {
             swash::scale::image::Content::Color => GlyphFormat::Color,
         };
 
+        let mut data = image.data;
+        if format == GlyphFormat::SubpixelMask {
+            filter_subpixel(&mut data, image.placement.width, image.placement.height);
+        }
+
         Some(GlyphImage {
             width: image.placement.width,
             height: image.placement.height,
             left: image.placement.left,
             top: image.placement.top,
-            data: image.data,
+            data,
             format,
         })
     }
