@@ -76,7 +76,14 @@ export async function hostIsEnrolled(args: {
     .first<{ ok: number }>();
   if (row === null) return false;
 
-  await storage.put(CACHE_KEY, { at: now } satisfies CachedLookup);
+  // The cache is an optimisation, so failing to write it costs one extra
+  // query per connect and nothing else. Rejecting the handler over it would
+  // refuse a host the query just said is enrolled.
+  try {
+    await storage.put(CACHE_KEY, { at: now } satisfies CachedLookup);
+  } catch {
+    // See above.
+  }
   return true;
 }
 
@@ -88,10 +95,17 @@ export async function hostIsEnrolled(args: {
  * store debounces the same field for the same reason; here position does the
  * work, because the control link is parked once and then silent for hours.
  *
- * Nothing is done with the result: a failed update means a slightly stale
- * timestamp, and refusing an authenticated host over it would take the fleet
- * down for a cosmetic column.
+ * Nothing is done with the result, and that has to include a *failure*. This
+ * comment said so while the code did the opposite: the `await` was unguarded,
+ * so a transient D1 error rejected the handler and an authenticated, enrolled
+ * daemon got no `ready`, no error frame and no close code — taken offline by a
+ * blip on a cosmetic column, which is exactly what this paragraph forbids.
  */
 export async function touchHost(db: D1Binding, host: string, now: number): Promise<void> {
-  await db.prepare(`UPDATE hosts SET last_seen_at = ? WHERE id = ?`).bind(now, host).run();
+  try {
+    await db.prepare(`UPDATE hosts SET last_seen_at = ? WHERE id = ?`).bind(now, host).run();
+  } catch {
+    // Swallowed deliberately, and swallowed *here* rather than at the call
+    // site, so a second caller cannot reintroduce the bug by forgetting.
+  }
 }

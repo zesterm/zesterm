@@ -138,6 +138,7 @@ class FakeStatement implements D1PreparedStatement {
       throw new Error(`the relay does not write this: ${this.#query}`);
     }
     this.#db.updates += 1;
+    if (this.#db.failUpdates) throw new Error('D1_ERROR: network');
     const [at, id] = this.#values;
     this.#db.lastSeen.set(String(id), Number(at));
     return {};
@@ -152,6 +153,9 @@ export class FakeDb implements D1Binding {
   /** Counted apart, because only one of the two is cached. */
   selects = 0;
   updates = 0;
+
+  /** Make every `UPDATE` throw, as a D1 blip does. */
+  failUpdates = false;
 
   prepare(query: string): D1PreparedStatement {
     return new FakeStatement(this, query, []);

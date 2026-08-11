@@ -213,6 +213,30 @@ function suite(mode: string, evicting: boolean): void {
     assert.equal(r.db.lastSeen.get(HOST), NOW, 'last_seen_at is written on connect');
   });
 
+  it('a D1 blip on last_seen_at does not take an enrolled host offline', async () => {
+    const r = relay();
+    // `last_seen_at` is cosmetic -- the fleet screen's "last seen". Its write
+    // was awaited unguarded, so a transient D1 error rejected the handler and
+    // an authenticated, enrolled daemon got no `ready`, no error frame and no
+    // close code: taken offline by a blip on something nobody makes a decision
+    // from. `touchHost`'s own doc comment forbade exactly that while the code
+    // did it.
+    r.db.failUpdates = true;
+    const ws = await r.dial();
+    await r.say(ws, await hello(nonceOf(ws)));
+
+    assert.deepEqual(
+      lastFrame(ws),
+      { t: 'ready', v: 1 },
+      'the host proved itself and is enrolled, so it parks -- whatever the timestamp column did',
+    );
+    assert.equal(
+      r.db.lastSeen.get(HOST),
+      undefined,
+      'and the write really did fail, so this is about the failure rather than a happy path',
+    );
+  });
+
   it('the challenge is answered from the attachment, not from anything in memory', async () => {
     const r = relay();
     const ws = await r.dial();
