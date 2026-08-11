@@ -71,9 +71,12 @@ impl TextTuning {
     /// said 1.3, and because nothing connected them the config's number was
     /// simply a lie.
     ///
-    /// Whether 1.3 is *right* is still open: ROADMAP asks for a side-by-side
-    /// against Windows Terminal, and that is a measurement, not a guess.
-    pub const DEFAULT_GAMMA: f32 = 1.0;
+    /// 1.2 is small on purpose. Coverage is linearized in the shader now, which
+    /// is the correction that actually matters; this is the modest weight added
+    /// back afterwards, because fully gamma-correct light-on-dark text reads
+    /// thin. The old 1.3 was doing something else entirely — compensating for
+    /// the missing linearization, in the wrong direction.
+    pub const DEFAULT_GAMMA: f32 = 1.2;
     pub const DEFAULT_CONTRAST: f32 = 0.0;
 }
 

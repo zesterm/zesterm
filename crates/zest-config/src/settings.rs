@@ -225,7 +225,7 @@ impl Default for Appearance {
             theme: "obsidian".to_string(),
             light_theme: String::new(),
             follow_system_theme: false,
-            text_gamma: 1.0,
+            text_gamma: 1.2,
             text_contrast: 0.0,
             text_antialias: TextAntialias::Subpixel,
         }
