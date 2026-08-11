@@ -19,7 +19,10 @@
 /// one invalidation path with font size and DPI.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Typography {
-    /// Font size in *logical* points.
+    /// Font size in **points**, as every other terminal means it.
+    ///
+    /// Converted to pixels at 96 logical DPI, so 12pt is 16 physical pixels at
+    /// 100% scaling — see [`Typography::size_px`].
     pub size_pt: f32,
     /// Multiplier on the font's natural line height. 1.0 is the font's own.
     pub line_height: f32,
@@ -35,7 +38,7 @@ pub struct Typography {
 impl Default for Typography {
     fn default() -> Self {
         Self {
-            size_pt: 13.0,
+            size_pt: 12.0,
             line_height: 1.2,
             letter_spacing: 0.0,
             cell_width: 1.0,
@@ -45,10 +48,23 @@ impl Default for Typography {
 }
 
 impl Typography {
+    /// Physical pixels per point, at 96 logical DPI.
+    ///
+    /// The DPI scaling factor is applied separately, so this is the constant
+    /// that turns the *unit* into pixels and nothing more.
+    pub const PX_PER_PT: f32 = 96.0 / 72.0;
+
     /// Font size in physical pixels — what the rasterizer actually needs.
+    ///
+    /// This used to be `size_pt * scale_factor`, which made the field's name a
+    /// lie: the default 13 was a **13 pixel** face, about 9.75 real points,
+    /// while Windows Terminal, WezTerm, kitty and Alacritty all specify points
+    /// and default to 11–12 of them. zesterm therefore rendered noticeably
+    /// smaller than every peer at the same number, and "the text is blurry"
+    /// was in part just "the text is small".
     #[must_use]
     pub fn size_px(&self) -> f32 {
-        (self.size_pt * self.scale_factor).max(1.0)
+        (self.size_pt * Self::PX_PER_PT * self.scale_factor).max(1.0)
     }
 }
 

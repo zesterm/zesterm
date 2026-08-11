@@ -450,14 +450,14 @@
     "key": "typography.size_pt",
     "group": "Text",
     "widget": "number",
-    "description": "Font size in points.",
+    "description": "Font size in points, converted to pixels at 96 logical DPI.\n\n12pt is 16 physical pixels at 100% scaling, which is what Windows\nTerminal, WezTerm and kitty all give you at their defaults. This field\nonce meant *pixels* despite its name, so the same number produced text\na quarter smaller than every peer — if a config from before that fix\nlooks too large now, it was previously too small.",
     "range": [
       4.0,
       144.0
     ],
     "integer": false,
     "variants": [],
-    "default": 13.0,
+    "default": 12.0,
     "restartHint": false
   },
   {

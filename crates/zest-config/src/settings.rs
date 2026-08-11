@@ -79,7 +79,13 @@ pub struct Typography {
     /// Font families in preference order; the first one with a glyph wins.
     #[schemars(extend("x_zest_group" = "Text", "x_zest_widget" = "font-list"))]
     pub families: Vec<String>,
-    /// Font size in points.
+    /// Font size in points, converted to pixels at 96 logical DPI.
+    ///
+    /// 12pt is 16 physical pixels at 100% scaling, which is what Windows
+    /// Terminal, WezTerm and kitty all give you at their defaults. This field
+    /// once meant *pixels* despite its name, so the same number produced text
+    /// a quarter smaller than every peer — if a config from before that fix
+    /// looks too large now, it was previously too small.
     #[schemars(range(min = 4.0, max = 144.0))]
     #[schemars(extend("x_zest_group" = "Text", "x_zest_widget" = "number"))]
     pub size_pt: f32,
@@ -136,7 +142,7 @@ impl Default for Typography {
             .iter()
             .map(|s| (*s).to_string())
             .collect(),
-            size_pt: 13.0,
+            size_pt: 12.0,
             line_height: 1.25,
             letter_spacing: 0.0,
             features: Vec::new(),

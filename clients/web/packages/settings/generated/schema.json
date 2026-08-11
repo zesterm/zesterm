@@ -418,8 +418,8 @@
           "x_zest_widget": "number"
         },
         "size_pt": {
-          "default": 13.0,
-          "description": "Font size in points.",
+          "default": 12.0,
+          "description": "Font size in points, converted to pixels at 96 logical DPI.\n\n12pt is 16 physical pixels at 100% scaling, which is what Windows\nTerminal, WezTerm and kitty all give you at their defaults. This field\nonce meant *pixels* despite its name, so the same number produced text\na quarter smaller than every peer — if a config from before that fix\nlooks too large now, it was previously too small.",
           "format": "float",
           "maximum": 144.0,
           "minimum": 4.0,
@@ -595,7 +595,7 @@
         "letter_spacing": 0.0,
         "ligatures": false,
         "line_height": 1.25,
-        "size_pt": 13.0
+        "size_pt": 12.0
       },
       "description": "Fonts, size, and the metrics derived from them."
     },
