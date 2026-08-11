@@ -120,6 +120,33 @@ test('a mint that fails is a dropped dial, which is the whole point', async (t) 
   assert.equal(sockets.created.length, 0, 'nothing was opened, so there is nothing to leak');
 });
 
+test('a mint that resolves into a throwing constructor is still a dropped dial', async (t) => {
+  const sockets = installFakeWebSocket();
+  t.after(() => sockets.restore());
+  const handlers = recorder();
+
+  // The real `WebSocket` constructor throws `SyntaxError` when a subprotocol
+  // value is not an RFC 7230 token, and a ticket is a string chosen by an
+  // endpoint that does not exist yet — standard base64 (`=`, `/`) would do it.
+  // `new URL` throws on a malformed origin the same way.
+  //
+  // The hazard is not the throw, it is where it lands: a `.then(onOk, onErr)`
+  // second argument does not catch `onOk` throwing, so this used to reject
+  // unhandled with neither callback firing. `SessionClient` then never
+  // schedules a redial and the tab hangs for ever — a silent, terminal wedge
+  // rather than the reconnect this file exists to guarantee.
+  sockets.throwOnConstruct(new Error('the subprotocol is invalid'));
+
+  relayDial('https://relay.example.com', HOST, async () => 'a-ticket')(handlers);
+  await flush();
+
+  assert.deepEqual(
+    handlers.log,
+    ['close'],
+    'a dial that cannot open its socket must report the link gone, or nothing above it ever retries',
+  );
+});
+
 test('closing before the ticket lands opens no socket, and still reports the link gone', async (t) => {
   const sockets = installFakeWebSocket();
   t.after(() => sockets.restore());

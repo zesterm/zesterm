@@ -8,7 +8,14 @@
  * the layer *above* the thing under test here.
  */
 
-export class FakeSocket {
+export /**
+ * Armed by `throwOnConstruct`. The real `WebSocket` constructor throws
+ * synchronously on a subprotocol that is not an RFC 7230 token, and a `Dial`
+ * that does not survive that wedges the layer above it.
+ */
+let thrown: Error | null = null;
+
+class FakeSocket {
   /** Every socket constructed since the last `installFakeWebSocket()`. */
   static created: FakeSocket[] = [];
 
@@ -23,6 +30,7 @@ export class FakeSocket {
   onerror: (() => void) | null = null;
 
   constructor(url: string, protocols?: string | string[]) {
+    if (thrown !== null) throw thrown;
     this.url = url;
     this.protocols = typeof protocols === 'string' ? [protocols] : (protocols ?? []);
     FakeSocket.created.push(this);
@@ -59,7 +67,12 @@ export function installFakeWebSocket(): FakeWebSockets {
       if (!socket) throw new Error('no socket was constructed');
       return socket;
     },
+    /** Make the next construction throw, as the real one does on a bad subprotocol. */
+    throwOnConstruct(error: Error): void {
+      thrown = error;
+    },
     restore(): void {
+      thrown = null;
       globalThis.WebSocket = real;
     },
   };

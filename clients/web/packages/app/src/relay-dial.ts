@@ -63,8 +63,8 @@ export function relayDial(
     let socket: WebSocket | null = null;
     let closed = false;
 
-    void mintTicket().then(
-      (ticket) => {
+    void mintTicket()
+      .then((ticket) => {
         // The owner hung up while the mint was in flight. Opening the socket
         // to close it again would still cost a connection at the edge and a
         // room wake-up, so it is never opened.
@@ -84,11 +84,25 @@ export function relayDial(
         // `close` always follows `error`; routing both would double the redial.
         ws.onerror = () => {};
         socket = ws;
-      },
-      () => {
-        if (!closed) handlers.onClose();
-      },
-    );
+      })
+      .catch(() => {
+        // `.catch` chained, not `.then(f, g)`. A second argument only covers a
+        // *rejected* mint; it does not cover the success handler throwing, and
+        // that handler contains two constructors that do. `new URL` throws on a
+        // malformed `relayOrigin`, and `new WebSocket` throws `SyntaxError` if
+        // any subprotocol value is not an RFC 7230 token — which a ticket is,
+        // until the endpoint that mints it exists and settles on base64url.
+        // Standard base64 (`=`, `/`) is not a token and would land here.
+        //
+        // Uncaught, the rejection was silent and terminal: no `onOpen`, no
+        // `onClose`, so `SessionClient` never schedules a redial and the tab
+        // hangs for ever rather than reconnecting. That is the one outcome this
+        // file's whole design is meant to make impossible.
+        if (!closed) {
+          closed = true;
+          handlers.onClose();
+        }
+      });
 
     return {
       // Not a queue: `SessionClient` sends nothing before `onOpen()`, which is
