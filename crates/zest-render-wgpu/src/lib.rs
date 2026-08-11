@@ -1084,7 +1084,9 @@ mod tests {
         assert_eq!(first, "enable dual_source_blending;");
         assert!(
             !super::GRID_WGSL.contains("blend_src"),
-            "the grayscale module must not mention @blend_src: naga validates it at type              level, so merely containing it fails create_shader_module on every device              without DUAL_SOURCE_BLENDING -- exactly the ones the fallback is for"
+            "the grayscale module must not mention @blend_src: naga validates it at \
+             type level, so merely containing it fails create_shader_module on every \
+             device without DUAL_SOURCE_BLENDING -- exactly the ones the fallback is for"
         );
     }
 
