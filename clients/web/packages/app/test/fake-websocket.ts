@@ -8,14 +8,16 @@
  * the layer *above* the thing under test here.
  */
 
-export /**
+/**
  * Armed by `throwOnConstruct`. The real `WebSocket` constructor throws
  * synchronously on a subprotocol that is not an RFC 7230 token, and a `Dial`
  * that does not survive that wedges the layer above it.
+ *
+ * Module-local: only `throwOnConstruct` and `restore` touch it.
  */
 let thrown: Error | null = null;
 
-class FakeSocket {
+export class FakeSocket {
   /** Every socket constructed since the last `installFakeWebSocket()`. */
   static created: FakeSocket[] = [];
 
@@ -52,6 +54,11 @@ export interface FakeWebSockets {
   readonly created: FakeSocket[];
   /** The newest socket, or a failure naming what did not happen. */
   latest(): FakeSocket;
+  /**
+   * Arm the constructor to throw, as the real one does on a subprotocol that
+   * is not an RFC 7230 token. Cleared by `restore`.
+   */
+  throwOnConstruct(error: Error): void;
   restore(): void;
 }
 
