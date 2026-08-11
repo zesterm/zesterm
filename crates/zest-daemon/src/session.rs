@@ -536,8 +536,17 @@ mod tests {
     ///
     /// Polling with a deadline rather than sleeping a fixed time: a fixed sleep
     /// is either flaky on a loaded machine or slow on an idle one.
-    fn wait_for(f: impl Fn() -> bool) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(10);
+    ///
+    /// The deadline is generous because it is only ever paid by a run that was
+    /// going to fail: a condition that holds returns immediately. Ten seconds
+    /// was not enough — on `test (windows-latest)` the scrollback test below
+    /// failed twice in a row roughly ten seconds after it started, which is
+    /// this returning `false` for `has_exited` on a PowerShell child that a
+    /// runner busy building the rest of the workspace had not finished
+    /// starting (#80). Anything that genuinely needs half a minute here is a
+    /// hang, and reports as one.
+    fn wait_for(mut f: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
             if f() {
                 return true;
@@ -613,7 +622,20 @@ mod tests {
         //
         // Both were hardcoded to 0 before this, which made every update look
         // like a valid continuation of every other.
-        // Several separate writes, so there is a chain rather than one update.
+        //
+        // Five separate writes, so there is usually a chain rather than one
+        // update -- but how many arrive is deliberately not asserted beyond
+        // "at least one". Demanding two, as this used to, is a claim about
+        // *coalescing* rather than about the chain: the writer is a child, so
+        // the test cannot interleave its polls with writes it does not
+        // control, and a daemon that turns five writes into one update is
+        // doing exactly what ADR-004 designed it to do -- the more so on
+        // Windows, where ConPTY repaints on its own schedule and hands over
+        // together what the child spaced out. `test (windows-latest)` duly
+        // failed with "only 1 updates arrived" on a diff that touched no Rust
+        // (#80). The property survives the collapse, because it is checked per
+        // update rather than over the run: each `base` must be the sequence
+        // its client was last given, which one update pins as well as five.
         let spec = script_cmd(
             "for i in 1 2 3 4 5; do printf 'line %s\\n' $i; sleep 0.05; done",
             "1..5 | ForEach-Object { Write-Host \\\"line $_\\\"; Start-Sleep -Milliseconds 50 }",
@@ -621,27 +643,71 @@ mod tests {
         let s = Session::spawn(SessionId(5), &spec, PtySize::new(80, 24), 100, |_| {})
             .expect("spawn");
 
-        // Attach *before* anything is drained: `poll` consumes, so waiting for
-        // output by polling would eat the very updates under test.
+        // A throwaway subscriber first, and it is what makes a single update
+        // enough to pin the chain.
+        //
+        // `attach_with` takes its baseline from the terminal as it stands, so a
+        // session that has parsed nothing hands out `attach_seq == 0`. Then the
+        // only assertion a lone update runs is `assert_eq!(base, 0)` — which a
+        // `base` hardcoded to 0, the exact regression named above, satisfies.
+        // Measured, not reasoned: with the baseline at 0 and the writes
+        // coalesced into one update, this test passed with `let base = 0;`
+        // substituted into `poll`. On macOS the writes do not coalesce, three
+        // updates arrive and it fails — so the hole was open on precisely the
+        // platform #80 is about.
+        //
+        // Draining one update through a subscriber that is then dropped leaves
+        // the terminal's sequence past zero, so the real subscriber's baseline
+        // is a number that can disagree with a hardcoded one.
+        let (warm, _, _) = s.attach();
+        assert!(
+            wait_for(|| s.poll(warm).is_some()),
+            "the child produced nothing, so there is no sequence to chain from"
+        );
+        s.detach(warm);
+
+        // Attach *before* anything else is drained: `poll` consumes, so waiting
+        // for output by polling would eat the very updates under test.
         let (handle, attach_seq, _) = s.attach();
+        assert!(
+            attach_seq > 0,
+            "the baseline is still zero, so a `base` hardcoded to zero would look correct"
+        );
 
         let mut previous = attach_seq;
         let mut seen = 0;
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline && seen < 3 {
-            let Some((base, seq, _)) = s.poll(handle) else {
-                std::thread::sleep(Duration::from_millis(10));
-                continue;
-            };
-            assert_eq!(
-                base, previous,
-                "update {seen} claimed to build on {base} when the last one produced {previous}"
-            );
-            assert!(seq > base, "an update must advance the sequence: {base} -> {seq}");
-            previous = seq;
-            seen += 1;
-        }
-        assert!(seen >= 2, "only {seen} updates arrived, so the chain was barely tested");
+        // Drain everything outstanding on each turn, then stop once a few
+        // updates have chained -- or once the child is gone and one has, since
+        // waiting out the deadline for a second one that coalescing may never
+        // produce is how this test used to fail.
+        let settled = wait_for(|| {
+            while let Some((base, seq, _)) = s.poll(handle) {
+                assert_eq!(
+                    base, previous,
+                    "update {seen} claimed to build on {base} when the last one produced {previous}"
+                );
+                assert!(seq > base, "an update must advance the sequence: {base} -> {seq}");
+                previous = seq;
+                seen += 1;
+            }
+            seen >= 3 || (seen >= 1 && s.has_exited())
+        });
+        // Both, and the `bool` is not optional however tempting it looks.
+        //
+        // The condition is "three updates, or one and a finished child", and a
+        // child that printed five lines does one or the other quickly. If
+        // neither ever becomes true the run burns the full deadline and then —
+        // with only `seen >= 1` asserted — passes, slowly, having proved
+        // nothing about a session that stalled. That is the
+        // waited-out-the-deadline-but-did-not-fail mode this whole change
+        // exists to remove, and leaving it at one call site while fixing the
+        // others is how it survives.
+        assert!(seen >= 1, "no update ever arrived, so nothing above was checked");
+        assert!(
+            settled,
+            "after {seen} update(s) the child neither produced a third nor exited, so this \
+             waited out its deadline on a session that had stalled"
+        );
     }
 
     #[test]
@@ -731,11 +797,25 @@ mod tests {
         );
         let s = Session::spawn(SessionId(77), &spec, PtySize::new(40, 3), 200, |_| {})
             .expect("spawn");
-        wait_for(|| s.has_exited());
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Two waits, both asserted, because "the child never ran" and "the
+        // child ran and produced no history" are different failures and only
+        // the second one is about scrollback. Discarding this `bool` is what
+        // made #80 report the history assertion on `test (windows-latest)`
+        // for a PowerShell that had not exited at all.
+        assert!(
+            wait_for(|| s.has_exited()),
+            "the child never finished, so nothing after this is about scrollback"
+        );
+        // Exiting is not the condition that matters, which is why the fixed
+        // 50ms sleep that used to stand here was a guess: on Windows it is the
+        // process watcher that reports the exit, and it can fire while the tail
+        // of the output is still in the ConPTY pipe, unread and unparsed.
+        assert!(
+            wait_for(|| !s.scrollback(0, 20).0.is_empty()),
+            "a session that scrolled must have history"
+        );
 
         let (rows, attrs) = s.scrollback(0, 20);
-        assert!(!rows.is_empty(), "a session that scrolled must have history");
         for row in &rows {
             for run in &row.runs {
                 assert!(
