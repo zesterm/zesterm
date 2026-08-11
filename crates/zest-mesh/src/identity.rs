@@ -540,6 +540,56 @@ mod tests {
     }
 
     #[test]
+    fn the_host_auth_signature_is_stable() {
+        // A golden, and the only reason it is in Rust: the relay Worker's
+        // control link verifies exactly these bytes in TypeScript
+        // (`cloud/packages/relay/test/control-golden.test.ts`), and the two
+        // implementations share no code. Without a vector one side produced,
+        // a drift surfaces at bring-up as a daemon that is refused and a
+        // Worker that says the signature is bad, and neither can say which
+        // moved. `enroll.rs`'s `the_preimage_is_stable` is the same pattern for
+        // the enrolment shape.
+        //
+        // The nonce counts up rather than repeating one byte, so a verifier
+        // that reversed it or mistook hex-decoding for hex-encoding fails here
+        // instead of passing by symmetry.
+        let me = HostIdentity::from_secret_bytes(&[7; SECRET_LEN]);
+        let nonce = Nonce::from_bytes(core::array::from_fn(|i| i as u8));
+        let sig = me.sign(Purpose::Auth, nonce.as_bytes());
+
+        assert_eq!(
+            to_hex(&me.host_id().0),
+            "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+            "the host id is the public key of `[7; 32]`; it is also the enrolment \
+             golden's, so the two fixtures name one machine"
+        );
+        assert_eq!(
+            to_hex(&preimage(Role::Host, Purpose::Auth, nonce.as_bytes())),
+            "7a65737465726d2d7369672d763100686f7374006175746800\
+             000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            "the relay builds this prefix by hand in TypeScript, so a byte of \
+             difference refuses every real control link"
+        );
+        assert_eq!(
+            to_hex(&sig.to_bytes()),
+            "568139271f5285187ab820a71165d8201341a5a6b304ea13164a04f82fc4b003\
+             15dbaeb745d39abd282c23b78b6f68a1a696ee582ec2d2feeabadc474c2fdb02",
+            "this exact signature is pinned on the TypeScript side"
+        );
+
+        verify_host(me.host_id(), Purpose::Auth, nonce.as_bytes(), &sig)
+            .expect("the golden must verify against the id it names");
+    }
+
+    fn to_hex(bytes: &[u8]) -> String {
+        bytes.iter().fold(String::new(), |mut acc, b| {
+            use fmt::Write as _;
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
+    }
+
+    #[test]
     fn a_host_id_that_is_not_a_curve_point_is_rejected_rather_than_ignored() {
         // `HostId` is frozen with a public field, so nothing stops arbitrary
         // bytes being called an id. The check has to live at the point of use.

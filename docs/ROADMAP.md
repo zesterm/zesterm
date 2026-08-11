@@ -1615,10 +1615,33 @@ three facts about Cloudflare that changed after #59 was written.
       touched, so a refused attach costs no wake-up. It is signed by the account
       service's key alone and by no key in the fleet, and verified against a
       *list* of public keys, because rotating a single one would mean deploying
-      two Workers at the same instant. What remains is what the ticket is for:
-      the control link the daemon parks, and the pipe. A verified attach earns a
-      `4404` today — the holder is allowed in a room with nobody on the other
-      side.
+      two Workers at the same instant.
+
+      **The control link landed second**, on the Worker's side: `GET /v1/control`
+      challenges with a 32-byte nonce and the relay's own public key, and a
+      daemon answers with an ordinary `Role::Host` + `Purpose::Auth` signature
+      over that nonce — the `zesterm-sig-v1` preimage that already existed, so
+      there is nothing new for a daemon to implement. `zest-mesh`'s
+      `the_host_auth_signature_is_stable` emits the vector the TypeScript pins,
+      because a byte of drift between two implementations otherwise arrives at
+      bring-up as a daemon that is refused and a Worker that says the signature
+      is bad, with neither able to say which moved.
+
+      **The nonce lives in the attachment, not in a field**, and that is the one
+      worth naming: it is the handshake rather than the pairing table, the gap
+      between `challenge` and `hello` is a network round trip, and a nonce in a
+      field passes every test written against a single live instance while
+      refusing every real daemon after the first idle moment. The suite runs
+      twice for it — and both halves of the guard were checked by writing the
+      bug: the nonce in a field fails nine of sixteen tests in the evicting run
+      and none in the live one, while "is a host present" in a field is the
+      opposite and only the `getWebSockets` call count catches it. Keepalive is
+      the object's free auto-response, the `hosts` lookup is cached 60s in the
+      object's own storage, `last_seen_at` is written on connect, and the data
+      path writes no storage at all. What remains is the pipe: an attach now
+      earns `4404` when nobody is home and `4501` when the host is there and
+      dial-back does not exist yet, which are different problems and only one of
+      them is the user's.
 
       Provable **before any Rust exists**: a Node script holding the control
       link with a real host key, dialling a real `zest-daemon --listen-ws`,
