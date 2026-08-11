@@ -15,7 +15,10 @@
  * from closed enums. That reasoning does not survive two caller-supplied
  * strings — concatenated, `("ab","cd")` and `("abc","d")` are identical bytes,
  * so a signature over one would verify the other, and the label is
- * attacker-chosen.
+ * attacker-chosen. So only this outer layer lives here; the signing domain
+ * itself is `@zesterm/cloud-shared`'s, so the relay Worker can build the same
+ * bytes without a second copy of them when it comes to verify its own
+ * challenge. Nothing in the relay imports it yet.
  *
  * Two implementations of one format is the hazard here: the daemon signs in
  * Rust and this verifies in TypeScript, and a disagreement surfaces as a
@@ -24,18 +27,12 @@
  * actually produced.
  */
 
-import { utf8 } from '@zesterm/cloud-shared';
+import { concat, signingPreimage, utf8, type Role } from '@zesterm/cloud-shared';
 import { verifyAsync } from '@noble/ed25519';
 
 const ENROLL_DOMAIN = 'zesterm-enroll-v1';
-const SIGNING_DOMAIN = 'zesterm-sig-v1';
 
-/**
- * Which key produced a signature. Inside the signing prefix, so a host's
- * enrolment proof cannot be replayed to enrol a browser key, or the reverse —
- * which matters because one machine is routinely both.
- */
-export type Role = 'host' | 'client';
+export type { Role };
 
 /** The public key being enrolled, raw. Ed25519, so always 32 bytes. */
 export const KEY_LEN = 32;
@@ -56,16 +53,6 @@ function pushLenPrefixed(parts: Uint8Array[], text: string): void {
   parts.push(new Uint8Array([bytes.length >>> 8, bytes.length & 0xff]), bytes);
 }
 
-function concat(parts: Uint8Array[]): Uint8Array {
-  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
-  let at = 0;
-  for (const part of parts) {
-    out.set(part, at);
-    at += part.length;
-  }
-  return out;
-}
-
 /** `zest_mesh::enroll::enrollment_request`, verbatim. */
 export function enrollmentRequest(code: string, key: Uint8Array, label: string): Uint8Array {
   if (key.length !== KEY_LEN) {
@@ -78,17 +65,14 @@ export function enrollmentRequest(code: string, key: Uint8Array, label: string):
   return concat(parts);
 }
 
-/** `zest_mesh::identity::preimage`, verbatim, for `Purpose::Enrollment`. */
+/** The enrolment request under `Purpose::Enrollment`'s signing domain. */
 export function enrollmentPreimage(
   role: Role,
   code: string,
   key: Uint8Array,
   label: string,
 ): Uint8Array {
-  return concat([
-    utf8(`${SIGNING_DOMAIN}\0${role}\0enrollment\0`),
-    enrollmentRequest(code, key, label),
-  ]);
+  return signingPreimage(role, 'enrollment', enrollmentRequest(code, key, label));
 }
 
 /**

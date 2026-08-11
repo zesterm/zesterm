@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Pure helpers shared by the cloud Workers: cookie signing, opaque tokens, constant-time compare. No runtime dependencies and no bindings, so every one of them is testable without workerd.",
+  "description": "Pure helpers shared by the cloud Workers: cookie signing, opaque tokens, constant-time compare, the zesterm-sig-v1 signing preimage. No runtime dependencies and no bindings, so every one of them is testable without workerd.",
   "exports": {
     ".": "./src/index.ts"
   },
