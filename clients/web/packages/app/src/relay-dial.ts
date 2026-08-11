@@ -18,8 +18,9 @@
  * implements.
  *
  * **`mintTicket` is a parameter on purpose, not because the caller varies.**
- * `POST /api/relay/ticket` is a later PR; injecting the mint is what lets this
- * land, be tested and be reviewed without it, and it is what makes the tests
+ * There is one caller — `relay-access.ts`, which posts to `/api/relay/ticket` —
+ * and injecting the mint is what let this land and be reviewed before that
+ * endpoint existed. It stays injected because it is what makes every test here
  * possible with no network at all.
  *
  * **A v1 cut, named so it reads as one:** `ByteLinkHandlers` has no error
@@ -42,13 +43,15 @@ const RELAY_SUBPROTOCOL = 'zesterm.relay.v1';
 /**
  * The room to dial, from an `https://`/`http://` origin.
  *
- * The path is the relay Worker's, and that Worker does not route it yet — it
- * answers 404 to everything. Named here anyway because a `Dial` has to produce
- * some URL, and the shape follows ADR-009's one-object-per-host: the host id
- * selects the room, and nothing secret is in the URL.
+ * `cloud/packages/relay/src/index.ts` is the other end and answers this exact
+ * path. Versioned, because the relay has no other HTTP surface to put a version
+ * in and a second attach shape would need one. The shape follows ADR-009's
+ * one-object-per-host: the host id selects the room, and nothing secret is in
+ * the URL — the ticket is a subprotocol, for the reason at the top of this file.
  */
 function relayUrl(relayOrigin: string, hostId: string): string {
-  const url = new URL(`/attach/${encodeURIComponent(hostId)}`, relayOrigin);
+  const url = new URL('/v1/attach', relayOrigin);
+  url.searchParams.set('host', hostId);
   if (url.protocol === 'https:') url.protocol = 'wss:';
   else if (url.protocol === 'http:') url.protocol = 'ws:';
   return url.toString();
@@ -90,9 +93,9 @@ export function relayDial(
         // *rejected* mint; it does not cover the success handler throwing, and
         // that handler contains two constructors that do. `new URL` throws on a
         // malformed `relayOrigin`, and `new WebSocket` throws `SyntaxError` if
-        // any subprotocol value is not an RFC 7230 token — which a ticket is,
-        // until the endpoint that mints it exists and settles on base64url.
-        // Standard base64 (`=`, `/`) is not a token and would land here.
+        // any subprotocol value is not an RFC 7230 token. The mint encodes
+        // unpadded base64url precisely so a ticket is one; standard base64
+        // (`=`, `/`) is not, and would land here.
         //
         // Uncaught, the rejection was silent and terminal: no `onOpen`, no
         // `onClose`, so `SessionClient` never schedules a redial and the tab

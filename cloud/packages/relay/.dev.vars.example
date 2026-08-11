@@ -1,0 +1,16 @@
+# Copy to `.dev.vars` for `wrangler dev`. Never commit the copy.
+#
+# The public halves of the keys attach tickets may be signed with, as
+# comma-separated lowercase hex. Its counterpart is the web Worker's
+# TICKET_SIGNING_KEY — generate the pair together with the one-liner in
+# `packages/web/.dev.vars.example` and put the *public* line here.
+#
+# **A list rather than one key.** Rotating a single key means deploying both
+# Workers at the same instant, which two `wrangler deploy`s cannot be; with a
+# list the new key goes here first, the mint switches to it, and the old one is
+# removed afterwards, with no window in which a fresh ticket meets a relay that
+# has never heard of the key that signed it.
+#
+# Leave it out and every attach is refused with 4401, which is the correct
+# answer for a relay whose mint has not been set up.
+TICKET_PUBLIC_KEYS="…"

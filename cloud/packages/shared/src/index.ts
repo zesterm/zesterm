@@ -23,6 +23,20 @@ export {
 export { signingPreimage, type Role, type Purpose } from './sig.ts';
 
 export {
+  ATTACH_TICKET_AUDIENCE,
+  ATTACH_TICKET_SIGNATURE_LEN,
+  ATTACH_TICKET_TTL_MS,
+  ATTACH_TICKET_VERSION,
+  MAX_ATTACH_TICKET_CHARS,
+  attachTicketPayload,
+  attachTicketPreimage,
+  decodeAttachTicket,
+  encodeAttachTicket,
+  type AttachTicket,
+  type DecodedAttachTicket,
+} from './ticket.ts';
+
+export {
   SESSION_TOKEN_BYTES,
   newSessionToken,
   sessionIdOf,

@@ -6,16 +6,16 @@
  * preimage = "zesterm-sig-v1" \0 role \0 purpose \0 message
  * ```
  *
- * Here rather than in the one Worker that uses it today, because a second is
- * coming. The web Worker verifies an enrolment request now; the relay Worker
- * will verify a host's signature over an attach challenge (ADR-009), and it
- * does not exist yet — it 404s on everything and imports nothing from here.
+ * Here rather than in the one Worker that uses it, because there are two. The
+ * web Worker verifies an enrolment request and signs an attach ticket; the
+ * relay Worker verifies that ticket (ADR-009), and the two share no code path
+ * at runtime — they are separate `wrangler deploy`s on separate cadences.
  *
- * The move is pre-emptive on purpose. A signed byte layout with two copies is
- * one that can disagree, and the disagreement surfaces at bring-up as a
- * signature mismatch that names neither side. Copying it once is how that
- * starts, so there is one copy before there is a second caller rather than
- * after.
+ * The move was pre-emptive on purpose, and this is what it bought. A signed
+ * byte layout with two copies is one that can disagree, and the disagreement
+ * surfaces at bring-up as a signature mismatch that names neither side. Copying
+ * it once is how that starts, so there was one copy before there was a second
+ * caller rather than after.
  *
  * Bytes only: no Ed25519 here, and no dependency that brings it. Verifying is
  * the caller's, in the package that already carries `@noble/ed25519`; this
@@ -37,9 +37,17 @@ const SIGNING_DOMAIN = 'zesterm-sig-v1';
 /**
  * Which key produced a signature. Inside the signing domain, so a host's proof
  * cannot be replayed as a client's — which matters because one machine is
- * routinely both. `zest_mesh::identity::Role`.
+ * routinely both. `zest_mesh::identity::Role`, plus one variant it does not
+ * have.
+ *
+ * **`relay` has no Rust counterpart, and must not grow one.** An attach ticket
+ * is signed by the account service and by nothing else, so no key in the fleet
+ * — not a host's, not a client's — can produce bytes that verify as one.
+ * Adding the variant to `zest_mesh::identity::Role` would hand every daemon
+ * the ability to mint its own admission to the relay, which is the one thing
+ * `ticket.ts` exists to prevent.
  */
-export type Role = 'host' | 'client';
+export type Role = 'host' | 'client' | 'relay';
 
 /**
  * What a signature is *for*. A closed union rather than a string, because a

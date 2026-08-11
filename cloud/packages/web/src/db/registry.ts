@@ -215,6 +215,24 @@ export async function listDevices(db: Db, userId: string): Promise<PublicDevice[
 }
 
 /**
+ * Is this machine one this account may attach to right now?
+ *
+ * All three conditions are in the `WHERE` clause, for the reason at the top of
+ * this file: "read the row, then check `user_id`" is the same code with the
+ * check somewhere it can be forgotten. It answers a boolean rather than the
+ * row, because the caller mints a ticket naming the id it already has — a row
+ * in hand is a row a future edit could be tempted to copy a field out of, and
+ * every one of those fields is something the relay would then be told.
+ */
+export async function ownsLiveHost(db: Db, id: string, userId: string): Promise<boolean> {
+  const row = await db
+    .prepare(`SELECT 1 AS ok FROM hosts WHERE id = ? AND user_id = ? AND revoked_at IS NULL`)
+    .bind(id, userId)
+    .first<{ ok: number }>();
+  return row !== null;
+}
+
+/**
  * Revoke, idempotently, and answer with *when* — which is the fact anyone
  * asking later actually wants.
  *

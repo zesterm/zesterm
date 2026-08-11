@@ -29,7 +29,27 @@ test('bootstrap says cloud, and signed out when there is no cookie', async () =>
   const res = await routeApi(get('/api/bootstrap'), env(db));
   assert.ok(res, '/api/bootstrap must be handled by the Worker, not the assets');
   assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), { mode: 'cloud', user: null });
+  // `relayOrigin: null` and not an absent field: the app narrows the envelope
+  // field by field, and "this deployment has no relay" is an answer rather than
+  // a gap. `env()` sets no RELAY_ORIGIN, which is that deployment.
+  assert.deepEqual(await res.json(), { mode: 'cloud', user: null, relayOrigin: null });
+  db.close();
+});
+
+test('bootstrap reports the relay origin when there is one, and /api/me never does', async () => {
+  // On the envelope rather than baked into the bundle, for the reason `mode` is:
+  // one `vite build` serves both the sidecar and the edge, so a `VITE_*`
+  // variable would mean the bundle that was tested is not the bundle shipped.
+  const db = testDb();
+  const relay = 'https://zesterm-relay.sigx.workers.dev';
+  const withRelay: Env = { ...env(db), RELAY_ORIGIN: relay };
+
+  const boot = await routeApi(get('/api/bootstrap'), withRelay);
+  assert.deepEqual(await boot!.json(), { mode: 'cloud', user: null, relayOrigin: relay });
+
+  // `/api/me` is "who is this" and nothing else; a second place to learn the
+  // relay's address is a second place for it to be stale.
+  assert.deepEqual(await (await routeApi(get('/api/me'), withRelay))!.json(), { user: null });
   db.close();
 });
 

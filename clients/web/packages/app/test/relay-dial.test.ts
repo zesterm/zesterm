@@ -35,7 +35,7 @@ test('the ticket becomes the second subprotocol, and the URL carries no secret',
   );
   assert.equal(
     ws.url,
-    `wss://relay.example.com/attach/${HOST}`,
+    `wss://relay.example.com/v1/attach?host=${HOST}`,
     'an https origin dials wss, and the room is selected by host id alone',
   );
   assert.equal(
@@ -54,7 +54,7 @@ test('an http origin dials ws, so a local relay is reachable', async (t) => {
 
   assert.equal(
     sockets.latest().url,
-    `ws://localhost:8787/attach/${HOST}`,
+    `ws://localhost:8787/v1/attach?host=${HOST}`,
     'wrangler dev serves plain http, and a dial that forced wss could never reach it',
   );
 });

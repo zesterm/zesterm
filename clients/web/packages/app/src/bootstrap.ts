@@ -30,6 +30,15 @@ export interface User {
 export interface CloudBootstrap {
   readonly mode: 'cloud';
   readonly user: User | null;
+  /**
+   * Where the relay Worker lives, or `null` where there is no relay.
+   *
+   * On the envelope rather than baked into the bundle for the reason `mode` is,
+   * and a *second* origin because ADR-009 makes the relay a second Worker.
+   * `null` is an ordinary deployment, not a broken one: the fleet is still
+   * reachable over `ws` on the LAN.
+   */
+  readonly relayOrigin: string | null;
 }
 
 export type Bootstrap = LocalBootstrap | CloudBootstrap;
@@ -65,13 +74,48 @@ export function parseUser(value: unknown): User | null {
   };
 }
 
+/**
+ * An `http(s)` origin, or `null`.
+ *
+ * Checked here rather than at the dial, because the dial is where it would be
+ * expensive: `relayDial` builds a `URL` from this string, and a malformed one
+ * throws inside a promise chain whose only vocabulary is "the connection
+ * closed" — so the fleet would show rows that fail to connect for ever with
+ * nothing naming the cause. A value that is not a URL is no relay, which is a
+ * state the app already renders honestly.
+ *
+ * `http(s)` only, though `relayDial` would happily open a `ws://` string:
+ * one spelling for one deployment. Two would eventually be two settings that
+ * disagree, and the scheme is the half `relayDial` derives anyway.
+ */
+function parseRelayOrigin(value: unknown): string | null {
+  if (typeof value !== 'string' || !URL.canParse(value)) return null;
+  const url = new URL(value);
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+  // An *origin*, not any parseable URL, and the returned value is the
+  // canonical one rather than whatever was sent.
+  //
+  // `new URL('/attach/x', 'https://relay.example.com/anything')` resolves
+  // against the origin and discards the path, so a server sending a path, a
+  // query, a fragment or userinfo would be silently accepted and silently
+  // ignored — a value the app trusts, printed nowhere, meaning something other
+  // than it says. Refusing is cheap and keeps "this is an origin" true.
+  if (url.username !== '' || url.password !== '') return null;
+  if (url.pathname !== '/' || url.search !== '' || url.hash !== '') return null;
+  return url.origin;
+}
+
 /** Narrow an unknown JSON body, rather than trusting the server's shape. */
 export function parseBootstrap(value: unknown): Bootstrap | null {
   if (typeof value !== 'object' || value === null) return null;
   const mode = (value as { mode?: unknown }).mode;
   if (mode === 'local') return { mode: 'local' };
   if (mode !== 'cloud') return null;
-  return { mode: 'cloud', user: parseUser((value as { user?: unknown }).user) };
+  return {
+    mode: 'cloud',
+    user: parseUser((value as { user?: unknown }).user),
+    relayOrigin: parseRelayOrigin((value as { relayOrigin?: unknown }).relayOrigin),
+  };
 }
 
 /**

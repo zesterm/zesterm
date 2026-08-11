@@ -51,7 +51,19 @@
     // Owned by the `zesterm` org rather than a personal account, so the
     // consent screen names the project and the credentials outlive any one
     // person's account.
-    "GITHUB_CLIENT_ID": "Ov23liTt8aOk9TURcT1h"
+    "GITHUB_CLIENT_ID": "Ov23liTt8aOk9TURcT1h",
+
+    // The relay Worker's origin, handed to the app by `/api/bootstrap` rather
+    // than baked into the bundle -- one `vite build` serves both the sidecar
+    // and the edge, so a `VITE_*` variable would mean the bundle you tested is
+    // not the bundle you shipped.
+    //
+    // A separate Worker and therefore a separate origin, which is deliberate:
+    // ADR-009 splits them because deploying a Worker evicts every live
+    // instance of the Durable Object class it owns. Cross-origin costs the
+    // relay nothing, because the ticket is what authorizes it and the session
+    // cookie could never have travelled there anyway.
+    "RELAY_ORIGIN": "https://zesterm-relay.sigx.workers.dev"
   },
 
   "d1_databases": [

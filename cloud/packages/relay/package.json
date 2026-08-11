@@ -16,5 +16,9 @@
     "@types/node": "^24.10.1",
     "typescript": "^5.9.3",
     "wrangler": "^4.28.0"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^3.0.0",
+    "@zesterm/cloud-shared": "workspace:*"
   }
 }

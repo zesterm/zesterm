@@ -16,3 +16,19 @@ GITHUB_CLIENT_SECRET="…"
 # Any 32 random bytes; it only signs the local state cookie.
 #   node -e "console.log(Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64'))"
 COOKIE_MAC_KEY="…"
+
+# The Ed25519 seed attach tickets are signed with, as 64 lowercase hex
+# characters. The relay Worker verifies against its *public* half, so the two
+# have to be generated together — print both, keep the first here and put the
+# second in the relay's TICKET_PUBLIC_KEYS:
+#   node -e "import('@noble/ed25519').then(async ed => { const s = crypto.getRandomValues(new Uint8Array(32)); const h = b => Buffer.from(b).toString('hex'); console.log('seed  ', h(s)); console.log('public', h(await ed.getPublicKeyAsync(s))) })"
+#
+# Without it, /api/relay/ticket answers 503 and everything else works — which
+# is the point of it being one secret rather than a startup check.
+TICKET_SIGNING_KEY="…"
+
+# The relay Worker's origin, reported to the app by /api/bootstrap. Point it at
+# `wrangler dev` in the relay package to exercise the attach path locally;
+# leave it out entirely and the app simply has no relay, which is a supported
+# state rather than a broken one.
+RELAY_ORIGIN="http://localhost:8788"

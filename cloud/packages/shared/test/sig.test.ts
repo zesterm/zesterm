@@ -51,13 +51,26 @@ test('every role and purpose spells its domain the way the Rust does', () => {
   }
 });
 
+test('the relay role is this side’s alone, and spells itself the same way', () => {
+  // `relay` has no variant in `zest_mesh::identity::Role`, deliberately: an
+  // attach ticket is signed by the account service and by nothing else, so no
+  // key in the fleet can produce bytes that verify as one. What it still has to
+  // be is stable, because the relay Worker rebuilds this prefix to verify.
+  assert.deepEqual(
+    signingPreimage('relay', 'attach-ticket', new Uint8Array()),
+    utf8('zesterm-sig-v1\0relay\0attach-ticket\0'),
+  );
+});
+
 test('one message under two contexts is never the same bytes', () => {
   // A machine is routinely both a host and a client, and the relay will ask it
   // to sign a challenge that looks exactly like an enrolment approval. Sharing
-  // bytes between any two of these makes one answer serve for the other.
+  // bytes between any two of these makes one answer serve for the other — and
+  // `relay` is in the sweep because a host that could mint its own attach
+  // ticket is the failure that variant exists to prevent.
   const message = utf8('a challenge nonce');
   const seen = new Map<string, string>();
-  for (const role of ['host', 'client'] as const) {
+  for (const role of ['host', 'client', 'relay'] as const) {
     for (const purpose of ['auth', 'enrollment', 'attach-ticket'] as const) {
       const bytes = hex(signingPreimage(role, purpose, message));
       const previous = seen.get(bytes);
