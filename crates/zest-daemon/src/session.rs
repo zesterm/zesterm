@@ -680,7 +680,7 @@ mod tests {
         // updates have chained -- or once the child is gone and one has, since
         // waiting out the deadline for a second one that coalescing may never
         // produce is how this test used to fail.
-        wait_for(|| {
+        let settled = wait_for(|| {
             while let Some((base, seq, _)) = s.poll(handle) {
                 assert_eq!(
                     base, previous,
@@ -692,9 +692,22 @@ mod tests {
             }
             seen >= 3 || (seen >= 1 && s.has_exited())
         });
-        // `seen`, not the `bool` above: the deadline expiring is only a failure
-        // if nothing ever arrived, and then it is this that says so.
+        // Both, and the `bool` is not optional however tempting it looks.
+        //
+        // The condition is "three updates, or one and a finished child", and a
+        // child that printed five lines does one or the other quickly. If
+        // neither ever becomes true the run burns the full deadline and then —
+        // with only `seen >= 1` asserted — passes, slowly, having proved
+        // nothing about a session that stalled. That is the
+        // waited-out-the-deadline-but-did-not-fail mode this whole change
+        // exists to remove, and leaving it at one call site while fixing the
+        // others is how it survives.
         assert!(seen >= 1, "no update ever arrived, so nothing above was checked");
+        assert!(
+            settled,
+            "after {seen} update(s) the child neither produced a third nor exited, so this \
+             waited out its deadline on a session that had stalled"
+        );
     }
 
     #[test]
