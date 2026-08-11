@@ -15,7 +15,7 @@
 import { createHost } from '@sigx/actors/host';
 import { memoryStorage } from '@sigx/actors/host';
 
-import { SessionDirectory } from '@zesterm/control';
+import { SessionDirectory, type DataPlane } from '@zesterm/control';
 import { startFeed } from './feed.ts';
 import { defaultSocketPath, socketDial } from './net-link.ts';
 import { startServer } from './server.ts';
@@ -47,10 +47,14 @@ async function main(): Promise<void> {
   const port = Number(opt('--port') ?? 7350);
   const bind = opt('--bind') ?? '127.0.0.1';
   const socketPath = opt('--socket') ?? defaultSocketPath();
+  // `satisfies`, not an annotation: the sidecar is the local path and can only
+  // ever advertise `ws`, and keeping the narrow type is what lets the log line
+  // below read `.host`/`.port` without re-narrowing a union it never holds.
   const dataPlane = {
+    kind: 'ws',
     host: opt('--ws-host') ?? '127.0.0.1',
     port: Number(opt('--ws-port') ?? 7718),
-  };
+  } satisfies DataPlane;
 
   // The directory is feed-primed on every start, so memory storage is the
   // honest choice: nothing here is worth surviving a restart, and a session

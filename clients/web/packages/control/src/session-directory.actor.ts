@@ -42,11 +42,20 @@ export interface HostInfo {
   readonly label: string;
 }
 
-/** Where the binary WebSocket data plane listens — the daemon's port, never the sidecar's. */
-export interface DataPlane {
-  readonly host: string;
-  readonly port: number;
-}
+/**
+ * How a browser reaches the grid, in one of the two ways it can.
+ *
+ * `ws` is the daemon's own `--listen-ws` address — its port, never the
+ * sidecar's. `relay` names a host to be reached through the edge instead, and
+ * carries no address at all: a laptop behind NAT has none to advertise, which
+ * is the whole reason the relay exists (ADR-009). A hosted `https://` page
+ * also may not open `ws://192.168.1.5:7718` at all — mixed content — so the
+ * two shapes are not two ways of saying the same thing, and code that turns a
+ * `DataPlane` into a URL must switch rather than read fields off it.
+ */
+export type DataPlane =
+  | { readonly kind: 'ws'; readonly host: string; readonly port: number }
+  | { readonly kind: 'relay'; readonly hostId: string };
 
 export interface DirectoryState {
   v: 1;

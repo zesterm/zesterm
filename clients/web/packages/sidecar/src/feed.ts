@@ -24,7 +24,11 @@ import type { SessionInfo } from '@zesterm/proto';
 export interface FeedOptions {
   readonly host: Host;
   readonly dial: Dial;
-  /** Advertised to browsers through the directory — the daemon's WS port. */
+  /**
+   * Advertised to browsers through the directory — the daemon's WS port.
+   * Always `kind: 'ws'`: the sidecar *is* the local path, and a browser that
+   * needs the relay never reached one of these.
+   */
   readonly dataPlane: DataPlane;
   readonly label?: string;
   readonly onLog?: (line: string) => void;
