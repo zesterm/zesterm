@@ -42,7 +42,7 @@ pub mod session;
 pub mod ws;
 
 pub use auth::{Auth, Authenticator};
-pub use lan::LanListener;
+pub use lan::{Gate, LanListener};
 pub use ws::WsListener;
 pub use local::{connect, default_socket_path, listen};
 #[cfg(windows)]

@@ -322,11 +322,16 @@ fn main() {
 
     let registry = Arc::new(Registry::new());
 
+    // One gate for every public transport, because what it bounds -- threads
+    // held by connections that have not proved themselves -- belongs to the
+    // process and not to a socket. → `lan::Gate`.
+    let gate = Arc::new(zest_daemon::Gate::new());
+
     // The LAN, if it was asked for. Held for the life of the process: the
     // advertiser unregisters on drop, so `let _ = ...` would take this machine
     // off every fleet listing the instant it was announced.
     let advertiser = if config.listen_lan {
-        match start_lan(&config, &registry, &auth) {
+        match start_lan(&config, &registry, &auth, &gate) {
             Ok(a) => a,
             Err(e) => {
                 // Refused, not degraded. Every failure here means this host
@@ -345,7 +350,7 @@ fn main() {
     // refused, not degraded, and loopback keeps working while someone reads
     // the error.
     if config.listen_ws {
-        if let Err(e) = start_ws(&config, &registry, &auth) {
+        if let Err(e) = start_ws(&config, &registry, &auth, &gate) {
             tracing::error!(error = %e, "not serving WebSocket clients; loopback is unaffected");
         }
     }
@@ -394,6 +399,7 @@ fn start_lan(
     config: &DaemonConfig,
     registry: &Arc<Registry>,
     auth: &Arc<Authenticator>,
+    gate: &Arc<zest_daemon::Gate>,
 ) -> Result<Option<zest_mesh::discovery::mdns::MdnsAdvertiser>, String> {
     // A trust store that cannot persist means every device re-prompts on every
     // reconnect, and a stream of prompts is how someone learns to approve
@@ -417,10 +423,11 @@ fn start_lan(
     let config = config.clone();
     let registry = Arc::clone(registry);
     let auth = Arc::clone(auth);
+    let gate = Arc::clone(gate);
     std::thread::Builder::new()
         .name("zest-daemon-lan".into())
         .spawn(move || {
-            if let Err(e) = listener.serve_forever(config, registry, auth) {
+            if let Err(e) = listener.serve_forever(config, registry, auth, gate) {
                 tracing::error!(error = %e, "the LAN listener stopped");
             }
         })
@@ -439,6 +446,7 @@ fn start_ws(
     config: &DaemonConfig,
     registry: &Arc<Registry>,
     auth: &Arc<Authenticator>,
+    gate: &Arc<zest_daemon::Gate>,
 ) -> Result<(), String> {
     // Same check as the LAN, same reason: a trust store that cannot persist
     // means every device re-prompts on every reconnect.
@@ -457,10 +465,11 @@ fn start_ws(
     let config = config.clone();
     let registry = Arc::clone(registry);
     let auth = Arc::clone(auth);
+    let gate = Arc::clone(gate);
     std::thread::Builder::new()
         .name("zest-daemon-ws".into())
         .spawn(move || {
-            if let Err(e) = listener.serve_forever(config, registry, auth) {
+            if let Err(e) = listener.serve_forever(config, registry, auth, gate) {
                 tracing::error!(error = %e, "the WebSocket listener stopped");
             }
         })

@@ -22,12 +22,16 @@
 //!   thread for as long as it likes.
 //! - **A cap on unauthenticated connections**, so that pinning threads is
 //!   bounded even when it is deliberate.
-//! - **A per-address failed-auth limit.** This is what makes a six-digit
+//! - **A per-peer failed-auth limit.** This is what makes a six-digit
 //!   pairing code sound: one online guess per connection at 1-in-10⁶ is only an
 //!   argument if connections cannot be made without limit.
+//!
+//! The last two live in a [`Gate`], which the process builds once and hands to
+//! every transport, because the thread pinned by a stalled handshake is a
+//! daemon-wide resource and not the LAN listener's.
 
 use std::collections::HashMap;
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -51,13 +55,13 @@ pub const DEFAULT_PORT: u16 = 7717;
 /// nothing at all.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How many connections may be mid-handshake at once.
+/// How many connections may be mid-handshake at once, across every transport.
 const MAX_UNAUTHENTICATED: usize = 32;
 
-/// Failed handshakes from one address before it is made to wait.
+/// Failed handshakes from one peer before it is made to wait.
 const MAX_FAILURES: u32 = 5;
 
-/// How long a rate-limited address waits.
+/// How long a rate-limited peer waits.
 const COOLDOWN: Duration = Duration::from_secs(60);
 
 /// A bound port, not yet serving.
@@ -130,11 +134,13 @@ impl LanListener {
         config: DaemonConfig,
         registry: Arc<Registry>,
         auth: Arc<Authenticator>,
+        gate: Arc<Gate>,
     ) -> Result<(), DaemonError> {
         tracing::info!(addr = %self.addr, "serving the LAN");
         accept_hardened(
             self.listener,
             self.handshake_timeout,
+            gate,
             move |stream, peer, watchdog, slot| {
                 let write_half = stream
                     .try_clone()
@@ -159,9 +165,10 @@ impl LanListener {
 /// Accept connections forever with the hardening every public port needs.
 ///
 /// The module docs list the three obligations — watchdog, mid-handshake cap,
-/// per-address failure limit — and this loop is where all three live, factored
-/// out of [`LanListener`] so a second public transport (the WebSocket listener)
-/// cannot accidentally take the port without taking the posture. `serve_conn`
+/// per-peer failure limit — and this loop is where they are applied: the last
+/// two out of the caller's [`Gate`], the watchdog here. Factored out of
+/// [`LanListener`] so a second public transport (the WebSocket listener) cannot
+/// accidentally take a port without taking the posture. `serve_conn`
 /// runs on its own thread with the watchdog already armed, so however long its
 /// transport takes to say hello — an HTTP upgrade, a raw `Hello`, nothing at
 /// all — the same deadline covers it.
@@ -171,6 +178,7 @@ impl LanListener {
 pub(crate) fn accept_hardened<F>(
     listener: TcpListener,
     handshake_timeout: Duration,
+    gate: Arc<Gate>,
     serve_conn: F,
 ) -> Result<(), DaemonError>
 where
@@ -180,42 +188,41 @@ where
         + 'static,
 {
     let serve_conn = Arc::new(serve_conn);
-    let limiter = Arc::new(RateLimiter::default());
-    let unauthenticated = Arc::new(AtomicUsize::new(0));
 
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let peer = stream
             .peer_addr()
             .map_or_else(|_| "unknown".to_string(), |a| a.to_string());
+        let key = PeerKey::from(&peer);
 
-        if let Some(wait) = limiter.blocked(&peer) {
-            tracing::warn!(%peer, ?wait, "refusing: too many failed handshakes");
-            drop(stream);
-            continue;
-        }
-
-        // Accept-and-close rather than leaving them queued: a peer told no
-        // immediately can back off, where one left hanging cannot.
-        if unauthenticated.load(Ordering::Acquire) >= MAX_UNAUTHENTICATED {
-            tracing::warn!(%peer, "refusing: too many connections are mid-handshake");
-            drop(stream);
-            continue;
-        }
+        // Refused connections are accepted and closed rather than left queued:
+        // a peer told no immediately can back off, where one left hanging
+        // cannot.
+        let guard = match gate.admit(key.clone()) {
+            Ok(guard) => guard,
+            Err(Refused::Cooling(wait)) => {
+                tracing::warn!(%peer, ?wait, "refusing: too many failed handshakes");
+                drop(stream);
+                continue;
+            }
+            Err(Refused::Busy) => {
+                tracing::warn!(%peer, "refusing: too many connections are mid-handshake");
+                drop(stream);
+                continue;
+            }
+        };
 
         let serve_conn = Arc::clone(&serve_conn);
-        let limiter = Arc::clone(&limiter);
-        let unauthenticated = Arc::clone(&unauthenticated);
+        let gate = Arc::clone(&gate);
 
-        unauthenticated.fetch_add(1, Ordering::AcqRel);
         std::thread::spawn(move || {
             let watchdog = Watchdog::start(&stream, handshake_timeout);
-            // Dropped when the handshake completes, not when the
-            // connection ends -- the cap is on connections *mid-handshake*,
-            // and holding it for the session made it a hard limit of 32
-            // concurrent clients.
-            let guard = Countdown(Some(unauthenticated));
 
+            // `guard` is dropped when the handshake completes, not when the
+            // connection ends -- the cap is on connections *mid-handshake*, and
+            // holding it for the session made it a hard limit of 32 concurrent
+            // clients.
             let result = serve_conn(stream, peer.clone(), watchdog.handle(), guard);
 
             // Read before disarming: `authenticated` is `!armed && !fired`,
@@ -224,17 +231,77 @@ where
             // exact bug its comment says it once had.
             let authenticated = watchdog.authenticated();
             watchdog.disarm();
-            if authenticated {
-                limiter.succeeded(&peer);
-            } else {
-                limiter.failed(&peer);
-            }
+            gate.settle(&key, authenticated);
             if let Err(e) = result {
                 tracing::warn!(%peer, error = %e, "connection ended");
             }
         });
     }
     Ok(())
+}
+
+/// Everything a public port is not allowed to be without: the mid-handshake
+/// cap and the per-peer failure limit, in one object the process owns.
+///
+/// **One `Gate` for the whole daemon, and that is a change.** Both were created
+/// per accept loop, so the LAN listener and the WebSocket listener each had
+/// their own budget of 32 mid-handshake connections. What the cap protects is
+/// threads, which are a property of the process rather than of a socket — and
+/// ADR-009 needs every logical relay stream counted against the same number,
+/// since under dial-back a stream *is* a socket and a host with a control link
+/// can be asked to open them without limit. The cost is real and worth stating:
+/// a flood on the LAN port can now crowd out a relay attach, where before each
+/// transport starved only itself.
+pub struct Gate {
+    unauthenticated: Arc<AtomicUsize>,
+    limiter: RateLimiter,
+}
+
+/// Why a connection was not admitted.
+#[derive(Debug)]
+pub enum Refused {
+    /// This peer has failed too many handshakes and must wait this long.
+    Cooling(Duration),
+    /// Too many connections are mid-handshake, daemon-wide.
+    Busy,
+}
+
+impl Default for Gate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Gate {
+    #[must_use]
+    pub fn new() -> Self {
+        Self { unauthenticated: Arc::new(AtomicUsize::new(0)), limiter: RateLimiter::default() }
+    }
+
+    /// Take a mid-handshake slot for this peer, or say why not.
+    ///
+    /// The returned [`Countdown`] gives the slot back — on drop, or earlier
+    /// when the handshake completes.
+    pub fn admit(&self, key: PeerKey) -> Result<Countdown, Refused> {
+        if let Some(wait) = self.limiter.blocked(key) {
+            return Err(Refused::Cooling(wait));
+        }
+        if self.unauthenticated.load(Ordering::Acquire) >= MAX_UNAUTHENTICATED {
+            return Err(Refused::Busy);
+        }
+        self.unauthenticated.fetch_add(1, Ordering::AcqRel);
+        Ok(Countdown(Some(Arc::clone(&self.unauthenticated))))
+    }
+
+    /// Record how a connection ended. `authenticated` is what feeds the
+    /// per-peer limit, so it must be the watchdog's real answer.
+    pub fn settle(&self, key: &PeerKey, authenticated: bool) {
+        if authenticated {
+            self.limiter.succeeded(key.clone());
+        } else {
+            self.limiter.failed(key.clone());
+        }
+    }
 }
 
 /// Decrements the mid-handshake count once, however it is released.
@@ -259,7 +326,7 @@ impl Drop for Countdown {
     }
 }
 
-/// Cuts a connection that never finishes **its handshake**.
+/// How a connection is severed once its deadline passes.
 ///
 /// `shutdown(Both)` rather than a read timeout, and that is the whole trick:
 /// `serve`'s reader treats *any* `Err` as fatal, so setting a timeout on the
@@ -267,6 +334,21 @@ impl Drop for Countdown {
 /// which is most of the time. Shutting the socket down unblocks the read once,
 /// and `serve` unwinds through its ordinary "the client went away" path with no
 /// change to its loop.
+///
+/// A trait because the *cut* is what varies and the watchdog is not: a TLS
+/// stream is not a `TcpStream` and cannot be `try_clone`d into one, and under
+/// ADR-009's dial-back a relayed stream is a socket of its own to shut down.
+pub trait Cut: Send + Sync + 'static {
+    fn cut(&self);
+}
+
+impl Cut for TcpStream {
+    fn cut(&self) {
+        let _ = self.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+/// Cuts a connection that never finishes **its handshake**, by way of [`Cut`].
 ///
 /// # It has to watch the handshake, not the connection
 ///
@@ -295,40 +377,53 @@ struct Watchdog {
 
 impl Watchdog {
     fn start(stream: &TcpStream, timeout: Duration) -> Self {
-        let armed = Arc::new(AtomicBool::new(true));
-        let fired = Arc::new(AtomicBool::new(false));
-        // Milliseconds from now, so the waiting thread can be told to wait
-        // longer without being restarted.
-        let deadline = Arc::new(AtomicU64::new(timeout.as_millis() as u64));
-        if let Ok(cut) = stream.try_clone() {
-            let armed = Arc::clone(&armed);
-            let fired = Arc::clone(&fired);
-            let deadline = Arc::clone(&deadline);
-            std::thread::spawn(move || {
-                let started = Instant::now();
-                // Slept in slices rather than once, because the deadline can
-                // move while we are asleep: a connection that reaches the
-                // approval prompt is waiting on a person, not stalled, and the
-                // bound that applies to it is the pairing window rather than the
-                // handshake one.
-                loop {
-                    if !armed.load(Ordering::Acquire) {
-                        return;
-                    }
-                    let want = Duration::from_millis(deadline.load(Ordering::Acquire));
-                    let Some(left) = want.checked_sub(started.elapsed()) else { break };
-                    std::thread::sleep(left.min(Duration::from_millis(250)));
-                }
-                // `swap`, not `load`: the connection may be ending on its own
-                // right now, and exactly one of us gets to say what happened.
-                if armed.swap(false, Ordering::AcqRel) {
-                    tracing::warn!("a connection never finished its handshake; closing");
-                    fired.store(true, Ordering::Release);
-                    let _ = cut.shutdown(std::net::Shutdown::Both);
-                }
-            });
+        match stream.try_clone() {
+            Ok(clone) => Self::start_with(Arc::new(clone), timeout),
+            // As before: with no second handle there is nothing to cut, so the
+            // connection runs unwatched rather than being refused.
+            Err(_) => Self::unwatched(timeout),
         }
-        Self { armed, fired, deadline }
+    }
+
+    fn unwatched(timeout: Duration) -> Self {
+        Self {
+            armed: Arc::new(AtomicBool::new(true)),
+            fired: Arc::new(AtomicBool::new(false)),
+            // Milliseconds from now, so the waiting thread can be told to wait
+            // longer without being restarted.
+            deadline: Arc::new(AtomicU64::new(timeout.as_millis() as u64)),
+        }
+    }
+
+    fn start_with(cut: Arc<dyn Cut>, timeout: Duration) -> Self {
+        let this = Self::unwatched(timeout);
+        let armed = Arc::clone(&this.armed);
+        let fired = Arc::clone(&this.fired);
+        let deadline = Arc::clone(&this.deadline);
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            // Slept in slices rather than once, because the deadline can
+            // move while we are asleep: a connection that reaches the
+            // approval prompt is waiting on a person, not stalled, and the
+            // bound that applies to it is the pairing window rather than the
+            // handshake one.
+            loop {
+                if !armed.load(Ordering::Acquire) {
+                    return;
+                }
+                let want = Duration::from_millis(deadline.load(Ordering::Acquire));
+                let Some(left) = want.checked_sub(started.elapsed()) else { break };
+                std::thread::sleep(left.min(Duration::from_millis(250)));
+            }
+            // `swap`, not `load`: the connection may be ending on its own
+            // right now, and exactly one of us gets to say what happened.
+            if armed.swap(false, Ordering::AcqRel) {
+                tracing::warn!("a connection never finished its handshake; closing");
+                fired.store(true, Ordering::Release);
+                cut.cut();
+            }
+        });
+        this
     }
 
     /// A handle the connection disarms when its handshake completes.
@@ -394,19 +489,66 @@ impl WatchdogHandle {
     }
 }
 
-/// Failed handshakes per address.
+/// What failed handshakes are counted against.
+///
+/// Opaque, and variants rather than a bare address, so that two peers which
+/// merely *look* alike cannot share a counter: a machine on the LAN at
+/// `203.0.113.4` and a client that reached us through a relay whose edge is at
+/// `203.0.113.4` are not the same peer, and giving them one budget lets either
+/// lock the other out.
+///
+/// # The relay hazard, stated before there is a relay
+///
+/// Behind a relay **every** connection carries the relay's address. Five failed
+/// handshakes is a generous allowance for one machine guessing a six-digit code
+/// and no allowance at all for a whole fleet behind one edge — one hostile peer
+/// would take the address to [`MAX_FAILURES`] and deny every other device for
+/// [`COOLDOWN`], repeatedly, at no cost to itself. So when the relay path lands,
+/// what a relayed connection settles against must be something the *peer* owns —
+/// its attach ticket — and not the socket it arrived on. [`Self::Relay`] exists
+/// to keep that decision visible and to keep the two address spaces apart in
+/// the meantime; it is not yet a correct key on its own.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum PeerKey {
+    /// A machine on this network, keyed on the address **without the port**: a
+    /// client reconnecting comes from a *new* ephemeral port every time, so
+    /// counting per `addr:port` would count to one forever and never limit
+    /// anything.
+    Lan(String),
+    /// A client that reached us through the relay, at the edge's address.
+    Relay(IpAddr),
+    /// The loopback transport, which has no address and one trust boundary:
+    /// reaching it at all means being this user on this machine.
+    Loopback,
+}
+
+impl From<&str> for PeerKey {
+    fn from(peer: &str) -> Self {
+        Self::Lan(peer.rsplit_once(':').map_or_else(|| peer.to_string(), |(addr, _)| addr.to_string()))
+    }
+}
+
+impl From<&String> for PeerKey {
+    // Every call site has an `addr:port` it formatted or was handed as a
+    // `String`, and a generic parameter does not deref-coerce for it.
+    fn from(peer: &String) -> Self {
+        Self::from(peer.as_str())
+    }
+}
+
+/// Failed handshakes per peer.
 ///
 /// The reason a six-digit code is defensible: an attacker gets one guess per
 /// connection, and connections are not free.
 #[derive(Default)]
 struct RateLimiter {
-    seen: Mutex<HashMap<String, (u32, Instant)>>,
+    seen: Mutex<HashMap<PeerKey, (u32, Instant)>>,
 }
 
 impl RateLimiter {
-    /// How long this address must wait, if at all.
-    fn blocked(&self, peer: &str) -> Option<Duration> {
-        let key = address_of(peer);
+    /// How long this peer must wait, if at all.
+    fn blocked(&self, peer: impl Into<PeerKey>) -> Option<Duration> {
+        let key = peer.into();
         let seen = self.seen.lock().expect("rate limiter lock");
         let (failures, last) = seen.get(&key)?;
         if *failures < MAX_FAILURES {
@@ -416,27 +558,16 @@ impl RateLimiter {
         (elapsed < COOLDOWN).then(|| COOLDOWN - elapsed)
     }
 
-    fn failed(&self, peer: &str) {
-        let key = address_of(peer);
+    fn failed(&self, peer: impl Into<PeerKey>) {
         let mut seen = self.seen.lock().expect("rate limiter lock");
-        let entry = seen.entry(key).or_insert((0, Instant::now()));
+        let entry = seen.entry(peer.into()).or_insert((0, Instant::now()));
         entry.0 = entry.0.saturating_add(1);
         entry.1 = Instant::now();
     }
 
-    fn succeeded(&self, peer: &str) {
-        let key = address_of(peer);
-        self.seen.lock().expect("rate limiter lock").remove(&key);
+    fn succeeded(&self, peer: impl Into<PeerKey>) {
+        self.seen.lock().expect("rate limiter lock").remove(&peer.into());
     }
-}
-
-/// The address without the port.
-///
-/// Keyed on the address alone: a client reconnecting comes from a *new*
-/// ephemeral port every time, so counting per `addr:port` would count to one
-/// forever and never limit anything.
-fn address_of(peer: &str) -> String {
-    peer.rsplit_once(':').map_or_else(|| peer.to_string(), |(addr, _)| addr.to_string())
 }
 
 #[cfg(test)]
@@ -586,7 +717,110 @@ mod tests {
 
     #[test]
     fn an_address_with_no_port_is_still_usable_as_a_key() {
-        assert_eq!(address_of("192.168.1.42:51314"), "192.168.1.42");
-        assert_eq!(address_of("unknown"), "unknown");
+        assert_eq!(PeerKey::from("192.168.1.42:51314"), PeerKey::Lan("192.168.1.42".into()));
+        assert_eq!(PeerKey::from("unknown"), PeerKey::Lan("unknown".into()));
+    }
+
+    #[test]
+    fn a_lan_peer_and_a_relayed_one_at_the_same_address_do_not_share_a_budget() {
+        // The reason the key is an enum rather than an address: an edge that
+        // happens to sit at a fleet member's address must not be able to spend
+        // its allowance, in either direction.
+        let limiter = RateLimiter::default();
+        let relayed = PeerKey::Relay("203.0.113.4".parse().expect("addr"));
+        for _ in 0..MAX_FAILURES {
+            limiter.failed(relayed.clone());
+        }
+        assert!(limiter.blocked(relayed).is_some(), "the relay edge should be cooling off");
+        assert!(
+            limiter.blocked("203.0.113.4:44000").is_none(),
+            "a LAN peer was locked out by failures that were not its own"
+        );
+    }
+
+    #[test]
+    fn the_mid_handshake_cap_is_one_budget_across_transports() {
+        // The behaviour change this commit makes on purpose: the count used to
+        // be created per accept loop, so the LAN port and the WebSocket port
+        // had 32 each. Threads belong to the process.
+        let gate = Gate::new();
+        let mut held = Vec::new();
+        for i in 0..MAX_UNAUTHENTICATED {
+            held.push(
+                gate.admit(PeerKey::Lan(format!("10.0.0.{i}")))
+                    .unwrap_or_else(|_| panic!("slot {i} should have been free")),
+            );
+        }
+        assert!(
+            gate.admit(PeerKey::Loopback).is_err(),
+            "a transport that shares the gate must see the budget the others spent"
+        );
+
+        held.pop();
+        assert!(gate.admit(PeerKey::Loopback).is_ok(), "a released slot must be reusable");
+    }
+
+    #[test]
+    fn a_peer_that_keeps_failing_is_refused_by_the_gate_rather_than_admitted() {
+        // `settle(_, false)` is what feeds the limiter, and `admit` is what
+        // reads it back. Both halves in one place, because either alone is a
+        // rate limiter nothing consults.
+        let gate = Gate::new();
+        let key = PeerKey::from("192.168.1.9:1000");
+        for _ in 0..MAX_FAILURES {
+            drop(gate.admit(key.clone()).expect("still under the limit"));
+            gate.settle(&key, false);
+        }
+        assert!(
+            matches!(gate.admit(key.clone()), Err(Refused::Cooling(_))),
+            "the sixth attempt from a peer that has failed five times must wait"
+        );
+
+        gate.settle(&key, true);
+        assert!(
+            gate.admit(key).is_ok(),
+            "a success clears the count, or a device that mistypes a code over a \
+             week is eventually locked out for reasons nobody can reconstruct"
+        );
+    }
+
+    #[test]
+    fn the_watchdog_cuts_what_it_was_given_when_the_deadline_passes() {
+        // No test reached the watchdog's own thread before -- they all built
+        // the struct by hand -- so the cut itself, the thing the whole object
+        // exists for, was never exercised.
+        struct Scissors(Arc<AtomicBool>);
+        impl Cut for Scissors {
+            fn cut(&self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let cut = Arc::new(AtomicBool::new(false));
+        let w = Watchdog::start_with(Arc::new(Scissors(Arc::clone(&cut))), Duration::from_millis(30));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(cut.load(Ordering::Acquire), "a handshake that never finished was left connected");
+        assert!(!w.authenticated(), "a connection that was cut is not an authenticated one");
+    }
+
+    #[test]
+    fn a_completed_handshake_is_never_cut() {
+        // The bug this whole object was reshaped around, now observable
+        // through the thread rather than through the flag it sets.
+        struct Scissors(Arc<AtomicBool>);
+        impl Cut for Scissors {
+            fn cut(&self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let cut = Arc::new(AtomicBool::new(false));
+        let w = Watchdog::start_with(Arc::new(Scissors(Arc::clone(&cut))), Duration::from_millis(30));
+        w.handle().completed();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !cut.load(Ordering::Acquire),
+            "a paired device was disconnected on a timer it had already beaten"
+        );
     }
 }

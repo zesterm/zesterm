@@ -72,7 +72,7 @@ use std::time::Duration;
 use sha1::{Digest, Sha1};
 
 use crate::auth::{Auth, Authenticator};
-use crate::lan::{accept_hardened, LanListener};
+use crate::lan::{accept_hardened, Gate, LanListener};
 use crate::server::{serve_lan, Registry};
 use crate::{DaemonConfig, DaemonError};
 
@@ -842,10 +842,11 @@ impl WsListener {
         config: DaemonConfig,
         registry: Arc<Registry>,
         auth: Arc<Authenticator>,
+        gate: Arc<Gate>,
     ) -> Result<(), DaemonError> {
         tracing::info!(addr = %self.local_addr(), "serving WebSocket clients");
         let (listener, handshake_timeout) = self.inner.into_parts();
-        accept_hardened(listener, handshake_timeout, move |mut stream, peer, watchdog, slot| {
+        accept_hardened(listener, handshake_timeout, gate, move |mut stream, peer, watchdog, slot| {
             let leftover = accept_upgrade(&mut stream)
                 .map_err(|e| DaemonError::Transport(format!("upgrade failed: {e}")))?;
             let (reader, writer) = split(stream, Role::Server, leftover)
