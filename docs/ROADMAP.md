@@ -1537,6 +1537,18 @@ three facts about Cloudflare that changed after #59 was written.
       suite run twice, the second time constructing a new instance before every
       handler call. → ADR-009.
 
+      **The ticket landed first**, on both sides: the account service mints one
+      from a session cookie at `POST /api/relay/ticket`, and `GET /v1/attach`
+      verifies it statelessly — signature, audience, expiry, and the room in the
+      URL against the room in the signed payload — before any Durable Object is
+      touched, so a refused attach costs no wake-up. It is signed by the account
+      service's key alone and by no key in the fleet, and verified against a
+      *list* of public keys, because rotating a single one would mean deploying
+      two Workers at the same instant. What remains is what the ticket is for:
+      the control link the daemon parks, and the pipe. A verified attach earns a
+      `4404` today — the holder is allowed in a room with nobody on the other
+      side.
+
       Provable **before any Rust exists**: a Node script holding the control
       link with a real host key, dialling a real `zest-daemon --listen-ws`,
       proves the browser, the ticket, the object, the pipe, the `zest-proto`

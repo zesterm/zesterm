@@ -15,6 +15,7 @@ import { readCookie, SESSION_COOKIE } from '@zesterm/cloud-shared';
 
 import { claimEnrollCode, mintEnrollCode } from './api/enroll.ts';
 import { listRegistry, revokeRegistryEntry } from './api/registry.ts';
+import { mintRelayTicket } from './api/relay.ts';
 import { finishLogin, logout, startLogin } from './auth/routes.ts';
 import { resolveSession } from './db/sessions.ts';
 import type { Env } from './env.ts';
@@ -73,7 +74,15 @@ export async function routeApi(
     );
     // `/api/me` is the same answer without the envelope -- one source of truth
     // for "who is this", so the two can never disagree about it.
-    return path === '/api/me' ? json({ user }) : json({ mode: 'cloud', user });
+    //
+    // `relayOrigin` is on the envelope rather than baked into the bundle for
+    // the reason `mode` is: the app ships as one `vite build` serving both the
+    // loopback sidecar and the edge, so anything it learns from a `VITE_*`
+    // variable is something the shipped bundle was never tested with. `null`
+    // is the ordinary answer for a deployment with no relay.
+    return path === '/api/me'
+      ? json({ user })
+      : json({ mode: 'cloud', user, relayOrigin: env.RELAY_ORIGIN ?? null });
   }
 
   if (path === '/api/enroll/code') {
@@ -83,6 +92,11 @@ export async function routeApi(
   if (path === '/api/enroll/claim') {
     if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
     return claimEnrollCode(request, env, now);
+  }
+
+  if (path === '/api/relay/ticket') {
+    if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+    return mintRelayTicket(request, env, now);
   }
 
   if (path === '/api/hosts' || path === '/api/devices') {

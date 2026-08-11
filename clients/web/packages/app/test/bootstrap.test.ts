@@ -23,7 +23,28 @@ test('the sidecar and the Worker are both understood', async () => {
   // lockfiles, so this is where the shapes are pinned to each other -- and
   // `cloud`'s own router test asserts its server emits exactly the second one.
   assert.deepEqual(parseBootstrap({ mode: 'local' }), { mode: 'local' });
-  assert.deepEqual(parseBootstrap({ mode: 'cloud', user: null }), { mode: 'cloud', user: null });
+  assert.deepEqual(parseBootstrap({ mode: 'cloud', user: null, relayOrigin: null }), {
+    mode: 'cloud',
+    user: null,
+    relayOrigin: null,
+  });
+});
+
+test('the relay origin is believed only when it is one', () => {
+  // It reaches `new URL` inside `relayDial`, in a promise chain whose only
+  // vocabulary is "the connection closed" -- so a value that is not a URL would
+  // otherwise become rows that fail to connect for ever with nothing naming the
+  // cause. "No relay" is a state the app already renders honestly.
+  const relay = (relayOrigin: unknown) =>
+    (parseBootstrap({ mode: 'cloud', user: null, relayOrigin }) as { relayOrigin: string | null })
+      .relayOrigin;
+
+  assert.equal(relay('https://relay.example.com'), 'https://relay.example.com');
+  assert.equal(relay('http://localhost:8788'), 'http://localhost:8788', 'wrangler dev serves plain http');
+
+  for (const bad of [null, undefined, 42, '', '/attach', 'relay.example.com', 'ws://relay.example.com']) {
+    assert.equal(relay(bad), null, `${JSON.stringify(bad)} is not an http(s) origin`);
+  }
 });
 
 test('an unrecognised body is rejected rather than half-believed', () => {
@@ -36,8 +57,8 @@ test('an unrecognised body is rejected rather than half-believed', () => {
 });
 
 test('a server that answers is believed', async () => {
-  const got = await fetchBootstrap(serving({ mode: 'cloud', user: null }));
-  assert.deepEqual(got, { mode: 'cloud', user: null } satisfies Bootstrap);
+  const got = await fetchBootstrap(serving({ mode: 'cloud', user: null, relayOrigin: null }));
+  assert.deepEqual(got, { mode: 'cloud', user: null, relayOrigin: null } satisfies Bootstrap);
 });
 
 test('boot never throws, whatever the network does', async () => {
@@ -101,9 +122,10 @@ const USER = {
 };
 
 test('a signed-in user parses through the bootstrap envelope', () => {
-  assert.deepEqual(parseBootstrap({ mode: 'cloud', user: USER }), {
+  assert.deepEqual(parseBootstrap({ mode: 'cloud', user: USER, relayOrigin: null }), {
     mode: 'cloud',
     user: USER,
+    relayOrigin: null,
   } satisfies Bootstrap);
 });
 
@@ -146,8 +168,8 @@ test('a cloud envelope carrying a malformed user is signed out, not rejected', (
   // The envelope is still understood -- this is the edge, and the app must
   // render /login rather than fall back to `local` and dial a daemon that is
   // not there.
-  const got = parseBootstrap({ mode: 'cloud', user: { id: 'u-1' } });
-  assert.deepEqual(got, { mode: 'cloud', user: null });
+  const got = parseBootstrap({ mode: 'cloud', user: { id: 'u-1' }, relayOrigin: null });
+  assert.deepEqual(got, { mode: 'cloud', user: null, relayOrigin: null });
 });
 
 test('wrong-typed fields do not leak through as undefined', () => {

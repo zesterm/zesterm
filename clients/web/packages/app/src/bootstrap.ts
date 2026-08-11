@@ -30,6 +30,15 @@ export interface User {
 export interface CloudBootstrap {
   readonly mode: 'cloud';
   readonly user: User | null;
+  /**
+   * Where the relay Worker lives, or `null` where there is no relay.
+   *
+   * On the envelope rather than baked into the bundle for the reason `mode` is,
+   * and a *second* origin because ADR-009 makes the relay a second Worker.
+   * `null` is an ordinary deployment, not a broken one: the fleet is still
+   * reachable over `ws` on the LAN.
+   */
+  readonly relayOrigin: string | null;
 }
 
 export type Bootstrap = LocalBootstrap | CloudBootstrap;
@@ -65,13 +74,37 @@ export function parseUser(value: unknown): User | null {
   };
 }
 
+/**
+ * An `http(s)` origin, or `null`.
+ *
+ * Checked here rather than at the dial, because the dial is where it would be
+ * expensive: `relayDial` builds a `URL` from this string, and a malformed one
+ * throws inside a promise chain whose only vocabulary is "the connection
+ * closed" — so the fleet would show rows that fail to connect for ever with
+ * nothing naming the cause. A value that is not a URL is no relay, which is a
+ * state the app already renders honestly.
+ *
+ * `http(s)` only, though `relayDial` would happily open a `ws://` string:
+ * one spelling for one deployment. Two would eventually be two settings that
+ * disagree, and the scheme is the half `relayDial` derives anyway.
+ */
+function parseRelayOrigin(value: unknown): string | null {
+  if (typeof value !== 'string' || !URL.canParse(value)) return null;
+  const { protocol } = new URL(value);
+  return protocol === 'https:' || protocol === 'http:' ? value : null;
+}
+
 /** Narrow an unknown JSON body, rather than trusting the server's shape. */
 export function parseBootstrap(value: unknown): Bootstrap | null {
   if (typeof value !== 'object' || value === null) return null;
   const mode = (value as { mode?: unknown }).mode;
   if (mode === 'local') return { mode: 'local' };
   if (mode !== 'cloud') return null;
-  return { mode: 'cloud', user: parseUser((value as { user?: unknown }).user) };
+  return {
+    mode: 'cloud',
+    user: parseUser((value as { user?: unknown }).user),
+    relayOrigin: parseRelayOrigin((value as { relayOrigin?: unknown }).relayOrigin),
+  };
 }
 
 /**
