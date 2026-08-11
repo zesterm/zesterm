@@ -44,8 +44,6 @@ pub struct EditBuffer {
 pub const NOT_YET_WIRED: &[&str] = &[
     "appearance.follow_system_theme",
     "appearance.light_theme",
-    "appearance.text_contrast",
-    "appearance.text_gamma",
     "cursor.shape",
     "cursor.trail",
     "motion.enabled",
@@ -80,6 +78,15 @@ pub fn build_rows(
     restart_pending: &std::collections::BTreeSet<String>,
     error: Option<&str>,
 ) -> (Vec<SettingsRowModel>, Vec<RowAction>) {
+    // Both sides of the "modified" comparison have to be spelled the same way.
+    // Every float in `Settings` is an `f32` and JSON has only `f64`, so a live
+    // `1.3f32` serializes as `1.2999999523162842` while the schema default is
+    // the shortest exact spelling. Comparing them raw marks every untouched
+    // float as edited, which is a dot next to a setting nobody changed.
+    let mut normalized = values.clone();
+    zest_config::schema::narrow_f32_literals(&mut normalized);
+    let values = &normalized;
+
     let filter = filter.to_lowercase();
     let mut rows = Vec::new();
     let mut actions = Vec::new();

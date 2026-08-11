@@ -32,7 +32,6 @@ pub mod instance;
 pub mod scene;
 pub mod ui_text;
 
-use wgpu::util::DeviceExt;
 
 pub use atlas::{Atlas, AtlasEntry, Cached};
 pub use capture::read_rgba;
@@ -50,7 +49,12 @@ pub use ui_text::{emit_ui_run, measure_ui_run};
 /// antialiasing needs it.
 pub const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-/// Text rendering knobs, applied once at resolve rather than baked per glyph.
+/// Text rendering knobs, applied to glyph coverage rather than baked per glyph.
+///
+/// Read per fragment from the shared globals, so changing either is a repaint
+/// and never an atlas rebuild. They deliberately do **not** touch anything but
+/// glyph coverage: a solid fill must come out of the frame as the colour that
+/// went in, which [`Renderer`]'s `a_solid_fill_survives_the_frame` pins.
 #[derive(Debug, Clone, Copy)]
 pub struct TextTuning {
     /// Stem darkening. Light-on-dark needs meaningfully more than dark-on-light,
@@ -59,9 +63,24 @@ pub struct TextTuning {
     pub contrast: f32,
 }
 
+impl TextTuning {
+    /// The one built-in default.
+    ///
+    /// It lives here rather than in `zest-config` so there is a single number to
+    /// argue with. The settings default is `None`, meaning "the theme's
+    /// suggestion, or this" -- previously the config said 1.0 and the renderer
+    /// said 1.3, and because nothing connected them the config's number was
+    /// simply a lie.
+    ///
+    /// Whether 1.3 is *right* is still open: ROADMAP asks for a side-by-side
+    /// against Windows Terminal, and that is a measurement, not a guess.
+    pub const DEFAULT_GAMMA: f32 = 1.3;
+    pub const DEFAULT_CONTRAST: f32 = 0.0;
+}
+
 impl Default for TextTuning {
     fn default() -> Self {
-        Self { gamma: 1.3, contrast: 0.0 }
+        Self { gamma: Self::DEFAULT_GAMMA, contrast: Self::DEFAULT_CONTRAST }
     }
 }
 
@@ -90,7 +109,6 @@ pub struct Renderer {
     atlas_generation: u64,
 
     resolve_layout: wgpu::BindGroupLayout,
-    resolve_params: wgpu::Buffer,
     resolve_sampler: wgpu::Sampler,
     resolve_bind_group: Option<wgpu::BindGroup>,
 
@@ -248,16 +266,6 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
             ],
         });
         let resolve_pipeline_layout =
@@ -294,11 +302,6 @@ impl Renderer {
             cache,
         });
 
-        let resolve_params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("zest resolve params"),
-            contents: bytemuck::cast_slice(&[1.3f32, 0.0, 0.0, 0.0]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
         let resolve_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("zest resolve sampler"),
             mag_filter: wgpu::FilterMode::Nearest,
@@ -319,7 +322,6 @@ impl Renderer {
             atlas_bind_group: None,
             atlas_generation: u64::MAX,
             resolve_layout,
-            resolve_params,
             resolve_sampler,
             resolve_bind_group: None,
             offscreen: None,
@@ -360,7 +362,6 @@ impl Renderer {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.resolve_sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: self.resolve_params.as_entire_binding() },
             ],
         }));
 
@@ -397,12 +398,6 @@ impl Renderer {
                 _pad: [0.0; 2],
             }),
         );
-        queue.write_buffer(
-            &self.resolve_params,
-            0,
-            bytemuck::cast_slice(&[self.tuning.gamma, self.tuning.contrast, 0.0, 0.0]),
-        );
-
         self.rects.upload(device, queue, bytemuck::cast_slice(&scene.rects));
         self.glyphs.upload(device, queue, bytemuck::cast_slice(&scene.glyphs));
         self.decors.upload(device, queue, bytemuck::cast_slice(&scene.decors));
@@ -707,6 +702,87 @@ fn decor_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
 
 #[cfg(test)]
 mod tests {
+    use super::{LinearRgba, Renderer, Scene, TextTuning};
+
+    /// A headless device, or `None` where there is no adapter at all.
+    ///
+    /// Any adapter will do, including a software one, which is what makes this
+    /// runnable in CI — the same assumption `examples/render_dump.rs` makes.
+    /// Returning `None` rather than panicking keeps a machine with no GPU at all
+    /// from failing the suite for a reason that is not about this code.
+    fn headless() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .ok()?;
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("zest test"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults(),
+            ..Default::default()
+        }))
+        .ok()
+    }
+
+    /// Render a scene with nothing but a backdrop and read one pixel back.
+    fn backdrop_pixel(tuning: TextTuning, color: LinearRgba) -> Option<[u8; 4]> {
+        let (device, queue) = headless()?;
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut renderer = Renderer::new(&device, format);
+        renderer.tuning = tuning;
+        renderer.resize(&device, 4, 4);
+
+        let scene = Scene { backdrop: color, ..Default::default() };
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("zest test target"),
+            size: wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let mut encoder = device.create_command_encoder(&Default::default());
+        renderer.render(&device, &queue, &mut encoder, &view, &scene);
+        queue.submit([encoder.finish()]);
+
+        let px = crate::read_rgba(&device, &queue, &texture, 4, 4, format);
+        Some([px[0], px[1], px[2], px[3]])
+    }
+
+    #[test]
+    fn a_solid_fill_survives_the_frame() {
+        // The bug this pins: text_gamma was applied in the resolve pass, which
+        // sees the *finished* frame, so `pow(rgb, 1/1.3)` landed on every pixel
+        // with any alpha -- cell backgrounds, selection and chrome as much as
+        // text. A dark theme's background arrived several shades lighter than
+        // the colour the theme asked for, and no setting could turn it off.
+        //
+        // Stem darkening now adjusts glyph coverage instead, so a solid fill has
+        // to come out of the frame as exactly the colour that went in, at every
+        // tuning. There are no glyphs in this scene at all.
+        let dark = LinearRgba::opaque(0x0D, 0x0D, 0x0D);
+        for gamma in [1.0f32, 1.3, 2.5] {
+            let tuning = TextTuning { gamma, contrast: 0.5 };
+            let Some(px) = backdrop_pixel(tuning, dark) else { return };
+            // One 8-bit step of slack for the linear round trip, and no more:
+            // the old code moved this by roughly 0x0D at gamma 1.3.
+            for (i, (got, want)) in px.iter().zip([0x0Du8, 0x0D, 0x0D, 0xFF]).enumerate() {
+                assert!(
+                    (i32::from(*got) - i32::from(want)).abs() <= 1,
+                    "channel {i} came back {got:#04X}, wanted {want:#04X} at gamma {gamma} \
+                     -- a solid fill must not be touched by a text setting"
+                );
+            }
+        }
+    }
+
     #[test]
     fn shader_layer_size_matches_the_atlas() {
         // The glyph shader normalizes UVs by a hardcoded LAYER_SIZE. If the

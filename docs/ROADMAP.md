@@ -575,11 +575,17 @@ theme screens. Colours, sizes and spacing come from there, not from this file.
       8×17 in an 8×18 cell. `typography.builtin_box_drawing` turns it off for
       anyone who wants a particular font's own. Found on Windows (#81), but the
       arithmetic was never platform-specific.
-- [ ] Validate gamma side-by-side against Windows Terminal. **Do not defer** —
-      it ships broken constantly and reads as "looks slightly off". Now known to
-      be worse than it looked: `text_gamma`/`text_contrast` are never wired to
-      the renderer at all, and the pass runs on the whole framebuffer rather
-      than on glyph coverage (#82).
+- [x] Stem darkening applies to **glyph coverage**, and the settings that
+      control it reach the renderer at all (#82). It ran on the whole
+      framebuffer before, so a theme's `#0D0D0D` background resolved to `0x20` —
+      a text setting was quietly repainting every background in the window, and
+      `appearance.text_gamma` could not turn it off because `Renderer::tuning`
+      was assigned `TextTuning::default()` once and never touched again. One
+      default now, asserted equal across the two crates that hold it.
+- [ ] Validate that default (1.3) side-by-side against Windows Terminal. **Do
+      not defer** — it ships broken constantly and reads as "looks slightly
+      off". The knob works now, so this is finally a measurement rather than a
+      code change.
 - [ ] Perf validation: vtebench, >500 MB/s, <2ms CPU frame, <10ms keypress→pixel.
 
 ✅ **Every animator provably settles** — assert zero frames 250ms after the last
