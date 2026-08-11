@@ -110,6 +110,9 @@ pub struct Renderer {
     antialias: zest_font::TextAntialias,
     /// Whether this device can blend per-channel coverage at all.
     dual_source: bool,
+    /// Set once the grayscale fallback has been reported, so a config reload
+    /// does not repeat it.
+    warned_no_dual_source: bool,
 
     globals_buffer: wgpu::Buffer,
     globals_bind_group: wgpu::BindGroup,
@@ -365,6 +368,7 @@ impl Renderer {
             // the answer is not what was asked for.
             antialias: zest_font::TextAntialias::Grayscale,
             dual_source,
+            warned_no_dual_source: false,
             globals_buffer,
             globals_bind_group,
             globals_layout,
@@ -424,9 +428,15 @@ impl Renderer {
                 self.antialias = zest_font::TextAntialias::Grayscale;
                 self.atlas.set_text_antialias(device, self.antialias);
             }
-            tracing::warn!(
-                "this adapter cannot do dual-source blending, so subpixel text is                  unavailable; falling back to grayscale antialiasing"
-            );
+            // Once per process, not once per call: a config reload asks again
+            // every time, and a capability that cannot change is not news twice.
+            if !self.warned_no_dual_source {
+                self.warned_no_dual_source = true;
+                tracing::warn!(
+                    "this adapter cannot do dual-source blending, so subpixel text is \
+                     unavailable; falling back to grayscale antialiasing"
+                );
+            }
             return;
         }
         if mode == self.antialias {
