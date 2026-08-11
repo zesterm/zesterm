@@ -109,6 +109,13 @@ impl CommandSpec {
             return;
         };
         match shell_integration::install(shell, &self.command_line, dir) {
+            Ok(injection) if injection.env.is_empty() && injection.args.is_empty() => {
+                // `install` declined — a PowerShell already running a command of
+                // its own is the case — and has said why at `info`. Reporting
+                // "injected" as well would contradict it two lines later, in the
+                // log someone is reading precisely because their blocks are
+                // missing.
+            }
             Ok(injection) => {
                 self.env.extend(injection.env);
                 self.command_line.push_str(&injection.args);
@@ -421,6 +428,29 @@ mod tests {
             spec.env.iter().any(|(k, _)| k == "ZDOTDIR"),
             "zsh finds its hook through ZDOTDIR and nothing else"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A PowerShell already running a command of its own is left exactly alone.
+    ///
+    /// `-Command` swallows the rest of the line, so appending after one does not
+    /// add a second `-Command` — it adds text to the user's command and breaks
+    /// their shell, which is strictly worse than the missing blocks it was meant
+    /// to fix.
+    #[test]
+    fn a_powershell_that_already_runs_a_command_is_spawned_exactly_as_asked() {
+        let dir = std::env::temp_dir().join(format!("zesterm-si-cmd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut spec = CommandSpec {
+            command_line: "pwsh -NoLogo -Command Get-Date".into(),
+            cwd: None,
+            env: Vec::new(),
+        };
+        spec.enable_shell_integration(&dir);
+
+        assert_eq!(spec.command_line, "pwsh -NoLogo -Command Get-Date");
+        assert!(spec.env.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 

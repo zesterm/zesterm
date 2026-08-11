@@ -155,9 +155,16 @@ pub const SHIM_PWSH: &str = "zesterm.ps1";
 /// Injecting twice is not merely redundant: every marker is emitted twice, which
 /// the parser reads as an empty block between each real one. Cheap to check and
 /// impossible to notice going wrong.
+///
+/// Case-insensitively, because the command lines this has to recognise are
+/// Windows ones and a person who wrote their own by hand may well have typed
+/// `ZESTERM.PS1`. The path opens the same file either way, so a case-sensitive
+/// check would inject a second hook into a shell that already had one.
 #[must_use]
 pub fn already_injected(command_line: &str) -> bool {
-    command_line.contains(SHIM_PWSH)
+    // Both sides lowered, rather than relying on `SHIM_PWSH` happening to be
+    // lowercase already -- renaming the file should not silently disarm this.
+    command_line.to_ascii_lowercase().contains(&SHIM_PWSH.to_ascii_lowercase())
 }
 
 /// What a shell needs at spawn in order to load the hook.
@@ -423,6 +430,12 @@ mod tests {
         assert!(already_injected(r#"pwsh -NoExit -Command ". 'C:\x\pwsh\zesterm.ps1'""#));
         assert!(!already_injected("pwsh -NoLogo"));
         assert!(!already_injected("/bin/zsh"));
+
+        // Windows paths are case-insensitive, and a command line written by
+        // hand is where the other spellings come from. Matching case-sensitively
+        // would hand a shell that already has the hook a second one.
+        assert!(already_injected(r#"pwsh -NoExit -Command ". 'C:\X\PWSH\ZESTERM.PS1'""#));
+        assert!(already_injected(r#"pwsh -NoExit -Command ". 'C:\x\pwsh\Zesterm.Ps1'""#));
     }
 
     #[test]
