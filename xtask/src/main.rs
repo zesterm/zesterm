@@ -110,6 +110,13 @@ const BOUNDARIES: &[Boundary] = &[
 /// `check_deps` matches on the crate-name field only and is a pure deny-list:
 /// there is no "allowed only here" form, and `zest-cloud` needs none — being
 /// absent from every list is what permits it.
+///
+/// One more thing it does not reach: `cargo tree --edges normal` excludes
+/// **dev- and build-dependencies**, so a test-only `reqwest` in a crate that
+/// forbids it is invisible here and always will be. That is deliberate —
+/// `zest-cloud`'s `rcgen` mints a certificate for a loopback test peer and
+/// ships in nothing — but it means those tables are held by reading them, not
+/// by this check.
 const TLS_AND_HTTP: &[&str] = &[
     "rustls",
     "rustls-platform-verifier",

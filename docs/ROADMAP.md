@@ -67,7 +67,7 @@ and its number (48ms) is reported rather than gated.
 | `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), restore-on-launch — runs on Windows *and* macOS (Metal, transparent titlebar) — ⬜ Windows chrome, motion |
 | `zest-proto` | ✅ protocol 2, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, cell-for-cell conformance, chaos-resync, command blocks |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store, sealed channel |
-| `zest-cloud` | ⬜ the crate and its fence exist and nothing else does: `check-deps` forbids rustls and every HTTP client in the seven portable crates, so the PR that adds one is the one that proves the boundary — ⬜ TLS, the relay dialler, HTTP (M6) |
+| `zest-cloud` | ✅ the fence held: rustls (ring) landed here and `check-deps` stayed green with no list edited — `TlsDuplex`, one connection as two independently owned halves, and a one-request HTTP POST over it — ⬜ the relay dialler, and nothing depends on this crate yet (M6) |
 | `zest-daemon` | ✅ session ownership *and* lifecycle, protocol loop, loopback *and* LAN transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing |
 
 ### What works end to end today
@@ -1542,7 +1542,7 @@ three facts about Cloudflare that changed after #59 was written.
       proves the browser, the ticket, the object, the pipe, the `zest-proto`
       handshake and the sealed channel end to end. Only the daemon's own
       outbound leg needs TLS.
-- [ ] **`zest-cloud`, and the workspace's first TLS stack.** The one crate that
+- [x] **`zest-cloud`, and the workspace's first TLS stack.** The one crate that
       owns rustls and HTTP, with `cargo xtask check-deps` growing a boundary
       that keeps them out of every crate that crosses to wasm or to a client.
 
@@ -1564,9 +1564,28 @@ three facts about Cloudflare that changed after #59 was written.
       to the socket reorder them and the peer fails the MAC. That is a rare,
       unreproducible disconnect under load, which is the whole bug class this
       milestone is trying not to ship.
+
+      **`TlsDuplex` is the answer**, and the fence held: rustls arrived in
+      `zest-cloud` and `check-deps` stayed green with no list edited. `ring`
+      rather than the default `aws-lc-rs`, which needs CMake on all three
+      runners and NASM on Windows and CI installs neither. Both root sources
+      are compiled in and chosen at runtime, because a corporate middlebox
+      needs the platform verifier and a minimal container has no trust store
+      for it to find. Cold-build cost, measured rather than guessed: **+18s**
+      for the crate and its dependencies, and +21s more for the `rcgen`
+      dev-dependency the tests mint a certificate with.
+
+      Beside it, an HTTP POST in about a hundred lines rather than a client
+      crate: one exchange, `connection: close`, a body read by
+      `content-length`. Chunked transfer-encoding is **detected and refused by
+      name** rather than half-decoded, because a chunk-size line read as a body
+      reaches `--enroll` as a token that is really a hex number.
 - [ ] **`--enroll` over a real HTTP client.** `NoHttpClient` names the missing
       dependency today; this is where it stops being missing. Falls out of the
-      TLS work and is worth having months before the relay does.
+      TLS work and is worth having months before the relay does — the client
+      itself now exists (`zest_cloud::http::post_json`); what is left is the
+      `ControlPlane` impl, the URL splitting, and `zest-daemon` taking the
+      dependency.
 - [ ] **The web client learns a second data plane.** `DataPlane` grows a
       discriminant, a relay `Dial` mints its ticket before opening the socket
       (the seam stays synchronous — a failed mint is a dropped dial, and

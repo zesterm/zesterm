@@ -21,4 +21,18 @@
 //! binary and is meant to. "Keeps TLS out of the app" would be false; "TLS has
 //! one owner, and the portable crates have none" is the property.
 //!
-//! Empty on purpose. → `docs/ARCHITECTURE.md`, ADR-009.
+//! # What is here
+//!
+//! [`tls`] is the transport: one connection, handed out as two independently
+//! owned halves, because `zest_daemon::server::serve` drives a reader and a
+//! writer from two threads and a `rustls::StreamOwned` can be neither cloned
+//! nor split. [`http`] is one request/response exchange over that — enough for
+//! the enrolment POST and nothing more.
+//!
+//! → `docs/ARCHITECTURE.md`, ADR-009.
+
+pub mod http;
+pub mod tls;
+
+#[cfg(test)]
+mod testing;
