@@ -375,7 +375,9 @@ mod tests {
     #[test]
     fn what_reaches_the_transport_is_what_the_url_said() {
         use std::cell::RefCell;
-        /// What the transport was handed: host, port, path, body, roots.
+        /// What the transport was handed, minus the roots — those have their
+        /// own test below, because asserting them here would mean recording a
+        /// value this test never varies.
         struct Asked {
             host: String,
             port: u16,

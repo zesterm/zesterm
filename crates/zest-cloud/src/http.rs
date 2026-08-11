@@ -105,6 +105,15 @@ impl Endpoint {
         if host.is_empty() {
             return Err(malformed(url, "there is no host in it"));
         }
+        // A colon left in the host means the "last colon is the port"
+        // assumption above did not hold — an unbracketed IPv6 literal, or an
+        // authority malformed some other way. Refusing beats guessing: the
+        // alternative is dialling a host that is not the one written down and
+        // reporting whatever answers, which is the shape of failure this whole
+        // type exists to keep out of the enrolment path.
+        if host.contains(':') {
+            return Err(malformed(url, "the host has a colon in it, so where the port starts is a guess"));
+        }
 
         Ok(Self { host: host.to_string(), port, path: path.to_string() })
     }
@@ -407,6 +416,24 @@ mod tests {
 
     fn parsed(url: &str) -> Endpoint {
         Endpoint::parse(url).unwrap_or_else(|e| panic!("{url} should split: {e}"))
+    }
+
+    #[test]
+    fn an_authority_whose_host_still_has_a_colon_is_refused() {
+        // The bracketed IPv6 form is refused earlier; these are the shapes that
+        // slipped past it and left a colon in the host, where "the last colon
+        // is the port" quietly stops being true. Guessing means dialling a host
+        // that is not the one written down and reporting whatever answers.
+        for url in [
+            "https://::1/api/enroll/claim",
+            "https://fe80::1:8787/api/enroll/claim",
+            "https://a:b:c/api/enroll/claim",
+        ] {
+            assert!(
+                Endpoint::parse(url).is_err(),
+                "{url} was accepted, so something other than the configured host would be dialled"
+            );
+        }
     }
 
     #[test]
