@@ -571,7 +571,16 @@ impl Connection {
                 None => {}
             }
 
-            if session.has_exited() {
+            // The snapshot from above, not a fresh read, and the difference is
+            // load-bearing. A session that exits *between* the two would be
+            // reported here having had its delta skipped a few lines earlier —
+            // which is exactly the ordering bug the snapshot was added to
+            // prevent, reintroduced by asking twice.
+            //
+            // Nothing is lost by being one pass late: the exit that set this
+            // flag is itself a wakeup, so the next pass polls with `ended`
+            // true and sends the final delta and the `Exited` together.
+            if ended {
                 out.push(HostMessage::Exited { session: addr, code: None });
             }
         }
