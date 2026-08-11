@@ -643,9 +643,36 @@ mod tests {
         let s = Session::spawn(SessionId(5), &spec, PtySize::new(80, 24), 100, |_| {})
             .expect("spawn");
 
-        // Attach *before* anything is drained: `poll` consumes, so waiting for
-        // output by polling would eat the very updates under test.
+        // A throwaway subscriber first, and it is what makes a single update
+        // enough to pin the chain.
+        //
+        // `attach_with` takes its baseline from the terminal as it stands, so a
+        // session that has parsed nothing hands out `attach_seq == 0`. Then the
+        // only assertion a lone update runs is `assert_eq!(base, 0)` — which a
+        // `base` hardcoded to 0, the exact regression named above, satisfies.
+        // Measured, not reasoned: with the baseline at 0 and the writes
+        // coalesced into one update, this test passed with `let base = 0;`
+        // substituted into `poll`. On macOS the writes do not coalesce, three
+        // updates arrive and it fails — so the hole was open on precisely the
+        // platform #80 is about.
+        //
+        // Draining one update through a subscriber that is then dropped leaves
+        // the terminal's sequence past zero, so the real subscriber's baseline
+        // is a number that can disagree with a hardcoded one.
+        let (warm, _, _) = s.attach();
+        assert!(
+            wait_for(|| s.poll(warm).is_some()),
+            "the child produced nothing, so there is no sequence to chain from"
+        );
+        s.detach(warm);
+
+        // Attach *before* anything else is drained: `poll` consumes, so waiting
+        // for output by polling would eat the very updates under test.
         let (handle, attach_seq, _) = s.attach();
+        assert!(
+            attach_seq > 0,
+            "the baseline is still zero, so a `base` hardcoded to zero would look correct"
+        );
 
         let mut previous = attach_seq;
         let mut seen = 0;
