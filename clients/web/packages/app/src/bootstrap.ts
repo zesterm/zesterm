@@ -90,8 +90,19 @@ export function parseUser(value: unknown): User | null {
  */
 function parseRelayOrigin(value: unknown): string | null {
   if (typeof value !== 'string' || !URL.canParse(value)) return null;
-  const { protocol } = new URL(value);
-  return protocol === 'https:' || protocol === 'http:' ? value : null;
+  const url = new URL(value);
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+  // An *origin*, not any parseable URL, and the returned value is the
+  // canonical one rather than whatever was sent.
+  //
+  // `new URL('/attach/x', 'https://relay.example.com/anything')` resolves
+  // against the origin and discards the path, so a server sending a path, a
+  // query, a fragment or userinfo would be silently accepted and silently
+  // ignored — a value the app trusts, printed nowhere, meaning something other
+  // than it says. Refusing is cheap and keeps "this is an origin" true.
+  if (url.username !== '' || url.password !== '') return null;
+  if (url.pathname !== '/' || url.search !== '' || url.hash !== '') return null;
+  return url.origin;
 }
 
 /** Narrow an unknown JSON body, rather than trusting the server's shape. */

@@ -20,6 +20,7 @@
  */
 
 import {
+  ATTACH_TICKET_TTL_MS,
   attachTicketPreimage,
   decodeAttachTicket,
   fromHex,
@@ -111,6 +112,12 @@ export async function verifyAttachTicket(args: {
   // ticket for another room is refused without an Ed25519 verification at all.
   if (decoded.ticket.host !== host) return null;
   if (decoded.ticket.exp <= now) return null;
+  // The relay bounds the lifetime as well as the expiry, and it is the only
+  // party that can. `exp` is chosen by the mint; a bug there — a stray unit, a
+  // configurable that grew — would issue signed bearer tickets good for hours,
+  // and every one of them would verify here. Nothing downstream would notice,
+  // because a valid signature is exactly what a long-lived ticket has.
+  if (decoded.ticket.exp - decoded.ticket.iat > ATTACH_TICKET_TTL_MS) return null;
 
   // No clock-skew allowance, and none wanted: the mint and this run on
   // Cloudflare's clock, and an `iat` tolerance is a window in which a ticket

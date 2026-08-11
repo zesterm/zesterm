@@ -47,9 +47,15 @@ export function relayAccess(
 async function mintTicket(hostId: string, fetchImpl: typeof fetch): Promise<string> {
   const res = await fetchImpl('/api/relay/ticket', {
     method: 'POST',
-    // Both halves of the CSRF rule the Worker applies: `credentials: 'same-origin'`
-    // is the default and the cookie is what authenticates this, and the JSON
-    // content type is what a cross-site form POST cannot set.
+    // Both halves of the CSRF rule the Worker applies. The cookie is what
+    // authenticates this, and the JSON content type is what a cross-site form
+    // POST cannot set.
+    //
+    // `credentials` is stated rather than left to the default it already
+    // matches: the default is `same-origin` only while the URL is relative,
+    // and a later change to an absolute one would drop the cookie and turn
+    // every mint into a 401 that looks like a signed-out session.
+    credentials: 'same-origin',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ hostId }),
   });

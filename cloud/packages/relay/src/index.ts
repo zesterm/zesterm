@@ -113,15 +113,25 @@ export default {
     server.accept();
     server.close(verdict.code, verdict.reason);
 
-    // The selected subprotocol is echoed, and only the protocol name — never
-    // the ticket token beside it. A server that selects nothing is legal, but
-    // a client is entitled to abort on it, and the ticket must not appear in a
-    // response header any intermediary might log.
-    return new Response(null, {
-      status: 101,
-      webSocket: client,
-      headers: { 'sec-websocket-protocol': RELAY_SUBPROTOCOL },
-    });
+    // Echoed only if it was offered, and only the protocol name — never the
+    // ticket token beside it, which must not reach a response header any
+    // intermediary might log.
+    //
+    // The conditional is not caution, it is the close code. Selecting a
+    // subprotocol the client did not offer is invalid (RFC 6455 §4.1) and a
+    // browser is entitled to fail the connection over it — which discards the
+    // 4401 or 4404 written above and leaves `event.code` as 1006. Every
+    // refusal here is a close code precisely because a browser cannot read an
+    // HTTP status, so mangling the handshake to announce a protocol nobody
+    // asked for would destroy the one channel that tells a person whether
+    // their machine is asleep or their ticket was refused.
+    const offered = (request.headers.get('sec-websocket-protocol') ?? '')
+      .split(',')
+      .map((token) => token.trim());
+    const headers: Record<string, string> = offered.includes(RELAY_SUBPROTOCOL)
+      ? { 'sec-websocket-protocol': RELAY_SUBPROTOCOL }
+      : {};
+    return new Response(null, { status: 101, webSocket: client, headers });
   },
 };
 
