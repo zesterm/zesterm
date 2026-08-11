@@ -104,6 +104,25 @@ pub struct DaemonConfig {
     /// neither is worth doing before someone needs the switch. Recorded in
     /// `docs/ROADMAP.md` under WS-E rather than left to be rediscovered.
     pub shell_integration: bool,
+    /// Least time between two *delta* sends on one connection.
+    ///
+    /// **Zero — no floor — unless the transport asks for one.** Loopback and
+    /// the LAN pay nothing per message and are close (ADR-007's 50–100µs over a
+    /// local socket, ADR-006's ~0.3ms across a desk), so a floor there would buy
+    /// nothing and cost a keystroke's echo latency. The relay transport
+    /// sets ~30ms: incoming messages are billed, and an object that never idles
+    /// never hibernates, which is what turns ADR-009's dominant cost term from
+    /// zero into continuous.
+    ///
+    /// **Why a floor is safe here and would not be safe over a byte stream.**
+    /// `zest-proto` coalesces on *state*: a subscriber holds an encoder shadow
+    /// and asks the terminal for the difference from what it last sent, so a
+    /// consumer that skips a hundred polls receives one delta describing the
+    /// current grid — not a backlog of a hundred. Nothing queues, so nothing
+    /// can be lost by not looking. A throttle over queued bytes would drop the
+    /// bytes it skipped; this drops intermediate *frames*, which is the whole
+    /// design. → ADR-004, ADR-009.
+    pub min_delta_interval: std::time::Duration,
 }
 
 /// A session's lifecycle, as clients see it.

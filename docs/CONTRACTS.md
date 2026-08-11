@@ -39,7 +39,7 @@ paragraph of justification attached.
 | `Peer`, `Endpoint`, `Reachability`, `Discovery` | `zest-mesh/` | **frozen** | WS-F, WS-H |
 | `HostIdentity`, `ClientIdentity`, `Signature`, `Nonce`, `Purpose` | `zest-mesh/src/identity.rs` | draft — WS-H may change freely | WS-H only |
 | `KeyStore`, `SecretStore`, `CredentialStore` | `zest-mesh/src/keystore.rs` | draft — WS-H may change freely | WS-H, WS-F |
-| `DaemonConfig`, `SessionHandle`, `SessionState` | `zest-daemon/src/lib.rs` | draft — WS-F may change freely | WS-F only |
+| `DaemonConfig`, `SessionHandle`, `SessionState` | `zest-daemon/src/lib.rs` | draft — WS-F may change freely; gained `min_delta_interval`, see below | WS-F only |
 | TypeScript bindings | `crates/zest-proto/bindings/` | **generated** — `cargo xtask check-bindings` | WS-G, WS-H |
 | Conformance fixtures | `crates/zest-proto/fixtures/` | **generated** — `cargo xtask check-fixtures` | WS-G, WS-H |
 | Settings schema + walked UI fields | `clients/web/packages/settings/generated/` | **generated** — `cargo xtask check-export-web` | WS-G |
@@ -327,3 +327,28 @@ no understudy. The test fails if the carry is reverted **and** if the drain is r
 
 Consumers: `zest-app` only. Still draft — WS-A and WS-F may move it — but the shape now has a reason
 that should survive the next change.
+
+---
+
+### Added once, for the relay: `DaemonConfig::min_delta_interval`
+
+A least interval between *delta* sends on one connection. **Zero by default**, so loopback and the
+LAN are byte-for-byte what they were; the relay transport sets ~30ms, because incoming messages are
+billed and a Durable Object that never idles never hibernates. → ADR-009.
+
+**A floor is safe here for a reason that is a property of this protocol and not of throttling in
+general.** `zest-proto` coalesces on *state*: a subscriber holds an encoder shadow and asks the
+terminal for the difference from what it last sent, so a consumer that skips a hundred polls
+receives one delta describing the current grid rather than a backlog of a hundred. Nothing queues,
+so nothing is lost by not looking. The same throttle over a byte stream would drop the bytes it
+skipped. → ADR-004.
+
+Two things it must never delay, and both are tested rather than asserted: a session's `Exited` —
+a client that is not told its shell ended waits for output that is not coming — and a keyframe
+answering `Attach` or `RequestKeyframe`, which are replies and never pass through the throttled
+poll. Skipping also has to mean *not asking the session at all*: `Session::poll` advances the
+subscriber's baseline, so a poll whose answer is discarded destroys output rather than coalescing
+it.
+
+Consumers: `zest-daemon` only, and the field is inert until something sets it. Still draft — WS-F
+may move it.

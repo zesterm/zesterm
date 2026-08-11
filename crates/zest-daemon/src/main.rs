@@ -56,7 +56,12 @@ fn main() {
              --lan-port <port>   preferred port (default 7717)\n\
              --listen-ws         serve WebSocket clients -- browsers (off by default)\n\
              --ws-bind <addr>    which interface (default 0.0.0.0)\n\
-             --ws-port <port>    preferred port (default 7718)\n\n\
+             --ws-port <port>    preferred port (default 7718)\n\
+             --min-delta-interval <ms>\n\
+             \x20                   least time between updates for one client\n\
+             \x20                   (default 0 -- send as fast as the shell\n\
+             \x20                   prints; a client behind a metered link gets\n\
+             \x20                   the current grid, never a backlog)\n\n\
              Sessions outlive the clients attached to them. Closing a window\n\
              does not end a shell."
         );
@@ -297,6 +302,12 @@ fn main() {
             .and_then(|p| p.parse().ok())
             .unwrap_or(zest_daemon::ws::DEFAULT_PORT),
         shell_integration: !flag("--no-shell-integration"),
+        // Zero unless asked. The relay transport is what needs a floor, and it
+        // sets its own; a flag exists so the effect can be seen on loopback
+        // without a Cloudflare account. → `DaemonConfig::min_delta_interval`.
+        min_delta_interval: opt("--min-delta-interval")
+            .and_then(|ms| ms.parse().ok())
+            .map_or(std::time::Duration::ZERO, std::time::Duration::from_millis),
     };
 
     tracing::info!(

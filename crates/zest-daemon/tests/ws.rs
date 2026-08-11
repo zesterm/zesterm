@@ -59,6 +59,7 @@ fn host() -> Host {
         ws_bind: "127.0.0.1".into(),
         ws_port: addr.port(),
         shell_integration: true,
+        min_delta_interval: std::time::Duration::ZERO,
     };
     let registry = Arc::new(Registry::new());
     std::thread::spawn(move || {

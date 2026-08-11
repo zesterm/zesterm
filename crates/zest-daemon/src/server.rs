@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use zest_proto::{
     frame, ClientId, ClientMessage, FrameReader, HostMessage, HostId, SessionAddr, SessionId,
@@ -499,6 +500,19 @@ impl Connection {
 
     /// Anything the attached sessions have produced since the last call.
     pub fn poll(&mut self) -> Vec<HostMessage> {
+        self.poll_with(true)
+    }
+
+    /// The same, with the option of leaving session output where it is.
+    ///
+    /// `updates == false` is the coalescing floor (`min_delta_interval`): the
+    /// grid is *not* asked for its difference, so nothing is consumed and
+    /// nothing is buffered here — the next pass sends one delta describing
+    /// wherever the terminal has got to. Everything else in this function still
+    /// runs, which is the point: a listing push, an `Exited` and a session the
+    /// sweep can collect are not deltas, and a floor that delayed them would be
+    /// delaying the end of a session to save a message.
+    fn poll_with(&mut self, updates: bool) -> Vec<HostMessage> {
         let mut out = Vec::new();
 
         // The listing push, first and coalesced: however many changes piled
@@ -518,7 +532,24 @@ impl Connection {
             let Some(session) = self.registry.get(SessionId(id)) else { continue };
             let addr = SessionAddr::new(self.config.host, SessionId(id));
 
-            match session.poll(handle) {
+            // Not polled-and-discarded: `Session::poll` advances the
+            // subscriber's baseline and the encoder shadow with it, so a
+            // discarded return value is output the client can never be sent.
+            // Not asking is what makes the floor lossless.
+            // A session that has ended is never throttled, and this is the one
+            // place the floor must look at a session rather than a clock.
+            //
+            // `Exited` is deliberately not delayed (see the doc above), so
+            // skipping this session's delta while sending its `Exited` behind
+            // it does not postpone the last screenful — it deletes it.
+            // `zest-app`'s reader *returns out of its thread* on `Exited`
+            // (`remote.rs`), so nothing after that message is ever decoded, and
+            // the window closes on `Wakeup::Exited` having never shown what the
+            // command printed last. A floor may delay output; it must never
+            // reorder it past the end of the stream.
+            let ended = session.has_exited();
+            let update = if updates || ended { session.poll(handle) } else { None };
+            match update {
                 Some((base, seq, Update::Delta(delta))) => out.push(HostMessage::Update {
                     session: addr,
                     base: Seq(base),
@@ -540,7 +571,16 @@ impl Connection {
                 None => {}
             }
 
-            if session.has_exited() {
+            // The snapshot from above, not a fresh read, and the difference is
+            // load-bearing. A session that exits *between* the two would be
+            // reported here having had its delta skipped a few lines earlier —
+            // which is exactly the ordering bug the snapshot was added to
+            // prevent, reintroduced by asking twice.
+            //
+            // Nothing is lost by being one pass late: the exit that set this
+            // flag is itself a wakeup, so the next pass polls with `ended`
+            // true and sends the final delta and the `Exited` together.
+            if ended {
                 out.push(HostMessage::Exited { session: addr, code: None });
             }
         }
@@ -1154,6 +1194,7 @@ where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
+    let floor = config.min_delta_interval;
     let conn = Arc::new(Mutex::new(Connection::new(
         config,
         Arc::clone(&registry),
@@ -1212,12 +1253,40 @@ where
         }));
     }
 
-    while let Ok(wake) = rx.recv() {
+    // The coalescing floor, kept here rather than in `Connection` because it is
+    // a property of this loop's *timing* and nothing the protocol can see.
+    // With `min_delta_interval` at zero — every transport that pays nothing per
+    // message, which is loopback and the LAN — no poll is ever skipped, so
+    // `owed_at` stays `None`, the `rx.recv()` arm below is the only one taken,
+    // and the loop behaves exactly as it did before this existed.
+    let mut last_update: Option<Instant> = None;
+    let mut owed_at: Option<Instant> = None;
+    loop {
+        let wake = match owed_at {
+            // A poll was skipped, so the wake that releases it has to come from
+            // a timer: the session's waker has already fired for the output
+            // being held back and will not fire again until there is *more* —
+            // which a command that has finished printing never produces. Without
+            // this the last frame of every burst waits for the next keystroke.
+            Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
+                Ok(w) => w,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Wake::Poll,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+            },
+            None => match rx.recv() {
+                Ok(w) => w,
+                Err(_) => return Ok(()),
+            },
+        };
         let mut outgoing = match wake {
             Wake::Closed => return Ok(()),
             Wake::Send(msgs) => msgs,
             Wake::Poll => Vec::new(),
         };
+        let now = Instant::now();
+        let updates = floor.is_zero()
+            || last_update.is_none_or(|sent| now.duration_since(sent) >= floor);
+        let replies = outgoing.len();
         {
             let mut c = conn.lock().expect("connection lock");
             // A pairing decision may have arrived while this connection was
@@ -1225,7 +1294,20 @@ where
             // already blocked on, so nothing polls and no lock is held across
             // however long someone took to answer.
             outgoing.extend(c.take_decision());
-            outgoing.extend(c.poll());
+            outgoing.extend(c.poll_with(updates));
+        }
+        if updates {
+            owed_at = None;
+            // Only what the *poll* produced restarts the interval. A keyframe
+            // answering `Attach` or `RequestKeyframe` is a reply, and letting a
+            // reply push the floor out would delay the resync it is part of.
+            if outgoing[replies..].iter().any(|m| {
+                matches!(m, HostMessage::Update { .. } | HostMessage::Keyframe { .. })
+            }) {
+                last_update = Some(now);
+            }
+        } else {
+            owed_at = last_update.map(|sent| sent + floor);
         }
         if outgoing.is_empty() {
             continue;
@@ -1250,7 +1332,6 @@ where
             return Ok(());
         }
     }
-    Ok(())
 }
 
 /// Serve a LAN connection, telling the listener when the handshake completes.
@@ -1432,6 +1513,7 @@ mod tests {
             ws_bind: "127.0.0.1".into(),
             ws_port: 0,
             shell_integration: true,
+            min_delta_interval: Duration::ZERO,
         }
     }
 
@@ -1645,6 +1727,21 @@ mod tests {
             "powershell.exe -NoProfile -Command Start-Sleep 30".into()
         } else {
             "/bin/sleep 30".into()
+        }
+    }
+
+    /// A child that prints *after* the client has had time to attach.
+    ///
+    /// The delay is the whole point: with a plain `echo` the output is already
+    /// in the terminal when `Attach` builds its keyframe, so a test about what
+    /// a later poll produces would be asserting on nothing.
+    fn delayed_echo_cmd() -> String {
+        if cfg!(windows) {
+            "powershell.exe -NoProfile -Command Start-Sleep -Milliseconds 300; \
+             Write-Output probe"
+                .into()
+        } else {
+            "/bin/sh -c 'sleep 0.3; echo probe'".into()
         }
     }
 
@@ -2156,5 +2253,68 @@ mod tests {
         for info in registry.list(config().host) {
             assert_eq!(info.addr.host, config().host);
         }
+    }
+
+    /// The two rules a message-rate test cannot see, at the layer that decides
+    /// them. `tests/coalescing.rs` measures what the floor is *for*; this is
+    /// what it is not allowed to cost.
+    ///
+    /// A floor that delays the news of a shell exiting is a client waiting for
+    /// output that is never coming, and a floor implemented by polling the
+    /// session and dropping the answer is output destroyed rather than
+    /// coalesced — the encoder shadow advances with every poll, so a discarded
+    /// return value can never be re-fetched.
+    #[test]
+    fn an_ended_session_sends_its_last_output_in_front_of_the_exit() {
+        let (mut c, registry) = conn();
+        let mut peer = authenticate(&mut c);
+        peer.send(
+            &mut c,
+            &ClientMessage::CreateSession {
+                command: delayed_echo_cmd(),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+            },
+        );
+        let addr = registry.list(config().host)[0].addr;
+        let session = registry.get(addr.session).expect("just created");
+        peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+
+        // Exit implies the reader drained the pty, so everything the child
+        // printed is in the terminal — and it printed all of it after the
+        // attach above, so none of it is in that keyframe.
+        assert!(wait_for(|| session.has_exited()), "the child never exited");
+
+        let held = c.poll_with(false);
+        assert!(
+            held.iter().any(|m| matches!(m, HostMessage::Exited { .. })),
+            "the floor held back the end of a session. A client that is never told \
+             its shell exited waits for output that will never come, and no saving \
+             is worth that: {held:?}"
+        );
+        // And its last output rides in front of that `Exited`, throttled or not.
+        //
+        // This assertion replaces its own opposite. The first version of this
+        // test required a skipped poll to send `Exited` with *no* update, which
+        // reads like a floor doing its job and is a lost screenful: `zest-app`'s
+        // reader returns out of its thread on `Exited` (`remote.rs`), so a delta
+        // held back behind one is never applied by anybody, and the window
+        // closes having never shown what the command last printed. There is no
+        // later pass to release it to — the exit is the end of the stream.
+        let update_at = held
+            .iter()
+            .position(|m| matches!(m, HostMessage::Update { .. } | HostMessage::Keyframe { .. }));
+        let exited_at = held.iter().position(|m| matches!(m, HostMessage::Exited { .. }));
+        assert!(
+            update_at.is_some(),
+            "an ended session's final output was throttled away. The floor may delay \
+             output; past an `Exited` there is nothing left to delay it until: {held:?}"
+        );
+        assert!(
+            update_at < exited_at,
+            "the last delta came out behind the `Exited` that ends the stream, so no \
+             client will ever apply it: {held:?}"
+        );
     }
 }

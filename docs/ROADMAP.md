@@ -1552,6 +1552,16 @@ three facts about Cloudflare that changed after #59 was written.
       what keeps the object hibernating between keystrokes; unthrottled is
       ~1000 msg/s and an object that never sleeps. → ADR-009's arithmetic.
 
+      **The daemon half landed first** (#72): `DaemonConfig::min_delta_interval`,
+      honoured by the writer loop every transport shares, and **zero by
+      default** so loopback and the LAN are unchanged. What remains is the relay
+      transport setting it — nothing does yet, and a floor nothing sets is a
+      field, which is why the deliverable was the test rather than the field.
+      `tests/coalescing.rs` floods a session and asserts both halves: the
+      message count stays inside one per interval, *and* the coalesced stream
+      reconstructs the host's final screen exactly. Measured while writing it:
+      1,294 updates without the floor, 5 with it, same final grid.
+
 ---
 
 ## Dogfooding
