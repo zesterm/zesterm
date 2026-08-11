@@ -22,7 +22,7 @@
  * page; `src/room/limits.ts` records what and how.
  */
 
-import { serialize } from 'node:v8';
+import { deserialize, serialize } from 'node:v8';
 
 import {
   MAX_ATTACHMENT_BYTES,
@@ -43,7 +43,8 @@ export class FakeSock implements Sock {
    */
   attachmentWrites = 0;
 
-  #attachment: unknown = null;
+  /** The serialized bytes, as the platform holds them -- never the live value. */
+  #attachment: Buffer | null = null;
 
   constructor(label = 'sock') {
     this.label = label;
@@ -76,19 +77,20 @@ export class FakeSock implements Sock {
           `'attachment' was ${bytes} bytes.`,
       );
     }
-    // A snapshot, not a reference. The platform stores serialized bytes, so
-    // mutating the value afterwards changes nothing; a fake that kept the
-    // reference would let an implementation which relies on that mutation pass
-    // here and lose it in production.
-    this.#attachment = structuredClone(value);
+    // Stored as the very bytes that were just measured, rather than a
+    // `structuredClone` of the same value. The two agree today, but they are
+    // two implementations of one thing, and the moment they disagree this fake
+    // would accept a size it does not store — which is precisely the property
+    // it exists to pin. Measuring and storing are now one operation, so they
+    // cannot drift apart.
+    this.#attachment = serialize(value);
     this.attachmentWrites += 1;
   }
 
   deserializeAttachment(): unknown {
-    // Cloned on the way out for the same reason: the platform deserializes
-    // afresh each call, so two reads are never the same object and mutating
-    // one is not visible to the next.
-    return structuredClone(this.#attachment);
+    // Deserialized afresh each call, because the platform is: two reads are
+    // never the same object, and mutating one is not visible to the next.
+    return this.#attachment === null ? null : deserialize(this.#attachment);
   }
 }
 
@@ -156,14 +158,31 @@ export class FakePlatform {
     };
   }
 
-  /** Every accepted socket, whatever its tags. */
+  /**
+   * Every accepted socket, whatever its tags.
+   *
+   * Narrowed rather than cast. `acceptWebSocket` takes any `Sock`, so a test
+   * that hands over a bare stub is legal — and the old `as FakeSock[]` made
+   * that stub look like a `FakeSock` right up to the point `attachmentWrites`
+   * read `undefined` off it and the sum came out `NaN`. A silently wrong
+   * counter is the worst outcome for an accessor whose entire job is to make
+   * "no bookkeeping on the data path" assertable.
+   */
   get sockets(): FakeSock[] {
-    return [...this.#tags.keys()] as FakeSock[];
+    return [...this.#tags.keys()].filter((ws) => ws instanceof FakeSock);
   }
 
   /** Attachment writes across every socket, for the "no bookkeeping" assertion. */
   get attachmentWrites(): number {
-    return this.sockets.reduce((n, s) => n + s.attachmentWrites, 0);
+    const all = [...this.#tags.keys()];
+    const mine = this.sockets;
+    if (mine.length !== all.length) {
+      throw new Error(
+        `attachmentWrites counts FakeSock only, and ${all.length - mine.length} of ` +
+          `${all.length} accepted sockets are not one — the total would silently undercount`,
+      );
+    }
+    return mine.reduce((n, s) => n + s.attachmentWrites, 0);
   }
 
   #accept(ws: Sock, tags: string[] = []): void {
