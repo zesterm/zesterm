@@ -14,7 +14,8 @@ dependency.
 
 ```
 packages/shared/  cookie signing, opaque tokens, constant-time compare, and
-                  the `zesterm-sig-v1` preimage both Workers verify against —
+                  the `zesterm-sig-v1` preimage the web Worker verifies
+                  against, and the relay will —
                   zero deps, and no runtime globals beyond what Node and
                   workerd both have, so it is testable under `node --test`
 packages/web/     the Worker: the built app, /api/*, /auth/*, D1

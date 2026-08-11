@@ -6,11 +6,16 @@
  * preimage = "zesterm-sig-v1" \0 role \0 purpose \0 message
  * ```
  *
- * Here rather than in one Worker because two Workers now verify signatures a
- * daemon made — the web Worker over an enrolment request, the relay over an
- * attach challenge — and a signed byte layout with two copies is one that can
- * disagree. The disagreement surfaces at bring-up as a signature mismatch that
- * names neither side.
+ * Here rather than in the one Worker that uses it today, because a second is
+ * coming. The web Worker verifies an enrolment request now; the relay Worker
+ * will verify a host's signature over an attach challenge (ADR-009), and it
+ * does not exist yet — it 404s on everything and imports nothing from here.
+ *
+ * The move is pre-emptive on purpose. A signed byte layout with two copies is
+ * one that can disagree, and the disagreement surfaces at bring-up as a
+ * signature mismatch that names neither side. Copying it once is how that
+ * starts, so there is one copy before there is a second caller rather than
+ * after.
  *
  * Bytes only: no Ed25519 here, and no dependency that brings it. Verifying is
  * the caller's, in the package that already carries `@noble/ed25519`; this

@@ -16,7 +16,9 @@
  * strings — concatenated, `("ab","cd")` and `("abc","d")` are identical bytes,
  * so a signature over one would verify the other, and the label is
  * attacker-chosen. So only this outer layer lives here; the signing domain
- * itself is `@zesterm/cloud-shared`'s, shared with the relay Worker.
+ * itself is `@zesterm/cloud-shared`'s, so the relay Worker can build the same
+ * bytes without a second copy of them when it comes to verify its own
+ * challenge. Nothing in the relay imports it yet.
  *
  * Two implementations of one format is the hazard here: the daemon signs in
  * Rust and this verifies in TypeScript, and a disagreement surfaces as a
