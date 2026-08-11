@@ -69,3 +69,47 @@ export const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 
 /** ChaCha20-Poly1305's tag. A sealed frame is this much longer than its plaintext. */
 export const SEAL_TAG_BYTES = 16;
+
+// --- the pipe --------------------------------------------------------------
+
+/**
+ * How long a host has to dial back before the attach is refused.
+ *
+ * The daemon is already connected and the round trip is one message down a
+ * parked socket plus one outbound dial, so this covers a machine that is busy
+ * or on a bad link — not one that is asleep, which shows up as a control link
+ * the platform has not yet reaped and is exactly what this timeout converts
+ * into an answer.
+ *
+ * Ten seconds rather than two, because the browser is *waiting* on it and a
+ * premature refusal costs a full redial ladder; and rather than sixty, because
+ * the object cannot hibernate while the `fetch` that awaits it is in flight, so
+ * every second here is billed duration on a pipe that may never exist.
+ */
+export const PIPE_DIAL_TIMEOUT_MS = 10_000;
+
+/**
+ * Messages per second per pipe leg, and the burst allowed above it.
+ *
+ * The daemon's coalescing floor is ~30ms, so a busy session is ~33 messages a
+ * second in the host→browser direction and a few keystrokes the other way. The
+ * cap is well clear of that on purpose: it is here to stop a peer converting an
+ * object that should hibernate into one that never idles, not to shape traffic
+ * — ADR-009's cost model turns on duration, and duration is what a message
+ * flood buys.
+ */
+export const PIPE_MESSAGE_RATE_PER_SECOND = 200;
+export const PIPE_MESSAGE_BURST = 400;
+
+/**
+ * Bytes per second per pipe leg, and the burst.
+ *
+ * **The burst is not a round number, and cannot be one.** ADR-009 settled that
+ * frames cross whole — chunking an 8 MiB scrollback response into 32 messages
+ * multiplies its billed cost by 32 on exactly the responses the chunking was
+ * meant to protect — so the byte bucket has to admit a single largest frame in
+ * one gulp or the relay would refuse the one case the ADR argues for. Three of
+ * them, so a burst of large frames is not instantly fatal either.
+ */
+export const PIPE_BYTE_RATE_PER_SECOND = 8 * 1024 * 1024;
+export const PIPE_BYTE_BURST_BYTES = 3 * (MAX_FRAME_BYTES + SEAL_TAG_BYTES);

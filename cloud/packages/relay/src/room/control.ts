@@ -118,18 +118,15 @@ export const CLOSE_CONTROL_REPLACED = 4409;
 /** The relay holds no key of its own, so there is nothing for a daemon to pin. */
 export const CLOSE_CONTROL_UNCONFIGURED = 4503;
 
-/** The room exists and the holder may enter it; no host is connected. */
-export const CLOSE_HOST_ABSENT = 4404;
-
 /**
- * The host is here and the pipe is not built yet.
+ * The room exists and the holder may enter it; no host is connected.
  *
- * Distinct from `4404` deliberately, and it is the whole difference this wave
- * makes visible: "your Mac is asleep" and "your Mac is connected and this relay
- * cannot yet join you to it" are different problems and only one of them is the
- * user's. → ADR-009's dial-back.
+ * Distinct from `CLOSE_PIPE_DIAL_TIMEOUT`, which is the *other* way an attach
+ * can fail with the account in perfect order: "your Mac is asleep" and "your
+ * Mac is connected and did not answer" are different problems and only one of
+ * them is the user's.
  */
-export const CLOSE_NO_DIAL_BACK = 4501;
+export const CLOSE_HOST_ABSENT = 4404;
 
 /**
  * Why a control link was refused.
@@ -348,15 +345,17 @@ export function readyControlLinks(state: RoomState): Sock[] {
 }
 
 /**
- * What an attach gets today: the room, and no pipe into it.
+ * The one link a dial-back can go down, or `null`.
  *
- * Two codes rather than one, because they are two different problems and only
- * one of them is the user's — see `CLOSE_NO_DIAL_BACK`.
+ * Singular by construction rather than by hope: `webSocketMessage` hangs up on
+ * every older parked link before it marks a new one ready, precisely so "dial
+ * back through which" is a question with an answer. Taking the first of the
+ * list here rather than asserting the length, because a second one appearing
+ * would be a bug in that path, and refusing every attach in the fleet until it
+ * is found is a worse failure than picking one.
  */
-export function attachRefusal(state: RoomState): { code: number; reason: string } {
-  return readyControlLinks(state).length === 0
-    ? { code: CLOSE_HOST_ABSENT, reason: 'no control link for this host' }
-    : { code: CLOSE_NO_DIAL_BACK, reason: 'the host is here; the relay cannot dial back yet' };
+export function readyControlLink(state: RoomState): Sock | null {
+  return readyControlLinks(state)[0] ?? null;
 }
 
 /** A fresh challenge nonce, as hex. */
