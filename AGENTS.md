@@ -502,6 +502,42 @@ Each of these cost real time and is documented where it bites:
   with a per-operation `OVERLAPPED` and event — and `ConnectNamedPipe` must then
   be overlapped too, or it returns without waiting and the server serves a
   connection nobody made. (`zest-daemon/src/local.rs`.)
+- **`shutdown` does not unpark a socket read that is already parked, on
+  Winsock**, and neither does arming `SO_RCVTIMEO` at cut time — a socket
+  timeout applies to calls issued *after* it is set, never to one already in
+  flight. So the thread whose `read` you are trying to interrupt stays exactly
+  where it was, for ever, with every call involved returning success. POSIX
+  wakes it and returns 0, so this is one more thing that is only ever wrong on
+  the primary platform. The fix is a read timeout armed **before the reader can
+  park**, plus a flag the reader checks each time one elapses, so a cut is
+  distinguishable from a quiet peer — the poll is the price of a cut that works
+  (`zest_cloud::tls::READ_POLL`, `zest_daemon::lan::READ_POLL`).
+
+  This has now cost two features, and the second one is why it is written here
+  rather than only in the code: #94 paid for it in the TLS reader, and
+  `zest-daemon`'s handshake watchdog was still `shutdown`-only — so on Windows
+  it cut nothing, its connections' threads leaked, and each held one of the 32
+  *shared* mid-handshake slots for ever. Thirty-two connections that opened and
+  said nothing would have made the daemon deaf to every new client, everywhere,
+  with no error and no log. **Every existing test agreed it worked**, because
+  `shutdown` does reach the *peer*: a test that checks the client saw EOF passes
+  on every platform while the server's own reader is still parked. Assert on the
+  side that has to wake up. (#99.)
+
+  Two more edges, both measured on this box rather than reasoned about:
+  - **A read timeout is per *handle* on Windows, not per socket.** A
+    `try_clone`d handle inherits the value at the moment it is duplicated and is
+    independent from then on, so clearing the timeout through one handle leaves
+    another handle's poll running — a call that reports success and does
+    nothing. On unix `try_clone` is `dup` and the option really is shared, so
+    code that assumes either behaviour is right on one platform. Have the thread
+    that owns the reading handle disarm its own, off a flag.
+  - **A read issued *after* the shutdown returns `ConnectionAborted` (os error
+    10053), not zero bytes** — and only sometimes, which is worse than always.
+    A cut is not a fault, so map any failure on an already-severed connection to
+    end-of-stream, or the log grows spurious errors for the watchdog doing its
+    job and the test has to accept two answers. In `tls.rs` that failure was
+    also *latched*, poisoning the writer along with it. (#101.)
 - **On macOS, `TIOCSWINSZ` on the pty master fails with `ENOTTY` until the slave
   has been opened once.** Setting the initial size right after `unlockpt` — the
   obvious place, and what Linux accepts — therefore fails with an error saying

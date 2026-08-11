@@ -468,8 +468,31 @@ fn a_connection_that_never_speaks_is_cut() {
     // blocking forever.
     silent.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
     let mut buf = [0u8; 16];
-    let n = silent.read(&mut buf).unwrap_or(0);
-    assert_eq!(n, 0, "a connection that never spoke was left open");
+    // `unwrap_or(0)` here made this test unfailable, and that is not a nitpick:
+    // the read timeout above turns "the daemon never cut anything" into an
+    // `Err`, which that maps to 0 — the same value the passing case asserts. A
+    // test whose failure mode and success mode are the same assertion is not a
+    // test, and this one sat green through the whole of issue #99.
+    assert_eq!(
+        silent.read(&mut buf).expect("the connection was still open when the read timed out"),
+        0,
+        "a connection that never spoke was left open"
+    );
+
+    // **This is only half of the cut, and the easy half.** `shutdown` reaches
+    // the *client*, so everything above passes on every platform — it did on
+    // Windows throughout #99, while the daemon's own reader stayed parked in
+    // `read` and the mid-handshake slot it held was never given back.
+    //
+    // The other half — that the slot returns to the `Gate` — deliberately lives
+    // in `lan.rs`'s unit tests rather than here, and the reason is worth
+    // writing down: filling the cap over loopback cannot work, because every
+    // connection from `127.0.0.1` shares one `PeerKey`, so 32 silent ones
+    // settle as 32 *failed handshakes* and the per-peer rate limiter refuses
+    // the test's own client long before the cap is the reason for anything.
+    // Measured, not assumed — at 4 it passes and at 32 it fails on the limiter,
+    // and the better the watchdog works the more surely it fails, since a slot
+    // only comes back by way of a `settle(_, false)`.
 }
 
 #[test]

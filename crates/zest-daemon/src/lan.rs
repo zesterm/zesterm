@@ -182,7 +182,7 @@ pub(crate) fn accept_hardened<F>(
     serve_conn: F,
 ) -> Result<(), DaemonError>
 where
-    F: Fn(TcpStream, String, WatchdogHandle, Countdown) -> Result<(), DaemonError>
+    F: Fn(Severable, String, WatchdogHandle, Countdown) -> Result<(), DaemonError>
         + Send
         + Sync
         + 'static,
@@ -195,6 +195,29 @@ where
             .peer_addr()
             .map_or_else(|_| "unknown".to_string(), |a| a.to_string());
         let key = PeerKey::from(&peer);
+
+        // Before anything can read: the poll has to be armed while the reader
+        // is still on this thread, or the cut cannot reach it (see
+        // [`READ_POLL`]). A socket that will not take a timeout is one the
+        // watchdog could never cut, so it is refused rather than served
+        // unwatchable.
+        //
+        // Logged, and not only for symmetry with the two refusals below: a
+        // silent `continue` here would refuse every connection with nothing to
+        // read out of the daemon, which is the exact shape of the outage this
+        // whole module was just fixed for.
+        let stream = match Severable::new(stream) {
+            Ok(stream) => stream,
+            Err(e) => {
+                tracing::warn!(
+                    %peer,
+                    error = %e,
+                    "refusing: the socket would not take a read timeout, so the handshake \
+                     watchdog could never cut this connection"
+                );
+                continue;
+            }
+        };
 
         // Refused connections are accepted and closed rather than left queued:
         // a peer told no immediately can back off, where one left hanging
@@ -335,23 +358,213 @@ impl Drop for Countdown {
 
 /// How a connection is severed once its deadline passes.
 ///
-/// `shutdown(Both)` rather than a read timeout, and that is the whole trick:
-/// `serve`'s reader treats *any* `Err` as fatal, so setting a timeout on the
-/// socket would kill healthy connections the moment a session went quiet —
-/// which is most of the time. Shutting the socket down unblocks the read once,
-/// and `serve` unwinds through its ordinary "the client went away" path with no
-/// change to its loop.
-///
 /// A trait because the *cut* is what varies and the watchdog is not: a TLS
 /// stream is not a `TcpStream` and cannot be `try_clone`d into one, and under
 /// ADR-009's dial-back a relayed stream is a socket of its own to shut down.
+///
+/// **There is deliberately no `impl Cut for TcpStream`.** There was, it was
+/// `shutdown(Both)`, and on Windows it did nothing — see [`Severable`].
 pub trait Cut: Send + Sync + 'static {
     fn cut(&self);
+
+    /// This connection finished its handshake and will never be cut, so
+    /// whatever the cut costs while it is possible can stop now.
+    ///
+    /// Default empty: a cut that costs nothing to stay ready has nothing to
+    /// stand down from.
+    fn stand_down(&self) {}
 }
 
-impl Cut for TcpStream {
+/// How often a reader that is parked in `read` surfaces to ask whether its
+/// connection still exists — and the only reason the cut works on Windows.
+///
+/// **This constant is the whole of issue #99 and two rounds of Windows CI on
+/// #94, so it is worth the paragraph.** A cut has to unpark a reader sitting in
+/// `read`. On POSIX `shutdown(Both)` does that. On Winsock it does not, and
+/// neither does arming `SO_RCVTIMEO` at cut time: a socket timeout applies to
+/// calls issued *after* it is set, never to one already in flight. So the
+/// reader stayed parked, its thread lived for ever, and the [`Countdown`] it
+/// held kept one of [`MAX_UNAUTHENTICATED`] slots for ever — a budget now
+/// shared by every transport, and 32. Thirty-two connections that open and then
+/// say nothing would have stopped the daemon accepting any client at all, with
+/// no error, no log, and every call involved reporting success.
+///
+/// Arming the timeout *before the reader can park* is what makes it portable:
+/// the reader is never blocked longer than this, so it always comes back to
+/// check `severed`. `zest_cloud::tls::READ_POLL` is the same constant for the
+/// same reason, arrived at first.
+///
+/// The cost is one syscall per second per connection, and it is bounded to the
+/// handshake rather than paid for the life of a session: [`Cut::stand_down`]
+/// takes the timeout back off once the handshake completes, because from that
+/// moment the watchdog can never fire. That matters here in a way it does not
+/// in `tls.rs` — a daemon that wakes on a timer to find nothing is a laptop
+/// that does not sleep, and the 0%-idle property is load-bearing enough to have
+/// its own test.
+const READ_POLL: Duration = Duration::from_secs(1);
+
+/// A socket whose reader can be cut out from under it on every platform.
+///
+/// The socket carries a [`READ_POLL`] read timeout while the handshake
+/// watchdog is armed, and this wrapper is what makes that invisible to the
+/// reader above it: `serve`'s read thread treats *any* `Err` as fatal, so a
+/// bare timeout would end a healthy connection the moment its peer went quiet —
+/// which, for a device waiting on a human to approve it, is the entire pairing
+/// window. [`Read::read`] therefore swallows an elapsed poll and blocks again,
+/// and only a real cut ends the read.
+pub(crate) struct Severable {
+    sock: TcpStream,
+    /// Set by the cut, before the socket is shut down. What tells an elapsed
+    /// poll from the end of the connection.
+    severed: Arc<AtomicBool>,
+    /// Whether a cut is still possible — cleared by [`Cut::stand_down`] when
+    /// the handshake completes.
+    ///
+    /// A flag the reader observes rather than a timeout somebody else takes
+    /// off, and that is not a style choice. **Measured on Windows: the read
+    /// timeout is per *handle*, not per socket.** A `try_clone`d handle
+    /// inherits the value at the moment it is duplicated and is independent of
+    /// the original from then on, so clearing it through the watchdog's handle
+    /// leaves the reader's own poll running for ever — a stand-down that
+    /// reports success and does nothing. The reader owns the only handle whose
+    /// timeout matters, so the reader is who disarms it.
+    watched: Arc<AtomicBool>,
+}
+
+impl Severable {
+    /// Arm the poll and take ownership. Fails only if the socket cannot carry
+    /// a timeout, in which case the caller has no cuttable connection.
+    fn new(sock: TcpStream) -> std::io::Result<Self> {
+        sock.set_read_timeout(Some(READ_POLL))?;
+        Ok(Self {
+            sock,
+            severed: Arc::new(AtomicBool::new(false)),
+            watched: Arc::new(AtomicBool::new(true)),
+        })
+    }
+
+    /// A handle that can sever this connection from another thread.
+    ///
+    /// A separate socket handle because the one the reader owns is parked in
+    /// `read` at exactly the moment this is used.
+    fn scissors(&self) -> std::io::Result<Scissors> {
+        Ok(Scissors {
+            sock: self.sock.try_clone()?,
+            severed: Arc::clone(&self.severed),
+            watched: Arc::clone(&self.watched),
+        })
+    }
+
+    /// Another handle on the same connection — the write half — which shares
+    /// the severed flag so that cutting ends both.
+    pub fn try_clone(&self) -> std::io::Result<Self> {
+        Ok(Self {
+            sock: self.sock.try_clone()?,
+            severed: Arc::clone(&self.severed),
+            watched: Arc::clone(&self.watched),
+        })
+    }
+
+    /// Whether a poll is armed, and how long.
+    ///
+    /// Only the tests need this, and they need it because "the cut can still
+    /// land" is otherwise not observable from outside — which is precisely how
+    /// the bug in #99 survived being reviewed.
+    #[cfg(test)]
+    fn read_timeout(&self) -> std::io::Result<Option<Duration>> {
+        self.sock.read_timeout()
+    }
+}
+
+impl std::io::Read for Severable {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            return match self.sock.read(buf) {
+                // A poll elapsing. Windows reports it as `TimedOut` and unix as
+                // `WouldBlock`; both spellings are the same event and matching
+                // only one of them is a silent half-fix.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    if self.severed.load(Ordering::Acquire) {
+                        return Ok(0);
+                    }
+                    // Severed first, then watched: a cut sets `severed` and
+                    // could in principle be seen in the same wake-up as a
+                    // stand-down, and ending the connection is the answer that
+                    // must win.
+                    if !self.watched.load(Ordering::Acquire) {
+                        // The handshake is over and nothing can cut this
+                        // connection now, so stop waking to ask. Best-effort:
+                        // if the option will not come off, the cost is a
+                        // syscall a second, not a broken connection.
+                        let _ = self.sock.set_read_timeout(None);
+                    }
+                    continue;
+                }
+                // Any failure on a connection that has been cut is the cut.
+                //
+                // **A cut is not a fault**, and on Windows it does not arrive
+                // looking like one thing: a read issued *after* the
+                // `shutdown` — the ordering a watchdog cannot control, since
+                // it fires on its own thread — comes back `ConnectionAborted`
+                // (os error 10053) rather than as zero bytes, and only
+                // sometimes, which is the worst of both. Reporting that up is
+                // a spurious "connection ended: error" in the log for what is
+                // simply the watchdog doing its job, and a test that has to
+                // accept either answer. Once `severed` is set there is exactly
+                // one true story about this connection and this is it.
+                Err(_) if self.severed.load(Ordering::Acquire) => Ok(0),
+                other => other,
+            };
+        }
+    }
+}
+
+impl std::io::Write for Severable {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.sock.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.sock.flush()
+    }
+}
+
+/// The cutting end of a [`Severable`], held by the watchdog.
+pub(crate) struct Scissors {
+    sock: TcpStream,
+    severed: Arc<AtomicBool>,
+    watched: Arc<AtomicBool>,
+}
+
+impl Cut for Scissors {
     fn cut(&self) {
-        let _ = self.shutdown(std::net::Shutdown::Both);
+        // Flag first, then shutdown: the reader checks the flag when its poll
+        // elapses, so setting it afterwards would let one more poll go by.
+        self.severed.store(true, Ordering::Release);
+        // The `shutdown` still earns its place. On POSIX it unparks the reader
+        // immediately, so the cut costs nothing there and the poll is only ever
+        // the Windows fallback.
+        let _ = self.sock.shutdown(std::net::Shutdown::Both);
+    }
+
+    /// The handshake completed, so stop polling.
+    ///
+    /// Safe precisely because of who calls it: [`WatchdogHandle::completed`]
+    /// stands down only when it wins the same `armed` swap the watchdog thread
+    /// must win to cut. Exactly one of them wins, so a stood-down connection is
+    /// one no cut can still be coming for.
+    ///
+    /// The reader takes its own timeout off when it next surfaces and sees
+    /// this, which is why it is a flag rather than a `set_read_timeout(None)`
+    /// from here — see [`Severable::watched`]. So the last poll of a
+    /// connection's life still elapses; one syscall, once, per connection.
+    fn stand_down(&self) {
+        self.watched.store(false, Ordering::Release);
     }
 }
 
@@ -372,6 +585,10 @@ impl Cut for TcpStream {
 struct Watchdog {
     /// Cleared when the handshake completes. Read by the watching thread.
     armed: Arc<AtomicBool>,
+    /// Kept beyond the watching thread so a completed handshake can call
+    /// [`Cut::stand_down`] — the poll that makes the cut work costs a syscall a
+    /// second, and nothing is watching once the handshake is over.
+    cut: Option<Arc<dyn Cut>>,
     /// How long, from the connection's start, before it is cut.
     ///
     /// Movable, because "has not finished the handshake" covers two states that
@@ -383,9 +600,9 @@ struct Watchdog {
 }
 
 impl Watchdog {
-    fn start(stream: &TcpStream, timeout: Duration) -> Self {
-        match stream.try_clone() {
-            Ok(clone) => Self::start_with(Arc::new(clone), timeout),
+    fn start(stream: &Severable, timeout: Duration) -> Self {
+        match stream.scissors() {
+            Ok(scissors) => Self::start_with(Arc::new(scissors), timeout),
             // As before: with no second handle there is nothing to cut, so the
             // connection runs unwatched rather than being refused.
             Err(_) => Self::unwatched(timeout),
@@ -396,6 +613,7 @@ impl Watchdog {
         Self {
             armed: Arc::new(AtomicBool::new(true)),
             fired: Arc::new(AtomicBool::new(false)),
+            cut: None,
             // Milliseconds from now, so the waiting thread can be told to wait
             // longer without being restarted.
             deadline: Arc::new(AtomicU64::new(timeout.as_millis() as u64)),
@@ -403,7 +621,8 @@ impl Watchdog {
     }
 
     fn start_with(cut: Arc<dyn Cut>, timeout: Duration) -> Self {
-        let this = Self::unwatched(timeout);
+        let mut this = Self::unwatched(timeout);
+        this.cut = Some(Arc::clone(&cut));
         let armed = Arc::clone(&this.armed);
         let fired = Arc::clone(&this.fired);
         let deadline = Arc::clone(&this.deadline);
@@ -438,6 +657,7 @@ impl Watchdog {
         WatchdogHandle {
             armed: Arc::clone(&self.armed),
             deadline: Arc::clone(&self.deadline),
+            cut: self.cut.clone(),
         }
     }
 
@@ -469,12 +689,23 @@ impl Watchdog {
 pub struct WatchdogHandle {
     armed: Arc<AtomicBool>,
     deadline: Arc<AtomicU64>,
+    cut: Option<Arc<dyn Cut>>,
 }
 
 impl WatchdogHandle {
     /// The handshake completed; stop watching.
     pub fn completed(&self) {
-        self.armed.store(false, Ordering::Release);
+        // `swap`, not `store`, and the difference is load-bearing: the watchdog
+        // thread cuts only if it wins this same swap, so winning it here is
+        // what proves no cut can still be on its way — and only then is it safe
+        // to stop the poll that lets a cut land at all (see [`READ_POLL`]).
+        // Losing the race means the connection has already been cut, and
+        // standing its poll down would park the reader for ever.
+        if self.armed.swap(false, Ordering::AcqRel) {
+            if let Some(cut) = &self.cut {
+                cut.stand_down();
+            }
+        }
     }
 
     /// This connection is waiting for a person to approve it.
@@ -580,6 +811,7 @@ impl RateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn the_bound_port_is_what_gets_advertised() {
@@ -637,6 +869,7 @@ mod tests {
         let w = Watchdog {
             armed: Arc::new(AtomicBool::new(true)),
             fired: Arc::new(AtomicBool::new(false)),
+            cut: None,
             deadline: Arc::new(AtomicU64::new(10_000)),
         };
         assert!(!w.authenticated(), "an armed watchdog means the handshake is unfinished");
@@ -659,6 +892,7 @@ mod tests {
         let w = Watchdog {
             armed: Arc::new(AtomicBool::new(true)),
             fired: Arc::new(AtomicBool::new(false)),
+            cut: None,
             deadline: Arc::new(AtomicU64::new(10_000)),
         };
 
@@ -687,6 +921,7 @@ mod tests {
         let w = Watchdog {
             armed: Arc::new(AtomicBool::new(true)),
             fired: Arc::new(AtomicBool::new(false)),
+            cut: None,
             deadline: Arc::new(AtomicU64::new(10_000)),
         };
         let h = w.handle();
@@ -704,6 +939,7 @@ mod tests {
         let w = Watchdog {
             armed: Arc::new(AtomicBool::new(true)),
             fired: Arc::new(AtomicBool::new(true)),
+            cut: None,
             deadline: Arc::new(AtomicU64::new(10_000)),
         };
         assert!(!w.authenticated());
@@ -828,6 +1064,288 @@ mod tests {
         assert!(
             !cut.load(Ordering::Acquire),
             "a paired device was disconnected on a timer it had already beaten"
+        );
+    }
+
+    /// Long enough that a deadlock is not mistaken for a slow machine, short
+    /// enough that a hung test is reported rather than waited out.
+    const PATIENCE: Duration = Duration::from_secs(5);
+
+    /// How long a reader is given to reach its blocking `read` before the test
+    /// starts relying on it being parked there.
+    ///
+    /// The race is one-sided: too short and a broken cut might pass, never the
+    /// reverse. There is nothing to observe instead — "parked in a syscall" is
+    /// not a state a thread can publish.
+    const SETTLE: Duration = Duration::from_millis(150);
+
+    /// A connected loopback pair, server end already armed for cutting. The
+    /// client end is returned so the caller can hold it: a dropped client
+    /// closes the connection and would unpark the reader for a reason these
+    /// tests are not about.
+    fn connected_pair() -> (Severable, TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("the bound address");
+        let client = TcpStream::connect(addr).expect("connect to it");
+        let (server, _) = listener.accept().expect("accept the connection");
+        (Severable::new(server).expect("arm the poll"), client)
+    }
+
+    /// A reader on its own thread, reporting one `read` back over a channel.
+    /// Returns once the thread has had time to reach the syscall.
+    fn park(mut stream: Severable) -> std::sync::mpsc::Receiver<std::io::Result<usize>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 256];
+            let _ = tx.send(std::io::Read::read(&mut stream, &mut buf));
+        });
+        std::thread::sleep(SETTLE);
+        rx
+    }
+
+    /// The question #99 was opened to settle, on the platform it was opened
+    /// about.
+    ///
+    /// Both watchdog tests above inject a fake `Cut`, so they prove the timer
+    /// fires and nothing about whether `shutdown` brings a thread back out of
+    /// `read`. That gap mattered because #94 hit exactly this in the TLS
+    /// reader: **`shutdown` does not reliably unpark a blocked `recv` on
+    /// Winsock**, and arming `SO_RCVTIMEO` at cut time does not help either,
+    /// since a socket timeout applies to calls made *after* it is set and never
+    /// to one already in flight.
+    ///
+    /// The measured answer, on this box: a bare `TcpStream` behaves the same
+    /// way. This test failed against the `shutdown`-only `Cut for TcpStream`
+    /// that `main` carried — the reader was still parked five seconds later —
+    /// and passes against [`Severable`], which is `TlsDuplex`'s fix in this
+    /// module's own shape.
+    ///
+    /// What was at stake, and what this test is left behind to hold: `serve`'s
+    /// reader parks for ever, its thread lives for ever, and the [`Countdown`]
+    /// it holds keeps one of [`MAX_UNAUTHENTICATED`] for ever. That budget is
+    /// shared across every transport (#75) and is 32, so 32 connections that
+    /// open and then say nothing stop the daemon accepting any client at all —
+    /// silently, with every call reporting success.
+    #[test]
+    fn cutting_a_real_socket_unparks_a_reader_already_parked_in_read() {
+        let (server, _client) = connected_pair();
+        let scissors = server.scissors().expect("a second handle on the accepted socket");
+        let parked = park(server);
+
+        scissors.cut();
+
+        let woke = parked.recv_timeout(PATIENCE).expect(
+            "the cut left a parked reader parked, which is the watchdog doing nothing: the \
+             connection is never dropped and its mid-handshake slot is never released",
+        );
+        assert_eq!(
+            woke.expect("a cut is not a fault: `serve` unwinds through 'the client went away'"),
+            0,
+            "a cut reads as end of stream"
+        );
+    }
+
+    /// The same, end to end through the watchdog's own thread and a real
+    /// socket — the two halves every other watchdog test exercises only apart.
+    #[test]
+    fn the_watchdog_cuts_a_real_connection_whose_reader_is_parked() {
+        let (server, _client) = connected_pair();
+        let reader = server.try_clone().expect("a second handle on the accepted socket");
+        // Parked *before* the watchdog is started, so the cut is guaranteed to
+        // land on a reader already in the syscall rather than winning a race.
+        // A watchdog that only cuts when it wins a race is not a watchdog.
+        let parked = park(reader);
+
+        let w = Watchdog::start(&server, Duration::from_millis(50));
+
+        let woke = parked
+            .recv_timeout(PATIENCE)
+            .expect("the handshake deadline passed and the connection was left up");
+        assert_eq!(woke.expect("a cut is not a fault"), 0, "a cut reads as end of stream");
+        assert!(!w.authenticated(), "a connection that was cut is not an authenticated one");
+    }
+
+    /// The ordering the sibling test cannot control, made deterministic.
+    ///
+    /// The watchdog fires on its own thread and cannot know whether the
+    /// connection's reader has reached `read` yet, so both orders are real, and
+    /// a watchdog that only works in one of them is not a watchdog.
+    #[test]
+    fn a_cut_that_lands_before_the_read_still_ends_it() {
+        let (server, _client) = connected_pair();
+        let scissors = server.scissors().expect("a second handle on the accepted socket");
+
+        scissors.cut();
+
+        let parked = park(server);
+        let woke = parked.recv_timeout(PATIENCE).expect(
+            "a read issued after the cut hung instead of ending, so a watchdog that fires \
+             before its connection's reader gets going pins the thread it meant to free",
+        );
+        assert_eq!(woke.expect("a cut is not a fault"), 0, "a cut reads as end of stream");
+    }
+
+    /// The regression the whole design is arranged around, and the reason the
+    /// original `Cut` chose `shutdown` over a read timeout in the first place.
+    ///
+    /// `serve`'s reader treats *any* `Err` as fatal, so if an elapsed poll
+    /// reached it, every connection would die the moment its peer went quiet —
+    /// which for a device waiting on a human to approve it is the entire
+    /// 120-second pairing window, and for an established session is almost
+    /// always. [`Severable`] swallows the poll; only a cut ends the read.
+    #[test]
+    fn a_quiet_connection_outlives_several_polls_untouched() {
+        let (server, mut client) = connected_pair();
+        let parked = park(server);
+
+        // Several `READ_POLL`s would have elapsed by now if the poll were
+        // visible above the wrapper. Sub-second, because the test suite pays
+        // this wall-clock: what is being proved is that a poll elapsing is not
+        // *reported*, and one elapsed poll proves that as well as ten.
+        std::thread::sleep(READ_POLL + READ_POLL / 2);
+        assert!(
+            matches!(parked.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
+            "a healthy but quiet connection was ended by its own watchdog poll"
+        );
+
+        // And it is still a working connection, not merely an unreported one.
+        client.write_all(b"hi").expect("the client's write half");
+        client.flush().expect("flush");
+        assert_eq!(
+            parked
+                .recv_timeout(PATIENCE)
+                .expect("the reader never woke for real data")
+                .expect("reading real data failed"),
+            2,
+            "the reader that swallowed a poll could no longer see real bytes"
+        );
+    }
+
+    /// The poll is bounded to the handshake, not paid for the life of a
+    /// session.
+    ///
+    /// A daemon that wakes on a timer to find nothing is a laptop that does not
+    /// sleep, and this project keeps a 0%-idle property deliberately. Once the
+    /// handshake completes the watchdog can never fire, so the timeout comes
+    /// straight back off.
+    #[test]
+    fn completing_the_handshake_takes_the_poll_back_off() {
+        let (server, mut client) = connected_pair();
+        assert_eq!(
+            server.read_timeout().expect("read the option back"),
+            Some(READ_POLL),
+            "the poll must be armed before the reader can park, or the cut cannot land"
+        );
+        let w = Watchdog::start(&server, Duration::from_secs(30));
+
+        // Observed through the reader's own handle, given back when its read
+        // returns, because that is the only handle whose timeout decides
+        // anything — see `Severable::watched`. Asserting it on any other handle
+        // is what made the first version of this pass while the reader polled
+        // on regardless.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut s = server;
+            let mut buf = [0u8; 8];
+            let got = std::io::Read::read(&mut s, &mut buf);
+            let _ = tx.send((got, s));
+        });
+        std::thread::sleep(SETTLE);
+
+        w.handle().completed();
+        // Long enough for the parked reader to surface once and disarm itself.
+        std::thread::sleep(READ_POLL + READ_POLL / 2);
+
+        client.write_all(b"x").expect("the client's write half");
+        client.flush().expect("flush");
+        let (got, reader) = rx.recv_timeout(PATIENCE).expect("the reader never returned");
+        assert_eq!(got.expect("the read failed"), 1, "the disarmed reader stopped seeing data");
+        assert_eq!(
+            reader.read_timeout().expect("read the option back"),
+            None,
+            "an established session kept waking once a second for nothing, which is the \
+             0%-idle property this daemon is built to keep"
+        );
+    }
+
+    /// The harm, in one test: silent connections must give their slots back.
+    ///
+    /// This is what issue #99 was actually about, and it is asserted here
+    /// rather than in `tests/lan.rs` because it cannot run there — over
+    /// loopback every connection shares one `PeerKey`, so filling the cap
+    /// settles 32 failed handshakes and the per-peer rate limiter refuses the
+    /// test's own client before the cap is ever the reason for anything.
+    ///
+    /// The thread below is `accept_hardened`'s, reduced to the four things that
+    /// matter: take a slot, arm the watchdog, park in `read`, and release the
+    /// slot when the read returns. Against the `shutdown`-only cut on `main`
+    /// the reads never returned, so no slot ever came back and the gate stayed
+    /// full for ever — 32 connections that open and say nothing, and the daemon
+    /// accepts no client from anywhere again.
+    #[test]
+    fn silent_connections_give_their_mid_handshake_slots_back() {
+        let gate = Gate::new();
+        let mut clients = Vec::new();
+
+        for _ in 0..MAX_UNAUTHENTICATED {
+            let (server, client) = connected_pair();
+            let mut slot = gate.admit(PeerKey::Loopback).expect("still under the cap");
+            let watchdog = Watchdog::start(&server, Duration::from_millis(50));
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 256];
+                let mut server = server;
+                let _ = std::io::Read::read(&mut server, &mut buf);
+                // Exactly where `accept_hardened` releases it: when serving
+                // this connection returns, however it returned.
+                slot.release();
+                drop(watchdog);
+            });
+            // Held so the connection stays open: what is being tested is the
+            // watchdog, not a peer hanging up.
+            clients.push(client);
+        }
+        assert!(
+            gate.admit(PeerKey::Loopback).is_err(),
+            "the cap must actually be full, or this test proves nothing"
+        );
+
+        // Polled rather than slept: the answer arrives one `READ_POLL` after
+        // the deadline on Windows and immediately on POSIX, and a flat sleep
+        // long enough for the slower of those is wall-clock every CI run pays.
+        let deadline = Instant::now() + PATIENCE;
+        while Instant::now() < deadline {
+            if gate.admit(PeerKey::Loopback).is_ok() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!(
+            "every mid-handshake slot was still held after the watchdog cut all {MAX_UNAUTHENTICATED} \
+             connections: the readers never woke, so their threads and their slots leak and the \
+             daemon is deaf to every new client from here on"
+        );
+    }
+
+    /// The race that makes standing the poll down safe at all.
+    ///
+    /// `completed` and the watchdog thread both settle it with a swap on
+    /// `armed`, and exactly one can win. If the watchdog won — the connection
+    /// is already cut — a late `completed` must **not** take the timeout off,
+    /// or the reader it was about to free parks for ever and the bug this whole
+    /// change removes comes back through the one door left open.
+    #[test]
+    fn a_late_completion_never_stands_down_a_connection_already_cut() {
+        let (server, _client) = connected_pair();
+        let w = Watchdog::start(&server, Duration::from_millis(30));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!w.authenticated(), "the watchdog was meant to have fired by now");
+
+        w.handle().completed();
+
+        assert!(
+            server.watched.load(Ordering::Acquire),
+            "a completion that lost the race stood the poll down anyway, which re-parks \
+             the very reader the cut was freeing"
         );
     }
 }
