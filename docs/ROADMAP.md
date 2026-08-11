@@ -1650,6 +1650,16 @@ three facts about Cloudflare that changed after #59 was written.
       `SessionClient`'s backoff already handles that), and the cloud session
       list becomes a reactive store per host rather than an actors host in a
       browser tab.
+
+      **The seam landed first**, with only the loopback implementation behind
+      it: `clients/web/packages/app/src/directory-source.ts` is what
+      `SessionList` reads, and it carries the argument against the two ways of
+      giving a hosted tab an actor (`createHost` in the browser;
+      `nodejs_compat` at the edge) so neither is rediscovered. The store half
+      is blocked on two things that do not exist — the ticket endpoint
+      `relay-dial.ts` injects around, and any notion of which hosts are
+      online — so wiring the cloud branch today would replace an honest card
+      with a list that reconnects for ever.
 - [ ] **The coalescing floor, with a test that asserts the message rate.** It is
       what keeps the object hibernating between keystrokes; unthrottled is
       ~1000 msg/s and an object that never sleeps. → ADR-009's arithmetic.

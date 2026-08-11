@@ -64,6 +64,14 @@ on every daemon. So the deployed app routes every session through the relay,
 including to the machine you are sitting at, and until that relay exists it
 renders a card saying so rather than a session list that spins forever.
 
+**The deployed app has no sidecar**, so there is nowhere at the edge to host
+the control-plane actors — the hosted session list has to live in the tab,
+written by one connection per host rather than read from a control plane. The
+seam that lets one `SessionList` read both is
+`packages/app/src/directory-source.ts`, which also records the two ways of
+giving the hosted client an actor that were rejected. Only the actor-backed
+implementation exists so far.
+
 That makes the sidecar path **not** a subset of the cloud path: it is the one
 that survives Cloudflare being unreachable, which ADR-005 requires of a local
 terminal.
