@@ -10,7 +10,7 @@
 //! cargo run -p zest-font --example font_dump -- --family "Cascadia Code" --size 24 --ligatures
 //! ```
 
-use zest_font::{Fonts, Style, Typography};
+use zest_font::{Fonts, GlyphFormat, Style, Typography};
 
 /// Lines chosen to exercise the things that actually break.
 const SAMPLE: &[(&str, Style)] = &[
@@ -215,21 +215,34 @@ fn blit(
             }
             let dst = (((y as u32) * canvas_w + x as u32) * 4) as usize;
 
-            let (src_rgb, alpha) = if img.is_color {
-                let s = ((gy * img.width + gx) * 4) as usize;
-                let Some(px) = img.data.get(s..s + 4) else { continue };
-                ([px[0], px[1], px[2]], px[3])
-            } else {
-                let s = (gy * img.width + gx) as usize;
-                let Some(&cov) = img.data.get(s) else { continue };
-                ([0xd7, 0xdc, 0xea], cov)
+            // Coverage per channel, so all three formats composite through one
+            // path. A grayscale mask and a colour glyph simply have the same
+            // number three times; a subpixel mask is the reason this is a
+            // triple at all.
+            let (src_rgb, alpha) = match img.format {
+                GlyphFormat::Color => {
+                    let s = ((gy * img.width + gx) * 4) as usize;
+                    let Some(px) = img.data.get(s..s + 4) else { continue };
+                    ([px[0], px[1], px[2]], [px[3]; 3])
+                }
+                GlyphFormat::SubpixelMask => {
+                    let s = ((gy * img.width + gx) * 4) as usize;
+                    // Byte 3 is deliberately not read: zeno never writes it.
+                    let Some(px) = img.data.get(s..s + 3) else { continue };
+                    ([0xd7, 0xdc, 0xea], [px[0], px[1], px[2]])
+                }
+                GlyphFormat::Mask => {
+                    let s = (gy * img.width + gx) as usize;
+                    let Some(&cov) = img.data.get(s) else { continue };
+                    ([0xd7, 0xdc, 0xea], [cov; 3])
+                }
             };
-            if alpha == 0 {
+            if alpha == [0; 3] {
                 continue;
             }
 
-            let a = f32::from(alpha) / 255.0;
             for c in 0..3 {
+                let a = f32::from(alpha[c]) / 255.0;
                 let old = f32::from(canvas[dst + c]);
                 let new = f32::from(src_rgb[c]);
                 canvas[dst + c] = (old * (1.0 - a) + new * a) as u8;

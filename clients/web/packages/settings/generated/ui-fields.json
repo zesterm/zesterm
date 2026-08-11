@@ -22,6 +22,26 @@
     "restartHint": false
   },
   {
+    "key": "appearance.text_antialias",
+    "group": "Appearance",
+    "widget": "select",
+    "description": "How text is antialiased.\n\nAlso decides whether outlines are grid-fitted, because the two are one\ndecision: swash hard-codes an LCD hinting target and does not let it be\nchosen, so hinting always means \"grid-fit for a rasterizer with three\ntimes the horizontal resolution\". Pairing that with grayscale coverage\nchanges glyph *shapes* rather than merely softening them.",
+    "range": null,
+    "integer": false,
+    "variants": [
+      {
+        "value": "subpixel",
+        "description": "Per-channel coverage at thirds of a pixel, outlines left unhinted.\n\nSharper on an ordinary 1x display, and it keeps each glyph the shape its\ndesigner drew. Needs an RGB-striped panel and a GPU that can blend per\nchannel; where either is missing, grayscale is used instead."
+      },
+      {
+        "value": "grayscale",
+        "description": "One coverage value per pixel, outlines grid-fitted.\n\nThe right choice on a rotated or non-RGB panel, where sampling at\nthirds of a pixel is simply wrong."
+      }
+    ],
+    "default": "subpixel",
+    "restartHint": false
+  },
+  {
     "key": "appearance.text_contrast",
     "group": "Appearance",
     "widget": "number",

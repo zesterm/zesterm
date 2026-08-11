@@ -55,6 +55,7 @@ pub struct Config {
     pub text_gamma: f32,
     /// Extra contrast on glyph coverage.
     pub text_contrast: f32,
+    pub text_antialias: zest_font::TextAntialias,
     pub theme: String,
     pub scrollback: usize,
     pub opacity: f32,
@@ -107,6 +108,10 @@ impl From<&zest_config::Settings> for Config {
             // there is one place that decides what an out-of-range gamma means.
             text_gamma: s.appearance.text_gamma,
             text_contrast: s.appearance.text_contrast,
+            text_antialias: match s.appearance.text_antialias {
+                zest_config::TextAntialias::Subpixel => zest_font::TextAntialias::Subpixel,
+                zest_config::TextAntialias::Grayscale => zest_font::TextAntialias::Grayscale,
+            },
             theme: s.appearance.theme.clone(),
             scrollback: s.scrolling.scrollback,
             opacity: s.window.opacity.clamp(0.0, 1.0),
@@ -3825,9 +3830,11 @@ impl App {
         // 1x, so on a Retina display a config reload silently halved the text.
         let scale = self.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
         let typo = Typography { scale_factor: scale, ..self.config.typography };
+        let antialias = self.effective_antialias();
         match Fonts::new(&self.config.font_families, typo) {
             Ok(mut fonts) => {
                 fonts.set_builtin_box_drawing(self.config.builtin_box_drawing);
+                fonts.set_text_antialias(antialias);
                 self.fonts = Some(fonts);
             }
             Err(e) => {
@@ -3837,11 +3844,58 @@ impl App {
                 return;
             }
         }
+        if let Some(gpu) = self.gpu.as_mut() {
+            // Before the clear, not after: switching mode recreates the mask
+            // texture and starts its own generation, and the rasterizer and the
+            // atlas must never disagree about how wide a texel is.
+            gpu.renderer.set_text_antialias(&gpu.device, antialias);
+        }
+        self.sync_antialias();
         if let (Some(gpu), Some(w)) = (self.gpu.as_mut(), self.window.as_ref()) {
             gpu.renderer.clear_atlas();
             let size = w.inner_size();
             self.resize_surface(size.width, size.height);
         }
+    }
+
+    /// Make the rasterizer agree with the renderer about coverage.
+    ///
+    /// The renderer has the last word, and it is not the same word: it refuses
+    /// subpixel outright on a device that cannot blend per channel. Asking the
+    /// config alone would leave `Fonts` emitting four-byte masks into a
+    /// one-byte texture — a validation error or three columns of garbage, on
+    /// exactly the machines the fallback exists to serve and never on one that
+    /// has the feature. So read the answer back rather than predicting it.
+    fn sync_antialias(&mut self) {
+        let Some(effective) = self.gpu.as_ref().map(|g| g.renderer.text_antialias()) else {
+            return;
+        };
+        if let Some(fonts) = self.fonts.as_mut() {
+            fonts.set_text_antialias(effective);
+        }
+    }
+
+    /// The antialiasing mode this configuration can actually have.
+    ///
+    /// Subpixel coverage is three alphas per pixel, and compositing that
+    /// against a *translucent* destination is undefined — the compositor holds
+    /// one alpha and cannot divide by three. So a translucent window forces
+    /// grayscale, regardless of the setting. On Windows this costs almost
+    /// nothing in practice: DX12 reports only `Opaque` (ADR-003), so opacity is
+    /// already forced to 1 there and the two fallbacks agree rather than fight.
+    ///
+    /// The *other* gate — whether the GPU can blend per channel at all — is the
+    /// renderer's, because only it knows the device.
+    fn effective_antialias(&self) -> zest_font::TextAntialias {
+        Self::antialias_for(&self.config)
+    }
+
+    /// As [`App::effective_antialias`], against a config alone so it is testable.
+    fn antialias_for(config: &Config) -> zest_font::TextAntialias {
+        if config.opacity < 1.0 {
+            return zest_font::TextAntialias::Grayscale;
+        }
+        config.text_antialias
     }
 
     fn resize_surface(&mut self, width: u32, height: u32) {
@@ -4024,6 +4078,7 @@ impl ApplicationHandler<Wakeup> for App {
         let typo = Typography { scale_factor: scale, ..self.config.typography };
         let mut fonts = Fonts::new(&self.config.font_families, typo).expect("no usable font");
         fonts.set_builtin_box_drawing(self.config.builtin_box_drawing);
+        fonts.set_text_antialias(self.effective_antialias());
         let metrics = fonts.cell_metrics();
         tracing::debug!(elapsed_ms = t0.elapsed().as_millis(), "fonts ready");
 
@@ -4119,8 +4174,17 @@ impl ApplicationHandler<Wakeup> for App {
             b: f64::from(bg.b) / 255.0,
             a: f64::from(self.config.opacity),
         };
-        let gpu = pollster::block_on(init_gpu(&window, self.config.opacity < 1.0, clear));
+        let gpu = pollster::block_on(init_gpu(
+            &window,
+            self.config.opacity < 1.0,
+            clear,
+            self.effective_antialias(),
+        ));
         tracing::debug!(elapsed_ms = t0.elapsed().as_millis(), "gpu ready");
+        // The renderer may have refused subpixel because the device cannot
+        // blend per channel. The rasterizer follows it, never the config —
+        // see `sync_antialias` for what going the other way costs.
+        fonts.set_text_antialias(gpu.renderer.text_antialias());
 
         // The surface may have landed on a slightly different size than the
         // window reported, so reconcile before the first frame.
@@ -5207,6 +5271,7 @@ async fn init_gpu(
     window: &Arc<Window>,
     want_transparency: bool,
     clear_color: wgpu::Color,
+    antialias: zest_font::TextAntialias,
 ) -> Gpu {
     let t = std::time::Instant::now();
 
@@ -5278,11 +5343,18 @@ async fn init_gpu(
     // cold start. Requested only when the adapter offers it, so a machine
     // without it simply pays the old cost.
     let want_cache = adapter.features().contains(wgpu::Features::PIPELINE_CACHE);
-    let features = if want_cache {
-        wgpu::Features::PIPELINE_CACHE
-    } else {
-        wgpu::Features::empty()
-    };
+    let mut features = wgpu::Features::empty();
+    if want_cache {
+        features |= wgpu::Features::PIPELINE_CACHE;
+    }
+    // Subpixel text blends three coverages against the destination, which needs
+    // a per-channel destination factor. DX12 (including WARP), Vulkan where the
+    // adapter reports dualSrcBlend, and Metal all have it; asked for only when
+    // offered, so a device without it starts normally and the renderer falls
+    // back to grayscale.
+    if adapter.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING) {
+        features |= wgpu::Features::DUAL_SOURCE_BLENDING;
+    }
 
     let adapter_limits = adapter.limits();
     let limits = wgpu::Limits {
@@ -5368,7 +5440,8 @@ async fn init_gpu(
     let previous_len = cached.as_ref().map_or(0, Vec::len);
     let cache = pipeline_cache::create(&device, want_cache, cached.as_deref());
 
-    let mut renderer = Renderer::with_cache(&device, format, cache.as_ref());
+    let mut renderer =
+        Renderer::with_cache(&device, format, cache.as_ref(), antialias);
     renderer.resize(&device, config.width, config.height);
     tracing::debug!(
         elapsed_ms = t.elapsed().as_millis(),
@@ -5458,6 +5531,49 @@ mod tuning_tests {
         s.appearance.text_gamma = gamma;
         s.appearance.text_contrast = contrast;
         Config::from(&s)
+    }
+
+    #[test]
+    fn the_antialias_setting_reaches_the_font_system() {
+        // The same hole #82 fell down: a setting that projects into `Config`
+        // but is never read is a control that visibly does nothing.
+        for (from, want) in [
+            (zest_config::TextAntialias::Subpixel, zest_font::TextAntialias::Subpixel),
+            (zest_config::TextAntialias::Grayscale, zest_font::TextAntialias::Grayscale),
+        ] {
+            let mut s = zest_config::Settings::default();
+            s.appearance.text_antialias = from;
+            assert_eq!(Config::from(&s).text_antialias, want, "{from:?} must survive");
+        }
+    }
+
+    #[test]
+    fn the_two_antialias_defaults_agree() {
+        // `zest-font` cannot depend on `zest-config`, so the shipping default
+        // is written twice. This is the only place the two meet.
+        let s = zest_config::Settings::default();
+        assert_eq!(
+            Config::from(&s).text_antialias,
+            zest_font::TextAntialias::default(),
+            "the schema default and the font layer's default have drifted apart"
+        );
+    }
+
+    #[test]
+    fn a_translucent_window_refuses_subpixel_text() {
+        // Per-channel coverage against a translucent destination is undefined:
+        // the compositor holds one alpha and cannot divide by three. This is
+        // the gate, and it must win over the setting.
+        let mut s = zest_config::Settings::default();
+        s.appearance.text_antialias = zest_config::TextAntialias::Subpixel;
+        s.window.opacity = 0.85;
+        let cfg = Config::from(&s);
+        assert_eq!(cfg.text_antialias, zest_font::TextAntialias::Subpixel, "the setting stands");
+        assert_eq!(
+            super::App::antialias_for(&cfg),
+            zest_font::TextAntialias::Grayscale,
+            "but a translucent window must force grayscale anyway"
+        );
     }
 
     #[test]

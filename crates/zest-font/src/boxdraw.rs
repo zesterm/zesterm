@@ -36,7 +36,7 @@
 //! point of this module, so the texture goes.
 
 use crate::metrics::CellMetrics;
-use crate::GlyphImage;
+use crate::{GlyphFormat, GlyphImage};
 
 /// How heavy one arm of a line character is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,7 +198,17 @@ impl Mask {
             left: 0,
             top: cell.baseline as i32,
             data: self.data,
-            is_color: false,
+            // Always a plain coverage mask, in every antialias mode.
+            //
+            // These are drawn geometrically at exactly cell size, with straight
+            // arms snapped to whole pixels precisely so they get no
+            // antialiasing at all. There is no outline, no hinter, and no
+            // horizontal detail below a pixel for subpixel sampling to recover
+            // — the three channels would be equal by construction. Emitting
+            // them anyway would cost four bytes per texel to say the same thing
+            // three times, and would put a colour fringe on a `│` that is
+            // currently one crisp column.
+            format: GlyphFormat::Mask,
         }
     }
 }

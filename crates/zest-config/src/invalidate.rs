@@ -75,6 +75,10 @@ pub const KEYS: &[(&str, Invalidation)] = &[
     // atlas rebuild -- the whole reason gamma is not baked per glyph.
     ("appearance.text_gamma", Invalidation::Free),
     ("appearance.text_contrast", Invalidation::Free),
+    // Unlike the two above, this one *is* baked into the atlas: it changes how
+    // many bytes a mask texel holds and whether the outline was grid-fitted at
+    // all, so every cached bitmap is wrong rather than merely stale.
+    ("appearance.text_antialias", Invalidation::AtlasBump),
     ("window.opacity", Invalidation::SurfaceRebuild),
     ("window.chrome_opacity", Invalidation::Free),
     ("window.backdrop", Invalidation::SurfaceRebuild),

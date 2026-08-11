@@ -32,7 +32,6 @@ pub mod instance;
 pub mod scene;
 pub mod ui_text;
 
-
 pub use atlas::{Atlas, AtlasEntry, Cached};
 pub use capture::read_rgba;
 pub use instance::{
@@ -102,8 +101,22 @@ pub struct Renderer {
     decor_pipeline: wgpu::RenderPipeline,
     resolve_pipeline: wgpu::RenderPipeline,
 
+    /// The dual-source glyph pipeline, built the first time subpixel text is
+    /// asked for. Lazily, because building it costs a shader module and a
+    /// pipeline, and most sessions never switch mode.
+    glyph_pipeline_subpixel: Option<wgpu::RenderPipeline>,
+    /// Effective antialiasing, after the adapter and the destination have had
+    /// their say. Not necessarily what the settings asked for.
+    antialias: zest_font::TextAntialias,
+    /// Whether this device can blend per-channel coverage at all.
+    dual_source: bool,
+    /// Set once the grayscale fallback has been reported, so a config reload
+    /// does not repeat it.
+    warned_no_dual_source: bool,
+
     globals_buffer: wgpu::Buffer,
     globals_bind_group: wgpu::BindGroup,
+    globals_layout: wgpu::BindGroupLayout,
     atlas_bind_group_layout: wgpu::BindGroupLayout,
     atlas_bind_group: Option<wgpu::BindGroup>,
     atlas_generation: u64,
@@ -124,6 +137,40 @@ pub struct Renderer {
     pub tuning: TextTuning,
 }
 
+/// The grid module: rects, glyphs and decorations in one, for the reason given
+/// where it is created.
+const GRID_WGSL: &str = concat!(
+    include_str!("shaders/common.wgsl"),
+    "\n",
+    include_str!("shaders/rect.wgsl"),
+    "\n",
+    include_str!("shaders/glyph.wgsl"),
+    "\n",
+    include_str!("shaders/decor.wgsl"),
+);
+
+/// The subpixel variant: the same glyph vertex stage plus a dual-source
+/// fragment stage.
+///
+/// A separate module rather than a second entry point in `GRID_WGSL`, because
+/// naga checks `@blend_src` during **type** validation — a module that merely
+/// contains the output struct is rejected by `create_shader_module` on a device
+/// without `DUAL_SOURCE_BLENDING`, whether or not anything uses it. One module
+/// for everyone would therefore fail to start on exactly the machines the
+/// fallback exists to serve.
+///
+/// `enable` must precede every declaration, so it is prepended here rather than
+/// written at the top of `glyph_subpixel.wgsl`. Rect and decor are left out:
+/// this module exists only to supply the glyph pipeline.
+const GRID_WGSL_SUBPIXEL: &str = concat!(
+    "enable dual_source_blending;\n",
+    include_str!("shaders/common.wgsl"),
+    "\n",
+    include_str!("shaders/glyph.wgsl"),
+    "\n",
+    include_str!("shaders/glyph_subpixel.wgsl"),
+);
+
 impl Renderer {
     /// Build the renderer for a given surface format.
     ///
@@ -131,8 +178,12 @@ impl Renderer {
     /// performs the sRGB encode itself, because premultiplying after a hardware
     /// encode is wrong (see `shaders/resolve.wgsl`). Handing it an `*Srgb`
     /// format would encode twice and wash everything out.
-    pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
-        Self::with_cache(device, target_format, None)
+    pub fn new(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        antialias: zest_font::TextAntialias,
+    ) -> Self {
+        Self::with_cache(device, target_format, None, antialias)
     }
 
     /// As [`Renderer::new`], reusing a driver pipeline cache.
@@ -146,6 +197,7 @@ impl Renderer {
         device: &wgpu::Device,
         target_format: wgpu::TextureFormat,
         cache: Option<&wgpu::PipelineCache>,
+        antialias: zest_font::TextAntialias,
     ) -> Self {
         debug_assert!(
             !target_format.is_srgb(),
@@ -165,18 +217,7 @@ impl Renderer {
         let t_shader = std::time::Instant::now();
         let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("zest grid"),
-            source: wgpu::ShaderSource::Wgsl(
-                concat!(
-                    include_str!("shaders/common.wgsl"),
-                    "\n",
-                    include_str!("shaders/rect.wgsl"),
-                    "\n",
-                    include_str!("shaders/glyph.wgsl"),
-                    "\n",
-                    include_str!("shaders/decor.wgsl"),
-                )
-                .into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(GRID_WGSL.into()),
         });
         let resolve_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("zest resolve"),
@@ -225,6 +266,7 @@ impl Renderer {
             ("vs_rect", "fs_rect"),
             &[&globals_layout],
             rect_vertex_layout(),
+            PREMULTIPLIED_OVER,
             cache,
         );
         let glyph_pipeline = make_pipeline(
@@ -234,6 +276,7 @@ impl Renderer {
             ("vs_glyph", "fs_glyph"),
             &[&globals_layout, &atlas_bind_group_layout],
             glyph_vertex_layout(),
+            PREMULTIPLIED_OVER,
             cache,
         );
         let decor_pipeline = make_pipeline(
@@ -243,6 +286,7 @@ impl Renderer {
             ("vs_decor", "fs_decor"),
             &[&globals_layout],
             decor_vertex_layout(),
+            PREMULTIPLIED_OVER,
             cache,
         );
 
@@ -311,13 +355,23 @@ impl Renderer {
 
         tracing::debug!(ms = t_pipe.elapsed().as_millis(), "pipeline objects");
 
-        Self {
+        let dual_source = device.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING);
+
+        let mut me = Self {
             rect_pipeline,
             glyph_pipeline,
             decor_pipeline,
             resolve_pipeline,
+            glyph_pipeline_subpixel: None,
+            // Starts grayscale and is raised by `set_text_antialias`, so there
+            // is exactly one place that decides -- and one place that logs when
+            // the answer is not what was asked for.
+            antialias: zest_font::TextAntialias::Grayscale,
+            dual_source,
+            warned_no_dual_source: false,
             globals_buffer,
             globals_bind_group,
+            globals_layout,
             atlas_bind_group_layout,
             atlas_bind_group: None,
             atlas_generation: u64::MAX,
@@ -330,8 +384,93 @@ impl Renderer {
             rects: GrowBuffer::new("zest rects"),
             glyphs: GrowBuffer::new("zest glyphs"),
             decors: GrowBuffer::new("zest decors"),
-            atlas: Atlas::new(device),
+            atlas: Atlas::new(device, zest_font::TextAntialias::Grayscale),
             tuning: TextTuning::default(),
+        };
+        me.set_text_antialias(device, antialias);
+        me
+    }
+
+    /// The antialiasing mode actually in use.
+    ///
+    /// May be [`TextAntialias::Grayscale`] when subpixel was requested — see
+    /// [`Renderer::set_text_antialias`] for the ladder.
+    #[must_use]
+    pub fn text_antialias(&self) -> zest_font::TextAntialias {
+        self.antialias
+    }
+
+    /// Whether this device can blend per-channel coverage.
+    #[must_use]
+    pub fn supports_subpixel_text(&self) -> bool {
+        self.dual_source
+    }
+
+    /// Ask for an antialiasing mode, and get the one that is actually possible.
+    ///
+    /// Subpixel coverage needs a per-channel destination blend factor, which is
+    /// `Features::DUAL_SOURCE_BLENDING` — DX12 (including WARP), Vulkan where
+    /// the adapter reports `dualSrcBlend`, and Metal. Where it is missing this
+    /// falls back to grayscale and says so once, rather than silently rendering
+    /// a third of every glyph.
+    ///
+    /// The caller must also refuse subpixel over a *translucent* destination:
+    /// three coverages cannot be composited by a compositor holding one alpha.
+    /// That is a property of the scene, not of the device, so it is decided
+    /// where opacity is known and arrives here as a plain `Grayscale`.
+    ///
+    /// Switching clears the atlas: the two modes store a different number of
+    /// bytes per texel.
+    pub fn set_text_antialias(&mut self, device: &wgpu::Device, mode: zest_font::TextAntialias) {
+        let want_subpixel = mode == zest_font::TextAntialias::Subpixel;
+        if want_subpixel && !self.dual_source {
+            if self.antialias != zest_font::TextAntialias::Grayscale {
+                self.antialias = zest_font::TextAntialias::Grayscale;
+                self.atlas.set_text_antialias(device, self.antialias);
+            }
+            // Once per process, not once per call: a config reload asks again
+            // every time, and a capability that cannot change is not news twice.
+            if !self.warned_no_dual_source {
+                self.warned_no_dual_source = true;
+                tracing::warn!(
+                    "this adapter cannot do dual-source blending, so subpixel text is \
+                     unavailable; falling back to grayscale antialiasing"
+                );
+            }
+            return;
+        }
+        if mode == self.antialias {
+            return;
+        }
+
+        if want_subpixel && self.glyph_pipeline_subpixel.is_none() {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("zest grid (subpixel)"),
+                source: wgpu::ShaderSource::Wgsl(GRID_WGSL_SUBPIXEL.into()),
+            });
+            self.glyph_pipeline_subpixel = Some(make_pipeline(
+                device,
+                "zest glyph (subpixel)",
+                &module,
+                ("vs_glyph", "fs_glyph_subpixel"),
+                &[&self.globals_layout, &self.atlas_bind_group_layout],
+                glyph_vertex_layout(),
+                PREMULTIPLIED_OVER_DUAL,
+                None,
+            ));
+        }
+
+        self.antialias = mode;
+        self.atlas.set_text_antialias(device, mode);
+    }
+
+    /// The glyph pipeline for the mode in force.
+    fn glyphs_pipeline(&self) -> &wgpu::RenderPipeline {
+        match self.antialias {
+            zest_font::TextAntialias::Subpixel => {
+                self.glyph_pipeline_subpixel.as_ref().unwrap_or(&self.glyph_pipeline)
+            }
+            zest_font::TextAntialias::Grayscale => &self.glyph_pipeline,
         }
     }
 
@@ -460,7 +599,7 @@ impl Renderer {
 
             if scene.chrome_glyphs_at > 0 {
                 if let Some(bg) = self.atlas_bind_group.as_ref() {
-                    pass.set_pipeline(&self.glyph_pipeline);
+                    pass.set_pipeline(self.glyphs_pipeline());
                     pass.set_bind_group(1, bg, &[]);
                     pass.set_vertex_buffer(0, self.glyphs.slice());
                     pass.draw(0..4, 0..scene.chrome_glyphs_at as u32);
@@ -483,7 +622,7 @@ impl Renderer {
                 }
                 if !glyphs.is_empty() {
                     if let Some(bg) = self.atlas_bind_group.as_ref() {
-                        pass.set_pipeline(&self.glyph_pipeline);
+                        pass.set_pipeline(self.glyphs_pipeline());
                         pass.set_bind_group(1, bg, &[]);
                         pass.set_vertex_buffer(0, self.glyphs.slice());
                         pass.draw(0..4, glyphs);
@@ -588,6 +727,48 @@ impl GrowBuffer {
     }
 }
 
+/// Premultiplied source-over, in every pipeline without exception.
+///
+/// Mixing this with SrcAlpha/OneMinusSrcAlpha is what produces dark halos
+/// around text. -> ADR-003.
+const PREMULTIPLIED_OVER: wgpu::BlendState = wgpu::BlendState {
+    color: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    },
+    alpha: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    },
+};
+
+/// Premultiplied source-over with a *per-channel* destination factor.
+///
+/// Subpixel coverage is three alphas per texel, which the equation above
+/// structurally cannot express: it has one `OneMinusSrcAlpha` for all three
+/// channels. The second fragment output carries the per-channel coverage and
+/// `OneMinusSrc1` consumes it, which is still exactly source-over -- per
+/// primitive, so overlapping glyphs (combining marks sit on top of their base)
+/// stay correct. Requires `Features::DUAL_SOURCE_BLENDING`.
+const PREMULTIPLIED_OVER_DUAL: wgpu::BlendState = wgpu::BlendState {
+    color: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusSrc1,
+        operation: wgpu::BlendOperation::Add,
+    },
+    alpha: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusSrc1Alpha,
+        operation: wgpu::BlendOperation::Add,
+    },
+};
+
+// Eight, because a render pipeline genuinely has eight independent parts and
+// the four call sites all read better as a flat list than as a builder or a
+// descriptor struct that would exist only to satisfy the lint.
+#[allow(clippy::too_many_arguments)]
 fn make_pipeline(
     device: &wgpu::Device,
     label: &str,
@@ -595,6 +776,7 @@ fn make_pipeline(
     entry_points: (&str, &str),
     bind_group_layouts: &[&wgpu::BindGroupLayout],
     vertex_layout: wgpu::VertexBufferLayout<'_>,
+    blend: wgpu::BlendState,
     cache: Option<&wgpu::PipelineCache>,
 ) -> wgpu::RenderPipeline {
     let layouts: Vec<Option<&wgpu::BindGroupLayout>> =
@@ -619,21 +801,7 @@ fn make_pipeline(
             entry_point: Some(entry_points.1),
             targets: &[Some(wgpu::ColorTargetState {
                 format: OFFSCREEN_FORMAT,
-                // Premultiplied source-over, in every pipeline without
-                // exception. Mixing this with SrcAlpha/OneMinusSrcAlpha is what
-                // produces dark halos around text. -> ADR-003.
-                blend: Some(wgpu::BlendState {
-                    color: wgpu::BlendComponent {
-                        src_factor: wgpu::BlendFactor::One,
-                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                        operation: wgpu::BlendOperation::Add,
-                    },
-                    alpha: wgpu::BlendComponent {
-                        src_factor: wgpu::BlendFactor::One,
-                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                        operation: wgpu::BlendOperation::Add,
-                    },
-                }),
+                blend: Some(blend),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: Default::default(),
@@ -718,9 +886,14 @@ mod tests {
         let adapter =
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
                 .ok()?;
+        let dual = adapter.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING);
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("zest test"),
-            required_features: wgpu::Features::empty(),
+            required_features: if dual {
+                wgpu::Features::DUAL_SOURCE_BLENDING
+            } else {
+                wgpu::Features::empty()
+            },
             required_limits: wgpu::Limits::downlevel_defaults(),
             ..Default::default()
         }))
@@ -731,7 +904,7 @@ mod tests {
     fn backdrop_pixel(tuning: TextTuning, color: LinearRgba) -> Option<[u8; 4]> {
         let (device, queue) = headless()?;
         let format = wgpu::TextureFormat::Rgba8Unorm;
-        let mut renderer = Renderer::new(&device, format);
+        let mut renderer = Renderer::new(&device, format, zest_font::TextAntialias::Grayscale);
         renderer.tuning = tuning;
         renderer.resize(&device, 4, 4);
 
@@ -781,6 +954,170 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Draw one synthetic glyph and read the pixel under it.
+    ///
+    /// The mask is supplied directly rather than rasterized from a font, so the
+    /// assertion is deterministic on any machine and says nothing about which
+    /// fonts are installed.
+    fn glyph_pixel(mode: zest_font::TextAntialias, mask: &zest_font::GlyphImage) -> Option<[u8; 4]> {
+        let (device, queue) = headless()?;
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut renderer = Renderer::new(&device, format, mode);
+        // The device may not offer dual-source blending; skip loudly rather
+        // than assert something the test cannot have set up.
+        if mode == zest_font::TextAntialias::Subpixel
+            && renderer.text_antialias() != zest_font::TextAntialias::Subpixel
+        {
+            eprintln!("[skip] this adapter has no DUAL_SOURCE_BLENDING");
+            return None;
+        }
+        renderer.tuning = TextTuning { gamma: 1.0, contrast: 0.0 };
+        renderer.resize(&device, 4, 4);
+
+        let key = zest_font::GlyphKey {
+            font: zest_font::FontId(0),
+            glyph: 42,
+            px: 13 * 256,
+            subpx_x: 0,
+            synthetic: 0,
+        };
+        let cached = renderer.atlas.insert(&device, &queue, key, mask)?;
+        let crate::Cached::Entry(e) = cached else { return None };
+
+        let mut scene = Scene { backdrop: LinearRgba::opaque(0, 0, 0), ..Default::default() };
+        scene.glyphs.push(crate::GlyphInstance {
+            pos: [0.0, 0.0],
+            uv: [f32::from(e.uv[0]), f32::from(e.uv[1])],
+            size: [f32::from(e.size[0]), f32::from(e.size[1])],
+            color: LinearRgba::opaque(0xFF, 0xFF, 0xFF),
+            clip: [0.0, 0.0, 4.0, 4.0],
+            layer: u32::from(e.layer),
+            flags: crate::glyph_flags::FIXED,
+        });
+        scene.chrome_glyphs_at = scene.glyphs.len();
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("zest glyph test target"),
+            size: wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let mut encoder = device.create_command_encoder(&Default::default());
+        renderer.render(&device, &queue, &mut encoder, &view, &scene);
+        queue.submit([encoder.finish()]);
+
+        let px = crate::read_rgba(&device, &queue, &texture, 4, 4, format);
+        Some([px[0], px[1], px[2], px[3]])
+    }
+
+    #[test]
+    fn subpixel_coverage_reaches_the_frame_per_channel() {
+        // The property the whole mode rests on: three different coverages go
+        // into the atlas and three different values come out of the frame. If
+        // this collapses to one number, the mask is being sampled with `.r`
+        // again, or the glyph pipeline quietly fell back to the single-alpha
+        // blend -- either way the atlas is four times the size for nothing.
+        let mask = zest_font::GlyphImage {
+            width: 1,
+            height: 1,
+            left: 0,
+            top: 0,
+            data: vec![0xFF, 0x80, 0x20, 0x00],
+            format: zest_font::GlyphFormat::SubpixelMask,
+        };
+        let Some(px) = glyph_pixel(zest_font::TextAntialias::Subpixel, &mask) else { return };
+        assert!(
+            px[0] > px[1] && px[1] > px[2],
+            "wanted the frame to keep R > G > B from the mask, got {px:?}"
+        );
+    }
+
+    #[test]
+    fn grayscale_coverage_still_composites_as_one_alpha() {
+        // The fallback has to stay exactly what it was: one coverage value,
+        // applied equally to all three channels.
+        let mask = zest_font::GlyphImage {
+            width: 1,
+            height: 1,
+            left: 0,
+            top: 0,
+            data: vec![0x80],
+            format: zest_font::GlyphFormat::Mask,
+        };
+        let Some(px) = glyph_pixel(zest_font::TextAntialias::Grayscale, &mask) else { return };
+        assert!(px[0] == px[1] && px[1] == px[2], "grayscale must stay neutral, got {px:?}");
+        assert!(px[0] > 0, "the glyph drew nothing at all");
+    }
+
+    #[test]
+    fn an_opaque_backdrop_keeps_the_frame_alpha_at_one() {
+        // Why `max(cov)` is a safe choice for the glyph's alpha: under the gate
+        // the destination is opaque, so whatever alpha the glyph contributes,
+        // the result is 1 and `resolve.wgsl`'s un-premultiply is the identity.
+        // If this ever fails, that choice has become observable and the comment
+        // in glyph_subpixel.wgsl needs revisiting.
+        let mask = zest_font::GlyphImage {
+            width: 1,
+            height: 1,
+            left: 0,
+            top: 0,
+            data: vec![0xFF, 0x80, 0x20, 0x00],
+            format: zest_font::GlyphFormat::SubpixelMask,
+        };
+        let Some(px) = glyph_pixel(zest_font::TextAntialias::Subpixel, &mask) else { return };
+        assert_eq!(px[3], 0xFF, "an opaque backdrop must stay opaque under a glyph");
+    }
+
+    #[test]
+    fn a_device_without_dual_source_reports_grayscale_so_the_rasterizer_can_follow() {
+        // The bug this pins, which Copilot found and no machine with the
+        // feature can reproduce: callers set `Fonts` from the *config* while
+        // the renderer had already refused subpixel, so four-byte masks were
+        // uploaded into a one-byte texture. `text_antialias()` is the answer
+        // every caller must read back, so it has to be the effective mode and
+        // never the requested one.
+        let Some((device, _queue)) = headless() else { return };
+        let r = Renderer::new(
+            &device,
+            wgpu::TextureFormat::Rgba8Unorm,
+            zest_font::TextAntialias::Subpixel,
+        );
+        if r.supports_subpixel_text() {
+            assert_eq!(r.text_antialias(), zest_font::TextAntialias::Subpixel);
+        } else {
+            assert_eq!(
+                r.text_antialias(),
+                zest_font::TextAntialias::Grayscale,
+                "a device without DUAL_SOURCE_BLENDING must report the mode it actually                  has, or every caller that trusts it uploads at the wrong stride"
+            );
+        }
+        assert_eq!(
+            r.atlas.text_antialias(),
+            r.text_antialias(),
+            "the atlas and the renderer must never disagree about coverage"
+        );
+    }
+
+    #[test]
+    fn the_subpixel_module_enables_the_extension_before_anything_else() {
+        // `enable` must precede every declaration. If it ever drifts below one,
+        // the module stops compiling on every machine at once, at startup --
+        // the worst possible moment to find out, and the cheapest possible test.
+        let first = super::GRID_WGSL_SUBPIXEL.lines().next().unwrap_or_default().trim();
+        assert_eq!(first, "enable dual_source_blending;");
+        assert!(
+            !super::GRID_WGSL.contains("blend_src"),
+            "the grayscale module must not mention @blend_src: naga validates it at \
+             type level, so merely containing it fails create_shader_module on every \
+             device without DUAL_SOURCE_BLENDING -- exactly the ones the fallback is for"
+        );
     }
 
     #[test]

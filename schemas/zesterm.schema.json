@@ -16,6 +16,13 @@
           "x_zest_group": "Appearance",
           "x_zest_widget": "theme-picker"
         },
+        "text_antialias": {
+          "$ref": "#/$defs/TextAntialias",
+          "default": "subpixel",
+          "description": "How text is antialiased.\n\nAlso decides whether outlines are grid-fitted, because the two are one\ndecision: swash hard-codes an LCD hinting target and does not let it be\nchosen, so hinting always means \"grid-fit for a rasterizer with three\ntimes the horizontal resolution\". Pairing that with grayscale coverage\nchanges glyph *shapes* rather than merely softening them.",
+          "x_zest_group": "Appearance",
+          "x_zest_widget": "select"
+        },
         "text_contrast": {
           "default": 0.0,
           "description": "Additional contrast applied to glyph coverage, not to the frame.",
@@ -332,6 +339,21 @@
         }
       ]
     },
+    "TextAntialias": {
+      "description": "How glyph coverage is sampled.",
+      "oneOf": [
+        {
+          "const": "subpixel",
+          "description": "Per-channel coverage at thirds of a pixel, outlines left unhinted.\n\nSharper on an ordinary 1x display, and it keeps each glyph the shape its\ndesigner drew. Needs an RGB-striped panel and a GPU that can blend per\nchannel; where either is missing, grayscale is used instead.",
+          "type": "string"
+        },
+        {
+          "const": "grayscale",
+          "description": "One coverage value per pixel, outlines grid-fitted.\n\nThe right choice on a rotated or non-RGB panel, where sampling at\nthirds of a pixel is simply wrong.",
+          "type": "string"
+        }
+      ]
+    },
     "Typography": {
       "properties": {
         "builtin_box_drawing": {
@@ -487,6 +509,7 @@
       "default": {
         "follow_system_theme": false,
         "light_theme": "",
+        "text_antialias": "subpixel",
         "text_contrast": 0.0,
         "text_gamma": 1.3,
         "theme": "obsidian"

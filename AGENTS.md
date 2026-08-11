@@ -394,6 +394,7 @@ cargo run --profile fast -p zest-app           # the terminal, quick rebuild
 cargo build --release && ./target/release/zesterm   # the shipping build
 cargo run -p zest-app  --example headless      # a terminal with no window
 cargo run -p zest-font --example font_dump     # font sample sheet as a PNG
+cargo run -p zest-font --example glyph_probe   # hinting vs coverage; prints a verdict
 cargo run -p zest-pty  --example pty_dump      # raw VT stream / corpus recorder
 cargo run -p zest-render-wgpu --example alpha_probe   # transparency capability
 
@@ -599,6 +600,32 @@ Each of these cost real time and is documented where it bites:
 - **DX12 cannot do per-pixel alpha** through wgpu's ordinary surface path.
   Transparency on Windows is adapter-dependent. Premultiply everywhere
   regardless. (ADR-003.)
+- **swash hard-codes an LCD hinting target you cannot select, and rasterizes
+  grayscale by default** — so every glyph is grid-fit for a rasterizer with 3x
+  the horizontal resolution and then sampled once per pixel. The symptom is not
+  "text looks soft", it is *shapes changing*: lowercase `w` at 13 ppem in
+  Cascadia Mono renders as three vertical stems and reads as `W`, and `o c e C
+  t` lose the baseline overshoot that `a` keeps, so "Close" reads a pixel short
+  beside "tab" in one label. It looks exactly like a bad font, a bad size, a
+  shaping bug or a broken atlas, and #100 chased all four before finding
+  `HintingMode::Smooth { lcd_subpixel: Some(LcdLayout::Horizontal), .. }` in
+  `swash/src/scale/hinting_cache.rs`, where `hint(bool)` is the whole API.
+
+  **Measured before believing it:** driving skrifa 0.44 directly with
+  `Target::Smooth { mode: Light }` — DirectWrite's natural mode, the obvious
+  escape — returns a **byte-identical** bitmap, because Cascadia Mono is
+  ClearType-aware and that disables FreeType's backward-compatibility mode.
+  There is no gentler target to reach for. Two more things about
+  `zeno::Format::Subpixel` that are not what you would guess, both read out of
+  `zeno-0.3.3/src/mask.rs`: it emits **4** bytes per texel and never writes the
+  fourth, so sampling it as alpha is silently total transparency rather than a
+  visible bug; and it does **not** widen the bitmap, because placement is
+  computed before the ±0.3px per-channel shifts are applied. And the two
+  symptoms have different axes — subpixel sampling is horizontal and cannot
+  restore a flattened overshoot, which is why the fix is `hint(false)` *and*
+  per-channel coverage rather than either alone. `cargo run -p zest-font
+  --example glyph_probe` reports both as measurements rather than opinions.
+  (ADR-010; #100, #84.)
 - **Emoji are script `Zyyy` and Nerd Font icons are Private Use Area**, so
   script-based font fallback structurally cannot find either. Emoji need an
   explicit `GenericFamily::Emoji` path; PUA needs an installed Nerd Font,

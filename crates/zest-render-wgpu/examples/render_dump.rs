@@ -69,10 +69,17 @@ async fn run() {
         .expect("no GPU adapter, not even a fallback");
     eprintln!("[render_dump] adapter: {:?}", adapter.get_info().name);
 
+    // Asked for only when offered, so the dumper still runs on a fallback
+    // adapter that has no dual-source blending.
+    let dual = adapter.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING);
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("zest render_dump"),
-            required_features: wgpu::Features::empty(),
+            required_features: if dual {
+                wgpu::Features::DUAL_SOURCE_BLENDING
+            } else {
+                wgpu::Features::empty()
+            },
             required_limits: wgpu::Limits::downlevel_defaults(),
             ..Default::default()
         })
@@ -124,7 +131,17 @@ async fn run() {
     );
 
     // --- render ---
-    let mut renderer = Renderer::new(&device, TARGET_FORMAT);
+    let antialias = if argv.iter().any(|a| a == "--grayscale") {
+        zest_font::TextAntialias::Grayscale
+    } else {
+        zest_font::TextAntialias::Subpixel
+    };
+    let mut renderer = Renderer::new(&device, TARGET_FORMAT, antialias);
+    // The renderer decides, not the flag: a fallback adapter may have no
+    // dual-source blending. Left unsynced, the rasterizer would emit four-byte
+    // subpixel masks into a one-byte texture.
+    fonts.set_text_antialias(renderer.text_antialias());
+    eprintln!("[render_dump] antialias: {:?}", renderer.text_antialias());
     renderer.resize(&device, width, height);
 
     let target = device.create_texture(&wgpu::TextureDescriptor {

@@ -475,3 +475,98 @@ entirely. It costs a WebRTC stack in the daemon — large, and against this proj
 ICE/STUN, plus TURN for symmetric NAT, which is where you pay again anyway. Revisit if the relay
 bill ever becomes the reason not to use the product. The corrected arithmetic above says that is
 far off.
+
+---
+
+## ADR-010 — Text is sampled per subpixel, because the hinter already assumed it
+
+**Status:** accepted — settled empirically by
+`cargo run -p zest-font --example glyph_probe`
+
+### The constraint, which is not ours
+
+`swash` does not let a caller choose a hinting *target*. It pins one:
+
+```rust
+// swash-0.2.10/src/scale/hinting_cache.rs
+const HINTING_MODE: HintingMode = HintingMode::Smooth {
+    lcd_subpixel: Some(LcdLayout::Horizontal),
+    preserve_linear_metrics: true,
+};
+```
+
+`hint(bool)` is the entire API. So hinting here has only ever meant "grid-fit this outline for a
+rasterizer with three times the horizontal resolution" — and until this change we then sampled it
+once per pixel. That mismatch does not read as softness. It changes **shapes**: `w` at 13 ppem in
+Cascadia Mono came back as three vertical stems and read as `W`, and `o c e C t` lost the baseline
+overshoot that `a` kept, so "Close" read a pixel short beside "tab" in one label. (#100.)
+
+**Measured before believing it:** driving skrifa 0.44 directly with
+`Target::Smooth { mode: Light }` — DirectWrite's natural mode, the obvious escape — produces a
+**byte-identical** bitmap. Cascadia Mono is ClearType-aware, which disables FreeType's
+backward-compatibility mode, so there is no gentler target to select. The choice is to match the
+sampler to the hinter or to decline the hinter.
+
+### The decision: both, as one setting
+
+`appearance.text_antialias` is `subpixel | grayscale`, defaulting to subpixel, and it decides
+hinting too — because they are one decision:
+
+- **Subpixel**: `zeno::Format::Subpixel`, and **no hinting**. The two symptoms have different
+  axes. Sampling per subpixel is horizontal and fixes the `w`; the flattened overshoot is
+  vertical and only not grid-fitting fixes that. Grid-fitting existed to buy horizontal
+  crispness that grayscale could not deliver; sampling per channel delivers it directly, so the
+  distortion is no longer buying anything.
+- **Grayscale**: `Format::Alpha` and hinting on, exactly as before. Unhinted *and* grayscale is
+  the blurry corner neither knob wants.
+
+This also closes #84 ("grayscale-only antialiasing reads thin on a 1× Windows display"), which
+was the same defect reported from the other side.
+
+### How per-channel coverage is blended
+
+Three coverages per texel cannot go through ADR-003's `One / OneMinusSrcAlpha`: that equation has
+one alpha for all three channels. The glyph pipeline emits a second fragment output carrying the
+per-channel coverage and blends `One / OneMinusSrc1` — still exactly source-over, and still
+**per primitive**, which matters because combining marks are separate instances drawn on top of
+their base glyph.
+
+**Rejected: a two-pass blend** (`Zero / OneMinusSrc`, then `One / One`), which needs no device
+feature. It is correct for one glyph and wrong for a *range* of them: pass one attenuates the
+destination by every glyph in the batch before pass two adds any ink, so wherever two glyphs
+overlap the result is additively too bright, into an `Rgba16Float` target with no clamping.
+Batching only non-overlapping glyphs would mean sorting by geometry — the same over-engineering
+`atlas.rs` already rejects for emoji — and it doubles every glyph draw.
+
+`Features::DUAL_SOURCE_BLENDING` is available on **DX12 (unconditionally, including WARP), Vulkan
+where the adapter reports `dualSrcBlend`, and Metal**. Where it is absent, grayscale is used and
+said so once in the log.
+
+### Where subpixel is refused, and why that is ADR-003's doing
+
+Per-channel coverage over a **translucent** destination is undefined: the compositor holds one
+alpha and cannot divide by three. So `window.opacity < 1.0` forces grayscale regardless of the
+setting. On Windows this costs almost nothing, because ADR-003 already found that DX12 reports
+only `Opaque` — opacity is forced to 1 there, and the two fallbacks agree rather than fight.
+
+ADR-003 otherwise stands unchanged: output is still premultiplied, and opacity still never
+applies to glyphs.
+
+### Consequences worth knowing
+
+- The mask atlas is `Rgba8Unorm` in subpixel mode — **never** `Rgba8UnormSrgb`. Coverage is not
+  colour, and `text_gamma`'s stem darkening is defined on raw coverage; an sRGB view would
+  linearize in the sampler and silently change what that setting means. Mask VRAM goes from 4 MiB
+  to 16 MiB per layer.
+- Stem darkening is applied **componentwise**, and the glyph's alpha is `max(cov)` taken *after*
+  that transfer. `max` is the smallest scalar that dominates every channel, so `resolve.wgsl`'s
+  un-premultiply can never produce `rgb/a > 1` and bloom a fringed edge.
+- The mode is a property of an atlas *generation*, not of `GlyphKey`. The key is hashed once per
+  cell per frame and there is no scene wanting both modes at once.
+- Box drawing stays a one-byte mask in both modes: it is generated geometrically at cell size
+  with arms snapped to whole pixels, so it has no sub-pixel detail to carry and subpixel offsets
+  would only put a colour fringe on a `│` that is currently one crisp column.
+- The dual-source shader is a **separate module**. naga validates `@blend_src` during *type*
+  checking, so a module that merely contains the output struct is rejected by
+  `create_shader_module` on any device without the feature — one module for everyone would fail
+  to start on exactly the machines the fallback exists to serve.
