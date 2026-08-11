@@ -16,23 +16,24 @@
 //! `--trusted`. The running daemon picks the token up from the credential store
 //! the next time it starts.
 //!
-//! # The transport is deliberately missing
+//! # The transport, and why it is still injected
 //!
-//! **This module cannot make the HTTP request yet, and says so at runtime
-//! rather than pretending.** The workspace has no HTTP client and no TLS stack,
-//! and adding `reqwest` or `rustls` here would settle by accident a decision
-//! that belongs to a future `zest-cloud` crate — which of the two TLS backends,
-//! whether an async runtime enters the tree at all, and what else in the
-//! workspace inherits them. That is a boundary decision, and it lands with the
-//! relay that needs the same transport.
+//! [`HttpsControlPlane`] is the real one: `zest_cloud::http` over
+//! `zest_cloud::tls`, which is the workspace's single owner of rustls and of
+//! anything resembling an HTTP client. It replaced a `NoHttpClient` stub that
+//! failed with an error naming the crate that did not exist yet — the seam was
+//! built first on purpose, because the parts either side of the wire (the
+//! signature, the exact JSON, what counts as a refusal, where the token goes)
+//! are the ones that are wrong in ways nobody notices, and none of them needs a
+//! socket to be got right.
 //!
-//! What is worth having *now* is everything either side of the wire: the
-//! signature, the exact JSON, what counts as a refusal, and where the token
-//! goes. Those are the parts that are wrong in ways nobody notices, so they are
-//! written and tested here against an injected [`ControlPlane`], and
-//! [`NoHttpClient`] fills the hole with an error that names the missing
-//! dependency. Swapping in a real client is one impl of one method.
+//! The [`ControlPlane`] trait outlived the stub for a reason that is not
+//! historical: every test below drives a real enrolment without opening one.
+//! A test that reached the network would be a test that fails on an aeroplane
+//! and passes against whatever the deployed Worker happens to answer today.
 
+use zest_cloud::http::Endpoint;
+use zest_cloud::tls::Roots;
 use zest_mesh::enroll::enrollment_request;
 use zest_mesh::identity::{HostIdentity, Purpose};
 use zest_mesh::keystore::{SecretStore, CLOUD_TOKEN_NAME};
@@ -72,10 +73,12 @@ pub struct Response {
 
 /// The single network call enrolment makes.
 ///
-/// A trait rather than a function taking a URL, so that the daemon's binary can
-/// be given a real client, a fake, or [`NoHttpClient`] without any of the code
-/// around it changing. See the module docs for why the real one does not exist
-/// yet.
+/// A trait rather than a function taking a URL, so that the binary can be given
+/// [`HttpsControlPlane`] and every test a fake, without a line of the enrolment
+/// logic between them changing. That is what kept this whole module — the
+/// signing, the JSON, the refusals, the store — testable months before the
+/// workspace had a TLS stack, and it is what keeps it testable now without one
+/// test opening a socket.
 pub trait ControlPlane {
     /// POST `body` to `url` as `application/json` and return what came back.
     ///
@@ -85,23 +88,86 @@ pub trait ControlPlane {
     fn post_json(&self, url: &str, body: &str) -> Result<Response, EnrollError>;
 }
 
-/// The placeholder that stands where the HTTP client will be.
+/// The real one: one HTTPS POST, through the crate that owns TLS.
 ///
-/// **TODO: implement this against the workspace's HTTP client once one
-/// exists.** It does not exist on purpose — see the module docs — and this
-/// fails loudly rather than silently, because the failure mode of a stub that
-/// returns `Ok` is a machine that reports itself enrolled and holds no token.
-#[derive(Debug, Clone, Copy)]
-pub struct NoHttpClient;
+/// Holds only the choice of trust anchors, because that is the one thing about
+/// this request a machine can need to be told — see [`Roots`]. Everything else
+/// is fixed by the URL.
+/// There is no `Default`: which trust store to check the control plane's
+/// certificate against is a choice with two live answers — a managed laptop
+/// behind a middlebox needs [`Roots::Platform`], a minimal container has no
+/// platform store to find — and a caller that did not think about it is a
+/// caller that will meet the other one as an unexplained certificate error.
+/// What actually goes to the network, behind a seam so a test can watch it.
+///
+/// The seam exists for one line — the call below — and that line is the only
+/// production code here the shipping CLI runs which nothing else covers.
+/// Without it, four separate mutations of it survived the whole suite:
+/// dropping the parsed port for 443, posting to `/` instead of the parsed
+/// path, sending an empty body, and ignoring the configured roots. The first
+/// is the exact failure `Endpoint`'s doc comment says this design exists to
+/// prevent — wrong on the first day anyone runs a control plane on 8443, and
+/// `--control-plane https://127.0.0.1:8787` is in the README.
+type Post = fn(&str, u16, &str, &str, Roots) -> std::io::Result<zest_cloud::http::Response>;
 
-impl ControlPlane for NoHttpClient {
-    fn post_json(&self, url: &str, _body: &str) -> Result<Response, EnrollError> {
-        Err(EnrollError::Transport(format!(
-            "this build cannot reach {url}: zesterm has no HTTP client or TLS stack yet. \
-             The signing and the token store are in place; the transport lands with the \
-             relay, in a zest-cloud crate that owns the choice of TLS backend"
-        )))
+#[derive(Clone, Copy)]
+pub struct HttpsControlPlane {
+    roots: Roots,
+    post: Post,
+}
+
+impl HttpsControlPlane {
+    /// Verifying the control plane against `roots`.
+    pub fn new(roots: Roots) -> Self {
+        Self { roots, post: zest_cloud::http::post_json }
     }
+
+    /// The same, over a stand-in that records what it was asked for.
+    #[cfg(test)]
+    fn posting_with(roots: Roots, post: Post) -> Self {
+        Self { roots, post }
+    }
+}
+
+impl ControlPlane for HttpsControlPlane {
+    fn post_json(&self, url: &str, body: &str) -> Result<Response, EnrollError> {
+        let to = addressed(url)?;
+        received(url, (self.post)(&to.host, to.port, &to.path, body, self.roots))
+    }
+}
+
+/// Where the configured URL says to post.
+///
+/// A URL that cannot be requested — the wrong scheme, no host, a port that is
+/// not a number — is a `Transport` failure and not a new variant, because it is
+/// the same thing to everyone downstream: nothing was asked, so nothing was
+/// refused, and the token is exactly where it was. The message quotes the URL,
+/// which is the part a person can act on.
+fn addressed(url: &str) -> Result<Endpoint, EnrollError> {
+    Endpoint::parse(url).map_err(|e| EnrollError::Transport(e.to_string()))
+}
+
+/// The one place `zest_cloud::http`'s answer becomes enrolment's.
+///
+/// Everything that crate reports as an `Err` is a request that produced no
+/// usable response — no route, a certificate that did not verify, a reply that
+/// is not HTTP/1.x, a body in an encoding it refuses to guess at — so all of it
+/// is [`EnrollError::Transport`]. That is what keeps the two things a person
+/// must be told apart: [`EnrollError::Refused`] and
+/// [`EnrollError::BadResponse`] are reachable only through a response that
+/// actually arrived, so "the control plane said no" can never be printed
+/// because the wifi dropped.
+///
+/// Separate from the impl above so the tests can put real HTTP bytes through
+/// the real client and the real mapping with no socket in the way; a fake that
+/// returned a `Response` directly would leave this function untested and it is
+/// where the classification is decided.
+fn received(
+    url: &str,
+    answer: std::io::Result<zest_cloud::http::Response>,
+) -> Result<Response, EnrollError> {
+    let got = answer.map_err(|e| EnrollError::Transport(format!("POST {url}: {e}")))?;
+    Ok(Response { status: got.status, body: got.body })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -293,6 +359,93 @@ fn clip(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// What `HttpsControlPlane` hands the transport, which nothing else checks.
+    ///
+    /// Four mutations of that one line survived the entire suite before this
+    /// existed: the parsed port replaced by 443, the parsed path by `/`, the
+    /// signed body by `""`, and the configured roots by `Bundled`. Every one
+    /// is silent — the daemon dials *something* and reports whatever comes
+    /// back — and the port one is the failure `Endpoint`'s doc comment says
+    /// the parsing exists to prevent.
+    ///
+    /// A `fn` pointer rather than a closure so `HttpsControlPlane` stays
+    /// `Copy`; the recording goes through a thread-local because a `fn` cannot
+    /// capture.
+    #[test]
+    fn what_reaches_the_transport_is_what_the_url_said() {
+        use std::cell::RefCell;
+        /// What the transport was handed, minus the roots — those have their
+        /// own test below, because asserting them here would mean recording a
+        /// value this test never varies.
+        struct Asked {
+            host: String,
+            port: u16,
+            path: String,
+            body: String,
+        }
+        thread_local! {
+            static SEEN: RefCell<Option<Asked>> = const { RefCell::new(None) };
+        }
+        fn record(
+            host: &str,
+            port: u16,
+            path: &str,
+            body: &str,
+            roots: Roots,
+        ) -> std::io::Result<zest_cloud::http::Response> {
+            let _ = roots;
+            SEEN.with(|s| {
+                *s.borrow_mut() = Some(Asked {
+                    host: host.to_string(),
+                    port,
+                    path: path.to_string(),
+                    body: body.to_string(),
+                });
+            });
+            Ok(zest_cloud::http::Response { status: 200, body: "{}".into() })
+        }
+
+        let plane = HttpsControlPlane::posting_with(Roots::Bundled, record);
+        let _ = plane.post_json("https://127.0.0.1:8787/api/enroll/claim", "{\"code\":\"abc\"}");
+
+        let seen = SEEN.with(|s| s.borrow_mut().take()).expect("the transport was never called");
+        assert_eq!(seen.host, "127.0.0.1", "the host in the URL is the host dialled");
+        assert_eq!(
+            seen.port, 8787,
+            "the port was parsed and then thrown away, so every control plane not on 443 is \
+             unreachable -- the one day this is wrong is the first day anyone runs one"
+        );
+        assert_eq!(seen.path, "/api/enroll/claim", "the path was parsed and then not used");
+        assert_eq!(seen.body, "{\"code\":\"abc\"}", "the signed claim never reached the wire");
+    }
+
+    /// The roots a caller chose are the roots that verify the certificate.
+    #[test]
+    fn the_configured_roots_reach_the_transport() {
+        use std::cell::RefCell;
+        thread_local! {
+            static ROOTS: RefCell<Option<Roots>> = const { RefCell::new(None) };
+        }
+        fn record(
+            _h: &str,
+            _p: u16,
+            _path: &str,
+            _b: &str,
+            roots: Roots,
+        ) -> std::io::Result<zest_cloud::http::Response> {
+            ROOTS.with(|s| *s.borrow_mut() = Some(roots));
+            Ok(zest_cloud::http::Response { status: 200, body: "{}".into() })
+        }
+
+        let plane = HttpsControlPlane::posting_with(Roots::Platform, record);
+        let _ = plane.post_json("https://example.test/api/enroll/claim", "{}");
+        assert!(
+            matches!(ROOTS.with(|s| s.borrow_mut().take()), Some(Roots::Platform)),
+            "a caller that asked for the OS trust store got something else, which is a \
+             certificate error nobody can explain on the machine it happens to"
+        );
+    }
     use super::*;
     use std::cell::RefCell;
     use zest_mesh::enroll::verify_enrollment;
@@ -326,6 +479,53 @@ mod tests {
         fn post_json(&self, url: &str, body: &str) -> Result<Response, EnrollError> {
             self.calls.borrow_mut().push((url.to_string(), body.to_string()));
             self.answer.clone().map_err(EnrollError::Transport)
+        }
+    }
+
+    /// The real client with the socket taken out: real request bytes into a
+    /// `Vec`, a canned response out of one.
+    ///
+    /// This is [`HttpsControlPlane`] with `TlsDuplex::connect` replaced and
+    /// nothing else — the same [`addressed`], the same request writer and
+    /// response parser in `zest_cloud::http`, the same [`received`]. What it
+    /// deliberately does not exercise is TLS and the `host:` header's port
+    /// suffix, both of which are `zest-cloud`'s to test; what it buys is that
+    /// "a 403 is a refusal" is proven against bytes a Worker could really
+    /// send, rather than against a `Response` a fake handed over ready-made.
+    struct CannedHttp {
+        response: Vec<u8>,
+        sent: RefCell<Vec<u8>>,
+    }
+
+    impl CannedHttp {
+        /// `head` carries the status line and any headers, each already
+        /// CRLF-terminated; the length and the blank line are added here so a
+        /// test only has to say the interesting part.
+        fn answering(head: &str, body: &str) -> Self {
+            Self {
+                response: format!("{head}content-length: {}\r\n\r\n{body}", body.len()).into_bytes(),
+                sent: RefCell::new(Vec::new()),
+            }
+        }
+
+        /// A peer that accepted the connection and then said nothing.
+        fn silent() -> Self {
+            Self { response: Vec::new(), sent: RefCell::new(Vec::new()) }
+        }
+
+        fn request(&self) -> String {
+            String::from_utf8(self.sent.borrow().clone()).expect("the request is UTF-8")
+        }
+    }
+
+    impl ControlPlane for CannedHttp {
+        fn post_json(&self, url: &str, body: &str) -> Result<Response, EnrollError> {
+            let to = addressed(url)?;
+            let mut sent = self.sent.borrow_mut();
+            received(
+                url,
+                zest_cloud::http::exchange(&self.response[..], &mut *sent, &to.host, &to.path, body),
+            )
         }
     }
 
@@ -541,16 +741,126 @@ mod tests {
     }
 
     #[test]
-    fn the_placeholder_transport_fails_and_names_what_is_missing() {
-        // The stub must be impossible to mistake for a working client. An
-        // `Ok(())` here would produce a machine that says it enrolled, holds no
-        // token, and blames the relay months later.
+    fn a_real_response_read_off_the_wire_enrols_this_machine() {
+        // End to end through the code that will run in production: the URL is
+        // split by `Endpoint`, the request is written and the response parsed
+        // by `zest_cloud::http`, and only the socket is missing.
         let store = MemoryKeyStore::new();
-        let err = enroll(&identity(), "C", "l", DEFAULT_CONTROL_PLANE, &NoHttpClient, &store)
-            .expect_err("there is no HTTP client in this workspace");
+        let http = CannedHttp::answering(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n",
+            r#"{"token":"zt_abc","account":"andy"}"#,
+        );
+
+        let enrolled = enroll(
+            &identity(),
+            "ABCD1234",
+            "andy-mac",
+            DEFAULT_CONTROL_PLANE,
+            &http,
+            &store,
+        )
+        .expect("a 200 carrying a token is an enrolment");
+
+        assert_eq!(enrolled.account.as_deref(), Some("andy"));
+        assert_eq!(token_in(&store).as_deref(), Some("zt_abc"));
+        let request = http.request();
         assert!(
-            err.to_string().contains("HTTP client"),
-            "the error has to say what is missing, or it reads as an outage; got {err}"
+            request.starts_with(&format!("POST {ENROLL_PATH} HTTP/1.1\r\n")),
+            "the configured base URL has to reduce to this request target, or every claim \
+             404s and a 404 here reads as an expired code; got {request:?}"
+        );
+        assert!(
+            request.contains("\r\ncontent-type: application/json\r\n")
+                && request.contains(r#""hostId":"#),
+            "the Worker routes on the content type and verifies the signed body it finds; \
+             got {request:?}"
+        );
+    }
+
+    #[test]
+    fn a_refusal_that_arrives_as_http_is_refused_and_not_a_transport_failure() {
+        // The classification `received` makes, against real bytes rather than
+        // against a `Response` a fake handed over. A completed request that
+        // said no must never be reported as a request that did not complete:
+        // one tells a person to try again, the other tells them why.
+        let store = MemoryKeyStore::new();
+        let http = CannedHttp::answering(
+            "HTTP/1.1 403 Forbidden\r\n",
+            r#"{"error":"that code has been used"}"#,
+        );
+
+        let err = enroll(&identity(), "ABCD1234", "andy-mac", DEFAULT_CONTROL_PLANE, &http, &store)
+            .expect_err("a 403 is not an enrolment");
+
+        assert!(matches!(err, EnrollError::Refused { status: 403, .. }), "got {err}");
+        assert!(err.to_string().contains("that code has been used"), "got {err}");
+        assert!(token_in(&store).is_none());
+    }
+
+    #[test]
+    fn a_response_that_is_not_json_reports_what_arrived() {
+        // The shape a proxy or an error page produces: a status that says yes
+        // and a body that is HTML. Naming it is the whole value — "the control
+        // plane refused this" with no reason is the least actionable error
+        // there is, and this is not a refusal at all.
+        let store = MemoryKeyStore::new();
+        let http = CannedHttp::answering(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\n",
+            "<html><body>Cloudflare</body></html>",
+        );
+
+        let err = enroll(&identity(), "C", "l", DEFAULT_CONTROL_PLANE, &http, &store)
+            .expect_err("a page is not an enrolment");
+
+        assert!(matches!(err, EnrollError::BadResponse(_)), "got {err}");
+        assert!(
+            err.to_string().contains("<html>"),
+            "the body has to reach the person, or a proxy in the way is indistinguishable \
+             from a control plane that answered nonsense; got {err}"
+        );
+        assert!(token_in(&store).is_none());
+    }
+
+    #[test]
+    fn a_peer_that_answers_nothing_is_a_transport_failure_naming_the_url() {
+        let store = MemoryKeyStore::new();
+        let http = CannedHttp::silent();
+        let err = enroll(&identity(), "C", "l", DEFAULT_CONTROL_PLANE, &http, &store)
+            .expect_err("a connection that said nothing did not enrol anything");
+        assert!(
+            matches!(err, EnrollError::Transport(_)),
+            "nothing was refused, because nothing answered; got {err}"
+        );
+        assert!(
+            err.to_string().contains(DEFAULT_CONTROL_PLANE),
+            "the URL is what a person checks first when nothing answers; got {err}"
+        );
+        assert!(token_in(&store).is_none());
+    }
+
+    #[test]
+    fn a_url_the_client_cannot_request_fails_before_anything_is_dialled() {
+        // The real `HttpsControlPlane`, and the one thing it can be asked that
+        // needs no network: a `--control-plane` that is not an https URL is
+        // refused by `Endpoint::parse` before `TlsDuplex::connect` is reached.
+        // Posting a bearer token over plaintext is the failure that would
+        // otherwise work, which is why it is refused rather than upgraded.
+        let store = MemoryKeyStore::new();
+        let err = enroll(
+            &identity(),
+            "C",
+            "l",
+            "http://zesterm.example",
+            &HttpsControlPlane::new(Roots::Platform),
+            &store,
+        )
+        .expect_err("plaintext must not carry an enrolment");
+
+        assert!(matches!(err, EnrollError::Transport(_)), "got {err}");
+        assert!(
+            err.to_string().contains("https"),
+            "the error has to name the scheme, or it reads as the control plane being down; \
+             got {err}"
         );
         assert!(token_in(&store).is_none());
     }

@@ -26,6 +26,106 @@ use crate::tls::{Roots, TlsDuplex};
 /// The scheme's port, and the only one this ever infers.
 pub const HTTPS_PORT: u16 = 443;
 
+/// A configured `https://host[:port]/path`, in the three pieces [`post_json`]
+/// takes.
+///
+/// # Why the splitting lives here rather than in the crate that calls it
+///
+/// The one caller is `zest_daemon::enroll`, which owns the control-plane URL
+/// and could have split it itself — this crate cannot depend on `zest-daemon`,
+/// so the `ControlPlane` impl is over there either way. What settled it is that
+/// every rule below is a statement about *this transport* and none of them is
+/// about enrolment: that the scheme must be `https` because [`post_json`]
+/// speaks TLS and nothing else, and that an absent port means [`HTTPS_PORT`].
+/// Splitting the URL in `zest-daemon` would put that default in a different
+/// crate from the constant and the dialler that honour it, and a default port
+/// that has quietly drifted from the client using it is wrong on exactly one
+/// day: the first time anyone runs a control plane on 8443.
+///
+/// It is deliberately **not** a general URL type — no userinfo, no relative
+/// resolution, no percent-decoding, no IPv6 literals. Each of those is refused
+/// by name rather than half-implemented, on the same argument the module docs
+/// make about chunked encoding: a URL parser that quietly mishandles a shape is
+/// a request sent somewhere nobody chose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Endpoint {
+    /// What is dialled, and the name the certificate is checked against.
+    pub host: String,
+    pub port: u16,
+    /// The request target, query string included: everything from the first
+    /// `/`, or `/` when the URL named only an origin.
+    pub path: String,
+}
+
+impl Endpoint {
+    /// Split a configured URL, or say what about it cannot be requested.
+    pub fn parse(url: &str) -> io::Result<Self> {
+        let Some(rest) = url.strip_prefix("https://") else {
+            // `http://` is refused rather than dialled: a bearer token goes up
+            // this request and another comes back down it, and a scheme that
+            // silently downgraded them would be the one failure here nobody
+            // sees, because it works.
+            return Err(malformed(url, "it is not an https:// URL"));
+        };
+        if url.contains('#') {
+            return Err(malformed(url, "a fragment is never sent to a server"));
+        }
+
+        let (authority, path) = match rest.find('/') {
+            Some(cut) => (&rest[..cut], &rest[cut..]),
+            None => (rest, "/"),
+        };
+        if authority.starts_with('[') {
+            return Err(malformed(
+                url,
+                "a bracketed IPv6 literal is not supported; the control plane is reached by name",
+            ));
+        }
+        if authority.contains('@') {
+            return Err(malformed(url, "userinfo in a URL is not a credential this sends"));
+        }
+        // A query with no path before it is not a control-plane URL, and the
+        // alternative to refusing it is a hostname with `?env=staging` inside,
+        // which resolves nowhere and reports a DNS failure.
+        if authority.contains('?') {
+            return Err(malformed(url, "there is no path before the query"));
+        }
+
+        // `rsplit_once`, so the last colon separates the port -- safe only
+        // because the bracketed form is refused above, which is the shape where
+        // the last colon is inside the host.
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((host, port)) => (
+                host,
+                port.parse::<u16>()
+                    .map_err(|_| malformed(url, &format!("{port:?} is not a port")))?,
+            ),
+            None => (authority, HTTPS_PORT),
+        };
+        if host.is_empty() {
+            return Err(malformed(url, "there is no host in it"));
+        }
+        // A colon left in the host means the "last colon is the port"
+        // assumption above did not hold — an unbracketed IPv6 literal, or an
+        // authority malformed some other way. Refusing beats guessing: the
+        // alternative is dialling a host that is not the one written down and
+        // reporting whatever answers, which is the shape of failure this whole
+        // type exists to keep out of the enrolment path.
+        if host.contains(':') {
+            return Err(malformed(url, "the host has a colon in it, so where the port starts is a guess"));
+        }
+
+        Ok(Self { host: host.to_string(), port, path: path.to_string() })
+    }
+}
+
+/// Why a configured URL cannot be requested. `InvalidInput` rather than
+/// `InvalidData`: this is something a person typed or a build set, not
+/// something a peer sent.
+fn malformed(url: &str, why: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, format!("{url:?} cannot be requested: {why}"))
+}
+
 /// How long the whole exchange may take before it is given up on.
 ///
 /// Safe here where it would be wrong on a session: a request/response exchange
@@ -312,5 +412,101 @@ mod tests {
         let e = exchange(&canned[..], &mut Vec::new(), "h", "/p", "{}")
             .expect_err("something that is not a response was parsed as one");
         assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+    }
+
+    fn parsed(url: &str) -> Endpoint {
+        Endpoint::parse(url).unwrap_or_else(|e| panic!("{url} should split: {e}"))
+    }
+
+    #[test]
+    fn an_authority_whose_host_still_has_a_colon_is_refused() {
+        // The bracketed IPv6 form is refused earlier; these are the shapes that
+        // slipped past it and left a colon in the host, where "the last colon
+        // is the port" quietly stops being true. Guessing means dialling a host
+        // that is not the one written down and reporting whatever answers.
+        for url in [
+            "https://::1/api/enroll/claim",
+            "https://fe80::1:8787/api/enroll/claim",
+            "https://a:b:c/api/enroll/claim",
+        ] {
+            assert!(
+                Endpoint::parse(url).is_err(),
+                "{url} was accepted, so something other than the configured host would be dialled"
+            );
+        }
+    }
+
+    #[test]
+    fn a_url_splits_into_the_three_things_a_request_needs() {
+        assert_eq!(
+            parsed("https://zesterm.sigx.workers.dev/api/enroll/claim"),
+            Endpoint {
+                host: "zesterm.sigx.workers.dev".into(),
+                port: HTTPS_PORT,
+                path: "/api/enroll/claim".into(),
+            },
+            "the deployed control plane's own URL is the one shape that must never be \
+             mis-split, and an absent port is the scheme's"
+        );
+        assert_eq!(
+            parsed("https://127.0.0.1:8787/api/enroll/claim"),
+            Endpoint { host: "127.0.0.1".into(), port: 8787, path: "/api/enroll/claim".into() },
+            "a port has to survive: `wrangler dev` serves on 8787, and losing it dials 443 \
+             on the same box and reports the local Worker as unreachable"
+        );
+        assert_eq!(
+            parsed("https://example.test").path,
+            "/",
+            "a URL naming only an origin still has to produce a request target"
+        );
+        assert_eq!(
+            parsed("https://example.test/base/api/enroll/claim").path,
+            "/base/api/enroll/claim",
+            "a control plane behind a path prefix is routed on the whole path"
+        );
+        assert_eq!(
+            parsed("https://example.test/claim?env=staging").path,
+            "/claim?env=staging",
+            "the query is part of the request target and is carried through verbatim"
+        );
+    }
+
+    #[test]
+    fn a_url_this_cannot_request_is_refused_rather_than_guessed_at() {
+        // Every one of these has a plausible wrong answer -- downgrade to
+        // plaintext, read the last colon out of an address, keep `user@` in the
+        // hostname -- and each wrong answer addresses something nobody chose.
+        // The first is the one that would work: a claim posted in the clear
+        // succeeds, and the token it carries is on the wire for anyone.
+        for (url, why) in [
+            ("http://example.test/claim", "plaintext must not be silently dialled over TLS"),
+            ("example.test/claim", "a URL with no scheme names no transport"),
+            ("wss://example.test/claim", "this client speaks HTTP and not WebSocket"),
+            ("https:///claim", "there is no host to dial or to check a certificate against"),
+            ("https://example.test:https/claim", "a port that is not a number is not a port"),
+            ("https://example.test:/claim", "an empty port is not the default"),
+            // Both spellings, because only the second reaches the userinfo
+            // check: the first is already refused for having `pw@example.test`
+            // where its port should be, so testing it alone would leave that
+            // check believed and unexercised.
+            ("https://user:pw@example.test/claim", "userinfo is a credential this never sends"),
+            ("https://user@example.test/claim", "`user@example.test` is not a host to dial"),
+            ("https://[::1]:8787/claim", "the last colon in a bracketed address is not a port"),
+            ("https://example.test/claim#frag", "a fragment never reaches a server"),
+            ("https://example.test?env=staging", "a query where the path should start leaves \
+              the query inside the hostname"),
+        ] {
+            let e = Endpoint::parse(url).err().unwrap_or_else(|| panic!("{url} was accepted: {why}"));
+            assert_eq!(
+                e.kind(),
+                io::ErrorKind::InvalidInput,
+                "a configured URL is something a person typed, not something a peer sent: {e}"
+            );
+            assert!(
+                e.to_string().contains(url),
+                "the error has to quote the URL, or it reads as an outage rather than as a \
+                 setting to fix: {e}"
+            );
+        }
     }
 }

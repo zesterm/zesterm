@@ -5586,6 +5586,7 @@ dependencies = [
  "tracing-subscriber",
  "tungstenite",
  "windows-sys 0.60.2",
+ "zest-cloud",
  "zest-core",
  "zest-mesh",
  "zest-proto",

@@ -67,7 +67,7 @@ and its number (48ms) is reported rather than gated.
 | `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), restore-on-launch — runs on Windows *and* macOS (Metal, transparent titlebar) — ⬜ Windows chrome, motion |
 | `zest-proto` | ✅ protocol 2, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, cell-for-cell conformance, chaos-resync, command blocks |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store, sealed channel |
-| `zest-cloud` | ✅ the fence held: rustls (ring) landed here and `check-deps` stayed green with no list edited — `TlsDuplex`, one connection as two independently owned halves, and a one-request HTTP POST over it — ⬜ the relay dialler, and nothing depends on this crate yet (M6) |
+| `zest-cloud` | ✅ the fence held in both directions: rustls (ring) landed here and `check-deps` stayed green with no list edited, and `zest-daemon`'s `--enroll` is now a real consumer — `TlsDuplex`, one connection as two independently owned halves, a one-request HTTP POST over it, `Endpoint` — ⬜ the relay dialler (M6) |
 | `zest-daemon` | ✅ session ownership *and* lifecycle, protocol loop, loopback *and* LAN transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing |
 
 ### What works end to end today
@@ -1209,7 +1209,9 @@ is now unblocked and building.
       surfaces at bring-up as a mismatch that names neither side. Verification
       is `zip215: false`, matching dalek's `verify_strict`: noble's default
       accepts small-order keys, which verify almost anything.
-      Still open: the daemon's `--enroll`, and the devices screen.
+      Still open: the devices screen. The daemon's `--enroll` now posts for
+      real — but the two halves have still never spoken over a network; each is
+      tested against the shared preimage, not against the other.
 - [x] **The fleet screen reads the account** — `GET /api/hosts` and
       `/api/devices`, with revoke on both.
       The plan called for a separate `/settings/devices`; that was wrong and
@@ -1508,20 +1510,24 @@ on each host. → ADR-005, ADR-006.
       not by name, and the kind of key backing the device is surfaced to the
       UI — a browser on the fallback is working, not secure, and the screen
       says so.
-- [ ] Host enrollment: `zest-daemon --enroll <code>` signs a code carried from
+- [x] Host enrollment: `zest-daemon --enroll <code>` signs a code carried from
       the account's devices screen with the host key, and keeps the token it is
       given beside the private key in the OS credential store — `--logout`
       forgets it, `--account` says what is held. Foreground flags, because a
       detached daemon has no terminal to be handed a one-shot code on.
 
-      **What is missing is deliberate: the HTTP call.** The workspace has no
-      HTTP client and no TLS stack, and choosing one settles by accident what
-      the `zest-cloud` crate the relay needs will be built on. So the request
-      goes through an injected `ControlPlane` seam, tested against a fake, and
-      `NoHttpClient` fills the hole with an error that names the missing
-      dependency rather than a stub that returns success. The signing, the JSON,
-      what counts as a refusal and where the token goes are the parts that are
-      wrong in ways nobody notices; those are done.
+      **The seam was built before the transport, and it paid.** The signing,
+      the JSON, what counts as a refusal and where the token goes are the parts
+      that are wrong in ways nobody notices, and none of them needs a socket;
+      they landed against an injected `ControlPlane` while `NoHttpClient` held
+      the hole open with an error naming the crate that did not exist yet.
+      `HttpsControlPlane` — `zest_cloud::http` over `zest_cloud::tls` — then
+      replaced it with no change to that logic and none to the tests around it;
+      the only test that went was the stub's own.
+
+      Not claimed: no enrolment has been made against the deployed Worker.
+      Both ends are tested against the shared preimage rather than against each
+      other, and the first live claim is still the first live claim.
 - [ ] Attach tickets (30s TTL, single use) minted by the actor.
 
 ## M5 — phone, AI, end-to-end encryption
@@ -1701,12 +1707,25 @@ three facts about Cloudflare that changed after #59 was written.
       `content-length`. Chunked transfer-encoding is **detected and refused by
       name** rather than half-decoded, because a chunk-size line read as a body
       reaches `--enroll` as a token that is really a hex number.
-- [ ] **`--enroll` over a real HTTP client.** `NoHttpClient` names the missing
-      dependency today; this is where it stops being missing. Falls out of the
-      TLS work and is worth having months before the relay does — the client
-      itself now exists (`zest_cloud::http::post_json`); what is left is the
-      `ControlPlane` impl, the URL splitting, and `zest-daemon` taking the
-      dependency.
+- [x] **`--enroll` over a real HTTP client.** `NoHttpClient` is gone;
+      `HttpsControlPlane` posts the signed claim over `zest_cloud::http`, and
+      `zest-daemon` is the first crate to depend on `zest-cloud`.
+
+      **Which proves the half of the fence that was vacuous.** #68 said rustls
+      has one owner and that the portable crates have none — but nothing
+      depended on `zest-cloud`, so only the first claim had ever been tested.
+      `check-deps` still reports all 9 boundaries hold with no list edited, and
+      `cargo tree -p zest-app -e normal -i rustls` shows the one path it
+      predicted: `zest-cloud → zest-daemon → zest-app`. rustls in the desktop
+      binary is the design, not a leak.
+
+      The URL splitting lives in `zest-cloud` beside `HTTPS_PORT` rather than
+      in the caller, because "an absent port means 443" is a statement about
+      the dialler; the argument is in `Endpoint`'s doc comment. It refuses
+      rather than guesses at `http://`, userinfo, a bracketed IPv6 literal, a
+      fragment and a query with no path in front of it — the first of those
+      would post a bearer token in the clear, and each of the rest addresses
+      something nobody chose.
 - [ ] **The web client learns a second data plane.** `DataPlane` grows a
       discriminant, a relay `Dial` mints its ticket before opening the socket
       (the seam stays synchronous — a failed mint is a dropped dial, and
