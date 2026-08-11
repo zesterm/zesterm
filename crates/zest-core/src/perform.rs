@@ -535,11 +535,16 @@ impl TermState {
                     self.pending_command = Some(unescape_vscode(cmd));
                 }
             }
-            // `P ; Cwd=<path>` -- a plain path, not the `file://` URL of OSC 7.
+            // `P ; Cwd=<path>` -- a plain path, not the `file://` URL of OSC 7,
+            // but escaped the same way `E` is. That is not decoration on
+            // Windows: VS Code's own hook sends `C:\x5cDev`, so reading the
+            // value literally put a cwd of `C:\x5cDev\x5czesterm` in the status
+            // bar for everyone using the integration it is here to support.
+            // Measured, not guessed -- see the 633 fixture.
             b'P' => {
                 if let Some(rest) = params.get(2).and_then(|b| core::str::from_utf8(b).ok()) {
                     if let Some(path) = rest.strip_prefix("Cwd=") {
-                        self.cwd = String::from(path);
+                        self.cwd = unescape_vscode(path);
                     }
                 }
             }

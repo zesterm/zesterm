@@ -22,6 +22,11 @@
 //! session misbehaves in a browser, this says whether the daemon's WebSocket
 //! transport or the browser's stack is at fault, with no browser involved.
 //!
+//! Anything on stdin is forwarded to the session as keystrokes, so a shell can
+//! be driven from here — `echo hello` then a failing command is how a shell
+//! integration is checked with no GUI in the picture. Type `\r`, not `\n`: it is
+//! a terminal on the other end.
+//!
 //! `--close` ends the session on the way out instead of merely detaching. It is
 //! the only way to see the difference from outside the daemon: detaching leaves
 //! the child running by design, so "did closing actually end it" is a question
@@ -116,17 +121,10 @@ fn run<R: Read + Send + 'static, W: Write + Send + 'static>(
     // deadline thread writes through this same closure, which is why it is a
     // lock at all and not a plain local.
     let sealer: Arc<Mutex<Option<zest_mesh::secure::Sealer>>> = Arc::new(Mutex::new(None));
-    let send = |writer: &Arc<Mutex<W>>, msg: &ClientMessage| {
-        let body = frame::encode_body(msg).expect("encode");
-        let mut w = writer.lock().expect("writer");
-        let body = match sealer.lock().expect("sealer").as_mut() {
-            Some(s) => s.seal(&body).expect("seal"),
-            None => body,
-        };
-        let bytes = frame::frame_bytes(&body).expect("frame");
-        Write::write_all(&mut *w, &bytes).expect("write");
-        Write::flush(&mut *w).expect("flush");
-    };
+    // A free function rather than only a closure, so the stdin thread can send
+    // through the same path instead of writing its own — the lock ordering above
+    // is the sort of thing that must not exist twice.
+    let send = |writer: &Arc<Mutex<W>>, msg: &ClientMessage| send_msg(writer, &sealer, msg);
 
     // A throwaway key. This is a diagnostic, not a device: it should not
     // accumulate a pairing on every host it is pointed at.
@@ -186,6 +184,31 @@ fn run<R: Read + Send + 'static, W: Write + Send + 'static>(
             }
             eprintln!("[attach] done");
             std::process::exit(0);
+        });
+    }
+
+    // Forward our stdin to the session, so a shell can actually be driven from
+    // here. Without it this example can watch a session but not make one do
+    // anything, which is the difference between seeing that a prompt appeared
+    // and seeing that a command ran, failed, and was indexed as a block —
+    // exactly what a shell-integration change has to be checked against.
+    //
+    // Waits for the address rather than buffering: input is addressed to a
+    // session, and there is no session to address until the keyframe names one.
+    {
+        let opened = Arc::clone(&opened);
+        let writer = Arc::clone(&writer);
+        let sealer = Arc::clone(&sealer);
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin().lock();
+            let mut buf = [0u8; 1024];
+            while let Ok(n) = stdin.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                let Some(session) = *opened.lock().expect("session slot") else { continue };
+                send_msg(&writer, &sealer, &ClientMessage::Input { session, bytes: buf[..n].to_vec() });
+            }
         });
     }
 
@@ -374,6 +397,27 @@ fn run<R: Read + Send + 'static, W: Write + Send + 'static>(
             }
         }
     }
+}
+
+/// Seal and write one message.
+///
+/// The sealer is locked *after* the writer, always: sealing advances a counter,
+/// so two threads that sealed in one order and wrote in the other would produce
+/// frames the host cannot open.
+fn send_msg<W: Write>(
+    writer: &Arc<Mutex<W>>,
+    sealer: &Arc<Mutex<Option<zest_mesh::secure::Sealer>>>,
+    msg: &ClientMessage,
+) {
+    let body = frame::encode_body(msg).expect("encode");
+    let mut w = writer.lock().expect("writer");
+    let body = match sealer.lock().expect("sealer").as_mut() {
+        Some(s) => s.seal(&body).expect("seal"),
+        None => body,
+    };
+    let bytes = frame::frame_bytes(&body).expect("frame");
+    Write::write_all(&mut *w, &bytes).expect("write");
+    Write::flush(&mut *w).expect("flush");
 }
 
 /// Print the command blocks, which is the phone client's whole view.

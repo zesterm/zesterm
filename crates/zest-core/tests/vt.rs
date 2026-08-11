@@ -831,6 +831,70 @@ fn osc_633_indexes_the_same_blocks_as_133() {
 }
 
 #[test]
+fn a_vscode_cwd_is_unescaped_like_the_command_it_travels_with() {
+    // `633;P` carries the same `\xNN` escaping as `633;E`, and reading it
+    // literally is wrong on exactly the platform where it matters: VS Code's own
+    // PowerShell hook escapes every backslash, so a Windows cwd arrived as
+    // `C:\x5cDev` and the status bar showed it. Measured against the real script
+    // (#83), not inferred from its source.
+    let t = run(40, 4, "\x1b]633;P;Cwd=C:\\x5cUsers\\x5candy\\x5cMy Code\x07\x1b]633;A\x07$ ");
+    assert_eq!(t.cwd(), r"C:\Users\andy\My Code");
+
+    // A path that merely *looks* escaped must survive, because `\x64` is a
+    // directory name people really have and `\D` is every other Windows path.
+    let t = run(40, 4, "\x1b]633;P;Cwd=/home/andy\x07\x1b]633;A\x07$ ");
+    assert_eq!(t.cwd(), "/home/andy", "an unescaped path is left alone");
+}
+
+#[test]
+fn a_real_pwsh_session_produces_real_blocks() {
+    // The PowerShell half of the zsh test below, and recorded the same way:
+    // through a real pty, from a real interactive `pwsh` with zesterm's hook
+    // dot-sourced by the command line it builds. PSReadLine's inline prediction
+    // is in the recording too, which is what makes it worth having -- the
+    // command a person typed is repainted several times before it runs.
+    let bytes =
+        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/corpus/blocks-pwsh.vtrec"))
+            .expect("blocks fixture");
+    let mut t = Terminal::new(120, 30, 200);
+    for chunk in parse_vtrec(&bytes) {
+        t.advance(&chunk);
+    }
+
+    let blocks = t.blocks().blocks();
+    assert!(blocks.len() >= 3, "expected a block per prompt, got {}", blocks.len());
+
+    let finished: Vec<_> = blocks.iter().filter(|b| b.end_line.is_some()).collect();
+    assert!(finished.len() >= 2, "two commands ran to completion");
+
+    assert!(!finished[0].failed(), "`echo hello` succeeded");
+    assert!(finished[1].failed(), "`cmd /c exit 3` did not, and the status says so");
+
+    // The whole reason the hook emits `633;E` rather than leaving zesterm to
+    // read the grid: PSReadLine repaints the line as it predicts, so the cells
+    // between `B` and `C` are a rendering of the command and not the command.
+    assert_eq!(finished[0].command, "echo hello");
+    assert_eq!(finished[1].command, "cmd /c exit 3");
+
+    // A native command's real exit code, not a bare "it failed". `$?` alone
+    // could not have produced this, which is what the status calculation in the
+    // hook exists for.
+    assert_eq!(
+        finished[1].state,
+        zest_core::BlockState::Finished { exit_code: Some(3) },
+        "the exit code is the command's own, not a stand-in 1"
+    );
+
+    // `633;P;Cwd=` rode along with the same hook -- escaped by the hook and
+    // unescaped here, which is the pairing a Windows path needs.
+    assert_eq!(finished[0].cwd, r"C:\zestdemo");
+
+    let out = finished[0].output_line.expect("output began");
+    let row = t.grid().row_of_line(out).expect("still on screen");
+    assert_eq!(t.grid().row(row).text(), "hello", "output_line is the first line of output");
+}
+
+#[test]
 fn a_real_zsh_session_produces_real_blocks() {
     // Recorded through a real pty from a real interactive `zsh` with zesterm's
     // shell integration injected -- not a hand-written sequence. It is the

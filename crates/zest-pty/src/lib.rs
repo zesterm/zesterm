@@ -65,14 +65,11 @@ impl CommandSpec {
         // spawn time rather than baked in, because this decides what the user
         // actually gets when they have not configured a shell.
         #[cfg(windows)]
-        let command_line = {
-            let pwsh = std::path::Path::new(r"C:\Program Files\PowerShell\7\pwsh.exe");
-            if pwsh.exists() {
-                r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo"#.to_string()
-            } else {
-                std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into())
-            }
-        };
+        let command_line = resolve_windows_shell(
+            &std::env::var("PATH").unwrap_or_default(),
+            &std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()),
+            |p| p.is_file(),
+        );
         #[cfg(not(windows))]
         let command_line = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
 
@@ -91,13 +88,37 @@ impl CommandSpec {
     /// rather than silent, because "why do I have no blocks" needs an answer
     /// somewhere.
     pub fn enable_shell_integration(&mut self, dir: &std::path::Path) {
+        // A command line can already carry the hook, because PowerShell's
+        // injection point *is* the command line and a command line travels: the
+        // app hands one to the daemon, and a user may have written their own.
+        // Injecting again would emit every marker twice, which the parser reads
+        // as an empty block between each real one.
+        if shell_integration::already_injected(&self.command_line) {
+            tracing::debug!(command = %self.command_line, "shell integration is already loaded");
+            return;
+        }
         let Some(shell) = shell_integration::Shell::detect(&self.command_line) else {
-            tracing::debug!(command = %self.command_line, "no shell integration for this shell");
+            // `info`, not `debug`. "Why does the status bar say 0 blocks" needs
+            // an answer that a default log setup actually prints -- the silence
+            // here is what made PowerShell's absence take a screenshot to
+            // notice (#83). `cmd.exe` is the honest permanent case.
+            tracing::info!(
+                command = %self.command_line,
+                "no shell integration for this shell; it will have no command blocks"
+            );
             return;
         };
-        match shell_integration::install(shell, dir) {
-            Ok(env) => {
-                self.env.extend(env);
+        match shell_integration::install(shell, &self.command_line, dir) {
+            Ok(injection) if injection.env.is_empty() && injection.args.is_empty() => {
+                // `install` declined — a PowerShell already running a command of
+                // its own is the case — and has said why at `info`. Reporting
+                // "injected" as well would contradict it two lines later, in the
+                // log someone is reading precisely because their blocks are
+                // missing.
+            }
+            Ok(injection) => {
+                self.env.extend(injection.env);
+                self.command_line.push_str(&injection.args);
                 tracing::debug!(shell = shell.name(), "shell integration injected");
             }
             Err(e) => {
@@ -109,6 +130,62 @@ impl CommandSpec {
             }
         }
     }
+}
+
+/// Which shell a Windows box gets when the user has not chosen one.
+///
+/// `PATH` first, and that is the fix rather than a nicety: the previous version
+/// probed `C:\Program Files\PowerShell\7\pwsh.exe` and nothing else, so a
+/// scoop, winget or MSIX PowerShell — none of which install there — dropped the
+/// user all the way to `cmd.exe`, which has no prompt hook and therefore no
+/// command blocks, ever. `PATH` is also what the user means by "pwsh", since it
+/// is what typing the word runs.
+///
+/// Windows PowerShell 5.1 sits between PowerShell 7 and `cmd` because it ships
+/// with the OS and takes the same hook. Falling past it to `cmd` trades a shell
+/// with command blocks for one that structurally cannot have them.
+///
+/// Pure, and takes its inputs rather than reading the environment, so the order
+/// can be tested without a PowerShell installed or the process environment
+/// mutated.
+#[cfg(windows)]
+fn resolve_windows_shell(
+    path_var: &str,
+    comspec: &str,
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> String {
+    let on_path = |exe: &str| {
+        path_var
+            .split(';')
+            .filter(|d| !d.is_empty())
+            .map(|d| std::path::Path::new(d).join(exe))
+            .find(|p| exists(p))
+    };
+
+    for exe in ["pwsh.exe", "powershell.exe"] {
+        if let Some(found) = on_path(exe) {
+            return quoted_shell(&found.to_string_lossy());
+        }
+        // Not on PATH but installed in the place its installer uses. The
+        // daemon's environment is frozen at first spawn and every shell in the
+        // fleet inherits it, so a PATH that predates an install is a case that
+        // really happens.
+        let default = match exe {
+            "pwsh.exe" => r"C:\Program Files\PowerShell\7\pwsh.exe",
+            _ => r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+        };
+        if exists(std::path::Path::new(default)) {
+            return quoted_shell(default);
+        }
+    }
+    comspec.to_string()
+}
+
+/// A path as a command line: quoted, because `CreateProcessW` parses the line
+/// itself and every plausible location for these has a space in it.
+#[cfg(windows)]
+fn quoted_shell(path: &str) -> String {
+    format!("\"{path}\" -NoLogo")
 }
 
 /// How the shell learns what terminal it is talking to.
@@ -313,6 +390,119 @@ pub trait PtyTransport: Send {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Injecting twice doubles every marker.
+    ///
+    /// Not hypothetical: PowerShell's hook lands *in the command line*, and a
+    /// command line is the one part of a spawn that travels. The app builds one
+    /// and hands it to the daemon, which detects a PowerShell in it and would
+    /// inject again — and a doubled marker stream reads to the parser as an
+    /// empty block between each real one, which is a subtly wrong index rather
+    /// than an obviously broken one.
+    #[test]
+    fn a_command_line_that_already_loads_the_hook_is_not_amended_again() {
+        let dir = std::env::temp_dir().join(format!("zesterm-si-twice-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut spec =
+            CommandSpec { command_line: "pwsh -NoLogo".into(), cwd: None, env: Vec::new() };
+        spec.enable_shell_integration(&dir);
+        let once = spec.command_line.clone();
+        spec.enable_shell_integration(&dir);
+
+        assert_eq!(spec.command_line, once, "the hook was injected a second time");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A shell hooked through the environment leaves the command line alone.
+    #[test]
+    fn hooking_zsh_does_not_touch_its_command_line() {
+        let dir = std::env::temp_dir().join(format!("zesterm-si-zsh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut spec = CommandSpec { command_line: "/bin/zsh".into(), cwd: None, env: Vec::new() };
+        spec.enable_shell_integration(&dir);
+
+        assert_eq!(spec.command_line, "/bin/zsh");
+        assert!(
+            spec.env.iter().any(|(k, _)| k == "ZDOTDIR"),
+            "zsh finds its hook through ZDOTDIR and nothing else"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A PowerShell already running a command of its own is left exactly alone.
+    ///
+    /// `-Command` swallows the rest of the line, so appending after one does not
+    /// add a second `-Command` — it adds text to the user's command and breaks
+    /// their shell, which is strictly worse than the missing blocks it was meant
+    /// to fix.
+    #[test]
+    fn a_powershell_that_already_runs_a_command_is_spawned_exactly_as_asked() {
+        let dir = std::env::temp_dir().join(format!("zesterm-si-cmd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut spec = CommandSpec {
+            command_line: "pwsh -NoLogo -Command Get-Date".into(),
+            cwd: None,
+            env: Vec::new(),
+        };
+        spec.enable_shell_integration(&dir);
+
+        assert_eq!(spec.command_line, "pwsh -NoLogo -Command Get-Date");
+        assert!(spec.env.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A shell we cannot hook is spawned unchanged.
+    #[test]
+    fn a_shell_with_no_hook_is_spawned_exactly_as_asked() {
+        let dir = std::env::temp_dir().join(format!("zesterm-si-none-{}", std::process::id()));
+        let mut spec = CommandSpec { command_line: "cmd.exe".into(), cwd: None, env: Vec::new() };
+        spec.enable_shell_integration(&dir);
+
+        assert_eq!(spec.command_line, "cmd.exe", "cmd has no hook and must not be given one");
+        assert!(spec.env.is_empty());
+        assert!(!dir.exists(), "nothing should have been written for a shell with no hook");
+    }
+
+    /// The order that decides whether a Windows user gets command blocks at all.
+    ///
+    /// The old code probed one hardcoded path, so a scoop or winget PowerShell
+    /// — neither of which installs there — fell through to `cmd.exe`, which has
+    /// no prompt hook and therefore no blocks, ever.
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_shell_is_looked_up_on_path_before_anywhere_else() {
+        let scoop = r"C:\Users\andy\scoop\shims";
+        let pf = r"C:\Program Files\PowerShell\7\pwsh.exe";
+        let ps51 = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
+        let path = format!(r"C:\Windows\System32;{scoop}");
+
+        let only = |want: String| move |p: &std::path::Path| p == std::path::Path::new(&want);
+
+        assert_eq!(
+            resolve_windows_shell(&path, "cmd.exe", only(format!(r"{scoop}\pwsh.exe"))),
+            format!("\"{scoop}\\pwsh.exe\" -NoLogo"),
+            "a PATH pwsh is what typing `pwsh` runs, so it is what the user means"
+        );
+        assert_eq!(
+            resolve_windows_shell(&path, "cmd.exe", only(pf.to_string())),
+            format!("\"{pf}\" -NoLogo"),
+            "an installer-placed pwsh is still a pwsh when PATH predates the install"
+        );
+        assert_eq!(
+            resolve_windows_shell(&path, "cmd.exe", only(ps51.to_string())),
+            format!("\"{ps51}\" -NoLogo"),
+            "5.1 ships with Windows and takes the same hook; falling past it to cmd \
+             trades a shell with command blocks for one that cannot have them"
+        );
+        assert_eq!(
+            resolve_windows_shell(&path, r"C:\Windows\system32\cmd.exe", |_| false),
+            r"C:\Windows\system32\cmd.exe",
+            "with no PowerShell at all, COMSPEC is the honest answer"
+        );
+    }
 
     /// An inherited agent-session marker must not reach the child.
     ///

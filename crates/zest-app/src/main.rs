@@ -328,8 +328,9 @@ fn main() -> std::process::ExitCode {
                     None => {
                         eprintln!(
                             "no shell integration for {name:?}.\n\
-                             zsh is supported; bash, fish and PowerShell are not yet — \
-                             see docs/ROADMAP.md, WS-E."
+                             zsh and PowerShell (pwsh, powershell) are supported; \
+                             bash and fish are not yet, and cmd.exe has no hook to \
+                             offer — see docs/ROADMAP.md, WS-E."
                         );
                         std::process::exit(2);
                     }

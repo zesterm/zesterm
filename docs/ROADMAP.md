@@ -97,10 +97,12 @@ and its number (48ms) is reported rather than gated.
   with a real `zsh`: a success, a failure with `exit 1`, and a command still
   running with no end line, each with its cwd from OSC 7.
 - **The shell says so itself, with nothing to install.** `zsh` gets zesterm's
-  OSC 133 hook through a `ZDOTDIR` shim that sources the user's own dotfiles
-  and writes none of them, so blocks appear against whatever prompt they
-  already had. VS Code's OSC 633 is understood too, for anyone who has its
-  integration.
+  OSC 133 hook through a `ZDOTDIR` shim that sources the user's own dotfiles and
+  writes none of them; PowerShell gets it dot-sourced from the command line,
+  having no `ZDOTDIR` to point anywhere, and keeps whatever `prompt` it already
+  had. Either way blocks appear against the prompt the user already has, and no
+  file of theirs is touched. VS Code's OSC 633 is understood too, for anyone who
+  has its integration.
 - **Acting on a block.** `Cmd`/`Ctrl+Shift` + `O` copies what the last command
   printed — its output alone, not the prompt and not the command — and `R` runs
   it again. The same chord plus a click does it for any block in scrollback.
@@ -765,12 +767,65 @@ and the palette's block rows are specified in
       the documented path for ssh, tmux and subshells, which injection
       structurally cannot reach. `zest-daemon --no-shell-integration` turns it
       off.
-- [ ] **bash, fish and PowerShell.** Deliberately not written yet: none can be
-      *seen working* on the machine this is built on. There is no fish and no
-      pwsh here, and `/bin/bash` is 3.2.57 — Apple's patched build, where the
-      `ENV` startup path injection depends on is disabled, and which Ghostty
+- [x] **Shell integration for PowerShell** (#83). Both PowerShell 7 and Windows
+      PowerShell 5.1, which is why nothing newer than 5.1 syntax appears in the
+      hook. PowerShell has no `ZDOTDIR` analogue and `$PROFILE` is a file
+      belonging to the user, so the injection point is the command line itself —
+      `-NoExit -Command ". <shim>"`. `install` therefore returns an `Injection`
+      of environment *and* command-line halves rather than a list of variables.
+
+      Three things had to be true and were not:
+
+      - `Shell::detect` split the command line on whitespace, so Windows' own
+        default shell — quoted, because `C:\Program Files` has a space in it —
+        had the executable `C:\Program` and matched nothing. **Every** Windows
+        shell was unhooked, with a status bar reading `0 blocks` as the only
+        sign; the "no shell integration for this shell" log was at `debug`, and
+        is now at `info`.
+      - The app forwarded its *built* command line to the daemon, which would
+        have detected a PowerShell in it and injected a second time — doubling
+        every marker, which the parser reads as an empty block between each real
+        one, and quietly overriding `--no-shell-integration`. It now sends what
+        the user configured, empty meaning the host's own default, exactly as
+        `new_tab` and `split_right` already did.
+      - `633;P;Cwd=` was read literally though VS Code's dialect escapes it, so
+        anyone using VS Code's own PowerShell integration — the zero-code
+        workaround this issue pointed at — had a cwd of `C:\x5cDev\x5czesterm`
+        in the status bar.
+
+      The hook chains the user's `prompt` rather than replacing it, states the
+      command with `633;E` instead of leaving zesterm to read it back off the
+      grid — PSReadLine repaints the line as it predicts, so the cells are a
+      rendering of the command and not the command — and reports the working
+      directory *before* `133;A`, since that marker opens the block and stamps
+      the cwd known at that moment onto it.
+
+      Verified against a real interactive `pwsh` 7.6.4 under ConPTY:
+      `echo hello` → `D;0`, `cmd /c exit 3` → `D;3` — the command's own exit
+      code, which `$?` alone could not have produced. The recording is in the
+      corpus as `blocks-pwsh.vtrec`. `zesterm --shell-integration pwsh` prints
+      the same hook for `$PROFILE`, via
+      `| Out-String | Invoke-Expression`.
+
+      `default_shell()` now resolves PowerShell on `PATH` before the one
+      hardcoded install location, then Windows PowerShell 5.1, then `%COMSPEC%`.
+      A scoop, winget or MSIX pwsh previously fell all the way to `cmd.exe`,
+      which has no prompt-function mechanism and therefore no command blocks,
+      ever — that is out of scope rather than pending, and is the one shell here
+      that gets a permanent no.
+- [ ] **bash, fish and WSL.** bash and fish are deliberately not written yet:
+      neither can be *seen working* on the machines this is built on. There is no
+      fish, and `/bin/bash` on the Mac is 3.2.57 — Apple's patched build, where
+      the `ENV` startup path injection depends on is disabled, and which Ghostty
       excludes on Darwin outright for that reason. Writing them blind is how the
       attach path nearly shipped compiled and unseen.
+
+      WSL is the next mechanism rather than the next shell, and it is the case
+      `Injection`'s two halves exist for: `WSLENV` is the only way a variable
+      crosses into the distro, *and* the inner shell still has to be named on the
+      command line. It also needs `Shell::detect` to look past the first token —
+      `wsl.exe -d Ubuntu -- bash` is a bash — which is why that is a token walk
+      rather than a one-line match.
 - [ ] **A settings key for shell integration.** Today it is a daemon flag, which
       is not where anyone will look. The shell runs on the *host*, so the host
       decides — but `zest-daemon` has no settings reader, since it does not
