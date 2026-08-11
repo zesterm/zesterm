@@ -9,7 +9,7 @@
  * golden has.
  *
  * That the layout is the one a real Rust key signs is proved a layer up, in
- * `web/test/enroll-preimage.test.ts`: a signature `zest-mesh` actually produced
+ * `packages/web/test/enroll-preimage.test.ts`: a signature `zest-mesh` actually produced
  * verifies against a preimage `signingPreimage` built. These tests are what
  * says *which byte* moved when it stops.
  */

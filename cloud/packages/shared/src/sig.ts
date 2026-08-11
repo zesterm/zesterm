@@ -26,7 +26,7 @@
  * `purpose` come from closed unions with fixed NUL-free ASCII names, so no
  * shorter field can be extended to look like a longer one, and the only
  * caller-influenced field is last. Add a caller-supplied string to the domain
- * and this must become length-prefixed — `web/src/enroll/preimage.ts` is what
+ * and this must become length-prefixed — `packages/web/src/enroll/preimage.ts` is what
  * that looks like, one layer up.
  */
 
