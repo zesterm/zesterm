@@ -68,7 +68,7 @@ import {
   ROLE_HOST,
 } from '../src/room/pipe.ts';
 import { FakePlatform, FakeSock } from './fake-platform.ts';
-import { NOW, parked, pipeOf, RELAY_SEED, Relay } from './harness.ts';
+import { freshJti, NOW, parked, pipeOf, RELAY_SEED, Relay } from './harness.ts';
 
 /** A sealed `MAX_FRAME`: the largest message this protocol can actually produce. */
 const SEALED_MAX_FRAME = MAX_FRAME_BYTES + SEAL_TAG_BYTES;
@@ -111,7 +111,7 @@ function suite(mode: string, evicting: boolean): void {
     // refusal on this path is a close code it can.
     control.close(1001, 'going away');
 
-    const ws = await r.attach('browser', 20);
+    const ws = await r.attach('browser');
     assert.deepEqual(
       ws.closed,
       { code: CLOSE_HOST_ABSENT, reason: 'no control link for this host' },
@@ -305,7 +305,7 @@ function suite(mode: string, evicting: boolean): void {
 
     const client = new FakeSock('browser');
     let settled = false;
-    const attaching = room.openAttach(client, NOW, 500).then(() => {
+    const attaching = room.openAttach(client, freshJti(), NOW, 500).then(() => {
       settled = true;
     });
 
@@ -333,7 +333,7 @@ function suite(mode: string, evicting: boolean): void {
 
     const control = await parked(r);
     const before = control.sent.length;
-    const silent = await r.attach('late', 10);
+    const silent = await r.attach('late', { timeoutMs: 10 });
     assert.deepEqual(
       silent.closed,
       { code: CLOSE_PIPE_DIAL_TIMEOUT, reason: 'the host did not dial back' },
@@ -377,7 +377,7 @@ function suite(mode: string, evicting: boolean): void {
     // the host is absent.
     const room = r.room();
     const late = new FakeSock('browser-late');
-    await room.openAttach(late, NOW, 5);
+    await room.openAttach(late, freshJti(), NOW, 5);
     assert.equal(late.closed?.code, CLOSE_PIPE_DIAL_TIMEOUT);
     assert.equal(
       room.openPipeLeg(new FakeSock('too-late'), pipeOf(control)),
@@ -397,11 +397,16 @@ function suite(mode: string, evicting: boolean): void {
     // be waiting would pass every one of them. This is where 128 bits either
     // is the credential or is decoration. (Written because exactly that
     // mutation survived the first draft of this file.)
+    // A turn between the call and the id, because `openAttach` spends the
+    // ticket before it publishes one — the `open` frame is no longer down the
+    // control link by the time the call returns.
     const first = new FakeSock('tab-one');
-    const attachingFirst = room.openAttach(first, NOW, 500);
+    const attachingFirst = room.openAttach(first, freshJti(), NOW, 500);
+    await turn();
     const firstId = pipeOf(control);
     const second = new FakeSock('tab-two');
-    const attachingSecond = room.openAttach(second, NOW, 500);
+    const attachingSecond = room.openAttach(second, freshJti(), NOW, 500);
+    await turn();
     const secondId = pipeOf(control);
 
     const guess = new FakeSock('guess');

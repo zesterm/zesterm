@@ -24,9 +24,37 @@ import { fromHex, hex, signingPreimage } from '@zesterm/cloud-shared';
 import type { Env } from '../src/env.ts';
 import { RelayRoom } from '../src/room.ts';
 import { KEEPALIVE_REQUEST, KEEPALIVE_RESPONSE, NONCE_BYTES } from '../src/room/control.ts';
+import { sweepSpentTickets } from '../src/room/replay.ts';
 import { FakeDb, FakePlatform, FakeSock } from './fake-platform.ts';
 
 export const NOW = 1_700_000_000_000;
+
+/**
+ * A `jti` no other attach in this process has used.
+ *
+ * Counted rather than random, so a failure names the same id on every run. It
+ * has to be unique because a ticket is spent once: a shared default would make
+ * the second attach of any test a replay, and every test that is not about
+ * replay would quietly be testing that instead.
+ */
+let minted = 0;
+export function freshJti(): string {
+  minted += 1;
+  return `jti-${minted}`;
+}
+
+/**
+ * One macrotask turn, which flushes every pending microtask behind it.
+ *
+ * `openAttach` now awaits storage before it publishes a pipe id, so a caller
+ * that wants to see the `open` frame has to let those settle first. A fixed
+ * number of `await`s would be a count that has to be maintained; a turn is not.
+ */
+function settled(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, 0);
+  });
+}
 
 /** The relay's own key. Its public half is what a daemon is to pin, once one exists. */
 export const RELAY_SEED = new Uint8Array(32).fill(3);
@@ -107,11 +135,40 @@ export class Relay {
    * `openAttach` awaits the host's dial-back, so this is async where the
    * pre-pipe version was not — and the short `timeoutMs` is what keeps a test
    * that expects no dial-back from waiting out the real deadline.
+   *
+   * The `jti` defaults to a fresh one per call; `freshJti` says why that matters.
    */
-  async attach(label = 'browser', timeoutMs = 20): Promise<FakeSock> {
+  async attach(
+    label = 'browser',
+    opts: { timeoutMs?: number; jti?: string; now?: number } = {},
+  ): Promise<FakeSock> {
     const ws = new FakeSock(label);
-    await this.room().openAttach(ws, NOW, timeoutMs);
+    await this.room().openAttach(ws, opts.jti ?? freshJti(), opts.now ?? NOW, opts.timeoutMs ?? 20);
     return ws;
+  }
+
+  /**
+   * The sweep, at a clock the test chooses.
+   *
+   * The pending alarm is taken first, as the platform takes it before calling
+   * the handler — a sweep that failed to re-arm must look like one that failed
+   * to re-arm, and a fake that left the old alarm set would hide it. Returns
+   * what was due, so a test can assert *when* the object was going to wake.
+   *
+   * This is the sweep rather than `RelayRoom.alarm`, which reads the wall clock;
+   * `alarm()` below drives that one, and the two together are what stop the
+   * handler and the function it delegates to from drifting apart.
+   */
+  async sweep(now = NOW): Promise<number | null> {
+    const due = this.platform.storage.takeAlarm();
+    await sweepSpentTickets(this.platform.storage, now);
+    return due;
+  }
+
+  /** The platform delivering the alarm to the object itself, wall clock and all. */
+  async alarm(): Promise<void> {
+    this.platform.storage.takeAlarm();
+    await this.room().alarm();
   }
 
   /**
@@ -128,14 +185,17 @@ export class Relay {
    */
   async pipe(
     control: FakeSock,
-    opts: { client?: string; host?: string; timeoutMs?: number } = {},
+    opts: { client?: string; host?: string; timeoutMs?: number; jti?: string } = {},
   ): Promise<Pipe> {
     const room = this.room();
     const client = new FakeSock(opts.client ?? 'browser');
-    // Deliberately not awaited yet: `openAttach` runs to its first `await`
-    // synchronously, so by the next line the `open` frame is down the control
-    // link and the id is dialable — which is the order the daemon sees.
-    const attaching = room.openAttach(client, NOW, opts.timeoutMs ?? 500);
+    // Started but not awaited, then given a turn: `openAttach` now spends the
+    // ticket before it publishes an id, so it no longer runs to the `open`
+    // frame synchronously. One turn later the frame is down the control link
+    // and the id is dialable, which is the order the daemon sees — and the
+    // attach itself is still parked on the dial-back, which is the point.
+    const attaching = room.openAttach(client, opts.jti ?? freshJti(), NOW, opts.timeoutMs ?? 500);
+    await settled();
     const id = pipeOf(control);
     const host = new FakeSock(opts.host ?? 'host-leg');
     assert.ok(room.openPipeLeg(host, id), `${host.label} was refused pipe ${id}`);

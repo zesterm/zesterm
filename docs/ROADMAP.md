@@ -1673,10 +1673,26 @@ three facts about Cloudflare that changed after #59 was written.
       opposite and only the `getWebSockets` call count catches it. Keepalive is
       the object's free auto-response, the `hosts` lookup is cached 60s in the
       object's own storage, `last_seen_at` is written on connect, and the data
-      path writes no storage at all. What remains is the pipe: an attach now
-      earns `4404` when nobody is home and `4501` when the host is there and
-      dial-back does not exist yet, which are different problems and only one of
-      them is the user's.
+      path writes no storage at all. An attach that finds nobody home earns
+      `4404`, and one whose host is present and does not dial back earns `4502`,
+      which are different problems and only one of them is the user's.
+
+      **The pipe landed third** (#110): the object mints an id, sends `open`
+      down the parked link, the daemon dials `/v1/pipe` for that id alone, and
+      after that the class is a byte pump. The 101 is written only once the pipe
+      has two ends, because a browser whose `open` fired early sends its `Hello`
+      into a room with nowhere to put it.
+
+      **And the ticket is now spent once.** The `jti` has been in the payload
+      since the mint; the room records it in `ctx.storage` before it does any
+      dial-back work, so a captured ticket buys nothing even inside its thirty
+      seconds and a replay costs the host neither an `open` frame nor a timer.
+      The check cannot live at the edge — the Worker holds no state and two
+      colos would not see each other's spent ids — which makes this the one
+      claim verified in one place and spent in another. An alarm sweeps the set,
+      because one that only grows is a leak, and it re-arms only while something
+      is left: a room whose last browser detached hours ago has to go quiet
+      completely. → ADR-009, `cloud/packages/relay/src/room/replay.ts`.
 
       Provable **before any Rust exists**: a Node script holding the control
       link with a real host key, dialling a real `zest-daemon --listen-ws`,

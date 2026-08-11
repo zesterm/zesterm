@@ -385,16 +385,25 @@ function suite(mode: string, evicting: boolean): void {
     );
   });
 
-  it('an attach costs no storage write and no query', async () => {
+  it('an attach costs one write to spend its ticket, and no query', async () => {
     const r = relay();
     await parked(r);
     const writes = r.platform.storage.writes;
     const selects = r.db.selects;
 
     await r.attach();
-    await r.attach();
+    assert.equal(
+      r.platform.storage.writes,
+      writes + 2,
+      'the spent `jti`, and the alarm that will sweep it — the only two writes an attach is allowed, and both are on the attach path rather than the data path ADR-009’s cost model is about',
+    );
 
-    assert.equal(r.platform.storage.writes, writes, 'ADR-009: never write storage on the data path');
+    await r.attach();
+    assert.equal(
+      r.platform.storage.writes,
+      writes + 3,
+      'the second attach spends its own ticket and finds the sweep already armed: re-arming per attach would slide the alarm forward for as long as a host keeps receiving them, and a busy room would never sweep at all',
+    );
     assert.equal(r.db.selects, selects, 'and the attach path makes no query of its own');
   });
 }

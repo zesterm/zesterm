@@ -171,30 +171,120 @@ export class FakeDb implements D1Binding {
 
 export class FakeRoomStorage implements RoomStorage {
   /**
-   * `put` and `delete`. ADR-009's cost model rests on never writing storage on
-   * the data path — a write there costs a request per message and keeps the
-   * object awake, which turns the dominant cost term from zero into
+   * `put`, `delete` and `setAlarm`. ADR-009's cost model rests on never writing
+   * storage on the data path — a write there costs a request per message and
+   * keeps the object awake, which turns the dominant cost term from zero into
    * continuous. Counting is what makes that assertable instead of aspirational.
+   *
+   * An alarm counts because it is one: `setAlarm` is a storage write, and it
+   * also buys a wake-up later, so a room that armed one per message would be
+   * paying twice for the thing the cost model forbids once.
    */
   writes = 0;
   reads = 0;
 
+  /**
+   * When the object is due to wake, as the platform holds it: one per object,
+   * so setting a second **replaces** the first rather than adding to it. A fake
+   * that queued them would hide a sweep that silently cancelled another.
+   */
+  alarm: number | null = null;
+
+  /**
+   * Make every read and write throw, as a storage blip does.
+   *
+   * Modelled because the attach path has to *fail closed* on one: a replay set
+   * that cannot be consulted must refuse rather than admit, and a fake with no
+   * failure mode leaves that branch as an untested opinion in a comment.
+   */
+  failStorage = false;
+
+  /**
+   * Make the alarm pair throw while the rest of storage works.
+   *
+   * Separate from `failStorage` because the two must have *opposite* outcomes:
+   * a claim that cannot be recorded refuses the attach, and a sweep that cannot
+   * be scheduled must not — refusing an honest browser over housekeeping is the
+   * mistake `touchHost` documents in `room/hosts.ts`. One flag could not tell
+   * those apart.
+   */
+  failAlarms = false;
+
   readonly #kv = new Map<string, unknown>();
+
+  /** Every key, in the platform's order. For assertions about what is left behind. */
+  get keys(): string[] {
+    return [...this.#kv.keys()].sort();
+  }
 
   async get<T>(key: string): Promise<T | undefined> {
     this.reads += 1;
+    this.#blip();
     if (!this.#kv.has(key)) return undefined;
     return structuredClone(this.#kv.get(key)) as T;
   }
 
   async put(key: string, value: unknown): Promise<void> {
     this.writes += 1;
+    this.#blip();
     this.#kv.set(key, structuredClone(value));
   }
 
   async delete(key: string): Promise<boolean> {
     this.writes += 1;
+    this.#blip();
     return this.#kv.delete(key);
+  }
+
+  /**
+   * Sorted, because the platform lists in key order and a fake that answered in
+   * insertion order would let a scan that depends on the ordering pass here and
+   * behave differently in production.
+   */
+  async list<T>(options: { prefix?: string } = {}): Promise<Map<string, T>> {
+    this.reads += 1;
+    this.#blip();
+    const prefix = options.prefix ?? '';
+    const found = new Map<string, T>();
+    for (const key of this.keys) {
+      if (key.startsWith(prefix)) found.set(key, structuredClone(this.#kv.get(key)) as T);
+    }
+    return found;
+  }
+
+  async getAlarm(): Promise<number | null> {
+    this.reads += 1;
+    if (this.failAlarms) throw new Error('storage: cannot read the alarm');
+    return this.alarm;
+  }
+
+  async setAlarm(scheduledTime: number): Promise<void> {
+    this.writes += 1;
+    if (this.failAlarms) throw new Error('storage: cannot set the alarm');
+    this.alarm = scheduledTime;
+  }
+
+  /**
+   * The platform delivering the alarm: it is **deleted before the handler
+   * runs**, which is what lets a handler re-arm itself.
+   *
+   * A fake that left it set would make a handler that never re-armed look like
+   * one that did — and that failure is a sweep which runs once and then never
+   * again, leaving the set to grow for the lifetime of the object.
+   */
+  takeAlarm(): number | null {
+    const due = this.alarm;
+    this.alarm = null;
+    return due;
+  }
+
+  /**
+   * Counted before it throws, deliberately: a failure still costs the request.
+   * A test that asserts what a refused attach spends should see the same number
+   * whether the storage answered or not.
+   */
+  #blip(): void {
+    if (this.failStorage) throw new Error('storage: unavailable');
   }
 }
 

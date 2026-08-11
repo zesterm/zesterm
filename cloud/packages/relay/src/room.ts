@@ -32,7 +32,7 @@ import { getPublicKeyAsync } from '@noble/ed25519';
 import { fromHex, hex } from '@zesterm/cloud-shared';
 
 import type { Env } from './env.ts';
-import { ATTACH_PATH, CONTROL_PATH, PIPE_PATH } from './routes.ts';
+import { attachJti, ATTACH_PATH, CONTROL_PATH, PIPE_PATH } from './routes.ts';
 import {
   challengeMessage,
   closeCodeFor,
@@ -61,6 +61,7 @@ import {
   CLOSE_PIPE_DIAL_TIMEOUT,
   CLOSE_PIPE_FLOOD,
   CLOSE_PIPE_PEER_GONE,
+  CLOSE_TICKET_REPLAYED,
   messageSize,
   newPipeId,
   openMessage,
@@ -72,6 +73,7 @@ import {
   ROLE_HOST,
   type PipeMembership,
 } from './room/pipe.ts';
+import { claimAttachTicket, sweepSpentTickets } from './room/replay.ts';
 import type { AutoResponsePair, RoomState, Sock } from './room/state.ts';
 
 /** An Ed25519 seed. Always 32 bytes. */
@@ -169,7 +171,13 @@ export class RelayRoom {
       // an attachment, which is either the hibernation bug or a storage write
       // on what is about to be the data path. Awaiting removes the problem
       // rather than relocating it.
-      await this.openAttach(server);
+      //
+      // `?jti=` is the id of a ticket the Worker has already verified — the
+      // room is handed the one field it needs, and never the ticket, so it
+      // cannot be mistaken for a second verifier. It is spent here rather than
+      // at the edge because only this object is single-instance per host;
+      // `room/replay.ts` argues that at length.
+      await this.openAttach(server, attachJti(url));
       return new Response(null, { status: 101, webSocket: client });
     }
 
@@ -328,6 +336,10 @@ export class RelayRoom {
   /**
    * A browser whose ticket verified, and the pipe it causes to exist.
    *
+   * The ticket verified at the edge; what is decided here is whether it has
+   * been spent, which is the half of the check that needs state — see
+   * `room/replay.ts`.
+   *
    * "Present" means a control link the platform still holds and that
    * authenticated — which is only as fresh as the platform's own detection of a
    * peer that vanished without closing. The dial-back is what turns that into a
@@ -341,9 +353,35 @@ export class RelayRoom {
    */
   async openAttach(
     ws: Sock,
+    jti: string,
     now: number = Date.now(),
     timeoutMs: number = PIPE_DIAL_TIMEOUT_MS,
   ): Promise<void> {
+    // First, and ahead of every line below it: a replayed ticket must cost the
+    // host nothing — no `open` frame down its control link, no pipe id, no
+    // ten-second timer, no socket it has to dial. Spending the id is one
+    // storage write on the *attach* path, which is not the path ADR-009's cost
+    // model is about.
+    //
+    // Spent here rather than once the pipe is up, so a ticket is burnt even by
+    // an attach that then fails. That direction is the cheap one, and it costs
+    // the browser nothing: `relay-dial.ts` mints inside the `Dial` itself, so
+    // every redial already carries a fresh ticket. Spending only on success
+    // would leave a captured one good for another try each time the host
+    // happened to be asleep.
+    const claim = await claimAttachTicket({ storage: this.#state.storage, jti, now });
+    if (claim !== 'claimed') {
+      // Accepted before it is closed, as the host-absent branch below is and
+      // for the reason given there.
+      this.#state.acceptWebSocket(ws);
+      const why =
+        claim === 'spent'
+          ? 'this attach ticket has been spent'
+          : 'this attach ticket cannot be spent';
+      ws.close(CLOSE_TICKET_REPLAYED, why);
+      return;
+    }
+
     const control = readyControlLink(this.#state);
     if (control === null) {
       // The hibernatable accept, not `server.accept()`, even though this socket
@@ -425,6 +463,27 @@ export class RelayRoom {
    */
   webSocketError(ws: Sock): void {
     this.webSocketClose(ws);
+  }
+
+  /**
+   * The replay set's sweep, and at present the object has no other alarm.
+   *
+   * Takes no clock, unlike every other method here: the platform calls this one
+   * itself, with an `AlarmInvocationInfo` in the first position. A `now`
+   * parameter defaulted the way `webSocketMessage`'s is would therefore be
+   * handed an *object* in production and arithmetic on it would silently
+   * produce `NaN` — so the clock is read here and the sweep, which does take
+   * one, is what the tests drive.
+   *
+   * A second user of the alarm would need a dispatcher: there is one alarm per
+   * object, and whoever adds the second must schedule both, not replace this.
+   *
+   * Unguarded, unlike every storage call on the attach path. A throw here is
+   * retried by the platform, which is what housekeeping wants; a throw there
+   * would hand a browser a 500 it cannot read.
+   */
+  async alarm(): Promise<void> {
+    await sweepSpentTickets(this.#state.storage, Date.now());
   }
 
   /**
