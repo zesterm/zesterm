@@ -536,7 +536,19 @@ impl Connection {
             // subscriber's baseline and the encoder shadow with it, so a
             // discarded return value is output the client can never be sent.
             // Not asking is what makes the floor lossless.
-            let update = if updates { session.poll(handle) } else { None };
+            // A session that has ended is never throttled, and this is the one
+            // place the floor must look at a session rather than a clock.
+            //
+            // `Exited` is deliberately not delayed (see the doc above), so
+            // skipping this session's delta while sending its `Exited` behind
+            // it does not postpone the last screenful — it deletes it.
+            // `zest-app`'s reader *returns out of its thread* on `Exited`
+            // (`remote.rs`), so nothing after that message is ever decoded, and
+            // the window closes on `Wakeup::Exited` having never shown what the
+            // command printed last. A floor may delay output; it must never
+            // reorder it past the end of the stream.
+            let ended = session.has_exited();
+            let update = if updates || ended { session.poll(handle) } else { None };
             match update {
                 Some((base, seq, Update::Delta(delta))) => out.push(HostMessage::Update {
                     session: addr,
@@ -2244,7 +2256,7 @@ mod tests {
     /// coalesced — the encoder shadow advances with every poll, so a discarded
     /// return value can never be re-fetched.
     #[test]
-    fn a_skipped_poll_still_reports_the_exit_and_keeps_the_output() {
+    fn an_ended_session_sends_its_last_output_in_front_of_the_exit() {
         let (mut c, registry) = conn();
         let mut peer = authenticate(&mut c);
         peer.send(
@@ -2272,21 +2284,28 @@ mod tests {
              its shell exited waits for output that will never come, and no saving \
              is worth that: {held:?}"
         );
+        // And its last output rides in front of that `Exited`, throttled or not.
+        //
+        // This assertion replaces its own opposite. The first version of this
+        // test required a skipped poll to send `Exited` with *no* update, which
+        // reads like a floor doing its job and is a lost screenful: `zest-app`'s
+        // reader returns out of its thread on `Exited` (`remote.rs`), so a delta
+        // held back behind one is never applied by anybody, and the window
+        // closes having never shown what the command last printed. There is no
+        // later pass to release it to — the exit is the end of the stream.
+        let update_at = held
+            .iter()
+            .position(|m| matches!(m, HostMessage::Update { .. } | HostMessage::Keyframe { .. }));
+        let exited_at = held.iter().position(|m| matches!(m, HostMessage::Exited { .. }));
         assert!(
-            !held
-                .iter()
-                .any(|m| matches!(m, HostMessage::Update { .. } | HostMessage::Keyframe { .. })),
-            "a skipped poll sent an update anyway, so there is no floor: {held:?}"
+            update_at.is_some(),
+            "an ended session's final output was throttled away. The floor may delay \
+             output; past an `Exited` there is nothing left to delay it until: {held:?}"
         );
-
-        let released = c.poll_with(true);
         assert!(
-            released
-                .iter()
-                .any(|m| matches!(m, HostMessage::Update { .. } | HostMessage::Keyframe { .. })),
-            "the output the skipped poll passed over never arrived. Skipping must mean \
-             not asking the session at all: asking and discarding advances the \
-             subscriber's baseline, and what it described is then unreachable"
+            update_at < exited_at,
+            "the last delta came out behind the `Exited` that ends the stream, so no \
+             client will ever apply it: {held:?}"
         );
     }
 }
