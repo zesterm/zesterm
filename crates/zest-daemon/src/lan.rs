@@ -191,16 +191,33 @@ where
 
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
+        let peer = stream
+            .peer_addr()
+            .map_or_else(|_| "unknown".to_string(), |a| a.to_string());
+        let key = PeerKey::from(&peer);
+
         // Before anything can read: the poll has to be armed while the reader
         // is still on this thread, or the cut cannot reach it (see
         // [`READ_POLL`]). A socket that will not take a timeout is one the
         // watchdog could never cut, so it is refused rather than served
         // unwatchable.
-        let Ok(stream) = Severable::new(stream) else { continue };
-        let peer = stream
-            .peer_addr()
-            .map_or_else(|_| "unknown".to_string(), |a| a.to_string());
-        let key = PeerKey::from(&peer);
+        //
+        // Logged, and not only for symmetry with the two refusals below: a
+        // silent `continue` here would refuse every connection with nothing to
+        // read out of the daemon, which is the exact shape of the outage this
+        // whole module was just fixed for.
+        let stream = match Severable::new(stream) {
+            Ok(stream) => stream,
+            Err(e) => {
+                tracing::warn!(
+                    %peer,
+                    error = %e,
+                    "refusing: the socket would not take a read timeout, so the handshake \
+                     watchdog could never cut this connection"
+                );
+                continue;
+            }
+        };
 
         // Refused connections are accepted and closed rather than left queued:
         // a peer told no immediately can back off, where one left hanging
@@ -446,11 +463,6 @@ impl Severable {
             severed: Arc::clone(&self.severed),
             watched: Arc::clone(&self.watched),
         })
-    }
-
-    /// The peer's address, for logging.
-    pub fn peer_addr(&self) -> std::io::Result<SocketAddr> {
-        self.sock.peer_addr()
     }
 
     /// Whether a poll is armed, and how long.
