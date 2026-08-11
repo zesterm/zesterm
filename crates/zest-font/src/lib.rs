@@ -83,6 +83,61 @@ pub struct GlyphKey {
 pub const SYNTHETIC_BOLD: u8 = 1 << 0;
 pub const SYNTHETIC_ITALIC: u8 = 1 << 1;
 
+/// How text is antialiased, and therefore what a mask texel means.
+///
+/// Not merely a quality knob: it also decides whether the outline is
+/// grid-fitted, because the two are the same decision made once. See
+/// [`Fonts::set_text_antialias`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum TextAntialias {
+    /// Per-channel coverage sampled at thirds of a pixel, outlines unhinted.
+    #[default]
+    Subpixel,
+    /// One coverage value per pixel, outlines grid-fitted.
+    Grayscale,
+}
+
+/// What one texel of [`GlyphImage::data`] means.
+///
+/// Three states rather than a bool, because subpixel coverage is a *third*
+/// thing: four bytes per texel like a colour glyph, one coverage value per
+/// channel like a mask. A bool that only separates "colour" from "not colour"
+/// uploads a subpixel mask into the one-byte coverage texture, which is not a
+/// crash — it is a third of a glyph.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum GlyphFormat {
+    /// One coverage byte per texel.
+    #[default]
+    Mask,
+    /// Four bytes per texel: independent R, G and B coverage, sampled at
+    /// -0.3, 0 and +0.3 of a pixel.
+    ///
+    /// **The fourth byte is always zero and is not alpha.** zeno rasterizes the
+    /// outline three times and writes only bytes 0, 1 and 2; the buffer is
+    /// zero-filled, so byte 3 is reliably 0 rather than garbage — which makes
+    /// sampling it as alpha a silent, total transparency rather than a visible
+    /// bug. (`zeno::mask::render`.)
+    SubpixelMask,
+    /// Four bytes per texel: straight, *non*-premultiplied RGBA. Emoji.
+    Color,
+}
+
+impl GlyphFormat {
+    #[must_use]
+    pub fn bytes_per_texel(self) -> u32 {
+        match self {
+            Self::Mask => 1,
+            Self::SubpixelMask | Self::Color => 4,
+        }
+    }
+
+    /// Whether this is a colour bitmap rather than a coverage mask.
+    #[must_use]
+    pub fn is_color(self) -> bool {
+        matches!(self, Self::Color)
+    }
+}
+
 /// A rasterized glyph.
 #[derive(Debug, Clone)]
 pub struct GlyphImage {
@@ -92,14 +147,13 @@ pub struct GlyphImage {
     pub left: i32,
     /// Offset from the baseline *up* to the bitmap's top edge.
     pub top: i32,
-    /// `width * height` coverage bytes, or `width * height * 4` RGBA when
-    /// [`GlyphImage::is_color`].
+    /// `width * height * format.bytes_per_texel()` bytes.
     pub data: Vec<u8>,
-    /// True for COLR/CBDT/sbix glyphs — emoji, essentially.
+    /// What a texel of [`GlyphImage::data`] means.
     ///
-    /// The renderer keeps these in a separate RGBA atlas, selected per-instance
-    /// by a flag bit rather than by a second draw call.
-    pub is_color: bool,
+    /// Colour glyphs live in a separate RGBA atlas, selected per-instance by a
+    /// flag bit rather than by a second draw call.
+    pub format: GlyphFormat,
 }
 
 impl GlyphImage {
@@ -146,6 +200,8 @@ pub struct Fonts {
     cell: CellMetrics,
     /// Draw U+2500–U+259F at cell size instead of taking the font's glyphs.
     builtin_box_drawing: bool,
+    /// Antialiasing, which also decides whether outlines are grid-fitted.
+    antialias: TextAntialias,
     requested: Vec<String>,
     /// Families to try for Private Use Area codepoints, best first.
     symbol_families: Vec<String>,
@@ -176,6 +232,7 @@ impl Fonts {
             shape_cx: ShapeContext::new(),
             typo,
             builtin_box_drawing: true,
+            antialias: TextAntialias::default(),
             cell: CellMetrics {
                 cell_w: 1,
                 cell_h: 1,
@@ -323,6 +380,24 @@ impl Fonts {
     #[must_use]
     pub fn builtin_box_drawing(&self) -> bool {
         self.builtin_box_drawing
+    }
+
+    /// Set the antialiasing mode.
+    ///
+    /// This changes both the coverage format and whether outlines are hinted --
+    /// see [`Fonts::rasterize`] for why those are one decision. **The caller
+    /// must clear the atlas afterwards.** [`GlyphKey`] deliberately does not
+    /// record the mode: it is hashed once per cell per frame and there is no
+    /// scene in which one glyph wants subpixel coverage and another does not,
+    /// so the mode is a property of an atlas *generation*, exactly as the font
+    /// stack and the pixel size already are.
+    pub fn set_text_antialias(&mut self, mode: TextAntialias) {
+        self.antialias = mode;
+    }
+
+    #[must_use]
+    pub fn text_antialias(&self) -> TextAntialias {
+        self.antialias
     }
 
     #[must_use]
@@ -567,7 +642,30 @@ impl Fonts {
         let font = face.font_ref()?;
         let px = f32::from(key.px) / 256.0;
 
-        let mut scaler = self.scale_cx.builder(font).size(px).hint(true).build();
+        // Hinting and coverage are one decision, not two.
+        //
+        // swash does not let you choose a hinting *target*: it hard-codes
+        // `HintingMode::Smooth { lcd_subpixel: Some(LcdLayout::Horizontal), .. }`
+        // (`swash/src/scale/hinting_cache.rs`), and `hint(bool)` is the whole
+        // API. So hinting here always means "grid-fit for a rasterizer with 3x
+        // horizontal resolution". Pairing that with `Format::Alpha` is a
+        // mismatch that shows up as *shapes changing*, not as softness --
+        // measured on Cascadia Mono at 13ppem, `w` comes back as three vertical
+        // stems and reads as `W`, and `o c e C t` lose the baseline overshoot
+        // that `a` keeps, so "Close" reads clipped beside "tab". (#100.)
+        //
+        // Subpixel coverage recovers the horizontal detail but is powerless
+        // against the flattened overshoot, which is vertical -- so the fix for
+        // the shapes is to stop grid-fitting, and subpixel coverage is what
+        // pays for the sharpness that costs. Grayscale keeps hinting, because
+        // unhinted *and* grayscale is the blurry corner neither knob wants.
+        let hint = self.antialias == TextAntialias::Grayscale;
+        let format = match self.antialias {
+            TextAntialias::Subpixel => swash::zeno::Format::Subpixel,
+            TextAntialias::Grayscale => swash::zeno::Format::Alpha,
+        };
+
+        let mut scaler = self.scale_cx.builder(font).size(px).hint(hint).build();
 
         let offset = swash::zeno::Vector::new(f32::from(key.subpx_x) * 0.25, 0.0);
         let mut render = Render::new(&[
@@ -575,7 +673,7 @@ impl Fonts {
             Source::ColorOutline(0),
             Source::Outline,
         ]);
-        render.format(swash::zeno::Format::Alpha).offset(offset);
+        render.format(format).offset(offset);
 
         if key.synthetic & SYNTHETIC_BOLD != 0 {
             // Proportional to size, or bold looks heavy at 8pt and thin at 32.
@@ -589,7 +687,14 @@ impl Fonts {
         }
 
         let image = render.render(&mut scaler, key.glyph)?;
-        let is_color = matches!(image.content, swash::scale::image::Content::Color);
+        // An exhaustive match, not `matches!`: a future swash content variant
+        // should be a compile error here rather than silently becoming `Color`
+        // and being uploaded to the wrong texture at the wrong stride.
+        let format = match image.content {
+            swash::scale::image::Content::Mask => GlyphFormat::Mask,
+            swash::scale::image::Content::SubpixelMask => GlyphFormat::SubpixelMask,
+            swash::scale::image::Content::Color => GlyphFormat::Color,
+        };
 
         Some(GlyphImage {
             width: image.placement.width,
@@ -597,7 +702,7 @@ impl Fonts {
             left: image.placement.left,
             top: image.placement.top,
             data: image.data,
-            is_color,
+            format,
         })
     }
 
@@ -1200,7 +1305,11 @@ mod tests {
             let key = f.key(id, gid);
             let img = f.rasterize(key).expect("emoji should rasterize");
             assert!(!img.is_empty(), "emoji rasterized to an empty bitmap");
-            assert!(img.is_color, "emoji should come from the COLR/CBDT path, not outlines");
+            assert_eq!(
+                img.format,
+                GlyphFormat::Color,
+                "emoji should come from the COLR/CBDT path, not outlines"
+            );
         }
 
         #[test]
@@ -1210,7 +1319,7 @@ mod tests {
             let img = f.rasterize(f.key(id, gid)).expect("rasterize M");
             assert!(!img.is_empty());
             assert!(img.data.iter().any(|&b| b > 0), "the bitmap is entirely blank");
-            assert!(!img.is_color, "text glyphs take the outline path");
+            assert!(!img.format.is_color(), "text glyphs take the outline path");
         }
 
         #[test]
@@ -1249,6 +1358,146 @@ mod tests {
             // reported synthesis. Both are fine; silently returning the regular
             // face with no synthesis is not, because bold would be invisible.
             assert!(regular != bold || f.face_count() >= 1);
+        }
+
+        /// Rasterize one character at the current mode and size.
+        fn glyph(f: &mut Fonts, ch: char) -> Option<GlyphImage> {
+            let (font, gid) = f.glyph_for(ch, Style::default())?;
+            let key = f.key(font, gid);
+            f.rasterize(key)
+        }
+
+        /// Rows of the bitmap that sit *below* the baseline.
+        ///
+        /// Round letters are drawn a touch below the baseline by design so they
+        /// do not read as smaller than flat-bottomed ones. Integer arithmetic,
+        /// no threshold: `top` is the rise from the baseline to the bitmap's top
+        /// edge, so anything past `height` hangs below.
+        fn below_baseline(img: &GlyphImage) -> i32 {
+            img.height as i32 - img.top
+        }
+
+        #[test]
+        fn subpixel_is_the_default_and_carries_per_channel_coverage() {
+            let Some(mut f) = fonts() else { return };
+            assert_eq!(f.text_antialias(), TextAntialias::Subpixel, "the shipping default");
+
+            // Something has to actually differ between the channels, or the
+            // mode is an expensive identity: four times the atlas to store the
+            // same number three times.
+            let mut chroma = 0u8;
+            for ch in ['w', 'm', 'x', 'o'] {
+                let Some(img) = glyph(&mut f, ch) else { continue };
+                assert_eq!(img.format, GlyphFormat::SubpixelMask, "{ch:?}");
+                assert_eq!(
+                    img.data.len(),
+                    (img.width * img.height * 4) as usize,
+                    "{ch:?}: four bytes per texel"
+                );
+                for px in img.data.chunks_exact(4) {
+                    let (lo, hi) = (px[..3].iter().min(), px[..3].iter().max());
+                    if let (Some(&lo), Some(&hi)) = (lo, hi) {
+                        chroma = chroma.max(hi - lo);
+                    }
+                }
+            }
+            assert!(
+                chroma >= 32,
+                "the three channels came back near-identical (max spread {chroma}), so \
+                 subpixel sampling recovered no horizontal detail at all -- the whole \
+                 point of the mode"
+            );
+        }
+
+        #[test]
+        fn grayscale_mode_is_one_coverage_byte_per_texel() {
+            let Some(mut f) = fonts() else { return };
+            f.set_text_antialias(TextAntialias::Grayscale);
+            let Some(img) = glyph(&mut f, 'x') else { return };
+            assert_eq!(img.format, GlyphFormat::Mask);
+            assert_eq!(img.data.len(), (img.width * img.height) as usize);
+        }
+
+        #[test]
+        fn box_drawing_stays_a_plain_mask_in_every_mode() {
+            // Generated geometrically at cell size, so there is no sub-pixel
+            // horizontal detail to recover and a `│` must stay one crisp column
+            // rather than gaining a colour fringe.
+            for mode in [TextAntialias::Subpixel, TextAntialias::Grayscale] {
+                let Some(mut f) = fonts() else { return };
+                f.set_text_antialias(mode);
+                let key = GlyphKey {
+                    font: FontId::BOXDRAW,
+                    glyph: '│' as u32 as u16,
+                    px: 0,
+                    subpx_x: 0,
+                    synthetic: 0,
+                };
+                let Some(img) = f.rasterize(key) else { continue };
+                assert_eq!(img.format, GlyphFormat::Mask, "{mode:?}");
+                assert_eq!(img.data.len(), (img.width * img.height) as usize, "{mode:?}");
+            }
+        }
+
+        #[test]
+        fn changing_the_mode_changes_what_a_key_rasterizes_to() {
+            // The obligation this documents: `GlyphKey` does not record the
+            // mode, so a caller that changes it without clearing the atlas gets
+            // a four-byte bitmap read at one byte per texel -- a third of a
+            // glyph, silently, with nothing in any error to name the cause.
+            let Some(mut f) = fonts() else { return };
+            let Some((font, gid)) = f.glyph_for('m', Style::default()) else { return };
+            let key = f.key(font, gid);
+
+            let Some(sub) = f.rasterize(key) else { return };
+            f.set_text_antialias(TextAntialias::Grayscale);
+            let Some(gray) = f.rasterize(key) else { return };
+
+            assert_ne!(sub.format, gray.format, "the same key, two different bitmaps");
+            assert_ne!(sub.data.len(), gray.data.len(), "and two different strides");
+        }
+
+        /// The `Close tab` half of #100.
+        ///
+        /// swash hard-codes an LCD hinting target and exposes only `hint(bool)`,
+        /// and at 13ppem that grid-fit flattens the baseline overshoot on
+        /// `o c e C t` while leaving it on `a` -- so `Close` reads a pixel short
+        /// beside `tab` in the same label. Subpixel sampling cannot fix this: it
+        /// is horizontal and the overshoot is vertical. Not hinting can, which
+        /// is why the two are one setting.
+        ///
+        /// Asserted against the flat-bottomed letters of the *same* face rather
+        /// than against absolute numbers, so it needs no particular font
+        /// installed: `x` and `z` are flat by design in any Latin face and `o`
+        /// `c` `e` are drawn below the baseline in any Latin face. Cascadia Mono
+        /// at 12.5px is the reported case, and that is what CI's Windows leg
+        /// runs, but the assertion is not specific to it.
+        #[test]
+        fn round_letters_keep_their_baseline_overshoot() {
+            let Some(mut f) = fonts() else { return };
+            f.set_ui_px(Some(12.5));
+
+            // Flat-bottomed controls first: if these ever overshoot, the metric
+            // is measuring something other than what it claims and every
+            // assertion below is worthless.
+            for ch in ['x', 'z'] {
+                let Some(img) = glyph(&mut f, ch) else { continue };
+                assert_eq!(below_baseline(&img), 0, "{ch:?} is flat-bottomed by design");
+            }
+
+            let flat = glyph(&mut f, 'x').map_or(0, |i| below_baseline(&i));
+            for ch in ['o', 'c', 'e'] {
+                let Some(img) = glyph(&mut f, ch) else { continue };
+                let round = below_baseline(&img);
+                assert!(
+                    round > flat,
+                    "{ch:?} sits no lower than 'x' ({round} vs {flat}). Round letters are \
+                     drawn slightly below the baseline on purpose so they do not read as \
+                     smaller than flat-bottomed ones; grid-fitting flattens that for \
+                     {ch:?} but not for 'a', which is why \"Close\" reads a pixel short \
+                     next to \"tab\" in the same label. (#100)"
+                );
+            }
         }
     }
 }

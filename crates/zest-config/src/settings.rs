@@ -179,6 +179,32 @@ pub struct Appearance {
     #[schemars(range(min = 0.0, max = 1.0))]
     #[schemars(extend("x_zest_group" = "Appearance", "x_zest_widget" = "number"))]
     pub text_contrast: f32,
+    /// How text is antialiased.
+    ///
+    /// Also decides whether outlines are grid-fitted, because the two are one
+    /// decision: swash hard-codes an LCD hinting target and does not let it be
+    /// chosen, so hinting always means "grid-fit for a rasterizer with three
+    /// times the horizontal resolution". Pairing that with grayscale coverage
+    /// changes glyph *shapes* rather than merely softening them.
+    #[schemars(extend("x_zest_group" = "Appearance", "x_zest_widget" = "select"))]
+    pub text_antialias: TextAntialias,
+}
+
+/// How glyph coverage is sampled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum TextAntialias {
+    /// Per-channel coverage at thirds of a pixel, outlines left unhinted.
+    ///
+    /// Sharper on an ordinary 1x display, and it keeps each glyph the shape its
+    /// designer drew. Needs an RGB-striped panel and a GPU that can blend per
+    /// channel; where either is missing, grayscale is used instead.
+    Subpixel,
+    /// One coverage value per pixel, outlines grid-fitted.
+    ///
+    /// The right choice on a rotated or non-RGB panel, where sampling at
+    /// thirds of a pixel is simply wrong.
+    Grayscale,
 }
 
 impl Default for Appearance {
@@ -189,6 +215,7 @@ impl Default for Appearance {
             follow_system_theme: false,
             text_gamma: 1.3,
             text_contrast: 0.0,
+            text_antialias: TextAntialias::Subpixel,
         }
     }
 }

@@ -582,6 +582,20 @@ theme screens. Colours, sizes and spacing come from there, not from this file.
       `appearance.text_gamma` could not turn it off because `Renderer::tuning`
       was assigned `TextTuning::default()` once and never touched again. One
       default now, asserted equal across the two crates that hold it.
+- [x] Text is sampled **per subpixel**, and outlines are no longer grid-fitted
+      (#100, #84). swash pins the hinting target to horizontal LCD
+      (`hinting_cache.rs`) and exposes only `hint(bool)`, so every glyph was
+      grid-fit for three times the horizontal resolution and then sampled once
+      per pixel. That changes shapes, not sharpness: `w` at 13 ppem in Cascadia
+      Mono came back as three vertical stems and read as `W`, and `o c e C t`
+      lost the baseline overshoot `a` kept, so "Close" read a pixel short beside
+      "tab". No gentler hinting target exists — skrifa driven directly with
+      `Target::Smooth { mode: Light }` returns a byte-identical bitmap, because
+      the face is ClearType-aware. The two symptoms have different axes, so the
+      fix is both halves: per-channel coverage for the horizontal one, no
+      hinting for the vertical one. `appearance.text_antialias` puts it back.
+      Blended with dual-source `OneMinusSrc1`; grayscale where the adapter or a
+      translucent window says no. ADR-010.
 - [ ] Validate that default (1.3) side-by-side against Windows Terminal. **Do
       not defer** — it ships broken constantly and reads as "looks slightly
       off". The knob works now, so this is finally a measurement rather than a
