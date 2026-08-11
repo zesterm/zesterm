@@ -9,6 +9,7 @@ import type { Theme } from '@zesterm/theme';
 
 import { createSessionOverDataPlane } from '../create-session.ts';
 import type { DeviceKey } from '../device-key.ts';
+import { actorDirectorySource } from '../directory-source.ts';
 import { SessionList, type OpenTarget } from './SessionList.tsx';
 import { TerminalView } from './TerminalView.tsx';
 
@@ -52,6 +53,9 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
       {view.error !== null ? <div class="shell-error">{view.error}</div> : null}
       {view.current.kind === 'list' ? (
         <SessionList
+          // The actor-backed source, because this shell is only ever reached
+          // on the loopback path — the sidecar is what hosts the actor.
+          source={actorDirectorySource}
           deviceKind={device.kind}
           onOpen={(target: OpenTarget) => (view.current = { kind: 'terminal', target })}
           onCreate={create}
