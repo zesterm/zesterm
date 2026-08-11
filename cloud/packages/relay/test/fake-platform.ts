@@ -64,6 +64,13 @@ export class FakeSock implements Sock {
   }
 
   close(code?: number, reason?: string): void {
+    // First close wins, as on a real socket: `close()` on one that is already
+    // CLOSING or CLOSED does nothing. It matters here because ending a pipe
+    // closes both legs and the platform then reports the close back, so a
+    // last-write-wins fake would overwrite the code the room chose with the one
+    // the follow-up sent — and a test asserting *why* a peer was cut would be
+    // reading the wrong answer.
+    if (this.closed !== null) return;
     this.closed = { code, reason };
   }
 
@@ -275,6 +282,21 @@ export class FakePlatform {
       );
     }
     return mine.reduce((n, s) => n + s.attachmentWrites, 0);
+  }
+
+  /**
+   * The platform reaping a socket, which `close()` alone does not model.
+   *
+   * A closed socket keeps appearing in `getWebSockets` until the close
+   * handshake finishes with a peer that may already be gone — `room.ts` says so
+   * where it clears a replaced control link's attachment rather than trusting
+   * the socket to disappear. So "closed" and "no longer held" are two states,
+   * and the byte pump's peer-gone branch is only reachable in the second. A
+   * fake with one state would make that branch untestable and therefore
+   * untested.
+   */
+  forget(ws: Sock): void {
+    this.#tags.delete(ws);
   }
 
   #accept(ws: Sock, tags: string[] = []): void {

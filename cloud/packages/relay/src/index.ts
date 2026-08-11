@@ -1,5 +1,5 @@
 /**
- * The entrypoint, and the two routes the relay has.
+ * The entrypoint, and the three routes the relay has.
  *
  * `GET /v1/control?host=<id>` is the daemon's. It has no edge-checkable
  * credential — the thing that proves a machine is itself is a signature over a
@@ -20,8 +20,13 @@
  * cost a room wake-up, or an unauthenticated caller can bill the account by
  * dialling garbage. The ticket is verified statelessly, so there is nothing
  * the object knows that this needs. Only a ticket that verifies reaches the
- * room — where the answer is now one of two things rather than always `4404`:
- * nobody is home, or the host is home and dial-back is not built yet.
+ * room — where it either becomes a pipe or is told which of the two things
+ * went wrong: nobody is home, or the host is home and did not dial back.
+ *
+ * `GET /v1/pipe?host=<id>&pipe=<id>` is the daemon's second connection, made
+ * because the room asked it to. The id is the credential and there is no other:
+ * 128 bits, published once down an authenticated control link, dialable for ten
+ * seconds. → `room/pipe.ts`.
  *
  * **Every refusal a browser can see is a WebSocket close code, not an HTTP
  * status.** The browser WebSocket API never surfaces the response status: a 401
@@ -45,8 +50,9 @@
 import { fromHex } from '@zesterm/cloud-shared';
 
 import type { Env } from './env.ts';
-import { ATTACH_PATH, CONTROL_PATH, roomName } from './routes.ts';
+import { ATTACH_PATH, CONTROL_PATH, PIPE_PATH, roomName } from './routes.ts';
 import { HOST_ID_BYTES } from './room/control.ts';
+import { pipeIdIsWellFormed } from './room/pipe.ts';
 import {
   RELAY_SUBPROTOCOL,
   ticketFromSubprotocols,
@@ -55,10 +61,15 @@ import {
 } from './ticket.ts';
 
 export { RelayRoom } from './room.ts';
-export { ATTACH_PATH, CONTROL_PATH } from './routes.ts';
-// The room's refusals live with the room. Re-exported because the two codes a
-// *browser* can be given belong beside `CLOSE_TICKET_REFUSED` in anyone's head.
-export { CLOSE_HOST_ABSENT, CLOSE_NO_DIAL_BACK } from './room/control.ts';
+export { ATTACH_PATH, CONTROL_PATH, PIPE_PATH } from './routes.ts';
+// The room's refusals live with the room. Re-exported because every code a
+// *browser* can be given belongs beside `CLOSE_TICKET_REFUSED` in anyone's head.
+export { CLOSE_HOST_ABSENT } from './room/control.ts';
+export {
+  CLOSE_PIPE_DIAL_TIMEOUT,
+  CLOSE_PIPE_FLOOD,
+  CLOSE_PIPE_PEER_GONE,
+} from './room/pipe.ts';
 
 /**
  * The ticket was missing, malformed, expired, signed by a key we do not hold,
@@ -158,7 +169,11 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    if (url.pathname === CONTROL_PATH) {
+    // Both daemon routes. Neither carries an edge-checkable credential — the
+    // control link's is a signature the object has to have challenged for, and
+    // the pipe's is an id only the object knows it issued — so both are
+    // syntax-checked here and decided inside.
+    if (url.pathname === CONTROL_PATH || url.pathname === PIPE_PATH) {
       if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
         return new Response('expected a WebSocket upgrade', { status: 426 });
       }
@@ -168,6 +183,15 @@ export default {
       const host = url.searchParams.get('host') ?? '';
       if (fromHex(host, HOST_ID_BYTES) === null) {
         return new Response('?host= must be 64 lowercase hex', { status: 400 });
+      }
+      // The same argument one level down: an id that is not 32 lowercase hex
+      // can never match a pipe this relay issued, so refusing it here is one
+      // fewer wake-up anyone can bill the account for by guessing.
+      if (
+        url.pathname === PIPE_PATH &&
+        !pipeIdIsWellFormed(url.searchParams.get('pipe') ?? '')
+      ) {
+        return new Response('?pipe= must be 32 lowercase hex', { status: 400 });
       }
       return env.RELAY_ROOM.get(env.RELAY_ROOM.idFromName(roomName(host))).fetch(request);
     }

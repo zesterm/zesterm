@@ -30,18 +30,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { getPublicKeyAsync, signAsync } from '@noble/ed25519';
-import { fromHex, hex, signingPreimage } from '@zesterm/cloud-shared';
+import { fromHex } from '@zesterm/cloud-shared';
 
-import type { Env } from '../src/env.ts';
-import { RelayRoom } from '../src/room.ts';
 import {
   CLOSE_CONTROL_PROTOCOL,
   CLOSE_CONTROL_REFUSED,
   CLOSE_CONTROL_REPLACED,
   CLOSE_CONTROL_UNCONFIGURED,
   CLOSE_HOST_ABSENT,
-  CLOSE_NO_DIAL_BACK,
   CONTROL_HANDSHAKE_TTL_MS,
   KEEPALIVE_REQUEST,
   KEEPALIVE_RESPONSE,
@@ -51,130 +47,23 @@ import {
   readControlAttachment,
 } from '../src/room/control.ts';
 import { HOST_LOOKUP_TTL_MS } from '../src/room/hosts.ts';
-import { FakeDb, FakePlatform, FakeSock } from './fake-platform.ts';
-
-const NOW = 1_700_000_000_000;
-
-/** The relay's own key. Its public half is what a daemon is to pin, once one exists. */
-const RELAY_SEED = new Uint8Array(32).fill(3);
-const RELAY_KEY = hex(await getPublicKeyAsync(RELAY_SEED));
-
-/** The machine. Deterministic, so a failure names the same id every run. */
-const HOST_SEED = new Uint8Array(32).fill(11);
-const HOST = hex(await getPublicKeyAsync(HOST_SEED));
-
-/** Another real key pair, for the impostor cases. */
-const STRANGER_SEED = new Uint8Array(32).fill(13);
-const STRANGER = hex(await getPublicKeyAsync(STRANGER_SEED));
-
-/** What `fetch` hands the room; a plain object here, since only the strings matter. */
-const KEEPALIVE = { request: KEEPALIVE_REQUEST, response: KEEPALIVE_RESPONSE };
-
-/**
- * A relay under test, with the switch that makes this suite worth writing.
- *
- * `evicting` decides whether every call gets a brand-new `RelayRoom` over the
- * same durable data — sockets, tags, attachments and storage — which is what
- * the runtime leaves behind between messages.
- */
-class Relay {
-  readonly platform = new FakePlatform();
-  readonly db = new FakeDb();
-
-  readonly #evicting: boolean;
-  readonly #env: Env;
-  #room: RelayRoom | null = null;
-
-  constructor(evicting: boolean, signingKey: string | undefined) {
-    this.#evicting = evicting;
-    this.db.enrolled.add(HOST);
-    this.#env = {
-      RELAY_ROOM: {
-        idFromName: () => {
-          throw new Error('a room does not address rooms');
-        },
-        get: () => {
-          throw new Error('a room does not address rooms');
-        },
-      },
-      DB: this.db,
-      ...(signingKey === undefined ? {} : { RELAY_SIGNING_KEY: signingKey }),
-    };
-  }
-
-  room(): RelayRoom {
-    if (this.#evicting) return new RelayRoom(this.platform.state(), this.#env);
-    this.#room ??= new RelayRoom(this.platform.state(), this.#env);
-    return this.#room;
-  }
-
-  /**
-   * Throw the instance away **whatever the mode**, keeping the durable data.
-   *
-   * For the one property that must hold in both runs: a test that only evicts
-   * in the evicting mode is a test whose comment is half true.
-   */
-  evict(): void {
-    this.#room = null;
-  }
-
-  async dial(label = 'daemon', args: { host?: string; now?: number } = {}): Promise<FakeSock> {
-    const ws = new FakeSock(label);
-    await this.room().openControlLink(ws, args.host ?? HOST, KEEPALIVE, args.now ?? NOW);
-    return ws;
-  }
-
-  async say(ws: FakeSock, message: string | ArrayBuffer, now = NOW): Promise<void> {
-    await this.room().webSocketMessage(ws, message, now);
-  }
-
-  attach(label = 'browser'): FakeSock {
-    const ws = new FakeSock(label);
-    this.room().refuseAttach(ws);
-    return ws;
-  }
-}
-
-function frames(ws: FakeSock): Array<Record<string, unknown>> {
-  return ws.sent.map((raw) => JSON.parse(String(raw)) as Record<string, unknown>);
-}
-
-function lastFrame(ws: FakeSock): Record<string, unknown> {
-  const all = frames(ws);
-  assert.ok(all.length > 0, `${ws.label} sent nothing`);
-  return all[all.length - 1]!;
-}
-
-function nonceOf(ws: FakeSock): string {
-  return String(frames(ws)[0]?.['nonce']);
-}
-
-async function hello(
-  nonce: string,
-  overrides: { seed?: Uint8Array; host?: string; label?: string; v?: number } = {},
-): Promise<string> {
-  const nonceBytes = fromHex(nonce, NONCE_BYTES);
-  assert.ok(nonceBytes, 'the challenge must carry 64 hex characters');
-  const signature = await signAsync(
-    signingPreimage('host', 'auth', nonceBytes),
-    overrides.seed ?? HOST_SEED,
-  );
-  return JSON.stringify({
-    t: 'hello',
-    v: overrides.v ?? 1,
-    host: overrides.host ?? HOST,
-    label: overrides.label ?? 'andy-mac',
-    sig: hex(signature),
-  });
-}
-
-/** Park an authenticated control link, the ordinary way. */
-async function parked(relay: Relay, label = 'daemon'): Promise<FakeSock> {
-  const ws = await relay.dial(label);
-  await relay.say(ws, await hello(nonceOf(ws)));
-  assert.equal(lastFrame(ws)['t'], 'ready', `${label} failed to park`);
-  return ws;
-}
+import { CLOSE_PIPE_DIAL_TIMEOUT } from '../src/room/pipe.ts';
+import { FakeSock } from './fake-platform.ts';
+import {
+  frames,
+  hello,
+  HOST,
+  lastFrame,
+  nonceOf,
+  NOW,
+  parked,
+  RELAY_KEY,
+  RELAY_SEED,
+  Relay,
+  STRANGER,
+  STRANGER_SEED,
+} from './harness.ts';
+import { hex } from '@zesterm/cloud-shared';
 
 // ---------------------------------------------------------------------------
 
@@ -271,7 +160,7 @@ function suite(mode: string, evicting: boolean): void {
     const r = relay();
 
     const before = r.platform.getWebSocketsCalls;
-    const alone = r.attach('early');
+    const alone = await r.attach('early');
     assert.deepEqual(alone.closed, {
       code: CLOSE_HOST_ABSENT,
       reason: 'no control link for this host',
@@ -283,14 +172,14 @@ function suite(mode: string, evicting: boolean): void {
 
     await parked(r);
 
-    const after = r.attach('late');
+    const after = await r.attach('late');
     assert.deepEqual(
       after.closed,
       {
-        code: CLOSE_NO_DIAL_BACK,
-        reason: 'the host is here; the relay cannot dial back yet',
+        code: CLOSE_PIPE_DIAL_TIMEOUT,
+        reason: 'the host did not dial back',
       },
-      '"your Mac is asleep" and "your Mac is here and this relay cannot join you to it" are different problems and only one of them is the user’s',
+      '"your Mac is asleep" and "your Mac is here and did not answer" are different problems and only one of them is the user’s. This host is parked but nothing plays its half, so the dial-back deadline is what answers',
     );
   });
 
@@ -298,7 +187,7 @@ function suite(mode: string, evicting: boolean): void {
     const r = relay();
     await r.dial();
     assert.equal(
-      r.attach().closed?.code,
+      (await r.attach()).closed?.code,
       CLOSE_HOST_ABSENT,
       'anyone can open a socket; only a signature over the nonce makes it a host',
     );
@@ -418,8 +307,8 @@ function suite(mode: string, evicting: boolean): void {
     );
     assert.equal(second.closed, null);
     assert.equal(
-      r.attach().closed?.code,
-      CLOSE_NO_DIAL_BACK,
+      (await r.attach()).closed?.code,
+      CLOSE_PIPE_DIAL_TIMEOUT,
       'exactly one host is present afterwards',
     );
   });
@@ -502,8 +391,8 @@ function suite(mode: string, evicting: boolean): void {
     const writes = r.platform.storage.writes;
     const selects = r.db.selects;
 
-    r.attach();
-    r.attach();
+    await r.attach();
+    await r.attach();
 
     assert.equal(r.platform.storage.writes, writes, 'ADR-009: never write storage on the data path');
     assert.equal(r.db.selects, selects, 'and the attach path makes no query of its own');
