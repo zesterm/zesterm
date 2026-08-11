@@ -14,3 +14,15 @@
 # Leave it out and every attach is refused with 4401, which is the correct
 # answer for a relay whose mint has not been set up.
 TICKET_PUBLIC_KEYS="…"
+
+# This relay's own Ed25519 seed, 64 lowercase hex characters. Its public half is
+# the `relay_key` every control-link challenge carries, which a daemon pins
+# across reconnects — so unlike TICKET_PUBLIC_KEYS this is the *private* half,
+# and it is one key rather than a list. Rotating it is a re-pin on every machine
+# in the fleet, which is why it is generated once and left alone:
+#   node -e "console.log(Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('hex'))"
+#
+# Leave it out and every control link is refused with 4503 and an `unconfigured`
+# error frame, which is the correct answer for a relay whose key has never been
+# set up — as opposed to a startup check, which would take the Worker down.
+RELAY_SIGNING_KEY="…"

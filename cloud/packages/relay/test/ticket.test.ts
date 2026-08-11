@@ -26,7 +26,7 @@ import {
   type AttachTicket,
 } from '@zesterm/cloud-shared';
 
-import { attachVerdict, ATTACH_PATH, CLOSE_HOST_ABSENT, CLOSE_TICKET_REFUSED } from '../src/index.ts';
+import { attachVerdict, ATTACH_PATH, CLOSE_TICKET_REFUSED } from '../src/index.ts';
 import type { Env } from '../src/env.ts';
 import {
   RELAY_SUBPROTOCOL,
@@ -297,11 +297,11 @@ const attach = (ticket: string | null, host = HOST, upgrade = true) =>
     },
   });
 
-test('a verified attach reaches the point where the host is missing, and nothing else does', async () => {
+test('a verified attach is the only thing that may name a room', async () => {
   assert.deepEqual(
     await attachVerdict(attach(await mint()), env(ACCOUNT.publicHex), IAT),
-    { kind: 'close', code: CLOSE_HOST_ABSENT, reason: 'no control link for this host' },
-    'the ticket is what the relay checks; the daemon being connected is a separate fact, and this build has no control link at all',
+    { kind: 'room', host: HOST },
+    'the ticket is what the edge checks; whether the daemon is connected is the room’s to answer, and the room is not woken until the ticket has verified',
   );
 });
 

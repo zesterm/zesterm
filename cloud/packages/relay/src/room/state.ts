@@ -17,9 +17,9 @@
  * every handler call — and that is only cheap if constructing the state is
  * cheap, which is only true if the state is one of these.
  *
- * Deliberately the *narrow* subset. `setWebSocketAutoResponse`, alarms and
- * `blockConcurrencyWhile` are all absent because nothing uses them yet; adding
- * one is a visible decision rather than a discovery.
+ * Deliberately the *narrow* subset. Alarms and `blockConcurrencyWhile` are
+ * absent because nothing uses them yet; adding one is a visible decision rather
+ * than a discovery.
  */
 
 /**
@@ -56,6 +56,20 @@ export interface RoomStorage {
   delete(key: string): Promise<boolean>;
 }
 
+/**
+ * The keepalive pair, as `setWebSocketAutoResponse` takes one.
+ *
+ * The platform's own `WebSocketRequestResponsePair` is a workerd global with a
+ * constructor and two string getters, and this is the shape of it that matters
+ * here. Declaring it means the room's logic can be handed a plain object under
+ * `node --test`; only the `new` in `room.ts`'s `fetch` — which already cannot
+ * be unit-tested, because `WebSocketPair` is there too — needs the real class.
+ */
+export interface AutoResponsePair {
+  readonly request: string;
+  readonly response: string;
+}
+
 export interface RoomState {
   readonly storage: RoomStorage;
   /**
@@ -66,4 +80,14 @@ export interface RoomState {
   /** Every accepted socket, or those carrying `tag`. This is the pairing. */
   getWebSockets(tag?: string): Sock[];
   getTags(ws: Sock): string[];
+  /**
+   * Answer `request` with `response` **without waking the object**.
+   *
+   * Object-wide rather than per-socket, and idempotent. It is the difference
+   * between an idle host costing nothing and costing a request every thirty
+   * seconds forever, which is the largest single term in ADR-009's arithmetic
+   * — and it is why the control link carries text, since these members are
+   * strings and the platform compares them literally.
+   */
+  setWebSocketAutoResponse(pair?: AutoResponsePair): void;
 }

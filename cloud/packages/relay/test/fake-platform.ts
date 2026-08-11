@@ -20,16 +20,22 @@
  *
  * The numbers were measured against real workerd rather than read off a doc
  * page; `src/room/limits.ts` records what and how.
+ *
+ * `FakeDb` is here for the same reason and holds the line the same way: it
+ * answers the two statements the control link issues and throws on anything
+ * else, so a query that appears on the data path fails a test rather than
+ * merely costing money.
  */
 
 import { deserialize, serialize } from 'node:v8';
 
+import type { D1Binding, D1PreparedStatement } from '../src/env.ts';
 import {
   MAX_ATTACHMENT_BYTES,
   MAX_TAGS_PER_SOCKET,
   MAX_TAG_LENGTH,
 } from '../src/room/limits.ts';
-import type { RoomState, RoomStorage, Sock } from '../src/room/state.ts';
+import type { AutoResponsePair, RoomState, RoomStorage, Sock } from '../src/room/state.ts';
 
 export class FakeSock implements Sock {
   /** For test messages; the platform has no such notion. */
@@ -94,6 +100,68 @@ export class FakeSock implements Sock {
   }
 }
 
+/**
+ * The two statements `room/hosts.ts` issues, and nothing else.
+ *
+ * A fake D1 that answered any query would let a future edit put the fleet's
+ * state on the attach path and still pass — so an unrecognised statement throws
+ * by name here. The `hosts` row is modelled as a set and a map rather than as
+ * SQL, because what the tests are about is *how many* queries the connect path
+ * makes, not what SQLite does with them.
+ */
+class FakeStatement implements D1PreparedStatement {
+  readonly #db: FakeDb;
+  readonly #query: string;
+  readonly #values: unknown[];
+
+  constructor(db: FakeDb, query: string, values: unknown[]) {
+    this.#db = db;
+    this.#query = query;
+    this.#values = values;
+  }
+
+  bind(...values: unknown[]): D1PreparedStatement {
+    return new FakeStatement(this.#db, this.#query, [...this.#values, ...values]);
+  }
+
+  async first<T>(): Promise<T | null> {
+    if (!this.#query.includes('SELECT 1 AS ok FROM hosts')) {
+      throw new Error(`the relay does not read this: ${this.#query}`);
+    }
+    this.#db.selects += 1;
+    const [id] = this.#values;
+    return this.#db.enrolled.has(String(id)) ? ({ ok: 1 } as T) : null;
+  }
+
+  async run(): Promise<unknown> {
+    if (!this.#query.includes('UPDATE hosts SET last_seen_at')) {
+      throw new Error(`the relay does not write this: ${this.#query}`);
+    }
+    this.#db.updates += 1;
+    if (this.#db.failUpdates) throw new Error('D1_ERROR: network');
+    const [at, id] = this.#values;
+    this.#db.lastSeen.set(String(id), Number(at));
+    return {};
+  }
+}
+
+export class FakeDb implements D1Binding {
+  /** Host ids with a live, unrevoked row. */
+  readonly enrolled = new Set<string>();
+  readonly lastSeen = new Map<string, number>();
+
+  /** Counted apart, because only one of the two is cached. */
+  selects = 0;
+  updates = 0;
+
+  /** Make every `UPDATE` throw, as a D1 blip does. */
+  failUpdates = false;
+
+  prepare(query: string): D1PreparedStatement {
+    return new FakeStatement(this, query, []);
+  }
+}
+
 export class FakeRoomStorage implements RoomStorage {
   /**
    * `put` and `delete`. ADR-009's cost model rests on never writing storage on
@@ -135,6 +203,26 @@ export class FakePlatform {
   /** How many `RoomState`s have been handed out — one per simulated eviction. */
   states = 0;
 
+  /**
+   * How many times the pairing was re-derived from the platform.
+   *
+   * The structural half of the eviction guard, and it pins *where* an answer
+   * came from rather than only that the answer was right. That is not a
+   * refinement: a room that answered "is a host present" from an instance
+   * field, set when the `hello` was accepted, gives the correct answer in a
+   * run against one live object — first `false`, then `true` — and every value
+   * assertion passes. This counter is the only thing that fails it there.
+   * (Measured by writing exactly that bug; the evicting run caught it too, the
+   * live one caught it here alone.)
+   */
+  getWebSocketsCalls = 0;
+
+  /** The keepalive pair the room last configured, or `null` if it never did. */
+  autoResponse: AutoResponsePair | null = null;
+
+  /** How many times it was configured. Object-wide and idempotent, so this may repeat. */
+  autoResponseCalls = 0;
+
   // Insertion-ordered, because `getWebSockets` returns accept order and a room
   // that happens to work only when the pairing arrives in one order should
   // fail somewhere a test can see it.
@@ -155,6 +243,10 @@ export class FakePlatform {
       acceptWebSocket: (ws, tags) => this.#accept(ws, tags),
       getWebSockets: (tag) => this.#get(tag),
       getTags: (ws) => this.#getTags(ws),
+      setWebSocketAutoResponse: (pair) => {
+        this.autoResponse = pair ?? null;
+        this.autoResponseCalls += 1;
+      },
     };
   }
 
@@ -205,6 +297,7 @@ export class FakePlatform {
   }
 
   #get(tag?: string): Sock[] {
+    this.getWebSocketsCalls += 1;
     const all = [...this.#tags.entries()];
     if (tag === undefined) return all.map(([ws]) => ws);
     return all.filter(([, tags]) => tags.includes(tag)).map(([ws]) => ws);
