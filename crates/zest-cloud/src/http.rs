@@ -145,8 +145,9 @@ fn read_response(reader: impl Read) -> io::Result<Response> {
     let Some(length) = length else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "the response had neither a content-length nor a transfer-encoding, so where it \
-             ends is not knowable",
+            "the response gave no content-length, so where its body ends is not knowable. \
+             (`transfer-encoding: identity` reaches here too: it is accepted, and it \
+             supplies no length either.)",
         ));
     };
     if length > MAX_BODY {

@@ -47,6 +47,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -131,6 +132,7 @@ impl TlsDuplex {
             sock_w: Mutex::new(sock),
             cut,
             fault: Mutex::new(None),
+            severed: AtomicBool::new(false),
         });
         Ok(Self {
             reader: TlsReader {
@@ -169,6 +171,13 @@ impl TlsDuplex {
 
 /// What both halves share: the TLS state, the write end of the socket, and the
 /// one error that ends the connection for both of them.
+/// How often a severed connection's parked reader checks that it was severed.
+///
+/// Short because it is only ever reached after the connection is over, and the
+/// cost of the delay is a thread that has nothing left to do sitting there for
+/// up to this long.
+const SEVER_POLL: Duration = Duration::from_millis(20);
+
 struct Shared {
     conn: Mutex<ClientConnection>,
     sock_w: Mutex<TcpStream>,
@@ -181,6 +190,12 @@ struct Shared {
     /// The first failure either half saw. `io::Error` is not `Clone`, so what
     /// is kept is enough to rebuild an equal one.
     fault: Mutex<Option<(io::ErrorKind, String)>>,
+    /// Whether this connection has been ended, by a fault or by a cut.
+    ///
+    /// Read by the reader to tell a severing timeout from an ordinary one, so
+    /// it exists for the same reason [`Shared::sever`] sets that timeout at
+    /// all — see there.
+    severed: AtomicBool,
 }
 
 impl Shared {
@@ -194,8 +209,27 @@ impl Shared {
         let (kind, message) = slot.get_or_insert_with(|| (e.kind(), e.to_string())).clone();
         // Not conditional on being first: whoever faults, the socket must go
         // down, or a parked reader waits for a peer that will never speak.
-        let _ = self.cut.shutdown(Shutdown::Both);
+        self.sever();
         io::Error::new(kind, message)
+    }
+
+    /// End the connection so that a reader parked in `read` comes back.
+    ///
+    /// **A `shutdown` is not enough, and assuming it was cost two Windows CI
+    /// failures on this file's own tests.** POSIX wakes a blocked `recv` and
+    /// returns 0 from one issued afterwards; Winsock does neither reliably, so
+    /// the reader stayed parked and the watchdog this exists to serve would
+    /// have done nothing on the project's primary platform.
+    ///
+    /// The read timeout is what makes it portable, and it also closes a race no
+    /// caller can avoid: `cut` may run *before* the reader reaches its `read`,
+    /// and a timeout applies to a call that has not started yet where a
+    /// shutdown may not. `severed` is what lets the reader tell the resulting
+    /// `TimedOut` from one a caller asked for with `set_read_timeout`.
+    fn sever(&self) {
+        self.severed.store(true, Ordering::Release);
+        let _ = self.cut.set_read_timeout(Some(SEVER_POLL));
+        let _ = self.cut.shutdown(Shutdown::Both);
     }
 
     fn latched(&self) -> Option<io::Error> {
@@ -227,9 +261,13 @@ impl Shared {
     fn feed(&self, cipher: &mut &[u8]) -> io::Result<bool> {
         let mut conn = self.conn.lock().expect("connection lock");
         if conn.read_tls(cipher)? == 0 {
-            // `read_tls` reports zero only after a close_notify, since the
-            // slice it is reading from is not empty. Anything behind that is
-            // not ours to interpret.
+            // `read_tls` returns the byte count its *reader* gave it, so zero
+            // means end of input — for a slice, an empty slice. The caller
+            // only reaches here with a non-empty one, so the remaining way to
+            // see zero is rustls having stopped wanting ciphertext, which
+            // after a `close_notify` it has. Whatever is behind that is not
+            // ours to interpret; the caller learns the connection ended from
+            // `drain` returning `Some(0)`.
             *cipher = &[];
             return Ok(false);
         }
@@ -305,6 +343,22 @@ impl Read for TlsReader {
                 // A signal, not a failure. `write_all` retries this for the
                 // writer; nothing retries it here.
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                // The timeout `sever` set, not one a caller asked for: this
+                // connection is over, so report it as the end of the stream
+                // (or as whatever failed first), exactly as a POSIX shutdown
+                // would have.
+                Err(e)
+                    if self.shared.severed.load(Ordering::Acquire)
+                        && matches!(
+                            e.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) =>
+                {
+                    return match self.shared.latched() {
+                        Some(e) => Err(e),
+                        None => Ok(0),
+                    };
+                }
                 Err(e) => return Err(self.shared.fault(&e)),
             };
             self.taken = 0;
@@ -397,7 +451,7 @@ pub struct TlsHandle {
 
 impl TlsHandle {
     pub fn cut(&self) {
-        let _ = self.shared.cut.shutdown(Shutdown::Both);
+        self.shared.sever();
     }
 }
 
@@ -610,6 +664,32 @@ mod tests {
             ),
             0,
             "end of stream is zero bytes"
+        );
+    }
+
+    #[test]
+    fn a_cut_that_lands_before_the_read_still_ends_it() {
+        // The ordering the sibling test cannot control, made deterministic.
+        //
+        // `cut` and the reader race by construction: a watchdog fires on its own
+        // thread and has no way to know whether the connection's reader has
+        // reached `read` yet. On POSIX either order works — a `read` issued
+        // after a `shutdown` returns 0 immediately. On Winsock it does not, and
+        // this exact ordering left the reader parked until the test timed out,
+        // twice, on CI. A watchdog that only cuts when it wins a race is not a
+        // watchdog, and Windows is this project's primary platform.
+        let peer = Peer::spawn();
+        let duplex = dial(&peer);
+        let handle = duplex.handle();
+        let (mut reader, _writer) = duplex.split();
+
+        handle.cut();
+
+        let mut buf = [0u8; 64];
+        assert_eq!(
+            reader.read(&mut buf).expect("a cut is not a fault"),
+            0,
+            "a read issued after the cut hung instead of reporting the end of the stream"
         );
     }
 
