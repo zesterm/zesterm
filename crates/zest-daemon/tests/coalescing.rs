@@ -66,6 +66,10 @@ fn last_line() -> String {
 }
 
 /// A daemon serving one connection, over loopback TCP.
+/// How long to keep draining after the flood's last line shows up, before
+/// calling the client caught up. Short: it is only ever spent once, at the end.
+const SETTLE: Duration = Duration::from_millis(300);
+
 fn serve_one(floor: Duration) -> TcpStream {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -161,7 +165,25 @@ fn a_floor_bounds_the_message_rate_and_still_lands_on_the_right_grid() {
     // still holding — and stopping there would compare a client that is
     // legitimately one batch behind. The last line of the flood cannot
     // overtake anything.
-    while !screen(&term).iter().any(|row| row.contains(&last_line())) {
+    // ...and then everything still behind it, which is not the same thing.
+    //
+    // The last line *appearing* does not mean the host has finished: under a
+    // floor the newline that scrolled it into place can arrive as its own
+    // batch. Stopping there compared a client one row short of the host, with
+    // a trailing blank -- an assertion that reads as "coalescing lost
+    // information" when nothing was lost and the client was simply one update
+    // behind. It failed that way once, on a slow Windows runner.
+    //
+    // So on seeing the last line the read timeout drops to `SETTLE` and this
+    // loop drains to it: "the client has everything the host will send"
+    // becomes true rather than likely, for one short wait instead of the 20s
+    // the real timeout would cost.
+    let mut settling = false;
+    loop {
+        if !settling && screen(&term).iter().any(|row| row.contains(&last_line())) {
+            settling = true;
+            stream.set_read_timeout(Some(SETTLE)).expect("read timeout");
+        }
         let msg = match client.next_message() {
             Ok(m) => m,
             // A read timeout arrives here as a transport error, as does a

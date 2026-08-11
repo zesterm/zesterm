@@ -8,8 +8,38 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
-# Deliberately empty. The crate exists before the dependency it is here to own,
-# so `cargo xtask check-deps` fences rustls and every HTTP client out of the
-# rest of the workspace *first* -- the PR that adds rustls is then the one that
-# proves the fence works, rather than the one that discovers it does not.
+# Versions are pinned here rather than in `[workspace.dependencies]`, which is
+# where every other shared dependency lives. That table exists so several crates
+# can agree on one version; these have exactly one consumer by design, and an
+# entry in the workspace table is an invitation for a second — `workspace = true`
+# is one line away and `cargo xtask check-deps` would then be the only thing
+# standing between rustls and a crate that must not have it.
 [dependencies]
+# `ring`, not the default `aws-lc-rs`: aws-lc-rs builds C and needs CMake on all
+# three CI runners plus NASM on Windows, and CI installs neither. `tls12` is on
+# because Cloudflare's edge offers 1.3 and this is a client that must also work
+# through a corporate middlebox that does not.
+rustls = { version = "0.23", default-features = false, features = [
+    "std",
+    "tls12",
+    "ring",
+    "logging",
+] }
+# Both root sources are compiled in and chosen at runtime ([`tls::Roots`]),
+# because each one's failure is the other's normal case: the platform verifier
+# is the only thing that accepts a corporate MITM's re-signed certificate, and
+# it is also the thing that finds no trust store at all inside a minimal
+# container.
+rustls-platform-verifier = "0.7"
+webpki-roots = "1"
+tracing = { workspace = true }
+
+[dev-dependencies]
+# Mints the certificate the loopback peer in `testing.rs` serves, so no test
+# needs the machine it runs on to trust anything.
+#
+# Also `ring` by default, for the reason above; a test dependency that dragged
+# in a C toolchain would break CI just as thoroughly as a real one. Nothing
+# checks that: `cargo xtask check-deps` reads `cargo tree --edges normal`, which
+# excludes dev-dependencies entirely, so this table is held by reading it.
+rcgen = "0.14"
