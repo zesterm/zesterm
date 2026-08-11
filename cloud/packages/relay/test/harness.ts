@@ -113,6 +113,74 @@ export class Relay {
     await this.room().openAttach(ws, NOW, timeoutMs);
     return ws;
   }
+
+  /**
+   * A whole pipe: a browser attaches, the parked host dials back, both legs
+   * come back live.
+   *
+   * The dial-back runs on the **same instance** as the attach in both modes,
+   * and that is not the eviction guard going soft. It is the one moment the
+   * platform cannot evict — a Durable Object stays alive while a `fetch` is in
+   * flight, the attach *is* one, and `#dialling` is the single instance field
+   * whose legality rests on exactly that. Evicting between the two halves would
+   * test something production never does. Everything *after* this returns is
+   * fair game: `say` and `close` go through `room()`, which evicts.
+   */
+  async pipe(
+    control: FakeSock,
+    opts: { client?: string; host?: string; timeoutMs?: number } = {},
+  ): Promise<Pipe> {
+    const room = this.room();
+    const client = new FakeSock(opts.client ?? 'browser');
+    // Deliberately not awaited yet: `openAttach` runs to its first `await`
+    // synchronously, so by the next line the `open` frame is down the control
+    // link and the id is dialable — which is the order the daemon sees.
+    const attaching = room.openAttach(client, NOW, opts.timeoutMs ?? 500);
+    const id = pipeOf(control);
+    const host = new FakeSock(opts.host ?? 'host-leg');
+    assert.ok(room.openPipeLeg(host, id), `${host.label} was refused pipe ${id}`);
+    await attaching;
+    assert.equal(client.closed, null, `${client.label} was closed instead of piped`);
+    return { id, client, host, room };
+  }
+
+  /** The platform reporting a leg's close, on whatever instance the mode gives. */
+  close(ws: FakeSock): void {
+    this.room().webSocketClose(ws);
+  }
+
+  /** The same news arriving as an error, which the runtime need not follow with a close. */
+  fail(ws: FakeSock): void {
+    this.room().webSocketError(ws);
+  }
+}
+
+/** Both ends of one live pipe, and the instance that paired them. */
+export interface Pipe {
+  readonly id: string;
+  readonly client: FakeSock;
+  readonly host: FakeSock;
+  /**
+   * The instance that owns it.
+   *
+   * Only for the two things that are legitimately instance-scoped: the pending
+   * dial (`openPipeLeg`) and the token buckets. Anything on the data path
+   * should go through `Relay.say`, which honours the mode.
+   */
+  readonly room: RelayRoom;
+}
+
+/**
+ * The pipe id the room most recently published down a control link.
+ *
+ * The last `open` rather than the first, because a host serves many browsers
+ * and a test that read frame zero would silently keep dialling the first pipe
+ * it ever opened.
+ */
+export function pipeOf(control: FakeSock): string {
+  const open = frames(control).findLast((frame) => frame['t'] === 'open');
+  assert.ok(open, `${control.label} was never asked to open a pipe`);
+  return String(open['pipe']);
 }
 
 export function frames(ws: FakeSock): Array<Record<string, unknown>> {
