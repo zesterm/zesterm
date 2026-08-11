@@ -103,8 +103,8 @@ impl From<&zest_config::Settings> for Config {
                 ..Default::default()
             },
             builtin_box_drawing: s.typography.builtin_box_drawing,
-            // Left as `Option` rather than resolved here: the fallback is the
-            // *theme's* suggestion, and the theme is not in scope yet.
+            // Carried, not clamped: `resolve_text_tuning` owns the range, so
+            // there is one place that decides what an out-of-range gamma means.
             text_gamma: s.appearance.text_gamma,
             text_contrast: s.appearance.text_contrast,
             theme: s.appearance.theme.clone(),

@@ -46,7 +46,7 @@
     ],
     "integer": false,
     "variants": [],
-    "default": 1.2999999523162842,
+    "default": 1.3,
     "restartHint": false
   },
   {
@@ -191,7 +191,7 @@
     ],
     "integer": false,
     "variants": [],
-    "default": 0.1599999964237213,
+    "default": 0.16,
     "restartHint": false
   },
   {

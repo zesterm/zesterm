@@ -27,7 +27,7 @@
           "x_zest_widget": "number"
         },
         "text_gamma": {
-          "default": 1.2999999523162842,
+          "default": 1.3,
           "description": "Stem darkening for text.\n\nApplied to glyph coverage each frame rather than baked into the atlas, so\ntuning it is a repaint rather than a re-rasterization. It affects text\nonly — backgrounds and chrome come out exactly as the theme specifies.\n\nThe default must stay equal to `zest_render_wgpu::TextTuning::DEFAULT_GAMMA`.\nIt cannot reference it — `zest-config` does not depend on the renderer —\nso `zest-app`'s `the_two_defaults_agree` asserts it instead. Before this\nwas wired the two numbers were 1.0 and 1.3 and nothing compared them, so\nthe schema documented a value the renderer never used.",
           "format": "float",
           "maximum": 2.5,
@@ -191,7 +191,7 @@
           "x_zest_widget": "number"
         },
         "spring_response": {
-          "default": 0.1599999964237213,
+          "default": 0.16,
           "description": "Spring response in seconds — roughly, time to reach the target.",
           "format": "float",
           "maximum": 2.0,
@@ -488,7 +488,7 @@
         "follow_system_theme": false,
         "light_theme": "",
         "text_contrast": 0.0,
-        "text_gamma": 1.2999999523162842,
+        "text_gamma": 1.3,
         "theme": "obsidian"
       },
       "description": "Colours and the theme they come from."
@@ -510,7 +510,7 @@
         "respect_system_reduce_motion": true,
         "smooth_scroll": true,
         "spring_damping": 1.0,
-        "spring_response": 0.1599999964237213
+        "spring_response": 0.16
       },
       "description": "Animation, and how much of it."
     },
