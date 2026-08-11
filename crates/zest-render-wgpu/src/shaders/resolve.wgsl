@@ -5,23 +5,25 @@
 //
 //  1. Blending happens in linear space, which is the only way compositing text
 //     over a background is correct.
-//  2. text_gamma / text_contrast are applied once, here, rather than baked into
-//     every glyph bitmap. Tuning them becomes a free repaint instead of an
-//     atlas rebuild.
-//  3. Premultiplication in *encoded* space -- see below. This is the subtle one.
-//  4. OS-driven repaints for free: when the compositor demands a redraw and
+//  2. Premultiplication in *encoded* space -- see below. This is the subtle one.
+//  3. OS-driven repaints for free: when the compositor demands a redraw and
 //     nothing is dirty, only this pass reruns from the retained offscreen. That
 //     is what makes the 0%-GPU-at-idle claim survive window exposure events.
+//
+// text_gamma / text_contrast used to be applied here as well, which was the
+// wrong place for them: this pass sees the finished frame, so the transfer
+// function landed on cell backgrounds, selection and chrome as much as on text,
+// and a dark theme's background arrived several shades lighter than the colour
+// the theme asked for. They now adjust glyph *coverage* in `glyph.wgsl`, which
+// is what stem darkening means and is still a per-fragment uniform read rather
+// than something baked into the atlas -- so tuning stays a repaint.
+//
+// This pass is now purely a transfer: whatever was composited comes out
+// unchanged apart from the sRGB encode. `a_solid_fill_survives_the_frame`
+// pins that.
 
 @group(0) @binding(0) var offscreen: texture_2d<f32>;
 @group(0) @binding(1) var offscreen_sampler: sampler;
-
-struct Params {
-    text_gamma: f32,
-    text_contrast: f32,
-    _pad: vec2<f32>,
-};
-@group(0) @binding(2) var<uniform> params: Params;
 
 struct VsOut {
     @builtin(position) clip_position: vec4<f32>,
@@ -56,19 +58,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0);
     }
 
-    // Un-premultiply to get the true colour back before the transfer function.
-    var rgb = src.rgb / max(a, 1e-5);
-
-    // Stem darkening. Grayscale antialiasing systematically under-weights thin
-    // strokes, and the effect is much stronger for light text on a dark
-    // background than the reverse -- which is why this is a knob rather than a
-    // constant. Without it, text looks anaemic on dark themes.
-    if params.text_gamma != 1.0 {
-        rgb = pow(rgb, vec3<f32>(1.0 / params.text_gamma));
-    }
-    if params.text_contrast != 0.0 {
-        rgb = clamp((rgb - 0.5) * (1.0 + params.text_contrast) + 0.5, vec3<f32>(0.0), vec3<f32>(1.0));
-    }
+    // Un-premultiply to get the true colour back before the encode.
+    let rgb = src.rgb / max(a, 1e-5);
 
     // THE SUBTLE PART.
     //

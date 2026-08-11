@@ -44,8 +44,6 @@ pub struct EditBuffer {
 pub const NOT_YET_WIRED: &[&str] = &[
     "appearance.follow_system_theme",
     "appearance.light_theme",
-    "appearance.text_contrast",
-    "appearance.text_gamma",
     "cursor.shape",
     "cursor.trail",
     "motion.enabled",

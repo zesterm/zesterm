@@ -161,14 +161,21 @@ pub struct Appearance {
     /// Follow the OS light/dark setting.
     #[schemars(extend("x_zest_group" = "Appearance", "x_zest_widget" = "toggle"))]
     pub follow_system_theme: bool,
-    /// Stem darkening for text on dark backgrounds.
+    /// Stem darkening for text.
     ///
-    /// Applied once in the resolve pass rather than baked into the atlas, so
-    /// tuning it is a repaint rather than a re-rasterization.
+    /// Applied to glyph coverage each frame rather than baked into the atlas, so
+    /// tuning it is a repaint rather than a re-rasterization. It affects text
+    /// only — backgrounds and chrome come out exactly as the theme specifies.
+    ///
+    /// The default must stay equal to `zest_render_wgpu::TextTuning::DEFAULT_GAMMA`.
+    /// It cannot reference it — `zest-config` does not depend on the renderer —
+    /// so `zest-app`'s `the_two_defaults_agree` asserts it instead. Before this
+    /// was wired the two numbers were 1.0 and 1.3 and nothing compared them, so
+    /// the schema documented a value the renderer never used.
     #[schemars(range(min = 0.5, max = 2.5))]
     #[schemars(extend("x_zest_group" = "Appearance", "x_zest_widget" = "number"))]
     pub text_gamma: f32,
-    /// Additional contrast applied at resolve time.
+    /// Additional contrast applied to glyph coverage, not to the frame.
     #[schemars(range(min = 0.0, max = 1.0))]
     #[schemars(extend("x_zest_group" = "Appearance", "x_zest_widget" = "number"))]
     pub text_contrast: f32,
@@ -180,7 +187,7 @@ impl Default for Appearance {
             theme: "obsidian".to_string(),
             light_theme: String::new(),
             follow_system_theme: false,
-            text_gamma: 1.0,
+            text_gamma: 1.3,
             text_contrast: 0.0,
         }
     }

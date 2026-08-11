@@ -18,7 +18,7 @@
         },
         "text_contrast": {
           "default": 0.0,
-          "description": "Additional contrast applied at resolve time.",
+          "description": "Additional contrast applied to glyph coverage, not to the frame.",
           "format": "float",
           "maximum": 1.0,
           "minimum": 0.0,
@@ -27,8 +27,8 @@
           "x_zest_widget": "number"
         },
         "text_gamma": {
-          "default": 1.0,
-          "description": "Stem darkening for text on dark backgrounds.\n\nApplied once in the resolve pass rather than baked into the atlas, so\ntuning it is a repaint rather than a re-rasterization.",
+          "default": 1.2999999523162842,
+          "description": "Stem darkening for text.\n\nApplied to glyph coverage each frame rather than baked into the atlas, so\ntuning it is a repaint rather than a re-rasterization. It affects text\nonly — backgrounds and chrome come out exactly as the theme specifies.\n\nThe default must stay equal to `zest_render_wgpu::TextTuning::DEFAULT_GAMMA`.\nIt cannot reference it — `zest-config` does not depend on the renderer —\nso `zest-app`'s `the_two_defaults_agree` asserts it instead. Before this\nwas wired the two numbers were 1.0 and 1.3 and nothing compared them, so\nthe schema documented a value the renderer never used.",
           "format": "float",
           "maximum": 2.5,
           "minimum": 0.5,
@@ -488,7 +488,7 @@
         "follow_system_theme": false,
         "light_theme": "",
         "text_contrast": 0.0,
-        "text_gamma": 1.0,
+        "text_gamma": 1.2999999523162842,
         "theme": "obsidian"
       },
       "description": "Colours and the theme they come from."

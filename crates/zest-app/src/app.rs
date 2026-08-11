@@ -51,6 +51,10 @@ pub struct Config {
     /// Not part of [`Typography`] because it changes what a glyph *is*, not how
     /// large a cell is — an atlas bump, never a pty resize.
     pub builtin_box_drawing: bool,
+    /// Stem darkening, applied to glyph coverage.
+    pub text_gamma: f32,
+    /// Extra contrast on glyph coverage.
+    pub text_contrast: f32,
     pub theme: String,
     pub scrollback: usize,
     pub opacity: f32,
@@ -99,6 +103,10 @@ impl From<&zest_config::Settings> for Config {
                 ..Default::default()
             },
             builtin_box_drawing: s.typography.builtin_box_drawing,
+            // Left as `Option` rather than resolved here: the fallback is the
+            // *theme's* suggestion, and the theme is not in scope yet.
+            text_gamma: s.appearance.text_gamma,
+            text_contrast: s.appearance.text_contrast,
             theme: s.appearance.theme.clone(),
             scrollback: s.scrolling.scrollback,
             opacity: s.window.opacity.clamp(0.0, 1.0),
@@ -367,6 +375,11 @@ pub struct App {
 
     /// The chrome's resolved palette; rebuilt with the theme.
     chrome_colors: ChromeColors,
+    /// Stem darkening, resolved from the user's settings and the theme.
+    ///
+    /// Stored rather than recomputed per frame: resolving it looks the theme up
+    /// by name, and this is read on the render path.
+    text_tuning: zest_render_wgpu::TextTuning,
     /// Last laid-out chrome, shared by redraw and the input path so a click
     /// is tested against exactly what is on screen.
     chrome_layout: Option<ChromeLayout>,
@@ -479,6 +492,7 @@ impl App {
         let resolved = zest_theme::resolve(&theme);
         let palette = to_core_palette(&resolved);
         let chrome_colors = ChromeColors::new(&theme.ui, &theme.effects, config.chrome_opacity);
+        let text_tuning = resolve_text_tuning(&config);
         let selection_bg = zest_core::Rgb::new(
             resolved.selection_bg.r,
             resolved.selection_bg.g,
@@ -487,6 +501,7 @@ impl App {
 
         Self {
             config,
+            text_tuning,
             proxy,
             window: None,
             gpu: None,
@@ -3672,6 +3687,10 @@ impl App {
 
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        // Assigned per frame rather than at theme-change time: it is one `Copy`
+        // struct, and the alternative is a second place for the renderer's copy
+        // to drift out of step with the settings.
+        gpu.renderer.tuning = self.text_tuning;
         gpu.renderer
             .render(&gpu.device, &gpu.queue, &mut encoder, &view, &self.scene);
         gpu.queue.submit([encoder.finish()]);
@@ -3763,6 +3782,7 @@ impl App {
             .unwrap_or_else(zest_theme::builtin::obsidian);
         let resolved = zest_theme::resolve(&theme);
         self.chrome_colors = ChromeColors::new(&theme.ui, &theme.effects, self.config.chrome_opacity);
+        self.text_tuning = resolve_text_tuning(&self.config);
         self.mark_chrome_dirty();
         self.palette = to_core_palette(&resolved);
         self.selection_bg = zest_core::Rgb::new(
@@ -5384,6 +5404,22 @@ fn clear_to(
     queue.present(frame);
 }
 
+/// Stem darkening, from the settings, clamped.
+///
+/// Until this existed, `Renderer::tuning` was assigned `TextTuning::default()`
+/// once and never touched again, so `appearance.text_gamma` was a control that
+/// visibly did nothing — and `Config::from(&Settings)` did not even carry it
+/// across.
+///
+/// Clamped rather than trusted: this comes from a file a person edits by hand,
+/// and a gamma of zero is a division by zero in the shader.
+fn resolve_text_tuning(config: &Config) -> zest_render_wgpu::TextTuning {
+    zest_render_wgpu::TextTuning {
+        gamma: config.text_gamma.clamp(0.5, 2.5),
+        contrast: config.text_contrast.clamp(0.0, 1.0),
+    }
+}
+
 /// `zest-theme` and `zest-core` deliberately do not depend on each other, so the
 /// app owns this conversion.
 fn to_core_palette(r: &zest_theme::ResolvedPalette) -> zest_core::PaletteSnapshot {
@@ -5400,3 +5436,53 @@ fn to_core_palette(r: &zest_theme::ResolvedPalette) -> zest_core::PaletteSnapsho
     }
 }
 
+
+#[cfg(test)]
+mod tuning_tests {
+    use super::{resolve_text_tuning, Config};
+    use zest_render_wgpu::TextTuning;
+
+    fn config(gamma: f32, contrast: f32) -> Config {
+        let mut s = zest_config::Settings::default();
+        s.appearance.text_gamma = gamma;
+        s.appearance.text_contrast = contrast;
+        Config::from(&s)
+    }
+
+    #[test]
+    fn the_setting_reaches_the_renderer() {
+        // The whole complaint in #82: `Config::from(&Settings)` did not carry
+        // these across at all, and `Renderer::tuning` was assigned
+        // `TextTuning::default()` once and never touched -- so both controls
+        // repainted and changed nothing.
+        let t = resolve_text_tuning(&config(1.8, 0.25));
+        assert!((t.gamma - 1.8).abs() < f32::EPSILON, "gamma must survive the projection");
+        assert!((t.contrast - 0.25).abs() < f32::EPSILON, "and so must contrast");
+    }
+
+    #[test]
+    fn the_two_defaults_agree() {
+        // They were 1.0 in the schema and 1.3 in the renderer, with nothing
+        // connecting them, so the schema documented a number that was never
+        // applied. `zest-config` cannot reference the renderer's constant --
+        // it does not depend on it, and should not -- so this is the only
+        // place the two can be compared. If either moves, this fails.
+        let s = zest_config::Settings::default();
+        assert!(
+            (s.appearance.text_gamma - TextTuning::DEFAULT_GAMMA).abs() < f32::EPSILON,
+            "settings default {} != renderer default {}",
+            s.appearance.text_gamma,
+            TextTuning::DEFAULT_GAMMA
+        );
+        assert!((s.appearance.text_contrast - TextTuning::DEFAULT_CONTRAST).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn absurd_values_are_clamped_rather_than_trusted() {
+        // Config is a file a person edits by hand, and a gamma of zero is a
+        // division by zero in the shader.
+        let t = resolve_text_tuning(&config(-5.0, 99.0));
+        assert!((0.5..=2.5).contains(&t.gamma), "gamma clamped, got {}", t.gamma);
+        assert!((0.0..=1.0).contains(&t.contrast), "contrast clamped, got {}", t.contrast);
+    }
+}

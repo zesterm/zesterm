@@ -215,10 +215,15 @@ pub struct TerminalColors {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ThemeEffects {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text_gamma: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text_contrast: Option<f32>,
+    // `text_gamma` and `text_contrast` used to live here. They were declared,
+    // never authored by any built-in theme, and never read by anything -- and
+    // they cannot be layered under `appearance.text_gamma` as things stand,
+    // because that setting always has a value, so there is no "unset" for a
+    // theme suggestion to fill. Making it optional is the right fix and is not
+    // a small one: the generated settings form computes "modified" against a
+    // schema default and has no representation for "follows the theme", in the
+    // Rust UI and the web client both. Tracked separately rather than smuggled
+    // in here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggested_opacity: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

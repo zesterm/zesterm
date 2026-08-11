@@ -80,9 +80,32 @@ fn fs_glyph(in: GlyphVsOut) -> @location(0) vec4<f32> {
 
     // Coverage mask. `in.color` is already premultiplied linear, so scaling the
     // whole vector by coverage keeps it premultiplied.
-    let coverage = textureSample(mask_atlas, atlas_sampler, in.uv, in.layer).r;
+    var coverage = textureSample(mask_atlas, atlas_sampler, in.uv, in.layer).r;
     if coverage <= 0.0 {
         discard;
     }
+
+    // Stem darkening, on the *coverage* and therefore only on text.
+    //
+    // Grayscale antialiasing systematically under-weights thin strokes, and the
+    // effect is much stronger for light text on a dark background than the
+    // reverse -- which is why this is a knob rather than a constant.
+    //
+    // This used to live in the resolve pass, applied to the whole framebuffer.
+    // That is the same arithmetic pointed at the wrong thing: every pixel with
+    // any alpha went through it, so cell backgrounds and chrome were lifted too
+    // and a dark theme's background came out several shades off the colour the
+    // theme asked for. Adjusting coverage is what "stem darkening" actually
+    // means, and it leaves every solid fill in the frame untouched.
+    //
+    // Still a uniform read per fragment rather than baked into the atlas, so
+    // tuning it stays a repaint and never a re-rasterization.
+    if globals.text_gamma != 1.0 {
+        coverage = pow(coverage, 1.0 / globals.text_gamma);
+    }
+    if globals.text_contrast != 0.0 {
+        coverage = clamp((coverage - 0.5) * (1.0 + globals.text_contrast) + 0.5, 0.0, 1.0);
+    }
+
     return in.color * coverage;
 }
