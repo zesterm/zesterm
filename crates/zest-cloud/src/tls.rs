@@ -373,6 +373,24 @@ impl Read for TlsReader {
                         None => Ok(0),
                     };
                 }
+                // A cut that landed *before* this read was issued — the other
+                // half of the ordering `a_cut_that_lands_before_the_read_still_ends_it`
+                // exists for, and the half the arm above cannot see because
+                // nothing ever parks.
+                //
+                // On Winsock such a read comes back `ConnectionAborted` (os
+                // error 10053) instead of zero bytes, and only sometimes, so
+                // without this a cut is reported as a fault *and latched* —
+                // poisoning the writer too — for what is simply the watchdog
+                // doing its job. It failed roughly two runs in three on
+                // Windows, which is worse than always. Same rule as everywhere
+                // else here: a cut is not a fault.
+                Err(_) if self.shared.severed.load(Ordering::Acquire) => {
+                    return match self.shared.latched() {
+                        Some(e) => Err(e),
+                        None => Ok(0),
+                    };
+                }
                 Err(e) => return Err(self.shared.fault(&e)),
             };
             self.taken = 0;

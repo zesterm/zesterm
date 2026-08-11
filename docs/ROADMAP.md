@@ -1598,6 +1598,21 @@ three facts about Cloudflare that changed after #59 was written.
       failures would let one hostile peer deny the whole fleet for a minute at a
       time. And the watchdog cuts through a `Cut` rather than a `TcpStream`,
       since a TLS stream is not one and cannot be cloned into one.
+
+      **The cut did not work on Windows, and nothing said so.** `Cut for
+      TcpStream` was `shutdown(Both)`, which on Winsock does not unpark a reader
+      already sitting in `read` — so `serve`'s thread never returned, and the
+      `Countdown` it held kept one of the 32 now-shared slots for ever. Thirty-two
+      silent connections would have made the daemon deaf to every new client,
+      from anywhere, with no error and every call reporting success. Both
+      watchdog tests injected a fake `Cut`, so they proved the timer fires and
+      nothing about whether a real socket comes back; the integration test
+      watched the *client* see EOF, which `shutdown` does deliver on every
+      platform. The fix is #94's, in this module's shape: a `Severable` that
+      arms a one-second read poll before any reader can park and swallows an
+      elapsed poll, so only a real cut ends a read — and stands the poll back
+      down once the handshake completes, since the 0%-idle property should not
+      pay for a watchdog that is no longer watching. → #99.
 - [ ] **The relay Worker and its Durable Object.** A control link the daemon
       parks, an attach ticket the browser carries on `Sec-WebSocket-Protocol`
       (not the query string — a secret in a URL lands in referrers, edge logs

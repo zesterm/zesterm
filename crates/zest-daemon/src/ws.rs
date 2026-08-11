@@ -65,14 +65,14 @@
 //! half-do here.
 
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sha1::{Digest, Sha1};
 
 use crate::auth::{Auth, Authenticator};
-use crate::lan::{accept_hardened, Gate, LanListener};
+use crate::lan::{accept_hardened, Gate, LanListener, Severable};
 use crate::server::{serve_lan, Registry};
 use crate::{DaemonConfig, DaemonError};
 
@@ -701,12 +701,12 @@ fn has_token(value: &str, token: &str) -> bool {
 /// must seed the frame parser. On failure a best-effort `400` is written and
 /// the error says why — and the caller's watchdog accounting records it as a
 /// failed handshake, which is what feeds the per-address cooldown.
-fn accept_upgrade(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
+fn accept_upgrade<S: Read + Write>(stream: &mut S) -> io::Result<Vec<u8>> {
     let (head, leftover) = read_header_block(stream)?;
     let text = std::str::from_utf8(&head)
         .map_err(|_| protocol_error("the HTTP request was not UTF-8"))?;
 
-    let refuse = |stream: &mut TcpStream, why: &str| -> io::Error {
+    let refuse = |stream: &mut S, why: &str| -> io::Error {
         let _ = stream
             .write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
         protocol_error(why)
@@ -802,12 +802,16 @@ fn split_message_halves<R: Read, W: Write>(
     )
 }
 
-/// Split an upgraded `TcpStream` into the halves `serve` wants.
+/// Split an upgraded connection into the halves `serve` wants.
+///
+/// A [`Severable`] rather than the `TcpStream` underneath it, because the write
+/// half has to be a second handle on the *same* severed flag: cutting a
+/// connection has to end both halves, and a raw clone would only end one.
 fn split(
-    stream: TcpStream,
+    stream: Severable,
     role: Role,
     leftover: Vec<u8>,
-) -> io::Result<(WsReader<TcpStream, TcpStream>, WsWriter<TcpStream>)> {
+) -> io::Result<(WsReader<Severable, Severable>, WsWriter<Severable>)> {
     let write_half = stream.try_clone()?;
     Ok(split_halves(stream, write_half, role, leftover))
 }
