@@ -630,7 +630,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_portable_crates_still_forbid_tls_and_http() {
+    fn every_boundary_but_the_owner_forbids_tls_and_http() {
         // `zest-mesh` stands in for the set: it is the crate most likely to
         // grow a "just one small HTTP call" for the relay, and the whole family
         // is one grouped slice, so losing it here means losing it everywhere.
@@ -638,15 +638,22 @@ mod tests {
         // The failure this guards against is a tidy-up, not a bug: the names
         // forbid dependencies nothing in the workspace has yet, so every entry
         // reads as dead weight until the day one of them would have fired.
-        let mesh = BOUNDARIES
-            .iter()
-            .find(|b| b.krate == "zest-mesh")
-            .expect("zest-mesh has a boundary and the fleet is what would reach for HTTP");
-        for name in TLS_AND_HTTP {
-            assert!(
-                mesh.forbidden.iter().any(|group| group.contains(name)),
-                "zest-mesh no longer forbids `{name}`; TLS and HTTP have exactly one owner",
-            );
+        // Every boundary except the owner's, not just `zest-mesh`. Checking one
+        // crate let the other six drop the names with nothing going red, which
+        // is the same gap the doc comment above `TLS_AND_HTTP` had: a fence
+        // that looks present because *a* fence is.
+        for boundary in BOUNDARIES {
+            if boundary.krate == "zest-cloud" {
+                continue;
+            }
+            for name in TLS_AND_HTTP {
+                assert!(
+                    boundary.forbidden.iter().any(|group| group.contains(name)),
+                    "`{}` no longer forbids `{name}`; TLS and HTTP have exactly one owner, \
+                     and a boundary that stops saying so is how a second one arrives unnoticed",
+                    boundary.krate,
+                );
+            }
         }
     }
 
