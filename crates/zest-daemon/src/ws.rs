@@ -562,6 +562,15 @@ impl<R: Read, W: Write> WsMessageReader<R, W> {
                     return Err(protocol_error("an oversized message"));
                 }
                 self.kind = frame.opcode;
+                // Belt and braces, and deliberately not covered by a test
+                // because nothing can currently observe it: a completed message
+                // leaves through `mem::take` below, and the only path that
+                // leaves bytes here returns `Err`, which fails the connection —
+                // `serve`'s reader treats any error as fatal, so there is no
+                // "next message" to contaminate. It stays because that is a
+                // property of the *callers*, not of this loop, and a future
+                // error that is recoverable would silently prepend the
+                // abandoned fragment to whatever came next.
                 self.partial.clear();
             }
 
