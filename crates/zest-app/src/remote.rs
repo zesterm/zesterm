@@ -951,6 +951,7 @@ mod tests {
                 ws_bind: "127.0.0.1".into(),
                 ws_port: 0,
                 shell_integration: true,
+                min_delta_interval: std::time::Duration::ZERO,
             };
             {
                 let registry = Arc::clone(&registry);
