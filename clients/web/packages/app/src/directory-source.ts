@@ -108,7 +108,11 @@ export function directoryStatusOf(state: MatchableAsync<DirectoryView>): Directo
  * that mutated the directory, whoever caused it, so a session created from the
  * desktop appears here without this page doing anything.
  */
-export function actorDirectorySource(): DirectoryReader {
+// Typed as the seam rather than as its return value. Both compile — a function
+// returning a `DirectoryReader` *is* a `DirectorySource` — but naming the seam
+// here means a change to it fails at this declaration, where the contract is,
+// instead of at whichever component happened to call it.
+export const actorDirectorySource: DirectorySource = () => {
   const state = useActorState(SessionDirectory, LOCAL_DIRECTORY_KEY, 'list', { live: true });
   return () => directoryStatusOf(state);
-}
+};
