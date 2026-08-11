@@ -13,7 +13,8 @@ thing, the built app, and that is a **directory path** rather than a package
 dependency.
 
 ```
-packages/shared/  cookie signing, opaque tokens, constant-time compare —
+packages/shared/  cookie signing, opaque tokens, constant-time compare, and
+                  the `zesterm-sig-v1` preimage both Workers verify against —
                   zero deps, and no runtime globals beyond what Node and
                   workerd both have, so it is testable under `node --test`
 packages/web/     the Worker: the built app, /api/*, /auth/*, D1

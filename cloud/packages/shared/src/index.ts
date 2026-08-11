@@ -12,12 +12,15 @@ export {
   toBase64Url,
   fromBase64Url,
   utf8,
+  concat,
   hex,
   fromHex,
   timingSafeEqual,
   randomBytes,
   sha256Base64Url,
 } from './bytes.ts';
+
+export { signingPreimage, type Role, type Purpose } from './sig.ts';
 
 export {
   SESSION_TOKEN_BYTES,
