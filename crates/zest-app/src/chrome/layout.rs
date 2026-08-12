@@ -211,11 +211,16 @@ pub fn layout(
         // wins the hit lookup — the same fact, stated once.
         picker_overlay(picker, colors, m, measure, &mut out);
     }
-    if let Some(palette) = &model.palette {
-        palette_overlay(palette, colors, m, measure, &mut out);
-    }
     if let Some(settings) = &model.settings {
         settings_overlay(settings, colors, m, measure, &mut out);
+    }
+    // After the settings overlay, not before: the palette is also how a
+    // long-list *value* is chosen, and that picker opens on top of the
+    // settings screen it was opened from. The command palette and the settings
+    // screen remain mutually exclusive, so this reordering changes nothing for
+    // them -- it only decides who wins when both are deliberately open.
+    if let Some(palette) = &model.palette {
+        palette_overlay(palette, colors, m, measure, &mut out);
     }
     // Dead last, after the modals, and that ordering is the feature: lookups
     // walk the map backwards, so the window's own edge outranks a palette

@@ -56,6 +56,7 @@ pub struct Config {
     /// Extra contrast on glyph coverage.
     pub text_contrast: f32,
     pub text_antialias: zest_font::TextAntialias,
+    pub text_hinting: zest_font::Hinting,
     pub theme: String,
     pub scrollback: usize,
     pub opacity: f32,
@@ -100,6 +101,7 @@ impl From<&zest_config::Settings> for Config {
                 // `f32::clamp` in the metrics code as a panic.
                 size_pt: s.typography.size_pt.clamp(4.0, 144.0),
                 line_height: s.typography.line_height.clamp(0.5, 3.0),
+                cell_width: s.typography.cell_width.clamp(0.0, 2.0),
                 letter_spacing: s.typography.letter_spacing.clamp(-5.0, 20.0),
                 ..Default::default()
             },
@@ -111,6 +113,10 @@ impl From<&zest_config::Settings> for Config {
             text_antialias: match s.appearance.text_antialias {
                 zest_config::TextAntialias::Subpixel => zest_font::TextAntialias::Subpixel,
                 zest_config::TextAntialias::Grayscale => zest_font::TextAntialias::Grayscale,
+            },
+            text_hinting: match s.appearance.text_hinting {
+                zest_config::TextHinting::None => zest_font::Hinting::None,
+                zest_config::TextHinting::Full => zest_font::Hinting::Full,
             },
             theme: s.appearance.theme.clone(),
             scrollback: s.scrolling.scrollback,
@@ -237,6 +243,45 @@ struct SettingsUiState {
     editing: Option<crate::settings_ui::EditBuffer>,
 }
 
+/// Choosing one value from a long list, drawn through the command palette's
+/// overlay because it is the same shape of thing: a filtered, scrollable list
+/// with one selection.
+///
+/// Cycling with the arrow keys is fine for five themes and useless for 266
+/// installed font families, which is what this exists for.
+struct ValuePickerState {
+    /// Index into the settings overlay's `fields`.
+    field: usize,
+    /// Everything choosable, unfiltered and in display order.
+    options: Vec<String>,
+    /// Parallel to the drawn rows, same-pass built — the picker discipline
+    /// used by the palette and the settings overlay alike.
+    visible: Vec<String>,
+    selected: usize,
+    filter: String,
+    scroll: f32,
+    scroll_to_selected: bool,
+}
+
+impl ValuePickerState {
+    /// The options a filter admits, matched case-insensitively on a substring.
+    ///
+    /// Substring rather than prefix on purpose: the family someone wants is
+    /// `MesloLGM NF`, and they will type `meslo`, but it is just as likely to
+    /// be `nerd` or `mono`.
+    fn matching(&self) -> Vec<String> {
+        if self.filter.is_empty() {
+            return self.options.clone();
+        }
+        let needle = self.filter.to_lowercase();
+        self.options
+            .iter()
+            .filter(|o| o.to_lowercase().contains(&needle))
+            .cloned()
+            .collect()
+    }
+}
+
 /// Which full-pane screen the window shows in place of the grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppScreen {
@@ -356,6 +401,8 @@ pub struct App {
     picker: Option<PickerState>,
     palette_ui: Option<PaletteState>,
     settings_ui: Option<SettingsUiState>,
+    /// Open over the settings overlay while a long-list field is being chosen.
+    value_picker: Option<ValuePickerState>,
     /// Where each non-default setting came from, kept from the last resolve —
     /// the settings overlay's "set by profile `k8s`" chips read it.
     provenance: std::collections::BTreeMap<String, zest_config::Source>,
@@ -525,6 +572,7 @@ impl App {
             fleet: None,
             picker: None,
             palette_ui: None,
+            value_picker: None,
             settings_ui: None,
             provenance,
             restart_pending: std::collections::BTreeSet::new(),
@@ -1935,6 +1983,29 @@ impl App {
             }
         });
 
+        // The value picker draws through the palette's overlay -- same shape of
+        // thing, and `PaletteRow` is display-only, so the chrome needs to know
+        // nothing about it.
+        let value_picker_model = self.value_picker.as_mut().map(|state| {
+            state.visible = state.matching();
+            state.selected = state.selected.min(state.visible.len().saturating_sub(1));
+            crate::chrome::model::PaletteModel {
+                rows: state
+                    .visible
+                    .iter()
+                    .map(|name| crate::chrome::model::PaletteRow::Command {
+                        name: name.clone(),
+                        chord: String::new(),
+                        runnable: true,
+                    })
+                    .collect(),
+                selected: state.selected,
+                filter: state.filter.clone(),
+                scroll: state.scroll,
+                ensure_visible: state.scroll_to_selected,
+            }
+        });
+
         let palette_model = self.palette_ui.as_mut().map(|state| {
             let (rows, actions) = keymap::palette(&state.filter);
             state.actions = actions;
@@ -2180,7 +2251,8 @@ impl App {
             toggle_chord: keymap::chord_for(keymap::Action::ToggleTabLayout),
             palette_chord: keymap::chord_for(keymap::Action::ToggleFleetPicker),
             picker: picker_model,
-            palette: palette_model,
+            // The picker wins: it opens *over* the settings overlay.
+            palette: value_picker_model.or(palette_model),
             settings: settings_model,
         };
 
@@ -2509,6 +2581,74 @@ impl App {
         self.mark_chrome_dirty();
     }
 
+    /// Open the long-list picker on the selected settings row.
+    ///
+    /// Returns false when the row has nothing to pick from, so the caller can
+    /// fall back to whatever it would otherwise have done.
+    fn open_value_picker(&mut self) -> bool {
+        let Some(idx) = self.selected_settings_field() else { return false };
+        let Some(field) = self.settings_ui.as_ref().and_then(|ui| ui.fields.get(idx)) else {
+            return false;
+        };
+        let options = match field.widget {
+            zest_config::ui::Widget::FontList => {
+                // A real scan of installed families, so it happens here -- once,
+                // on the keypress that opens the list -- and never per frame.
+                self.fonts.as_mut().map(Fonts::installed_families).unwrap_or_default()
+            }
+            zest_config::ui::Widget::ThemePicker => {
+                zest_theme::builtin::all().into_iter().map(|t| t.id).collect()
+            }
+            _ => return false,
+        };
+        if options.is_empty() {
+            return false;
+        }
+        // Start on the value already set, so opening the list and pressing
+        // Enter is a no-op rather than a surprise.
+        let current = self.settings_value_of(idx).and_then(|v| match &v {
+            serde_json::Value::Array(a) => {
+                a.first().and_then(|f| f.as_str().map(str::to_string))
+            }
+            serde_json::Value::String(s) => Some(s.clone()),
+            _ => None,
+        });
+        let selected = current
+            .and_then(|c| options.iter().position(|o| *o == c))
+            .unwrap_or(0);
+
+        self.value_picker = Some(ValuePickerState {
+            field: idx,
+            visible: options.clone(),
+            options,
+            selected,
+            filter: String::new(),
+            scroll: 0.0,
+            scroll_to_selected: true,
+        });
+        self.mark_chrome_dirty();
+        true
+    }
+
+    /// Take the picker's selection and write it to the field.
+    fn accept_value_picker(&mut self) {
+        let Some(state) = self.value_picker.take() else { return };
+        self.mark_chrome_dirty();
+        let Some(chosen) = state.visible.get(state.selected).cloned() else { return };
+        let Some(field) = self.settings_ui.as_ref().and_then(|ui| ui.fields.get(state.field))
+        else {
+            return;
+        };
+        let value = if field.widget == zest_config::ui::Widget::FontList {
+            // The chosen face, and only it -- see `settings_ui::adjust` for why
+            // a tail is neither needed nor harmless.
+            serde_json::Value::Array(vec![serde_json::Value::String(chosen)])
+        } else {
+            serde_json::Value::String(chosen)
+        };
+        self.apply_edit(state.field, value);
+    }
+
     /// The selected settings row's field index, when it is a real field.
     fn selected_settings_field(&self) -> Option<usize> {
         let ui = self.settings_ui.as_ref()?;
@@ -2531,11 +2671,21 @@ impl App {
     fn adjust_selected_setting(&mut self, dir: i32) {
         let Some(idx) = self.selected_settings_field() else { return };
         let Some(current) = self.settings_value_of(idx) else { return };
+        // Enumerating installed families is a real scan, so it happens only on
+        // the keypress that needs it and only for the field that needs it.
+        let installed: Vec<String> = self
+            .settings_ui
+            .as_ref()
+            .and_then(|ui| ui.fields.get(idx))
+            .filter(|f| f.widget == zest_config::ui::Widget::FontList)
+            .and(self.fonts.as_mut())
+            .map(Fonts::installed_families)
+            .unwrap_or_default();
         let next = self.settings_ui.as_ref().and_then(|ui| {
             let field = ui.fields.get(idx)?;
             let themes: Vec<String> =
                 zest_theme::builtin::all().into_iter().map(|t| t.id).collect();
-            crate::settings_ui::adjust(field, &current, dir, &themes)
+            crate::settings_ui::adjust(field, &current, dir, &themes, &installed)
         });
         if let Some(value) = next {
             self.apply_edit(idx, value);
@@ -2557,8 +2707,19 @@ impl App {
         match widget {
             // One keypress, one change: instant for the widgets whose next
             // value is unambiguous.
-            Widget::Toggle | Widget::Select | Widget::ThemePicker => {
+            Widget::Toggle | Widget::Select => {
                 self.adjust_selected_setting(1);
+            }
+            // Long lists open a filtered picker instead of cycling. Stepping is
+            // fine for a handful of themes and useless for 266 installed font
+            // families, which is what this exists for -- the arrows still cycle
+            // for anyone who wants them.
+            Widget::FontList | Widget::ThemePicker => {
+                if !self.open_value_picker() {
+                    // Nothing to choose from: fall back to cycling rather than
+                    // swallowing the keypress.
+                    self.adjust_selected_setting(1);
+                }
             }
             // Numbers, text and paths open a buffer: arrows step a number,
             // but "make it 18" should not be nine keypresses, and a string
@@ -2580,9 +2741,9 @@ impl App {
                     });
                 }
             }
-            // The list widgets have no inline editor; their rows say where
-            // the edit happens instead.
-            Widget::FontList | Widget::TagList | Widget::KeyValue => {}
+            // The remaining list widgets have no inline editor; their rows say
+            // where the edit happens instead.
+            Widget::TagList | Widget::KeyValue => {}
         }
         self.mark_chrome_dirty();
     }
@@ -3835,6 +3996,8 @@ impl App {
             Ok(mut fonts) => {
                 fonts.set_builtin_box_drawing(self.config.builtin_box_drawing);
                 fonts.set_text_antialias(antialias);
+                fonts.set_hinting(self.config.text_hinting);
+                fonts.set_grid_antialias(self.config.text_antialias);
                 self.fonts = Some(fonts);
             }
             Err(e) => {
@@ -3891,11 +4054,19 @@ impl App {
     }
 
     /// As [`App::effective_antialias`], against a config alone so it is testable.
+    /// What the *renderer* should composite, which is a capability question
+    /// and not a preference one.
+    ///
+    /// `appearance.text_antialias` deliberately does not appear here. It is the
+    /// terminal grid's setting and reaches the rasterizer through
+    /// `Fonts::set_grid_antialias`; the chrome is pinned to whatever the
+    /// renderer can actually do, so that turning the grid down to grayscale
+    /// does not drag the window's own furniture with it.
     fn antialias_for(config: &Config) -> zest_font::TextAntialias {
         if config.opacity < 1.0 {
             return zest_font::TextAntialias::Grayscale;
         }
-        config.text_antialias
+        zest_font::TextAntialias::Subpixel
     }
 
     fn resize_surface(&mut self, width: u32, height: u32) {
@@ -4079,6 +4250,8 @@ impl ApplicationHandler<Wakeup> for App {
         let mut fonts = Fonts::new(&self.config.font_families, typo).expect("no usable font");
         fonts.set_builtin_box_drawing(self.config.builtin_box_drawing);
         fonts.set_text_antialias(self.effective_antialias());
+        fonts.set_hinting(self.config.text_hinting);
+        fonts.set_grid_antialias(self.config.text_antialias);
         let metrics = fonts.cell_metrics();
         tracing::debug!(elapsed_ms = t0.elapsed().as_millis(), "fonts ready");
 
@@ -4185,6 +4358,8 @@ impl ApplicationHandler<Wakeup> for App {
         // blend per channel. The rasterizer follows it, never the config —
         // see `sync_antialias` for what going the other way costs.
         fonts.set_text_antialias(gpu.renderer.text_antialias());
+        fonts.set_hinting(self.config.text_hinting);
+        fonts.set_grid_antialias(self.config.text_antialias);
 
         // The surface may have landed on a slightly different size than the
         // window reported, so reconcile before the first frame.
@@ -4553,6 +4728,77 @@ impl ApplicationHandler<Wakeup> for App {
                         _ => {}
                     }
                     return;
+                }
+
+                // The value picker sits *over* the settings overlay and takes
+                // the keyboard from it, so it is tested before both.
+                if self.value_picker.is_some() {
+                    use winit::keyboard::{Key, NamedKey};
+                    let mut consumed = true;
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            self.value_picker = None;
+                            self.mark_chrome_dirty();
+                        }
+                        Key::Named(NamedKey::Enter) => self.accept_value_picker(),
+                        Key::Named(NamedKey::ArrowDown) => {
+                            if let Some(p) = self.value_picker.as_mut() {
+                                let last = p.visible.len().saturating_sub(1);
+                                p.selected = (p.selected + 1).min(last);
+                                p.scroll_to_selected = true;
+                                self.mark_chrome_dirty();
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowUp) => {
+                            if let Some(p) = self.value_picker.as_mut() {
+                                p.selected = p.selected.saturating_sub(1);
+                                p.scroll_to_selected = true;
+                                self.mark_chrome_dirty();
+                            }
+                        }
+                        Key::Named(NamedKey::PageDown) => {
+                            if let Some(p) = self.value_picker.as_mut() {
+                                p.scroll += 300.0;
+                                self.mark_chrome_dirty();
+                            }
+                        }
+                        Key::Named(NamedKey::PageUp) => {
+                            if let Some(p) = self.value_picker.as_mut() {
+                                p.scroll -= 300.0;
+                                self.mark_chrome_dirty();
+                            }
+                        }
+                        Key::Named(NamedKey::Backspace) => {
+                            if let Some(p) = self.value_picker.as_mut() {
+                                p.filter.pop();
+                                p.selected = 0;
+                                p.scroll_to_selected = true;
+                                self.mark_chrome_dirty();
+                            }
+                        }
+                        // Spacebar arrives as Named(Space), not as a character;
+                        // family names are full of them.
+                        Key::Named(NamedKey::Space) => {
+                            if let Some(p) = self.value_picker.as_mut() {
+                                p.filter.push(' ');
+                                p.selected = 0;
+                                p.scroll_to_selected = true;
+                                self.mark_chrome_dirty();
+                            }
+                        }
+                        Key::Character(c) => {
+                            if let Some(p) = self.value_picker.as_mut() {
+                                p.filter.push_str(c);
+                                p.selected = 0;
+                                p.scroll_to_selected = true;
+                                self.mark_chrome_dirty();
+                            }
+                        }
+                        _ => consumed = false,
+                    }
+                    if consumed {
+                        return;
+                    }
                 }
 
                 // The open command palette likewise owns the keyboard. It and
@@ -5499,7 +5745,7 @@ fn clear_to(
 /// and a gamma of zero is a division by zero in the shader.
 fn resolve_text_tuning(config: &Config) -> zest_render_wgpu::TextTuning {
     zest_render_wgpu::TextTuning {
-        gamma: config.text_gamma.clamp(0.5, 2.5),
+        gamma: config.text_gamma.clamp(0.5, 4.0),
         contrast: config.text_contrast.clamp(0.0, 1.0),
     }
 }
@@ -5520,6 +5766,53 @@ fn to_core_palette(r: &zest_theme::ResolvedPalette) -> zest_core::PaletteSnapsho
     }
 }
 
+
+#[cfg(test)]
+mod value_picker_tests {
+    use super::ValuePickerState;
+
+    fn picker(options: &[&str], filter: &str) -> ValuePickerState {
+        ValuePickerState {
+            field: 0,
+            options: options.iter().map(|s| (*s).to_string()).collect(),
+            visible: Vec::new(),
+            selected: 0,
+            filter: filter.to_string(),
+            scroll: 0.0,
+            scroll_to_selected: true,
+        }
+    }
+
+    #[test]
+    fn filtering_matches_anywhere_in_the_name() {
+        // Prefix matching would be useless here: the family is "MesloLGM NF"
+        // and the words someone reaches for are "meslo", "nerd" or "mono",
+        // only one of which starts it.
+        let p = picker(&["Cascadia Mono", "MesloLGM NF", "MesloLGM Nerd Font"], "nerd");
+        assert_eq!(p.matching(), vec!["MesloLGM Nerd Font"]);
+
+        let p = picker(&["Cascadia Mono", "MesloLGM NF", "JetBrainsMono Nerd Font"], "mono");
+        assert_eq!(
+            p.matching(),
+            vec!["Cascadia Mono", "JetBrainsMono Nerd Font"],
+            "and it is case-insensitive"
+        );
+    }
+
+    #[test]
+    fn an_empty_filter_offers_everything() {
+        let p = picker(&["A", "B", "C"], "");
+        assert_eq!(p.matching().len(), 3);
+    }
+
+    #[test]
+    fn a_filter_matching_nothing_offers_nothing_rather_than_everything() {
+        // The failure that would be worse than useless: a typo silently
+        // showing the whole list again, so Enter picks an arbitrary font.
+        let p = picker(&["Cascadia Mono", "Consolas"], "zzz");
+        assert!(p.matching().is_empty());
+    }
+}
 
 #[cfg(test)]
 mod tuning_tests {
@@ -5545,6 +5838,32 @@ mod tuning_tests {
             s.appearance.text_antialias = from;
             assert_eq!(Config::from(&s).text_antialias, want, "{from:?} must survive");
         }
+    }
+
+    #[test]
+    fn the_hinting_setting_reaches_the_font_system() {
+        for (from, want) in [
+            (zest_config::TextHinting::None, zest_font::Hinting::None),
+            (zest_config::TextHinting::Full, zest_font::Hinting::Full),
+        ] {
+            let mut s = zest_config::Settings::default();
+            s.appearance.text_hinting = from;
+            assert_eq!(Config::from(&s).text_hinting, want, "{from:?} must survive");
+        }
+    }
+
+    #[test]
+    fn hinting_is_independent_of_antialiasing() {
+        // The point of the setting: all four combinations are reachable. They
+        // used to be welded together, which hid the one that matters -- at 9pt
+        // it is grayscale + full that matches Windows Terminal, and that pair
+        // was not expressible.
+        let mut s = zest_config::Settings::default();
+        s.appearance.text_antialias = zest_config::TextAntialias::Grayscale;
+        s.appearance.text_hinting = zest_config::TextHinting::Full;
+        let c = Config::from(&s);
+        assert_eq!(c.text_antialias, zest_font::TextAntialias::Grayscale);
+        assert_eq!(c.text_hinting, zest_font::Hinting::Full);
     }
 
     #[test]

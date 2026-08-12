@@ -71,9 +71,21 @@ impl TextTuning {
     /// said 1.3, and because nothing connected them the config's number was
     /// simply a lie.
     ///
-    /// Whether 1.3 is *right* is still open: ROADMAP asks for a side-by-side
-    /// against Windows Terminal, and that is a measurement, not a guess.
-    pub const DEFAULT_GAMMA: f32 = 1.3;
+    /// Coverage is linearized in the shader, so the two steps compose to
+    /// `apparent = pow(coverage, 1/gamma)` — this knob is now exactly "how much
+    /// heavier than perceptually-linear should a stroke be", and nothing else.
+    ///
+    /// 2.5 rather than something timid, settled by looking rather than by
+    /// arithmetic: the aggregate measures barely move across 1.2 to 2.5 (41-42%
+    /// of inked pixels fully saturated throughout), and the difference is
+    /// plainly visible. More coverage is more contrast, and contrast is what
+    /// reads as sharp.
+    ///
+    /// The same number suits a light background and a dark one, which the
+    /// theory says it should not: dark-on-light is meant to need far less stem
+    /// darkening. Tested on both and preferred on both, so the per-theme value
+    /// `ThemeEffects` still has a comment proposing is not needed.
+    pub const DEFAULT_GAMMA: f32 = 2.5;
     pub const DEFAULT_CONTRAST: f32 = 0.0;
 }
 
@@ -982,6 +994,11 @@ mod tests {
             px: 13 * 256,
             subpx_x: 0,
             synthetic: 0,
+            raster: if mask.format == zest_font::GlyphFormat::SubpixelMask {
+                zest_font::RASTER_SUBPIXEL
+            } else {
+                0
+            },
         };
         let cached = renderer.atlas.insert(&device, &queue, key, mask)?;
         let crate::Cached::Entry(e) = cached else { return None };

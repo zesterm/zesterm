@@ -324,7 +324,7 @@ mod tests {
         let values = serde_json::to_value(crate::Settings::default()).expect("serializes");
         assert_eq!(
             value_at(&values, "typography.size_pt").and_then(serde_json::Value::as_f64),
-            Some(13.0)
+            Some(12.0)
         );
         assert!(value_at(&values, "no.such.key").is_none());
     }

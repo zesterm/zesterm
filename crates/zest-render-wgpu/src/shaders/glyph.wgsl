@@ -85,6 +85,9 @@ fn fs_glyph(in: GlyphVsOut) -> @location(0) vec4<f32> {
         discard;
     }
 
+    // Perceptual coverage -> linear weight; see `linearize_coverage`.
+    coverage = linearize_coverage(vec3<f32>(coverage)).r;
+
     // Stem darkening, on the *coverage* and therefore only on text.
     //
     // Grayscale antialiasing systematically under-weights thin strokes, and the

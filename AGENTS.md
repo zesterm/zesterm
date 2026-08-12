@@ -626,12 +626,19 @@ Each of these cost real time and is documented where it bites:
   `zeno-0.3.3/src/mask.rs`: it emits **4** bytes per texel and never writes the
   fourth, so sampling it as alpha is silently total transparency rather than a
   visible bug; and it does **not** widen the bitmap, because placement is
-  computed before the ±0.3px per-channel shifts are applied. And the two
-  symptoms have different axes — subpixel sampling is horizontal and cannot
-  restore a flattened overshoot, which is why the fix is `hint(false)` *and*
-  per-channel coverage rather than either alone. `cargo run -p zest-font
-  --example glyph_probe` reports both as measurements rather than opinions.
-  (ADR-010; #100, #84.)
+  computed before the ±0.3px per-channel shifts are applied. `cargo run -p
+  zest-font --example glyph_probe` reports the shapes as measurements rather
+  than opinions. (ADR-010; #100, #84.)
+
+  **What ships is grayscale coverage, grid-fitted** — the opposite of what that
+  investigation concluded, and ADR-011 has the numbers. Two ways of measuring
+  badly produced the wrong answer, and both are easy to repeat: hinting was
+  evaluated at 16px, where a stem is three pixels wide and grid-fitting does
+  almost nothing, and everything was evaluated against a baseline that still had
+  the linear-coverage bug, so every candidate was judged against text that was
+  already too fat. **Fix the known defect first, then evaluate anything else
+  against it.** Windows Terminal, measured rather than assumed, does not use
+  subpixel rendering at all: channel spread on its inked pixels is 0.0.
 - **Emoji are script `Zyyy` and Nerd Font icons are Private Use Area**, so
   script-based font fallback structurally cannot find either. Emoji need an
   explicit `GenericFamily::Emoji` path; PUA needs an installed Nerd Font,
@@ -679,6 +686,14 @@ Each of these cost real time and is documented where it bites:
   two counts agree — so the entire recorded corpus was blind to it until a
   synthetic `astral` fixture was added. The corpus now refuses to generate
   without something past U+FFFF in it.
+- **Aggregate pixel metrics hide text rendering bugs**, and did so three times
+  in one issue. Mid-tone fraction, ink coverage and saturated-pixel share each
+  looked flat across a change that was obvious on screen — one of them because
+  it normalized by the 99.5th percentile, which divides out exactly the global
+  tone shift being measured. What worked was looking at a few pixels instead of
+  averaging millions: the intensity profile across a single stem, and the peak
+  brightness of one UI element. A stem profile shows immediately that a glyph's
+  counters never reach the background; no average will. (ADR-011.)
 - **`cargo run` costs ~500ms** of workspace resolution and freshness checking
   before the process starts, which is comparable to zesterm's whole startup.
   Measure and demo with the built binary, or startup numbers are meaningless.

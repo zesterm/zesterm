@@ -18,7 +18,7 @@
         },
         "text_antialias": {
           "$ref": "#/$defs/TextAntialias",
-          "default": "subpixel",
+          "default": "grayscale",
           "description": "How text is antialiased.\n\nAlso decides whether outlines are grid-fitted, because the two are one\ndecision: swash hard-codes an LCD hinting target and does not let it be\nchosen, so hinting always means \"grid-fit for a rasterizer with three\ntimes the horizontal resolution\". Pairing that with grayscale coverage\nchanges glyph *shapes* rather than merely softening them.",
           "x_zest_group": "Appearance",
           "x_zest_widget": "select"
@@ -34,14 +34,21 @@
           "x_zest_widget": "number"
         },
         "text_gamma": {
-          "default": 1.3,
-          "description": "Stem darkening for text.\n\nApplied to glyph coverage each frame rather than baked into the atlas, so\ntuning it is a repaint rather than a re-rasterization. It affects text\nonly — backgrounds and chrome come out exactly as the theme specifies.\n\nThe default must stay equal to `zest_render_wgpu::TextTuning::DEFAULT_GAMMA`.\nIt cannot reference it — `zest-config` does not depend on the renderer —\nso `zest-app`'s `the_two_defaults_agree` asserts it instead. Before this\nwas wired the two numbers were 1.0 and 1.3 and nothing compared them, so\nthe schema documented a value the renderer never used.",
+          "default": 2.5,
+          "description": "Stem darkening for text. 1.0 is perceptually linear; higher is heavier.\n\nApplied to glyph coverage each frame rather than baked into the atlas, so\ntuning it is a repaint rather than a re-rasterization. It affects text\nonly — backgrounds and chrome come out exactly as the theme specifies.\n\nCoverage is linearized in the shader, so this composes to\n`apparent = pow(coverage, 1/gamma)` and means exactly one thing: how\nmuch heavier than perceptually-linear a stroke should be. More coverage\nis more contrast, and contrast is what reads as sharpness — which is why\nthe default is 2.5 and not something cautious.\n\nOne number serves light and dark alike. That is not what the theory\npredicts — dark-on-light is supposed to need far less stem darkening\nthan light-on-dark, and there is a comment on `ThemeEffects` proposing a\nper-theme value on exactly that basis — but 2.5 was tested against a\nwhite background and a dark one and preferred on both. Measured beats\npredicted, so there is no per-theme value and no reason to add one.\n\nThe default must stay equal to `zest_render_wgpu::TextTuning::DEFAULT_GAMMA`.\nIt cannot reference it — `zest-config` does not depend on the renderer —\nso `zest-app`'s `the_two_defaults_agree` asserts it instead. Before this\nwas wired the two numbers were 1.0 and 1.3 and nothing compared them, so\nthe schema documented a value the renderer never used.",
           "format": "float",
-          "maximum": 2.5,
+          "maximum": 4.0,
           "minimum": 0.5,
           "type": "number",
           "x_zest_group": "Appearance",
           "x_zest_widget": "number"
+        },
+        "text_hinting": {
+          "$ref": "#/$defs/TextHinting",
+          "default": "full",
+          "description": "Whether glyph outlines are snapped to the pixel grid.\n\nIndependent of `text_antialias`, and the mixed settings are the\ninteresting ones. Grid-fitting matters most where a stem is about one\npixel wide, so it decides everything at 9pt and almost nothing at 16px.\n\nMeasured against Windows Terminal at size 9: `grayscale` + `full` gives\n12.6% ink coverage and 43% fully-saturated pixels against its 11.7% and\n45%, which is as close as these get.",
+          "x_zest_group": "Appearance",
+          "x_zest_widget": "select"
         },
         "theme": {
           "default": "obsidian",
@@ -344,12 +351,27 @@
       "oneOf": [
         {
           "const": "subpixel",
-          "description": "Per-channel coverage at thirds of a pixel, outlines left unhinted.\n\nSharper on an ordinary 1x display, and it keeps each glyph the shape its\ndesigner drew. Needs an RGB-striped panel and a GPU that can blend per\nchannel; where either is missing, grayscale is used instead.",
+          "description": "Per-channel coverage at thirds of a pixel.\n\nKeeps horizontal detail a single sample per pixel throws away. Needs an\nRGB-striped panel and a GPU that can blend per channel; where either is\nmissing, grayscale is used instead.",
           "type": "string"
         },
         {
           "const": "grayscale",
-          "description": "One coverage value per pixel, outlines grid-fitted.\n\nThe right choice on a rotated or non-RGB panel, where sampling at\nthirds of a pixel is simply wrong.",
+          "description": "One coverage value per pixel. **The default.**\n\nWhat Windows Terminal does — measurably: its channel spread on inked\npixels is zero. Paired with `text_hinting = \"full\"` it matches it\nclosely at small sizes, 12.6% ink coverage against 11.7% and 43% of\ninked pixels fully saturated against 45%. Also the right choice on a\nrotated or non-RGB panel, where thirds of a pixel are simply wrong.",
+          "type": "string"
+        }
+      ]
+    },
+    "TextHinting": {
+      "description": "Whether glyph outlines are snapped to the pixel grid.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Use outlines as drawn. Softer at small sizes, always faithful in shape.\n\nWorth choosing on a HiDPI display, where a stem is several pixels wide\nand there is nothing for grid-fitting to buy.",
+          "type": "string"
+        },
+        {
+          "const": "full",
+          "description": "Grid-fit through the font's own TrueType bytecode. **The default.**\n\nCrisper at small sizes, and what every Windows application looks like.\nThis is what makes a one-pixel stem land on one pixel instead of\nspreading over two, which is the whole difference at 9pt and nearly\nnothing at 16px.\nThe cost is that swash pins its hinting target to horizontal LCD and\nwill not let it be chosen, so on a ClearType-aware face this grid-fits\nhorizontally too — sampled once per pixel that changes glyph shapes,\nwhich is what made `w` render as `W` at 13ppem.",
           "type": "string"
         }
       ]
@@ -363,6 +385,16 @@
           "x_zest_group": "Text",
           "x_zest_widget": "toggle"
         },
+        "cell_width": {
+          "default": 0.0,
+          "description": "Cell width as a multiple of the font size. `0` uses the font's own.\n\nStated against the size rather than against the face's natural advance,\nwhich is how Windows Terminal states it — most monospace faces sit near\n0.6. Use it to tighten or loosen the grid without changing the type\nsize, or to make two fonts occupy the same columns.\n\n`0` means \"whatever this face says\", which is the only sane default: the\nright absolute number depends on the font, so a fixed one would be wrong\nfor every face but the one it was chosen against. Geometry — changing it\nchanges how many columns fit, and resizes the pty.",
+          "format": "float",
+          "maximum": 2.0,
+          "minimum": 0.0,
+          "type": "number",
+          "x_zest_group": "Text",
+          "x_zest_widget": "number"
+        },
         "families": {
           "default": [
             "Cascadia Mono",
@@ -372,7 +404,7 @@
             "DejaVu Sans Mono",
             "monospace"
           ],
-          "description": "Font families in preference order; the first one with a glyph wins.",
+          "description": "Font families in preference order; the first one with a glyph wins.\n\nA preference order, *not* a coverage mechanism. A character the chosen\nface lacks is resolved per-character against the system — DirectWrite,\nCoreText, fontconfig — Nerd Font icons come from the discovered symbol\nfamilies, and emoji have their own path; none of that consults this\nlist. The shipped default names several because it has to work on\nWindows, macOS and Linux without knowing which it will start on. Choose\na font and one entry is enough, which is what the settings screen\nwrites.",
           "items": {
             "type": "string"
           },
@@ -418,8 +450,8 @@
           "x_zest_widget": "number"
         },
         "size_pt": {
-          "default": 13.0,
-          "description": "Font size in points.",
+          "default": 12.0,
+          "description": "Font size in points, converted to pixels at 96 logical DPI.\n\n12pt is 16 physical pixels at 100% scaling, which is what Windows\nTerminal, WezTerm and kitty all give you at their defaults. This field\nonce meant *pixels* despite its name, so the same number produced text\na quarter smaller than every peer — if a config from before that fix\nlooks too large now, it was previously too small.",
           "format": "float",
           "maximum": 144.0,
           "minimum": 4.0,
@@ -509,9 +541,10 @@
       "default": {
         "follow_system_theme": false,
         "light_theme": "",
-        "text_antialias": "subpixel",
+        "text_antialias": "grayscale",
         "text_contrast": 0.0,
-        "text_gamma": 1.3,
+        "text_gamma": 2.5,
+        "text_hinting": "full",
         "theme": "obsidian"
       },
       "description": "Colours and the theme they come from."
@@ -583,6 +616,7 @@
       "$ref": "#/$defs/Typography",
       "default": {
         "builtin_box_drawing": true,
+        "cell_width": 0.0,
         "families": [
           "Cascadia Mono",
           "Consolas",
@@ -595,7 +629,7 @@
         "letter_spacing": 0.0,
         "ligatures": false,
         "line_height": 1.25,
-        "size_pt": 13.0
+        "size_pt": 12.0
       },
       "description": "Fonts, size, and the metrics derived from them."
     },
