@@ -941,6 +941,201 @@ body {
   background: var(--zt-hairline);
 }
 
+/* --- command palette (design §6) ------------------------------------------ */
+
+.palette-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40; /* over the launcher (30); the palette is the top modal */
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  /* the mock's rgba(5,7,13,.66): tone from the shadow token, strength as
+     alpha — the launcher shadow's rule */
+  background: color-mix(in srgb, var(--zt-shadow) 66%, transparent);
+  backdrop-filter: blur(3px);
+}
+
+.palette {
+  display: flex;
+  flex-direction: column;
+  width: 620px;
+  max-width: 92%;
+  margin-top: 88px;
+  max-height: calc(100vh - 120px); /* the results scroll; the panel never leaves the viewport */
+  border: 1px solid var(--zt-line);
+  border-radius: 14px;
+  background: var(--zt-panel);
+  overflow: hidden;
+  box-shadow: 0 30px 80px color-mix(in srgb, var(--zt-shadow) 65%, transparent);
+}
+
+.palette-query {
+  position: relative; /* anchors the hidden input */
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--zt-hairline);
+  cursor: text;
+}
+
+.p-prompt {
+  flex: none;
+  font-family: var(--zt-mono, ui-monospace, monospace);
+  font-size: 14px;
+  color: var(--zt-accent);
+}
+
+.p-qtext {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--zt-mono, ui-monospace, monospace);
+  font-size: 14px;
+  color: var(--zt-fg);
+  white-space: pre; /* a trailing space in the query must keep the caret out */
+}
+
+/* The real focus target; the drawn query line above is presentation (the
+   terminal textarea's IME-safe trick — a styled input cannot have the mock's
+   block caret). */
+.palette-input {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: none;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.p-count {
+  flex: none;
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--zt-faint);
+}
+
+.palette-results {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.palette-empty {
+  padding: 10px;
+  font-size: 11.5px;
+  color: var(--zt-faint);
+}
+
+.p-label {
+  padding: 6px 10px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--zt-faint);
+}
+
+.palette-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: none;
+  border-radius: 9px;
+  background: none;
+  color: var(--zt-fg);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.palette-row:hover {
+  background: var(--zt-sel-soft);
+}
+
+.palette-row.selected {
+  background: var(--zt-accent-soft);
+}
+
+.p-glyph {
+  flex: none;
+  width: 16px;
+  text-align: center;
+  font-size: 10px;
+  color: var(--zt-faint);
+}
+
+/* Block glyphs tint off the outcome — the blocks pane's rail palette. */
+.p-glyph.success {
+  color: var(--zt-success);
+}
+
+.p-glyph.danger {
+  color: var(--zt-danger);
+}
+
+.p-glyph.warn {
+  color: var(--zt-warn);
+}
+
+.p-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+}
+
+/* Commands are mono, sessions/actions sans (§6). */
+.p-text.mono {
+  font-family: var(--zt-mono, ui-monospace, monospace);
+}
+
+.p-prov {
+  flex: none;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
+  color: var(--zt-faint);
+}
+
+.p-hint {
+  flex: none;
+  font-size: 10px;
+  color: var(--zt-accent);
+}
+
+.palette-footer {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: none;
+  padding: 9px 16px;
+  border-top: 1px solid var(--zt-hairline);
+  background: var(--zt-block-header);
+  font-size: 10.5px;
+  color: var(--zt-faint);
+}
+
+.p-key {
+  font-family: var(--zt-mono, ui-monospace, monospace);
+  color: var(--zt-dim);
+}
+
+.p-esc {
+  margin-left: auto;
+}
+
 /* --- vertical layout ------------------------------------------------------ */
 
 .v-header {

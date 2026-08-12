@@ -28,7 +28,7 @@ import {
   modsOf,
   shellChord,
 } from '@zesterm/input';
-import { sliceBlocks } from '@zesterm/proto';
+import { sliceBlocks, type BlockPayload } from '@zesterm/proto';
 import { measureMetrics } from '@zesterm/render';
 import { resolveTerminalPalette, type Theme } from '@zesterm/theme';
 import type { SessionEntry } from '@zesterm/control';
@@ -57,6 +57,21 @@ import { BlocksPane } from './BlocksPane.tsx';
  */
 let folds: FoldsState = NO_FOLDS;
 
+/**
+ * The shell's reach into a mounted session — what the command palette needs
+ * and no more. Registered on mount and revoked on unmount, so the shell's map
+ * of these IS the set of grids the browser actually holds: the palette's
+ * "N hosts searched" honesty rests on nothing surviving here past close().
+ */
+export interface TerminalHooks {
+  /** The live grid's block index, read at call time. */
+  blocks(): readonly BlockPayload[];
+  /** Type `command` + CR, under the ⌘⇧R gate; declines rather than risking stdin. */
+  runCommand(command: string): void;
+  /** Refocus the hidden textarea — where dismissed overlays send focus home. */
+  focus(): void;
+}
+
 export const TerminalView = component<{
   entry: SessionEntry;
   dataPlaneUrl: string;
@@ -66,6 +81,8 @@ export const TerminalView = component<{
   onTitle?: (title: string) => void;
   /** Link health surfaces on the tab, not on a status bar the design removed. */
   onLink?: (link: LinkState) => void;
+  /** The palette's seam; called with null on unmount so the shell's map stays honest. */
+  register?: (hooks: TerminalHooks | null) => void;
 }>((ctx) => {
   const { entry, dataPlaneUrl, signer, theme } = ctx.props;
 
@@ -199,10 +216,16 @@ export const TerminalView = component<{
         scheduleModel();
       }
     }, 1000);
+    ctx.props.register?.({
+      blocks: () => client.grid.blocks,
+      runCommand,
+      focus: () => inputEl?.focus(),
+    });
     inputEl?.focus();
   });
 
   onUnmounted(() => {
+    ctx.props.register?.(null);
     if (ticker !== null) clearInterval(ticker);
     sizeObserver?.disconnect();
     unsubTheme?.();
@@ -225,21 +248,25 @@ export const TerminalView = component<{
     navigator.clipboard.writeText(text).catch(() => {});
   };
 
-  const reRun = (): void => {
-    // Re-run TYPES, so it may fire only when the shell is the thing reading:
-    // primary screen, trailing block an open prompt (atShellPrompt, tested).
-    // During a running command the selected block IS that command, and the
-    // replay would land in its stdin; in the alt screen it would land in the
-    // full-screen app's document. Both callers — the ⌘⇧R chord and the
-    // header chip — pass through here, so the gate covers a chip clicked on
-    // a running block's header too.
-    if (client.grid.altScreen || !atShellPrompt(client.grid.blocks)) return;
-    const target = mostRecentBlockWithOutput(sliceBlocks(client.grid));
-    if (target === null || target.block.command === '') return;
-    const bytes = encodeComposedText(target.block.command);
+  const runCommand = (command: string): void => {
+    // Running a command TYPES, so it may fire only when the shell is the
+    // thing reading: primary screen, trailing block an open prompt
+    // (atShellPrompt, tested). During a running command the replay would land
+    // in that command's stdin; in the alt screen it would land in the
+    // full-screen app's document. Every caller — the ⌘⇧R chord, the header
+    // chip, and the palette's ⏎ on a block row — passes through here, so the
+    // gate covers all three or none.
+    if (client.grid.altScreen || !atShellPrompt(client.grid.blocks) || command === '') return;
+    const bytes = encodeComposedText(command);
     if (bytes !== null) client.input(bytes);
     // Enter exactly as the key path sends it: a bare CR (key.ts's 'Enter' arm).
     client.input(Uint8Array.of(0x0d));
+  };
+
+  const reRun = (): void => {
+    const target = mostRecentBlockWithOutput(sliceBlocks(client.grid));
+    if (target === null) return;
+    runCommand(target.block.command);
   };
 
   const onToggleFold = (blockId: number): void => {

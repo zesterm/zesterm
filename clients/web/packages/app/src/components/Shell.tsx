@@ -24,6 +24,7 @@ import { modsOf, shellChord, type ShellAction } from '@zesterm/input';
 
 import {
   launcherRows,
+  shortHostId,
   tabIdOf,
   type HostChoice,
 } from '../chrome-model.ts';
@@ -42,11 +43,31 @@ import {
   type TabsState,
 } from '../state/tabs.ts';
 import { loadLayout, saveLayout, toggleLayout, type Layout } from '../state/layout.ts';
-import { closePalette, openPalette, PALETTE_CLOSED, type PaletteState } from '../state/palette.ts';
+import {
+  closePalette,
+  moveSelection,
+  openPalette,
+  PALETTE_CLOSED,
+  setQuery,
+  type PaletteState,
+} from '../state/palette.ts';
+import { themeStore } from '../state/theme.ts';
+import { flattenResults, rankResults, type PaletteSources } from '../palette/rank.ts';
+import {
+  actionItems,
+  blockItems,
+  hostItems,
+  hostsSearchedCount,
+  runTargetOf,
+  sessionItems,
+  type AttachedTabBlocks,
+  type PaletteItem,
+} from '../palette/sources.ts';
+import { Palette } from './Palette.tsx';
 import { SessionList, type OpenTarget } from './SessionList.tsx';
 import { SidebarTabs, VerticalHeader } from './SidebarTabs.tsx';
 import { TabStrip } from './TabStrip.tsx';
-import { TerminalView } from './TerminalView.tsx';
+import { TerminalView, type TerminalHooks } from './TerminalView.tsx';
 
 export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
   const { device, theme } = ctx.props;
@@ -76,6 +97,13 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
   // them: `Tab` is pure data shared with node tests, and a dial target is
   // this component's wiring, not state the reducers should know about.
   const targets = new Map<string, OpenTarget>();
+
+  // The palette's reach: each mounted TerminalView registers its hooks here
+  // and revokes them on unmount, so this map IS the set of grids the browser
+  // holds — the "N hosts searched" count states exactly its hosts. Today the
+  // shell mounts one view (the active tab); a future multi-pane shell widens
+  // the map without the palette changing.
+  const termHooks = new Map<string, TerminalHooks>();
 
   const tabFor = (target: OpenTarget): Tab => {
     const e = target.entry;
@@ -195,6 +223,82 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
   };
 
   /**
+   * Everything the palette searches, gathered fresh at call time: blocks from
+   * the registered grids, sessions from the open tabs plus the directory,
+   * hosts from the launcher's list, and the static actions. A function, not
+   * cached state — the handlers re-ask so a wrap or a ⏎ is decided against
+   * the results that exist at the keystroke, not at the last render.
+   */
+  const paletteData = (): { sources: PaletteSources; hostsSearched: number } => {
+    const labels = hostLabelsOf();
+    const attached: AttachedTabBlocks[] = [];
+    for (const [tabId, hooks] of termHooks) {
+      const tab = store.tabs.tabs.find((t) => t.id === tabId);
+      if (tab === undefined) continue;
+      attached.push({
+        tabId,
+        hostId: tab.hostId,
+        hostLabel: labels[tab.hostId] ?? shortHostId(tab.hostId),
+        blocks: hooks.blocks(),
+      });
+    }
+    const dir = directory();
+    return {
+      sources: {
+        blocks: blockItems(attached, Date.now()),
+        sessions: sessionItems(store.tabs.tabs, dir.kind === 'ready' ? dir.view.sessions : [], labels),
+        hosts: hostItems(hostChoices()),
+        actions: actionItems(),
+      },
+      hostsSearched: hostsSearchedCount(attached),
+    };
+  };
+
+  const movePaletteSelection = (delta: number): void => {
+    const groups = rankResults(store.palette.query, paletteData().sources);
+    store.palette = moveSelection(store.palette, delta, flattenResults(groups).length);
+  };
+
+  const runPaletteItem = (item: PaletteItem): void => {
+    // Close FIRST: unmounting the palette restores focus to the terminal
+    // textarea, so a run-block's typed bytes follow a focused terminal.
+    store.palette = closePalette(store.palette);
+    const target = runTargetOf(item, store.tabs.activeId);
+    switch (target.kind) {
+      case 'run-block':
+        // The terminal's own gate (runCommand = the ⌘⇧R rule) decides whether
+        // typing is safe; at a running command or in the alt screen it
+        // declines and nothing destructive happens.
+        termHooks.get(target.tabId)?.runCommand(target.command);
+        break;
+      case 'activate-tab':
+        // A block on a background tab lands here (runTargetOf): activate so
+        // the user can SEE the prompt state, and do nothing destructive.
+        activateAndNavigate(target.tabId);
+        break;
+      case 'open-session': {
+        const dir = directory();
+        if (dir.kind !== 'ready') break;
+        const entry = dir.view.sessions.find(
+          (e) => e.host === target.hostId && e.session === target.sessionId,
+        );
+        const url = dataPlaneUrl(dir.view.dataPlane);
+        if (entry !== undefined && url !== null) openTarget({ entry, dataPlaneUrl: url }, true);
+        break;
+      }
+      case 'create-session':
+        createOn(target.hostId);
+        break;
+      case 'layout-toggle':
+        dispatch({ kind: 'layout-toggle' });
+        break;
+      case 'set-theme':
+        themeStore()?.setTheme(target.themeId);
+        break;
+    }
+  };
+
+  /**
    * URL → tabs, the one allowed direction of that arrow. Activates the named
    * tab if it is open; opens it from the directory once the directory is
    * ready; never navigates. Idempotent, because the watch below re-runs on
@@ -232,8 +336,6 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
   const dispatch = (action: ShellAction): void => {
     switch (action.kind) {
       case 'palette':
-        // Toggled but not yet rendered — the palette is its own work item;
-        // claiming the chord now is what keeps it out of the terminal.
         store.palette = store.palette.open ? closePalette(store.palette) : openPalette();
         break;
       case 'layout-toggle': {
@@ -264,6 +366,10 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
     if (action === null) return;
     e.preventDefault();
     e.stopPropagation();
+    // While the palette is open it owns the keyboard: every chord is still
+    // claimed (the terminal must never see one), but only the palette toggle
+    // acts — a layout flip behind a modal is a surprise, not a feature.
+    if (store.palette.open && action.kind !== 'palette') return;
     dispatch(action);
   };
   onMounted(() => window.addEventListener('keydown', onWindowKeyDown, true));
@@ -301,6 +407,10 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
             theme={theme}
             onTitle={(title: string) => (store.tabs = setTitle(store.tabs, id, title))}
             onLink={(link) => (store.tabs = setLink(store.tabs, id, link))}
+            register={(hooks: TerminalHooks | null) => {
+              if (hooks === null) termHooks.delete(id);
+              else termHooks.set(id, hooks);
+            }}
           />
         );
       }
@@ -314,10 +424,31 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
       );
     })();
 
+    // Recomputed by this render whenever the query or the selection moves —
+    // signal writes re-run the render fn, which re-asks paletteData(), so the
+    // list tracks the keystrokes without its own store.
+    const paletteEl = ((): unknown => {
+      if (!store.palette.open) return null;
+      const { sources, hostsSearched } = paletteData();
+      return (
+        <Palette
+          query={store.palette.query}
+          selection={store.palette.selection}
+          groups={rankResults(store.palette.query, sources)}
+          hostsSearched={hostsSearched}
+          onQuery={(q: string) => (store.palette = setQuery(store.palette, q))}
+          onMove={movePaletteSelection}
+          onRun={runPaletteItem}
+          onDismiss={() => (store.palette = closePalette(store.palette))}
+        />
+      );
+    })();
+
     if (store.layout === 'vertical') {
       return (
         <div class="shell vertical">
           {store.error !== null ? <div class="shell-error">{store.error}</div> : null}
+          {paletteEl}
           <VerticalHeader
             active={active}
             hostLabels={labels}
@@ -346,6 +477,7 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
     return (
       <div class="shell horizontal">
         {store.error !== null ? <div class="shell-error">{store.error}</div> : null}
+        {paletteEl}
         <TabStrip
           tabs={tabs.tabs}
           activeId={tabs.activeId}
