@@ -103,15 +103,30 @@ function parseArgs(argv) {
       case '--path':
         options.path = value;
         break;
-      case '--status':
-        options.status = Number(value);
+      case '--status': {
+        const n = Number(value);
+        // Validated here rather than discovered in the assertion, which would
+        // read "expected status NaN" and send the reader looking at the Worker.
+        if (!Number.isInteger(n) || n < 100 || n > 599) {
+          die(`--status wants an HTTP status code, got ${JSON.stringify(value)}`);
+        }
+        options.status = n;
         break;
+      }
       case '--body-contains':
         options.bodyContains = value;
         break;
-      case '--timeout':
-        options.timeoutMs = Number(value);
+      case '--timeout': {
+        const n = Number(value);
+        // A NaN or non-positive timeout makes the backstop fire immediately, so
+        // every run reports "the Worker never came up" and the real failure is
+        // whatever was actually wrong. Refuse it where the cause is still named.
+        if (!Number.isFinite(n) || n <= 0) {
+          die(`--timeout wants a positive number of milliseconds, got ${JSON.stringify(value)}`);
+        }
+        options.timeoutMs = n;
         break;
+      }
       case '--var': {
         const eq = value.indexOf('=');
         if (eq < 1) die(`--var wants NAME=value, got ${JSON.stringify(value)}`);
@@ -205,11 +220,20 @@ async function stopWorker() {
 
 if (outcome.kind === 'runtime-error') {
   await stopWorker();
+  // The named-export hint only when the error is that one. It is the failure
+  // this gate was built for, but a config parse error or a missing asset
+  // directory lands here too, and a confident wrong explanation on a CI failure
+  // is worse than none — it sends the reader to the wrong file.
+  const namedExport =
+    /not of type 'function or ExportedHandler'|Incorrect type for map entry/.test(outcome.message);
   die(
     `the Worker did not start:\n\n  ${outcome.message}\n\n` +
-      `workerd mounts every named export of the entrypoint as an entrypoint, so a plain ` +
-      `\`export const\` beside the handler is a type error in that map and nothing serves at ` +
-      `all. \`wrangler deploy --dry-run\` cannot see this — it never starts a runtime.`,
+      (namedExport
+        ? `workerd mounts every named export of the entrypoint as an entrypoint, so a plain ` +
+          `\`export const\` beside the handler is a type error in that map and nothing serves ` +
+          `at all.\n\n`
+        : '') +
+      `\`wrangler deploy --dry-run\` cannot see any of this — it never starts a runtime.`,
   );
 }
 if (outcome.kind === 'timeout') {
