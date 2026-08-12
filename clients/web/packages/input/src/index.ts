@@ -30,6 +30,7 @@ export { type Mods, NO_MODS, mods, modsOf } from './mods.ts';
 export { type KeyLike, encodeKey } from './key.ts';
 export { type EventType, encodeKitty } from './kitty.ts';
 export { belongsToDesktop, isClipboardChord, belongsToBrowser } from './desktop.ts';
+export { type ShellAction, shellChord } from './chords.ts';
 export { encodePaste } from './paste.ts';
 export { encodeComposedText } from './text.ts';
 export { encodeFocus } from './focus.ts';

@@ -1,0 +1,64 @@
+/**
+ * Which blocks are folded, per session — and a session is the FULL
+ * (host, session) pair, never a bare session id: session ids are allocated
+ * per daemon, so `studio`'s session 3 and `forge`'s session 3 are different
+ * terminals, and keying folds by the bare id would fold blocks in both when
+ * the user folded one. The public API takes the two ids separately so a
+ * caller holding only a session id cannot compile.
+ */
+
+export interface FoldsState {
+  readonly folded: ReadonlyMap<string, ReadonlySet<string>>;
+}
+
+export const NO_FOLDS: FoldsState = { folded: new Map() };
+
+// ' ' as the seam: it cannot appear in a hex host id or a decimal
+// session id, so no (host, session) pair can collide with another by
+// shuffling characters across the join.
+function keyOf(hostId: string, sessionId: string): string {
+  return `${hostId} ${sessionId}`;
+}
+
+const EMPTY: ReadonlySet<string> = new Set();
+
+export function toggle(
+  state: FoldsState,
+  hostId: string,
+  sessionId: string,
+  blockId: string,
+): FoldsState {
+  const key = keyOf(hostId, sessionId);
+  const folded = new Map(state.folded);
+  const blocks = new Set(folded.get(key) ?? EMPTY);
+  if (blocks.has(blockId)) {
+    blocks.delete(blockId);
+  } else {
+    blocks.add(blockId);
+  }
+  // An empty set is deleted rather than kept: sessions come and go, and a map
+  // that only ever grows is a leak in a window that stays open for days.
+  if (blocks.size === 0) {
+    folded.delete(key);
+  } else {
+    folded.set(key, blocks);
+  }
+  return { folded };
+}
+
+export function isFolded(
+  state: FoldsState,
+  hostId: string,
+  sessionId: string,
+  blockId: string,
+): boolean {
+  return state.folded.get(keyOf(hostId, sessionId))?.has(blockId) ?? false;
+}
+
+export function foldedFor(
+  state: FoldsState,
+  hostId: string,
+  sessionId: string,
+): ReadonlySet<string> {
+  return state.folded.get(keyOf(hostId, sessionId)) ?? EMPTY;
+}
