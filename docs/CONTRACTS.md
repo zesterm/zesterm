@@ -350,5 +350,47 @@ poll. Skipping also has to mean *not asking the session at all*: `Session::poll`
 subscriber's baseline, so a poll whose answer is discarded destroys output rather than coalescing
 it.
 
-Consumers: `zest-daemon` only, and the field is inert until something sets it. Still draft — WS-F
-may move it.
+Consumers: `zest-daemon` only. **It is no longer inert**: `relay::pipe_config` sets 30ms on every
+relay pipe and on nothing else, which is the one consumer it was added for. Still draft — WS-F may
+move it.
+
+---
+
+### The relay control link: JSON, and the one seam that is not `zest-proto`
+
+Four messages between `zest-daemon` and the relay Worker, and neither end shares a line of code with
+the other. `crates/zest-daemon/src/relay.rs` and `cloud/packages/relay/src/room/control.ts` are the
+two implementations.
+
+```
+DO -> {"t":"challenge","v":1,"nonce":"<64 hex>","relay_key":"<64 hex>"}
+D  -> {"t":"hello","v":1,"host":"<64 hex>","label":"…","sig":"<128 hex>"}
+DO -> {"t":"ready","v":1}   |   {"t":"error","v":1,"code":"…"}
+DO -> {"t":"open","v":1,"pipe":"<32 hex>","exp":<epoch ms>}
+```
+
+**Text, not MessagePack, and that is not a lapse.** The object's free keepalive is
+`WebSocketRequestResponsePair('ping','pong')`, whose members are strings, and answering a ping
+without waking the object is the whole of ADR-009's "an idle host costs nothing". The pipes this
+link opens carry `zest-proto` as binary and are unaffected.
+
+`sig` is an ordinary `Role::Host` + `Purpose::Auth` signature over the nonce bytes under the
+`zesterm-sig-v1` preimage, so there was nothing new to implement on either side. Both ends pin it
+against the *same* Rust-produced vector — `relay::tests::the_hello_this_daemon_sends_is_the_one_the_relay_pinned`
+and `cloud/packages/relay/test/control-golden.test.ts` — because a byte of drift otherwise arrives at
+bring-up as a daemon that is refused and a Worker that says the signature is bad, with neither able
+to say which of them moved.
+
+Two fields are deliberately **not** acted on, and a reader should know before assuming otherwise.
+`relay_key` is read and logged and pinned to nothing; the Worker cannot prove it yet either
+(`relay/src/env.ts` says so at length), and what makes it survivable is that everything of value
+inside a pipe is sealed to a key the relay never holds. `exp` is read and not enforced: it is
+absolute epoch milliseconds, so honouring it would mean trusting this machine's clock against the
+relay's, and a laptop ten seconds out would silently refuse every attach it was ever offered. The
+relay enforces its own deadline — a late dial gets a 404 — which depends on nobody's clock.
+
+An unknown `t` is ignored rather than fatal, so a fifth message cannot knock every daemon in the
+fleet off its link on deploy. A `v` that is not 1 is refused by name on both sides.
+
+Consumers: `zest-daemon` and `cloud/packages/relay`. Frozen in the sense that matters — the two
+implementations are already deployed against each other's tests.

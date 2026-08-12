@@ -37,12 +37,14 @@ pub mod enroll;
 pub mod history;
 pub mod lan;
 pub mod local;
+pub mod relay;
 pub mod server;
 pub mod session;
 pub mod ws;
 
 pub use auth::{Auth, Authenticator};
 pub use lan::{Gate, LanListener};
+pub use relay::Relay;
 pub use ws::WsListener;
 pub use local::{connect, default_socket_path, listen};
 #[cfg(windows)]
@@ -90,6 +92,20 @@ pub struct DaemonConfig {
     pub ws_bind: String,
     /// Which port to prefer for WebSocket clients. 0 means "always ephemeral".
     pub ws_port: u16,
+    /// The relay this machine dials out to, so it can be reached from anywhere.
+    ///
+    /// `None` by default, and the third transport with that posture: `--relay`
+    /// is something someone asks for. Unlike [`Self::listen_lan`] and
+    /// [`Self::listen_ws`] it is **outbound** — nothing here opens a port —
+    /// which is the whole point of ADR-009: a machine behind a NAT, on hotel
+    /// wifi, or on a network whose admin will never forward a port is reachable
+    /// because it dialled out.
+    ///
+    /// A `String` and not a parsed origin, because the failure has to be
+    /// reportable: [`relay::RelayOrigin::parse`] refuses several shapes by name
+    /// and the daemon logs which, rather than a config that cannot represent
+    /// what someone typed.
+    pub relay: Option<String>,
     /// Load zesterm's OSC 133 hook into shells this daemon spawns.
     ///
     /// On by default: it writes no file of the user's, and without it there are

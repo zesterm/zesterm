@@ -85,6 +85,7 @@ fn serve_one(floor: Duration) -> TcpStream {
         listen_ws: false,
         ws_bind: "127.0.0.1".into(),
         ws_port: 0,
+        relay: None,
         // A shell hook on a command that is not a shell buys nothing, and
         // writing the shim is a filesystem dependency this test does not need.
         shell_integration: false,

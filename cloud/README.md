@@ -166,24 +166,72 @@ without the override.
 Sign-in locally also needs the **second** OAuth app: a GitHub OAuth app accepts
 exactly one callback URL, so production cannot also serve `localhost`.
 
-## Seeing the relay work, without a daemon that can dial it
+## Seeing the relay work
 
-The daemon's outbound leg is the one piece of the relay path with no Rust yet,
-so two scripts stand in for the ends and everything between them is real: a real
-Durable Object under workerd, a real attach ticket, real `zest-proto` framing,
-and the ADR-008 sealed channel the relay cannot read.
+The daemon dials the relay itself now — `zest-daemon --relay <url>`,
+`crates/zest-daemon/src/relay.rs` — so `fake-host.mjs` is no longer the only
+way to park a control link. It stays, because a stand-in for one end is how you
+find out which end is wrong; but the run below is the real one.
 
 ```sh
 # 1. the relay Worker, under a real runtime
 pnpm -C cloud --filter @zesterm/relay-worker exec wrangler dev --port 8787
 
-# 2. a real daemon with a WebSocket port for the fake host to reach
+# 2. the daemon, dialling out. `http://` is accepted for loopback only.
+./target/fast/zest-daemon --ephemeral --relay http://127.0.0.1:8787
+
+# 3. the browser's half: mints a ticket and attaches
+node cloud/packages/relay/tools/fake-browser.mjs \
+  --ticket-seed <64 hex> --host <the daemon's host id>
+```
+
+`--ephemeral` mints a fresh key every start, so the `hosts` row has to name
+whatever *this* run's id is. The daemon logs only the short form; the full 64
+hex is in the request the Worker saw, which `wrangler dev` will hand back:
+
+```sh
+curl -s -X POST http://localhost:8787/cdn-cgi/local/explorer/api/local/observability/query \
+  -H 'Content-Type: application/json' \
+  -d '{"sql":"SELECT json(attributes) FROM spans WHERE parent_id IS NULL ORDER BY rowid DESC LIMIT 1"}'
+```
+
+Until that row exists the relay answers `unknown-host` and the daemon redials on
+a growing delay, which is the correct behaviour and looks exactly like a bug if
+nobody says so. Insert the row and the next redial parks.
+
+### What the first `zest-proto` handshake over the relay proved
+
+Run on 2026-08-12, against `wrangler dev` on this Mac. Every layer real except
+the browser, which was a Rust client presenting a genuine minted ticket:
+
+```
+[daemon] the relay control link is parked            host=77eb1ca9
+[daemon] a relay pipe is up; serving it              remote=relay ws://127.0.0.1:8787 pipe ac55309d
+[daemon] pair "live-probe" (c811d122) from relay ws://127.0.0.1:8787 pipe ac55309d?
+[client] WELCOME from "Mac"  ·  ListSessions -> 0  ·  created session 77eb1ca9:1
+```
+
+So: a signature the Worker's `helloSignatureIsValid` accepted, a real D1
+`hosts` lookup, an attach ticket verified at the edge and spent in the object,
+an `open` down the parked link, a **second** socket dialled back for that pipe
+alone, and inside it the whole `zest-proto` handshake — including the ADR-008
+sealed channel, a pairing approval, and a PTY spawned on the host.
+
+Two things that run did *not* prove, and both are worth keeping in view. It was
+one machine and loopback, so it says nothing about TLS to the real edge, about
+two genuinely separate networks, or about the hibernation the cost model rests
+on. And the pairing prompt named the relay in the `remote` field, which is
+right — but a person approving a device still cannot tell *which* device, and
+`PeerKey::Relay` is still not a key anything is limited by.
+
+### The old way, with both ends stood in for
+
+Still the fastest way to isolate a failure to one end, and it needs no Rust at
+all:
+
+```sh
 ./target/fast/zest-daemon --ephemeral --listen-ws --ws-port 7718
-
-# 3. the daemon's relay leg: parks a control link, dials back on `open`
 node cloud/packages/relay/tools/fake-host.mjs --relay http://127.0.0.1:8787
-
-# 4. the browser's half: mints a ticket and attaches
 node cloud/packages/relay/tools/fake-browser.mjs \
   --ticket-seed <64 hex> --host "$(node cloud/packages/relay/tools/fake-host.mjs --host-id)"
 ```

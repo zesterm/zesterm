@@ -541,6 +541,7 @@ mod tests {
             listen_ws: false,
             ws_bind: "127.0.0.1".into(),
             ws_port: 0,
+            relay: None,
             shell_integration: true,
             min_delta_interval: Duration::ZERO,
         }
@@ -707,6 +708,7 @@ mod unix_tests {
             listen_ws: false,
             ws_bind: "127.0.0.1".into(),
             ws_port: 0,
+            relay: None,
             shell_integration: true,
             min_delta_interval: std::time::Duration::ZERO,
         };

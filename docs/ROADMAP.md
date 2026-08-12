@@ -67,7 +67,7 @@ and its number (48ms) is reported rather than gated.
 | `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), restore-on-launch — runs on Windows *and* macOS (Metal, transparent titlebar) — ⬜ Windows chrome, motion |
 | `zest-proto` | ✅ protocol 2, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, cell-for-cell conformance, chaos-resync, command blocks |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store, sealed channel |
-| `zest-cloud` | ✅ the fence held in both directions: rustls (ring) landed here and `check-deps` stayed green with no list edited, and `zest-daemon`'s `--enroll` is now a real consumer — `TlsDuplex`, one connection as two independently owned halves, a one-request HTTP POST over it, `Endpoint` — ⬜ the relay dialler (M6) |
+| `zest-cloud` | ✅ the fence held in both directions: rustls (ring) landed here and `check-deps` stayed green with no list edited, and `zest-daemon`'s `--enroll` is now a real consumer — `TlsDuplex`, one connection as two independently owned halves, a one-request HTTP POST over it, `Endpoint` — and `zest-daemon`'s `--relay` is the second, dialling `TlsDuplex` per pipe under ADR-009's dial-back |
 | `zest-daemon` | ✅ session ownership *and* lifecycle, protocol loop, loopback *and* LAN transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing |
 
 ### What works end to end today
@@ -186,7 +186,7 @@ below means "do not touch this file".
 | **E** | [Command blocks](#ws-e) | `zest-core/src/blocks.rs`, OSC 133, shell integration | Open | [#6](https://github.com/zesterm/zesterm/issues/6) |
 | **F** | [`zest-proto` + `zest-daemon`](#ws-f) | `crates/zest-proto/`, `crates/zest-daemon/` | Protocol + daemon ✅ · **applier, app attach, LAN listener next** | [#4](https://github.com/zesterm/zesterm/issues/4) |
 | **G** | [Web client](#ws-g) | `clients/web/`, `zest-proto/fixtures/` | Decoder + fixtures ✅ · renderer next, transport blocked | [#8](https://github.com/zesterm/zesterm/issues/8) |
-| **H** | [Mesh identity, discovery, transports](#ws-h) | `crates/zest-mesh/`, `crates/zest-cloud/`, `cloud/` | Identity, discovery, pairing, accounts ✅ · **the relay next** ([#59](https://github.com/zesterm/zesterm/issues/59)) | [#7](https://github.com/zesterm/zesterm/issues/7) |
+| **H** | [Mesh identity, discovery, transports](#ws-h) | `crates/zest-mesh/`, `crates/zest-cloud/`, `cloud/` | Identity, discovery, pairing, accounts ✅ · the relay Worker and the daemon's `--relay` leg ✅ · **the web client's second data plane next** ([#59](https://github.com/zesterm/zesterm/issues/59)) | [#7](https://github.com/zesterm/zesterm/issues/7) |
 
 **Ordering that mattered, and is now settled.** B landed before A, so `zest-app`
 is free of input code and A can fill it with chrome. C1 landed before D, so
@@ -1756,6 +1756,41 @@ three facts about Cloudflare that changed after #59 was written.
       fragment and a query with no path in front of it — the first of those
       would post a bearer token in the clear, and each of the rest addresses
       something nobody chose.
+- [x] **`--relay`: the daemon dials the relay itself.** The last large piece,
+      and it adds no protocol — it composes `TlsDuplex`, `ws::client`, the
+      `Gate`, the `Watchdog` and `serve_lan` into `zest-daemon/src/relay.rs`.
+      A control link is parked with a `Role::Host` + `Purpose::Auth` signature
+      over the room's nonce, and each `open` becomes a **second connection** to
+      `/v1/pipe`, handed to `serve_lan` exactly as a device on the LAN is. One
+      pipe is one socket, which is what lets the handshake watchdog cut a
+      logical stream. Refuse-not-degrade, like `--listen-ws`: a relay that will
+      not come up is a log line, and loopback keeps serving. → ADR-005.
+
+      **The transport is injected** — `Fn(&str, u16) -> io::Result<Wire>`,
+      defaulting to TLS — because the real relay is a Worker and without the
+      seam this leg has no test at all. `tests/relay.rs` runs the whole of it
+      against an in-process fake relay built on `tungstenite`, an independent
+      RFC 6455 implementation rather than a mirror of `ws.rs`: challenge,
+      signature, `open`, dial-back, and a real `zest-proto` session at the end
+      of it. Every pipe takes a `Gate` slot and sets the 30 ms floor; neither
+      goes through `accept_hardened`, which is inbound and `TcpListener`-shaped.
+
+      **It has been run against the real thing**, which is what the fake relay
+      cannot prove — see `cloud/README.md`. It also found the one bug no test
+      here had: the redial ladder reset only when a parked link closed
+      *cleanly*, and almost nothing closes cleanly. Restarting the Worker left
+      the daemon waiting out the twenty seconds three earlier refusals had
+      built, with a healthy relay already listening. `LinkEnd` now carries
+      "did it park" beside "how did it end", because a `Result` cannot.
+
+      **Two gaps stated rather than closed.** The relay's `relay_key` is read,
+      logged and pinned to nothing — the sealed channel inside a pipe is what
+      makes that survivable, and the Worker cannot yet *prove* the pin either
+      (`env.ts` says so). And a relayed pipe takes a mid-handshake slot but
+      feeds no rate limiter, because the only key available is the edge's
+      address and one hostile peer on it would lock out the whole fleet — the
+      hazard `PeerKey::Relay` already describes. Closing it needs a key the
+      peer owns, which is its attach ticket, which the daemon never sees.
 - [ ] **The web client learns a second data plane.** `DataPlane` grows a
       discriminant, a relay `Dial` mints its ticket before opening the socket
       (the seam stays synchronous — a failed mint is a dropped dial, and
@@ -1772,15 +1807,20 @@ three facts about Cloudflare that changed after #59 was written.
       `relay-dial.ts` injects around, and any notion of which hosts are
       online — so wiring the cloud branch today would replace an honest card
       with a list that reconnects for ever.
-- [ ] **The coalescing floor, with a test that asserts the message rate.** It is
+- [x] **The coalescing floor, with a test that asserts the message rate.** It is
       what keeps the object hibernating between keystrokes; unthrottled is
       ~1000 msg/s and an object that never sleeps. → ADR-009's arithmetic.
 
       **The daemon half landed first** (#72): `DaemonConfig::min_delta_interval`,
       honoured by the writer loop every transport shares, and **zero by
       default** so loopback and the LAN are unchanged. What remains is the relay
-      transport setting it — nothing does yet, and a floor nothing sets is a
-      field, which is why the deliverable was the test rather than the field.
+      transport setting it — and `relay.rs` now does, at 30 ms for every relay
+      pipe and only for those, so the field has the one consumer it was written
+      for. `pipe_config` is a function rather than two lines at the call site
+      precisely so a test can hold it: the floor is invisible from a client's
+      end, since it changes *when* deltas arrive and never what they say, so a
+      line that quietly went missing would show up as a Cloudflare bill and
+      nothing else.
       `tests/coalescing.rs` floods a session and asserts both halves: the
       message count stays inside one per interval, *and* the coalesced stream
       reconstructs the host's final screen exactly. Measured while writing it:

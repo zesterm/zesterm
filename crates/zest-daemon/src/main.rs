@@ -58,6 +58,11 @@ fn main() {
              --listen-ws         serve WebSocket clients -- browsers (off by default)\n\
              --ws-bind <addr>    which interface (default 0.0.0.0)\n\
              --ws-port <port>    preferred port (default 7718)\n\
+             --relay <url>       dial this relay so the machine is reachable\n\
+             \x20                   from anywhere, without opening a port\n\
+             \x20                   (off by default; --relay-url is the same\n\
+             \x20                   flag). wss://host, or http://127.0.0.1:8787\n\
+             \x20                   for a relay running on this machine\n\
              --min-delta-interval <ms>\n\
              \x20                   least time between updates for one client\n\
              \x20                   (default 0 -- send as fast as the shell\n\
@@ -307,6 +312,12 @@ fn main() {
         ws_port: opt("--ws-port")
             .and_then(|p| p.parse().ok())
             .unwrap_or(zest_daemon::ws::DEFAULT_PORT),
+        // Two spellings of one flag, and no default value behind either. The
+        // relay a machine should dial is a property of the *account* — the web
+        // client is already handed its relay origin at runtime rather than
+        // building one in — and nothing is deployed yet, so a built-in URL here
+        // would be a guess this daemon presented as configuration.
+        relay: opt("--relay").or_else(|| opt("--relay-url")),
         shell_integration: !flag("--no-shell-integration"),
         // Zero unless asked. The relay transport is what needs a floor, and it
         // sets its own; a flag exists so the effect can be seen on loopback
@@ -369,6 +380,20 @@ fn main() {
     if config.listen_ws {
         if let Err(e) = start_ws(&config, &registry, &auth, &gate) {
             tracing::error!(error = %e, "not serving WebSocket clients; loopback is unaffected");
+        }
+    }
+
+    // The relay, if asked for. Same posture again, and it matters most here:
+    // the relay is the transport that depends on somebody else's cloud being
+    // up, and ADR-005 requires a local terminal to survive Cloudflare being
+    // unreachable. A relay that will not start must therefore cost this daemon
+    // nothing but a log line.
+    if let Some(url) = config.relay.clone() {
+        if let Err(e) = start_relay(&url, &identity, &config, &registry, &auth, &gate) {
+            tracing::error!(
+                error = %e,
+                "not dialling the relay; loopback and the LAN are unaffected"
+            );
         }
     }
 
@@ -490,6 +515,58 @@ fn start_ws(
                 tracing::error!(error = %e, "the WebSocket listener stopped");
             }
         })
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+/// Park a control link at the relay, and keep it parked.
+///
+/// Modelled on [`start_ws`] and different in one way that shows in the
+/// signature: there is no listener and no port, because this transport dials
+/// *out*. Everything else is deliberately the same — the same registry, the
+/// same authenticator, and above all the same [`Gate`](zest_daemon::Gate), so
+/// that a relayed stream counts against the same mid-handshake budget a LAN
+/// connection does.
+///
+/// The URL is parsed here rather than inside the thread, which is what makes a
+/// mistyped `--relay` a message at startup instead of a thread failing forever
+/// in a log nobody is reading.
+fn start_relay(
+    url: &str,
+    identity: &Arc<HostIdentity>,
+    config: &DaemonConfig,
+    registry: &Arc<Registry>,
+    auth: &Arc<Authenticator>,
+    gate: &Arc<zest_daemon::Gate>,
+) -> Result<(), String> {
+    // Same check as the LAN and the WebSocket port, same reason: a trust store
+    // that cannot persist means every device re-prompts on every reconnect.
+    auth.trust().list().map_err(|e| format!("the trust store is unusable: {e}"))?;
+
+    // The operating system's trust store, as `--enroll` uses: it is the only
+    // thing that accepts a corporate middlebox's re-signed certificate, and a
+    // managed laptop is exactly the machine that needs a relay.
+    let relay = zest_daemon::Relay::new(
+        url,
+        Arc::clone(identity),
+        config.clone(),
+        Arc::clone(registry),
+        Arc::clone(auth),
+        Arc::clone(gate),
+        Roots::Platform,
+    )
+    .map_err(|e| e.to_string())?;
+
+    tracing::info!(
+        relay = %relay.origin(),
+        host = %config.host.short(),
+        "dialling the relay; this machine will be reachable through it"
+    );
+
+    std::thread::Builder::new()
+        .name("zest-daemon-relay".into())
+        .spawn(move || relay.run())
         .map_err(|e| e.to_string())?;
 
     Ok(())

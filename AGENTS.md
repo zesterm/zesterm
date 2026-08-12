@@ -402,7 +402,12 @@ zest-daemon --socket-path                      # where this user's daemon listen
 zest-daemon --socket <path>                    # serve this machine's terminals
 zest-daemon --listen-lan                       # serve other machines too (off by default)
 zest-daemon --listen-ws                        # serve browsers over WebSocket (off by default, port 7718)
+zest-daemon --relay <url>                      # dial a relay so this machine is reachable from
+                                               #   anywhere, opening no port (off by default).
+                                               #   wss://host, or http://127.0.0.1:8787 for a relay
+                                               #   on this machine — plaintext is loopback-only
 zest-daemon --min-delta-interval <ms>          # coalescing floor; 0 (off) unless the transport asks
+                                               #   (--relay sets 30ms per pipe)
 zest-daemon --identity                         # this host's public key
 zest-daemon --trusted                          # which devices are paired
 zest-daemon --ephemeral                        # throwaway key, for the edit-run loop
