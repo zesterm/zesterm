@@ -24,24 +24,24 @@ const RAIL_PAD: f32 = 12.0;
 const FILTER_H: f32 = 30.0;
 const CAT_ROW_H: f32 = 30.0;
 const CAT_GAP: f32 = 2.0;
-const CONTENT_X: f32 = 30.0;
+pub(super) const CONTENT_X: f32 = 30.0;
 const HEADER_PAD_TOP: f32 = 22.0;
 const HEADER_PAD_BOTTOM: f32 = 16.0;
 const HEADING_PX: f32 = 17.0;
 const LEDE_PX: f32 = 12.0;
-const ROW_VPAD: f32 = 16.0;
+pub(super) const ROW_VPAD: f32 = 16.0;
 /// Control column width (§11: `flex: 0 1 262px`).
-const CONTROL_W: f32 = 262.0;
+pub(super) const CONTROL_W: f32 = 262.0;
 /// Below this content-column width the control drops to its own line,
 /// right-aligned, instead of crushing the label column (§11).
 pub const WRAP_AT: f32 = 400.0;
-const FOOTER_H: f32 = 42.0;
-const DESC_PX: f32 = 11.5;
-const KEY_PX: f32 = 10.5;
-const LABEL_PX: f32 = 13.0;
-const CHIP_PX: f32 = 10.0;
-const LINE_H: f32 = 17.0;
-const HAIRLINE: f32 = 1.0;
+pub(super) const FOOTER_H: f32 = 42.0;
+pub(super) const DESC_PX: f32 = 11.5;
+pub(super) const KEY_PX: f32 = 10.5;
+pub(super) const LABEL_PX: f32 = 13.0;
+pub(super) const CHIP_PX: f32 = 10.0;
+pub(super) const LINE_H: f32 = 17.0;
+pub(super) const HAIRLINE: f32 = 1.0;
 // Widgets (§11's table).
 const TOGGLE_W: f32 = 38.0;
 const TOGGLE_H: f32 = 22.0;
@@ -58,15 +58,22 @@ const LIST_GAP: f32 = 4.0;
 const CHIP_H: f32 = 26.0;
 const MENU_W: f32 = 288.0;
 const MENU_RADIUS: f32 = 11.0;
+// The §12 direct-choice cells (profiles editor; settings never builds them).
+const SCHEME_CELL_W: f32 = 60.0;
+const SCHEME_CELL_H: f32 = 32.0;
+const SCHEME_CHIP_H: f32 = 14.0;
+const SCHEME_GAP: f32 = 8.0;
+const ACCENT_SWATCH: f32 = 22.0;
+const GLYPH_TILE: f32 = 26.0;
 
-fn baseline_in(y: f32, h: f32, px: f32) -> f32 {
+pub(super) fn baseline_in(y: f32, h: f32, px: f32) -> f32 {
     y + (h + px * 0.72) / 2.0
 }
 
 /// Greedy word wrap against the injected measure — the §11 descriptions and
 /// ledes are sentences, and an ellipsis mid-sentence loses the clause that
 /// carries the meaning.
-fn wrap_text(
+pub(super) fn wrap_text(
     text: &str,
     px: f32,
     max_w: f32,
@@ -95,7 +102,7 @@ fn wrap_text(
 /// A dashed 1px border for the add affordances — same placeholder-grade
 /// recipe as the fleet's asleep cards (`screens::dashed_border` is private
 /// to its own concerns; four dashes of arithmetic beat a wider interface).
-fn dashed_border(
+pub(super) fn dashed_border(
     rects: &mut Vec<RectInstance>,
     rect: [f32; 4],
     s: f32,
@@ -118,13 +125,20 @@ fn dashed_border(
     }
 }
 
+/// How many scheme-swatch cells fit one control-column row, and the row
+/// count for `n` options — height and drawing must agree, so it lives here.
+fn scheme_grid(n: usize) -> (usize, usize) {
+    let per_row = (((CONTROL_W + SCHEME_GAP) / (SCHEME_CELL_W + SCHEME_GAP)) as usize).max(1);
+    (per_row, n.div_ceil(per_row))
+}
+
 /// The height of one row's control, in logical px — the row layout and the
 /// scroll math must agree on it, so it is computed once, here.
-fn control_height(cell: &SettingsValueCell) -> f32 {
+pub(super) fn control_height(cell: &SettingsValueCell) -> f32 {
     match cell {
         SettingsValueCell::Toggle { .. } => TOGGLE_H,
         SettingsValueCell::Segmented { .. } => SEG_H,
-        SettingsValueCell::Select { .. } => SELECT_H,
+        SettingsValueCell::Select { .. } | SettingsValueCell::HostPill { .. } => SELECT_H,
         SettingsValueCell::Slider { .. } => 14.0,
         SettingsValueCell::Stepper { .. } => STEP_H,
         SettingsValueCell::Text { .. }
@@ -140,12 +154,18 @@ fn control_height(cell: &SettingsValueCell) -> f32 {
         SettingsValueCell::KeyValue { entries } => {
             (entries.len() + 1) as f32 * LIST_ROW_H + entries.len() as f32 * LIST_GAP
         }
+        SettingsValueCell::SchemeSwatches { options, .. } => {
+            let (_, rows) = scheme_grid(options.len());
+            rows as f32 * SCHEME_CELL_H + (rows.saturating_sub(1)) as f32 * SCHEME_GAP
+        }
+        SettingsValueCell::AccentSwatches { .. } => ACCENT_SWATCH,
+        SettingsValueCell::Glyphs { .. } => GLYPH_TILE,
     }
 }
 
 /// One row's extents: (total height, wrapped description lines). `narrow`
 /// stacks the control under the text instead of beside it (§11's wrap).
-fn row_extent(
+pub(super) fn row_extent(
     row: &SettingsRowModel,
     narrow: bool,
     desc_w: f32,
@@ -537,7 +557,15 @@ pub fn settings_screen(
                     top
                 };
                 let anchor = draw_control(
-                    out, value, i, model, colors, s, rows_clip, control_right, control_top,
+                    out,
+                    value,
+                    i,
+                    model.menu.as_ref().map(|m| m.row),
+                    colors,
+                    s,
+                    rows_clip,
+                    control_right,
+                    control_top,
                     measure,
                 );
                 if let Some(a) = anchor {
@@ -553,13 +581,15 @@ pub fn settings_screen(
 }
 
 /// Draw one value cell right-aligned against `right` at `top`; returns the
-/// dropdown anchor when this row's select pill is the open menu's.
+/// dropdown anchor when this row's select pill is the open menu's
+/// (`menu_row`). Shared with the profiles editor — the §11 widget vocabulary
+/// is one vocabulary, drawn once.
 #[allow(clippy::too_many_arguments)]
-fn draw_control(
+pub(super) fn draw_control(
     out: &mut ChromeLayout,
     value: &SettingsValueCell,
     row: usize,
-    model: &SettingsScreenModel,
+    menu_row: Option<usize>,
     colors: &ChromeColors,
     s: f32,
     clip: [f32; 4],
@@ -661,7 +691,7 @@ fn draw_control(
                 bold: false,
                 tracking: 0.0,
             });
-            if model.menu.as_ref().is_some_and(|menu| menu.row == row) {
+            if menu_row == Some(row) {
                 menu_anchor = Some(pill);
             }
         }
@@ -900,6 +930,171 @@ fn draw_control(
                 chip_right -= w + 6.0 * s;
             }
         }
+        SettingsValueCell::HostPill { name, online } => {
+            // The §12 host pill: the Select pill's geometry with a status dot
+            // — clicking routes through the same SettingsSelect dispatch,
+            // which the profiles editor answers with the fleet picker.
+            let pill = [right - SELECT_W * s, top, SELECT_W * s, SELECT_H * s];
+            out.rects.push(RectInstance {
+                radii: [8.0 * s; 4],
+                border: colors.line,
+                border_width: HAIRLINE * s,
+                ..RectInstance::filled(pill, colors.panel_bg, clip)
+            });
+            if let Some(hit) = intersect(pill, clip) {
+                out.hit.push(hit, HitRegion::SettingsSelect(row));
+            }
+            let dot_d = 6.0 * s;
+            let dot_color = if *online { colors.success } else { colors.text_faint };
+            out.rects.push(RectInstance::rounded(
+                [pill[0] + 11.0 * s, pill[1] + (pill[3] - dot_d) / 2.0, dot_d, dot_d],
+                dot_d / 2.0,
+                dot_color,
+                clip,
+            ));
+            out.texts.push(TextRun {
+                text: name.clone(),
+                pos: [pill[0] + 24.0 * s, baseline_in(pill[1], pill[3], mono)],
+                max_width: pill[2] - 48.0 * s,
+                color: colors.text_active,
+                clip,
+                px: mono,
+                bold: false,
+                tracking: 0.0,
+            });
+            let vw = measure("\u{25be}", 10.0 * s, false, 0.0);
+            out.texts.push(TextRun {
+                text: "\u{25be}".into(),
+                pos: [pill[0] + pill[2] - 12.0 * s - vw, baseline_in(pill[1], pill[3], 10.0 * s)],
+                max_width: vw + 2.0,
+                color: colors.text_faint,
+                clip,
+                px: 10.0 * s,
+                bold: false,
+                tracking: 0.0,
+            });
+        }
+        SettingsValueCell::SchemeSwatches { options, selected } => {
+            let (per_row, _) = scheme_grid(options.len());
+            let col_left = right - CONTROL_W * s;
+            for (j, option) in options.iter().enumerate() {
+                let gx = col_left + (j % per_row) as f32 * (SCHEME_CELL_W + SCHEME_GAP) * s;
+                let gy = top + (j / per_row) as f32 * (SCHEME_CELL_H + SCHEME_GAP) * s;
+                let cell = [gx, gy, SCHEME_CELL_W * s, SCHEME_CELL_H * s];
+                let chosen = *selected == Some(j);
+                if chosen {
+                    // Ringed accent on accentSoft (§12) — the wash spills a
+                    // couple of px past the chip so the ring reads as a ring.
+                    out.rects.push(RectInstance::rounded(
+                        [cell[0] - 3.0 * s, cell[1] - 3.0 * s, cell[2] + 6.0 * s, cell[3] + 6.0 * s],
+                        4.0 * s,
+                        colors.accent_soft,
+                        clip,
+                    ));
+                }
+                let chip = [cell[0], cell[1], cell[2], SCHEME_CHIP_H * s];
+                // The eight normal ANSI colours in index order, no gaps —
+                // read from zest-theme upstream, never re-typed here.
+                let sw = chip[2] / 8.0;
+                for (k, c) in option.ansi.iter().enumerate() {
+                    out.rects.push(RectInstance::filled(
+                        [chip[0] + k as f32 * sw, chip[1], sw + 0.5, chip[3]],
+                        LinearRgba::opaque(c[0], c[1], c[2]),
+                        clip,
+                    ));
+                }
+                out.rects.push(RectInstance {
+                    radii: [2.0 * s; 4],
+                    border: if chosen { colors.accent } else { colors.line },
+                    border_width: HAIRLINE * s,
+                    ..RectInstance::filled(chip, LinearRgba::TRANSPARENT, clip)
+                });
+                out.texts.push(TextRun {
+                    text: option.id.clone(),
+                    pos: [cell[0], cell[1] + cell[3] - 3.0 * s],
+                    max_width: cell[2],
+                    color: if chosen { colors.accent } else { colors.text_faint },
+                    clip,
+                    px: 9.0 * s,
+                    bold: false,
+                    tracking: 0.0,
+                });
+                if let Some(hit) = intersect(cell, clip) {
+                    out.hit.push(hit, HitRegion::ProfilesChoice(row, j));
+                }
+            }
+        }
+        SettingsValueCell::AccentSwatches { selected, inert } => {
+            // Six swatches from the window theme's accent roster — the same
+            // roster the tab chips resolve `tab_color` against, so what is
+            // picked here is what the chip draws.
+            let d = ACCENT_SWATCH * s;
+            let gap = 6.0 * s;
+            let col_left = right - 6.0 * (d + gap) + gap;
+            for j in 0..6u8 {
+                let cell = [col_left + f32::from(j) * (d + gap), top, d, d];
+                let ink = super::layout::accent_color(
+                    colors,
+                    super::model::AccentChoice::Profile(j),
+                );
+                // Dimmed to 35% AND inert while the host decides (§12): no
+                // hit region, so the swatch cannot act while looking unable.
+                let ink = if *inert { super::layout::washed(ink, 0.35) } else { ink };
+                out.rects.push(RectInstance::rounded(cell, 5.0 * s, ink, clip));
+                if *selected == Some(j) && !inert {
+                    out.rects.push(RectInstance {
+                        radii: [7.0 * s; 4],
+                        border: colors.accent,
+                        border_width: 1.5 * s,
+                        ..RectInstance::filled(
+                            [cell[0] - 3.0 * s, cell[1] - 3.0 * s, d + 6.0 * s, d + 6.0 * s],
+                            LinearRgba::TRANSPARENT,
+                            clip,
+                        )
+                    });
+                }
+                if !inert {
+                    if let Some(hit) = intersect(cell, clip) {
+                        out.hit.push(hit, HitRegion::ProfilesChoice(row, usize::from(j)));
+                    }
+                }
+            }
+        }
+        SettingsValueCell::Glyphs { options, selected } => {
+            let d = GLYPH_TILE * s;
+            let gap = 6.0 * s;
+            let n = options.len() as f32;
+            let col_left = right - n * (d + gap) + gap;
+            for (j, glyph) in options.iter().enumerate() {
+                let cell = [col_left + j as f32 * (d + gap), top, d, d];
+                let chosen = *selected == Some(j);
+                let ink = if chosen { colors.accent } else { colors.text_inactive };
+                out.rects.push(RectInstance {
+                    radii: [6.0 * s; 4],
+                    border: if chosen { colors.accent } else { colors.line },
+                    border_width: HAIRLINE * s,
+                    ..RectInstance::filled(
+                        cell,
+                        if chosen { colors.accent_soft } else { colors.panel_bg },
+                        clip,
+                    )
+                });
+                let gw = measure(glyph, 12.0 * s, false, 0.0);
+                out.texts.push(TextRun {
+                    text: glyph.clone(),
+                    pos: [cell[0] + (d - gw) / 2.0, baseline_in(cell[1], d, 12.0 * s)],
+                    max_width: d,
+                    color: ink,
+                    clip,
+                    px: 12.0 * s,
+                    bold: false,
+                    tracking: 0.0,
+                });
+                if let Some(hit) = intersect(cell, clip) {
+                    out.hit.push(hit, HitRegion::ProfilesChoice(row, j));
+                }
+            }
+        }
         SettingsValueCell::KeyValue { entries } => {
             let w = CONTROL_W * s;
             let x = right - w;
@@ -958,7 +1153,7 @@ fn draw_control(
 
 /// A list item's × affordance.
 #[allow(clippy::too_many_arguments)]
-fn list_remove(
+pub(super) fn list_remove(
     out: &mut ChromeLayout,
     colors: &ChromeColors,
     s: f32,
@@ -986,7 +1181,7 @@ fn list_remove(
 
 /// A list widget's dashed add row.
 #[allow(clippy::too_many_arguments)]
-fn list_add(
+pub(super) fn list_add(
     out: &mut ChromeLayout,
     colors: &ChromeColors,
     s: f32,
@@ -1016,7 +1211,7 @@ fn list_add(
 /// The 288px dropdown (§11): ✓, label, the kebab wire value in mono, and
 /// the variant's doc comment underneath. Drawn after every row so it sits
 /// on top; its hit regions likewise outrank the rows beneath.
-fn dropdown_menu(
+pub(super) fn dropdown_menu(
     menu: &super::model::SettingsMenuModel,
     anchor: [f32; 4],
     area: [f32; 4],
@@ -1307,7 +1502,7 @@ fn footer(
     });
 }
 
-fn intersect(r: [f32; 4], c: [f32; 4]) -> Option<[f32; 4]> {
+pub(super) fn intersect(r: [f32; 4], c: [f32; 4]) -> Option<[f32; 4]> {
     let x0 = r[0].max(c[0]);
     let y0 = r[1].max(c[1]);
     let x1 = (r[0] + r[2]).min(c[0] + c[2]);

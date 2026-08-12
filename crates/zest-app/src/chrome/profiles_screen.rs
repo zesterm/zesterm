@@ -1,0 +1,1041 @@
+//! The Profiles tab's screen (design §12): a 248px profile rail and an
+//! editor column, drawn over the grid area while the Profiles pane is up.
+//!
+//! Sibling of `settings_screen`, same discipline — pure, event-driven; rects,
+//! text runs and hit regions out of one pass — and it *borrows* that module's
+//! widget vocabulary (`draw_control`, `row_extent`, the dropdown) rather than
+//! redrawing it: the §11 controls and the §12 controls are one vocabulary.
+//! What is new here is §12's own chrome: the rail of launch targets, the
+//! editor header, the live preview, and the inheritance chips.
+
+use zest_render_wgpu::{LinearRgba, RectInstance};
+
+use super::hit::HitRegion;
+use super::layout::{accent_color, washed};
+use super::layout::{ChromeLayout, TextRun};
+use super::model::{InheritChip, ProfilePreviewModel, ProfilesScreenModel, SettingsRowModel};
+use super::settings_screen as ss;
+use super::theme::ChromeColors;
+
+// §12 geometry, logical px (docs/design/client-ui/README.md §12) — change
+// them there first or not at all.
+pub const RAIL_W: f32 = 248.0;
+const RAIL_PAD: f32 = 12.0;
+const RAIL_ROW_H: f32 = 44.0;
+const RAIL_TILE: f32 = 24.0;
+/// The 6px gap after Defaults, so it reads as the parent, not a sibling.
+const DEFAULTS_GAP: f32 = 6.0;
+const HEAD_TILE: f32 = 34.0;
+const BTN_H: f32 = 26.0;
+const HAIRLINE: f32 = 1.0;
+const SECTION_PX: f32 = 10.5;
+
+fn srgb(c: [u8; 3]) -> LinearRgba {
+    LinearRgba::opaque(c[0], c[1], c[2])
+}
+
+/// A profile's glyph tile: the icon in its accent on a 12%-alpha wash, or
+/// the placeholder dot the tab chips draw while a profile has no icon.
+#[allow(clippy::too_many_arguments)]
+fn glyph_tile(
+    out: &mut ChromeLayout,
+    rect: [f32; 4],
+    radius: f32,
+    icon: Option<&str>,
+    ink: LinearRgba,
+    px: f32,
+    clip: [f32; 4],
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+) {
+    out.rects.push(RectInstance::rounded(rect, radius, washed(ink, 0.12), clip));
+    match icon {
+        Some(glyph) if !glyph.is_empty() => {
+            let gw = measure(glyph, px, false, 0.0);
+            out.texts.push(TextRun {
+                text: glyph.to_string(),
+                pos: [rect[0] + (rect[2] - gw) / 2.0, ss::baseline_in(rect[1], rect[3], px)],
+                max_width: rect[2] + 2.0,
+                color: ink,
+                clip,
+                px,
+                bold: false,
+                tracking: 0.0,
+            });
+        }
+        _ => {
+            let d = rect[2] * 0.33;
+            out.rects.push(RectInstance::rounded(
+                [
+                    rect[0] + (rect[2] - d) / 2.0,
+                    rect[1] + (rect[3] - d) / 2.0,
+                    d,
+                    d,
+                ],
+                d / 2.0,
+                ink,
+                clip,
+            ));
+        }
+    }
+}
+
+pub fn profiles_screen(
+    model: &ProfilesScreenModel,
+    area: [f32; 4],
+    colors: &ChromeColors,
+    hover: Option<HitRegion>,
+    s: f32,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+    out: &mut ChromeLayout,
+) {
+    // Opaque ground over the whole grid area — a screen, not a scrim — and
+    // one swallow region so nothing falls through to what is beneath (the
+    // grid, or an open Settings tab's content).
+    out.rects.push(RectInstance::filled(area, colors.bg_opaque, area));
+    out.hit.push(area, HitRegion::ScreenPanel);
+
+    rail(model, area, colors, s, measure, out);
+
+    let rail_w = (RAIL_W * s).min(area[2] * 0.4);
+    let content = [area[0] + rail_w, area[1], (area[2] - rail_w).max(0.0), area[3]];
+    let cx = content[0] + ss::CONTENT_X * s;
+    let cw = (content[2] - 2.0 * ss::CONTENT_X * s).max(0.0);
+
+    let head_bottom = header(model, content, cx, cw, colors, hover, s, measure, out);
+    let preview_bottom =
+        preview(&model.preview, cx, cw, head_bottom, content, colors, s, measure, out);
+
+    out.rects.push(RectInstance::filled(
+        [content[0], preview_bottom, content[2], HAIRLINE * s],
+        colors.hairline_soft,
+        content,
+    ));
+    let rows_top = preview_bottom + HAIRLINE * s;
+
+    // Footer fixed at the bottom; the field rows scroll between.
+    let footer_y = area[1] + area[3] - ss::FOOTER_H * s;
+    footer(model, content, footer_y, colors, s, measure, out);
+
+    let rows_clip = [content[0], rows_top, content[2], (footer_y - rows_top).max(0.0)];
+    // The rows pane answers the wheel as settings content does — same
+    // region, same meaning: scrollable generated-form ground.
+    out.hit.push(rows_clip, HitRegion::SettingsPanel);
+
+    // §11's responsive wrap, inherited whole: under ~400 logical px the
+    // control drops to its own line instead of crushing the label column.
+    let narrow = cw / s < ss::WRAP_AT;
+    let desc_w = if narrow {
+        cw
+    } else {
+        (cw - ss::CONTROL_W * s - 20.0 * s).max(60.0 * s)
+    }
+    .min(420.0 * s);
+
+    // Extents first: ensure-visible needs the selected row's offset before
+    // anything draws (the settings screen's exact discipline).
+    let mut tops = Vec::with_capacity(model.rows.len());
+    let mut descs = Vec::with_capacity(model.rows.len());
+    let mut content_h = 0.0f32;
+    for row in &model.rows {
+        let (h, lines) = ss::row_extent(row, narrow, desc_w, s, measure);
+        tops.push(content_h);
+        descs.push(lines);
+        content_h += h;
+    }
+    content_h += 12.0 * s;
+    let max_scroll = (content_h - rows_clip[3]).max(0.0);
+    let mut scroll = model.scroll.clamp(0.0, max_scroll);
+    if model.ensure_visible {
+        if let (Some(top), Some(row)) = (tops.get(model.selected), model.rows.get(model.selected))
+        {
+            let bottom = top + ss::row_extent(row, narrow, desc_w, s, measure).0;
+            if *top < scroll {
+                scroll = *top;
+            } else if bottom > scroll + rows_clip[3] {
+                scroll = bottom - rows_clip[3];
+            }
+            scroll = scroll.clamp(0.0, max_scroll);
+        }
+    }
+    out.profiles_scroll = scroll;
+
+    if model.rows.is_empty() {
+        if let Some(empty) = &model.empty {
+            out.texts.push(TextRun {
+                text: empty.clone(),
+                pos: [cx, rows_top + 40.0 * s],
+                max_width: cw,
+                color: colors.text_faint,
+                clip: rows_clip,
+                px: 12.0 * s,
+                bold: false,
+                tracking: 0.0,
+            });
+        }
+    }
+
+    let mut menu_anchor: Option<[f32; 4]> = None;
+
+    for (i, row) in model.rows.iter().enumerate() {
+        let y = rows_top + tops[i] - scroll;
+        let h = model.rows.get(i + 1).map_or(content_h - 12.0 * s, |_| tops[i + 1]) - tops[i];
+        if y + h < rows_clip[1] || y > rows_clip[1] + rows_clip[3] {
+            continue;
+        }
+        let band = [content[0], y, content[2], h];
+        let Some(visible) = ss::intersect(band, rows_clip) else { continue };
+
+        match row {
+            SettingsRowModel::Group { title } => {
+                // The §12 section rule: uppercase label, hairline running to
+                // the column's right edge.
+                let px = SECTION_PX * s;
+                let base = ss::baseline_in(y, h, px);
+                let label = title.to_uppercase();
+                let tw = measure(&label, px, true, 0.09 * px);
+                out.texts.push(TextRun {
+                    text: label,
+                    pos: [cx, base],
+                    max_width: cw,
+                    color: colors.text_inactive,
+                    clip: rows_clip,
+                    px,
+                    bold: true,
+                    tracking: 0.09 * px,
+                });
+                out.rects.push(RectInstance::filled(
+                    [cx + tw + 12.0 * s, base - 3.0 * s, (cw - tw - 12.0 * s).max(0.0), HAIRLINE * s],
+                    colors.hairline_soft,
+                    rows_clip,
+                ));
+            }
+            SettingsRowModel::Notice { .. } => {
+                let band_rect = [cx, y + 6.0 * s, cw, h - 12.0 * s];
+                out.rects.push(RectInstance {
+                    radii: [9.0 * s; 4],
+                    border: colors.pill_warn_text,
+                    border_width: HAIRLINE * s,
+                    ..RectInstance::filled(band_rect, colors.pill_warn_bg, rows_clip)
+                });
+                let mut ty = y + 6.0 * s;
+                for line in &descs[i] {
+                    ty += 17.0 * s;
+                    out.texts.push(TextRun {
+                        text: line.clone(),
+                        pos: [cx + 14.0 * s, ty],
+                        max_width: cw - 28.0 * s,
+                        color: colors.pill_warn_text,
+                        clip: rows_clip,
+                        px: ss::DESC_PX * s,
+                        bold: false,
+                        tracking: 0.0,
+                    });
+                }
+            }
+            SettingsRowModel::Unknown { .. } => {
+                // The profiles builder never produces these; drawing nothing
+                // is honest if one ever arrives.
+            }
+            SettingsRowModel::Setting { label, key, value, modified, .. } => {
+                if i == model.selected {
+                    out.rects.push(RectInstance::rounded(
+                        [content[0] + 8.0 * s, y + 4.0 * s, content[2] - 16.0 * s, h - 8.0 * s],
+                        8.0 * s,
+                        colors.accent_soft,
+                        rows_clip,
+                    ));
+                }
+                out.hit.push(visible, HitRegion::SettingsRow(i));
+                if i + 1 < model.rows.len()
+                    && !matches!(model.rows.get(i + 1), Some(SettingsRowModel::Group { .. }))
+                {
+                    out.rects.push(RectInstance::filled(
+                        [cx, y + h - HAIRLINE * s, cw, HAIRLINE * s],
+                        colors.hairline_soft,
+                        rows_clip,
+                    ));
+                }
+
+                let top = y + ss::ROW_VPAD * s;
+                // The modified dot IS the reset (§12: back through Defaults):
+                // only an override draws one, and only a drawn one is a
+                // click target — remove_profile_value, never the root file.
+                let dot = [cx, top + 6.0 * s, 5.0 * s, 5.0 * s];
+                if *modified {
+                    out.rects.push(RectInstance::rounded(dot, 2.5 * s, colors.accent, rows_clip));
+                    let grab = [dot[0] - 5.0 * s, dot[1] - 5.0 * s, 16.0 * s, 16.0 * s];
+                    if let Some(hit) = ss::intersect(grab, rows_clip) {
+                        out.hit.push(hit, HitRegion::SettingsReset(i));
+                    }
+                }
+                let text_x = cx + 14.0 * s;
+                let mut ty = top + 13.0 * s;
+                out.texts.push(TextRun {
+                    text: label.clone(),
+                    pos: [text_x, ty],
+                    max_width: desc_w,
+                    color: colors.text_active,
+                    clip: rows_clip,
+                    px: ss::LABEL_PX * s,
+                    bold: false,
+                    tracking: 0.0,
+                });
+                ty += 5.0 * s;
+                for line in &descs[i] {
+                    ty += 17.0 * s;
+                    out.texts.push(TextRun {
+                        text: line.clone(),
+                        pos: [text_x, ty],
+                        max_width: desc_w,
+                        color: colors.text_inactive,
+                        clip: rows_clip,
+                        px: ss::DESC_PX * s,
+                        bold: false,
+                        tracking: 0.0,
+                    });
+                }
+                ty += 16.0 * s;
+                let kw = measure(key, ss::KEY_PX * s, false, 0.0);
+                out.texts.push(TextRun {
+                    text: key.clone(),
+                    pos: [text_x, ty],
+                    max_width: desc_w,
+                    color: colors.text_faint,
+                    clip: rows_clip,
+                    px: ss::KEY_PX * s,
+                    bold: false,
+                    tracking: 0.0,
+                });
+                // The §12 inheritance chip, riding the key line: accent on
+                // accentSoft for an override, faint on the header fill for a
+                // value that fell through Defaults.
+                if let Some(chip) = model.chips.get(i).copied().flatten() {
+                    let (text, fg, bg, border) = match chip {
+                        InheritChip::Overrides => (
+                            "overrides Defaults",
+                            colors.accent,
+                            colors.accent_soft,
+                            LinearRgba::TRANSPARENT,
+                        ),
+                        InheritChip::Inherited => (
+                            "inherited from Defaults",
+                            colors.text_faint,
+                            colors.block_header_bg,
+                            colors.hairline_soft,
+                        ),
+                    };
+                    let tw = measure(text, ss::CHIP_PX * s, false, 0.0);
+                    let pad = 6.0 * s;
+                    let chip_x = text_x + kw + 10.0 * s;
+                    out.rects.push(RectInstance {
+                        radii: [5.0 * s; 4],
+                        border,
+                        border_width: HAIRLINE * s,
+                        ..RectInstance::filled(
+                            [chip_x, ty - 10.0 * s, tw + 2.0 * pad, 15.0 * s],
+                            bg,
+                            rows_clip,
+                        )
+                    });
+                    out.texts.push(TextRun {
+                        text: text.to_string(),
+                        pos: [chip_x + pad, ty + 1.0 * s],
+                        max_width: tw + 2.0,
+                        color: fg,
+                        clip: rows_clip,
+                        px: ss::CHIP_PX * s,
+                        bold: false,
+                        tracking: 0.0,
+                    });
+                }
+
+                let control_h = ss::control_height(value) * s;
+                let control_right = cx + cw;
+                let control_top =
+                    if narrow { y + h - ss::ROW_VPAD * s - control_h } else { top };
+                let anchor = ss::draw_control(
+                    out,
+                    value,
+                    i,
+                    model.menu.as_ref().map(|m| m.row),
+                    colors,
+                    s,
+                    rows_clip,
+                    control_right,
+                    control_top,
+                    measure,
+                );
+                if let Some(a) = anchor {
+                    menu_anchor = Some(a);
+                }
+            }
+        }
+    }
+
+    if let (Some(menu), Some(anchor)) = (&model.menu, menu_anchor) {
+        ss::dropdown_menu(menu, anchor, area, colors, s, measure, out);
+    }
+}
+
+/// The profile rail (§12): header, Defaults pinned first, a row per profile,
+/// dashed "＋ New profile" footer. NO discovery line — #145 tracks it, and a
+/// dead row reads as broken.
+fn rail(
+    model: &ProfilesScreenModel,
+    area: [f32; 4],
+    colors: &ChromeColors,
+    s: f32,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+    out: &mut ChromeLayout,
+) {
+    let w = (RAIL_W * s).min(area[2] * 0.4);
+    out.rects.push(RectInstance::filled([area[0], area[1], w, area[3]], colors.block_header_bg, area));
+    out.rects.push(RectInstance::filled(
+        [area[0] + w - HAIRLINE * s, area[1], HAIRLINE * s, area[3]],
+        colors.hairline_soft,
+        area,
+    ));
+
+    let x = area[0] + RAIL_PAD * s;
+    let inner_w = w - 2.0 * RAIL_PAD * s;
+    let mut y = area[1] + 16.0 * s;
+
+    let head_px = SECTION_PX * s;
+    y += head_px;
+    out.texts.push(TextRun {
+        text: "LAUNCH TARGETS".into(),
+        pos: [x, y],
+        max_width: inner_w,
+        color: colors.text_inactive,
+        clip: area,
+        px: head_px,
+        bold: true,
+        tracking: 0.09 * head_px,
+    });
+    y += 15.0 * s;
+    out.texts.push(TextRun {
+        text: "what to run, which machine runs it, how it looks".into(),
+        pos: [x, y],
+        max_width: inner_w,
+        color: colors.text_faint,
+        clip: area,
+        px: 11.0 * s,
+        bold: false,
+        tracking: 0.0,
+    });
+    y += 14.0 * s;
+
+    // The dashed footer first, so the rows know where to stop.
+    let add = [x, area[1] + area[3] - (30.0 + RAIL_PAD) * s, inner_w, 30.0 * s];
+    ss::dashed_border(&mut out.rects, add, s, colors.line, area);
+    out.hit.push(add, HitRegion::ProfilesNew);
+    let add_label = "+ New profile";
+    let aw = measure(add_label, 11.5 * s, false, 0.0);
+    out.texts.push(TextRun {
+        text: add_label.into(),
+        pos: [add[0] + (add[2] - aw) / 2.0, ss::baseline_in(add[1], add[3], 11.5 * s)],
+        max_width: add[2],
+        color: colors.text_faint,
+        clip: area,
+        px: 11.5 * s,
+        bold: false,
+        tracking: 0.0,
+    });
+
+    let rows_clip = [area[0], y, w, (add[1] - 8.0 * s - y).max(0.0)];
+    for (i, row) in model.rail.iter().enumerate() {
+        let rect = [x, y, inner_w, RAIL_ROW_H * s];
+        if i == model.selected_rail {
+            out.rects.push(RectInstance::rounded(rect, 8.0 * s, colors.accent_soft, rows_clip));
+        }
+        if let Some(hit) = ss::intersect(rect, rows_clip) {
+            out.hit.push(hit, HitRegion::ProfilesRailRow(i));
+        }
+
+        let ink = accent_color(colors, row.accent);
+        let tile = [
+            rect[0] + 6.0 * s,
+            rect[1] + (rect[3] - RAIL_TILE * s) / 2.0,
+            RAIL_TILE * s,
+            RAIL_TILE * s,
+        ];
+        glyph_tile(out, tile, 6.0 * s, row.icon.as_deref(), ink, 12.0 * s, rows_clip, measure);
+
+        let tx = tile[0] + tile[2] + 9.0 * s;
+        let mut right = rect[0] + rect[2] - 10.0 * s;
+        if let Some(d) = row.digit {
+            let hint = d.to_string();
+            let hw = measure(&hint, 10.0 * s, false, 0.0);
+            out.texts.push(TextRun {
+                text: hint,
+                pos: [right - hw, ss::baseline_in(rect[1], rect[3], 10.0 * s)],
+                max_width: hw + 2.0,
+                color: colors.text_faint,
+                clip: rows_clip,
+                px: 10.0 * s,
+                bold: false,
+                tracking: 0.0,
+            });
+            right -= hw + 8.0 * s;
+        }
+        out.texts.push(TextRun {
+            text: row.name.clone(),
+            pos: [tx, rect[1] + 18.0 * s],
+            max_width: (right - tx).max(0.0),
+            color: if i == model.selected_rail { colors.text_active } else { colors.text_inactive },
+            clip: rows_clip,
+            px: 12.5 * s,
+            bold: false,
+            tracking: 0.0,
+        });
+        out.texts.push(TextRun {
+            text: row.sub.clone(),
+            pos: [tx, rect[1] + 33.0 * s],
+            max_width: (right - tx).max(0.0),
+            color: colors.text_faint,
+            clip: rows_clip,
+            px: 10.0 * s,
+            bold: false,
+            tracking: 0.0,
+        });
+
+        y += RAIL_ROW_H * s + 2.0 * s;
+        if i == 0 {
+            // Defaults reads as the parent, not a sibling (§12).
+            y += DEFAULTS_GAP * s;
+        }
+    }
+}
+
+/// The editor header (§12): 34px glyph tile, name, host chip, command line,
+/// Duplicate / Delete. Returns the y below its hairline.
+#[allow(clippy::too_many_arguments)]
+fn header(
+    model: &ProfilesScreenModel,
+    content: [f32; 4],
+    cx: f32,
+    cw: f32,
+    colors: &ChromeColors,
+    hover: Option<HitRegion>,
+    s: f32,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+    out: &mut ChromeLayout,
+) -> f32 {
+    let top = content[1] + 18.0 * s;
+    let ink = accent_color(colors, model.accent);
+    let tile = [cx, top, HEAD_TILE * s, HEAD_TILE * s];
+    // 12%-alpha fill, 33%-alpha border — the §12 numbers.
+    out.rects.push(RectInstance {
+        radii: [9.0 * s; 4],
+        border: washed(ink, 0.33),
+        border_width: HAIRLINE * s,
+        ..RectInstance::filled(tile, washed(ink, 0.12), content)
+    });
+    glyph_tile(
+        out,
+        [tile[0] + 1.0, tile[1] + 1.0, tile[2] - 2.0, tile[3] - 2.0],
+        8.0 * s,
+        model.icon.as_deref(),
+        ink,
+        16.0 * s,
+        content,
+        measure,
+    );
+
+    // Buttons from the right: Delete (when allowed), then Duplicate.
+    let mut right = cx + cw;
+    let button = |right: f32,
+                      label: &str,
+                      region: HitRegion,
+                      danger: bool,
+                      measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+                      out: &mut ChromeLayout|
+     -> f32 {
+        let px = 11.0 * s;
+        let tw = measure(label, px, false, 0.0);
+        let rect = [right - tw - 20.0 * s, top + (HEAD_TILE * s - BTN_H * s) / 2.0, tw + 20.0 * s, BTN_H * s];
+        let hovered = hover == Some(region);
+        out.rects.push(RectInstance {
+            radii: [7.0 * s; 4],
+            border: if hovered && danger {
+                colors.danger
+            } else if hovered {
+                colors.accent
+            } else {
+                colors.line
+            },
+            border_width: HAIRLINE * s,
+            ..RectInstance::filled(rect, colors.panel_bg, content)
+        });
+        out.hit.push(rect, region);
+        out.texts.push(TextRun {
+            text: label.to_string(),
+            pos: [rect[0] + 10.0 * s, ss::baseline_in(rect[1], rect[3], px)],
+            max_width: tw + 2.0,
+            // Delete hovers danger (§12); resting it is an ordinary button.
+            color: if hovered && danger { colors.danger } else { colors.text_inactive },
+            clip: content,
+            px,
+            bold: false,
+            tracking: 0.0,
+        });
+        rect[0]
+    };
+    if model.can_delete {
+        right = button(right, "Delete", HitRegion::ProfilesDelete, true, measure, out) - 8.0 * s;
+    }
+    right = button(right, "Duplicate", HitRegion::ProfilesDuplicate, false, measure, out) - 14.0 * s;
+
+    let name_px = 17.0 * s;
+    let nx = tile[0] + tile[2] + 12.0 * s;
+    let name_w = measure(&model.name, name_px, true, -0.01 * name_px).min((right - nx).max(0.0));
+    out.texts.push(TextRun {
+        text: model.name.clone(),
+        pos: [nx, top + 15.0 * s],
+        max_width: name_w,
+        color: colors.text_active,
+        clip: content,
+        px: name_px,
+        bold: true,
+        tracking: -0.01 * name_px,
+    });
+    if let Some(host) = &model.host_chip {
+        let px = 10.0 * s;
+        let tw = measure(host, px, false, 0.0);
+        let chip = [nx + name_w + 10.0 * s, top + 2.0 * s, tw + 14.0 * s, 16.0 * s];
+        if chip[0] + chip[2] < right {
+            out.rects.push(RectInstance {
+                radii: [5.0 * s; 4],
+                border: colors.line,
+                border_width: HAIRLINE * s,
+                ..RectInstance::filled(chip, colors.panel_bg, content)
+            });
+            out.texts.push(TextRun {
+                text: host.clone(),
+                pos: [chip[0] + 7.0 * s, ss::baseline_in(chip[1], chip[3], px)],
+                max_width: tw + 2.0,
+                color: colors.text_inactive,
+                clip: content,
+                px,
+                bold: false,
+                tracking: 0.0,
+            });
+        }
+    }
+    out.texts.push(TextRun {
+        text: model.command.clone(),
+        pos: [nx, top + 31.0 * s],
+        max_width: (right - nx).max(0.0),
+        color: colors.text_faint,
+        clip: content,
+        px: 11.0 * s,
+        bold: false,
+        tracking: 0.0,
+    });
+
+    top + HEAD_TILE * s + 14.0 * s
+}
+
+/// The §12 live preview: a mini tab-chip in the WINDOW's chrome colours
+/// carrying only the profile's 2px rule and glyph, over a body block in the
+/// profile's scheme, with the caption saying exactly that. Returns the y
+/// where the rows begin.
+#[allow(clippy::too_many_arguments)]
+fn preview(
+    p: &ProfilePreviewModel,
+    cx: f32,
+    cw: f32,
+    top: f32,
+    content: [f32; 4],
+    colors: &ChromeColors,
+    s: f32,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+    out: &mut ChromeLayout,
+) -> f32 {
+    let ink = accent_color(colors, p.accent);
+    let bw = cw.min(520.0 * s);
+
+    // The chip: the window's panel fill and line border — deliberately NOT
+    // the scheme's colours; that restraint is what the caption points at.
+    let title_px = 11.5 * s;
+    let chip_w = (measure(&p.title, title_px, false, 0.0) + 52.0 * s).min(bw * 0.6);
+    let chip = [cx, top, chip_w, 26.0 * s];
+    out.rects.push(RectInstance {
+        radii: [7.0 * s, 7.0 * s, 0.0, 0.0],
+        border: colors.line,
+        border_width: HAIRLINE * s,
+        ..RectInstance::filled(chip, colors.panel_bg, content)
+    });
+    // The one per-tab concession: the 2px rule in the profile's accent.
+    out.rects.push(RectInstance::filled(
+        [chip[0] + HAIRLINE * s, chip[1] + HAIRLINE * s, chip[2] - 2.0 * HAIRLINE * s, 2.0 * s],
+        ink,
+        content,
+    ));
+    let tile = [chip[0] + 6.0 * s, chip[1] + 5.0 * s, 16.0 * s, 16.0 * s];
+    glyph_tile(out, tile, 4.0 * s, p.icon.as_deref(), ink, 10.0 * s, content, measure);
+    out.texts.push(TextRun {
+        text: p.title.clone(),
+        pos: [tile[0] + tile[2] + 7.0 * s, ss::baseline_in(chip[1], chip[3], title_px)],
+        max_width: chip[2] - 34.0 * s,
+        color: colors.text_active,
+        clip: content,
+        px: title_px,
+        bold: false,
+        tracking: 0.0,
+    });
+
+    // The body block: the profile's scheme, and only here.
+    let mono = 11.5 * s;
+    let lh = 17.0 * s;
+    let bh = p.lines.len() as f32 * lh + 18.0 * s;
+    let body = [cx, top + 26.0 * s, bw, bh];
+    out.rects.push(RectInstance {
+        radii: [0.0, 7.0 * s, 7.0 * s, 7.0 * s],
+        border: colors.line,
+        border_width: HAIRLINE * s,
+        ..RectInstance::filled(body, srgb(p.scheme_bg), content)
+    });
+    let mut ly = body[1] + 6.0 * s;
+    for (i, line) in p.lines.iter().enumerate() {
+        ly += lh;
+        // The prompt line leads with the scheme's accent — the third colour
+        // §12 asks the fragment to prove.
+        let (head, rest) = match (i, line.split_once(' ')) {
+            (0, Some((h, r))) => (Some(h.to_string()), format!(" {r}")),
+            _ => (None, line.clone()),
+        };
+        let mut lx = body[0] + 12.0 * s;
+        if let Some(head) = head {
+            let hw = measure(&head, mono, false, 0.0);
+            out.texts.push(TextRun {
+                text: head,
+                pos: [lx, ly],
+                max_width: hw + 2.0,
+                color: srgb(p.scheme_accent),
+                clip: content,
+                px: mono,
+                bold: false,
+                tracking: 0.0,
+            });
+            lx += hw;
+        }
+        out.texts.push(TextRun {
+            text: rest,
+            pos: [lx, ly],
+            max_width: (body[0] + body[2] - lx - 12.0 * s).max(0.0),
+            color: srgb(p.scheme_fg),
+            clip: content,
+            px: mono,
+            bold: false,
+            tracking: 0.0,
+        });
+    }
+
+    // The caption, verbatim from the model (§12's exact sentence).
+    let mut cy = body[1] + body[3] + 6.0 * s;
+    for line in ss::wrap_text(&p.caption, 10.5 * s, cw, measure) {
+        cy += 14.0 * s;
+        out.texts.push(TextRun {
+            text: line,
+            pos: [cx, cy],
+            max_width: cw,
+            color: colors.text_faint,
+            clip: content,
+            px: 10.5 * s,
+            bold: false,
+            tracking: 0.0,
+        });
+    }
+    cy + 12.0 * s
+}
+
+/// The footer bar (§12): a dot in the profile's colour, the override-count
+/// sentence, the TOML table name, and `Edit as TOML`.
+fn footer(
+    model: &ProfilesScreenModel,
+    content: [f32; 4],
+    footer_y: f32,
+    colors: &ChromeColors,
+    s: f32,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+    out: &mut ChromeLayout,
+) {
+    let bar = [content[0], footer_y, content[2], ss::FOOTER_H * s];
+    out.rects.push(RectInstance::filled(bar, colors.block_header_bg, content));
+    out.rects.push(RectInstance::filled(
+        [bar[0], bar[1], bar[2], HAIRLINE * s],
+        colors.hairline_soft,
+        content,
+    ));
+
+    // Right side first, so the sentence budgets against it.
+    let mut right = bar[0] + bar[2] - ss::CONTENT_X * s;
+    let edit = "Edit as TOML";
+    let ew = measure(edit, ss::DESC_PX * s, false, 0.0);
+    right -= ew;
+    out.hit.push([right - 6.0 * s, bar[1], ew + 12.0 * s, bar[3]], HitRegion::SettingsEditToml);
+    out.texts.push(TextRun {
+        text: edit.into(),
+        pos: [right, ss::baseline_in(bar[1], bar[3], ss::DESC_PX * s)],
+        max_width: ew + 2.0,
+        color: colors.text_inactive,
+        clip: content,
+        px: ss::DESC_PX * s,
+        bold: false,
+        tracking: 0.0,
+    });
+    right -= 14.0 * s;
+    let tw = measure(&model.table_name, ss::KEY_PX * s, false, 0.0).min(bar[2] * 0.35);
+    right -= tw;
+    out.texts.push(TextRun {
+        text: model.table_name.clone(),
+        pos: [right, ss::baseline_in(bar[1], bar[3], ss::KEY_PX * s)],
+        max_width: tw + 2.0,
+        color: colors.text_faint,
+        clip: content,
+        px: ss::KEY_PX * s,
+        bold: false,
+        tracking: 0.0,
+    });
+
+    let x = bar[0] + ss::CONTENT_X * s;
+    out.rects.push(RectInstance::rounded(
+        [x, bar[1] + (bar[3] - 5.0 * s) / 2.0, 5.0 * s, 5.0 * s],
+        2.5 * s,
+        accent_color(colors, model.accent),
+        content,
+    ));
+    out.texts.push(TextRun {
+        text: model.footer_sentence.clone(),
+        pos: [x + 13.0 * s, ss::baseline_in(bar[1], bar[3], 11.0 * s)],
+        max_width: (right - x - 27.0 * s).max(0.0),
+        color: colors.text_inactive,
+        clip: content,
+        px: 11.0 * s,
+        bold: false,
+        tracking: 0.0,
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::model::{
+        AccentChoice, ProfileRailRow, SettingsValueCell,
+    };
+    use super::*;
+
+    fn colors() -> ChromeColors {
+        let theme = zest_theme::builtin::obsidian();
+        ChromeColors::new(&theme.ui, &theme.effects, 1.0)
+    }
+
+    fn measure(text: &str, px: f32, _b: bool, _t: f32) -> f32 {
+        text.chars().count() as f32 * px * 0.6
+    }
+
+    fn rail_row(name: &str, digit: Option<u8>) -> ProfileRailRow {
+        ProfileRailRow {
+            name: name.into(),
+            sub: "pwsh \u{b7} studio".into(),
+            icon: None,
+            accent: AccentChoice::Host(0),
+            digit,
+        }
+    }
+
+    fn setting_row(key: &str, value: SettingsValueCell, modified: bool) -> SettingsRowModel {
+        SettingsRowModel::Setting {
+            label: key.to_string(),
+            key: key.to_string(),
+            description: "Words about the field.".into(),
+            value,
+            provenance: None,
+            restart: false,
+            inert: false,
+            modified,
+        }
+    }
+
+    fn model(can_delete: bool) -> ProfilesScreenModel {
+        ProfilesScreenModel {
+            rail: vec![rail_row("Defaults", None), rail_row("ubuntu", Some(1))],
+            selected_rail: 1,
+            name: "ubuntu".into(),
+            command: "wsl.exe -d Ubuntu".into(),
+            host_chip: Some("forge".into()),
+            icon: None,
+            accent: AccentChoice::Profile(2),
+            can_delete,
+            preview: ProfilePreviewModel {
+                title: "ubuntu".into(),
+                icon: None,
+                accent: AccentChoice::Profile(2),
+                scheme_bg: [10, 15, 26],
+                scheme_fg: [215, 220, 234],
+                scheme_accent: [110, 168, 255],
+                caption: "Chrome is the window's theme (obsidian). Only the grid follows \
+                          this profile's scheme."
+                    .into(),
+                lines: vec!["\u{276f} uname -sr".into(), "Linux 6.8.0-31-generic".into()],
+            },
+            rows: vec![
+                SettingsRowModel::Group { title: "Appearance".into() },
+                setting_row(
+                    "color_scheme",
+                    SettingsValueCell::SchemeSwatches {
+                        options: vec![
+                            super::super::model::SchemeSwatch {
+                                id: "obsidian".into(),
+                                ansi: [[0; 3]; 8],
+                            },
+                            super::super::model::SchemeSwatch {
+                                id: "nord".into(),
+                                ansi: [[10; 3]; 8],
+                            },
+                        ],
+                        selected: Some(1),
+                    },
+                    true,
+                ),
+                setting_row(
+                    "tab_color",
+                    SettingsValueCell::AccentSwatches { selected: Some(2), inert: false },
+                    false,
+                ),
+                setting_row(
+                    "icon",
+                    SettingsValueCell::Glyphs {
+                        options: vec!["\u{2605}".into(), "\u{25cf}".into()],
+                        selected: None,
+                    },
+                    false,
+                ),
+                setting_row(
+                    "host",
+                    SettingsValueCell::HostPill { name: "forge".into(), online: true },
+                    false,
+                ),
+            ],
+            chips: vec![
+                None,
+                Some(InheritChip::Overrides),
+                Some(InheritChip::Inherited),
+                None,
+                None,
+            ],
+            selected: 1,
+            filter: String::new(),
+            scroll: 0.0,
+            ensure_visible: false,
+            empty: None,
+            footer_sentence: "1 setting overrides Defaults".into(),
+            table_name: "[profiles.ubuntu]".into(),
+            menu: None,
+        }
+    }
+
+    fn lay(model: &ProfilesScreenModel, w: f32, h: f32) -> ChromeLayout {
+        let mut out = ChromeLayout::default();
+        profiles_screen(model, [0.0, 46.0, w, h], &colors(), None, 1.0, &mut measure, &mut out);
+        out
+    }
+
+    #[test]
+    fn the_rail_the_header_the_choices_and_the_footer_all_answer() {
+        let l = lay(&model(true), 1100.0, 720.0);
+        let mut rail_rows = std::collections::HashSet::new();
+        let mut choices = std::collections::HashSet::new();
+        let mut seen_new = false;
+        let mut seen_dup = false;
+        let mut seen_del = false;
+        let mut seen_row = false;
+        let mut seen_reset = false;
+        let mut seen_toml = false;
+        let mut seen_host_pill = false;
+        for x in (0..1100).step_by(2) {
+            for y in (46..766).step_by(2) {
+                match l.hit.hit(x as f32, y as f32) {
+                    Some(HitRegion::ProfilesRailRow(i)) => {
+                        rail_rows.insert(i);
+                    }
+                    Some(HitRegion::ProfilesChoice(row, opt)) => {
+                        choices.insert((row, opt));
+                    }
+                    Some(HitRegion::ProfilesNew) => seen_new = true,
+                    Some(HitRegion::ProfilesDuplicate) => seen_dup = true,
+                    Some(HitRegion::ProfilesDelete) => seen_del = true,
+                    Some(HitRegion::SettingsRow(_)) => seen_row = true,
+                    Some(HitRegion::SettingsReset(1)) => seen_reset = true,
+                    Some(HitRegion::SettingsEditToml) => seen_toml = true,
+                    Some(HitRegion::SettingsSelect(4)) => seen_host_pill = true,
+                    Some(HitRegion::SettingsReset(i)) => {
+                        panic!("row {i} is not an override; its dot must not take clicks")
+                    }
+                    Some(HitRegion::ScreenPanel | HitRegion::SettingsPanel) | None => {}
+                    other => panic!("({x},{y}) escaped the profiles screen: {other:?}"),
+                }
+            }
+        }
+        assert_eq!(rail_rows.len(), 2, "every rail row answers as itself");
+        assert!(seen_new, "the dashed + New profile is clickable");
+        assert!(seen_dup, "Duplicate answers");
+        assert!(seen_del, "Delete answers when allowed");
+        assert!(seen_row, "field rows select on click");
+        assert!(seen_reset, "the override's dot is the reset");
+        assert!(seen_toml, "'Edit as TOML' answers");
+        assert!(seen_host_pill, "the host pill routes through the select dispatch");
+        // Scheme swatches (row 1: two options), accent swatches (row 2: six),
+        // icon tiles (row 3: two) all answer with their option index.
+        assert!(
+            choices.contains(&(1, 0)) && choices.contains(&(1, 1)),
+            "scheme chips answer: {choices:?}"
+        );
+        assert_eq!(
+            (0..6).filter(|o| choices.contains(&(2, *o))).count(),
+            6,
+            "all six accent swatches answer: {choices:?}"
+        );
+        assert!(choices.contains(&(3, 0)) && choices.contains(&(3, 1)), "icon tiles answer");
+    }
+
+    #[test]
+    fn defaults_draws_no_delete_button() {
+        // §12: Defaults has no Delete — the parent every profile falls
+        // through to must not be one misclick from gone.
+        let l = lay(&model(false), 1100.0, 720.0);
+        let mut seen_dup = false;
+        for x in (0..1100).step_by(2) {
+            for y in (46..766).step_by(2) {
+                match l.hit.hit(x as f32, y as f32) {
+                    Some(HitRegion::ProfilesDelete) => {
+                        panic!("({x},{y}): Delete must not exist on Defaults")
+                    }
+                    Some(HitRegion::ProfilesDuplicate) => seen_dup = true,
+                    _ => {}
+                }
+            }
+        }
+        assert!(seen_dup, "Duplicate stays — copying Defaults into a profile is legal");
+    }
+
+    #[test]
+    fn inert_accent_swatches_take_no_clicks() {
+        // §12: dimmed AND inert when the host decides — a swatch that acts
+        // while looking disabled would betray `color_from = "host"`.
+        let mut m = model(true);
+        m.rows[2] = setting_row(
+            "tab_color",
+            SettingsValueCell::AccentSwatches { selected: Some(2), inert: true },
+            false,
+        );
+        let l = lay(&m, 1100.0, 720.0);
+        for x in (0..1100).step_by(2) {
+            for y in (46..766).step_by(2) {
+                if let Some(HitRegion::ProfilesChoice(2, opt)) = l.hit.hit(x as f32, y as f32) {
+                    panic!("({x},{y}): inert swatch {opt} answered a click");
+                }
+            }
+        }
+    }
+}

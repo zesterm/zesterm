@@ -279,6 +279,48 @@ impl SettingsUiState {
     }
 }
 
+/// The Profiles tab's state — created when the tab opens, dropped when it
+/// closes (design §12; the same lifetime rule as `SettingsUiState`).
+struct ProfilesUiState {
+    /// The profile being edited, by table name (`defaults` for Defaults) —
+    /// a name, not an index, because a reload can grow or shrink the rail.
+    profile: String,
+    /// Index into the drawn rows the keyboard is on.
+    selected: usize,
+    filter: String,
+    scroll: f32,
+    /// Bring the selection into view on the next layout — keyboard only.
+    scroll_to_selected: bool,
+    /// Parallel to the drawn rows, same-pass built (the picker discipline).
+    actions: Vec<crate::settings_ui::RowAction>,
+    /// `profiles::fields()`, cached at open like the settings walk.
+    fields: Vec<zest_config::ui::UiField>,
+    /// A typed edit in progress; while `Some`, characters belong to it.
+    editing: Option<crate::settings_ui::EditBuffer>,
+    /// An open dropdown menu: (row index, keyboard selection) — backdrop's.
+    menu: Option<(usize, usize)>,
+    /// The last profile write that failed, shown as a banner.
+    error: Option<String>,
+}
+
+impl ProfilesUiState {
+    /// Composed (IME) text, routed exactly like the Settings tab's: menu
+    /// swallows, an open buffer takes it, otherwise the filter.
+    fn commit_text(&mut self, text: &str) {
+        if self.menu.is_some() {
+            return;
+        }
+        if let Some(edit) = self.editing.as_mut() {
+            edit.buffer.push_str(text);
+            edit.error = false;
+        } else {
+            self.filter.push_str(text);
+            self.selected = 0;
+            self.scroll_to_selected = true;
+        }
+    }
+}
+
 /// The + launcher menu's transient state while it is open (design §1), and
 /// the action list parallel to the drawn rows — built in the same
 /// `launcher::build_rows` pass, so index `n` means the same thing in both by
@@ -455,6 +497,8 @@ pub struct App {
     picker: Option<PickerState>,
     palette_ui: Option<PaletteState>,
     settings_ui: Option<SettingsUiState>,
+    /// The Profiles tab's editor state, while that tab exists (§12).
+    profiles_ui: Option<ProfilesUiState>,
     /// Open over the settings overlay while a long-list field is being chosen.
     value_picker: Option<ValuePickerState>,
     /// The + launcher menu's transient state, while open — one of the
@@ -667,6 +711,7 @@ impl App {
             palette_ui: None,
             value_picker: None,
             settings_ui: None,
+            profiles_ui: None,
             launcher: None,
             app_tabs: crate::tabs::AppTabs::default(),
             provenance,
@@ -1239,7 +1284,7 @@ impl App {
                     return;
                 }
                 if self.screen == AppScreen::Profiles {
-                    self.app_tabs.close_profiles();
+                    self.close_profiles_tab();
                     self.show_screen(AppScreen::Terminal);
                     return;
                 }
@@ -1592,7 +1637,9 @@ impl App {
                     .collect();
                 Some(ScreenModel::Themes { cards })
             }
-            AppScreen::Profiles => Some(ScreenModel::Profiles),
+            // Built in refresh_chrome beside the Settings model — it needs
+            // &mut access to the editor state, which &self here cannot give.
+            AppScreen::Profiles => None,
         }
     }
 
@@ -1713,7 +1760,37 @@ impl App {
     /// shows the one that does.
     fn open_profiles_tab(&mut self) {
         self.app_tabs.open_profiles();
+        if self.profiles_ui.is_none() {
+            self.profiles_ui = Some(ProfilesUiState {
+                profile: zest_config::profiles::RESERVED_PROFILE.to_string(),
+                selected: 0,
+                filter: String::new(),
+                scroll: 0.0,
+                scroll_to_selected: true,
+                actions: Vec::new(),
+                fields: zest_config::profiles::fields(),
+                editing: None,
+                menu: None,
+                error: None,
+            });
+        }
         self.show_screen(AppScreen::Profiles);
+    }
+
+    /// Close the Profiles tab — its state lives as long as the tab, exactly
+    /// like the Settings tab's (§11's rule, applied to §12).
+    fn close_profiles_tab(&mut self) {
+        self.app_tabs.close_profiles();
+        self.profiles_ui = None;
+        if self.screen == AppScreen::Profiles {
+            self.screen = AppScreen::Terminal;
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// The Profiles editor holds the keyboard and the grid area.
+    fn profiles_tab_active(&self) -> bool {
+        self.screen == AppScreen::Profiles && self.profiles_ui.is_some()
     }
 
     /// Toggle the + launcher menu (clicking the `+`, `--screen launcher`).
@@ -1869,6 +1946,17 @@ impl App {
                         p.selected = 0;
                         p.scroll_to_selected = true;
                     } else if let Some(ui) = self.settings_ui.as_mut() {
+                        ui.commit_text(&text);
+                    }
+                    self.mark_chrome_dirty();
+                } else if self.picker.is_none()
+                    && self.palette_ui.is_none()
+                    && self.profiles_tab_active()
+                {
+                    // The Profiles editor holds the keyboard the same way —
+                    // a composed word is a filter or a buffer, never bytes
+                    // for a shell nobody can see.
+                    if let Some(ui) = self.profiles_ui.as_mut() {
                         ui.commit_text(&text);
                     }
                     self.mark_chrome_dirty();
@@ -2162,18 +2250,7 @@ impl App {
         // can change under an open menu via the config watcher, and rows
         // and actions must come from one pass or a click runs the wrong row.
         let launcher_rows = self.launcher.is_some().then(|| {
-            // On a remote route, a command-less launch sends an empty command
-            // and the far host runs its own default shell — showing this
-            // machine's shell.command there would caption the row with a
-            // command that will not run.
-            let fallback = match self.route {
-                Some(HostRoute::Tcp(_)) => "the host's default shell".to_string(),
-                _ => self
-                    .config
-                    .shell
-                    .clone()
-                    .unwrap_or_else(|| CommandSpec::default_shell().command_line),
-            };
+            let fallback = self.shell_fallback();
             let active_profile = self
                 .tabs
                 .active()
@@ -2249,7 +2326,14 @@ impl App {
         // (its state persists while it is a background chip). Inputs gathered
         // before the &mut borrow of the tab state below; the clone is a
         // handful of provenance entries, on an event-driven rebuild.
-        let settings_inputs = self.settings_tab_active().then(|| {
+        // Not built while a full-pane screen covers it: the screen's opaque
+        // ground would shadow every region positionally anyway, but
+        // `settings_tracks` is keyed by row index, not position — the
+        // Profiles screen shares the widget vocabulary, and two panes'
+        // tracks under one key would send a slider drag to the wrong file.
+        let settings_inputs = (self.settings_tab_active()
+            && self.screen == AppScreen::Terminal)
+            .then(|| {
             (
                 serde_json::to_value(&self.settings).unwrap_or(serde_json::Value::Null),
                 self.provenance.clone(),
@@ -2406,10 +2490,157 @@ impl App {
             },
         );
 
+        // The Profiles editor's screen (§12), built only while its pane
+        // holds the grid area — the Settings tab's exact discipline: inputs
+        // gathered before the &mut borrow of the tab state.
+        let profiles_inputs = self.profiles_tab_active().then(|| {
+            let hosts: Vec<(String, bool, bool)> = self
+                .fleet
+                .as_ref()
+                .map(|f| {
+                    f.snapshot()
+                        .into_iter()
+                        .map(|h| {
+                            let online = h.local
+                                || h.presence == zest_mesh::discovery::Presence::Online;
+                            (h.label, online, h.local)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let local_host = hosts
+                .iter()
+                .find(|(_, _, local)| *local)
+                .map_or_else(|| "this machine".to_string(), |(label, ..)| label.clone());
+            (
+                serde_json::to_value(&self.settings).unwrap_or(serde_json::Value::Null),
+                self.settings.clone(),
+                self.shell_fallback(),
+                local_host,
+                hosts.into_iter().map(|(label, online, _)| (label, online)).collect::<Vec<_>>(),
+                self.config.theme.clone(),
+            )
+        });
+        let profiles_model = self.profiles_ui.as_mut().zip(profiles_inputs).map(
+            |(ui, (window_values, settings, fallback_command, local_host, hosts, window_theme))| {
+                use crate::profiles_ui as pui;
+                use crate::settings_ui as sui;
+                // A profile deleted or renamed under the editor falls back
+                // to Defaults rather than editing a ghost.
+                let names = pui::rail_names(&settings);
+                if !names.contains(&ui.profile) {
+                    ui.profile = zest_config::profiles::RESERVED_PROFILE.to_string();
+                    ui.selected = 0;
+                    ui.scroll = 0.0;
+                }
+                let selected_rail = names.iter().position(|n| *n == ui.profile).unwrap_or(0);
+                let is_defaults = selected_rail == 0;
+
+                let root = crate::launcher::profiles_root(&settings);
+                let resolved = zest_config::profiles::resolve_profile(&root, &ui.profile);
+                let schemes = pui::scheme_swatches();
+                let ctx = pui::ProfileRowContext {
+                    window_values: &window_values,
+                    window_theme: &window_theme,
+                    fallback_command: &fallback_command,
+                    local_host: &local_host,
+                    hosts: &hosts,
+                    schemes: &schemes,
+                    is_defaults,
+                };
+                let (rows, chips, actions) = pui::build_profile_rows(
+                    &ui.fields,
+                    &resolved,
+                    &ctx,
+                    &ui.filter,
+                    ui.editing.as_ref(),
+                    ui.error.as_deref(),
+                );
+                ui.actions = actions;
+                // A filter edit can strand the selection on a section rule
+                // or past the end; land it on the nearest real row.
+                ui.selected = sui::nearest_field(&ui.actions, ui.selected);
+
+                // The open dropdown, resolved same-pass against the row's
+                // variants (window.backdrop's menu; the pickers have none).
+                let overrides = pui::overrides_json(&resolved);
+                let menu = ui.menu.and_then(|(row, selected)| {
+                    let field_idx = match ui.actions.get(row) {
+                        Some(sui::RowAction::Field(i)) => *i,
+                        _ => return None,
+                    };
+                    let field = ui.fields.get(field_idx)?;
+                    if field.variants.is_empty() {
+                        return None;
+                    }
+                    let current = pui::effective_value(field, &resolved, &overrides, &ctx);
+                    let current = current
+                        .as_str()
+                        .and_then(|v| field.variants.iter().position(|o| o.value == v));
+                    Some(crate::chrome::model::SettingsMenuModel {
+                        row,
+                        options: field
+                            .variants
+                            .iter()
+                            .map(|v| crate::chrome::model::SettingsMenuOption {
+                                label: sui::humanize_value(&v.value),
+                                value: v.value.clone(),
+                                doc: v.description.lines().next().unwrap_or_default().to_string(),
+                            })
+                            .collect(),
+                        current,
+                        selected: selected.min(field.variants.len().saturating_sub(1)),
+                    })
+                });
+
+                let display_name =
+                    if is_defaults { "Defaults".to_string() } else { ui.profile.clone() };
+                // Static, per the §12 caption's spirit: the real per-host
+                // uname needs the control plane and belongs to the
+                // cross-host launch item, not to a preview.
+                let os_line =
+                    format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
+                let preview =
+                    pui::build_preview(&display_name, &resolved, &window_theme, &os_line);
+                let count = pui::override_count(&ui.fields, &resolved);
+                let empty = rows
+                    .is_empty()
+                    .then(|| format!("nothing matches \u{201c}{}\u{201d}", ui.filter));
+
+                Box::new(crate::chrome::model::ProfilesScreenModel {
+                    rail: pui::build_rail(&settings, &fallback_command, &local_host),
+                    selected_rail,
+                    name: display_name,
+                    command: resolved
+                        .meta
+                        .command
+                        .clone()
+                        .unwrap_or_else(|| fallback_command.clone()),
+                    host_chip: resolved.meta.host.clone(),
+                    icon: resolved.meta.icon.clone(),
+                    accent: pui::accent_of(&resolved.meta),
+                    can_delete: !is_defaults,
+                    preview,
+                    rows,
+                    chips,
+                    selected: ui.selected,
+                    filter: ui.filter.clone(),
+                    scroll: ui.scroll,
+                    ensure_visible: ui.scroll_to_selected,
+                    empty,
+                    footer_sentence: pui::footer_sentence(is_defaults, count),
+                    table_name: format!("[profiles.{}]", ui.profile),
+                    menu,
+                })
+            },
+        );
+
         // Built before the font borrow below: these read tabs, fleet and the
         // filesystem, never the fonts.
         let fleet_hosts = self.fleet.as_ref().map(|f| f.snapshot()).unwrap_or_default();
-        let screen_model = self.build_screen_model(&fleet_hosts);
+        let screen_model = profiles_model
+            .map(crate::chrome::model::ScreenModel::Profiles)
+            .or_else(|| self.build_screen_model(&fleet_hosts));
         let panes = self.build_panes_model(&fleet_hosts);
         let grid_area = early_geometry.map_or([0.0; 4], |(scale, size)| {
             self.insets_at(scale).grid_rect(size.width, size.height)
@@ -2711,10 +2942,21 @@ impl App {
             // One layout consumed the request; the wheel is free again.
             state.scroll_to_selected = false;
         }
-        if let Some(state) = self.settings_ui.as_mut() {
-            state.scroll = laid.settings_scroll;
-            // One layout consumed the request; the wheel is free again.
-            state.scroll_to_selected = false;
+        // Written back only when the pane actually laid out — a covered tab
+        // reports 0.0, and writing that would reset a scroll the user set.
+        if self.tabs.settings_active() && self.screen == AppScreen::Terminal {
+            if let Some(state) = self.settings_ui.as_mut() {
+                state.scroll = laid.settings_scroll;
+                // One layout consumed the request; the wheel is free again.
+                state.scroll_to_selected = false;
+            }
+        }
+        if self.screen == AppScreen::Profiles {
+            if let Some(state) = self.profiles_ui.as_mut() {
+                state.scroll = laid.profiles_scroll;
+                // One layout consumed the request; the wheel is free again.
+                state.scroll_to_selected = false;
+            }
         }
         self.chrome_layout = Some(laid);
     }
@@ -2752,13 +2994,21 @@ impl App {
             }
             self.mark_chrome_dirty();
         }
+        if self.profiles_ui.as_ref().is_some_and(|ui| ui.menu.is_some())
+            && !matches!(region, HitRegion::SettingsMenuRow(_))
+        {
+            if let Some(ui) = self.profiles_ui.as_mut() {
+                ui.menu = None;
+            }
+            self.mark_chrome_dirty();
+        }
         match (region, button) {
             (HitRegion::Tab(addr), MouseButton::Left) => {
                 // The Profiles chip is an app tab, not a session: clicking
-                // it shows its pane (the singleton is already open — the
-                // chip would not exist otherwise).
+                // it shows its pane. Through the open path (idempotent) so
+                // the editor state is guaranteed to exist behind the screen.
                 if addr == crate::tabs::profiles_tab_addr() {
-                    self.show_screen(AppScreen::Profiles);
+                    self.open_profiles_tab();
                     return;
                 }
                 // Even when it is already the active one: clicking a session
@@ -2774,11 +3024,7 @@ impl App {
                     // No chip × exists (app tabs carry none), but middle
                     // click closes every other tab and must not skip this
                     // one — closing it is closing a tab.
-                    self.app_tabs.close_profiles();
-                    if self.screen == AppScreen::Profiles {
-                        self.screen = AppScreen::Terminal;
-                    }
-                    self.mark_chrome_dirty();
+                    self.close_profiles_tab();
                     return;
                 }
                 self.close_tab(addr, false, el);
@@ -2886,8 +3132,16 @@ impl App {
                 self.palette_ui = None;
                 self.mark_chrome_dirty();
             }
+            // The Settings* widget regions are the shared §11 vocabulary:
+            // while the Profiles screen is up they were drawn by it (the
+            // Settings tab's model is not even built then), so they route
+            // to the profiles state; otherwise to the settings tab as ever.
             (HitRegion::SettingsRow(i), MouseButton::Left) => {
-                if let Some(ui) = self.settings_ui.as_mut() {
+                if self.profiles_tab_active() {
+                    if let Some(ui) = self.profiles_ui.as_mut() {
+                        ui.selected = i;
+                    }
+                } else if let Some(ui) = self.settings_ui.as_mut() {
                     ui.selected = i;
                 }
                 self.mark_chrome_dirty();
@@ -2895,13 +3149,24 @@ impl App {
             (HitRegion::SettingsToggle(i), MouseButton::Left) => {
                 // Select first, then flip through the same path the keyboard
                 // uses — one code path per change, however it arrives.
+                if self.profiles_tab_active() {
+                    if let Some(ui) = self.profiles_ui.as_mut() {
+                        ui.selected = i;
+                    }
+                    self.profiles_adjust(1);
+                    return;
+                }
                 if let Some(ui) = self.settings_ui.as_mut() {
                     ui.selected = i;
                 }
                 self.adjust_selected_setting(1);
             }
             (HitRegion::SettingsSlider(i), MouseButton::Left) => {
-                if let Some(ui) = self.settings_ui.as_mut() {
+                if self.profiles_tab_active() {
+                    if let Some(ui) = self.profiles_ui.as_mut() {
+                        ui.selected = i;
+                    }
+                } else if let Some(ui) = self.settings_ui.as_mut() {
                     ui.selected = i;
                 }
                 self.slider_drag = Some(i);
@@ -2911,9 +3176,15 @@ impl App {
                 self.select_settings_category(i);
             }
             (HitRegion::SettingsReset(i), MouseButton::Left) => {
-                // THE DOT RESETS (§11): delete the key from the file, then
-                // reload through the cascade — the file stays the single
-                // source of truth, exactly like every other edit.
+                // THE DOT RESETS (§11/§12): delete the key from the file,
+                // then reload through the cascade — the file stays the
+                // single source of truth, exactly like every other edit.
+                // The profiles dot deletes from `[profiles.<name>]`, never
+                // the root.
+                if self.profiles_tab_active() {
+                    self.profiles_reset_row(i);
+                    return;
+                }
                 self.reset_setting_row(i);
             }
             (HitRegion::SettingsEditToml, MouseButton::Left) => {
@@ -2923,6 +3194,13 @@ impl App {
             // "yes, this is where the characters go".
             (HitRegion::SettingsFilter, MouseButton::Left) => {}
             (HitRegion::SettingsSegment(row, opt), MouseButton::Left) => {
+                if self.profiles_tab_active() {
+                    if let Some(ui) = self.profiles_ui.as_mut() {
+                        ui.selected = row;
+                    }
+                    self.profiles_apply_variant(row, opt);
+                    return;
+                }
                 if let Some(ui) = self.settings_ui.as_mut() {
                     ui.selected = row;
                 }
@@ -2931,6 +3209,13 @@ impl App {
             (HitRegion::SettingsStep(row, up), MouseButton::Left) => {
                 // Select first, then step through the keyboard's path — one
                 // code path per change, however it arrives.
+                if self.profiles_tab_active() {
+                    if let Some(ui) = self.profiles_ui.as_mut() {
+                        ui.selected = row;
+                    }
+                    self.profiles_adjust(if up { 1 } else { -1 });
+                    return;
+                }
                 if let Some(ui) = self.settings_ui.as_mut() {
                     ui.selected = row;
                 }
@@ -2944,12 +3229,29 @@ impl App {
                 // so the same-pass menu resolution discarded the menu and
                 // the click opened nothing. Enter already knows the picker
                 // is that widget's dropdown.
+                if self.profiles_tab_active() {
+                    if let Some(ui) = self.profiles_ui.as_mut() {
+                        ui.selected = row;
+                    }
+                    self.profiles_activate_selected();
+                    return;
+                }
                 if let Some(ui) = self.settings_ui.as_mut() {
                     ui.selected = row;
                 }
                 self.activate_selected_setting();
             }
             (HitRegion::SettingsMenuRow(opt), MouseButton::Left) => {
+                if self.profiles_tab_active() {
+                    let row = self.profiles_ui.as_ref().and_then(|ui| ui.menu).map(|(r, _)| r);
+                    if let Some(ui) = self.profiles_ui.as_mut() {
+                        ui.menu = None;
+                    }
+                    if let Some(row) = row {
+                        self.profiles_apply_variant(row, opt);
+                    }
+                    return;
+                }
                 let row = self.settings_ui.as_ref().and_then(|ui| ui.menu).map(|(r, _)| r);
                 if let Some(ui) = self.settings_ui.as_mut() {
                     ui.menu = None;
@@ -2972,6 +3274,23 @@ impl App {
                     ui.list_drag = Some((row, item));
                 }
                 self.mark_chrome_dirty();
+            }
+            (HitRegion::ProfilesRailRow(i), MouseButton::Left) => {
+                // Selecting in the rail EDITS; only the launcher launches —
+                // two different verbs, two different places (§12).
+                self.profiles_select_rail(i);
+            }
+            (HitRegion::ProfilesNew, MouseButton::Left) => {
+                self.profiles_new();
+            }
+            (HitRegion::ProfilesDuplicate, MouseButton::Left) => {
+                self.profiles_duplicate();
+            }
+            (HitRegion::ProfilesDelete, MouseButton::Left) => {
+                self.profiles_delete();
+            }
+            (HitRegion::ProfilesChoice(row, opt), MouseButton::Left) => {
+                self.profiles_choice(row, opt);
             }
             // PalettePanel and SettingsPanel deliberately have no arm: the
             // panels exist in the hit map to swallow clicks, not to act.
@@ -3381,6 +3700,23 @@ impl App {
             return;
         };
         let frac = f64::from(((x - track[0]) / track[2]).clamp(0.0, 1.0));
+        // Whose track: while the Profiles screen is up, the tracks were
+        // drawn by it (the Settings model is not built then — the gate in
+        // refresh_chrome is what makes this dispatch unambiguous).
+        if self.profiles_tab_active() {
+            let Some(field_idx) = self.profiles_field_of_row(row) else { return };
+            let candidate = self
+                .profiles_ui
+                .as_ref()
+                .and_then(|ui| ui.fields.get(field_idx))
+                .and_then(|field| crate::settings_ui::slider_value(field, frac));
+            let Some(candidate) = candidate else { return };
+            if self.profiles_value_of(field_idx).as_ref() == Some(&candidate) {
+                return;
+            }
+            self.profiles_apply_edit(field_idx, candidate);
+            return;
+        }
         let Some(field_idx) = self.settings_ui.as_ref().and_then(|ui| {
             match ui.actions.get(row) {
                 Some(crate::settings_ui::RowAction::Field(i)) => Some(*i),
@@ -3662,6 +3998,357 @@ impl App {
         let moved = arr.remove(from);
         arr.insert(to, moved);
         self.apply_edit(idx, serde_json::Value::Array(arr));
+    }
+
+    // ----- The Profiles editor's input path (§12) --------------------------
+    //
+    // The Settings tab's shape, scoped to `[profiles.<name>]`: every edit is
+    // write_profile_value → reload_config → rows rebuilt from the resolved
+    // file — one state path; the editor never holds a value the file does
+    // not. The reload re-resolves open tabs' identities (#162), which is
+    // what makes a scheme edit restyle a running tab live.
+
+    /// The field index a profiles row stands for, when it is a real field.
+    fn profiles_field_of_row(&self, row: usize) -> Option<usize> {
+        match self.profiles_ui.as_ref()?.actions.get(row) {
+            Some(crate::settings_ui::RowAction::Field(i)) => Some(*i),
+            _ => None,
+        }
+    }
+
+    /// The selected profiles row's field index, when it is a real field.
+    fn profiles_selected_field(&self) -> Option<usize> {
+        self.profiles_field_of_row(self.profiles_ui.as_ref()?.selected)
+    }
+
+    /// The value a profiles row currently SHOWS — the profile's resolved
+    /// value, or the window's where the profile is silent — so an edit
+    /// steps from what is on screen, exactly like the Settings tab.
+    fn profiles_value_of(&self, field_idx: usize) -> Option<serde_json::Value> {
+        use crate::profiles_ui as pui;
+        let ui = self.profiles_ui.as_ref()?;
+        let field = ui.fields.get(field_idx)?;
+        let root = crate::launcher::profiles_root(&self.settings);
+        let resolved = zest_config::profiles::resolve_profile(&root, &ui.profile);
+        let overrides = pui::overrides_json(&resolved);
+        let window_values = serde_json::to_value(&self.settings).ok()?;
+        let fallback = self.shell_fallback();
+        // hosts/schemes are display-only inputs `effective_value` never
+        // reads (its doc pins that), so the input path skips the snapshot.
+        let ctx = pui::ProfileRowContext {
+            window_values: &window_values,
+            window_theme: &self.config.theme,
+            fallback_command: &fallback,
+            local_host: "this machine",
+            hosts: &[],
+            schemes: &[],
+            is_defaults: ui.profile == zest_config::profiles::RESERVED_PROFILE,
+        };
+        Some(pui::effective_value(field, &resolved, &overrides, &ctx))
+    }
+
+    /// Write one edited value into `[profiles.<name>]`, then reload — never
+    /// the root file: the root is the window's, the table is the profile's.
+    fn profiles_apply_edit(&mut self, field_idx: usize, new_value: serde_json::Value) {
+        let Some((profile, key, value)) = self.profiles_ui.as_ref().and_then(|ui| {
+            let field = ui.fields.get(field_idx)?;
+            Some((
+                ui.profile.clone(),
+                field.key.clone(),
+                crate::settings_ui::to_toml(field, &new_value)?,
+            ))
+        }) else {
+            return;
+        };
+        let Some(target) = Self::config_target() else {
+            if let Some(ui) = self.profiles_ui.as_mut() {
+                ui.error = Some("no config directory on this system".to_string());
+            }
+            self.mark_chrome_dirty();
+            return;
+        };
+        match zest_config::write_profile_value(&target, &profile, &key, value) {
+            Ok(()) => {
+                if let Some(ui) = self.profiles_ui.as_mut() {
+                    ui.error = None;
+                }
+                self.reload_config();
+            }
+            Err(e) => {
+                tracing::error!(error = %e, key = %key, profile = %profile, "could not write the profile value");
+                if let Some(ui) = self.profiles_ui.as_mut() {
+                    ui.error = Some(format!("could not save {key}: {e}"));
+                }
+            }
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// The override dot's click: delete the key from `[profiles.<name>]`,
+    /// reload — the row falls back through Defaults (§12). Idempotent
+    /// because `remove_profile_value` is.
+    fn profiles_reset_row(&mut self, row: usize) {
+        let Some((profile, key)) = self.profiles_field_of_row(row).and_then(|i| {
+            let ui = self.profiles_ui.as_ref()?;
+            Some((ui.profile.clone(), ui.fields.get(i)?.key.clone()))
+        }) else {
+            return;
+        };
+        let Some(target) = Self::config_target() else { return };
+        match zest_config::remove_profile_value(&target, &profile, &key) {
+            Ok(()) => {
+                if let Some(ui) = self.profiles_ui.as_mut() {
+                    ui.error = None;
+                }
+                self.reload_config();
+            }
+            Err(e) => {
+                tracing::error!(error = %e, key = %key, profile = %profile, "could not clear the override");
+                if let Some(ui) = self.profiles_ui.as_mut() {
+                    ui.error = Some(format!("could not reset {key}: {e}"));
+                }
+            }
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// Arrow-key editing on the selected profiles row: flip, cycle or step,
+    /// then write through the profile path.
+    fn profiles_adjust(&mut self, dir: i32) {
+        let Some(idx) = self.profiles_selected_field() else { return };
+        let Some(current) = self.profiles_value_of(idx) else { return };
+        let installed: Vec<String> = self
+            .profiles_ui
+            .as_ref()
+            .and_then(|ui| ui.fields.get(idx))
+            .filter(|f| f.widget == zest_config::ui::Widget::FontList)
+            .and(self.fonts.as_mut())
+            .map(Fonts::installed_families)
+            .unwrap_or_default();
+        let next = self.profiles_ui.as_ref().and_then(|ui| {
+            let field = ui.fields.get(idx)?;
+            let themes: Vec<String> =
+                zest_theme::builtin::all().into_iter().map(|t| t.id).collect();
+            crate::profiles_ui::adjust_profile(field, &current, dir, &themes, &installed)
+        });
+        if let Some(value) = next {
+            self.profiles_apply_edit(idx, value);
+        }
+    }
+
+    /// Enter on the selected profiles row: act the way its widget wants.
+    fn profiles_activate_selected(&mut self) {
+        use zest_config::ui::Widget;
+        let Some(idx) = self.profiles_selected_field() else { return };
+        let Some((widget, key, segmented)) =
+            self.profiles_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| {
+                (f.widget, f.key.clone(), crate::settings_ui::select_is_segmented(f))
+            })
+        else {
+            return;
+        };
+        match widget {
+            Widget::Toggle => self.profiles_adjust(1),
+            // tab_title's third state is typing (the #135 contract: any
+            // other string is a custom title) — Enter opens a buffer; the
+            // drawn segments stay the two fixed spellings.
+            Widget::Select if key == "tab_title" => self.profiles_begin_edit(idx),
+            Widget::Select if segmented => self.profiles_adjust(1),
+            Widget::Select => {
+                let row = self.profiles_ui.as_ref().map(|ui| ui.selected);
+                if let (Some(ui), Some(row)) = (self.profiles_ui.as_mut(), row) {
+                    ui.menu = Some((row, 0));
+                }
+            }
+            // The fleet-picker-as-chooser belongs to the cross-host launch
+            // item (a picker row *launches* today, which is not choosing);
+            // until then the host is typed — the same write path, honestly.
+            Widget::HostPicker => self.profiles_begin_edit(idx),
+            Widget::Number | Widget::Slider | Widget::Text | Widget::Path => {
+                self.profiles_begin_edit(idx);
+            }
+            // The direct-choice rows also answer Enter by stepping, so the
+            // keyboard can drive them without a pointer.
+            Widget::SchemePicker
+            | Widget::AccentPicker
+            | Widget::IconPicker
+            | Widget::FontList
+            | Widget::ThemePicker => self.profiles_adjust(1),
+            Widget::TagList | Widget::KeyValue => {}
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// Open a typed edit on a profiles field, seeded with what the row shows.
+    fn profiles_begin_edit(&mut self, idx: usize) {
+        let current = self.profiles_value_of(idx);
+        let seed = match &current {
+            // Strings seed verbatim whatever the widget (host, tab_title,
+            // command); numbers go through the settings seeding.
+            Some(serde_json::Value::String(s)) => s.clone(),
+            other => self
+                .profiles_ui
+                .as_ref()
+                .and_then(|ui| ui.fields.get(idx))
+                .map(|f| crate::settings_ui::edit_seed(f, other.as_ref()))
+                .unwrap_or_default(),
+        };
+        if let Some(ui) = self.profiles_ui.as_mut() {
+            ui.editing = Some(crate::settings_ui::EditBuffer {
+                field_idx: idx,
+                buffer: seed,
+                error: false,
+                append: false,
+            });
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// A direct-choice click (scheme swatch, accent swatch, icon tile).
+    fn profiles_choice(&mut self, row: usize, opt: usize) {
+        if let Some(ui) = self.profiles_ui.as_mut() {
+            ui.selected = row;
+        }
+        let Some(idx) = self.profiles_field_of_row(row) else { return };
+        let value = self.profiles_ui.as_ref().and_then(|ui| {
+            let field = ui.fields.get(idx)?;
+            crate::profiles_ui::choice_value(field, opt, &crate::profiles_ui::scheme_swatches())
+        });
+        if let Some(value) = value {
+            self.profiles_apply_edit(idx, value);
+        } else {
+            self.mark_chrome_dirty();
+        }
+    }
+
+    /// Write one of a select field's variants — profiles-side twin of
+    /// `apply_variant`, landing in the profile's table.
+    fn profiles_apply_variant(&mut self, row: usize, opt: usize) {
+        let Some((idx, value)) = self.profiles_field_of_row(row).and_then(|i| {
+            let field = self.profiles_ui.as_ref()?.fields.get(i)?;
+            let variant = field.variants.get(opt)?;
+            Some((i, serde_json::Value::String(variant.value.clone())))
+        }) else {
+            return;
+        };
+        self.profiles_apply_edit(idx, value);
+    }
+
+    /// Select the rail's `i`-th profile for editing; selection and scroll
+    /// reset — a profile is a fresh page, not a continuation.
+    fn profiles_select_rail(&mut self, i: usize) {
+        let names = crate::profiles_ui::rail_names(&self.settings);
+        let Some(name) = names.get(i).cloned() else { return };
+        if let Some(ui) = self.profiles_ui.as_mut() {
+            if ui.profile != name {
+                ui.profile = name;
+                ui.selected = 0;
+                ui.scroll = 0.0;
+                ui.scroll_to_selected = true;
+                ui.editing = None;
+                ui.menu = None;
+                ui.error = None;
+            }
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// "＋ New profile": create `[profiles.new-profile-N]` (unique), reload,
+    /// select it.
+    fn profiles_new(&mut self) {
+        let Some(target) = Self::config_target() else {
+            if let Some(ui) = self.profiles_ui.as_mut() {
+                ui.error = Some("no config directory on this system".to_string());
+            }
+            self.mark_chrome_dirty();
+            return;
+        };
+        let names = crate::profiles_ui::rail_names(&self.settings);
+        let name = crate::profiles_ui::new_profile_name(&names);
+        match zest_config::create_profile(&target, &name) {
+            Ok(()) => {
+                self.reload_config();
+                if let Some(ui) = self.profiles_ui.as_mut() {
+                    ui.profile = name;
+                    ui.selected = 0;
+                    ui.scroll = 0.0;
+                    ui.scroll_to_selected = true;
+                    ui.error = None;
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, profile = %name, "could not create the profile");
+                if let Some(ui) = self.profiles_ui.as_mut() {
+                    ui.error = Some(format!("could not create {name}: {e}"));
+                }
+            }
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// Duplicate the edited profile under a unique sibling name and select
+    /// the copy. Renaming rides this plus Delete (§12 offered either shape;
+    /// this one keeps the header name read-only).
+    fn profiles_duplicate(&mut self) {
+        let Some(from) = self.profiles_ui.as_ref().map(|ui| ui.profile.clone()) else { return };
+        let Some(target) = Self::config_target() else { return };
+        let names = crate::profiles_ui::rail_names(&self.settings);
+        let to = crate::profiles_ui::copy_name(&names, &from);
+        // Defaults (or a layer-supplied profile) may have no table in the
+        // user's file to copy — an empty duplicate still falls through
+        // Defaults, which is exactly what a copy of it means.
+        let result = zest_config::copy_profile(&target, &from, &to).or_else(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                zest_config::create_profile(&target, &to)
+            } else {
+                Err(e)
+            }
+        });
+        match result {
+            Ok(()) => {
+                self.reload_config();
+                if let Some(ui) = self.profiles_ui.as_mut() {
+                    ui.profile = to;
+                    ui.scroll_to_selected = true;
+                    ui.error = None;
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, profile = %from, "could not duplicate the profile");
+                if let Some(ui) = self.profiles_ui.as_mut() {
+                    ui.error = Some(format!("could not duplicate {from}: {e}"));
+                }
+            }
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// Delete the edited profile; the editor falls back to Defaults. The
+    /// screen never draws Delete for Defaults, and this guards it anyway.
+    fn profiles_delete(&mut self) {
+        let Some(name) = self.profiles_ui.as_ref().map(|ui| ui.profile.clone()) else { return };
+        if name == zest_config::profiles::RESERVED_PROFILE {
+            return;
+        }
+        let Some(target) = Self::config_target() else { return };
+        match zest_config::remove_profile(&target, &name) {
+            Ok(()) => {
+                self.reload_config();
+                if let Some(ui) = self.profiles_ui.as_mut() {
+                    ui.profile = zest_config::profiles::RESERVED_PROFILE.to_string();
+                    ui.selected = 0;
+                    ui.scroll = 0.0;
+                    ui.error = None;
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, profile = %name, "could not delete the profile");
+                if let Some(ui) = self.profiles_ui.as_mut() {
+                    ui.error = Some(format!("could not delete {name}: {e}"));
+                }
+            }
+        }
+        self.mark_chrome_dirty();
     }
 
     /// The picker's rows and their actions, from the fleet snapshot.
@@ -4078,6 +4765,22 @@ impl App {
     /// the chord is how the default stays one keystroke away).
     fn new_tab(&mut self) {
         self.open_shell_tab(None, None);
+    }
+
+    /// The command a command-less launch resolves to — the launcher rows'
+    /// caption and the profiles editor's unset `command` row. On a remote
+    /// route the far host runs its own default shell, and captioning that
+    /// with this machine's `shell.command` would name a command that will
+    /// not run.
+    fn shell_fallback(&self) -> String {
+        match self.route {
+            Some(HostRoute::Tcp(_)) => "the host's default shell".to_string(),
+            _ => self
+                .config
+                .shell
+                .clone()
+                .unwrap_or_else(|| CommandSpec::default_shell().command_line),
+        }
     }
 
     /// Launch a named profile (a launcher row, or its digit): v1 runs the
@@ -6182,6 +6885,270 @@ impl ApplicationHandler<Wakeup> for App {
                     return;
                 }
 
+                // The Profiles editor, while its pane holds the grid area —
+                // the Settings tab's keyboard discipline, on §12's surface.
+                if self.profiles_tab_active() {
+                    use winit::keyboard::{Key, NamedKey};
+
+                    // The open dropdown menu owns the keys before everything.
+                    if self.profiles_ui.as_ref().is_some_and(|ui| ui.menu.is_some()) {
+                        let options = self
+                            .profiles_ui
+                            .as_ref()
+                            .and_then(|ui| {
+                                let (row, _) = ui.menu?;
+                                let i = match ui.actions.get(row) {
+                                    Some(crate::settings_ui::RowAction::Field(i)) => *i,
+                                    _ => return None,
+                                };
+                                ui.fields.get(i).map(|f| f.variants.len())
+                            })
+                            .unwrap_or(0);
+                        match &event.logical_key {
+                            Key::Named(NamedKey::Escape) => {
+                                if let Some(ui) = self.profiles_ui.as_mut() {
+                                    ui.menu = None;
+                                }
+                            }
+                            Key::Named(NamedKey::Enter) => {
+                                let menu = self.profiles_ui.as_ref().and_then(|ui| ui.menu);
+                                if let Some(ui) = self.profiles_ui.as_mut() {
+                                    ui.menu = None;
+                                }
+                                if let Some((row, sel)) = menu {
+                                    self.profiles_apply_variant(row, sel);
+                                }
+                            }
+                            Key::Named(NamedKey::ArrowDown) => {
+                                if let Some((_, sel)) =
+                                    self.profiles_ui.as_mut().and_then(|ui| ui.menu.as_mut())
+                                {
+                                    *sel = (*sel + 1).min(options.saturating_sub(1));
+                                }
+                            }
+                            Key::Named(NamedKey::ArrowUp) => {
+                                if let Some((_, sel)) =
+                                    self.profiles_ui.as_mut().and_then(|ui| ui.menu.as_mut())
+                                {
+                                    *sel = sel.saturating_sub(1);
+                                }
+                            }
+                            _ => {}
+                        }
+                        self.mark_chrome_dirty();
+                        return;
+                    }
+
+                    // A typed edit owns the keys before the list does.
+                    if self.profiles_ui.as_ref().is_some_and(|ui| ui.editing.is_some()) {
+                        match &event.logical_key {
+                            Key::Named(NamedKey::Escape) => {
+                                if let Some(ui) = self.profiles_ui.as_mut() {
+                                    ui.editing = None;
+                                }
+                            }
+                            Key::Named(NamedKey::Enter) => {
+                                let edit = self.profiles_ui.as_ref().and_then(|ui| {
+                                    let edit = ui.editing.as_ref()?;
+                                    Some((edit.field_idx, edit.buffer.clone()))
+                                });
+                                if let Some((idx, buffer)) = edit {
+                                    let parsed = self
+                                        .profiles_ui
+                                        .as_ref()
+                                        .and_then(|ui| ui.fields.get(idx))
+                                        .and_then(|field| {
+                                            crate::settings_ui::parse_input(field, &buffer)
+                                        });
+                                    match parsed {
+                                        Some(value) => {
+                                            if let Some(ui) = self.profiles_ui.as_mut() {
+                                                ui.editing = None;
+                                            }
+                                            // An emptied string is the file's
+                                            // spelling of "unset" — it parses,
+                                            // writes, and resolution falls
+                                            // back through Defaults for it
+                                            // (profiles.rs's contract).
+                                            self.profiles_apply_edit(idx, value);
+                                        }
+                                        None => {
+                                            if let Some(edit) = self
+                                                .profiles_ui
+                                                .as_mut()
+                                                .and_then(|ui| ui.editing.as_mut())
+                                            {
+                                                edit.error = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Key::Named(NamedKey::Backspace) => {
+                                if let Some(edit) =
+                                    self.profiles_ui.as_mut().and_then(|ui| ui.editing.as_mut())
+                                {
+                                    edit.buffer.pop();
+                                    edit.error = false;
+                                }
+                            }
+                            Key::Named(NamedKey::Space) => {
+                                if let Some(edit) =
+                                    self.profiles_ui.as_mut().and_then(|ui| ui.editing.as_mut())
+                                {
+                                    edit.buffer.push(' ');
+                                    edit.error = false;
+                                }
+                            }
+                            Key::Character(c) => {
+                                if !self.modifiers.control_key()
+                                    && !key::belongs_to_desktop(self.modifiers)
+                                {
+                                    if let Some(edit) = self
+                                        .profiles_ui
+                                        .as_mut()
+                                        .and_then(|ui| ui.editing.as_mut())
+                                    {
+                                        edit.buffer.push_str(c.as_str());
+                                        edit.error = false;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        self.mark_chrome_dirty();
+                        return;
+                    }
+
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Enter) => {
+                            self.profiles_activate_selected();
+                        }
+                        Key::Named(NamedKey::ArrowRight) => {
+                            self.profiles_adjust(1);
+                        }
+                        Key::Named(NamedKey::ArrowLeft) => {
+                            self.profiles_adjust(-1);
+                        }
+                        Key::Named(NamedKey::Escape) => {
+                            // Layered: edit and menu were handled above, so a
+                            // filter clears first, and a second Esc CLOSES
+                            // THE TAB — closing it is closing a tab (§12
+                            // takes §11's rule whole).
+                            let filtered = self
+                                .profiles_ui
+                                .as_ref()
+                                .is_some_and(|ui| !ui.filter.is_empty());
+                            if filtered {
+                                if let Some(ui) = self.profiles_ui.as_mut() {
+                                    ui.filter.clear();
+                                    ui.selected = 0;
+                                    ui.scroll_to_selected = true;
+                                }
+                            } else {
+                                self.close_profiles_tab();
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowDown) => {
+                            if let Some(ui) = self.profiles_ui.as_mut() {
+                                ui.selected = crate::settings_ui::step_selection(
+                                    &ui.actions,
+                                    ui.selected,
+                                    true,
+                                );
+                                ui.scroll_to_selected = true;
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowUp) => {
+                            if let Some(ui) = self.profiles_ui.as_mut() {
+                                ui.selected = crate::settings_ui::step_selection(
+                                    &ui.actions,
+                                    ui.selected,
+                                    false,
+                                );
+                                ui.scroll_to_selected = true;
+                            }
+                        }
+                        Key::Named(NamedKey::Backspace) => {
+                            if let Some(ui) = self.profiles_ui.as_mut() {
+                                ui.filter.pop();
+                                ui.selected = 0;
+                                ui.scroll_to_selected = true;
+                            }
+                        }
+                        Key::Named(NamedKey::Space) => {
+                            if let Some(ui) = self.profiles_ui.as_mut() {
+                                ui.filter.push(' ');
+                                ui.selected = 0;
+                                ui.scroll_to_selected = true;
+                            }
+                        }
+                        Key::Character(c) => {
+                            match keymap::lookup(&event.logical_key, event.physical_key, self.modifiers)
+                                .map(|b| b.action)
+                            {
+                                // ⌘⇧, on the active Profiles tab is already
+                                // where it goes; swallow rather than reopen.
+                                Some(keymap::Action::OpenProfiles) => {}
+                                // A tab is not a modal: the tab-management
+                                // chords keep working over it — ⌘W closes it
+                                // via perform's Profiles arm.
+                                Some(
+                                    action @ (keymap::Action::ToggleFleetPicker
+                                    | keymap::Action::TogglePalette
+                                    | keymap::Action::ToggleSettings
+                                    | keymap::Action::CloseTab
+                                    | keymap::Action::NewTab
+                                    | keymap::Action::ToggleTabLayout
+                                    | keymap::Action::ActivateTab(_)
+                                    | keymap::Action::ActivateLastTab
+                                    | keymap::Action::PrevTab
+                                    | keymap::Action::NextTab),
+                                ) => self.perform(action, el),
+                                _ => {
+                                    // A LEADING digit jumps the rail (its
+                                    // drawn 1–9 hints); once a filter is
+                                    // live, digits filter like any other
+                                    // character — the two meanings are
+                                    // separated by the filter's emptiness,
+                                    // not by guesswork.
+                                    let digit = c
+                                        .as_str()
+                                        .parse::<usize>()
+                                        .ok()
+                                        .filter(|d| (1..=9).contains(d));
+                                    let filter_empty = self
+                                        .profiles_ui
+                                        .as_ref()
+                                        .is_some_and(|ui| ui.filter.is_empty());
+                                    if let (Some(d), true) = (digit, filter_empty) {
+                                        if !self.modifiers.control_key()
+                                            && !key::belongs_to_desktop(self.modifiers)
+                                        {
+                                            self.profiles_select_rail(d);
+                                        }
+                                    } else if c.as_str() != "/"
+                                        && !self.modifiers.control_key()
+                                        && !key::belongs_to_desktop(self.modifiers)
+                                    {
+                                        // '/' focuses the filter (§11) —
+                                        // where every other character
+                                        // already goes.
+                                        if let Some(ui) = self.profiles_ui.as_mut() {
+                                            ui.filter.push_str(c.as_str());
+                                            ui.selected = 0;
+                                            ui.scroll_to_selected = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    self.mark_chrome_dirty();
+                    return;
+                }
+
                 // A full-pane screen owns the keyboard the way an overlay
                 // does, minus the filter: Esc returns to the grid, chords
                 // still work, and nothing falls through to the shell — the
@@ -6479,14 +7446,22 @@ impl ApplicationHandler<Wakeup> for App {
                         | HitRegion::SettingsSelect(_)
                         | HitRegion::SettingsListRemove(..)
                         | HitRegion::SettingsListAdd(_)
-                        | HitRegion::SettingsListItem(..),
+                        | HitRegion::SettingsListItem(..)
+                        | HitRegion::ProfilesChoice(..),
                     ) => {
                         let px = match delta {
                             MouseScrollDelta::LineDelta(_, y) => y * 40.0,
                             MouseScrollDelta::PixelDelta(p) => p.y as f32,
                         };
                         if px != 0.0 {
-                            if let Some(ui) = self.settings_ui.as_mut() {
+                            // While the Profiles screen is up, these regions
+                            // are its rows pane's (the Settings model is not
+                            // built under a covering screen).
+                            if self.profiles_tab_active() {
+                                if let Some(ui) = self.profiles_ui.as_mut() {
+                                    ui.scroll -= px;
+                                }
+                            } else if let Some(ui) = self.settings_ui.as_mut() {
                                 ui.scroll -= px;
                             }
                             self.mark_chrome_dirty();
