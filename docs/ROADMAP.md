@@ -231,9 +231,11 @@ entry stay). The resulting work items, measurements in the handoff README:
 
 - [ ] `TabContent` — tabs that aren't sessions (Settings, Profiles), without
       touching the `SessionAddr`-keyed hit machinery.
-- [ ] Screens 1–2 reconciliation: title-only chips (closes #51 structurally),
-      status-bar deletion, layout-pill removal, full-width vertical header,
-      strip scroll keeping the active tab in view.
+- [x] Screens 1–2 reconciliation → [#149](https://github.com/zesterm/zesterm/issues/149):
+      title-only chips (closes #51 structurally), status-bar deletion,
+      layout-pill removal, full-width vertical header, horizontal strip scroll
+      keeping the active tab in view. The *vertical* sidebar clamps its scroll
+      but does not yet ensure-visible on activation — that gap is still open.
 - [ ] `--screen <fleet|themes|settings|palette|launcher|profiles>`, composing
       with `--screenshot`, so every design screen is capturable headlessly.
 - [ ] The `+` launcher menu (README §1).

@@ -259,6 +259,17 @@ impl TabStrip {
         self.active().map(Tab::focused_source)
     }
 
+    /// Whether `addr` names the tab holding the keyboard. `close_tab` asks
+    /// this *before* closing to decide if the close is also an activation:
+    /// only then may `after_activation` run, because its ensure-visible flag
+    /// would otherwise snap a wheel-scrolled strip back to the active chip on
+    /// every background ×-click, pulling the next close target out from under
+    /// the pointer.
+    #[must_use]
+    pub fn is_active(&self, addr: SessionAddr) -> bool {
+        self.active().is_some_and(|t| t.addr == addr)
+    }
+
     /// The tab holding `addr` as its *split* pane, if any.
     pub fn find_split_owner(&mut self, addr: SessionAddr) -> Option<&mut Tab> {
         self.tabs.iter_mut().find(|t| t.split.as_ref().is_some_and(|s| s.addr == addr))
@@ -359,6 +370,31 @@ mod tests {
         // Close the tab after it: nothing moves.
         strip.close(placeholder_addr(3)).expect("tab 3 exists").kill();
         assert_eq!(strip.active().expect("active").addr, placeholder_addr(2));
+    }
+
+    #[test]
+    fn closing_a_background_chip_is_not_an_activation() {
+        // close_tab() asks this *before* closing to decide whether
+        // after_activation() runs — which sets strip_ensure_visible.
+        // Answering true for a background chip snaps a wheel-scrolled strip
+        // back to the active chip on every ×-click, pulling the next close
+        // target out from under the pointer.
+        let mut strip = TabStrip::default();
+        for n in 1..=3 {
+            strip.push(fake(n));
+        }
+        strip.activate(1);
+        assert!(
+            strip.is_active(placeholder_addr(2)),
+            "closing the tab holding the keyboard is an activation"
+        );
+        assert!(
+            !strip.is_active(placeholder_addr(1)),
+            "closing a background chip is not, even though its index shift moves `active`"
+        );
+        for tab in [placeholder_addr(1), placeholder_addr(2), placeholder_addr(3)] {
+            strip.close(tab).expect("tab exists").kill();
+        }
     }
 
     #[test]

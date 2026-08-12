@@ -3291,6 +3291,7 @@ impl App {
     /// `already_exited` marks the child as gone (a `TabExited` wakeup), where
     /// there is nothing left to kill. The last tab closing closes the window.
     fn close_tab(&mut self, addr: zest_proto::SessionAddr, already_exited: bool, el: &ActiveEventLoop) {
+        let was_active = self.tabs.is_active(addr);
         let Some(tab) = self.tabs.close(addr) else { return };
         if already_exited || tab.dead || !tab.local {
             // Dropping detaches (the destructor sends it); a remote session
@@ -3307,7 +3308,16 @@ impl App {
             el.exit();
             return;
         }
-        self.after_activation();
+        if was_active {
+            self.after_activation();
+        } else {
+            // Closing a background chip is not an activation: the pane the
+            // user is looking at never changed, so after_activation() — whose
+            // ensure-visible flag would snap a wheel-scrolled strip back to
+            // the active chip mid-close-spree — must not run. The strip still
+            // changed shape, so chrome repaints.
+            self.mark_chrome_dirty();
+        }
         self.relayout_grid();
     }
 
