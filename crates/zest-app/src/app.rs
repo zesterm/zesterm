@@ -2640,19 +2640,9 @@ impl App {
             return;
         };
         let value = if field.widget == zest_config::ui::Widget::FontList {
-            // Replace the primary, leave the fallbacks alone. Appending here is
-            // what once grew a real config to ninety families.
-            let mut out = vec![chosen.clone()];
-            if let Some(serde_json::Value::Array(a)) = self.settings_value_of(state.field) {
-                out.extend(
-                    a.iter()
-                        .skip(1)
-                        .filter_map(|v| v.as_str())
-                        .filter(|f| *f != chosen)
-                        .map(str::to_string),
-                );
-            }
-            serde_json::Value::Array(out.into_iter().map(serde_json::Value::String).collect())
+            // The chosen face, and only it -- see `settings_ui::adjust` for why
+            // a tail is neither needed nor harmless.
+            serde_json::Value::Array(vec![serde_json::Value::String(chosen)])
         } else {
             serde_json::Value::String(chosen)
         };

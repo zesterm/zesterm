@@ -77,6 +77,15 @@ impl Default for Settings {
 #[serde(default)]
 pub struct Typography {
     /// Font families in preference order; the first one with a glyph wins.
+    ///
+    /// A preference order, *not* a coverage mechanism. A character the chosen
+    /// face lacks is resolved per-character against the system — DirectWrite,
+    /// CoreText, fontconfig — Nerd Font icons come from the discovered symbol
+    /// families, and emoji have their own path; none of that consults this
+    /// list. The shipped default names several because it has to work on
+    /// Windows, macOS and Linux without knowing which it will start on. Choose
+    /// a font and one entry is enough, which is what the settings screen
+    /// writes.
     #[schemars(extend("x_zest_group" = "Text", "x_zest_widget" = "font-list"))]
     pub families: Vec<String>,
     /// Font size in points, converted to pixels at 96 logical DPI.

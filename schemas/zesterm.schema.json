@@ -404,7 +404,7 @@
             "DejaVu Sans Mono",
             "monospace"
           ],
-          "description": "Font families in preference order; the first one with a glyph wins.",
+          "description": "Font families in preference order; the first one with a glyph wins.\n\nA preference order, *not* a coverage mechanism. A character the chosen\nface lacks is resolved per-character against the system — DirectWrite,\nCoreText, fontconfig — Nerd Font icons come from the discovered symbol\nfamilies, and emoji have their own path; none of that consults this\nlist. The shipped default names several because it has to work on\nWindows, macOS and Linux without knowing which it will start on. Choose\na font and one entry is enough, which is what the settings screen\nwrites.",
           "items": {
             "type": "string"
           },

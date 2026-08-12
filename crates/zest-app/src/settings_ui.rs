@@ -297,34 +297,33 @@ pub fn adjust(
         }
         Widget::ThemePicker => cycle(themes),
         Widget::FontList => {
-            // A font *stack*, and only the first entry is a choice: the rest
-            // are the fallbacks that stop a missing glyph becoming tofu, and
-            // cycling those would be meaningless. Replace the primary; leave
-            // the tail exactly as it was.
+            // One entry, replacing whatever was there.
             //
-            // The tail must not grow. Keeping the face just stepped off looks
-            // considerate -- it might hold the only copy of some glyph -- and
-            // is wrong: every press appends, so walking the picker across an
-            // installed set once leaves ninety families in the fallback chain,
-            // in visit order, with script and display faces among them. Seen in
-            // a real config after one pass.
+            // The list is a *preference order*, not a coverage mechanism: a
+            // character the chosen face lacks is resolved per-character by
+            // fontique against the system (DirectWrite, CoreText, fontconfig),
+            // Nerd Font icons come from `symbol_families`, and emoji have their
+            // own path. None of that consults this list. The shipped default is
+            // several entries only because it has to name a face that exists on
+            // Windows *and* macOS *and* Linux before it knows which it is on.
+            //
+            // Once someone has chosen, that reason is gone, and keeping a tail
+            // is how the picker used to grow one: it appended on every press,
+            // so a single pass across an installed set left ninety families
+            // behind, Curlz MT among them.
             if fonts.is_empty() {
                 return None;
             }
-            let list: Vec<String> = current
+            let current = current
                 .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            let primary = list.first().cloned().unwrap_or_default();
-            let at = fonts.iter().position(|f| *f == primary).unwrap_or(0);
+            let at = fonts.iter().position(|f| f == current).unwrap_or(0);
             let next = (at as i32 + dir).rem_euclid(fonts.len() as i32) as usize;
-            let chosen = fonts[next].clone();
-
-            let mut out = vec![chosen.clone()];
-            out.extend(list.into_iter().skip(1).filter(|f| *f != chosen));
-            Some(serde_json::Value::Array(
-                out.into_iter().map(serde_json::Value::String).collect(),
-            ))
+            Some(serde_json::Value::Array(vec![serde_json::Value::String(
+                fonts[next].clone(),
+            )]))
         }
         Widget::Number | Widget::Slider if field.integer => {
             let (min, max) = field
@@ -837,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn the_font_stack_cycles_its_primary_and_keeps_the_fallbacks() {
+    fn the_font_picker_writes_one_face() {
         // The point of the roster: a font face is choosable from the settings
         // screen rather than only from config.toml.
         let fonts = vec!["Cascadia Mono".to_string(), "Meslo LG M".to_string()];
@@ -847,7 +846,7 @@ mod tests {
         let next = adjust(&f, &current, 1, &[], &fonts).expect("cycles");
         let got: Vec<&str> = next.as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
 
-        assert_eq!(got, ["Meslo LG M", "Consolas"], "primary steps, fallbacks stay put");
+        assert_eq!(got, ["Meslo LG M"], "one chosen face, not a chain");
     }
 
     #[test]
@@ -863,8 +862,7 @@ mod tests {
             v = adjust(&f, &v, 1, &[], &fonts).expect("cycles");
         }
         let got: Vec<&str> = v.as_array().unwrap().iter().filter_map(|s| s.as_str()).collect();
-        assert_eq!(got.len(), 3, "the tail is fixed, not a history: {got:?}");
-        assert_eq!(&got[1..], ["Consolas", "monospace"], "and it is the original tail");
+        assert_eq!(got.len(), 1, "one entry however many times it is cycled: {got:?}");
     }
 
     #[test]
