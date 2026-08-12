@@ -1707,6 +1707,13 @@ impl App {
     fn run_launcher_action(&mut self, action: crate::launcher::LauncherAction) {
         use crate::launcher::LauncherAction;
         match action {
+            // Neither launch arm calls leave_screen(), on purpose: a
+            // successful launch runs through open_shell_tab, which ends in
+            // after_activation() — and that steps off any full-pane screen,
+            // so launching over the fleet/Profiles view lands on the new tab
+            // rather than behind the screen (measured, not assumed). A
+            // *failed* launch appended nothing, and leaving the screen for
+            // it would trade the view the user had for a warn! in a log.
             LauncherAction::Launch(name) => {
                 self.launcher = None;
                 self.mark_chrome_dirty();
