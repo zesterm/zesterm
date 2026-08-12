@@ -398,8 +398,27 @@ mod tests {
             command_line: if cfg!(windows) { "cmd /c exit" } else { "/usr/bin/true" }.into(),
             ..zest_pty::CommandSpec::default_shell()
         };
-        let session = Session::spawn(&spec, zest_pty::PtySize::new(10, 4), 10, |_| {})
-            .expect("spawn a trivial child");
-        Tab::in_process(session, placeholder_addr(n), (10, 4))
+        // Retried, because allocating a pty is not reliable under load.
+        //
+        // On a busy macOS runner this fails intermittently with ENXIO — "Device
+        // not configured" — from the `posix_openpt`/`grantpt` path, and every
+        // test in this module wants one, in parallel. It failed twice in a row
+        // on unrelated changes, on a different test each time, which is what a
+        // resource flake looks like rather than a bug in the code under test.
+        //
+        // A few attempts a few milliseconds apart, and a message naming the
+        // cause if they all fail — so a genuine breakage still reads as one
+        // rather than being retried into a timeout.
+        let mut last = None;
+        for _ in 0..10 {
+            match Session::spawn(&spec, zest_pty::PtySize::new(10, 4), 10, |_| {}) {
+                Ok(session) => return Tab::in_process(session, placeholder_addr(n), (10, 4)),
+                Err(e) => {
+                    last = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+        }
+        panic!("spawn a trivial child, after 10 attempts: {last:?}")
     }
 }
