@@ -19,6 +19,14 @@ import type { Tab } from './state/tabs.ts';
 export const MONO_FAMILY = 'ui-monospace, "SF Mono", Menlo, Consolas, monospace';
 
 /**
+ * The grid's font size in CSS pixels. Shared for the same reason as the
+ * family: `TerminalView` sizes the pty off these metrics and `GridPane` sizes
+ * its canvas off them — two literals would let the pty and the painted grid
+ * disagree by a row.
+ */
+export const GRID_FONT_SIZE = 13;
+
+/**
  * A tab chip shows its title ONLY — host and cwd live in the tooltip and the
  * vertical sidebar/header, which have room for them (design §1). An untitled
  * session reads as `shell`, never as a blank chip.

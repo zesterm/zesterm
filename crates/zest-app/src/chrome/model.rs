@@ -34,10 +34,23 @@ pub enum TabOrigin {
     Remote { host_label: String },
 }
 
+/// What kind of thing a tab is: a session, or one of the app's own screens.
+///
+/// App tabs (design §11) are ordinary tabs in the strip — same geometry, same
+/// active treatment — but they size to their content, carry no close
+/// affordance and no accent wash: they are places, not shells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabKind {
+    Session,
+    Settings,
+    Profiles,
+}
+
 /// One tab, ready to draw.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TabModel {
     pub addr: SessionAddr,
+    pub kind: TabKind,
     /// Already derived: OSC title, else cwd basename, else "shell".
     pub title: String,
     /// The machine's display name ("studio"). Layout composes the chip's
@@ -60,11 +73,17 @@ pub struct TabModel {
     /// An attach or restore is in flight; the tab shows itself but cannot be
     /// typed into yet.
     pub connecting: bool,
+    /// How this tab's host is currently reached. The one fact the deleted
+    /// status bar owned alone was link degradation, and it surfaces here:
+    /// the chip's glyph tile takes warn ink when stalled, danger when
+    /// reconnecting.
+    pub link: LinkKind,
 }
 
 impl TabModel {
-    /// The chip's mono sub-line: `host · cwd`, or just the host when the cwd
-    /// is unknown.
+    /// `host · cwd`, or just the host when the cwd is unknown — the vertical
+    /// header's identity line. (The horizontal chip deliberately does not
+    /// draw this: a second line on a 34px chip was unreadable at 9.5px.)
     #[must_use]
     pub fn detail(&self) -> String {
         if self.cwd.is_empty() {
@@ -299,7 +318,8 @@ pub struct SettingsModel {
     pub ensure_visible: bool,
 }
 
-/// How the active tab's host is currently reached, as the status bar says it.
+/// How a tab's host is currently reached, carried per tab since the status
+/// bar's deletion (design §1: "no status bar").
 ///
 /// `Stalled` and `Reconnecting` describe the *link*, not the path — a LAN
 /// session mid-hiccup is stalled, whatever route it normally takes.
@@ -310,23 +330,6 @@ pub enum LinkKind {
     Tunnel,
     Stalled,
     Reconnecting,
-}
-
-/// The status bar's data (design screen 1). All strings arrive composed; the
-/// layout draws and colours, it does not format.
-#[derive(Debug, Clone, PartialEq)]
-pub struct StatusModel {
-    /// Home-shortened working directory of the active session.
-    pub cwd: String,
-    /// Current git branch of that directory, when known locally.
-    pub branch: Option<String>,
-    /// Command blocks in the active session's scrollback.
-    pub blocks: usize,
-    /// The resolved theme id.
-    pub theme: String,
-    pub link: LinkKind,
-    /// Measured (or path-typical) round trip, milliseconds.
-    pub latency_ms: Option<f32>,
 }
 
 /// The animation clock's current phases, computed by the app per rebuild.
@@ -385,14 +388,16 @@ pub struct ChromeModel {
     /// Scroll offset of the tab strip contents, physical pixels. Layout
     /// clamps it and reports the clamped value back.
     pub strip_scroll: f32,
+    /// Bring the active chip into the strip's viewport this pass — set on
+    /// activation paths only, so wheel scrolling never snaps back. The same
+    /// discipline as the picker's `ensure_visible`.
+    pub ensure_active_visible: bool,
     /// What the pointer is over, from last frame's hit map. Only used for
     /// hover fills, so one frame of lag is invisible.
     pub hover: Option<HitRegion>,
     /// What the window's own controls take out of the chrome.
     pub controls: WindowControls,
     pub focused: bool,
-    /// The status bar; `None` only when the window is too small to spare it.
-    pub status: Option<StatusModel>,
     /// Sidebar grouping and footer counts; `None` in the horizontal layout.
     pub sidebar: Option<SidebarModel>,
     /// A full-pane screen over the grid area (fleet, themes); Esc returns.
@@ -404,11 +409,8 @@ pub struct ChromeModel {
     /// Where the grid area is, physical pixels — the rectangle a screen
     /// covers. Computed by the app from its insets.
     pub grid_area: [f32; 4],
-    /// The layout-toggle pill's chord, platform-spelled ("⌘⇧E" or
-    /// "Ctrl+Shift+E") — composed by the app because the chrome does not know
-    /// what a modifier is.
-    pub toggle_chord: String,
-    /// The palette pill's chord, likewise platform-spelled ("⌘K").
+    /// The palette pill's chord, platform-spelled ("⌘K") — composed by the
+    /// app because the chrome does not know what a modifier is.
     pub palette_chord: String,
     /// The fleet picker, drawn over everything when open.
     pub picker: Option<PickerModel>,
