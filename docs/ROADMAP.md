@@ -596,10 +596,26 @@ theme screens. Colours, sizes and spacing come from there, not from this file.
       hinting for the vertical one. `appearance.text_antialias` puts it back.
       Blended with dual-source `OneMinusSrc1`; grayscale where the adapter or a
       translucent window says no. ADR-010.
-- [ ] Validate that default (1.3) side-by-side against Windows Terminal. **Do
-      not defer** — it ships broken constantly and reads as "looks slightly
-      off". The knob works now, so this is finally a measurement rather than a
-      code change.
+- [x] Text reads right beside Windows Terminal (#111), which took four goes and
+      is worth reading ADR-011 for. Coverage was being applied in *linear* space
+      and sRGB-encoded after, so 20% coverage emerged at 48% brightness — every
+      edge inflated, every counter filled, and the whole window read fat. It is
+      linearized now. `size_pt` also meant *pixels* despite its name, so the
+      default was ~9.75pt against every peer's 11-12; it means points. Defaults
+      are grayscale coverage, grid-fitted, stem darkening 2.5 — which is what
+      Windows Terminal itself does, measured: its channel spread on inked pixels
+      is 0.0, so it is not doing subpixel at all. `text_antialias` and
+      `text_hinting` are separate settings because the mixed pair is the one
+      that matters, and the chrome is pinned to the good configuration rather
+      than following them. Also: cell width stated the way Windows Terminal
+      states it, and a searchable font picker, because cycling 266 families with
+      an arrow key is not a picker.
+- [x] Validated that default side-by-side against Windows Terminal (#111). It
+      was 1.3, which was compensating for the linear-coverage bug and pushing
+      the wrong way; it is 2.5, tested against a light background and a dark one
+      and preferred on both. The warning that stood here — that it "ships broken
+      constantly and reads as looks slightly off" — was right, and it took a
+      user saying the text looked fat to act on it.
 - [ ] Perf validation: vtebench, >500 MB/s, <2ms CPU frame, <10ms keypress→pixel.
 
 ✅ **Every animator provably settles** — assert zero frames 250ms after the last
