@@ -500,6 +500,7 @@ mod tests {
         ProfileIdentity {
             name: "test".into(),
             scheme: None,
+            selection_bg: None,
             tab_color,
             icon: None,
             color_from,

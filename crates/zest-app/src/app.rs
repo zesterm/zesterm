@@ -5784,48 +5784,38 @@ fn resolve_text_tuning(config: &Config) -> zest_render_wgpu::TextTuning {
     }
 }
 
-/// An identity's colour scheme, resolved — `None` when the identity has no
-/// scheme *or* names one that does not exist. Unknown warns and falls back
-/// rather than failing (the never-crash rule): a deleted scheme must not
-/// take a running session's window down, it just follows the window again.
-fn scheme_resolved(
-    identity: Option<&crate::tabs::ProfileIdentity>,
-) -> Option<zest_theme::ResolvedPalette> {
-    let scheme = identity?.scheme.as_deref()?;
-    match zest_theme::builtin::get(scheme) {
-        Some(theme) => Some(zest_theme::resolve(&theme)),
-        None => {
-            tracing::warn!(scheme, "unknown colour scheme; the tab follows the window palette");
-            None
-        }
-    }
-}
-
 /// The palette one terminal should be seeded with: its identity's scheme when
-/// it has one, the window's otherwise.
+/// it has one, the window's otherwise. Unknown or unset falls back to the
+/// window with a warn, never a failure (`tabs::resolve_scheme`).
 ///
 /// The seam `apply_theme` reseeds through, one call per terminal — split
 /// panes included, because a pane may later carry its own profile. Pure so
 /// the reseed decision is testable without a window: this is where "a window
-/// theme change wiped every profile tab's scheme" lived.
+/// theme change wiped every profile tab's scheme" lived. Resolving here is
+/// fine — seeding happens per spawn and per theme change, not per frame.
 fn seed_palette(
     window: &zest_core::PaletteSnapshot,
     identity: Option<&crate::tabs::ProfileIdentity>,
 ) -> zest_core::PaletteSnapshot {
-    scheme_resolved(identity).map_or_else(|| window.clone(), |r| to_core_palette(&r))
+    identity
+        .and_then(|i| i.scheme.as_deref())
+        .and_then(crate::tabs::resolve_scheme)
+        .map_or_else(|| window.clone(), |r| to_core_palette(&r))
 }
 
 /// The selection wash for one viewport, from the same scheme its grid uses.
 ///
 /// A profile grid selected in the *window's* selection colour can be
 /// unreadable — a dark window's wash over paper's light background — so the
-/// selection follows the scheme, not the window.
+/// selection follows the scheme, not the window. Reads the identity's
+/// *cached* wash rather than resolving the scheme: this runs per pane per
+/// frame, where a resolve is a full theme lookup plus an allocation, and a
+/// deleted scheme's warn would repeat on every caret-blink repaint.
 fn pane_selection_bg(
     window: zest_core::Rgb,
     identity: Option<&crate::tabs::ProfileIdentity>,
 ) -> zest_core::Rgb {
-    scheme_resolved(identity)
-        .map_or(window, |r| zest_core::Rgb::new(r.selection_bg.r, r.selection_bg.g, r.selection_bg.b))
+    identity.and_then(|i| i.selection_bg).unwrap_or(window)
 }
 
 /// The cell-background opacity for one viewport: the identity's override when
@@ -5864,6 +5854,7 @@ mod palette_tests {
         ProfileIdentity {
             name: "test".into(),
             scheme: scheme.map(str::to_string),
+            selection_bg: scheme.and_then(crate::tabs::scheme_selection_wash),
             tab_color: None,
             icon: None,
             color_from: None,
@@ -5942,6 +5933,37 @@ mod palette_tests {
             pane_selection_bg(win, Some(&identity(Some("no-such-scheme")))),
             win,
             "unknown falls back, never fails"
+        );
+    }
+
+    #[test]
+    fn the_render_path_reads_the_cached_wash_and_never_resolves_the_scheme() {
+        // pane_selection_bg runs per pane per frame. Resolving the scheme
+        // there meant a deleted scheme warned on every caret-blink repaint —
+        // one warn every ~500ms, forever — and a valid one paid a theme
+        // resolve + allocation per pane per frame. The wash is resolved once,
+        // at identity (re-)resolve time; render must only read the cache.
+        let win = zest_core::Rgb::new(1, 2, 3);
+
+        // A real scheme but an empty cache: a render path that resolves
+        // would return paper's wash here and betray a per-frame lookup.
+        let mut id = identity(Some("paper"));
+        id.selection_bg = None;
+        assert_eq!(
+            pane_selection_bg(win, Some(&id)),
+            win,
+            "render reads the cached wash, never the scheme name"
+        );
+
+        // The mirror: a dead scheme with a cache still serves the cache —
+        // and, crucially, without re-running the unknown-scheme warn.
+        let cached = zest_core::Rgb::new(9, 9, 9);
+        let mut id = identity(Some("no-such-scheme"));
+        id.selection_bg = Some(cached);
+        assert_eq!(
+            pane_selection_bg(win, Some(&id)),
+            cached,
+            "the cache is the render path's only source"
         );
     }
 

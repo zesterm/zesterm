@@ -31,6 +31,13 @@ pub struct ProfileIdentity {
     pub name: String,
     /// Colour scheme id: the ANSI half of a theme, for this tab's grid.
     pub scheme: Option<String>,
+    /// The scheme's selection wash, resolved *here* rather than per frame.
+    /// `None` means no scheme (or one that no longer exists): follow the
+    /// window's. The redraw path reads this field per pane per frame, so
+    /// resolving there made a deleted scheme warn on every caret blink —
+    /// unbounded log growth for a non-event — and charged a full theme
+    /// resolve + allocation per pane per frame for a valid one.
+    pub selection_bg: Option<zest_core::Rgb>,
     /// Index into the theme's accents for the chip's rule and glyph tile.
     pub tab_color: Option<u8>,
     /// Glyph for the tab's icon tile.
@@ -74,9 +81,11 @@ impl ProfileIdentity {
             })
             .map(|o| o.clamp(0.0, 1.0));
 
+        let scheme = resolved.meta.color_scheme;
         Self {
             name: name.to_string(),
-            scheme: resolved.meta.color_scheme,
+            selection_bg: scheme.as_deref().and_then(scheme_selection_wash),
+            scheme,
             tab_color: resolved.meta.tab_color,
             icon: resolved.meta.icon,
             color_from: resolved.meta.color_from,
@@ -84,6 +93,29 @@ impl ProfileIdentity {
             title: resolved.meta.tab_title,
         }
     }
+}
+
+/// A colour scheme id resolved to its palette — `None` for a name that does
+/// not exist. Unknown warns and falls back rather than failing (the
+/// never-crash rule): a deleted scheme must not take a running session's
+/// window down, its tab just follows the window again. Called at identity
+/// (re-)resolve and terminal (re-)seed time only — never per frame, so the
+/// warn fires once per transition instead of once per redraw.
+pub(crate) fn resolve_scheme(scheme: &str) -> Option<zest_theme::ResolvedPalette> {
+    match zest_theme::builtin::get(scheme) {
+        Some(theme) => Some(zest_theme::resolve(&theme)),
+        None => {
+            tracing::warn!(scheme, "unknown colour scheme; the tab follows the window palette");
+            None
+        }
+    }
+}
+
+/// The scheme's selection wash — the one colour the per-frame render path
+/// needs, extracted here so it can be cached on the identity.
+pub(crate) fn scheme_selection_wash(scheme: &str) -> Option<zest_core::Rgb> {
+    let r = resolve_scheme(scheme)?;
+    Some(zest_core::Rgb::new(r.selection_bg.r, r.selection_bg.g, r.selection_bg.b))
 }
 
 /// Where a tab's terminal actually lives.
@@ -533,6 +565,12 @@ mod tests {
         strip.reresolve_identities(&settings("paper", 0.5));
         let id = strip.iter().next().unwrap().identity.as_ref().expect("identity kept");
         assert_eq!(id.scheme.as_deref(), Some("paper"), "the reload's scheme wins");
+        assert_eq!(
+            id.selection_bg,
+            scheme_selection_wash("paper"),
+            "the cached wash follows the re-resolve — the render path reads \
+             only the cache, so a stale one selects in the old scheme's colour"
+        );
         assert_eq!(id.opacity, Some(0.5), "and so does its opacity");
         assert_eq!(id.tab_color, Some(2), "unchanged keys survive the re-resolve");
         assert!(
@@ -559,6 +597,7 @@ mod tests {
         assert_eq!(id.color_from, Some(zest_config::ColorFrom::Host), "fell through Defaults");
         assert_eq!(id.icon.as_deref(), Some("tux"), "own keys shadow Defaults'");
         assert_eq!(id.scheme, None, "unset stays unset — the window palette's cue");
+        assert_eq!(id.selection_bg, None, "no scheme, no cached wash: render falls back live");
         assert_eq!(id.opacity, None);
     }
 
