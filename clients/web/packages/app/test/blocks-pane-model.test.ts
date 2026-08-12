@@ -32,9 +32,11 @@ import {
 
 import {
   atShellPrompt,
+  copyOutputText,
   followsOutput,
   formatDuration,
   isInterrupted,
+  linkOf,
   mostRecentBlockWithOutput,
   paneModel,
   type HeaderItem,
@@ -370,6 +372,60 @@ test('atShellPrompt: re-run may type only into a shell that is reading', () => {
   assert.ok(
     !atShellPrompt([finished]),
     'a finished trailing block (D received, next A not yet) is mid-transition, not a prompt',
+  );
+});
+
+test('copyOutputText rejoins soft-wrapped rows instead of inserting newlines', () => {
+  // One printed line that wrapped across two grid rows, then a real second
+  // line. `wrapped` exists on the wire precisely so this copy has no
+  // spurious newline (delta.rs, RowPayload.wrapped).
+  const rows: RowPayload[] = [
+    { ...synthRow(0n, 'a long line that '), wrapped: true },
+    synthRow(1n, 'kept going'),
+    synthRow(2n, 'second line'),
+  ];
+  assert.equal(
+    copyOutputText(rows, new Map()),
+    'a long line that kept going\nsecond line',
+    'a wrapped row continues onto the next — a newline there is text the command never printed',
+  );
+  assert.equal(
+    copyOutputText([synthRow(0n, 'only')], new Map()),
+    'only',
+    'a single unwrapped row copies as itself, with no trailing newline',
+  );
+  assert.equal(
+    copyOutputText(
+      [{ ...synthRow(0n, 'cut '), wrapped: true }, synthRow(1n, 'short')],
+      new Map(),
+    ),
+    'cut short',
+    'the join must preserve the wrapped row verbatim — trimming would eat a real space',
+  );
+});
+
+test('linkOf: a link the client gave up on stays degraded, never live', () => {
+  assert.equal(
+    linkOf({ phase: 'failed', reason: 'denied', message: 'no' }),
+    'reconnecting',
+    "§4's degraded rendering must persist at the moment the client stops redialling — " +
+      "anything less flips the interrupted block back to a 'running' counter on a dead link",
+  );
+  assert.equal(
+    linkOf({ phase: 'reconnecting', attempt: 3 }),
+    'reconnecting',
+    'a redialling link is the degraded state §4 draws',
+  );
+  assert.equal(linkOf({ phase: 'connected' }), 'live', 'a healthy link degrades nothing');
+  assert.equal(
+    linkOf({ phase: 'connecting' }),
+    'stalled',
+    'the same mapping feeds the tab chip, which must not claim live before the link exists',
+  );
+  assert.equal(
+    linkOf({ phase: 'awaiting-approval', code: '12-34' }),
+    'stalled',
+    'waiting on the host to approve is not a live link either',
   );
 });
 

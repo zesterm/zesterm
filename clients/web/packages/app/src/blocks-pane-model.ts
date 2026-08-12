@@ -14,8 +14,10 @@
  */
 
 import {
+  expandRow,
   outputLineCount,
   rowSpans,
+  rowText,
   sliceBlocks,
   type AttrDef,
   type BlockPayload,
@@ -25,6 +27,7 @@ import {
   type RowPayload,
   type Span,
 } from '@zesterm/proto';
+import type { ConnectionState } from '@zesterm/client';
 
 /**
  * The transport's health, as the pane cares about it. `stalled` has no
@@ -33,6 +36,32 @@ import {
  * `TerminalView` grows the detection later without this file changing.
  */
 export type LinkHealth = 'live' | 'stalled' | 'reconnecting';
+
+/**
+ * ConnectionState → link health, one mapping feeding two consumers: the pane
+ * model (§4's degraded states) and the tab chip. connecting / awaiting-approval
+ * read as stalled — a tab must not claim live before the link ever existed.
+ * 'failed' — the client gave up redialling for good — is *more* degraded than
+ * reconnecting, not less: anything short of 'reconnecting' lifts §4's
+ * rendering at exactly the moment the link died for good, flipping an
+ * interrupted open block back to a 'running Ns' counter that ticks forever
+ * ('stalled' is late data, not a lost host — it interrupts nothing). The
+ * connection banner names the refusal precisely; the pane and the tab only
+ * have to stay degraded. Delta-silence stall detection slots in here when it
+ * exists.
+ */
+export function linkOf(state: ConnectionState): LinkHealth {
+  switch (state.phase) {
+    case 'connected':
+      return 'live';
+    case 'reconnecting':
+    case 'failed':
+      return 'reconnecting';
+    case 'connecting':
+    case 'awaiting-approval':
+      return 'stalled';
+  }
+}
 
 export type RailToken = 'success' | 'danger' | 'warn' | 'faint';
 
@@ -123,6 +152,28 @@ export function mostRecentBlockWithOutput(layout: BlocksLayout): BlockSlice | nu
     if (s.outputRows.length > 0) return s;
   }
   return null;
+}
+
+/**
+ * A block's output as clipboard text. `wrapped` is load-bearing: it marks a
+ * grid row whose line continues onto the next row (soft-wrapped at the
+ * terminal's width), and the wire carries it precisely so a copy can rejoin
+ * the line — `delta.rs` on `RowPayload.wrapped`: "so a client can copy a
+ * wrapped line without a spurious newline". Joining every row with '\n'
+ * would put newlines into text the command never printed.
+ */
+export function copyOutputText(
+  rows: readonly RowPayload[],
+  attrs: ReadonlyMap<number, AttrDef>,
+): string {
+  let text = '';
+  let prevWrapped = true; // nothing precedes the first row, so no separator
+  for (const r of rows) {
+    if (!prevWrapped) text += '\n';
+    text += rowText(expandRow(r, 0, attrs));
+    prevWrapped = r.wrapped;
+  }
+  return text;
 }
 
 /**

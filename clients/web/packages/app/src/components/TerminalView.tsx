@@ -28,17 +28,19 @@ import {
   modsOf,
   shellChord,
 } from '@zesterm/input';
-import { expandRow, rowText, sliceBlocks } from '@zesterm/proto';
-import { measureMetrics, type Metrics } from '@zesterm/render';
+import { sliceBlocks } from '@zesterm/proto';
+import { measureMetrics } from '@zesterm/render';
 import { resolveTerminalPalette, type Theme } from '@zesterm/theme';
 import type { SessionEntry } from '@zesterm/control';
 
 import { wsDial } from '../ws-dial.ts';
-import { MONO_FAMILY } from '../chrome-model.ts';
+import { GRID_FONT_SIZE, MONO_FAMILY } from '../chrome-model.ts';
 import { currentTheme, themeStore } from '../state/theme.ts';
 import { NO_FOLDS, foldedFor, toggle, type FoldsState } from '../state/folds.ts';
 import {
   atShellPrompt,
+  copyOutputText,
+  linkOf,
   mostRecentBlockWithOutput,
   paneModel,
   type LinkHealth,
@@ -54,20 +56,6 @@ import { BlocksPane } from './BlocksPane.tsx';
  * so one shared map serves every session without cross-talk.
  */
 let folds: FoldsState = NO_FOLDS;
-
-/**
- * ConnectionState → link health, one mapping feeding two consumers: the pane
- * model (§4's degraded states) and the tab chip via onLink. connecting /
- * awaiting-approval / failed all read as stalled — a tab must not claim live
- * before the link ever existed, and a hard failure must not leave it frozen
- * in whatever it last showed. LinkHealth and LinkState share the same values
- * by design; delta-silence stall detection slots in here when it exists.
- */
-function linkOf(state: ConnectionState): LinkHealth & LinkState {
-  if (state.phase === 'connected') return 'live';
-  if (state.phase === 'reconnecting') return 'reconnecting';
-  return 'stalled';
-}
 
 export const TerminalView = component<{
   entry: SessionEntry;
@@ -101,7 +89,9 @@ export const TerminalView = component<{
    * the shell received nothing.
    */
   let inputEl: HTMLTextAreaElement | null = null;
+  let wrapEl: HTMLElement | null = null;
   let gridHooks: GridPaneHooks | null = null;
+  let sizeObserver: ResizeObserver | null = null;
   let unsubTheme: (() => void) | null = null;
   let ticker: ReturnType<typeof setInterval> | null = null;
 
@@ -171,6 +161,28 @@ export const TerminalView = component<{
   });
 
   onMounted(() => {
+    // The pty's size belongs HERE, not to a pane: the blocks mode is the
+    // default screen, and a session that never entered the alt screen would
+    // otherwise keep the directory's dims forever — COLUMNS frozen at a width
+    // unrelated to the visible pane, every command's output formatted for it.
+    // Grid metrics on purpose, in both modes: the alt screen must fit its
+    // canvas exactly, while the blocks body (same family, 12.5px) only gets
+    // narrower and wraps per invariant 11. Sized before connect() so the
+    // attach itself carries the measured dims rather than entry's.
+    const meas = document.createElement('canvas').getContext('2d');
+    if (meas !== null && wrapEl !== null) {
+      const m = measureMetrics(meas, MONO_FAMILY, GRID_FONT_SIZE, window.devicePixelRatio || 1);
+      const fit = (): void => {
+        if (wrapEl === null) return;
+        client.resize(
+          Math.max(2, Math.floor((wrapEl.clientWidth * m.dpr) / m.cellW)),
+          Math.max(1, Math.floor((wrapEl.clientHeight * m.dpr) / m.cellH)),
+        );
+      };
+      fit();
+      sizeObserver = new ResizeObserver(fit);
+      sizeObserver.observe(wrapEl);
+    }
     client.connect();
     // The blocks palette resolves at render time; a theme switch only needs
     // a re-render. GridPane rebuilds its own painter on the same event.
@@ -192,6 +204,7 @@ export const TerminalView = component<{
 
   onUnmounted(() => {
     if (ticker !== null) clearInterval(ticker);
+    sizeObserver?.disconnect();
     unsubTheme?.();
     client.close();
     document.title = 'zesterm';
@@ -204,9 +217,8 @@ export const TerminalView = component<{
   const copyOutput = (): void => {
     const target = mostRecentBlockWithOutput(sliceBlocks(client.grid));
     if (target === null) return;
-    const text = target.outputRows
-      .map((r) => rowText(expandRow(r, 0, client.grid.attrs)))
-      .join('\n');
+    // copyOutputText, not a '\n' join: `wrapped` rejoins soft-wrapped lines.
+    const text = copyOutputText(target.outputRows, client.grid.attrs);
     // writeText rejects in insecure contexts and on denied permission; an
     // unhandled rejection in the console for a copy that simply didn't take
     // helps nobody, and there is no toast surface yet to say more.
@@ -349,6 +361,9 @@ export const TerminalView = component<{
       <div class="terminal-view">
         <div
           class="term-wrap"
+          ref={(el: HTMLElement) => {
+            wrapEl = el;
+          }}
           onMouseDown={() => {
             // Clicking anywhere in the terminal focuses the hidden input —
             // preventDefault would break future selection, so focus rides the

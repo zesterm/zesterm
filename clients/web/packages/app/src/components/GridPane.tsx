@@ -1,9 +1,10 @@
 /**
  * The alt-screen pane: the canvas and its painter, extracted verbatim from
  * `TerminalView` when the primary screen became DOM blocks (#151). This
- * component owns pixels and sizing only — the `SessionClient`, the hidden
- * input textarea and the connection chrome stay in `TerminalView`, shared
- * with the blocks mode.
+ * component owns pixels only — the `SessionClient`, the hidden input
+ * textarea, the connection chrome AND the pty's size stay in `TerminalView`,
+ * shared with the blocks mode: a resize owned here would never fire on the
+ * primary screen, freezing COLUMNS at whatever the directory reported.
  *
  * Dirty rows arrive by registration rather than by prop: the client's
  * `onChange` fires per delta, and threading that through reactive props would
@@ -18,9 +19,7 @@ import { GridPainter, measureMetrics, type Metrics } from '@zesterm/render';
 import { resolveTerminalPalette, type Theme } from '@zesterm/theme';
 
 import { currentTheme, themeStore } from '../state/theme.ts';
-import { MONO_FAMILY } from '../chrome-model.ts';
-
-const FONT_SIZE = 13;
+import { GRID_FONT_SIZE, MONO_FAMILY } from '../chrome-model.ts';
 
 export interface GridPaneHooks {
   schedulePaint(dirty: DirtyRows): void;
@@ -60,18 +59,20 @@ export const GridPane = component<{
     });
   };
 
-  const sizeToWrapper = (): { cols: number; rows: number } | null => {
+  // Canvas bitmap only — the pty resize lives in TerminalView (one authority
+  // for both modes). Same family/size/formula, so the bitmap and the pty
+  // agree on cols/rows without this ever telling the client anything.
+  const sizeToWrapper = (): void => {
     const m = metrics;
     const el = wrapper;
     const c = canvas;
-    if (!m || !el || !c) return null;
+    if (!m || !el || !c) return;
     const cols = Math.max(2, Math.floor((el.clientWidth * m.dpr) / m.cellW));
     const rows = Math.max(1, Math.floor((el.clientHeight * m.dpr) / m.cellH));
     c.width = cols * m.cellW;
     c.height = rows * m.cellH;
     c.style.width = `${c.width / m.dpr}px`;
     c.style.height = `${c.height / m.dpr}px`;
-    return { cols, rows };
   };
 
   onMounted(() => {
@@ -82,7 +83,7 @@ export const GridPane = component<{
     if (!ctx2d) return;
 
     const dpr = window.devicePixelRatio || 1;
-    const m = measureMetrics(ctx2d, MONO_FAMILY, FONT_SIZE, dpr);
+    const m = measureMetrics(ctx2d, MONO_FAMILY, GRID_FONT_SIZE, dpr);
     metrics = m;
     // currentTheme, not the prop: the prop is `store.theme` captured once at
     // boot, so a view mounted after a setTheme would paint the grid in the
@@ -107,13 +108,11 @@ export const GridPane = component<{
         schedulePaint('all');
       }) ?? null;
 
-    const size = sizeToWrapper();
-    if (size) client.resize(size.cols, size.rows);
+    sizeToWrapper();
     ctx.props.register({ schedulePaint });
 
     observer = new ResizeObserver(() => {
-      const next = sizeToWrapper();
-      if (next) client.resize(next.cols, next.rows);
+      sizeToWrapper();
       schedulePaint('all');
     });
     observer.observe(el);
