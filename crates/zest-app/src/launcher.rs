@@ -15,7 +15,8 @@ use crate::tabs::ProfileIdentity;
 /// What one launcher row does, parallel to the drawn rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LauncherAction {
-    /// Launch this named profile (v1: its command on the window's route).
+    /// Launch this named profile: its command on the host its `host` key
+    /// pins (the window's route when it pins none — issue #175).
     Launch(String),
     /// The synthetic row of an empty profiles table: a plain default shell —
     /// exactly what ⌘T spawns.
@@ -42,11 +43,13 @@ pub(crate) fn profiles_root(settings: &Settings) -> toml::Table {
     root
 }
 
-/// The command a profile runs, resolved through Defaults; `None` falls
-/// through to `shell.command` (the launch path supplies that fallback).
+/// A profile's launch metadata — command, host, ask_host, directory —
+/// resolved through Defaults, exactly as the rows here were built. The
+/// launch path reads this so what a row *promised* (its command line, its
+/// host chip) and what launching it *does* come from one resolution.
 #[must_use]
-pub fn profile_command(settings: &Settings, name: &str) -> Option<String> {
-    profiles::resolve_profile(&profiles_root(settings), name).meta.command
+pub fn profile_meta(settings: &Settings, name: &str) -> profiles::ProfileMeta {
+    profiles::resolve_profile(&profiles_root(settings), name).meta
 }
 
 /// Build the menu: launch targets first (default row leading), then the
@@ -93,8 +96,10 @@ pub fn build_rows(
         let resolved = profiles::resolve_profile(&root, name);
         // The accent arrives on the row, resolved with the same truth table
         // the tab chips use — a launcher row should look like the tab it is
-        // about to become. Host slot 0 (the local machine) because v1
-        // launches ride the window's route.
+        // about to become. Host slot 0 because this builder is pure over
+        // Settings and the window's host→slot table lives with the chrome;
+        // the host itself is carried as text on the chip, which is the
+        // design's rule for origin anyway (text, never colour alone).
         let identity = ProfileIdentity::resolve(settings, name);
         rows.push(LauncherRow::Profile {
             name: name.clone(),
@@ -277,6 +282,49 @@ mod tests {
             ),
             other => panic!("expected a profile row, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn host_chips_appear_exactly_when_a_host_is_pinned() {
+        // The chip tells the truth about where the row launches (issue
+        // #175): a profile with a `host` key carries it — its own, or
+        // Defaults' when inherited — and a host-less profile carries none,
+        // because a chip naming a machine the launch will not use is the
+        // dead-affordance rule inverted.
+        let (rows, _) = build_rows(
+            &settings_with(&[
+                ("defaults", "host = \"studio\""),
+                ("pinned", "host = \"forge\""),
+                ("unpinned", "host = \"\""),
+            ]),
+            "sh",
+            None,
+            String::new(),
+        );
+        let chip = |name: &str| {
+            rows.iter()
+                .find_map(|r| match r {
+                    LauncherRow::Profile { name: n, host_label, .. } if n == name => {
+                        Some(host_label.clone())
+                    }
+                    _ => None,
+                })
+                .expect("row exists")
+        };
+        assert_eq!(chip("pinned").as_deref(), Some("forge"), "its own pin");
+        assert_eq!(
+            chip("unpinned").as_deref(),
+            Some("studio"),
+            "an empty host key is unset, so Defaults' pin falls through — the \
+             chip must say where the launch actually goes"
+        );
+
+        // And with no host anywhere, no chip at all.
+        let (rows, _) = build_rows(&settings_with(&[("plain", "")]), "sh", None, String::new());
+        assert!(
+            matches!(&rows[0], LauncherRow::Profile { host_label: None, .. }),
+            "no host key in the whole cascade: the row draws no chip"
+        );
     }
 
     #[test]

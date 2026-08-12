@@ -416,6 +416,26 @@ mod tests {
     }
 
     #[test]
+    fn a_create_sessions_cwd_crosses_the_wire_intact() {
+        // The profile launch path (issue #175) rides this field for
+        // `starting_directory` — it was already on the frame, so no growth
+        // was needed, but nothing pinned it. Through the real msgpack
+        // framing, not serde_json: `to_vec_named` is what the daemon
+        // decodes, and the path is deliberately opaque — `\\wsl$\...` is a
+        // path only the *host* can interpret, so any normalization here
+        // would be corruption.
+        let msg = ClientMessage::CreateSession {
+            command: "wsl.exe -d Ubuntu-24.04".to_string(),
+            cwd: r"\\wsl$\Ubuntu-24.04\home\andy".to_string(),
+            cols: 120,
+            rows: 34,
+        };
+        let body = crate::frame::encode_body(&msg).expect("encode");
+        let back: ClientMessage = crate::frame::decode(&body).expect("decode");
+        assert_eq!(msg, back, "command, cwd and size all survive the frame");
+    }
+
+    #[test]
     fn an_unknown_field_does_not_break_an_older_peer() {
         // A fleet is never upgraded atomically: the phone updates through an app
         // store and the Mac daemon whenever someone remembers. A newer host

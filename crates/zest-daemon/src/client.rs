@@ -275,6 +275,7 @@ impl DaemonClient {
     pub fn open_session(
         &mut self,
         command: &str,
+        cwd: &str,
         cols: u16,
         rows: u16,
         adopt: bool,
@@ -284,7 +285,7 @@ impl DaemonClient {
             adopt.then(|| existing.iter().rev().find(|s| !s.attached).map(|s| s.addr)).flatten();
         match adopted {
             Some(addr) => Ok(addr),
-            None => self.create(command, "", cols, rows),
+            None => self.create(command, cwd, cols, rows),
         }
     }
 

@@ -85,6 +85,12 @@ pub struct AttachOptions<'a> {
     pub label: &'a str,
     /// Empty means the host's default shell.
     pub command: &'a str,
+    /// Working directory for a session this attach *creates*; empty inherits
+    /// the daemon's. Resolved on the host that runs the profile — it may name
+    /// a path this machine has never heard of (design §12), which is why it
+    /// travels as an opaque string. Ignored when adopting or attaching to an
+    /// existing session: those already have one.
+    pub cwd: &'a str,
     pub cols: u16,
     pub rows: u16,
     pub scrollback: usize,
@@ -255,6 +261,7 @@ impl RemoteSession {
             identity,
             label,
             command,
+            cwd,
             cols,
             rows,
             scrollback,
@@ -270,9 +277,9 @@ impl RemoteSession {
         let (read, write) = dial()?;
         let mut conn = DaemonClient::connect(read, write, identity, label, expect_host, false)?;
         let addr = match target {
-            Target::Open => conn.open_session(command, cols, rows, adopt)?,
+            Target::Open => conn.open_session(command, cwd, cols, rows, adopt)?,
             Target::Existing(a) => a,
-            Target::Create => conn.create(command, "", cols, rows)?,
+            Target::Create => conn.create(command, cwd, cols, rows)?,
         };
         let (keyframe_seq, keyframe) = conn.attach(addr, cols, rows)?;
         let host_label = conn.host_label().to_string();
@@ -369,6 +376,7 @@ impl RemoteSession {
             let identity = Arc::clone(identity);
             let label = label.to_string();
             let command = command.to_string();
+            let cwd = cwd.to_string();
             let addr_cell = Arc::clone(&addr_cell);
             std::thread::Builder::new()
                 .name("zest-remote-reader".into())
@@ -588,7 +596,7 @@ impl RemoteSession {
                                 // be typed into again, rather than one that
                                 // never recovers.
                                 Rebind::AdoptOrCreate => conn
-                                    .open_session(&command, cols, rows, true)
+                                    .open_session(&command, &cwd, cols, rows, true)
                                     .and_then(|fresh| {
                                         addr = fresh;
                                         *addr_cell.lock() = fresh;
@@ -1046,6 +1054,7 @@ mod tests {
                     identity: &identity,
                     label: "test",
                     command,
+                    cwd: "",
                     cols: 40,
                     rows: 6,
                     scrollback: 100,
@@ -1251,6 +1260,7 @@ mod tests {
                 identity: &identity,
                 label: "test",
                 command: "/bin/sh",
+                cwd: "",
                 cols: 40,
                 rows: 6,
                 scrollback: 100,
@@ -1562,6 +1572,7 @@ mod tests {
                 identity: &identity,
                 label: "test",
                 command: "",
+                cwd: "",
                 cols: 40,
                 rows: 6,
                 scrollback: 100,
@@ -1625,6 +1636,7 @@ mod tests {
                 identity: &identity,
                 label: "test",
                 command: "",
+                cwd: "",
                 cols: 40,
                 rows: 6,
                 scrollback: 100,
@@ -1667,6 +1679,7 @@ mod tests {
             identity,
             label: "test",
             command: "/bin/sh",
+            cwd: "",
             cols: 40,
             rows: 6,
             scrollback: 100,
