@@ -61,6 +61,7 @@ pub const KEYS: &[(&str, Invalidation)] = &[
     ("typography.families", Invalidation::Geometry),
     ("typography.size_pt", Invalidation::Geometry),
     ("typography.line_height", Invalidation::Geometry),
+    ("typography.cell_width", Invalidation::Geometry),
     ("typography.letter_spacing", Invalidation::Geometry),
     // Features change which glyphs are chosen, not how large a cell is.
     ("typography.features", Invalidation::AtlasBump),

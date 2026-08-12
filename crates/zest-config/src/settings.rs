@@ -96,6 +96,20 @@ pub struct Typography {
     #[schemars(range(min = 0.5, max = 3.0))]
     #[schemars(extend("x_zest_group" = "Text", "x_zest_widget" = "number"))]
     pub line_height: f32,
+    /// Cell width as a multiple of the font size. `0` uses the font's own.
+    ///
+    /// Stated against the size rather than against the face's natural advance,
+    /// which is how Windows Terminal states it — most monospace faces sit near
+    /// 0.6. Use it to tighten or loosen the grid without changing the type
+    /// size, or to make two fonts occupy the same columns.
+    ///
+    /// `0` means "whatever this face says", which is the only sane default: the
+    /// right absolute number depends on the font, so a fixed one would be wrong
+    /// for every face but the one it was chosen against. Geometry — changing it
+    /// changes how many columns fit, and resizes the pty.
+    #[schemars(range(min = 0.0, max = 2.0))]
+    #[schemars(extend("x_zest_group" = "Text", "x_zest_widget" = "number"))]
+    pub cell_width: f32,
     /// Extra space between cells, in pixels. Also geometry.
     #[schemars(range(min = -5.0, max = 20.0))]
     #[schemars(extend("x_zest_group" = "Text", "x_zest_widget" = "number"))]
@@ -144,6 +158,7 @@ impl Default for Typography {
             .collect(),
             size_pt: 12.0,
             line_height: 1.25,
+            cell_width: 0.0,
             letter_spacing: 0.0,
             features: Vec::new(),
             ligatures: false,

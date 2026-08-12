@@ -101,6 +101,7 @@ impl From<&zest_config::Settings> for Config {
                 // `f32::clamp` in the metrics code as a panic.
                 size_pt: s.typography.size_pt.clamp(4.0, 144.0),
                 line_height: s.typography.line_height.clamp(0.5, 3.0),
+                cell_width: s.typography.cell_width.clamp(0.0, 2.0),
                 letter_spacing: s.typography.letter_spacing.clamp(-5.0, 20.0),
                 ..Default::default()
             },

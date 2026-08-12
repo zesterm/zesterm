@@ -299,10 +299,15 @@ pub fn adjust(
         Widget::FontList => {
             // A font *stack*, and only the first entry is a choice: the rest
             // are the fallbacks that stop a missing glyph becoming tofu, and
-            // cycling those would be meaningless. So step the primary and keep
-            // the tail — including keeping the old primary in it, so switching
-            // away from a face that had the only copy of some glyph does not
-            // silently lose it.
+            // cycling those would be meaningless. Replace the primary; leave
+            // the tail exactly as it was.
+            //
+            // The tail must not grow. Keeping the face just stepped off looks
+            // considerate -- it might hold the only copy of some glyph -- and
+            // is wrong: every press appends, so walking the picker across an
+            // installed set once leaves ninety families in the fallback chain,
+            // in visit order, with script and display faces among them. Seen in
+            // a real config after one pass.
             if fonts.is_empty() {
                 return None;
             }
@@ -316,7 +321,7 @@ pub fn adjust(
             let chosen = fonts[next].clone();
 
             let mut out = vec![chosen.clone()];
-            out.extend(list.into_iter().filter(|f| *f != chosen));
+            out.extend(list.into_iter().skip(1).filter(|f| *f != chosen));
             Some(serde_json::Value::Array(
                 out.into_iter().map(serde_json::Value::String).collect(),
             ))
@@ -842,12 +847,24 @@ mod tests {
         let next = adjust(&f, &current, 1, &[], &fonts).expect("cycles");
         let got: Vec<&str> = next.as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
 
-        assert_eq!(got[0], "Meslo LG M", "the primary steps to the next installed family");
-        assert!(
-            got.contains(&"Consolas") && got.contains(&"Cascadia Mono"),
-            "and the fallbacks survive, including the face we just stepped off --              dropping them turns one missing glyph into tofu, got {got:?}"
-        );
-        assert_eq!(got.len(), 3, "no duplicates: {got:?}");
+        assert_eq!(got, ["Meslo LG M", "Consolas"], "primary steps, fallbacks stay put");
+    }
+
+    #[test]
+    fn cycling_the_font_picker_never_grows_the_stack() {
+        // It did. Keeping the face just stepped off looks considerate and
+        // appends on every press, so one pass across an installed set left
+        // ninety families in a real config -- Curlz MT among the fallbacks.
+        let fonts: Vec<String> =
+            (0..30).map(|i| format!("Face {i}")).collect();
+        let f = field("typography.families");
+        let mut v = serde_json::json!(["Face 0", "Consolas", "monospace"]);
+        for _ in 0..60 {
+            v = adjust(&f, &v, 1, &[], &fonts).expect("cycles");
+        }
+        let got: Vec<&str> = v.as_array().unwrap().iter().filter_map(|s| s.as_str()).collect();
+        assert_eq!(got.len(), 3, "the tail is fixed, not a history: {got:?}");
+        assert_eq!(&got[1..], ["Consolas", "monospace"], "and it is the original tail");
     }
 
     #[test]

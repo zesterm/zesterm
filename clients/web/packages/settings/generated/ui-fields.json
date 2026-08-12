@@ -399,6 +399,20 @@
     "restartHint": false
   },
   {
+    "key": "typography.cell_width",
+    "group": "Text",
+    "widget": "number",
+    "description": "Cell width as a multiple of the font size. `0` uses the font's own.\n\nStated against the size rather than against the face's natural advance,\nwhich is how Windows Terminal states it — most monospace faces sit near\n0.6. Use it to tighten or loosen the grid without changing the type\nsize, or to make two fonts occupy the same columns.\n\n`0` means \"whatever this face says\", which is the only sane default: the\nright absolute number depends on the font, so a fixed one would be wrong\nfor every face but the one it was chosen against. Geometry — changing it\nchanges how many columns fit, and resizes the pty.",
+    "range": [
+      0.0,
+      2.0
+    ],
+    "integer": false,
+    "variants": [],
+    "default": 0.0,
+    "restartHint": false
+  },
+  {
     "key": "typography.families",
     "group": "Text",
     "widget": "font-list",

@@ -28,8 +28,15 @@ pub struct Typography {
     pub line_height: f32,
     /// Extra horizontal space per cell, in logical pixels. May be negative.
     pub letter_spacing: f32,
-    /// Multiplier on the natural advance width. Rarely wanted, but some fonts
-    /// are too tight or too loose for a grid.
+    /// Cell advance as a multiple of the font size, or `0.0` for the font's own.
+    ///
+    /// A multiple of the *size* rather than of the font's natural advance,
+    /// which is how Windows Terminal states it and therefore the number a user
+    /// comparing the two already has. Most monospace faces sit near 0.6.
+    ///
+    /// `0.0` means "whatever this face says", which is the only sane default:
+    /// the right absolute number depends on the font, so a fixed one would be
+    /// wrong for every face but the one it was picked against.
     pub cell_width: f32,
     /// Physical pixels per logical pixel.
     pub scale_factor: f32,
@@ -41,7 +48,7 @@ impl Default for Typography {
             size_pt: 12.0,
             line_height: 1.2,
             letter_spacing: 0.0,
-            cell_width: 1.0,
+            cell_width: 0.0,
             scale_factor: 1.0,
         }
     }
@@ -92,7 +99,12 @@ impl CellMetrics {
         let cell_h = (natural_h * typo.line_height).round().max(1.0);
 
         let letter_spacing_px = typo.letter_spacing * typo.scale_factor;
-        let cell_w = (advance * typo.cell_width + letter_spacing_px).round().max(1.0);
+        // An override replaces the face's advance rather than scaling it, so
+        // the number means the same thing whichever font is loaded -- which is
+        // the point of stating it against the size.
+        let advance =
+            if typo.cell_width > 0.0 { typo.size_px() * typo.cell_width } else { advance };
+        let cell_w = (advance + letter_spacing_px).round().max(1.0);
 
         // Split the leftover evenly so the text sits centred in the cell.
         let extra = cell_h - natural_h;
@@ -179,6 +191,35 @@ mod tests {
         let cm = CellMetrics::derive(&metrics(), 10.0, &typo);
         assert_eq!(cm.cell_h, 30);
         assert_eq!(cm.baseline, 21, "half the extra space goes above the text");
+    }
+
+    #[test]
+    fn cell_width_is_stated_against_the_font_size_not_the_face() {
+        // The number a user brings from Windows Terminal has to mean the same
+        // thing here, or "0.6" is a different width in each application.
+        let m = metrics();
+        let typo = Typography { size_pt: 12.0, cell_width: 0.6, ..Default::default() };
+        let px = typo.size_px();
+        // A face whose natural advance is nothing like 0.6 of the size: the
+        // override must ignore it entirely rather than scale it.
+        let wide = CellMetrics::derive(&m, px * 1.4, &typo);
+        let narrow = CellMetrics::derive(&m, px * 0.2, &typo);
+        assert_eq!(wide.cell_w, narrow.cell_w, "the face's own advance stops mattering");
+        assert_eq!(
+            wide.cell_w,
+            (px * 0.6).round() as u32,
+            "0.6 means 0.6 of the font size, as Windows Terminal states it"
+        );
+    }
+
+    #[test]
+    fn zero_cell_width_keeps_the_faces_own_advance() {
+        // The default, and the only sane one: the right absolute number depends
+        // on the font, so a fixed default would be wrong for every face but one.
+        let m = metrics();
+        let typo = Typography { cell_width: 0.0, ..Default::default() };
+        assert_eq!(CellMetrics::derive(&m, 9.0, &typo).cell_w, 9);
+        assert_eq!(CellMetrics::derive(&m, 13.0, &typo).cell_w, 13);
     }
 
     #[test]
