@@ -14,7 +14,7 @@ use zest_config::settings::TabsPosition;
 use zest_render_wgpu::{LinearRgba, RectInstance};
 
 use super::hit::{CaptionButton, ChromeHitMap, HitRegion, ResizeEdge};
-use super::model::{ChromeMetrics, ChromeModel, TabModel, TabOrigin, TabPresence};
+use super::model::{ChromeMetrics, ChromeModel, LinkKind, TabKind, TabPresence};
 use super::theme::ChromeColors;
 
 /// One run of UI text, to be shaped and emitted at redraw.
@@ -71,14 +71,26 @@ pub struct ChromeLayout {
 // are the design handoff's (docs/design/client-ui/README.md) — change them
 // there first or not at all.
 const TAB_H: f32 = 34.0;
-const TAB_MIN: f32 = 196.0;
-const TAB_MAX: f32 = 240.0;
+/// Chips stop shrinking here; past it the strip scrolls. Below 104 the
+/// label degrades to a single letter (design §1).
+const TAB_MIN: f32 = 104.0;
+/// Hard ceiling on any chip — in practice only a content-sized app tab with
+/// a long label can reach for it, since session chips never grow past basis.
+const TAB_MAX: f32 = 232.0;
+/// The preferred chip width (the mock's `flex: 0 1 168px`): chips shrink
+/// from here, they never grow past it.
+const TAB_BASIS: f32 = 168.0;
 const TAB_GAP: f32 = 3.0;
 const TAB_PAD: f32 = 11.0;
 const TAB_INNER_GAP: f32 = 9.0;
 const TAB_RADIUS: f32 = 9.0;
 const ACCENT_RULE: f32 = 2.0;
 const DOT: f32 = 6.0;
+/// The chip's rounded glyph tile: the profile's icon in the tab's colour on
+/// a 12%-alpha wash of it (design §1). The icon itself is a placeholder dot
+/// until profiles land — position and size are what this pins.
+const TILE: f32 = 18.0;
+const TILE_RADIUS: f32 = 5.0;
 const TEXT_PAD: f32 = 8.0;
 const RADIUS: f32 = 6.0;
 const CLOSE: f32 = 16.0;
@@ -107,21 +119,17 @@ const CAPTION_X: f32 = 15.0;
 const RESIZE_BAND: f32 = 5.0;
 const ROW_HPAD: f32 = 8.0;
 // Sidebar (design screen 2).
-const SIDEBAR_HEADER: f32 = 44.0;
 const SEARCH_PAD: f32 = 10.0;
 const SEARCH_H: f32 = 30.0;
 const GROUP_HEADER_H: f32 = 26.0;
 const GROUP_GAP: f32 = 14.0;
 const SIDE_ROW_H: f32 = 44.0;
 const FOOTER_H: f32 = 42.0;
-/// Public because `insets_at` must reserve it above the grid, exactly as it
-/// reserves the strip: a bar the grid does not know about paints over row 0.
-pub const SLIM_BAR_H: f32 = 44.0;
+/// The vertical layout's full-width header row (design §2). Public because
+/// `insets_at` must reserve it above the grid, exactly as it reserves the
+/// strip: a bar the grid does not know about paints over row 0.
+pub const HEADER_H: f32 = 46.0;
 const SLIM_PAD: f32 = 14.0;
-
-/// The status bar's height, logical pixels. Public because `insets_at` must
-/// subtract it from the grid.
-pub const STATUS_H: f32 = 28.0;
 
 // Split panes (design screen 5). Public because the app's viewport math and
 // the chrome's frame drawing must be the same numbers or the border misses
@@ -153,12 +161,10 @@ pub fn pane_body(frame: [f32; 4], s: f32) -> [f32; 4] {
         (frame[3] - PANE_HEADER * s - b).max(0.0),
     ]
 }
-const STATUS_HPAD: f32 = 14.0;
 
 // The design's type scale, logical px.
 const UI_BODY: f32 = 12.5;
 const UI_SMALL: f32 = 11.0;
-const UI_TAB_SUB: f32 = 9.5;
 const UI_CHORD: f32 = 10.0;
 const UI_STATUS: f32 = 10.5;
 
@@ -182,6 +188,13 @@ fn host_accent(colors: &ChromeColors, slot: usize) -> LinearRgba {
 /// with radius d/2.
 fn dot(rects: &mut Vec<RectInstance>, cx: f32, cy: f32, d: f32, color: LinearRgba, clip: [f32; 4]) {
     rects.push(RectInstance::rounded([cx - d / 2.0, cy - d / 2.0, d, d], d / 2.0, color, clip));
+}
+
+/// The colour at a fraction of its own alpha. Colours here are premultiplied,
+/// so scaling every channel is the correct alpha multiply — the glyph tile's
+/// 12% wash is its ink through this.
+fn washed(c: LinearRgba, f: f32) -> LinearRgba {
+    LinearRgba([c.0[0] * f, c.0[1] * f, c.0[2] * f, c.0[3] * f])
 }
 
 pub fn layout(
@@ -1469,24 +1482,6 @@ fn settings_overlay(
     }
 }
 
-/// The origin/presence pill's label, or `None` for a plain local tab.
-///
-/// Presence is *words*, not colour alone: "acting on the wrong machine" is
-/// the mistake this UI exists to prevent, and "which machine" must survive
-/// any theme.
-fn pill_label(tab: &TabModel) -> Option<(String, bool)> {
-    match (&tab.origin, tab.presence) {
-        (TabOrigin::Local, _) => None,
-        (TabOrigin::Remote { host_label }, TabPresence::Unreachable) => {
-            Some((format!("{host_label} · unreachable"), true))
-        }
-        (TabOrigin::Remote { host_label }, TabPresence::Away) => {
-            Some((format!("{host_label} · away"), false))
-        }
-        (TabOrigin::Remote { host_label }, _) => Some((host_label.clone(), false)),
-    }
-}
-
 fn intersect(r: [f32; 4], c: [f32; 4]) -> Option<[f32; 4]> {
     let x0 = r[0].max(c[0]);
     let y0 = r[1].max(c[1]);
@@ -1522,12 +1517,14 @@ fn horizontal(
     let reserve = model.controls.native_leading.map_or(BAR_PAD * s, |t| t[0] + TRAFFIC_PAD * s);
     out.hit.push([0.0, 0.0, reserve, sh], HitRegion::Drag);
 
-    // Right side first: the pills have intrinsic widths, the tabs take what
-    // remains. Two pills — "(chord) Vertical" and the palette's "(chord)" —
-    // 26px tall, hairline border that turns accent under the pointer.
+    // Right side first: the pill has an intrinsic width, the tabs take what
+    // remains. One pill — the palette's "(chord)" — 26px tall, hairline
+    // border that turns accent under the pointer. The layout toggle is gone
+    // from the chrome (design §1): `tabs.position` is a setting, and a button
+    // duplicating a setting is a second source of truth.
     //
     // The caption cluster, when we draw one, is further right still and the
-    // pills start from where it ends. Both are right-aligned, so laying them
+    // pill starts from where it ends. Both are right-aligned, so laying them
     // out independently is how they would come to overlap.
     let pill_y = (sh - PILL_H * s) / 2.0;
     let caption_left = caption_cluster(&mut out, colors, model, [0.0, 0.0, m.width, sh], s, measure);
@@ -1548,64 +1545,90 @@ fn horizontal(
             bold: false,
             tracking: 0.0,
         });
-        right = rect[0] - PILL_GAP * s;
-    }
-    {
-        let label = if model.position == TabsPosition::Top { "Vertical" } else { "Horizontal" };
-        let chord_w = measure(&model.toggle_chord, UI_CHORD * s, false, 0.0);
-        let label_w = measure(label, UI_SMALL * s, false, 0.0);
-        let w = chord_w + PILL_GAP * s + label_w + 2.0 * PILL_PAD * s;
-        let rect = [right - w, pill_y, w, PILL_H * s];
-        let hovered = model.hover == Some(HitRegion::LayoutPill);
-        pill_button(&mut out.rects, colors, rect, PILL_RADIUS * s, hovered, no_clip);
-        out.hit.push(rect, HitRegion::LayoutPill);
-        let color = if hovered { colors.text_active } else { colors.text_inactive };
-        out.texts.push(TextRun {
-            text: model.toggle_chord.clone(),
-            pos: [rect[0] + PILL_PAD * s, baseline_in(pill_y, PILL_H * s, UI_CHORD * s)],
-            max_width: chord_w + 2.0,
-            color,
-            clip: no_clip,
-            px: UI_CHORD * s,
-            bold: false,
-            tracking: 0.0,
-        });
-        out.texts.push(TextRun {
-            text: label.into(),
-            pos: [
-                rect[0] + PILL_PAD * s + chord_w + PILL_GAP * s,
-                baseline_in(pill_y, PILL_H * s, UI_SMALL * s),
-            ],
-            max_width: label_w + 2.0,
-            color,
-            clip: no_clip,
-            px: UI_SMALL * s,
-            bold: false,
-            tracking: 0.0,
-        });
         right = rect[0] - BAR_PAD * s;
     }
 
     let avail = (right - reserve).max(0.0);
-    // Chips reach the strip's bottom edge and cover the hairline there, so
-    // the active tab's fill meets the pane with nothing drawn between them.
-    let clip = [reserve, 0.0, avail, sh];
     let chip_y = sh - TAB_H * s;
 
-    let n = model.tabs.len();
     let gap = TAB_GAP * s;
     let new_tab_w = NEW_TAB_W * s;
-    let tab_w = if n == 0 {
-        0.0
-    } else {
-        ((avail - new_tab_w - n as f32 * gap) / n as f32).clamp(TAB_MIN * s, TAB_MAX * s)
-    };
-    let content_w = n as f32 * (tab_w + gap) + new_tab_w;
-    let max_scroll = (content_w - avail).max(0.0);
-    out.strip_scroll = model.strip_scroll.clamp(0.0, max_scroll);
+    // The `+` sits *outside* the scrolled row (design §1: "the launcher must
+    // sit outside the scrolling row or its menu is clipped"), so the row's
+    // viewport ends where the button's slot begins.
+    // No extra gap subtracted: content_w already carries a trailing gap per
+    // chip, so that is what separates the last chip from the `+` — taking a
+    // second one here left the button a gap short of the strip's right edge
+    // whenever the row overflowed.
+    let viewport = (avail - new_tab_w).max(0.0);
 
+    // Widths per chip. App tabs (Settings, Profiles) size to their content;
+    // session chips share what is left at the 168px basis, shrink to the
+    // 104px floor, and past that the row scrolls rather than crushing —
+    // which is what makes the #51 class of overlap impossible.
+    let widths: Vec<f32> = {
+        let mut app_total = 0.0;
+        let mut sessions = 0usize;
+        let natural: Vec<f32> = model
+            .tabs
+            .iter()
+            .map(|tab| match tab.kind {
+                TabKind::Session => {
+                    sessions += 1;
+                    0.0
+                }
+                TabKind::Settings | TabKind::Profiles => {
+                    let label_w = measure(&tab.title, UI_BODY * s, false, 0.0);
+                    let w = (2.0 * TAB_PAD * s
+                        + TILE * s
+                        + TAB_INNER_GAP * s
+                        + label_w)
+                        .min(TAB_MAX * s);
+                    app_total += w;
+                    w
+                }
+            })
+            .collect();
+        let n = model.tabs.len();
+        let share = if sessions == 0 {
+            0.0
+        } else {
+            (viewport - app_total - n as f32 * gap) / sessions as f32
+        };
+        let session_w = share.clamp(TAB_MIN * s, TAB_BASIS * s);
+        natural.into_iter().map(|w| if w == 0.0 { session_w } else { w }).collect()
+    };
+    let content_w: f32 = widths.iter().map(|w| w + gap).sum();
+    let max_scroll = (content_w - viewport).max(0.0);
+    let mut scroll = model.strip_scroll.clamp(0.0, max_scroll);
+
+    // Activation must never land on a chip the user cannot see — the
+    // picker's ensure-visible discipline, applied to the strip.
+    if model.ensure_active_visible {
+        if let Some(active_w) = widths.get(model.active) {
+            let x0: f32 = widths[..model.active].iter().map(|w| w + gap).sum();
+            let x1 = x0 + active_w;
+            if x0 < scroll {
+                scroll = x0;
+            } else if x1 > scroll + viewport {
+                scroll = x1 - viewport;
+            }
+            scroll = scroll.clamp(0.0, max_scroll);
+        }
+    }
+    out.strip_scroll = scroll;
+
+    // Chips reach the strip's bottom edge and cover the hairline there, so
+    // the active tab's fill meets the pane with nothing drawn between them.
+    // They clip at the row's viewport, not the whole strip: a scrolled chip
+    // must not slide under the `+`.
+    let clip = [reserve, 0.0, viewport, sh];
+
+    let mut chip_x = reserve - out.strip_scroll;
     for (i, tab) in model.tabs.iter().enumerate() {
-        let x = reserve + i as f32 * (tab_w + gap) - out.strip_scroll;
+        let tab_w = widths[i];
+        let x = chip_x;
+        chip_x += tab_w + gap;
         let chip = [x, chip_y, tab_w, TAB_H * s];
 
         let active = i == model.active;
@@ -1678,21 +1701,42 @@ fn horizontal(
             out.hit.push(hit, HitRegion::Tab(tab.addr));
         }
 
-        // Host dot: the machine's accent on the active tab, faint otherwise.
-        let dot_color = if active { host_accent(colors, tab.accent) } else { colors.text_faint };
+        // The glyph tile: the tab's colour on a 12%-alpha wash of itself,
+        // faint with no wash when inactive. Link degradation surfaces here —
+        // the one fact the deleted status bar owned alone — as warn (stalled)
+        // or danger (reconnecting) ink, active or not: a background tab that
+        // is quietly buffering must still say so. App tabs are places, not
+        // shells: no wash, no link, faint until active.
+        let tile = [
+            x + TAB_PAD * s,
+            chip_y + (TAB_H - TILE) * s / 2.0,
+            TILE * s,
+            TILE * s,
+        ];
+        let ink = match (tab.kind, tab.link) {
+            (TabKind::Session, LinkKind::Stalled) => colors.warn,
+            (TabKind::Session, LinkKind::Reconnecting) => colors.danger,
+            _ if active => host_accent(colors, tab.accent),
+            _ => colors.text_faint,
+        };
+        if active && tab.kind == TabKind::Session {
+            out.rects.push(RectInstance::rounded(tile, TILE_RADIUS * s, washed(ink, 0.12), clip));
+        }
+        // The icon is a placeholder dot until profiles carry real glyphs;
+        // the tile's box is what the design fixes (§Assets).
         dot(
             &mut out.rects,
-            x + TAB_PAD * s + DOT * s / 2.0,
-            chip_y + TAB_H * s / 2.0,
+            tile[0] + tile[2] / 2.0,
+            tile[1] + tile[3] / 2.0,
             DOT * s,
-            dot_color,
+            ink,
             clip,
         );
 
-        // Every tab carries its close affordance, as the mock draws it; only
-        // its hover treatment is conditional.
-        let text_right;
-        {
+        // Session chips carry their close affordance, as the mock draws it;
+        // app tabs do not — closing Settings is closing a tab, but from its
+        // own chrome, not from a chip × it never shows.
+        let text_right = if tab.kind == TabKind::Session {
             let close_hovered = model.hover == Some(HitRegion::TabClose(tab.addr));
             let close =
                 [x + tab_w - TAB_PAD * s - CLOSE * s, chip_y + (TAB_H * s - CLOSE * s) / 2.0, CLOSE * s, CLOSE * s];
@@ -1712,23 +1756,33 @@ fn horizontal(
                 max_width: close[2],
                 color: if close_hovered { colors.text_active } else { colors.text_faint },
                 clip,
-            px: UI_BODY * s,
-            bold: false,
-            tracking: 0.0,
+                px: UI_BODY * s,
+                bold: false,
+                tracking: 0.0,
             });
-            text_right = close[0] - TAB_INNER_GAP * s;
-        }
+            close[0] - TAB_INNER_GAP * s
+        } else {
+            x + tab_w - TAB_PAD * s
+        };
 
-        // Two stacked lines: the title, then `host \u{b7} cwd` in mono-small.
-        let text_x = x + TAB_PAD * s + DOT * s + TAB_INNER_GAP * s;
+        // The title only (design §1): host and cwd were a second line once,
+        // and a 34px chip made them unreadable at 9.5px. They live in the
+        // vertical sidebar and header now. Unreachability still gets words,
+        // not colour alone (#23) — appended to the one line that remains.
+        let text_x = tile[0] + TILE * s + TAB_INNER_GAP * s;
+        let title = if tab.presence == TabPresence::Unreachable {
+            format!("{} · unreachable", tab.title)
+        } else {
+            tab.title.clone()
+        };
         let title_color = match (active, model.focused, tab.connecting) {
             (_, _, true) => colors.text_faint,
             (true, true, _) => colors.text_active,
             _ => colors.text_inactive,
         };
         out.texts.push(TextRun {
-            text: tab.title.clone(),
-            pos: [text_x, chip_y + 14.5 * s],
+            text: title,
+            pos: [text_x, baseline_in(chip_y, TAB_H * s, UI_BODY * s)],
             max_width: (text_right - text_x).max(0.0),
             color: title_color,
             clip,
@@ -1736,32 +1790,17 @@ fn horizontal(
             bold: false,
             tracking: 0.0,
         });
-        // Unreachability is words, not colour alone (#23): the sub-line says
-        // it, in warn, where the host's name already lives.
-        let (sub, sub_color) = if tab.presence == TabPresence::Unreachable {
-            (format!("{} · unreachable", tab.detail()), colors.pill_warn_text)
-        } else {
-            (tab.detail(), colors.text_faint)
-        };
-        out.texts.push(TextRun {
-            text: sub,
-            pos: [text_x, chip_y + 27.0 * s],
-            max_width: (text_right - text_x).max(0.0),
-            color: sub_color,
-            clip,
-            px: UI_TAB_SUB * s,
-            bold: false,
-            tracking: 0.0,
-        });
     }
 
-    // The new-tab button trails the last tab and scrolls with the content.
-    let nt_x = reserve + n as f32 * (tab_w + gap) - out.strip_scroll;
+    // The new-tab button sits after the scrolled row and outside its scroll
+    // offset: its future menu must never be clipped by the row, and it must
+    // never leave the strip however many tabs are open.
+    let nt_x = reserve + content_w.min(viewport);
     let nt = [nt_x, chip_y + (TAB_H * s - NEW_TAB_H * s) / 2.0, NEW_TAB_W * s, NEW_TAB_H * s];
     if model.hover == Some(HitRegion::NewTab) {
-        out.rects.push(RectInstance::rounded(nt, PILL_RADIUS * s, colors.tab_hover_bg, clip));
+        out.rects.push(RectInstance::rounded(nt, PILL_RADIUS * s, colors.tab_hover_bg, no_clip));
     }
-    if let Some(hit) = intersect(nt, clip) {
+    if let Some(hit) = intersect(nt, [reserve, 0.0, avail, sh]) {
         out.hit.push(hit, HitRegion::NewTab);
     }
     let plus_w = measure("+", 16.0 * s, false, 0.0);
@@ -1770,10 +1809,10 @@ fn horizontal(
         pos: [nt[0] + (nt[2] - plus_w) / 2.0, baseline_in(nt[1], nt[3], 16.0 * s)],
         max_width: nt[2],
         color: colors.text_inactive,
-        clip,
+        clip: [reserve, 0.0, avail, sh],
         px: 16.0 * s,
         bold: false,
-            tracking: 0.0,
+        tracking: 0.0,
     });
 
     // Whatever the content does not cover is a drag handle, like any titlebar.
@@ -1782,7 +1821,6 @@ fn horizontal(
         out.hit.push([drag_from, 0.0, right - drag_from, sh], HitRegion::Drag);
     }
 
-    status_bar(model, colors, m, measure, 0.0, &mut out);
     out
 }
 
@@ -1801,98 +1839,6 @@ fn pill_button(
         border_width: HAIRLINE * rect[3] / PILL_H, // 1px at the pill's own scale
         ..RectInstance::filled(rect, LinearRgba::TRANSPARENT, clip)
     });
-}
-
-/// The 28px status bar (design screen 1): cwd, branch and block count on the
-/// left; theme and the link segment on the right. `x0` is where the bar
-/// starts — 0 under a top strip, the sidebar's edge in the vertical layout.
-fn status_bar(
-    model: &ChromeModel,
-    colors: &ChromeColors,
-    m: &ChromeMetrics,
-    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
-    x0: f32,
-    out: &mut ChromeLayout,
-) {
-    let Some(st) = model.status.as_ref() else { return };
-    let s = m.scale;
-    let h = STATUS_H * s;
-    let y = m.height - h;
-    let no_clip = [0.0, 0.0, m.width, m.height];
-    let bar = [x0, y, m.width - x0, h];
-    out.rects.push(RectInstance::filled(bar, colors.strip_bg, no_clip));
-    out.rects.push(RectInstance::filled(
-        [x0, y, m.width - x0, HAIRLINE * s],
-        colors.hairline_soft,
-        no_clip,
-    ));
-    out.hit.push(bar, HitRegion::Status);
-
-    let px = UI_STATUS * s;
-    let base = baseline_in(y, h, px);
-
-    // Right side first, so the left knows where it must stop.
-    let (link_text, link_color) = match st.link {
-        super::model::LinkKind::Loopback => ("\u{25cf} loopback", colors.success),
-        super::model::LinkKind::Lan => ("\u{25cf} LAN direct", colors.success),
-        super::model::LinkKind::Tunnel => ("\u{25cf} tunnel", colors.warn),
-        super::model::LinkKind::Stalled => ("\u{25cf} buffering", colors.warn),
-        super::model::LinkKind::Reconnecting => ("\u{25cf} reconnecting", colors.danger),
-    };
-    let latency = st.latency_ms.map(format_ms);
-    let mut right_runs: Vec<(String, LinearRgba)> =
-        vec![(st.theme.clone(), colors.text_faint), (" \u{b7} ".into(), colors.text_faint)];
-    right_runs.push((link_text.into(), link_color));
-    if let Some(ms) = latency {
-        right_runs.push((format!(" {ms}"), colors.text_faint));
-    }
-    let right_w: f32 = right_runs.iter().map(|(t, _)| measure(t, px, false, 0.0)).sum();
-    let mut x = m.width - STATUS_HPAD * s - right_w;
-    let right_start = x;
-    for (text, color) in right_runs {
-        let w = measure(&text, px, false, 0.0);
-        out.texts.push(TextRun {
-            text,
-            pos: [x, base],
-            max_width: w + 2.0,
-            color,
-            clip: no_clip,
-            px,
-            bold: false,
-            tracking: 0.0,
-        });
-        x += w;
-    }
-
-    let mut left_runs: Vec<(String, LinearRgba)> =
-        vec![(st.cwd.clone(), colors.text_inactive)];
-    if let Some(b) = &st.branch {
-        left_runs.push((" \u{b7} ".into(), colors.text_faint));
-        left_runs.push((format!("\u{2387} {b}"), colors.success));
-    }
-    left_runs.push((" \u{b7} ".into(), colors.text_faint));
-    let blocks = if st.blocks == 1 { "1 block".into() } else { format!("{} blocks", st.blocks) };
-    left_runs.push((blocks, colors.text_faint));
-
-    let mut x = x0 + STATUS_HPAD * s;
-    let stop = right_start - TEXT_PAD * s;
-    for (text, color) in left_runs {
-        if x >= stop {
-            break;
-        }
-        let w = measure(&text, px, false, 0.0).min(stop - x);
-        out.texts.push(TextRun {
-            text,
-            pos: [x, base],
-            max_width: w,
-            color,
-            clip: no_clip,
-            px,
-            bold: false,
-            tracking: 0.0,
-        });
-        x += w;
-    }
 }
 
 /// "0.08 ms", "0.3 ms", "41 ms" — the design's precision: enough digits to
@@ -1917,27 +1863,148 @@ fn vertical(
     let mut out = ChromeLayout::default();
     let no_clip = [0.0, 0.0, m.width, m.height];
 
+    // The window is a column (design §2): one full-width header, then the
+    // sidebar + pane row. Full width on purpose — on Windows the caption
+    // buttons sit top-right, and a header stopping at the sidebar's edge
+    // left a dead gap above the sidebar; full width also gives the window
+    // controls and ⌘K somewhere to live.
+    let header_h =
+        model.controls.native_leading.map_or(HEADER_H * s, |t| t[1].max(HEADER_H * s));
+    let bar = [0.0, 0.0, m.width, header_h];
+    out.rects.push(RectInstance::filled(bar, colors.strip_bg, no_clip));
+    out.rects.push(RectInstance::filled(
+        [0.0, header_h - HAIRLINE * s, m.width, HAIRLINE * s],
+        colors.line,
+        no_clip,
+    ));
+    out.hit.push(bar, HitRegion::Drag);
+
+    // Right end first: the caption cluster when we draw one, then ⌘K — the
+    // same helper and order as the horizontal strip, so the two tab
+    // positions cannot put Close in two different places.
+    let caption_left = caption_cluster(&mut out, colors, model, bar, s, measure);
+    let controls_left = {
+        let w = measure(&model.palette_chord, UI_CHORD * s, false, 0.0) + 2.0 * PILL_PAD * s;
+        let rect =
+            [caption_left - BAR_PAD * s - w, (header_h - PILL_H * s) / 2.0, w, PILL_H * s];
+        let hovered = model.hover == Some(HitRegion::PalettePill);
+        pill_button(&mut out.rects, colors, rect, PILL_RADIUS * s, hovered, no_clip);
+        out.hit.push(rect, HitRegion::PalettePill);
+        out.texts.push(TextRun {
+            text: model.palette_chord.clone(),
+            pos: [rect[0] + PILL_PAD * s, baseline_in(rect[1], rect[3], UI_CHORD * s)],
+            max_width: w,
+            color: if hovered { colors.text_active } else { colors.text_inactive },
+            clip: no_clip,
+            px: UI_CHORD * s,
+            bold: false,
+            tracking: 0.0,
+        });
+        rect[0] - BAR_PAD * s
+    };
+
+    // The active tab's identity: title, `host · cwd`, and the host chip.
+    // Reads from the ACTIVE tab — literal text here contradicts the pane the
+    // moment the active tab is not the first one. Every run budgets against
+    // where the controls start (#51: text laid out at natural width drew
+    // straight under them at narrow widths), and the chip yields last — it
+    // is the "which machine" fact this UI exists for.
+    let reserve =
+        model.controls.native_leading.map_or(SLIM_PAD * s, |t| t[0] + TRAFFIC_PAD * s);
+    if let Some(tab) = model.tabs.get(model.active) {
+        let mut x = reserve;
+        let budget_right = controls_left - SLIM_PAD * s;
+        let chip_px = UI_STATUS * s;
+        let chip_text_w = measure(&tab.host, chip_px, false, 0.0);
+        let chip_w = 5.0 * s + 6.0 * s + chip_text_w + 16.0 * s;
+
+        let name_px = 13.0 * s;
+        let name_w = measure(&tab.title, name_px, false, 0.0)
+            .min((budget_right - x - chip_w - 20.0 * s).max(0.0));
+        out.texts.push(TextRun {
+            text: tab.title.clone(),
+            pos: [x, baseline_in(0.0, header_h, name_px)],
+            max_width: name_w,
+            color: colors.text_active,
+            clip: no_clip,
+            px: name_px,
+            bold: false,
+            tracking: 0.0,
+        });
+        // The spacer only exists when a title was actually drawn: at widths
+        // too tight for the name, charging 10px anyway could push the host
+        // chip out even though it fits flush at the reserve edge — and the
+        // chip is the identity that yields LAST here, not first.
+        if name_w > 0.0 {
+            x += name_w + 10.0 * s;
+        }
+
+        let detail = tab.detail();
+        let detail_w = measure(&detail, UI_SMALL * s, false, 0.0)
+            .min((budget_right - x - chip_w - 10.0 * s).max(0.0));
+        if detail_w > 8.0 * s {
+            out.texts.push(TextRun {
+                text: detail,
+                pos: [x, baseline_in(0.0, header_h, UI_SMALL * s)],
+                max_width: detail_w,
+                color: colors.text_inactive,
+                clip: no_clip,
+                px: UI_SMALL * s,
+                bold: false,
+                tracking: 0.0,
+            });
+            x += detail_w + 10.0 * s;
+        }
+
+        // The host chip: where this shell runs, said in a pill.
+        if x + chip_w <= budget_right {
+            let chip_h = 20.0 * s;
+            let chip = [x, (header_h - chip_h) / 2.0, chip_w, chip_h];
+            out.rects.push(RectInstance::rounded(chip, 6.0 * s, colors.accent_soft, no_clip));
+            dot(
+                &mut out.rects,
+                chip[0] + 8.0 * s + 2.5 * s,
+                chip[1] + chip_h / 2.0,
+                5.0 * s,
+                colors.success,
+                no_clip,
+            );
+            out.texts.push(TextRun {
+                text: tab.host.clone(),
+                pos: [
+                    chip[0] + 8.0 * s + 5.0 * s + 6.0 * s,
+                    baseline_in(chip[1], chip_h, chip_px),
+                ],
+                max_width: chip_text_w + 2.0,
+                color: colors.accent,
+                clip: no_clip,
+                px: chip_px,
+                bold: false,
+                tracking: 0.0,
+            });
+        }
+    }
+
+    // The sidebar, below the header, full remaining height.
     let sw = m.sidebar_width * s;
-    let sidebar = [0.0, 0.0, sw, m.height];
+    let sidebar = [0.0, header_h, sw, (m.height - header_h).max(0.0)];
     out.rects.push(RectInstance::filled(sidebar, colors.strip_bg, no_clip));
     out.rects.push(RectInstance::filled(
-        [sw - HAIRLINE * s, 0.0, HAIRLINE * s, m.height],
+        [sw - HAIRLINE * s, header_h, HAIRLINE * s, sidebar[3]],
         colors.line,
         no_clip,
     ));
     out.hit.push(sidebar, HitRegion::Strip);
 
-    // The header band exists so the traffic lights have chrome under them
-    // and the window keeps a place to grab; the sidebar being wider than the
-    // button cluster is what lets the grid run full height beside it.
-    let header_h = model.controls.native_leading.map_or(SIDEBAR_HEADER * s, |t| t[1].max(SIDEBAR_HEADER * s));
-    out.hit.push([0.0, 0.0, sw, header_h], HitRegion::Drag);
-
-    // The search affordance: looks like an input, acts like a button.
+    // Search row at the sidebar's top: the search pill with the new-tab `+`
+    // to its right — searching and starting a session are the two things you
+    // do at the top of a sidebar (design §2, invariant 5). The `+` here is
+    // the same launcher the horizontal strip carries.
+    let plus_w = NEW_TAB_W * s;
     let search = [
         SEARCH_PAD * s,
-        header_h + 0.0,
-        sw - 2.0 * SEARCH_PAD * s,
+        header_h + SEARCH_PAD * s,
+        (sw - 2.0 * SEARCH_PAD * s - plus_w - PILL_GAP * s).max(0.0),
         SEARCH_H * s,
     ];
     {
@@ -1969,6 +2036,24 @@ fn vertical(
             color: colors.text_faint,
             clip: no_clip,
             px: 12.0 * s,
+            bold: false,
+            tracking: 0.0,
+        });
+    }
+    {
+        let nt = [search[0] + search[2] + PILL_GAP * s, search[1], plus_w, search[3]];
+        if model.hover == Some(HitRegion::NewTab) {
+            out.rects.push(RectInstance::rounded(nt, PILL_RADIUS * s, colors.tab_hover_bg, no_clip));
+        }
+        out.hit.push(nt, HitRegion::NewTab);
+        let glyph_w = measure("+", 16.0 * s, false, 0.0);
+        out.texts.push(TextRun {
+            text: "+".into(),
+            pos: [nt[0] + (nt[2] - glyph_w) / 2.0, baseline_in(nt[1], nt[3], 16.0 * s)],
+            max_width: nt[2],
+            color: colors.text_inactive,
+            clip: no_clip,
+            px: 16.0 * s,
             bold: false,
             tracking: 0.0,
         });
@@ -2008,8 +2093,7 @@ fn vertical(
     let content_h: f32 = groups
         .iter()
         .map(|g| group_header_h + g.tabs.len() as f32 * row_h + GROUP_GAP * s)
-        .sum::<f32>()
-        + row_h; // the trailing new-tab row
+        .sum::<f32>();
     let max_scroll = (content_h - rows_clip[3]).max(0.0);
     out.strip_scroll = model.strip_scroll.clamp(0.0, max_scroll);
 
@@ -2143,25 +2227,6 @@ fn vertical(
         y += GROUP_GAP * s;
     }
 
-    // New-tab row, trailing the last group.
-    let row = [ROW_HPAD * s, y, sw - 2.0 * ROW_HPAD * s, row_h];
-    if model.hover == Some(HitRegion::NewTab) {
-        out.rects.push(RectInstance::rounded(row, 8.0 * s, colors.tab_hover_bg, rows_clip));
-    }
-    if let Some(hit) = intersect(row, rows_clip) {
-        out.hit.push(hit, HitRegion::NewTab);
-    }
-    out.texts.push(TextRun {
-        text: "+ new session".into(),
-        pos: [row[0] + 8.0 * s, baseline_in(y, row_h, UI_BODY * s)],
-        max_width: row[2] - 16.0 * s,
-        color: colors.text_inactive,
-        clip: rows_clip,
-        px: UI_BODY * s,
-        bold: false,
-        tracking: 0.0,
-    });
-
     // Footer: fleet counts, and the door to the fleet view.
     {
         let fy = m.height - footer_h;
@@ -2200,101 +2265,6 @@ fn vertical(
         });
     }
 
-    // The slim title bar over the main column: session name, cwd, host chip,
-    // and the way back to horizontal tabs.
-    {
-        let bar = [sw, 0.0, m.width - sw, SLIM_BAR_H * s];
-        out.rects.push(RectInstance::filled(bar, colors.strip_bg, no_clip));
-        out.rects.push(RectInstance::filled(
-            [sw, SLIM_BAR_H * s - HAIRLINE * s, m.width - sw, HAIRLINE * s],
-            colors.line,
-            no_clip,
-        ));
-        out.hit.push(bar, HitRegion::Drag);
-
-        if let Some(tab) = model.tabs.get(model.active) {
-            let mut x = sw + SLIM_PAD * s;
-            let name_px = 13.0 * s;
-            let name_w = measure(&tab.title, name_px, false, 0.0).min(bar[2] * 0.4);
-            out.texts.push(TextRun {
-                text: tab.title.clone(),
-                pos: [x, baseline_in(0.0, bar[3], name_px)],
-                max_width: name_w,
-                color: colors.text_active,
-                clip: no_clip,
-                px: name_px,
-                bold: false,
-                tracking: 0.0,
-            });
-            x += name_w + 10.0 * s;
-            if !tab.cwd.is_empty() {
-                let cwd_w = measure(&tab.cwd, UI_SMALL * s, false, 0.0).min(bar[2] * 0.3);
-                out.texts.push(TextRun {
-                    text: tab.cwd.clone(),
-                    pos: [x, baseline_in(0.0, bar[3], UI_SMALL * s)],
-                    max_width: cwd_w,
-                    color: colors.text_inactive,
-                    clip: no_clip,
-                    px: UI_SMALL * s,
-                    bold: false,
-                    tracking: 0.0,
-                });
-                x += cwd_w + 10.0 * s;
-            }
-            // The host chip: where this shell runs, said in a pill.
-            let chip_px = UI_STATUS * s;
-            let chip_text_w = measure(&tab.host, chip_px, false, 0.0);
-            let chip_h = 20.0 * s;
-            let chip = [x, (bar[3] - chip_h) / 2.0, 5.0 * s + 6.0 * s + chip_text_w + 16.0 * s, chip_h];
-            out.rects.push(RectInstance::rounded(chip, 6.0 * s, colors.accent_soft, no_clip));
-            dot(
-                &mut out.rects,
-                chip[0] + 8.0 * s + 2.5 * s,
-                chip[1] + chip_h / 2.0,
-                5.0 * s,
-                colors.success,
-                no_clip,
-            );
-            out.texts.push(TextRun {
-                text: tab.host.clone(),
-                pos: [chip[0] + 8.0 * s + 5.0 * s + 6.0 * s, baseline_in(chip[1], chip_h, chip_px)],
-                max_width: chip_text_w + 2.0,
-                color: colors.accent,
-                clip: no_clip,
-                px: chip_px,
-                bold: false,
-                tracking: 0.0,
-            });
-        }
-
-        // The caption cluster lives in this bar too, at the same size and in
-        // the same order as the horizontal strip's — one helper, so the two
-        // tab positions cannot put Close in two different places.
-        let caption_left = caption_cluster(&mut out, colors, model, bar, s, measure);
-
-        // The way back: same pill, same region, other word.
-        let label = "Horizontal tabs";
-        let label_w = measure(label, UI_SMALL * s, false, 0.0);
-        let w = label_w + 2.0 * PILL_PAD * s;
-        let rect = [caption_left - BAR_PAD * s - w, (bar[3] - PILL_H * s) / 2.0, w, PILL_H * s];
-        let hovered = model.hover == Some(HitRegion::LayoutPill);
-        pill_button(&mut out.rects, colors, rect, PILL_RADIUS * s, hovered, no_clip);
-        out.hit.push(rect, HitRegion::LayoutPill);
-        out.texts.push(TextRun {
-            text: label.into(),
-            pos: [rect[0] + PILL_PAD * s, baseline_in(rect[1], rect[3], UI_SMALL * s)],
-            max_width: label_w + 2.0,
-            color: if hovered { colors.text_active } else { colors.text_inactive },
-            clip: no_clip,
-            px: UI_SMALL * s,
-            bold: false,
-            tracking: 0.0,
-        });
-    }
-
-    // The status bar spans the main column only; the sidebar keeps its full
-    // height (design screen 2).
-    status_bar(model, colors, m, measure, sw, &mut out);
     out
 }
 
@@ -2306,7 +2276,7 @@ fn text_baseline(m: &ChromeMetrics, y: f32, h: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::model::WindowControls;
+    use super::super::model::{TabModel, TabOrigin, WindowControls};
     use super::*;
     use zest_proto::{HostId, SessionAddr, SessionId};
 
@@ -2323,6 +2293,7 @@ mod tests {
         };
         TabModel {
             addr: addr(n),
+            kind: TabKind::Session,
             title: format!("tab {n}"),
             host,
             cwd: format!("~/dir{n}"),
@@ -2332,6 +2303,7 @@ mod tests {
             running: false,
             age: "2m".into(),
             connecting: false,
+            link: LinkKind::Loopback,
         }
     }
 
@@ -2359,23 +2331,15 @@ mod tests {
             active: 0,
             position,
             strip_scroll: 0.0,
+            ensure_active_visible: false,
             hover: None,
             controls: WindowControls::default(),
             focused: true,
-            status: Some(super::super::model::StatusModel {
-                cwd: "~/dev/zesterm".into(),
-                branch: Some("main".into()),
-                blocks: 3,
-                theme: "obsidian".into(),
-                link: super::super::model::LinkKind::Lan,
-                latency_ms: Some(0.3),
-            }),
             sidebar: None,
             screen: None,
             panes: None,
             anim: super::super::model::AnimPhase::default(),
             grid_area: [0.0, 46.0, 1200.0, 726.0],
-            toggle_chord: "⌘⇧E".into(),
             palette_chord: "⌘K".into(),
             picker: None,
             palette: None,
@@ -2572,11 +2536,8 @@ mod tests {
         let mut x = leftmost_caption;
         while x < m.width {
             assert!(
-                !matches!(
-                    l.hit.hit(x, 30.0),
-                    Some(HitRegion::PalettePill | HitRegion::LayoutPill)
-                ),
-                "a pill reaches into the caption cluster at x={x}"
+                !matches!(l.hit.hit(x, 30.0), Some(HitRegion::PalettePill)),
+                "the pill reaches into the caption cluster at x={x}"
             );
             x += 1.0;
         }
@@ -2702,8 +2663,10 @@ mod tests {
 
     #[test]
     fn a_remote_tab_names_its_machine_in_words() {
-        // Colour is not enough on its own (#23). The label must appear as
-        // text in both orientations, and an unreachable host must say so.
+        // Colour is not enough on its own (#23). Unreachability must appear
+        // as text in both orientations; the host's *name* now lives where
+        // there is room for it — the vertical sidebar and header — not on a
+        // 34px chip (design §1: title only).
         for position in [TabsPosition::Top, TabsPosition::Left] {
             let tabs = vec![tab(
                 2,
@@ -2712,50 +2675,56 @@ mod tests {
             )];
             let m = metrics(1200.0, 800.0, 1.0);
             let l = layout(&model(tabs, position), &colors(), &m, &mut measure);
-            // The host may be spelled on the chip's sub-line (Top) or as an
-            // uppercase group label (Left); either way it is *text*, and the
-            // unreachability is said in words somewhere.
-            let says_host =
-                l.texts.iter().any(|t| t.text.to_lowercase().contains("alien"));
-            let says_unreachable = l.texts.iter().any(|t| t.text.contains("unreachable"));
             assert!(
-                says_host && says_unreachable,
-                "{position:?} must spell out host and unreachability"
+                l.texts.iter().any(|t| t.text.contains("unreachable")),
+                "{position:?} must say unreachability in words"
             );
+            if position == TabsPosition::Left {
+                assert!(
+                    l.texts.iter().any(|t| t.text.to_lowercase().contains("alien")),
+                    "the sidebar must spell out the host's name"
+                );
+            }
         }
     }
 
     #[test]
-    fn the_title_bar_carries_the_pills_and_the_status_bar_the_bottom() {
-        // Design screen 1: the layout/palette pills are clickable in the top
-        // strip, and the status bar owns exactly its 28 logical pixels — one
-        // pixel above it belongs to the grid, or the bar is eating a row.
+    fn the_title_bar_keeps_only_the_palette_pill_at_its_right_end() {
+        // Design §1: the layout toggle is gone from the chrome —
+        // `tabs.position` is a setting, and a button duplicating a setting
+        // is a second source of truth. ⌘K stays, and stays clickable.
         let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
         let m = metrics(1200.0, 800.0, 1.0);
         let l = layout(&model(tabs, TabsPosition::Top), &colors(), &m, &mut measure);
-
-        let strip_has = |want: HitRegion| {
-            (0..1200)
-                .step_by(2)
-                .any(|x| (0..46).step_by(2).any(|y| l.hit.hit(x as f32, y as f32) == Some(want)))
-        };
-        assert!(strip_has(HitRegion::LayoutPill), "the layout toggle must be clickable");
-        assert!(strip_has(HitRegion::PalettePill), "the palette pill must be clickable");
-
-        assert_eq!(
-            l.hit.hit(600.0, 800.0 - STATUS_H / 2.0),
-            Some(HitRegion::Status),
-            "the status bar swallows its own clicks"
-        );
-        assert_eq!(
-            l.hit.hit(600.0, 800.0 - STATUS_H - 1.0),
-            None,
-            "one pixel above the bar is the grid's"
-        );
+        let found = (0..1200)
+            .step_by(2)
+            .any(|x| (0..46).step_by(2).any(|y| {
+                l.hit.hit(x as f32, y as f32) == Some(HitRegion::PalettePill)
+            }));
+        assert!(found, "the palette pill must be clickable in the strip");
         assert!(
-            l.texts.iter().any(|t| t.text.contains("LAN direct")),
-            "the link segment says its path in words"
+            !l.texts.iter().any(|t| t.text == "Vertical" || t.text == "Horizontal"),
+            "no layout-toggle pill is drawn"
         );
+    }
+
+    #[test]
+    fn nothing_reserves_the_bottom_edge() {
+        // The status bar is deleted (design §1: "no status bar") — the
+        // window's bottom edge belongs to the grid again, in both layouts.
+        // A chrome region still answering there means insets and drawing
+        // disagree about who owns the last rows.
+        for position in [TabsPosition::Top, TabsPosition::Left] {
+            let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
+            let m = metrics(1200.0, 800.0, 1.0);
+            let l = layout(&model(tabs, position), &colors(), &m, &mut measure);
+            // x=600 is right of the sidebar, below the header: pane country.
+            assert_eq!(
+                l.hit.hit(600.0, 799.0),
+                None,
+                "{position:?}: the bottom edge is the grid's, not chrome"
+            );
+        }
     }
 
     #[test]
@@ -3108,6 +3077,316 @@ mod tests {
             Some(HitRegion::SettingsSlider(1)),
             "the grab band must cover the track it reports"
         );
+    }
+
+    #[test]
+    fn the_vertical_header_text_yields_to_the_right_controls() {
+        // #51: at narrow widths the header's right-hand controls drew straight
+        // over the session path and the host chip. The header's text must
+        // budget against wherever the controls start, at any width.
+        let m = metrics(500.0, 300.0, 1.0);
+        let mut tabs = vec![
+            tab(1, TabOrigin::Local, TabPresence::Online),
+            tab(2, TabOrigin::Local, TabPresence::Online),
+        ];
+        tabs[1].cwd = "~/dev/zesterm/branches/49-screenshot".into();
+        let mut mo = borderless(tabs, TabsPosition::Left);
+        mo.active = 1;
+        let l = layout(&mo, &colors(), &m, &mut measure);
+
+        // Where the right-hand controls begin, found by sweeping like a
+        // pointer would — below the resize band, which owns the top pixels.
+        let controls_start = (0..500)
+            .map(|x| x as f32)
+            .find(|&x| {
+                matches!(
+                    l.hit.hit(x, 22.0),
+                    Some(HitRegion::PalettePill | HitRegion::CaptionButton(_))
+                )
+            })
+            .expect("the header carries controls at its right end");
+        for run in l.texts.iter().filter(|t| {
+            t.pos[1] < 46.0
+                && (t.text.contains("tab 2")
+                    || t.text.contains("~/dev/zesterm")
+                    || t.text == "local")
+        }) {
+            assert!(
+                run.pos[0] + run.max_width <= controls_start + 0.5,
+                "header text {:?} reaches x={} into the controls at x={controls_start}",
+                run.text,
+                run.pos[0] + run.max_width,
+            );
+        }
+        // And the header reads from the ACTIVE tab — literal text there
+        // contradicts the pane the moment the active tab is not the first.
+        assert!(
+            l.texts.iter().any(|t| t.text.contains("tab 2")),
+            "the header names the active session, not the first one"
+        );
+    }
+
+    #[test]
+    fn a_chip_carries_title_only() {
+        // Design §1, and the structural fix for #51's class of bug: the
+        // 9.5px `host · cwd` sub-line is gone — host and cwd live in the
+        // vertical sidebar and header, which have room for them.
+        let tabs = vec![
+            tab(1, TabOrigin::Local, TabPresence::Online),
+            tab(2, TabOrigin::Remote { host_label: "alien".into() }, TabPresence::Online),
+        ];
+        let m = metrics(1200.0, 800.0, 1.0);
+        let l = layout(&model(tabs, TabsPosition::Top), &colors(), &m, &mut measure);
+        assert!(
+            l.texts.iter().all(|t| (t.px - 9.5).abs() > 0.01),
+            "no 9.5px sub-line text survives in the horizontal chrome"
+        );
+        assert!(
+            !l.texts.iter().any(|t| t.text.contains("~/dir")),
+            "cwd does not appear on a chip; it lives in the tooltip and the sidebar"
+        );
+
+        // The remaining line is budgeted: at the 104px floor the title stops
+        // before the close affordance begins, never under it.
+        let tabs: Vec<_> =
+            (1..=8).map(|n| tab(n, TabOrigin::Local, TabPresence::Online)).collect();
+        let m = metrics(500.0, 300.0, 1.0);
+        let l = layout(&model(tabs, TabsPosition::Top), &colors(), &m, &mut measure);
+        let close_left = (0..500)
+            .map(|x| x as f32)
+            .find(|&x| l.hit.hit(x, 21.0) == Some(HitRegion::TabClose(addr(1))))
+            .expect("the first chip shows its close affordance");
+        let title = l
+            .texts
+            .iter()
+            .find(|t| t.text == "tab 1")
+            .expect("the first chip carries its title");
+        assert!(
+            title.pos[0] + title.max_width <= close_left,
+            "the title's budget ({}) must stop before the close region ({close_left})",
+            title.pos[0] + title.max_width
+        );
+    }
+
+    #[test]
+    fn chips_floor_at_104_then_the_strip_scrolls() {
+        // Below 104px the label degrades to a single letter, so chips stop
+        // shrinking there and the row scrolls instead of crushing (§1).
+        let tabs: Vec<_> =
+            (1..=10).map(|n| tab(n, TabOrigin::Local, TabPresence::Online)).collect();
+        let m = metrics(800.0, 600.0, 1.0);
+        let mo = model(tabs, TabsPosition::Top);
+        let l = layout(&mo, &colors(), &m, &mut measure);
+        assert!(l.strip_scroll >= 0.0);
+        // Chip pitch = width + gap, read off the hit map like a pointer
+        // would: the first x where each chip answers.
+        let first_x = |l: &ChromeLayout, n: u8| {
+            (0..800).map(|x| x as f32).find(|&x| {
+                matches!(
+                    l.hit.hit(x, 29.0),
+                    Some(HitRegion::Tab(a) | HitRegion::TabClose(a)) if a == addr(n)
+                )
+            })
+        };
+        let x1 = first_x(&l, 1).expect("chip 1 visible at scroll 0");
+        let x2 = first_x(&l, 2).expect("chip 2 visible at scroll 0");
+        assert!(
+            ((x2 - x1) - (TAB_MIN + TAB_GAP)).abs() < 0.6,
+            "ten chips in an 800px strip sit at the 104px floor, got pitch {}",
+            x2 - x1
+        );
+
+        // The `+` sits outside the scroll offset: same place at scroll 0 and
+        // at a wild scroll, so its future menu can never be clipped or lost.
+        let nt_at = |l: &ChromeLayout| {
+            (0..800)
+                .map(|x| x as f32)
+                .find(|&x| l.hit.hit(x, 23.0) == Some(HitRegion::NewTab))
+        };
+        let at_zero = nt_at(&l).expect("the + is reachable at scroll 0");
+        let mut scrolled = model(
+            (1..=10).map(|n| tab(n, TabOrigin::Local, TabPresence::Online)).collect(),
+            TabsPosition::Top,
+        );
+        scrolled.strip_scroll = 1e9;
+        let l = layout(&scrolled, &colors(), &m, &mut measure);
+        assert!(l.strip_scroll > 0.0, "an overflowing strip scrolls");
+        let at_max = nt_at(&l).expect("the + is reachable at max scroll");
+        assert!(
+            (at_zero - at_max).abs() < 0.5,
+            "the + must not move with the scroll: {at_zero} vs {at_max}"
+        );
+    }
+
+    #[test]
+    fn chips_prefer_the_168_basis_and_never_grow_past_it() {
+        // The mock's `flex: 0 1 168px`: one tab in a wide window takes the
+        // basis, not the 232px ceiling — chips shrink, they do not grow.
+        let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
+        let m = metrics(1200.0, 800.0, 1.0);
+        let l = layout(&model(tabs, TabsPosition::Top), &colors(), &m, &mut measure);
+        let xs: Vec<f32> = (0..1200)
+            .map(|x| x as f32)
+            .filter(|&x| {
+                matches!(
+                    l.hit.hit(x, 29.0),
+                    Some(HitRegion::Tab(_) | HitRegion::TabClose(_))
+                )
+            })
+            .collect();
+        let width = xs.last().unwrap() - xs.first().unwrap() + 1.0;
+        assert!(
+            (width - TAB_BASIS).abs() < 1.5,
+            "a lone chip is basis-wide (168), got {width}"
+        );
+    }
+
+    #[test]
+    fn activating_an_offscreen_tab_scrolls_it_into_view() {
+        // The picker's ensure-visible discipline, applied to the strip:
+        // activation must never land on a chip the user cannot see.
+        let tabs: Vec<_> =
+            (1..=20).map(|n| tab(n, TabOrigin::Local, TabPresence::Online)).collect();
+        let m = metrics(1000.0, 800.0, 1.0);
+        let mut mo = model(tabs, TabsPosition::Top);
+        mo.active = 19;
+        mo.strip_scroll = 0.0;
+        let visible = |l: &ChromeLayout| {
+            (0..1000).step_by(2).any(|x| {
+                matches!(
+                    l.hit.hit(x as f32, 29.0),
+                    Some(HitRegion::Tab(a) | HitRegion::TabClose(a)) if a == addr(20)
+                )
+            })
+        };
+        let l = layout(&mo, &colors(), &m, &mut measure);
+        assert!(!visible(&l), "sanity: the last of twenty tabs starts offscreen");
+
+        mo.ensure_active_visible = true;
+        let l = layout(&mo, &colors(), &m, &mut measure);
+        assert!(l.strip_scroll > 0.0, "the strip scrolled to reach the activation");
+        assert!(visible(&l), "the active chip must be hittable after ensure-visible");
+    }
+
+    #[test]
+    fn app_tabs_size_to_content_and_offer_no_close() {
+        // Design §11: Settings and Profiles are ordinary tabs with the same
+        // active treatment, but they size to their content instead of taking
+        // the 168px basis, and carry no close ×.
+        let mut settings = tab(9, TabOrigin::Local, TabPresence::Online);
+        settings.kind = TabKind::Settings;
+        settings.title = "Settings".into();
+        let tabs = vec![
+            tab(1, TabOrigin::Local, TabPresence::Online),
+            tab(2, TabOrigin::Local, TabPresence::Online),
+            settings,
+        ];
+        let m = metrics(1200.0, 800.0, 1.0);
+        let l = layout(&model(tabs, TabsPosition::Top), &colors(), &m, &mut measure);
+
+        let extent = |a: SessionAddr| {
+            let xs: Vec<f32> = (0..1200)
+                .map(|x| x as f32)
+                .filter(|&x| {
+                    matches!(
+                        l.hit.hit(x, 29.0),
+                        Some(HitRegion::Tab(b) | HitRegion::TabClose(b)) if b == a
+                    )
+                })
+                .collect();
+            xs.last().copied().unwrap_or(0.0) - xs.first().copied().unwrap_or(0.0) + 1.0
+        };
+        assert!(
+            extent(addr(9)) < extent(addr(1)),
+            "the app tab ({}) sizes to its label, narrower than a session chip ({})",
+            extent(addr(9)),
+            extent(addr(1))
+        );
+        let close_anywhere = (0..1200).step_by(2).any(|x| {
+            (0..46).any(|y| l.hit.hit(x as f32, y as f32) == Some(HitRegion::TabClose(addr(9))))
+        });
+        assert!(!close_anywhere, "an app tab shows no close affordance");
+        assert!(
+            l.texts.iter().any(|t| t.text == "Settings"),
+            "the app tab carries its label"
+        );
+    }
+
+    #[test]
+    fn a_degraded_link_inks_its_chip() {
+        // The one fact the deleted status bar owned alone: link degradation.
+        // It surfaces on the affected tab's glyph tile — warn when stalled,
+        // danger when reconnecting — active or not, or a background tab
+        // could sit buffering with no visible sign anywhere.
+        let c = colors();
+        for (link, ink) in [(LinkKind::Stalled, c.warn), (LinkKind::Reconnecting, c.danger)] {
+            let mut tabs = vec![
+                tab(1, TabOrigin::Local, TabPresence::Online),
+                tab(2, TabOrigin::Remote { host_label: "alien".into() }, TabPresence::Online),
+            ];
+            tabs[1].link = link;
+            let m = metrics(1200.0, 800.0, 1.0);
+            let l = layout(&model(tabs, TabsPosition::Top), &colors(), &m, &mut measure);
+            assert!(
+                l.rects.iter().any(|r| r.fill == ink && r.rect[1] < 46.0),
+                "{link:?} must ink a rect in the strip with its state colour"
+            );
+        }
+    }
+
+    #[test]
+    fn the_vertical_header_spans_the_window() {
+        // Design §2: one 46px header edge to edge — a header stopping at the
+        // sidebar left a dead gap above it on Windows, where the caption
+        // buttons live top-right.
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mo = borderless(
+            vec![tab(1, TabOrigin::Local, TabPresence::Online)],
+            TabsPosition::Left,
+        );
+        let l = layout(&mo, &colors(), &m, &mut measure);
+
+        // Every x across the window answers as chrome inside the header band
+        // (below the resize band, which owns the top pixels).
+        for x in [5.0, 300.0, 600.0, 900.0, 1190.0] {
+            assert!(
+                l.hit.hit(x, 20.0).is_some(),
+                "the header must own ({x}, 20): it runs edge to edge"
+            );
+        }
+        // ⌘K lives in the header, left of the caption cluster.
+        let pill_x = (0..1200)
+            .map(|x| x as f32)
+            .find(|&x| l.hit.hit(x, 22.0) == Some(HitRegion::PalettePill))
+            .expect("⌘K is in the header");
+        let captions = caption_rects(&l, &m, 22.0);
+        assert_eq!(captions.len(), 3, "the drawn caption cluster sits in the header");
+        assert!(
+            pill_x < captions[0].0,
+            "⌘K yields to the caption reserve at the right end"
+        );
+
+        // The sidebar's top row: search pill, then the + to its right
+        // (invariant 5) — both inside the sidebar.
+        let sw = m.sidebar_width;
+        let search_x = (0..1200)
+            .map(|x| x as f32)
+            .find_map(|x| {
+                (46..110).map(|y| y as f32).find_map(|y| {
+                    (l.hit.hit(x, y) == Some(HitRegion::SidebarSearch)).then_some(x)
+                })
+            })
+            .expect("the search pill sits at the sidebar's top");
+        let plus_x = (0..1200)
+            .map(|x| x as f32)
+            .find_map(|x| {
+                (46..110).map(|y| y as f32).find_map(|y| {
+                    (l.hit.hit(x, y) == Some(HitRegion::NewTab)).then_some(x)
+                })
+            })
+            .expect("the + sits beside the search pill");
+        assert!(search_x < plus_x, "the + is right of the search pill");
+        assert!(plus_x < sw, "the + stays inside the sidebar");
     }
 
     #[test]

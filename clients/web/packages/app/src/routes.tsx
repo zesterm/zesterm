@@ -24,6 +24,7 @@ import type { DeviceKey } from './device-key.ts';
 import { Login } from './components/Login.tsx';
 import { Fleet } from './components/Fleet.tsx';
 import { NotFound } from './components/NotFound.tsx';
+import { ThemeGallery } from './components/ThemeGallery.tsx';
 import { SHELL_CHILD_PATHS, SHELL_PATH } from './route-table.ts';
 
 export interface AppContext {
@@ -78,6 +79,8 @@ export function routerPlugin(ctx: AppContext) {
     <Fleet bootstrap={ctx.bootstrap} device={ctx.device} theme={ctx.theme} />
   ));
 
+  const ThemesRoute = component(() => () => <ThemeGallery theme={ctx.theme} />);
+
   return createRouterPlugin({
     history: createWebHistory(),
     routes: [
@@ -101,6 +104,10 @@ export function routerPlugin(ctx: AppContext) {
         beforeEnter: gate,
         children: SHELL_CHILD_PATHS.map((path) => ({ path })),
       },
+      // The theme gallery (design §8). Gated like the shell on the hosted
+      // path; on the local path the gate is a pass-through, and the gallery
+      // works identically there — the theme id never crosses the wire.
+      { path: '/themes', component: ThemesRoute, beforeEnter: gate },
       // Unknown paths must not quietly render the session list: the Worker's
       // asset fallback serves index.html for *any* path, so a typo arrives
       // here looking exactly like a real route.

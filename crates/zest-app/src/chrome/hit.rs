@@ -66,13 +66,8 @@ pub enum HitRegion {
     /// The strip itself — catches wheel scrolling and swallows clicks that
     /// would otherwise fall through to the grid beneath.
     Strip,
-    /// The title bar's layout-toggle pill ("⌘⇧E Vertical" / "Horizontal
-    /// tabs"); clicking flips `tabs.position`.
-    LayoutPill,
     /// The title bar's "⌘K" pill; clicking opens the palette.
     PalettePill,
-    /// The status bar — swallows clicks like the strip does.
-    Status,
     /// The sidebar's search affordance; clicking opens the palette.
     SidebarSearch,
     /// The sidebar's footer ("4 hosts online · 1 asleep"); clicking opens

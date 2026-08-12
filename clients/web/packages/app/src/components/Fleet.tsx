@@ -1,5 +1,5 @@
 /**
- * Your machines, and what can reach them.
+ * Your machines, and what can reach them — as the design §7 card grid.
  *
  * On the **local** path this is the real session list, unchanged: the sidecar
  * hosts the `SessionDirectory` actor and the daemon is a `ws://` away.
@@ -13,7 +13,8 @@
  * Enrolment is the spine here, not discovery. It is durable and account-scoped
  * and survives a machine being asleep; presence will decorate it once there is
  * a relay to learn presence from. Until then `last seen` is the only honest
- * thing to show, and it comes from the enrolment record.
+ * thing to show, and it comes from the enrolment record. The same honesty
+ * shapes what each card OMITS — see `fleet-model.ts` and the note below.
  */
 
 import { component, signal } from 'sigx';
@@ -21,29 +22,10 @@ import type { Theme } from '@zesterm/theme';
 
 import type { Bootstrap, User } from '../bootstrap.ts';
 import type { DeviceKey } from '../device-key.ts';
+import { ago, hostCard } from '../fleet-model.ts';
 import { fetchRegistry, revoke, type Device, type Host } from '../registry.ts';
 import { AccountMenu } from './AccountMenu.tsx';
 import { Shell } from './Shell.tsx';
-
-/**
- * Rough, and deliberately so — an exact age is not a thing anyone reads.
- *
- * Reads the clock itself rather than taking a snapshot. Capturing `Date.now()`
- * once at setup froze every age at the moment the screen mounted, so a tab left
- * open all afternoon still said `5h ago` — wrong rather than merely stale,
- * which is the worse of the two. It is still only as fresh as the last render,
- * which is honest for a list that reloads on revoke.
- */
-function ago(at: number | null): string {
-  if (at === null) return 'never';
-  const now = Date.now();
-  const mins = Math.floor((now - at) / 60_000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
-}
 
 type Load =
   | { readonly phase: 'loading' }
@@ -102,7 +84,20 @@ export const Fleet = component<{
         <AccountMenu user={user} />
       </header>
 
-      <div class="fleet">
+      <div class="fleet-page">
+        <header class="page-head">
+          <h1>
+            Your fleet
+            <span class="page-tagline">
+              every machine is a host · every window, tab and phone is a client
+            </span>
+          </h1>
+          <p class="page-lede">
+            The directory knows which machines exist and how to reach them. Sessions never leave
+            the machine they run on.
+          </p>
+        </header>
+
         {state.load.phase === 'loading' ? <p class="muted">Loading…</p> : null}
 
         {state.load.phase === 'failed' ? (
@@ -114,29 +109,50 @@ export const Fleet = component<{
         {state.load.phase === 'ready' ? (
           <>
             <section>
-              <h2>Machines</h2>
               {state.load.hosts.length === 0 ? (
                 <p class="muted">
                   No machines yet. Run <code>zest-daemon --enroll &lt;code&gt;</code> on one to add
                   it.
                 </p>
               ) : (
-                <ul class="rows">
-                  {state.load.hosts.map((h) => (
-                    <li class="row">
-                      <span class="row-name">{h.label}</span>
-                      <span class="row-meta">
-                        {h.platform !== '' ? `${h.platform} · ` : ''}last seen {ago(h.lastSeenAt)}
-                      </span>
-                      <button
-                        class="button subtle"
-                        disabled={state.busy === h.id}
-                        onClick={() => drop('hosts', h.id, h.label)}
-                      >
-                        revoke
-                      </button>
-                    </li>
-                  ))}
+                <ul class="card-grid">
+                  {/* Deliberately absent from these cards, each tracked rather
+                      than rendered dead: path/latency rows and the tunnel pill
+                      (#148), wake-over-LAN (#146). Session counts appear only
+                      when something real supplies one — the registry does not.
+                      localHostId is null: on the hosted path the browser is a
+                      DEVICE, so no host is identifiably this machine. */}
+                  {state.load.hosts.map((h) => {
+                    const card = hostCard(h, { localHostId: null, now: Date.now() });
+                    return (
+                      <li key={h.id} class={`host-card${card.local ? ' local' : ''}`}>
+                        <div class="card-head">
+                          {/* Faint on purpose: presence is unknown until the
+                              relay exists — a green dot would claim liveness
+                              the directory cannot know. */}
+                          <span class="card-dot" />
+                          <span class="card-name">{card.name}</span>
+                          {card.local ? <span class="card-note">this machine</span> : null}
+                          <span class="grow" />
+                          <button
+                            class="button subtle"
+                            disabled={state.busy === h.id}
+                            onClick={() => drop('hosts', h.id, h.label)}
+                          >
+                            revoke
+                          </button>
+                        </div>
+                        <div class="card-rows">
+                          {card.rows.map((r) => (
+                            <div class="card-row">
+                              <span class="card-label">{r.label}</span>
+                              <span class={`card-value${r.mono ? ' mono' : ''}`}>{r.value}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
               {/* Honest about the gap: enrolled is not the same as reachable. */}
@@ -159,10 +175,10 @@ export const Fleet = component<{
               ) : (
                 <ul class="rows">
                   {state.load.devices.map((d) => (
-                    <li class="row">
+                    <li key={d.id} class="row">
                       <span class="row-name">{d.label}</span>
                       <span class="row-meta">
-                        {d.kind} · last seen {ago(d.lastSeenAt)}
+                        {d.kind} · last seen {ago(d.lastSeenAt, Date.now())}
                         {d.extractable ? (
                           // Said out loud rather than shown as a tick: this key
                           // is readable by any script on the origin, which is

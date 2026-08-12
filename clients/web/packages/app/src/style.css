@@ -575,23 +575,207 @@ body {
   flex-direction: column;
 }
 
-/* The fleet screen: machines, and the keys that can reach them. */
-.fleet {
-  padding: 20px 24px;
-  max-width: 72ch;
+/* --- page frame (design §7–§8: fleet, themes) -----------------------------
+
+   The full-page directory screens share one frame: 34px/38px padding, the
+   19px/600 heading with its faint tagline, and the dim lede capped at 640px.
+   The frame scrolls as a whole (invariant 10). */
+
+.fleet-page {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 34px 38px;
 }
 
-.fleet section + section {
+.page-head h1 {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--zt-fg);
+}
+
+.page-tagline {
+  margin-left: 10px;
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--zt-faint);
+}
+
+.page-lede {
+  margin: 8px 0 0;
+  max-width: 640px;
+  font-size: 12px;
+  color: var(--zt-dim);
+  text-wrap: pretty;
+}
+
+.fleet-page section + section {
   margin-top: 28px;
 }
 
-.fleet h2 {
+.fleet-page h2 {
   margin: 0 0 8px;
-  font-size: 13px;
+  font-size: 10.5px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.09em;
   color: var(--zt-dim);
+}
+
+.card-grid {
+  list-style: none;
+  margin: 26px 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
+}
+
+.card-grid.themes {
+  grid-template-columns: repeat(auto-fill, minmax(268px, 1fr));
+  gap: 18px;
+}
+
+.host-card {
+  padding: 18px;
+  background: var(--zt-panel);
+  border: 1px solid var(--zt-line);
+  border-radius: 12px;
+}
+
+.host-card.local {
+  border-color: var(--zt-accent);
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Faint, not green: presence is unknown until the relay exists, and a live
+   dot the directory cannot back would be the comfortable lie. */
+.card-dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--zt-faint);
+}
+
+.card-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--zt-fg);
+}
+
+.card-note {
+  font-size: 11px;
+  color: var(--zt-faint);
+}
+
+.card-rows {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.card-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 7px;
+  font-size: 11.5px;
+}
+
+.card-label {
+  color: var(--zt-faint);
+}
+
+.card-value {
+  color: var(--zt-dim);
+  text-align: right;
+}
+
+.card-value.mono {
+  font-family: var(--zt-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+}
+
+/* The devices list keeps its row shape (§7 covers machines only); capped so
+   a row does not stretch label-to-button across the whole card grid's width. */
+.fleet-page .rows {
+  max-width: 640px;
+}
+
+/* --- theme cards (design §8) ---------------------------------------------
+
+   Three bands: the live preview (colours arrive INLINE from the theme object
+   — that theme's own bg/fg/ANSI, never this stylesheet's variables), the
+   10px normal-ANSI swatch strip, and the panel footer. */
+
+.theme-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 0;
+  border: 1px solid var(--zt-line);
+  border-radius: 12px;
+  overflow: hidden;
+  background: none;
+  color: var(--zt-fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.theme-card.active {
+  border-color: var(--zt-accent);
+}
+
+.theme-preview {
+  padding: 14px;
+  font-family: var(--zt-mono, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre;
+  overflow: hidden;
+}
+
+.theme-swatches {
+  display: flex;
+  height: 10px;
+}
+
+.theme-swatches span {
+  flex: 1;
+}
+
+.theme-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  background: var(--zt-panel);
+}
+
+.theme-name {
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.theme-mode {
+  font-size: 10.5px;
+  color: var(--zt-faint);
+}
+
+.theme-active {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--zt-accent);
 }
 
 .rows {
