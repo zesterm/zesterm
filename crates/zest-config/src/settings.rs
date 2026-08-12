@@ -201,7 +201,7 @@ pub struct Appearance {
     /// `apparent = pow(coverage, 1/gamma)` and means exactly one thing: how
     /// much heavier than perceptually-linear a stroke should be. More coverage
     /// is more contrast, and contrast is what reads as sharpness — which is why
-    /// the default is 2.0 and not something cautious.
+    /// the default is 2.5 and not something cautious.
     ///
     /// One number serves light and dark alike. That is not what the theory
     /// predicts — dark-on-light is supposed to need far less stem darkening

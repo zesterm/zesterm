@@ -75,11 +75,11 @@ impl TextTuning {
     /// `apparent = pow(coverage, 1/gamma)` — this knob is now exactly "how much
     /// heavier than perceptually-linear should a stroke be", and nothing else.
     ///
-    /// 2.0 rather than something timid, settled by looking rather than by
+    /// 2.5 rather than something timid, settled by looking rather than by
     /// arithmetic: the aggregate measures barely move across 1.2 to 2.5 (41-42%
     /// of inked pixels fully saturated throughout), and the difference is
-    /// plainly visible. Light text on a dark background needs a lot of it —
-    /// more coverage is more contrast, and contrast is what reads as sharp.
+    /// plainly visible. More coverage is more contrast, and contrast is what
+    /// reads as sharp.
     ///
     /// The same number suits a light background and a dark one, which the
     /// theory says it should not: dark-on-light is meant to need far less stem
