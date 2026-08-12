@@ -703,6 +703,6 @@ which is the point: the mistake is now unrepresentable, not merely avoided.
   is undiscoverable, so off macOS it falls through to the Desktop row's
   shift-blind meaning instead of running something no chip names.
 - **App tabs address by reserved sentinels** on the all-zero host: Settings
-  `u64::MAX`, Profiles `u64::MAX − 1`. Two parallel work items independently
+  `u64::MAX`, Profiles `u64::MAX - 1`. Two parallel work items independently
   picked `u64::MAX`; a test now asserts the pair differs, because the
   collision was not hypothetical — it happened, in review, on the same day.
