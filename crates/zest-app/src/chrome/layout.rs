@@ -59,6 +59,11 @@ pub struct ChromeLayout {
     /// Slider tracks by row index, exactly as drawn — a click's fraction is
     /// computed against these, so pointer and pixels cannot disagree.
     pub settings_tracks: Vec<(usize, [f32; 4])>,
+    /// The `+` button, exactly as drawn this pass — the launcher menu
+    /// anchors to it, so the button and its menu come from one computation
+    /// and cannot drift apart (the hit map's discipline, applied to
+    /// anchoring).
+    pub new_tab_rect: [f32; 4],
     /// Index into `rects`/`texts` where the overlay layer (picker, palette,
     /// settings) begins. The renderer draws base chrome's text before the
     /// overlay's panel, so text under a panel cannot bleed through it.
@@ -262,6 +267,12 @@ pub fn layout(
     // content it was opened from.
     if let Some(palette) = &model.palette {
         palette_overlay(palette, colors, m, measure, &mut out);
+    }
+    if let Some(launcher) = &model.launcher {
+        // Anchored to the `+` the strip pass just recorded; exclusive with
+        // the other overlays by the app's rule, so its place in this list
+        // carries no ranking.
+        launcher_overlay(launcher, model.hover, colors, m, measure, &mut out);
     }
     // Dead last, after the modals, and that ordering is the feature: lookups
     // walk the map backwards, so the window's own edge outranks a palette
@@ -1126,6 +1137,243 @@ fn palette_overlay(
     }
 }
 
+// The + launcher menu (design §1), logical px.
+const LAUNCHER_W: f32 = 318.0;
+const LAUNCHER_RADIUS: f32 = 12.0;
+const LAUNCHER_PAD: f32 = 6.0;
+/// The `⏎ runs the default` header line.
+const LAUNCHER_HEAD_H: f32 = 24.0;
+/// A profile row: name over its command line.
+const LAUNCHER_ROW_H: f32 = 44.0;
+const LAUNCHER_DIVIDER_H: f32 = 9.0;
+/// The two single-line action rows.
+const LAUNCHER_ACTION_H: f32 = 32.0;
+/// Vertical gap between the `+` and the panel's top edge.
+const LAUNCHER_DROP: f32 = 6.0;
+/// The panel never touches the window edge — the clamp the layout test pins.
+const LAUNCHER_MARGIN: f32 = 8.0;
+
+fn launcher_overlay(
+    launcher: &super::model::LauncherModel,
+    hover: Option<HitRegion>,
+    colors: &ChromeColors,
+    m: &ChromeMetrics,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+    out: &mut ChromeLayout,
+) {
+    use super::model::{LauncherAnchor, LauncherRow};
+    let s = m.scale;
+    let no_clip = [0.0, 0.0, m.width, m.height];
+
+    // The scrim: full-window and *transparent* — a menu dims nothing, but a
+    // click-away must dismiss without falling through to a tab, the grid,
+    // or a block header. A hit region with no rect is exactly that.
+    out.hit.push(no_clip, HitRegion::LauncherScrim);
+
+    let w = (LAUNCHER_W * s).min((m.width - 2.0 * LAUNCHER_MARGIN * s).max(0.0));
+    let nt = out.new_tab_rect;
+    let (x, y) = match launcher.anchor {
+        // Right-anchored under the button (§1). The + sits at the strip's
+        // right end, so this fits by construction — the clamp below is what
+        // makes "by construction" survive a narrow window anyway.
+        LauncherAnchor::Strip => (nt[0] + nt[2] - w, nt[1] + nt[3] + LAUNCHER_DROP * s),
+        // top:40, left:0 from the button, opening rightwards over the pane
+        // (§2): right-anchored it runs off the window's left edge.
+        LauncherAnchor::Sidebar => (nt[0], nt[1] + 40.0 * s),
+    };
+    let x = x.clamp(LAUNCHER_MARGIN * s, (m.width - w - LAUNCHER_MARGIN * s).max(LAUNCHER_MARGIN * s));
+
+    let row_h = |row: &LauncherRow| match row {
+        LauncherRow::Profile { .. } => LAUNCHER_ROW_H * s,
+        LauncherRow::Divider => LAUNCHER_DIVIDER_H * s,
+        LauncherRow::RunOnHost | LauncherRow::ManageProfiles { .. } => LAUNCHER_ACTION_H * s,
+    };
+    let content_h: f32 = LAUNCHER_HEAD_H * s
+        + launcher.rows.iter().map(&row_h).sum::<f32>()
+        + 2.0 * LAUNCHER_PAD * s;
+    // Clamped to the window; a menu long enough to clip earns scrolling with
+    // the profiles editor's work item, not here — rows past the edge are
+    // clipped from the hit map too, so nothing invisible answers clicks.
+    let h = content_h.min((m.height - y - LAUNCHER_MARGIN * s).max(0.0));
+    let panel = [x, y, w, h];
+    out.rects.push(RectInstance {
+        radii: [LAUNCHER_RADIUS * s; 4],
+        border: colors.line,
+        border_width: HAIRLINE * s,
+        // The design's `0 20px 50px rgba(0,0,0,.62)`, through the theme's
+        // shadow discipline like the picker.
+        shadow_blur: 20.0 * s,
+        shadow_alpha: colors.shadow_alpha,
+        ..RectInstance::filled(panel, colors.panel_bg, no_clip)
+    });
+    // The panel between rows swallows clicks; rows out-rank it where they
+    // overlap (push order is draw order).
+    out.hit.push(panel, HitRegion::LauncherPanel);
+
+    // Header: `⏎ runs the default`, small and faint.
+    {
+        let head = [x, y + LAUNCHER_PAD * s, w, LAUNCHER_HEAD_H * s];
+        out.texts.push(TextRun {
+            text: "\u{23ce} runs the default".into(),
+            pos: [x + 12.0 * s, baseline_in(head[1], head[3], UI_CHORD * s)],
+            max_width: w - 24.0 * s,
+            color: colors.text_faint,
+            clip: panel,
+            px: UI_CHORD * s,
+            bold: false,
+            tracking: 0.0,
+        });
+    }
+
+    let mut ry = y + LAUNCHER_PAD * s + LAUNCHER_HEAD_H * s;
+    for (i, row) in launcher.rows.iter().enumerate() {
+        let rh = row_h(row);
+        let rect = [x + LAUNCHER_PAD * s, ry, w - 2.0 * LAUNCHER_PAD * s, rh];
+        ry += rh;
+
+        if matches!(row, LauncherRow::Divider) {
+            out.rects.push(RectInstance::filled(
+                [rect[0] + 4.0 * s, rect[1] + rh / 2.0, rect[2] - 8.0 * s, HAIRLINE * s],
+                colors.hairline_soft,
+                panel,
+            ));
+            continue;
+        }
+
+        let selected = i == launcher.selected;
+        let hovered = hover == Some(HitRegion::LauncherRow(i));
+        // Selected rows read accentSoft, hovered ones selSoft (§1) — the
+        // same pair every row list in the design uses.
+        if selected {
+            out.rects.push(RectInstance::rounded(rect, 8.0 * s, colors.accent_soft, panel));
+        } else if hovered {
+            out.rects.push(RectInstance::rounded(rect, 8.0 * s, colors.tab_hover_bg, panel));
+        }
+
+        match row {
+            LauncherRow::Profile { name, command, host_label, default, digit, active, accent } => {
+                // v1 launches on the window's route, so the host chip is
+                // omitted rather than shown and ignored (the design's
+                // dead-affordance rule); the field waits for the cross-host
+                // item.
+                let _ = host_label;
+
+                // Glyph tile: the row's accent on a 12%-alpha wash of it —
+                // the same recipe as the tab chips, so a profile looks like
+                // the tab it is about to become.
+                let ink = accent_color(colors, *accent);
+                let tile = [
+                    rect[0] + 6.0 * s,
+                    rect[1] + (rh - TILE * s) / 2.0,
+                    TILE * s,
+                    TILE * s,
+                ];
+                out.rects.push(RectInstance::rounded(tile, TILE_RADIUS * s, washed(ink, 0.12), panel));
+                dot(&mut out.rects, tile[0] + tile[2] / 2.0, tile[1] + tile[3] / 2.0, DOT * s, ink, panel);
+
+                let tx = tile[0] + TILE * s + TAB_INNER_GAP * s;
+                let mut right = rect[0] + rect[2] - 12.0 * s;
+                if let Some(d) = digit {
+                    let hint = d.to_string();
+                    let hw = measure(&hint, UI_CHORD * s, false, 0.0);
+                    out.texts.push(TextRun {
+                        text: hint,
+                        pos: [right - hw, baseline_in(rect[1], rh, UI_CHORD * s)],
+                        max_width: hw + 2.0,
+                        color: colors.text_faint,
+                        clip: panel,
+                        px: UI_CHORD * s,
+                        bold: false,
+                        tracking: 0.0,
+                    });
+                    right -= hw + 8.0 * s;
+                }
+
+                let name_px = UI_BODY * s;
+                let name_w = measure(name, name_px, false, 0.0).min((right - tx).max(0.0));
+                out.texts.push(TextRun {
+                    text: name.clone(),
+                    pos: [tx, baseline_in(rect[1] + 2.0 * s, 20.0 * s, name_px)],
+                    max_width: name_w,
+                    // An active profile reads accent, like the app-tab rows
+                    // in the mock — the menu says "this is where you are".
+                    color: if *active { colors.accent } else { colors.text_active },
+                    clip: panel,
+                    px: name_px,
+                    bold: false,
+                    tracking: 0.0,
+                });
+                if *default {
+                    // The `default` tag on accentSoft (§1) — what ⏎ runs.
+                    let tag_px = 9.0 * s;
+                    let tw = measure("default", tag_px, false, 0.0);
+                    let chip = [tx + name_w + 6.0 * s, rect[1] + 6.0 * s, tw + 10.0 * s, 14.0 * s];
+                    if chip[0] + chip[2] < right {
+                        out.rects.push(RectInstance::rounded(chip, 4.0 * s, colors.accent_soft, panel));
+                        out.texts.push(TextRun {
+                            text: "default".into(),
+                            pos: [chip[0] + 5.0 * s, baseline_in(chip[1], chip[3], tag_px)],
+                            max_width: tw + 2.0,
+                            color: colors.accent,
+                            clip: panel,
+                            px: tag_px,
+                            bold: false,
+                            tracking: 0.0,
+                        });
+                    }
+                }
+                out.texts.push(TextRun {
+                    text: command.clone(),
+                    pos: [tx, baseline_in(rect[1] + 22.0 * s, 18.0 * s, UI_CHORD * s)],
+                    max_width: (right - tx).max(0.0),
+                    color: colors.text_faint,
+                    clip: panel,
+                    px: UI_CHORD * s,
+                    bold: false,
+                    tracking: 0.0,
+                });
+            }
+            LauncherRow::RunOnHost | LauncherRow::ManageProfiles { .. } => {
+                let (label, hint) = match row {
+                    LauncherRow::RunOnHost => ("Run on another host\u{2026}", "\u{21e7}\u{23ce}".to_string()),
+                    LauncherRow::ManageProfiles { chord } => ("Manage profiles", chord.clone()),
+                    _ => unreachable!("matched above"),
+                };
+                let mut right = rect[0] + rect[2] - 12.0 * s;
+                if !hint.is_empty() {
+                    let hw = measure(&hint, UI_CHORD * s, false, 0.0);
+                    out.texts.push(TextRun {
+                        text: hint,
+                        pos: [right - hw, baseline_in(rect[1], rh, UI_CHORD * s)],
+                        max_width: hw + 2.0,
+                        color: colors.text_faint,
+                        clip: panel,
+                        px: UI_CHORD * s,
+                        bold: false,
+                        tracking: 0.0,
+                    });
+                    right -= hw + 8.0 * s;
+                }
+                out.texts.push(TextRun {
+                    text: label.into(),
+                    pos: [rect[0] + 12.0 * s, baseline_in(rect[1], rh, UI_BODY * s)],
+                    max_width: (right - rect[0] - 12.0 * s).max(0.0),
+                    color: if selected { colors.text_active } else { colors.text_inactive },
+                    clip: panel,
+                    px: UI_BODY * s,
+                    bold: false,
+                    tracking: 0.0,
+                });
+            }
+            LauncherRow::Divider => unreachable!("handled above"),
+        }
+
+        if let Some(hit) = intersect(rect, panel) {
+            out.hit.push(hit, HitRegion::LauncherRow(i));
+        }
+    }
+}
+
 fn intersect(r: [f32; 4], c: [f32; 4]) -> Option<[f32; 4]> {
     let x0 = r[0].max(c[0]);
     let y0 = r[1].max(c[1]);
@@ -1472,7 +1720,12 @@ fn horizontal(
     // never leave the strip however many tabs are open.
     let nt_x = reserve + content_w.min(viewport);
     let nt = [nt_x, chip_y + (TAB_H * s - NEW_TAB_H * s) / 2.0, NEW_TAB_W * s, NEW_TAB_H * s];
-    if model.hover == Some(HitRegion::NewTab) {
+    out.new_tab_rect = nt;
+    // While its menu is open the `+` wears selSoft fill and accent ink
+    // (design §1) — the open state must read on the button itself, or the
+    // menu appears anchored to nothing.
+    let open = model.launcher.is_some();
+    if open || model.hover == Some(HitRegion::NewTab) {
         out.rects.push(RectInstance::rounded(nt, PILL_RADIUS * s, colors.tab_hover_bg, no_clip));
     }
     if let Some(hit) = intersect(nt, [reserve, 0.0, avail, sh]) {
@@ -1483,7 +1736,7 @@ fn horizontal(
         text: "+".into(),
         pos: [nt[0] + (nt[2] - plus_w) / 2.0, baseline_in(nt[1], nt[3], 16.0 * s)],
         max_width: nt[2],
-        color: colors.text_inactive,
+        color: if open { colors.accent } else { colors.text_inactive },
         clip: [reserve, 0.0, avail, sh],
         px: 16.0 * s,
         bold: false,
@@ -1718,7 +1971,10 @@ fn vertical(
     }
     {
         let nt = [search[0] + search[2] + PILL_GAP * s, search[1], plus_w, search[3]];
-        if model.hover == Some(HitRegion::NewTab) {
+        out.new_tab_rect = nt;
+        // Open state on the button, exactly as the horizontal strip does it.
+        let open = model.launcher.is_some();
+        if open || model.hover == Some(HitRegion::NewTab) {
             out.rects.push(RectInstance::rounded(nt, PILL_RADIUS * s, colors.tab_hover_bg, no_clip));
         }
         out.hit.push(nt, HitRegion::NewTab);
@@ -1727,7 +1983,7 @@ fn vertical(
             text: "+".into(),
             pos: [nt[0] + (nt[2] - glyph_w) / 2.0, baseline_in(nt[1], nt[3], 16.0 * s)],
             max_width: nt[2],
-            color: colors.text_inactive,
+            color: if open { colors.accent } else { colors.text_inactive },
             clip: no_clip,
             px: 16.0 * s,
             bold: false,
@@ -2087,6 +2343,7 @@ mod tests {
             picker: None,
             palette: None,
             settings: None,
+            launcher: None,
         }
     }
 
@@ -3199,6 +3456,125 @@ mod tests {
             .expect("the + sits beside the search pill");
         assert!(search_x < plus_x, "the + is right of the search pill");
         assert!(plus_x < sw, "the + stays inside the sidebar");
+    }
+
+    /// A launcher with the full row vocabulary: two profiles (the first
+    /// tagged default), the divider, and both action rows.
+    fn launcher(anchor: super::super::model::LauncherAnchor) -> super::super::model::LauncherModel {
+        use super::super::model::{LauncherModel, LauncherRow};
+        let profile = |name: &str, default: bool, digit: u8| LauncherRow::Profile {
+            name: name.into(),
+            command: "pwsh -NoLogo".into(),
+            host_label: None,
+            default,
+            digit: Some(digit),
+            active: false,
+            accent: AccentChoice::Profile(0),
+        };
+        LauncherModel {
+            rows: vec![
+                profile("default", true, 1),
+                profile("ubuntu", false, 2),
+                LauncherRow::Divider,
+                LauncherRow::RunOnHost,
+                LauncherRow::ManageProfiles { chord: "⌘⇧,".into() },
+            ],
+            selected: 0,
+            anchor,
+        }
+    }
+
+    #[test]
+    fn the_launcher_stays_inside_the_window_from_both_anchors() {
+        // §1 anchors right under the strip's `+`; §2 anchors the sidebar's
+        // rightwards. Both must keep the 318px panel inside the window —
+        // the sidebar one right-anchored would run off the LEFT edge, which
+        // is the defect class invariant 5 names.
+        use super::super::model::LauncherAnchor;
+        for (position, anchor) in
+            [(TabsPosition::Top, LauncherAnchor::Strip), (TabsPosition::Left, LauncherAnchor::Sidebar)]
+        {
+            let tabs = vec![
+                tab(1, TabOrigin::Local, TabPresence::Online),
+                tab(2, TabOrigin::Local, TabPresence::Online),
+            ];
+            let m = metrics(1200.0, 800.0, 1.0);
+            let mut mo = model(tabs, position);
+            mo.launcher = Some(launcher(anchor));
+            let l = layout(&mo, &colors(), &m, &mut measure);
+
+            // Panel extent, read off the hit map like a pointer would.
+            let mut min_x = f32::MAX;
+            let mut max_x: f32 = 0.0;
+            let mut max_y: f32 = 0.0;
+            let mut rows = std::collections::HashSet::new();
+            for x in (0..1200).step_by(2) {
+                for y in (0..800).step_by(2) {
+                    match l.hit.hit(x as f32, y as f32) {
+                        Some(HitRegion::LauncherPanel) | Some(HitRegion::LauncherRow(_)) => {
+                            min_x = min_x.min(x as f32);
+                            max_x = max_x.max(x as f32);
+                            max_y = max_y.max(y as f32);
+                            if let Some(HitRegion::LauncherRow(i)) = l.hit.hit(x as f32, y as f32) {
+                                rows.insert(i);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            assert!(min_x >= 0.0 && max_x < 1200.0, "{anchor:?}: panel escapes horizontally");
+            assert!(max_y < 800.0, "{anchor:?}: panel escapes the bottom");
+            assert!(
+                (max_x - min_x) > 300.0,
+                "{anchor:?}: the panel is its designed 318px, got {}",
+                max_x - min_x
+            );
+            // Every actionable row answers; the divider (index 2) never does.
+            assert_eq!(
+                rows,
+                [0usize, 1, 3, 4].into(),
+                "{anchor:?}: profile and action rows are hittable, the divider is not"
+            );
+
+            // The scrim is everywhere the panel is not: click-away dismisses
+            // without falling through to the grid or a chip beneath.
+            assert_eq!(
+                l.hit.hit(600.0, 780.0),
+                Some(HitRegion::LauncherScrim),
+                "{anchor:?}: a far corner is the scrim's"
+            );
+            let panel_mid = ((min_x + max_x) / 2.0, 60.0);
+            let _ = panel_mid;
+        }
+    }
+
+    #[test]
+    fn the_plus_wears_selsoft_and_accent_while_the_launcher_is_open() {
+        // Design §1: `ui.selSoft` fill with `ui.accent` ink while its menu
+        // is open — the open state must read on the button itself.
+        use super::super::model::LauncherAnchor;
+        let c = colors();
+        let m = metrics(1200.0, 800.0, 1.0);
+        let tabs = || vec![tab(1, TabOrigin::Local, TabPresence::Online)];
+
+        let closed = layout(&model(tabs(), TabsPosition::Top), &c, &m, &mut measure);
+        let plus = |l: &ChromeLayout| {
+            l.texts.iter().find(|t| t.text == "+").expect("the + is drawn").color
+        };
+        assert_eq!(plus(&closed), c.text_inactive, "closed: dim ink");
+
+        let mut mo = model(tabs(), TabsPosition::Top);
+        mo.launcher = Some(launcher(LauncherAnchor::Strip));
+        let open = layout(&mo, &c, &m, &mut measure);
+        assert_eq!(plus(&open), c.accent, "open: accent ink");
+        let nt = open.new_tab_rect;
+        assert!(
+            open.rects.iter().any(|r| r.fill == c.tab_hover_bg
+                && (r.rect[0] - nt[0]).abs() < 0.5
+                && (r.rect[1] - nt[1]).abs() < 0.5),
+            "open: the button carries the selSoft fill"
+        );
     }
 
     #[test]

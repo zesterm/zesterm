@@ -116,6 +116,15 @@ pub enum HitRegion {
     /// The settings tab's ground (rail, headers, the space between rows) —
     /// swallows, so a click cannot fall through to the grid beneath.
     SettingsPanel,
+    /// One actionable row of the + launcher menu, by index into its rows.
+    LauncherRow(usize),
+    /// The launcher's panel between rows (header, divider) — swallows
+    /// clicks so a near-miss beside a row does not dismiss like the scrim.
+    LauncherPanel,
+    /// The full-window transparent region beneath the launcher panel:
+    /// click-away dismisses without the press falling through to a tab,
+    /// the grid, or a block header.
+    LauncherScrim,
     /// One row of the settings tab's category rail; clicking selects it.
     SettingsCategory(usize),
     /// A settings row's modified dot: clicking *resets* — deletes the key

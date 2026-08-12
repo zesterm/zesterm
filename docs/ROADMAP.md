@@ -245,12 +245,23 @@ entry stay). The resulting work items, measurements in the handoff README:
       → [#161](https://github.com/zesterm/zesterm/issues/161). Each arm makes
       the exact call the keyboard would; `settings` opens the §11 tab (it
       opened the old overlay before #169, through the same call — the flag
-      never changed). `launcher` and
-      `profiles` parse but refuse with "not implemented" until their work
-      items land — a one-line arm each, then. `--tabs-position <top|left>`
+      never changed). `launcher` and `profiles` were parsed-but-refused until
+      #168 landed them (the one-line arms this entry predicted).
+      `--tabs-position <top|left>`
       landed alongside it: a CommandLine-layer override like `--theme`, so
       both chip orientations (handoff README §§1–2) are capturable too.
-- [ ] The `+` launcher menu (README §1).
+- [x] The `+` launcher menu (README §1) →
+      [#168](https://github.com/zesterm/zesterm/issues/168): clicking the `+`
+      opens the menu (⌘T still spawns the default directly); rows come from
+      `Settings::profiles` through `resolve_profile` (an empty table degrades
+      to one synthetic default-shell row — the menu never renders empty), the
+      default row leads and `⏎` runs it, plain digits 1–9 launch the Nth row,
+      `⇧⏎` opens the fleet picker, and *Manage profiles* opens the singleton
+      Profiles tab (⌘⇧,; a placeholder pane until §12's editor lands —
+      `--screen launcher|profiles` now work). Launches seed the tab's palette
+      through the #162 identity, so a profile's scheme shows on frame one.
+      v1 launches on the window's route: a profile's `host` key (and its row
+      chip, per the dead-affordance rule) waits for the cross-host item.
 - [x] Settings as a tab (README §11), replacing the ⌘, overlay →
       [#169](https://github.com/zesterm/zesterm/issues/169): ⌘, opens or
       activates the singleton tab (closing it is closing a tab — ⌘W, or Esc

@@ -43,6 +43,9 @@ pub enum Action {
     /// The Settings tab (⌘, — the desktop's own convention). Opens it, or
     /// activates the one that exists; closing it is closing a tab (§11).
     ToggleSettings,
+    /// The Profiles tab (⌘⇧, — the settings chord, shifted, per design §12).
+    /// Opens the singleton tab, or activates it when it is already open.
+    OpenProfiles,
     /// Horizontal ⇄ vertical tabs (⌘⇧E, and the title bar's pill). Writes
     /// `tabs.position` through the settings path, so the file stays the one
     /// source of truth.
@@ -86,6 +89,14 @@ pub enum Mods {
     /// `shift_key()`, so Ctrl+Shift+PgUp paged too, and behavior-preserving
     /// means keeping that.
     Shift,
+    /// Super *with* Shift required — for a key whose unshifted chord is
+    /// already spoken for (⌘, is Settings, ⌘⇧, is Profiles). The Ctrl+Shift
+    /// convention structurally cannot spell it: Shift is spent on the
+    /// modifier, so Ctrl+Shift+<key> stays with the unshifted sibling. A row
+    /// in this family is therefore mac-only from the keyboard and MUST keep
+    /// a palette row and a clickable affordance; `chord_label` prints
+    /// nothing off macOS rather than naming a chord that runs something else.
+    SuperShift,
 }
 
 /// The key half of a chord, stored as winit *delivers* it, never as the
@@ -266,6 +277,14 @@ pub static BINDINGS: &[Binding] = &[
     hidden(Mods::Desktop, ChordKey::Char("P"), Action::TogglePalette, Category::Help),
     hidden(Mods::Clipboard, ChordKey::Char("/"), Action::TogglePalette, Category::Help),
     hidden(Mods::Clipboard, ChordKey::Char("?"), Action::TogglePalette, Category::Help),
+    // ⌘⇧, — the Profiles tab (design §12), BEFORE the settings row because
+    // the Desktop policy ignores Shift under Super: with the order flipped,
+    // ⌘⇧, would match the settings row first and Profiles would be one more
+    // dead design chord. On Windows both spellings collapse onto
+    // Ctrl+Shift+, — which stays with Settings, the unshifted meaning — so
+    // this row is mac-only from the keyboard (see `Mods::SuperShift`); the
+    // palette row and the launcher's "Manage profiles" row carry it there.
+    b(Mods::SuperShift, ChordKey::Code(KeyCode::Comma), Action::OpenProfiles, "⇧,", "Open profiles", Category::Help),
     // ⌘, — the settings chord every desktop app shares. By position for the
     // same reason as the digits: Shift+, is `<`, so the Ctrl+Shift form has no
     // comma in it.
@@ -302,6 +321,13 @@ fn mods_match(m: Mods, s: ModifiersState) -> Option<Form> {
         Mods::Ctrl => (s.control_key() && !s.shift_key()).then_some(Form::Plain),
         Mods::CtrlShift => (s.control_key() && s.shift_key()).then_some(Form::Plain),
         Mods::Shift => s.shift_key().then_some(Form::Plain),
+        // Guarded to macOS: on Windows `super` is the Win key, so Win+Shift+,
+        // would run an action whose chord_label deliberately prints nothing
+        // there — a chord that fires but cannot be discovered or documented.
+        // The mac-only intent is enforced, not just described.
+        Mods::SuperShift => {
+            (cfg!(target_os = "macos") && s.super_key() && s.shift_key()).then_some(Form::Super)
+        }
     }
 }
 
@@ -417,6 +443,16 @@ pub fn chord_label(binding: &Binding) -> String {
                 "⇧"
             } else {
                 "Shift+"
+            }
+        }
+        Mods::SuperShift => {
+            if MAC {
+                "⌘"
+            } else {
+                // No reachable spelling off macOS (see `Mods::SuperShift`):
+                // an empty label draws no chip, which is honest, where
+                // printing "Ctrl+Shift+…" would name the sibling's chord.
+                return String::new();
             }
         }
     };
@@ -779,6 +815,56 @@ mod tests {
             None,
             "bare PgUp still belongs to the program"
         );
+    }
+
+    #[test]
+    fn shift_comma_opens_profiles_and_plain_comma_stays_settings() {
+        // Design §12's chord pair: ⌘, is Settings, ⌘⇧, is Profiles. The
+        // profiles row must sit before the settings row (Desktop ignores
+        // Shift under Super) or ⌘⇧, silently stays Settings — the state it
+        // was in before this binding existed.
+        if MAC {
+            assert_eq!(
+                action_at(&char_key("<"), KeyCode::Comma, SUPER.union(SHIFT)),
+                Some(Action::OpenProfiles),
+                "⌘⇧, opens the Profiles tab"
+            );
+        } else {
+            // Off macOS `super` is the Win key, and the SuperShift row is
+            // deliberately inert: Win+Shift+, firing an action whose label
+            // prints nothing would be a chord that runs but cannot be
+            // discovered. It falls through to Desktop's shift-blind comma —
+            // the Settings meaning the unshifted chord already has.
+            assert_eq!(
+                action_at(&char_key("<"), KeyCode::Comma, SUPER.union(SHIFT)),
+                Some(Action::ToggleSettings),
+                "Win+Shift+, must not fire the undiscoverable Profiles chord"
+            );
+        }
+        assert_eq!(
+            action_at(&char_key(","), KeyCode::Comma, SUPER),
+            Some(Action::ToggleSettings),
+            "⌘, without shift stays Settings"
+        );
+        // On Windows both mac spellings collapse onto Ctrl+Shift+, — which
+        // keeps its established meaning. Profiles is reachable there via
+        // the palette row and the launcher's Manage-profiles row instead.
+        assert_eq!(
+            action_at(&char_key("<"), KeyCode::Comma, CTRL_SHIFT),
+            Some(Action::ToggleSettings),
+            "Ctrl+Shift+, keeps Settings; the shifted sibling must not steal it"
+        );
+        if !MAC {
+            let profiles = BINDINGS
+                .iter()
+                .find(|b| b.action == Action::OpenProfiles)
+                .expect("the profiles binding exists");
+            assert_eq!(
+                chord_label(profiles),
+                "",
+                "off macOS the label is empty — a chip naming Ctrl+Shift+, would lie"
+            );
+        }
     }
 
     #[test]

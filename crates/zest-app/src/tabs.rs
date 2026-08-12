@@ -221,7 +221,6 @@ impl Tab {
     }
 
     #[must_use]
-    #[allow(dead_code, reason = "the profile launcher sets it; the next §12 work item")]
     pub fn with_identity(mut self, identity: Option<ProfileIdentity>) -> Self {
         self.identity = identity;
         self
@@ -339,11 +338,51 @@ pub fn is_placeholder(addr: SessionAddr) -> bool {
 /// shell, but the strip's hit machinery is keyed by `SessionAddr` and staying
 /// inside that key is what keeps this change from retouching every hit
 /// region (#23's lesson). All-zero host — no real host, it is a key
-/// fingerprint — plus the one `SessionId` the placeholder counter can never
+/// fingerprint — plus a `SessionId` the placeholder counter can never
 /// count up to.
 #[must_use]
 pub fn settings_addr() -> SessionAddr {
     SessionAddr::new(HostId::from_bytes([0; 32]), SessionId(u64::MAX))
+}
+
+/// The Profiles chip's address (design §12), one below Settings' — the top
+/// two ids on the all-zero host are the app tabs', reserved as a pair so the
+/// two chips can never collide, and real placeholder ids count up from 1 so
+/// neither is reachable by opening tabs.
+#[must_use]
+pub fn profiles_tab_addr() -> SessionAddr {
+    SessionAddr::new(HostId::from_bytes([0; 32]), SessionId(u64::MAX - 1))
+}
+
+/// The window's Profiles tab (design §12): a place, not a shell, as a
+/// placeholder pane until its work item lands. Settings has its own strip
+/// machinery (§11, landed with #172); Profiles keeps this thinner shape
+/// until the editor replaces the placeholder.
+///
+/// At most one — the singleton rule (`⌘⇧,` on an already-open Profiles tab
+/// activates it rather than opening a second; the web client's
+/// `openSingleton` pins the same rule). A `bool` makes duplication
+/// unrepresentable rather than merely checked.
+#[derive(Default)]
+pub struct AppTabs {
+    profiles: bool,
+}
+
+impl AppTabs {
+    /// Open the Profiles tab. `false` means it already existed — the reopen
+    /// is then an activation, which the caller performs by showing it.
+    pub fn open_profiles(&mut self) -> bool {
+        !core::mem::replace(&mut self.profiles, true)
+    }
+
+    #[must_use]
+    pub fn profiles_open(&self) -> bool {
+        self.profiles
+    }
+
+    pub fn close_profiles(&mut self) {
+        self.profiles = false;
+    }
 }
 
 /// The window's open tabs, and which one the keyboard belongs to.
@@ -716,6 +755,41 @@ mod tests {
     }
 
     #[test]
+    fn the_profiles_tab_opens_once_and_reopening_is_an_activation() {
+        // The singleton rule: `⌘⇧,` (or the launcher's Manage-profiles row)
+        // on an already-open Profiles tab must activate it, never grow a
+        // second chip — the state itself makes a duplicate unrepresentable,
+        // and this pins the open/reopen answers the caller branches on.
+        let mut tabs = AppTabs::default();
+        assert!(!tabs.profiles_open(), "nothing is open until asked");
+        assert!(tabs.open_profiles(), "the first open reports newly created");
+        assert!(tabs.profiles_open());
+        assert!(
+            !tabs.open_profiles(),
+            "the second open reports already-there: an activation, not a duplicate"
+        );
+        assert!(tabs.profiles_open(), "…and it is still open, exactly once");
+        tabs.close_profiles();
+        assert!(!tabs.profiles_open(), "closing it is closing a tab");
+        assert!(tabs.open_profiles(), "and it can come back");
+    }
+
+    #[test]
+    fn the_profiles_chip_address_is_a_placeholder_no_session_reaches() {
+        // Persistence and the picker skip placeholders, so the chip can
+        // never be saved as a session; real placeholders count up from 1,
+        // and the two app tabs' reserved ids must never collide with each
+        // other either — both branches once picked u64::MAX independently.
+        assert!(is_placeholder(profiles_tab_addr()));
+        assert_ne!(profiles_tab_addr(), placeholder_addr(1));
+        assert_ne!(
+            profiles_tab_addr(),
+            settings_addr(),
+            "Settings and Profiles are different tabs and need different keys"
+        );
+    }
+
+    #[test]
     fn the_settings_tab_is_a_singleton_that_activates_in_place() {
         // §11: ⌘, opens it; if it is already open it activates that tab
         // rather than opening a second. Closing it hands the keyboard back
@@ -800,6 +874,7 @@ mod tests {
         assert!(!strip.activate_next(), "a lone tab has no next");
         assert!(!strip.activate_prev(), "nor a prev");
         assert!(strip.settings_active(), "and it keeps the keyboard");
+
     }
 
     #[test]

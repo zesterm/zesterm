@@ -279,6 +279,17 @@ impl SettingsUiState {
     }
 }
 
+/// The + launcher menu's transient state while it is open (design §1), and
+/// the action list parallel to the drawn rows — built in the same
+/// `launcher::build_rows` pass, so index `n` means the same thing in both by
+/// construction.
+struct LauncherState {
+    selected: usize,
+    /// Which `+` opened it — decides where the panel hangs (§1 vs §2).
+    anchor: crate::chrome::model::LauncherAnchor,
+    actions: Vec<crate::launcher::LauncherAction>,
+}
+
 /// Choosing one value from a long list, drawn through the command palette's
 /// overlay because it is the same shape of thing: a filtered, scrollable list
 /// with one selection.
@@ -327,6 +338,10 @@ enum AppScreen {
     Terminal,
     Fleet,
     Themes,
+    /// The Profiles tab's pane. Unlike Fleet/Themes this one is tab-shaped:
+    /// `AppTabs` says the tab exists, this says it holds the pane — Esc (or
+    /// activating a session) leaves it open in the strip, inactive.
+    Profiles,
 }
 
 #[derive(Clone)]
@@ -442,6 +457,12 @@ pub struct App {
     settings_ui: Option<SettingsUiState>,
     /// Open over the settings overlay while a long-list field is being chosen.
     value_picker: Option<ValuePickerState>,
+    /// The + launcher menu's transient state, while open — one of the
+    /// mutually exclusive overlays, like the three above.
+    launcher: Option<LauncherState>,
+    /// The app tabs this window holds open (Profiles today) — the singleton
+    /// state the launcher's Manage-profiles row and ⌘⇧, both go through.
+    app_tabs: crate::tabs::AppTabs,
     /// Where each non-default setting came from, kept from the last resolve —
     /// the settings tab's "set by profile `k8s`" chips read it.
     provenance: std::collections::BTreeMap<String, zest_config::Source>,
@@ -591,6 +612,11 @@ pub enum StartScreen {
     Themes,
     Settings,
     Palette,
+    /// The + launcher menu, open over the default screen (design §1).
+    Launcher,
+    /// The Profiles tab (design §12 — the placeholder pane, until the
+    /// editor's work item lands).
+    Profiles,
 }
 
 impl App {
@@ -641,6 +667,8 @@ impl App {
             palette_ui: None,
             value_picker: None,
             settings_ui: None,
+            launcher: None,
+            app_tabs: crate::tabs::AppTabs::default(),
             provenance,
             unknown_keys,
             restart_pending: std::collections::BTreeSet::new(),
@@ -1203,10 +1231,16 @@ impl App {
         match action {
             Action::NewTab => self.new_tab(),
             Action::CloseTab => {
-                // Closing the Settings tab is closing a tab (§11) — ⌘W is
-                // the close affordance the chip deliberately does not draw.
+                // App tabs first, whichever holds the pane: closing one is
+                // closing a tab (§11's rule), and their chips deliberately
+                // draw no × — ⌘W is the close affordance.
                 if self.settings_tab_active() {
                     self.close_settings_tab();
+                    return;
+                }
+                if self.screen == AppScreen::Profiles {
+                    self.app_tabs.close_profiles();
+                    self.show_screen(AppScreen::Terminal);
                     return;
                 }
                 // A split tab closes its focused pane first; the tab itself
@@ -1264,6 +1298,7 @@ impl App {
             Action::ScrollPageDown => self.scroll_page(-1),
             Action::TogglePalette => self.toggle_palette(),
             Action::ToggleSettings => self.open_settings_tab(),
+            Action::OpenProfiles => self.open_profiles_tab(),
             Action::ToggleTabLayout => self.toggle_tab_layout(),
             Action::SplitRight => self.split_right(),
         }
@@ -1557,6 +1592,7 @@ impl App {
                     .collect();
                 Some(ScreenModel::Themes { cards })
             }
+            AppScreen::Profiles => Some(ScreenModel::Profiles),
         }
     }
 
@@ -1668,7 +1704,90 @@ impl App {
         self.screen = screen;
         self.picker = None;
         self.palette_ui = None;
+        self.launcher = None;
         self.mark_chrome_dirty();
+    }
+
+    /// Open (or activate) the Profiles tab — the ⌘⇧, / Manage-profiles /
+    /// `--screen profiles` singleton: at most one exists, and reopening it
+    /// shows the one that does.
+    fn open_profiles_tab(&mut self) {
+        self.app_tabs.open_profiles();
+        self.show_screen(AppScreen::Profiles);
+    }
+
+    /// Toggle the + launcher menu (clicking the `+`, `--screen launcher`).
+    ///
+    /// ⌘T deliberately does NOT come here: the design keeps the default
+    /// profile one keystroke away, so the chord spawns it directly and only
+    /// the button (whose old direct-spawn behaviour this replaces) opens
+    /// the menu.
+    fn toggle_launcher(&mut self) {
+        self.launcher = match self.launcher {
+            Some(_) => None,
+            None => {
+                // One modal at a time — the exclusivity rule every overlay
+                // toggle enforces, so the input blocks stay order-free. The
+                // settings TAB is not in this set: it is a place, not an
+                // overlay (§11), and the menu floats over it like any pane.
+                self.picker = None;
+                self.palette_ui = None;
+                self.value_picker = None;
+                Some(LauncherState {
+                    // Row 0 is the default row by construction, so opening
+                    // and pressing ⏎ runs the default — the menu's header
+                    // is a promise, not a hint.
+                    selected: 0,
+                    anchor: match self.config.tabs.position {
+                        zest_config::settings::TabsPosition::Top => {
+                            crate::chrome::model::LauncherAnchor::Strip
+                        }
+                        zest_config::settings::TabsPosition::Left => {
+                            crate::chrome::model::LauncherAnchor::Sidebar
+                        }
+                    },
+                    actions: Vec::new(),
+                })
+            }
+        };
+        self.mark_chrome_dirty();
+    }
+
+    /// Act on a launcher row. Every action closes the menu: the user chose.
+    fn run_launcher_action(&mut self, action: crate::launcher::LauncherAction) {
+        use crate::launcher::LauncherAction;
+        match action {
+            // Neither launch arm calls leave_screen(), on purpose: a
+            // successful launch runs through open_shell_tab, which ends in
+            // after_activation() — and that steps off any full-pane screen,
+            // so launching over the fleet/Profiles view lands on the new tab
+            // rather than behind the screen (measured, not assumed). A
+            // *failed* launch appended nothing, and leaving the screen for
+            // it would trade the view the user had for a warn! in a log.
+            LauncherAction::Launch(name) => {
+                self.launcher = None;
+                self.mark_chrome_dirty();
+                self.launch_profile(&name);
+            }
+            LauncherAction::LaunchDefault => {
+                self.launcher = None;
+                self.mark_chrome_dirty();
+                self.new_tab();
+            }
+            LauncherAction::RunOnHost => {
+                // The fleet picker is the "choose the machine" surface the
+                // design points ⇧⏎ at; toggle_launcher's exclusivity closed
+                // us already, but the order matters: toggle_picker closes
+                // every sibling, so the launcher must go first.
+                self.launcher = None;
+                self.toggle_picker();
+            }
+            LauncherAction::ManageProfiles => {
+                self.launcher = None;
+                self.open_profiles_tab();
+            }
+            LauncherAction::None => {}
+        }
     }
 
     /// Apply a theme from the gallery, through the settings write path —
@@ -1990,6 +2109,7 @@ impl App {
         if !self.strip_shown()
             && self.picker.is_none()
             && self.palette_ui.is_none()
+            && self.launcher.is_none()
             && !self.tabs.settings_open()
             && self.screen == AppScreen::Terminal
         {
@@ -2035,6 +2155,54 @@ impl App {
                 ensure_visible: state.scroll_to_selected,
                 hosts_searched,
                 caret_on,
+            }
+        });
+
+        // The launcher's rows, rebuilt per pass like the picker's: profiles
+        // can change under an open menu via the config watcher, and rows
+        // and actions must come from one pass or a click runs the wrong row.
+        let launcher_rows = self.launcher.is_some().then(|| {
+            // On a remote route, a command-less launch sends an empty command
+            // and the far host runs its own default shell — showing this
+            // machine's shell.command there would caption the row with a
+            // command that will not run.
+            let fallback = match self.route {
+                Some(HostRoute::Tcp(_)) => "the host's default shell".to_string(),
+                _ => self
+                    .config
+                    .shell
+                    .clone()
+                    .unwrap_or_else(|| CommandSpec::default_shell().command_line),
+            };
+            let active_profile = self
+                .tabs
+                .active()
+                .and_then(|t| t.identity.as_ref())
+                .map(|i| i.name.clone());
+            crate::launcher::build_rows(
+                &self.settings,
+                &fallback,
+                active_profile.as_deref(),
+                keymap::chord_for(keymap::Action::OpenProfiles),
+            )
+        });
+        let launcher_model = launcher_rows.map(|(rows, actions)| {
+            let state = self.launcher.as_mut().expect("is_some gated the build");
+            state.actions = actions;
+            // A reload can shrink the rows under the selection; land it on
+            // the nearest actionable row rather than off the end or on the
+            // divider.
+            state.selected = state.selected.min(rows.len().saturating_sub(1));
+            if matches!(
+                state.actions.get(state.selected),
+                Some(crate::launcher::LauncherAction::None) | None
+            ) {
+                state.selected = crate::launcher::step(&state.actions, state.selected, true);
+            }
+            crate::chrome::model::LauncherModel {
+                rows,
+                selected: state.selected,
+                anchor: state.anchor,
             }
         });
 
@@ -2389,10 +2557,34 @@ impl App {
             })
             .collect();
 
-        // The Settings tab, after the session tabs and before the `+`
-        // (design §11): same list, so the strip, the sidebar's pinned row
-        // and the hit map all agree it exists.
+        // App tabs after the session tabs, in §1's order: sessions, then
+        // Profiles, then Settings, then the `+`. One list, so the strip,
+        // the sidebar's pinned row and the hit map all agree what exists.
+        // Profiles is horizontal-only for now: the vertical design pins app
+        // tabs above the sidebar footer, which is §11's pinned-rows shape —
+        // a chip grouped under a fake host would be worse than none.
         let mut tab_models = tab_models;
+        let profiles_chip = self.app_tabs.profiles_open()
+            && self.config.tabs.position == zest_config::settings::TabsPosition::Top;
+        if profiles_chip {
+            tab_models.push(TabModel {
+                addr: crate::tabs::profiles_tab_addr(),
+                kind: crate::chrome::model::TabKind::Profiles,
+                title: "Profiles".into(),
+                host: local_label.clone(),
+                cwd: String::new(),
+                origin: TabOrigin::Local,
+                presence: TabPresence::Online,
+                accent: 0,
+                // Accent index 0 is the theme's own accent: an app tab is a
+                // place, not a shell on a host.
+                tab_accent: crate::chrome::model::AccentChoice::Profile(0),
+                running: false,
+                age: String::new(),
+                connecting: false,
+                link: crate::chrome::model::LinkKind::Loopback,
+            });
+        }
         if self.tabs.settings_open() {
             tab_models.push(TabModel {
                 addr: crate::tabs::settings_addr(),
@@ -2462,9 +2654,24 @@ impl App {
 
         self.anim_pulse = tab_models.iter().any(|t| t.running)
             && self.config.tabs.position == zest_config::settings::TabsPosition::Left;
+
+        // Which chip is lit — exactly one (invariant 9). The Profiles pane
+        // wins while its screen is up (its chip sits right after the
+        // sessions), the Settings tab while it holds the keyboard (its chip
+        // is last), else the active session. Computed here rather than via
+        // display_active(): that helper predates the Profiles chip and
+        // assumes Settings is the only insertion.
+        let active = if profiles_chip && self.screen == AppScreen::Profiles {
+            self.tabs.len()
+        } else if self.tabs.settings_active() {
+            tab_models.len() - 1
+        } else {
+            self.tabs.active_index()
+        };
+
         let model = ChromeModel {
             tabs: tab_models,
-            active: self.tabs.display_active(),
+            active,
             position: self.config.tabs.position,
             strip_scroll: self.strip_scroll,
             ensure_active_visible: self.strip_ensure_visible,
@@ -2482,6 +2689,7 @@ impl App {
             // The picker wins: it opens *over* the settings tab's content.
             palette: value_picker_model.or(palette_model),
             settings: settings_model,
+            launcher: launcher_model,
         };
 
         let colors = self.chrome_colors;
@@ -2546,6 +2754,13 @@ impl App {
         }
         match (region, button) {
             (HitRegion::Tab(addr), MouseButton::Left) => {
+                // The Profiles chip is an app tab, not a session: clicking
+                // it shows its pane (the singleton is already open — the
+                // chip would not exist otherwise).
+                if addr == crate::tabs::profiles_tab_addr() {
+                    self.show_screen(AppScreen::Profiles);
+                    return;
+                }
                 // Even when it is already the active one: clicking a session
                 // means "show me this", which no screen may overrule.
                 self.leave_screen();
@@ -2555,10 +2770,42 @@ impl App {
             }
             (HitRegion::TabClose(addr), MouseButton::Left)
             | (HitRegion::Tab(addr), MouseButton::Middle) => {
+                if addr == crate::tabs::profiles_tab_addr() {
+                    // No chip × exists (app tabs carry none), but middle
+                    // click closes every other tab and must not skip this
+                    // one — closing it is closing a tab.
+                    self.app_tabs.close_profiles();
+                    if self.screen == AppScreen::Profiles {
+                        self.screen = AppScreen::Terminal;
+                    }
+                    self.mark_chrome_dirty();
+                    return;
+                }
                 self.close_tab(addr, false, el);
             }
             (HitRegion::NewTab, MouseButton::Left) => {
-                self.new_tab();
+                // The + opens the launcher menu (design §1) — there is no
+                // separate default-only half; ⌘T still spawns the default
+                // directly, so it stays one keystroke away.
+                self.toggle_launcher();
+            }
+            (HitRegion::LauncherRow(i), MouseButton::Left) => {
+                if let Some(l) = self.launcher.as_mut() {
+                    l.selected = i;
+                }
+                let action = self.launcher.as_ref().and_then(|l| l.actions.get(i).cloned());
+                if let Some(action) = action {
+                    self.run_launcher_action(action);
+                } else {
+                    self.mark_chrome_dirty();
+                }
+            }
+            // A click on the panel beside a row chose nothing; swallowing it
+            // is what makes a near-miss not a dismissal.
+            (HitRegion::LauncherPanel, _) => {}
+            (HitRegion::LauncherScrim, MouseButton::Left) => {
+                self.launcher = None;
+                self.mark_chrome_dirty();
             }
             (HitRegion::PalettePill, MouseButton::Left)
             | (HitRegion::SidebarSearch, MouseButton::Left) => {
@@ -2815,6 +3062,7 @@ impl App {
                 // order-independent. The settings *tab* is not an overlay
                 // and stays put underneath.
                 self.palette_ui = None;
+                self.launcher = None;
                 Some(PickerState {
                     selected: 0,
                     filter: String::new(),
@@ -2833,6 +3081,7 @@ impl App {
             Some(_) => None,
             None => {
                 self.picker = None;
+                self.launcher = None;
                 Some(PaletteState {
                     selected: 0,
                     filter: String::new(),
@@ -2867,6 +3116,7 @@ impl App {
         self.picker = None;
         self.palette_ui = None;
         self.value_picker = None;
+        self.launcher = None;
         if self.settings_ui.is_none() {
             // The scan is a real cost, paid once at open — the font rows'
             // fallback tags read the cached roster from then on.
@@ -3823,33 +4073,64 @@ impl App {
         }
     }
 
-    /// Open a new tab on the current tab's host (⌘T, the + button).
+    /// Open a new default-shell tab on the current tab's host (⌘T; the +
+    /// button used to do this directly and now opens the launcher instead —
+    /// the chord is how the default stays one keystroke away).
+    fn new_tab(&mut self) {
+        self.open_shell_tab(None, None);
+    }
+
+    /// Launch a named profile (a launcher row, or its digit): v1 runs the
+    /// profile's command through the ordinary new-tab machinery on the
+    /// WINDOW's current route — a profile's `host` key is the next §12 item,
+    /// which is also why the launcher draws no host chip yet.
+    fn launch_profile(&mut self, name: &str) {
+        let identity = crate::tabs::ProfileIdentity::resolve(&self.settings, name);
+        let command = crate::launcher::profile_command(&self.settings, name);
+        self.open_shell_tab(command, Some(identity));
+    }
+
+    /// Open a tab running `command` (the configured shell when `None`),
+    /// wearing `identity` — the profile appearance seam from #162, so a
+    /// profile-launched tab gets its scheme on its very first frame.
     ///
     /// One daemon per window today, so "the current tab's host" is the
     /// window's route; the fleet model makes it genuinely per-tab. Runs
     /// inline: creating on an already-proven route is sub-millisecond on
     /// loopback and a few on the LAN — the picker's cold dials are the ones
     /// that must not block, and they arrive with the fleet model.
-    fn new_tab(&mut self) {
+    fn open_shell_tab(
+        &mut self,
+        command: Option<String>,
+        identity: Option<crate::tabs::ProfileIdentity>,
+    ) {
         let (cols, rows) = self.current_dims();
+        // Seeded before the first byte arrives, so the grid never flashes
+        // the window's palette under a profile's scheme.
+        let seed = self.palette_for(identity.as_ref());
 
         match (&self.route, &self.client_identity) {
-            (Some(route), Some(identity)) => {
+            (Some(route), Some(client)) => {
                 self.next_placeholder += 1;
                 let cell = Arc::new(parking_lot::Mutex::new(crate::tabs::placeholder_addr(
                     self.next_placeholder,
                 )));
                 let wake = wake_for(&self.proxy, Arc::clone(&cell), Arc::clone(&self.activity));
                 // Empty means the host's default shell — for a remote host,
-                // its shell, never this machine's command line.
-                let command = match route {
-                    HostRoute::LocalSocket(_) => self.config.shell.clone().unwrap_or_default(),
-                    HostRoute::Tcp(_) => String::new(),
+                // its shell, never this machine's command line. A profile's
+                // command travels as written: it is what the profile means,
+                // whichever machine runs it.
+                let command = match (&command, route) {
+                    (Some(c), _) => c.clone(),
+                    (None, HostRoute::LocalSocket(_)) => {
+                        self.config.shell.clone().unwrap_or_default()
+                    }
+                    (None, HostRoute::Tcp(_)) => String::new(),
                 };
                 let session = crate::remote::RemoteSession::create_and_attach(
                     route.dialer(),
                     &crate::remote::AttachOptions {
-                        identity,
+                        identity: client,
                         label: "zesterm",
                         command: &command,
                         cols,
@@ -3864,9 +4145,10 @@ impl App {
                 match session {
                     Ok(session) => {
                         *cell.lock() = session.addr();
-                        session.terminal().lock().set_palette(self.palette.clone());
+                        session.terminal().lock().set_palette(seed);
                         let local = route.is_local();
-                        self.tabs.push(Tab::daemon(session, local, (cols, rows)));
+                        self.tabs
+                            .push(Tab::daemon(session, local, (cols, rows)).with_identity(identity));
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "could not open a new tab");
@@ -3881,15 +4163,20 @@ impl App {
                 self.next_placeholder += 1;
                 let addr = crate::tabs::placeholder_addr(self.next_placeholder);
                 let cell = Arc::new(parking_lot::Mutex::new(addr));
+                let mut spec = self.build_spec();
+                if let Some(c) = &command {
+                    spec.command_line = c.clone();
+                }
                 match Session::spawn(
-                    &self.build_spec(),
+                    &spec,
                     PtySize::new(cols, rows),
                     self.config.scrollback,
                     wake_for(&self.proxy, cell, Arc::clone(&self.activity)),
                 ) {
                     Ok(session) => {
-                        session.terminal().lock().set_palette(self.palette.clone());
-                        self.tabs.push(Tab::in_process(session, addr, (cols, rows)));
+                        session.terminal().lock().set_palette(seed);
+                        self.tabs
+                            .push(Tab::in_process(session, addr, (cols, rows)).with_identity(identity));
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "could not spawn a new in-process tab");
@@ -5069,6 +5356,9 @@ impl ApplicationHandler<Wakeup> for App {
             Some(StartScreen::Themes) => self.show_screen(AppScreen::Themes),
             Some(StartScreen::Settings) => self.open_settings_tab(),
             Some(StartScreen::Palette) => self.toggle_picker(),
+            // Over the default screen, exactly as clicking the + would.
+            Some(StartScreen::Launcher) => self.toggle_launcher(),
+            Some(StartScreen::Profiles) => self.open_profiles_tab(),
             None => {}
         }
 
@@ -5296,6 +5586,80 @@ impl ApplicationHandler<Wakeup> for App {
                 // code, and the failure mode -- a half-composed word running as
                 // a command -- is bad enough to check twice.
                 if self.ime.composing() {
+                    return;
+                }
+
+                // The open launcher owns the keyboard, like every overlay.
+                // Chords resolve through the table first: ⌘1..⌘9 stay
+                // ActivateTab (the plain digits below are the launcher's),
+                // ⌘K switches to the picker, ⌘T spawns the default — the
+                // menu yields to any chord rather than dying against it.
+                if self.launcher.is_some() {
+                    use winit::keyboard::{Key, NamedKey};
+                    if let Some(binding) =
+                        keymap::lookup(&event.logical_key, event.physical_key, self.modifiers)
+                    {
+                        self.launcher = None;
+                        self.mark_chrome_dirty();
+                        self.perform(binding.action, el);
+                        return;
+                    }
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            self.launcher = None;
+                            self.mark_chrome_dirty();
+                        }
+                        Key::Named(NamedKey::Enter) => {
+                            // ⇧⏎ is the Run-on-another-host chord wherever
+                            // the selection sits; plain ⏎ runs the selected
+                            // row — the default row, until the user moves.
+                            if self.modifiers.shift_key() {
+                                self.run_launcher_action(crate::launcher::LauncherAction::RunOnHost);
+                            } else {
+                                let action = self
+                                    .launcher
+                                    .as_ref()
+                                    .and_then(|l| l.actions.get(l.selected).cloned());
+                                if let Some(action) = action {
+                                    self.run_launcher_action(action);
+                                }
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowDown) => {
+                            if let Some(l) = self.launcher.as_mut() {
+                                l.selected = crate::launcher::step(&l.actions, l.selected, true);
+                            }
+                            self.mark_chrome_dirty();
+                        }
+                        Key::Named(NamedKey::ArrowUp) => {
+                            if let Some(l) = self.launcher.as_mut() {
+                                l.selected = crate::launcher::step(&l.actions, l.selected, false);
+                            }
+                            self.mark_chrome_dirty();
+                        }
+                        Key::Character(c) => {
+                            // Plain digits 1–9 run the Nth profile row (§1's
+                            // ⌘N hints, minus the modifier the open menu
+                            // makes unnecessary). Chords were resolved
+                            // above, so anything with a desktop modifier is
+                            // already gone.
+                            let digit = (!self.modifiers.control_key()
+                                && !key::belongs_to_desktop(self.modifiers))
+                            .then(|| c.as_str())
+                            .and_then(|s| s.parse::<u8>().ok())
+                            .filter(|d| (1..=9).contains(d));
+                            if let Some(d) = digit {
+                                let action = self.launcher.as_ref().and_then(|l| {
+                                    let i = crate::launcher::digit_action_index(&l.actions, d)?;
+                                    l.actions.get(i).cloned()
+                                });
+                                if let Some(action) = action {
+                                    self.run_launcher_action(action);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                     return;
                 }
 
@@ -6064,6 +6428,13 @@ impl ApplicationHandler<Wakeup> for App {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
+                // The open launcher swallows the wheel without scrolling
+                // anything: a menu that lets the grid scroll beneath it
+                // reads as detached from the window it floats over. (It
+                // grows its own scroll with the profiles editor, not here.)
+                if self.launcher.is_some() {
+                    return;
+                }
                 // An open modal overlay takes the wheel wholesale. The
                 // settings tab is below: not modal, so it scrolls only under
                 // the pointer, by hit region, like the strip does.

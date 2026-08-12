@@ -15,6 +15,7 @@ mod daemon;
 mod fair_mutex;
 mod fleet;
 mod keymap;
+mod launcher;
 mod pipeline_cache;
 mod platform;
 mod remote;
@@ -112,21 +113,14 @@ fn screenshot_from(
 }
 
 /// `--screen`'s value, or the message to refuse it with.
-///
-/// `launcher` and `profiles` are recognized and refused separately from typos:
-/// they are real design screens whose work items have not landed, and "not
-/// implemented" tells the caller to wait where "unknown" sends them hunting for
-/// a misspelling that is not there. Each becomes a one-line `Ok` arm when its
-/// screen exists.
 fn screen_from(value: Option<&str>) -> Result<app::StartScreen, String> {
     match value.map(str::trim) {
         Some("fleet") => Ok(app::StartScreen::Fleet),
         Some("themes") => Ok(app::StartScreen::Themes),
         Some("settings") => Ok(app::StartScreen::Settings),
         Some("palette") => Ok(app::StartScreen::Palette),
-        Some(s @ ("launcher" | "profiles")) => {
-            Err(format!("--screen {s} is not implemented yet — it lands with its work item"))
-        }
+        Some("launcher") => Ok(app::StartScreen::Launcher),
+        Some("profiles") => Ok(app::StartScreen::Profiles),
         _ => Err("--screen needs one of fleet|themes|settings|palette|launcher|profiles".into()),
     }
 }
@@ -439,10 +433,10 @@ fn parse_args(args: &[String]) -> Result<Flags, EarlyExit> {
                      --attach-probe    report what attaching to the daemon cost, then exit\n\
                      --no-daemon       own the pty in this process, do not attach\n\
                      --new-session     start a fresh shell instead of restoring your tabs\n\
-                     --screen <name>   open on fleet|themes|settings|palette instead of\n\
-                     \x20                 the terminal ('palette' is the ⌘K search, not the\n\
-                     \x20                 keymap's command palette; launcher and profiles\n\
-                     \x20                 are recognized but pending their work items).\n\
+                     --screen <name>   open on fleet|themes|settings|palette|launcher|\n\
+                     \x20                 profiles instead of the terminal ('palette' is\n\
+                     \x20                 the ⌘K search, not the keymap's command palette;\n\
+                     \x20                 'launcher' is the + menu over the default screen).\n\
                      \x20                 Composes with\n\
                      \x20                 --screenshot; screen content is live state, and\n\
                      \x20                 --screenshot already implies --no-daemon, which\n\
@@ -674,25 +668,19 @@ mod tests {
     #[test]
     fn every_shipped_screen_parses() {
         use app::StartScreen as S;
-        // The four arms below are the four surfaces that exist today; a value
+        // The six arms below are the six surfaces that exist today; a value
         // that stops parsing is a screenshot pipeline that silently stops
         // covering that screen.
         assert_eq!(screen_from(Some("fleet")), Ok(S::Fleet));
         assert_eq!(screen_from(Some("themes")), Ok(S::Themes));
         assert_eq!(screen_from(Some("settings")), Ok(S::Settings));
         assert_eq!(screen_from(Some("palette")), Ok(S::Palette));
+        assert_eq!(screen_from(Some("launcher")), Ok(S::Launcher));
+        assert_eq!(screen_from(Some("profiles")), Ok(S::Profiles));
     }
 
     #[test]
-    fn the_unbuilt_screens_are_refused_as_pending_not_as_typos() {
-        // `launcher` and `profiles` are real design screens whose work items
-        // have not landed. "not implemented" tells the caller to wait;
-        // "needs one of" tells them to fix their spelling -- conflating the
-        // two sends someone hunting for a typo that is not there.
-        for pending in ["launcher", "profiles"] {
-            let msg = screen_from(Some(pending)).unwrap_err();
-            assert!(msg.contains("not implemented"), "{pending} is pending, not unknown: {msg}");
-        }
+    fn a_misspelled_screen_is_refused_with_the_valid_values() {
         let unknown = screen_from(Some("flet")).unwrap_err();
         assert!(unknown.contains("needs one of"), "a typo lists the valid values: {unknown}");
         let missing = screen_from(None).unwrap_err();
@@ -760,7 +748,6 @@ mod tests {
         for bad in [
             v(&["--screen", "bogus"]),
             v(&["--screen"]),
-            v(&["--screen", "launcher"]),
             v(&["--tabs-position", "middle"]),
             v(&["--tabs-position"]),
         ] {
