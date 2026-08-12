@@ -37,6 +37,11 @@ export const TabStrip = component<{
   // acts. Guarded rather than unconditional: scrollIntoView on every render
   // would fight the user's own scroll through the strip.
   const keepActiveVisible = (): void => {
+    // Prune closed tabs' entries first — the ref callback only ever adds, so
+    // without this the map holds every chip element a long session has seen.
+    for (const [id, el] of chipEls) {
+      if (!el.isConnected) chipEls.delete(id);
+    }
     const id = ctx.props.activeId;
     if (id === null || scrollEl === null) return;
     const chip = chipEls.get(id);
@@ -54,6 +59,7 @@ export const TabStrip = component<{
     <header class="titlebar">
       <div
         class="tabs-scroll"
+        role="tablist"
         ref={(el: HTMLElement) => {
           scrollEl = el;
         }}
@@ -62,6 +68,11 @@ export const TabStrip = component<{
           <div
             key={t.id}
             class={`tab-chip${t.id === ctx.props.activeId ? ' active' : ''}`}
+            role="tab"
+            aria-selected={t.id === ctx.props.activeId}
+            // Roving tabindex: one Tab stop for the whole strip. Mouse focus
+            // is cancelled below, so this is the keyboard's path in.
+            tabIndex={t.id === ctx.props.activeId ? 0 : -1}
             title={chipTooltip(t, ctx.props.hostLabels[t.hostId])}
             style={`--tab-color:${t.color ?? 'var(--zt-accent)'}`}
             onMouseDown={(e: MouseEvent) => {
@@ -73,6 +84,12 @@ export const TabStrip = component<{
               e.preventDefault();
             }}
             onClick={() => ctx.props.onActivate(t.id)}
+            onKeyDown={(e: KeyboardEvent) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                ctx.props.onActivate(t.id);
+              }
+            }}
             ref={(el: HTMLElement) => chipEls.set(t.id, el)}
           >
             <span class="tab-glyph">❯</span>

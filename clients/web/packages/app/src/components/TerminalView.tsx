@@ -160,6 +160,11 @@ export const TerminalView = component<{
             ctx.props.onLink?.('live');
           } else if (state.phase === 'reconnecting') {
             ctx.props.onLink?.('reconnecting');
+          } else {
+            // connecting / awaiting-approval / failed: the tab must not read
+            // as live before the link ever existed, and a hard failure must
+            // not leave it frozen in whatever state it last showed.
+            ctx.props.onLink?.('stalled');
           }
         },
         onExited: (code) => {

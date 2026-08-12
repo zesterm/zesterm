@@ -112,10 +112,10 @@ export const SidebarTabs = component<{
             <div class="host-head" title={label(g.hostId)}>
               <span class="host-dot" />
               <span class="host-label">{label(g.hostId)}</span>
-              {/* Just the host name — the mock's `LAN 0.3ms` is data this
-                  client does not have, and a made-up number is worse than
-                  none. Latency joins when the control plane carries it. */}
-              <span class="host-sub">{label(g.hostId)}</span>
+              {/* The mock's sub-line (`macOS · LAN 0.3ms`) is data this client
+                  does not have, and a made-up number is worse than none — so
+                  there is no sub-line at all until the control plane carries
+                  OS and latency. The .host-sub style stays for that day. */}
             </div>
             {g.tabs.map((t) => (
               <button

@@ -88,7 +88,10 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
       cwd: e.cwd,
       color: null,
       panes: [{ id: `${id}-p0`, hostId: e.host, sessionId: e.session, focused: true }],
-      link: 'live',
+      // The SessionClient starts in 'connecting'; TerminalView flips this to
+      // 'live' when the connection actually exists. Starting live would show
+      // a healthy tab for a session that may never connect.
+      link: 'stalled',
     };
   };
 
