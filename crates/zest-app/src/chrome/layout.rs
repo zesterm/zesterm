@@ -1556,7 +1556,11 @@ fn horizontal(
     // The `+` sits *outside* the scrolled row (design §1: "the launcher must
     // sit outside the scrolling row or its menu is clipped"), so the row's
     // viewport ends where the button's slot begins.
-    let viewport = (avail - new_tab_w - gap).max(0.0);
+    // No extra gap subtracted: content_w already carries a trailing gap per
+    // chip, so that is what separates the last chip from the `+` — taking a
+    // second one here left the button a gap short of the strip's right edge
+    // whenever the row overflowed.
+    let viewport = (avail - new_tab_w).max(0.0);
 
     // Widths per chip. App tabs (Settings, Profiles) size to their content;
     // session chips share what is left at the 168px basis, shrink to the
@@ -1927,7 +1931,13 @@ fn vertical(
             bold: false,
             tracking: 0.0,
         });
-        x += name_w + 10.0 * s;
+        // The spacer only exists when a title was actually drawn: at widths
+        // too tight for the name, charging 10px anyway could push the host
+        // chip out even though it fits flush at the reserve edge — and the
+        // chip is the identity that yields LAST here, not first.
+        if name_w > 0.0 {
+            x += name_w + 10.0 * s;
+        }
 
         let detail = tab.detail();
         let detail_w = measure(&detail, UI_SMALL * s, false, 0.0)
