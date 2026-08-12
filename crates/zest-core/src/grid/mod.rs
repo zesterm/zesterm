@@ -258,10 +258,18 @@ impl Grid {
     /// tail stayed blank. Scroll up during a build and it overwrote your
     /// scrollback; scroll back down and the output was gone.
     ///
-    /// The rule that keeps this fixed: **`perform.rs` and `term.rs` never use a
-    /// display-space accessor**, and neither does the wire encoder. Every
-    /// mutating accessor here resolves through this one, so a write cannot
-    /// reach scrollback even if someone forgets.
+    /// The rule that keeps this fixed, by what the caller is *for* rather than
+    /// by which file it lives in: **the VT parser, the wire encoder and the
+    /// retention horizon are active space**. They speak for the session, and
+    /// the session does not know anyone scrolled.
+    ///
+    /// Pointing is the other half and is display space on purpose — selection,
+    /// hit-testing and `Terminal::abs_pos` translate where the *reader* clicked,
+    /// which is exactly the row they are looking at. Both kinds live in
+    /// `term.rs`, so the split is not a per-file rule.
+    ///
+    /// Every mutating accessor here resolves through this one regardless, so a
+    /// write cannot reach scrollback even if someone forgets.
     #[inline]
     fn active_base(&self) -> usize {
         self.storage.len().saturating_sub(self.rows)
