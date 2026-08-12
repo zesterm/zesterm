@@ -352,12 +352,17 @@ fn remove_at(path: &Path, parts: &[&str]) -> std::io::Result<()> {
 /// Pruning matters because [`write_at`] creates parents on demand: without it,
 /// set-then-reset leaves a trail of empty `[profiles.x.window]` headers that
 /// read as settings the user once had.
-fn remove_in(table: &mut toml_edit::Table, parts: &[&str]) -> bool {
+fn remove_in(table: &mut dyn toml_edit::TableLike, parts: &[&str]) -> bool {
     match parts {
         [] => false,
         [last] => table.remove(last).is_some(),
         [head, rest @ ..] => {
-            let Some(child) = table.get_mut(head).and_then(toml_edit::Item::as_table_mut) else {
+            // `as_table_like_mut`, not `as_table_mut`: a hand-written inline
+            // table (`profiles = { x = { … } }`) is a Value, not a Table, and
+            // the narrower cast made removals through it silently no-op while
+            // write_at's index-based traversal wrote into it just fine.
+            let Some(child) = table.get_mut(head).and_then(toml_edit::Item::as_table_like_mut)
+            else {
                 return false;
             };
             let removed = remove_in(child, rest);
@@ -506,6 +511,35 @@ mod tests {
         assert!(
             !table.contains_key("profiles"),
             "emptied tables were not pruned: {text:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn removal_reaches_into_inline_tables() {
+        // A hand-written `profiles = { x = { ... } }` is the same data in a
+        // different representation, and write_at happily writes through it —
+        // so a removal that silently no-ops there strands overrides the
+        // editor created and can never clear, and "Delete profile" reports
+        // success while the profile survives.
+        let path = temp("rm-inline");
+        std::fs::write(
+            &path,
+            "profiles = { x = { command = \"wsl\", window = { opacity = 0.5 } } }\n",
+        )
+        .expect("write");
+
+        remove_profile_value(&path, "x", "window.opacity").expect("remove");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(!text.contains("opacity"), "removal no-oped through an inline table: {text}");
+        assert!(text.contains("command"), "removal must take only the one key: {text}");
+
+        remove_profile(&path, "x").expect("remove profile");
+        let text = std::fs::read_to_string(&path).expect("read");
+        let table: toml::Table = text.parse().expect("still valid toml");
+        assert!(
+            !table.contains_key("profiles"),
+            "an inline profile survived its own deletion: {text:?}"
         );
         let _ = std::fs::remove_file(&path);
     }
