@@ -702,6 +702,61 @@ fn a_full_reset_clears_the_block_index() {
 }
 
 #[test]
+fn output_arriving_while_the_reader_scrolled_back_is_not_lost() {
+    // The whole-terminal statement of the grid bug: a build streaming output
+    // while someone reads their scrollback used to print onto the rows being
+    // read, leaving the live screen blank. Nothing about it is recoverable
+    // afterwards -- the text is simply gone.
+    let mut t = Terminal::new(20, 3, 100);
+    t.advance(b"anchor\r\n");
+    for _ in 0..5 {
+        t.advance(b"filler\r\n");
+    }
+    t.scroll_display(5);
+    let read_before = t.screen_text();
+
+    t.advance(b"one\r\ntwo");
+    assert_eq!(t.screen_text(), read_before, "output moved or overwrote what was being read");
+
+    t.scroll_to_bottom();
+    let after = t.screen_text();
+    for line in ["one", "two"] {
+        assert!(after.contains(line), "{line:?} never reached the live screen: {after:?}");
+    }
+}
+
+#[test]
+fn block_markers_name_the_live_line_not_the_scrolled_one() {
+    // `block_line` read the cursor's row through the display, so every OSC 133
+    // marker emitted while the user was scrolled back named the line they had
+    // scrolled *to*. A block then straddled thousands of lines, and the header
+    // pass -- which matches an id range against the visible rows -- painted one
+    // opaque band over the entire pane.
+    let mut t = Terminal::new(20, 3, 100);
+    for _ in 0..8 {
+        t.advance(b"old\r\n");
+    }
+    t.scroll_display(6);
+
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07x\x1b]133;C\x07\r\nout\r\n\x1b]133;D;0\x07");
+
+    let b = t.blocks().blocks().last().expect("a block");
+    let oldest_live = t.grid().active_row(0).id;
+    assert!(
+        b.prompt_line >= oldest_live,
+        "the prompt was recorded at line {} but the live screen starts at {oldest_live}",
+        b.prompt_line
+    );
+    let (o, e) = (b.output_line.expect("output"), b.end_line.expect("end"));
+    assert!(e >= o, "a block that printed a line must not end before it began");
+    assert!(
+        e - b.prompt_line < t.grid().rows() as u64,
+        "a one-command block spanned {} lines",
+        e - b.prompt_line
+    );
+}
+
+#[test]
 fn a_session_past_its_scrollback_bound_does_not_grow_its_index() {
     // The leak with a long fuse: a fleet makes a session that has been running
     // for weeks the normal case, and an index that only ever grows is how that

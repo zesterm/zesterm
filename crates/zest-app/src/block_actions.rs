@@ -150,9 +150,14 @@ pub fn rerun_bytes(block: &Block) -> Option<Vec<u8>> {
 }
 
 /// The newest line the grid holds, for a block that has not ended.
+///
+/// Active space: "what has this command printed so far" is a question about the
+/// live screen. Read through the display it would truncate copy-output at
+/// wherever the user happened to have scrolled to, and return nothing at all
+/// once they scrolled above the command's first output row.
 fn last_line(term: &Terminal) -> LineId {
     let grid = term.grid();
-    grid.line_id_at(grid.rows().saturating_sub(1)).unwrap_or(0)
+    grid.active_line_id_at(grid.rows().saturating_sub(1)).unwrap_or(0)
 }
 
 #[cfg(test)]

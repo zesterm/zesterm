@@ -577,7 +577,7 @@ impl TermState {
         if self.alt_grid.is_some() {
             return None;
         }
-        self.grid.line_id_at(self.grid.cursor.row)
+        self.grid.active_line_id_at(self.grid.cursor.row)
     }
 
     fn block_prompt_start(&mut self) {
@@ -647,7 +647,7 @@ impl TermState {
     /// command would shift everything after it.
     fn command_text(&self) -> String {
         let Some((start_line, start_col)) = self.prompt_end else { return String::new() };
-        let Some(end_line) = self.grid.line_id_at(self.grid.cursor.row) else {
+        let Some(end_line) = self.grid.active_line_id_at(self.grid.cursor.row) else {
             return String::new();
         };
 
