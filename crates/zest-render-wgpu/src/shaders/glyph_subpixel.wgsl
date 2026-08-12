@@ -50,6 +50,10 @@ fn fs_glyph_subpixel(in: GlyphVsOut) -> SubpixelOut {
         discard;
     }
 
+    // Perceptual coverage -> linear weight, before anything else looks at it.
+    // See `linearize_coverage` for what this costs when it is missing.
+    cov = linearize_coverage(cov);
+
     // Stem darkening, componentwise -- which is the correct answer, not merely
     // the convenient one. Each channel is an independent sample at a different
     // x offset, and the transfer models the rasterizer under-weighting thin

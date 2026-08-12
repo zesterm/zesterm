@@ -77,9 +77,24 @@ impl Default for Settings {
 #[serde(default)]
 pub struct Typography {
     /// Font families in preference order; the first one with a glyph wins.
+    ///
+    /// A preference order, *not* a coverage mechanism. A character the chosen
+    /// face lacks is resolved per-character against the system — DirectWrite,
+    /// CoreText, fontconfig — Nerd Font icons come from the discovered symbol
+    /// families, and emoji have their own path; none of that consults this
+    /// list. The shipped default names several because it has to work on
+    /// Windows, macOS and Linux without knowing which it will start on. Choose
+    /// a font and one entry is enough, which is what the settings screen
+    /// writes.
     #[schemars(extend("x_zest_group" = "Text", "x_zest_widget" = "font-list"))]
     pub families: Vec<String>,
-    /// Font size in points.
+    /// Font size in points, converted to pixels at 96 logical DPI.
+    ///
+    /// 12pt is 16 physical pixels at 100% scaling, which is what Windows
+    /// Terminal, WezTerm and kitty all give you at their defaults. This field
+    /// once meant *pixels* despite its name, so the same number produced text
+    /// a quarter smaller than every peer — if a config from before that fix
+    /// looks too large now, it was previously too small.
     #[schemars(range(min = 4.0, max = 144.0))]
     #[schemars(extend("x_zest_group" = "Text", "x_zest_widget" = "number"))]
     pub size_pt: f32,
@@ -90,6 +105,20 @@ pub struct Typography {
     #[schemars(range(min = 0.5, max = 3.0))]
     #[schemars(extend("x_zest_group" = "Text", "x_zest_widget" = "number"))]
     pub line_height: f32,
+    /// Cell width as a multiple of the font size. `0` uses the font's own.
+    ///
+    /// Stated against the size rather than against the face's natural advance,
+    /// which is how Windows Terminal states it — most monospace faces sit near
+    /// 0.6. Use it to tighten or loosen the grid without changing the type
+    /// size, or to make two fonts occupy the same columns.
+    ///
+    /// `0` means "whatever this face says", which is the only sane default: the
+    /// right absolute number depends on the font, so a fixed one would be wrong
+    /// for every face but the one it was chosen against. Geometry — changing it
+    /// changes how many columns fit, and resizes the pty.
+    #[schemars(range(min = 0.0, max = 2.0))]
+    #[schemars(extend("x_zest_group" = "Text", "x_zest_widget" = "number"))]
+    pub cell_width: f32,
     /// Extra space between cells, in pixels. Also geometry.
     #[schemars(range(min = -5.0, max = 20.0))]
     #[schemars(extend("x_zest_group" = "Text", "x_zest_widget" = "number"))]
@@ -136,8 +165,9 @@ impl Default for Typography {
             .iter()
             .map(|s| (*s).to_string())
             .collect(),
-            size_pt: 13.0,
+            size_pt: 12.0,
             line_height: 1.25,
+            cell_width: 0.0,
             letter_spacing: 0.0,
             features: Vec::new(),
             ligatures: false,
@@ -161,18 +191,31 @@ pub struct Appearance {
     /// Follow the OS light/dark setting.
     #[schemars(extend("x_zest_group" = "Appearance", "x_zest_widget" = "toggle"))]
     pub follow_system_theme: bool,
-    /// Stem darkening for text.
+    /// Stem darkening for text. 1.0 is perceptually linear; higher is heavier.
     ///
     /// Applied to glyph coverage each frame rather than baked into the atlas, so
     /// tuning it is a repaint rather than a re-rasterization. It affects text
     /// only — backgrounds and chrome come out exactly as the theme specifies.
+    ///
+    /// Coverage is linearized in the shader, so this composes to
+    /// `apparent = pow(coverage, 1/gamma)` and means exactly one thing: how
+    /// much heavier than perceptually-linear a stroke should be. More coverage
+    /// is more contrast, and contrast is what reads as sharpness — which is why
+    /// the default is 2.5 and not something cautious.
+    ///
+    /// One number serves light and dark alike. That is not what the theory
+    /// predicts — dark-on-light is supposed to need far less stem darkening
+    /// than light-on-dark, and there is a comment on `ThemeEffects` proposing a
+    /// per-theme value on exactly that basis — but 2.5 was tested against a
+    /// white background and a dark one and preferred on both. Measured beats
+    /// predicted, so there is no per-theme value and no reason to add one.
     ///
     /// The default must stay equal to `zest_render_wgpu::TextTuning::DEFAULT_GAMMA`.
     /// It cannot reference it — `zest-config` does not depend on the renderer —
     /// so `zest-app`'s `the_two_defaults_agree` asserts it instead. Before this
     /// was wired the two numbers were 1.0 and 1.3 and nothing compared them, so
     /// the schema documented a value the renderer never used.
-    #[schemars(range(min = 0.5, max = 2.5))]
+    #[schemars(range(min = 0.5, max = 4.0))]
     #[schemars(extend("x_zest_group" = "Appearance", "x_zest_widget" = "number"))]
     pub text_gamma: f32,
     /// Additional contrast applied to glyph coverage, not to the frame.
@@ -188,22 +231,58 @@ pub struct Appearance {
     /// changes glyph *shapes* rather than merely softening them.
     #[schemars(extend("x_zest_group" = "Appearance", "x_zest_widget" = "select"))]
     pub text_antialias: TextAntialias,
+    /// Whether glyph outlines are snapped to the pixel grid.
+    ///
+    /// Independent of `text_antialias`, and the mixed settings are the
+    /// interesting ones. Grid-fitting matters most where a stem is about one
+    /// pixel wide, so it decides everything at 9pt and almost nothing at 16px.
+    ///
+    /// Measured against Windows Terminal at size 9: `grayscale` + `full` gives
+    /// 12.6% ink coverage and 43% fully-saturated pixels against its 11.7% and
+    /// 45%, which is as close as these get.
+    #[schemars(extend("x_zest_group" = "Appearance", "x_zest_widget" = "select"))]
+    pub text_hinting: TextHinting,
+}
+
+/// Whether glyph outlines are snapped to the pixel grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum TextHinting {
+    /// Use outlines as drawn. Softer at small sizes, always faithful in shape.
+    ///
+    /// Worth choosing on a HiDPI display, where a stem is several pixels wide
+    /// and there is nothing for grid-fitting to buy.
+    None,
+    /// Grid-fit through the font's own TrueType bytecode. **The default.**
+    ///
+    /// Crisper at small sizes, and what every Windows application looks like.
+    /// This is what makes a one-pixel stem land on one pixel instead of
+    /// spreading over two, which is the whole difference at 9pt and nearly
+    /// nothing at 16px.
+    /// The cost is that swash pins its hinting target to horizontal LCD and
+    /// will not let it be chosen, so on a ClearType-aware face this grid-fits
+    /// horizontally too — sampled once per pixel that changes glyph shapes,
+    /// which is what made `w` render as `W` at 13ppem.
+    Full,
 }
 
 /// How glyph coverage is sampled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum TextAntialias {
-    /// Per-channel coverage at thirds of a pixel, outlines left unhinted.
+    /// Per-channel coverage at thirds of a pixel.
     ///
-    /// Sharper on an ordinary 1x display, and it keeps each glyph the shape its
-    /// designer drew. Needs an RGB-striped panel and a GPU that can blend per
-    /// channel; where either is missing, grayscale is used instead.
+    /// Keeps horizontal detail a single sample per pixel throws away. Needs an
+    /// RGB-striped panel and a GPU that can blend per channel; where either is
+    /// missing, grayscale is used instead.
     Subpixel,
-    /// One coverage value per pixel, outlines grid-fitted.
+    /// One coverage value per pixel. **The default.**
     ///
-    /// The right choice on a rotated or non-RGB panel, where sampling at
-    /// thirds of a pixel is simply wrong.
+    /// What Windows Terminal does — measurably: its channel spread on inked
+    /// pixels is zero. Paired with `text_hinting = "full"` it matches it
+    /// closely at small sizes, 12.6% ink coverage against 11.7% and 43% of
+    /// inked pixels fully saturated against 45%. Also the right choice on a
+    /// rotated or non-RGB panel, where thirds of a pixel are simply wrong.
     Grayscale,
 }
 
@@ -213,9 +292,10 @@ impl Default for Appearance {
             theme: "obsidian".to_string(),
             light_theme: String::new(),
             follow_system_theme: false,
-            text_gamma: 1.3,
+            text_gamma: 2.5,
             text_contrast: 0.0,
-            text_antialias: TextAntialias::Subpixel,
+            text_antialias: TextAntialias::Grayscale,
+            text_hinting: TextHinting::Full,
         }
     }
 }

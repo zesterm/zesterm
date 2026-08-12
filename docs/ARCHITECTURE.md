@@ -480,8 +480,10 @@ far off.
 
 ## ADR-010 — Text is sampled per subpixel, because the hinter already assumed it
 
-**Status:** accepted — settled empirically by
-`cargo run -p zest-font --example glyph_probe`
+**Status:** superseded in part by ADR-011. The constraint below is still true and still the
+reason the subpixel pipeline exists; the *decision* it reached — subpixel coverage with hinting
+off, as one setting — was reversed after measuring against Windows Terminal. Read ADR-011 with
+it.
 
 ### The constraint, which is not ours
 
@@ -508,6 +510,9 @@ backward-compatibility mode, so there is no gentler target to select. The choice
 sampler to the hinter or to decline the hinter.
 
 ### The decision: both, as one setting
+
+**Reversed — see ADR-011.** Recorded as it was argued, because the reasoning is sound and the
+conclusion still wrong, which is worth more than a tidy edit.
 
 `appearance.text_antialias` is `subpixel | grayscale`, defaulting to subpixel, and it decides
 hinting too — because they are one decision:
@@ -570,3 +575,74 @@ applies to glyphs.
   checking, so a module that merely contains the output struct is rejected by
   `create_shader_module` on any device without the feature — one module for everyone would fail
   to start on exactly the machines the fallback exists to serve.
+
+---
+
+## ADR-011 — Grayscale coverage, grid-fitted, and the same for the chrome
+
+**Status:** accepted — settled by looking, against Windows Terminal on the reporter's own screen
+
+ADR-010 reasoned its way to subpixel coverage with hinting off, and shipped it. It was wrong on
+both halves, and it is worth being precise about why, because the errors were not careless — they
+were measured, just measured badly.
+
+### What Windows Terminal actually does
+
+**It does not use subpixel rendering.** Channel spread on inked pixels in a screenshot of it is
+`0.0`; grayscale is its default antialiasing mode. What makes it crisp at a 7px cell is
+**grid-fitting**, which puts a one-pixel stem on one pixel instead of spreading it across two.
+
+Measured on the same string at 9pt, against its 11.7% ink coverage and 45.3% of inked pixels
+fully saturated:
+
+| | ink | saturated |
+|---|---|---|
+| subpixel + unhinted (ADR-010's decision) | 16.07% | 23.9% |
+| **grayscale + full hinting** | **12.60%** | **43.1%** |
+
+### Why the earlier measurements missed it
+
+Two mistakes, both worth naming because they are easy to repeat:
+
+1. **Hinting was measured at 16px**, where a stem is three pixels wide and grid-fitting has
+   almost nothing to do. It moved a blur proxy by 0.5% and was dismissed. At a 7px cell it is the
+   whole difference.
+2. **It was measured against a broken baseline.** Coverage was still being applied in linear
+   space, so every glyph was already too fat and every candidate fix was judged against that. The
+   subpixel fringe filter was reverted for "softening the text" on the same basis, and was
+   reinstated unchanged once the baseline was fixed.
+
+Fix the known defect first, then evaluate anything else against it. Both errors came from not
+doing that.
+
+### The decisions
+
+- **Coverage is linearized before it is used as a weight** (`linearize_coverage`, `common.wgsl`).
+  It is a perceptual quantity multiplied into a linear target that the resolve pass sRGB-encodes,
+  so 20% coverage emerged at 48% brightness — every edge inflated, every counter filled. This is
+  the sRGB transfer and not a tunable.
+- **`appearance.text_antialias` and `appearance.text_hinting` are independent**, defaulting to
+  `grayscale` and `full`. Welding them made the pair that matches inexpressible.
+- **Stem darkening defaults to 2.5**, on light backgrounds and dark alike. Theory says
+  dark-on-light needs far less; both were tested and both preferred 2.5, so the per-theme value
+  `ThemeEffects` still carries a comment proposing is not needed.
+- **The chrome is pinned to grayscale + grid-fitted**, whatever the terminal is set to. The
+  settings are the terminal's; the window's own furniture has one right answer.
+
+### The cost, accepted deliberately
+
+Grid-fitting flattens the baseline overshoot on `o c e` while sparing `a`, so a label mixing them
+is a pixel inconsistent — which is exactly the "Close reads a pixel short beside tab" half of
+#100, now reintroduced in the chrome. It was traded for crispness, which is far more visible: the
+unhinted chrome was reported as blurry twice, and nobody has mentioned the pixel since.
+
+`hinting_flattens_the_overshoot_inconsistently` asserts the defect rather than the fix. If
+anything ever makes grid-fitting consistent, that test fails and tells us the chrome can have its
+overshoot back.
+
+### What did not survive contact
+
+Aggregate metrics. Mid-tone fraction, ink coverage and saturated-pixel share each hid something
+that was obvious on the screen — three separate times. The measurements that worked were the
+per-stem intensity profile and the per-element peak brightness, both of which look at a few
+pixels rather than averaging millions. Prefer them.

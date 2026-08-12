@@ -166,7 +166,7 @@ fn setting_row(
     // List-shaped values have no inline editor yet; the row says where the
     // edit happens instead of leaving Enter to silently do nothing.
     let description = match field.widget {
-        Widget::FontList | Widget::TagList | Widget::KeyValue => {
+        Widget::TagList | Widget::KeyValue => {
             format!("{} · edit in config.toml", first_line(&field.description))
         }
         _ => first_line(&field.description),
@@ -208,7 +208,17 @@ fn value_cell(field: &UiField, value: Option<&serde_json::Value>) -> SettingsVal
         Widget::Number | Widget::Text | Widget::Path => {
             SettingsValueCell::Text { text: text_of(value) }
         }
-        Widget::FontList | Widget::TagList => SettingsValueCell::ReadOnly {
+        // The primary face is the choice; the rest of the stack is fallback and
+        // would only make the row unreadable.
+        Widget::FontList => SettingsValueCell::Select {
+            value: value
+                .and_then(serde_json::Value::as_array)
+                .and_then(|a| a.first())
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("—")
+                .to_string(),
+        },
+        Widget::TagList => SettingsValueCell::ReadOnly {
             text: match value.and_then(serde_json::Value::as_array) {
                 Some(items) if !items.is_empty() => items
                     .iter()
@@ -255,14 +265,16 @@ fn format_number(v: f64) -> String {
 /// The value an arrow key or Enter produces on a field: flip a toggle,
 /// cycle a select (wrapping), step a number (clamped to the schema range).
 ///
-/// `themes` is the theme roster for [`Widget::ThemePicker`] — the schema
-/// cannot know it, so the caller brings it.
+/// `themes` and `fonts` are the rosters for [`Widget::ThemePicker`] and
+/// [`Widget::FontList`] — the schema cannot know either, so the caller brings
+/// them.
 #[must_use]
 pub fn adjust(
     field: &UiField,
     current: &serde_json::Value,
     dir: i32,
     themes: &[String],
+    fonts: &[String],
 ) -> Option<serde_json::Value> {
     let cycle = |options: &[String]| -> Option<serde_json::Value> {
         if options.is_empty() {
@@ -284,6 +296,35 @@ pub fn adjust(
             cycle(&options)
         }
         Widget::ThemePicker => cycle(themes),
+        Widget::FontList => {
+            // One entry, replacing whatever was there.
+            //
+            // The list is a *preference order*, not a coverage mechanism: a
+            // character the chosen face lacks is resolved per-character by
+            // fontique against the system (DirectWrite, CoreText, fontconfig),
+            // Nerd Font icons come from `symbol_families`, and emoji have their
+            // own path. None of that consults this list. The shipped default is
+            // several entries only because it has to name a face that exists on
+            // Windows *and* macOS *and* Linux before it knows which it is on.
+            //
+            // Once someone has chosen, that reason is gone, and keeping a tail
+            // is how the picker used to grow one: it appended on every press,
+            // so a single pass across an installed set left ninety families
+            // behind, Curlz MT among them.
+            if fonts.is_empty() {
+                return None;
+            }
+            let current = current
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let at = fonts.iter().position(|f| f == current).unwrap_or(0);
+            let next = (at as i32 + dir).rem_euclid(fonts.len() as i32) as usize;
+            Some(serde_json::Value::Array(vec![serde_json::Value::String(
+                fonts[next].clone(),
+            )]))
+        }
         Widget::Number | Widget::Slider if field.integer => {
             let (min, max) = field
                 .range
@@ -391,7 +432,16 @@ pub fn to_toml(
         Widget::Number | Widget::Slider => {
             Some(zest_config::toml_edit::Value::from(clean_float(value.as_f64()?)))
         }
-        Widget::FontList | Widget::TagList | Widget::KeyValue => None,
+        Widget::FontList => {
+            // The whole stack, primary first — writing only the primary would
+            // drop the fallbacks and turn a missing glyph into tofu.
+            let mut arr = zest_config::toml_edit::Array::new();
+            for f in value.as_array()?.iter().filter_map(serde_json::Value::as_str) {
+                arr.push(f);
+            }
+            Some(zest_config::toml_edit::Value::Array(arr))
+        }
+        Widget::TagList | Widget::KeyValue => None,
     }
 }
 
@@ -614,37 +664,37 @@ mod tests {
         let themes = vec!["obsidian".to_string(), "nord".to_string()];
 
         let size = field("typography.size_pt");
-        assert_eq!(adjust(&size, &serde_json::json!(13.0), 1, &themes), Some(serde_json::json!(14.0)), "font size steps in whole points");
+        assert_eq!(adjust(&size, &serde_json::json!(13.0), 1, &themes, &[]), Some(serde_json::json!(14.0)), "font size steps in whole points");
         assert_eq!(
-            adjust(&size, &serde_json::json!(144.0), 1, &themes),
+            adjust(&size, &serde_json::json!(144.0), 1, &themes, &[]),
             Some(serde_json::json!(144.0)),
             "the schema maximum is a wall"
         );
         assert_eq!(
-            adjust(&size, &serde_json::json!(4.0), -1, &themes),
+            adjust(&size, &serde_json::json!(4.0), -1, &themes, &[]),
             Some(serde_json::json!(4.0)),
             "and so is the minimum"
         );
 
         let toggle = field("tabs.restore");
-        assert_eq!(adjust(&toggle, &serde_json::json!(true), 1, &themes), Some(serde_json::json!(false)));
+        assert_eq!(adjust(&toggle, &serde_json::json!(true), 1, &themes, &[]), Some(serde_json::json!(false)));
 
         let position = field("tabs.position");
         assert_eq!(
-            adjust(&position, &serde_json::json!("left"), 1, &themes),
+            adjust(&position, &serde_json::json!("left"), 1, &themes, &[]),
             Some(serde_json::json!("top")),
             "a select cycles with wraparound"
         );
 
         let theme = field("appearance.theme");
         assert_eq!(
-            adjust(&theme, &serde_json::json!("nord"), 1, &themes),
+            adjust(&theme, &serde_json::json!("nord"), 1, &themes, &[]),
             Some(serde_json::json!("obsidian")),
             "the theme picker cycles the roster the caller brings"
         );
 
         let padding = field("window.padding");
-        assert_eq!(adjust(&padding, &serde_json::json!(8), 1, &themes), Some(serde_json::json!(9)), "integers step by one");
+        assert_eq!(adjust(&padding, &serde_json::json!(8), 1, &themes, &[]), Some(serde_json::json!(9)), "integers step by one");
     }
 
     #[test]
@@ -655,7 +705,7 @@ mod tests {
         let lh = field("typography.line_height");
         let mut v = serde_json::json!(1.25);
         for _ in 0..10 {
-            v = adjust(&lh, &v, 1, &[]).expect("steps");
+            v = adjust(&lh, &v, 1, &[], &[]).expect("steps");
         }
         // The off-grid 1.25 snaps to 1.3 first, then nine clean 0.1 steps.
         assert_eq!(v, serde_json::json!(2.2));
@@ -690,7 +740,11 @@ mod tests {
         let v = to_toml(&padding, &serde_json::json!(12)).expect("writable");
         assert_eq!(v.to_string().trim(), "12", "integers are written as integers");
         let families = field("typography.families");
-        assert!(to_toml(&families, &serde_json::json!([])).is_none(), "lists are not inline-editable yet");
+        let v = to_toml(&families, &serde_json::json!(["Meslo LG M", "Consolas"]))
+            .expect("a font stack is writable");
+        assert_eq!(v.to_string().trim(), r#"["Meslo LG M", "Consolas"]"#, "the whole stack, in order");
+        let features = field("typography.features");
+        assert!(to_toml(&features, &serde_json::json!([])).is_none(), "other lists still are not");
     }
 
     #[test]
@@ -782,13 +836,50 @@ mod tests {
     }
 
     #[test]
+    fn the_font_picker_writes_one_face() {
+        // The point of the roster: a font face is choosable from the settings
+        // screen rather than only from config.toml.
+        let fonts = vec!["Cascadia Mono".to_string(), "Meslo LG M".to_string()];
+        let f = field("typography.families");
+        let current = serde_json::json!(["Cascadia Mono", "Consolas"]);
+
+        let next = adjust(&f, &current, 1, &[], &fonts).expect("cycles");
+        let got: Vec<&str> = next.as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+
+        assert_eq!(got, ["Meslo LG M"], "one chosen face, not a chain");
+    }
+
+    #[test]
+    fn cycling_the_font_picker_never_grows_the_stack() {
+        // It did. Keeping the face just stepped off looks considerate and
+        // appends on every press, so one pass across an installed set left
+        // ninety families in a real config -- Curlz MT among the fallbacks.
+        let fonts: Vec<String> =
+            (0..30).map(|i| format!("Face {i}")).collect();
+        let f = field("typography.families");
+        let mut v = serde_json::json!(["Face 0", "Consolas", "monospace"]);
+        for _ in 0..60 {
+            v = adjust(&f, &v, 1, &[], &fonts).expect("cycles");
+        }
+        let got: Vec<&str> = v.as_array().unwrap().iter().filter_map(|s| s.as_str()).collect();
+        assert_eq!(got.len(), 1, "one entry however many times it is cycled: {got:?}");
+    }
+
+    #[test]
+    fn a_font_row_without_a_roster_does_nothing_rather_than_emptying_the_stack() {
+        let f = field("typography.families");
+        let current = serde_json::json!(["Cascadia Mono"]);
+        assert!(adjust(&f, &current, 1, &[], &[]).is_none());
+    }
+
+    #[test]
     fn list_rows_say_where_the_edit_happens() {
         let (rows, _) = build(&values(), &BTreeMap::new(), "");
         for row in &rows {
             if let SettingsRowModel::Setting { key, description, .. } = row {
                 let listy = matches!(
                     field(key).widget,
-                    Widget::FontList | Widget::TagList | Widget::KeyValue
+                    Widget::TagList | Widget::KeyValue
                 );
                 assert_eq!(
                     description.contains("edit in config.toml"),

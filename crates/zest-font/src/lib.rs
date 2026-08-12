@@ -78,23 +78,67 @@ pub struct GlyphKey {
     pub subpx_x: u8,
     /// Synthetic bold/oblique applied because the family lacked a real face.
     pub synthetic: u8,
+    /// Which rasterization this bitmap was made with: [`RASTER_SUBPIXEL`],
+    /// [`RASTER_HINTED`].
+    ///
+    /// In the key because chrome and the grid rasterize *differently* and can
+    /// ask for the same glyph at the same size — the terminal's antialiasing
+    /// settings are the terminal's, and chrome is pinned to what looks right.
+    /// Without this the first one rasterized would win and the other would get
+    /// a bitmap made for someone else.
+    pub raster: u8,
 }
+
+/// Per-channel coverage rather than one value per pixel.
+pub const RASTER_SUBPIXEL: u8 = 1 << 0;
+/// The outline was grid-fitted.
+pub const RASTER_HINTED: u8 = 1 << 1;
 
 pub const SYNTHETIC_BOLD: u8 = 1 << 0;
 pub const SYNTHETIC_ITALIC: u8 = 1 << 1;
 
 /// How text is antialiased, and therefore what a mask texel means.
-///
-/// Not merely a quality knob: it also decides whether the outline is
-/// grid-fitted, because the two are the same decision made once. See
-/// [`Fonts::set_text_antialias`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum TextAntialias {
-    /// Per-channel coverage sampled at thirds of a pixel, outlines unhinted.
-    #[default]
+    /// Per-channel coverage sampled at thirds of a pixel.
     Subpixel,
-    /// One coverage value per pixel, outlines grid-fitted.
+    /// One coverage value per pixel.
+    ///
+    /// The default, and deliberately the *safe* one: a mask is one byte per
+    /// texel until the renderer says it can composite more, so nothing can
+    /// upload four bytes into a one-byte texture before that is known.
+    ///
+    /// What Windows Terminal does by default, and measured to match it closely
+    /// when paired with [`Hinting::Full`]: at 12px, 12.6% ink coverage against
+    /// its 11.7%, and 43% of inked pixels fully saturated against its 45%.
+    #[default]
     Grayscale,
+}
+
+/// Whether outlines are grid-fitted before rasterization.
+///
+/// Kept separate from [`TextAntialias`] because the two really are independent,
+/// and the interesting configurations are the mixed ones. Grid-fitting snaps a
+/// stem onto whole pixels, so it is worth most where a stem is one pixel wide
+/// and almost nothing where it is three — which is why it looks irrelevant at
+/// 16px and decides everything at 9pt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Hinting {
+    /// Outlines are used as the designer drew them.
+    ///
+    /// Softer at small sizes, and the only option that is certainly faithful:
+    /// swash pins the hinting target to horizontal LCD and does not let it be
+    /// chosen, so `Full` means "grid-fit for a rasterizer with three times the
+    /// horizontal resolution" whether or not that is what we are.
+    None,
+    /// Grid-fit through swash, which runs the font's own TrueType bytecode.
+    ///
+    /// Crisper at small sizes and what every Windows application looks like.
+    /// The cost is that a ClearType-aware face grid-fits horizontally too, and
+    /// sampled at one point per pixel that changes glyph *shapes* -- `w` at
+    /// 13ppem in Cascadia Mono is the case that started #100.
+    #[default]
+    Full,
 }
 
 /// What one texel of [`GlyphImage::data`] means.
@@ -135,6 +179,75 @@ impl GlyphFormat {
     #[must_use]
     pub fn is_color(self) -> bool {
         matches!(self, Self::Color)
+    }
+}
+
+/// Smear subpixel coverage across neighbouring samples, to tame colour fringes.
+///
+/// A row of a subpixel mask is `3 * width` coverage samples a third of a pixel
+/// apart. Rasterizing them and stopping there is what puts saturated orange on
+/// a stem's left edge and blue on its right: the three channels of one pixel
+/// disagree completely, and the eye reads that disagreement as colour rather
+/// than as position. Measured against Windows Terminal on the same glyphs at
+/// the same size, that colour was the whole remaining difference once weight
+/// was matched — its `d` is neutral grey, ours was orange and blue.
+///
+/// The taps are FreeType's default rather than the textbook `[1,2,3,2,1]/9`,
+/// which puts an eighth of the energy two subpixels out and visibly softens the
+/// stem along with the colour.
+///
+/// **This was tried once against the wrong baseline.** With coverage still
+/// applied in linear space every glyph was already too fat, so the filter's
+/// small softening landed on top of that and read as unacceptable. Coverage is
+/// linearized now, and the same filter costs far less — which is the argument
+/// for judging a change against a fixed baseline rather than a broken one.
+///
+/// Applied at rasterization, so it is baked into the atlas and costs nothing
+/// per frame. Unlike `text_gamma`, which is a taste knob and stays a uniform.
+/// A four-byte-per-texel bitmap with one empty column added on each side.
+fn pad_columns(src: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let (w, h) = (width as usize, height as usize);
+    let out_w = w + 2;
+    let mut out = vec![0u8; out_w * h * 4];
+    for y in 0..h {
+        let from = y * w * 4;
+        let to = (y * out_w + 1) * 4;
+        out[to..to + w * 4].copy_from_slice(&src[from..from + w * 4]);
+    }
+    out
+}
+
+fn filter_subpixel(data: &mut [u8], width: u32, height: u32) {
+    const TAP: [u32; 5] = [0x08, 0x4D, 0x56, 0x4D, 0x08];
+    const DIV: u32 = 0x100;
+
+    let w = width as usize;
+    if w == 0 {
+        return;
+    }
+    let n = w * 3;
+    let mut row = vec![0u8; n];
+    for y in 0..height as usize {
+        let base = y * w * 4;
+        for x in 0..w {
+            for c in 0..3 {
+                row[x * 3 + c] = data[base + x * 4 + c];
+            }
+        }
+        for i in 0..n {
+            let mut acc = 0u32;
+            for (k, tap) in TAP.iter().enumerate() {
+                // Clamped at the ends, not wrapped: the first and last subpixel
+                // of a glyph have no neighbour, and borrowing the opposite
+                // edge's would drag ink across the whole cell.
+                let j = i as isize + k as isize - 2;
+                if j < 0 || j >= n as isize {
+                    continue;
+                }
+                acc += tap * u32::from(row[j as usize]);
+            }
+            data[base + (i / 3) * 4 + (i % 3)] = (acc / DIV).min(255) as u8;
+        }
     }
 }
 
@@ -200,8 +313,13 @@ pub struct Fonts {
     cell: CellMetrics,
     /// Draw U+2500–U+259F at cell size instead of taking the font's glyphs.
     builtin_box_drawing: bool,
-    /// Antialiasing, which also decides whether outlines are grid-fitted.
-    antialias: TextAntialias,
+    /// What the renderer is *able* to composite, set from its effective mode.
+    /// Chrome uses this directly; the grid may ask for less.
+    available: TextAntialias,
+    /// The terminal grid's antialiasing, from settings.
+    grid_antialias: TextAntialias,
+    /// The terminal grid's grid-fitting, from settings.
+    grid_hinting: Hinting,
     requested: Vec<String>,
     /// Families to try for Private Use Area codepoints, best first.
     symbol_families: Vec<String>,
@@ -232,7 +350,9 @@ impl Fonts {
             shape_cx: ShapeContext::new(),
             typo,
             builtin_box_drawing: true,
-            antialias: TextAntialias::default(),
+            available: TextAntialias::default(),
+            grid_antialias: TextAntialias::default(),
+            grid_hinting: Hinting::default(),
             cell: CellMetrics {
                 cell_w: 1,
                 cell_h: 1,
@@ -392,12 +512,69 @@ impl Fonts {
     /// so the mode is a property of an atlas *generation*, exactly as the font
     /// stack and the pixel size already are.
     pub fn set_text_antialias(&mut self, mode: TextAntialias) {
-        self.antialias = mode;
+        self.available = mode;
+    }
+
+    /// Set grid-fitting. **The caller must clear the atlas afterwards**, for
+    /// the same reason as [`Fonts::set_text_antialias`].
+    pub fn set_hinting(&mut self, hinting: Hinting) {
+        self.grid_hinting = hinting;
+    }
+
+    #[must_use]
+    pub fn hinting(&self) -> Hinting {
+        self.grid_hinting
+    }
+
+    /// The grid's antialiasing preference. Never raises it above what the
+    /// renderer can composite.
+    pub fn set_grid_antialias(&mut self, mode: TextAntialias) {
+        self.grid_antialias = mode;
+    }
+
+    /// The rasterization mode for the text being laid out right now.
+    ///
+    /// Chrome is pinned to per-channel coverage with no grid-fitting, whatever
+    /// the terminal is set to. Grid-fitting at chrome sizes flattens the
+    /// baseline overshoot on `o c e` while leaving it on `a`, which is why
+    /// "Close" reads a pixel short beside "tab" in one label — measured at
+    /// 12.5px, and the reason #100 was opened. The terminal's settings are for
+    /// the terminal; the chrome is the application's own furniture and has one
+    /// right answer.
+    ///
+    /// Keyed off `ui_px` because that is already exactly "is this chrome text".
+    fn raster_mode(&self) -> u8 {
+        let (aa, hint) = if self.ui_px.is_some() {
+            // Chrome is pinned to the configuration that reads best on this
+            // platform — grayscale coverage, grid-fitted — and not to whatever
+            // the terminal is set to. The window's own furniture has one right
+            // answer; the settings are for the grid.
+            //
+            // It was briefly pinned to *unhinted* subpixel coverage instead, on
+            // the argument that grid-fitting at chrome sizes flattens the
+            // baseline overshoot on `o c e` while leaving it on `a` — the
+            // "Close reads a pixel short beside tab" defect that opened #100.
+            // That traded an obvious blur for a subtle one-pixel win: the tab
+            // strip and sidebar came out visibly softer than the grid an inch
+            // away, which is how it was reported twice. Grid-fitting plus stem
+            // darkening is what makes text look right here, and the chrome
+            // should not be the one thing opting out of it.
+            (TextAntialias::Grayscale, Hinting::Full)
+        } else {
+            // Never above what the renderer can composite.
+            let aa = match (self.available, self.grid_antialias) {
+                (TextAntialias::Subpixel, TextAntialias::Subpixel) => TextAntialias::Subpixel,
+                _ => TextAntialias::Grayscale,
+            };
+            (aa, self.grid_hinting)
+        };
+        (if aa == TextAntialias::Subpixel { RASTER_SUBPIXEL } else { 0 })
+            | (if hint == Hinting::Full { RASTER_HINTED } else { 0 })
     }
 
     #[must_use]
     pub fn text_antialias(&self) -> TextAntialias {
-        self.antialias
+        self.available
     }
 
     #[must_use]
@@ -642,27 +819,29 @@ impl Fonts {
         let font = face.font_ref()?;
         let px = f32::from(key.px) / 256.0;
 
-        // Hinting and coverage are one decision, not two.
+        // Hinting and coverage are independent, and the interesting
+        // configurations are the mixed ones.
         //
-        // swash does not let you choose a hinting *target*: it hard-codes
+        // swash does not let a caller choose a hinting *target*: it pins
         // `HintingMode::Smooth { lcd_subpixel: Some(LcdLayout::Horizontal), .. }`
-        // (`swash/src/scale/hinting_cache.rs`), and `hint(bool)` is the whole
-        // API. So hinting here always means "grid-fit for a rasterizer with 3x
-        // horizontal resolution". Pairing that with `Format::Alpha` is a
-        // mismatch that shows up as *shapes changing*, not as softness --
-        // measured on Cascadia Mono at 13ppem, `w` comes back as three vertical
-        // stems and reads as `W`, and `o c e C t` lose the baseline overshoot
-        // that `a` keeps, so "Close" reads clipped beside "tab". (#100.)
+        // (`swash/src/scale/hinting_cache.rs`) and `hint(bool)` is the whole
+        // API. So `Hinting::Full` always means "grid-fit for a rasterizer with
+        // three times the horizontal resolution", and pairing that with
+        // grayscale coverage is what changes glyph shapes rather than merely
+        // sharpening them -- `w` at 13ppem in Cascadia Mono came back as three
+        // vertical stems and read as `W`. (#100.)
         //
-        // Subpixel coverage recovers the horizontal detail but is powerless
-        // against the flattened overshoot, which is vertical -- so the fix for
-        // the shapes is to stop grid-fitting, and subpixel coverage is what
-        // pays for the sharpness that costs. Grayscale keeps hinting, because
-        // unhinted *and* grayscale is the blurry corner neither knob wants.
-        let hint = self.antialias == TextAntialias::Grayscale;
-        let format = match self.antialias {
-            TextAntialias::Subpixel => swash::zeno::Format::Subpixel,
-            TextAntialias::Grayscale => swash::zeno::Format::Alpha,
+        // That is a real cost and it is not the whole story: grid-fitting is
+        // worth most where a stem is one pixel wide, so at 9pt it is the
+        // difference between matching Windows Terminal and not, and at 16px it
+        // is nearly invisible. Hence a setting rather than a rule.
+        // From the *key*, never from `self`: the key is what the atlas cached
+        // under, and `ui_px` may well have been cleared since.
+        let hint = key.raster & RASTER_HINTED != 0;
+        let format = if key.raster & RASTER_SUBPIXEL != 0 {
+            swash::zeno::Format::Subpixel
+        } else {
+            swash::zeno::Format::Alpha
         };
 
         let mut scaler = self.scale_cx.builder(font).size(px).hint(hint).build();
@@ -696,12 +875,40 @@ impl Fonts {
             swash::scale::image::Content::Color => GlyphFormat::Color,
         };
 
+        let mut data = image.data;
+        let (mut width, mut left) = (image.placement.width, image.placement.left);
+        if format == GlyphFormat::SubpixelMask {
+            // Widen by a pixel each side *before* filtering, and keep it.
+            //
+            // The filter reaches two subpixels, two thirds of a pixel, so it
+            // spreads ink past the outline's tight bounding box. zeno does not
+            // inflate the box for a subpixel mask -- placement is computed
+            // before the per-channel shifts -- so filtering in place throws that
+            // ink away, and it is the outermost samples that lose it: measured
+            // at 16px, 6-9% of a round or wide glyph's ink sits in the two
+            // outermost subpixels on each side, and the outermost loses a third
+            // of itself outward.
+            //
+            // Zero-padding the convolution is right and is not the problem:
+            // beyond the box the coverage really is zero, so renormalizing by
+            // the taps that landed would brighten those samples above their true
+            // filtered value. What is wrong is discarding the output that falls
+            // outside, so the answer is a wider output, not a different kernel.
+            //
+            // The pen position and the advance do not move -- `left` shifts by
+            // exactly the column that was added -- so this changes no layout.
+            data = pad_columns(&data, width, image.placement.height);
+            width += 2;
+            left -= 1;
+            filter_subpixel(&mut data, width, image.placement.height);
+        }
+
         Some(GlyphImage {
-            width: image.placement.width,
+            width,
             height: image.placement.height,
-            left: image.placement.left,
+            left,
             top: image.placement.top,
-            data: image.data,
+            data,
             format,
         })
     }
@@ -734,6 +941,7 @@ impl Fonts {
             px: (self.shaping_px() * 256.0) as u16,
             subpx_x: 0,
             synthetic: self.faces.get(font.0 as usize).map_or(0, |f| f.synthetic),
+            raster: self.raster_mode(),
         }
     }
 
@@ -829,6 +1037,11 @@ impl Fonts {
     }
 
     /// Families consulted for Private Use Area glyphs, best first.
+    /// Every installed family, for a settings UI that wants to offer a choice.
+    pub fn installed_families(&mut self) -> Vec<String> {
+        installed_families(&mut self.collection)
+    }
+
     #[must_use]
     pub fn symbol_families(&self) -> &[String] {
         &self.symbol_families
@@ -864,6 +1077,39 @@ fn is_private_use(ch: char) -> bool {
 /// Nerd Font to make their prompt work should not then have to name it in a
 /// config file for the terminal to find it. Mono variants sort first: they are
 /// designed to occupy one cell, which is what a grid wants.
+/// Every installed family that is plausibly usable as a terminal face.
+///
+/// The settings UI needs a roster it can cycle, and the schema cannot carry one
+/// — the same problem the theme picker has, solved the same way: the caller
+/// brings the list.
+///
+/// fontique does not expose a monospace flag, so this cannot be an exact
+/// answer. It is a *widened* one on purpose: too few entries means the font
+/// someone wants is unreachable from the UI, while too many only means a couple
+/// of extra presses. Faces that are certainly not terminal candidates — the
+/// icon-only and symbol-only fonts — are dropped, and the rest is offered.
+#[must_use]
+pub fn installed_families(collection: &mut fontique::Collection) -> Vec<String> {
+    let mut found: Vec<String> = collection
+        .family_names()
+        .filter(|name| {
+            let lower = name.to_ascii_lowercase();
+            // Icon fonts have no letters at all; offering them would render the
+            // whole terminal as tofu.
+            !(lower.contains("symbols only")
+                || lower.starts_with("segoe fluent icons")
+                || lower.starts_with("segoe mdl2")
+                || lower.starts_with("marlett")
+                || lower.starts_with("webdings")
+                || lower.starts_with("wingdings"))
+        })
+        .map(str::to_string)
+        .collect();
+    found.sort_by_key(|n| n.to_ascii_lowercase());
+    found.dedup();
+    found
+}
+
 fn discover_symbol_families(collection: &mut fontique::Collection) -> Vec<String> {
     let mut found: Vec<String> = collection
         .family_names()
@@ -1378,9 +1624,53 @@ mod tests {
         }
 
         #[test]
-        fn subpixel_is_the_default_and_carries_per_channel_coverage() {
+        fn the_fringe_filter_keeps_the_ink_it_spreads() {
+            // The filter reaches two thirds of a pixel, and zeno does not
+            // inflate a subpixel mask's box, so filtering in place throws the
+            // outward spread away -- worst at the outermost samples, which is
+            // exactly the glyph's edge. The box is widened first; this asserts
+            // the ink survives it.
+            //
+            // A low-pass filter conserves its input when nothing is clipped, so
+            // total coverage should come back within rounding: the taps sum to
+            // 256 and each output is an integer division, so a few units per
+            // sample is the floor, not slack.
             let Some(mut f) = fonts() else { return };
-            assert_eq!(f.text_antialias(), TextAntialias::Subpixel, "the shipping default");
+            f.set_text_antialias(TextAntialias::Subpixel);
+            f.set_grid_antialias(TextAntialias::Subpixel);
+
+            for ch in ['o', 'w', 'm'] {
+                let Some((font, gid)) = f.glyph_for(ch, Style::default()) else { continue };
+                let key = f.key(font, gid);
+                let Some(img) = f.rasterize(key) else { continue };
+                if img.format != GlyphFormat::SubpixelMask {
+                    continue;
+                }
+                let w = img.width as usize;
+                // The outermost pixel column exists because it was added, so a
+                // glyph that touched its old edge now has room to spread into.
+                let outer: u64 = (0..img.height as usize)
+                    .flat_map(|y| (0..3).map(move |c| (y, c)))
+                    .map(|(y, c)| u64::from(img.data[(y * w) * 4 + c]))
+                    .sum();
+                let total: u64 = img.data.chunks_exact(4)
+                    .map(|p| u64::from(p[0]) + u64::from(p[1]) + u64::from(p[2]))
+                    .sum();
+                assert!(total > 0, "{ch:?} rasterized to nothing");
+                assert!(
+                    outer * 20 < total,
+                    "{ch:?}: the added column holds {outer} of {total} ink, which is not a                      filter's spill -- the padding is being filled by something else"
+                );
+            }
+        }
+
+        #[test]
+        fn subpixel_coverage_really_is_per_channel() {
+            let Some(mut f) = fonts() else { return };
+            // Grayscale is the default now, so ask for subpixel explicitly --
+            // both what the renderer can do and what the grid wants.
+            f.set_text_antialias(TextAntialias::Subpixel);
+            f.set_grid_antialias(TextAntialias::Subpixel);
 
             // Something has to actually differ between the channels, or the
             // mode is an expensive identity: four times the atlas to store the
@@ -1432,6 +1722,7 @@ mod tests {
                     px: 0,
                     subpx_x: 0,
                     synthetic: 0,
+                    raster: 0,
                 };
                 let Some(img) = f.rasterize(key) else { continue };
                 assert_eq!(img.format, GlyphFormat::Mask, "{mode:?}");
@@ -1440,20 +1731,28 @@ mod tests {
         }
 
         #[test]
-        fn changing_the_mode_changes_what_a_key_rasterizes_to() {
-            // The obligation this documents: `GlyphKey` does not record the
-            // mode, so a caller that changes it without clearing the atlas gets
-            // a four-byte bitmap read at one byte per texel -- a third of a
-            // glyph, silently, with nothing in any error to name the cause.
+        fn the_mode_is_in_the_key_so_two_bitmaps_cannot_alias() {
+            // This used to document an obligation -- change the mode without
+            // clearing the atlas and a four-byte bitmap gets read at one byte
+            // per texel, a third of a glyph, silently. The mode is part of
+            // `GlyphKey` now, because chrome and the grid rasterize
+            // differently at the same time, so the hazard is gone by
+            // construction rather than by remembering.
             let Some(mut f) = fonts() else { return };
             let Some((font, gid)) = f.glyph_for('m', Style::default()) else { return };
-            let key = f.key(font, gid);
 
-            let Some(sub) = f.rasterize(key) else { return };
-            f.set_text_antialias(TextAntialias::Grayscale);
-            let Some(gray) = f.rasterize(key) else { return };
+            f.set_text_antialias(TextAntialias::Subpixel);
+            f.set_grid_antialias(TextAntialias::Subpixel);
+            let sub_key = f.key(font, gid);
+            f.set_grid_antialias(TextAntialias::Grayscale);
+            let gray_key = f.key(font, gid);
 
-            assert_ne!(sub.format, gray.format, "the same key, two different bitmaps");
+            assert_ne!(sub_key, gray_key, "two rasterizations, two cache entries");
+
+            let (Some(sub), Some(gray)) = (f.rasterize(sub_key), f.rasterize(gray_key)) else {
+                return;
+            };
+            assert_ne!(sub.format, gray.format);
             assert_ne!(sub.data.len(), gray.data.len(), "and two different strides");
         }
 
@@ -1473,9 +1772,72 @@ mod tests {
         /// at 12.5px is the reported case, and that is what CI's Windows leg
         /// runs, but the assertion is not specific to it.
         #[test]
-        fn round_letters_keep_their_baseline_overshoot() {
+        fn the_grids_settings_do_not_reach_the_chrome() {
+            // The requirement, stated as a test: `appearance.text_antialias`
+            // and `appearance.text_hinting` are the *terminal's*. Chrome is the
+            // application's own furniture and is pinned to what looks right.
+            //
+            // It matters specifically because grid-fitting at chrome sizes
+            // flattens the baseline overshoot on `o c e` and not on `a`, so
+            // "Close" reads a pixel short beside "tab" in one label -- which is
+            // how #100 was opened, and would come straight back the first time
+            // anyone set text_hinting = "full" for the grid.
             let Some(mut f) = fonts() else { return };
+            // Ask the grid for the *opposite* of chrome's pinned pair, so the
+            // test fails if chrome ever starts following the settings.
+            f.set_text_antialias(TextAntialias::Subpixel);
+            f.set_grid_antialias(TextAntialias::Subpixel);
+            f.set_hinting(Hinting::None);
+
+            let Some((font, gid)) = f.glyph_for('o', Style::default()) else { return };
+
+            let grid = f.key(font, gid);
+            assert_eq!(grid.raster & RASTER_HINTED, 0, "the grid asked for no hinting");
+            assert_eq!(grid.raster & RASTER_SUBPIXEL, RASTER_SUBPIXEL, "and for subpixel");
+
             f.set_ui_px(Some(12.5));
+            let chrome = f.key(font, gid);
+            f.set_ui_px(None);
+
+            // Chrome is pinned to the configuration that reads best here,
+            // whatever the terminal is set to.
+            assert_eq!(
+                chrome.raster,
+                RASTER_HINTED,
+                "chrome is grayscale and grid-fitted regardless of the grid's settings"
+            );
+            assert_ne!(grid.raster, chrome.raster, "and so the two cannot share a cache entry");
+        }
+
+        #[test]
+        fn a_grid_that_asks_for_more_than_the_renderer_has_does_not_get_it() {
+            // The grid's preference is a ceiling, not an override: asking for
+            // subpixel coverage on a device that cannot composite it would
+            // upload four bytes per texel into a one-byte texture.
+            let Some(mut f) = fonts() else { return };
+            f.set_text_antialias(TextAntialias::Grayscale); // what the renderer can do
+            f.set_grid_antialias(TextAntialias::Subpixel); // what the settings want
+            let Some((font, gid)) = f.glyph_for('m', Style::default()) else { return };
+            assert_eq!(
+                f.key(font, gid).raster & RASTER_SUBPIXEL,
+                0,
+                "the renderer's capability wins over the setting"
+            );
+        }
+
+        /// The shape half of #100, asserted where it still holds.
+        ///
+        /// Unhinted, round letters keep the overshoot their designer drew.
+        /// Grid-fitting flattens it — and flattens it on `o c e` while leaving
+        /// it on `a`, which is the inconsistency that made "Close" read a pixel
+        /// short beside "tab". Chrome is grid-fitted deliberately now, so this
+        /// measures the unhinted path and `hinting_flattens_the_overshoot`
+        /// below records what the other choice costs.
+        #[test]
+        fn round_letters_keep_their_baseline_overshoot_when_unhinted() {
+            let Some(mut f) = fonts() else { return };
+            f.set_hinting(Hinting::None);
+            f.set_typography(Typography { size_pt: 9.375, ..f.typography() });
 
             // Flat-bottomed controls first: if these ever overshoot, the metric
             // is measuring something other than what it claims and every

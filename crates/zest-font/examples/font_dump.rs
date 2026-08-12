@@ -66,7 +66,7 @@ fn main() {
         size_pt,
         line_height,
         letter_spacing: arg("--letter-spacing").and_then(|s| s.parse().ok()).unwrap_or(0.0),
-        cell_width: 1.0,
+        cell_width: 0.0,
         scale_factor: scale,
     };
 

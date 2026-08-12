@@ -61,6 +61,7 @@ pub const KEYS: &[(&str, Invalidation)] = &[
     ("typography.families", Invalidation::Geometry),
     ("typography.size_pt", Invalidation::Geometry),
     ("typography.line_height", Invalidation::Geometry),
+    ("typography.cell_width", Invalidation::Geometry),
     ("typography.letter_spacing", Invalidation::Geometry),
     // Features change which glyphs are chosen, not how large a cell is.
     ("typography.features", Invalidation::AtlasBump),
@@ -79,6 +80,8 @@ pub const KEYS: &[(&str, Invalidation)] = &[
     // many bytes a mask texel holds and whether the outline was grid-fitted at
     // all, so every cached bitmap is wrong rather than merely stale.
     ("appearance.text_antialias", Invalidation::AtlasBump),
+    // Same reason: grid-fitting changes the bitmap, not how it is composited.
+    ("appearance.text_hinting", Invalidation::AtlasBump),
     ("window.opacity", Invalidation::SurfaceRebuild),
     ("window.chrome_opacity", Invalidation::Free),
     ("window.backdrop", Invalidation::SurfaceRebuild),
