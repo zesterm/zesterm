@@ -27,8 +27,11 @@ use zest_core::{AbsPos, Block, LineId, Selection, SelectionMode, Terminal};
 /// that the fold then declines — which is what a command that printed nothing
 /// (`cd ..`) and every still-running command used to get.
 ///
-/// Inclusive: the parser already adjusted `D` back onto the last output row, so
-/// a one-line output has `e == o` and still folds.
+/// **Returns a half-open range, `[output_line, end_line + 1)`**, because that is
+/// what the row test below wants. The `+ 1` is the conversion, not slack: a
+/// `Block`'s `end_line` is the last output row *inclusive* — the parser already
+/// pulled `D` back onto it — so a one-line output has `end_line == output_line`
+/// and must still fold, which an unconverted half-open range would drop.
 #[must_use]
 pub fn fold_range(b: &Block) -> Option<(LineId, LineId)> {
     let (o, e) = (b.output_line?, b.end_line?);
@@ -36,13 +39,16 @@ pub fn fold_range(b: &Block) -> Option<(LineId, LineId)> {
 }
 
 /// The fold view: for each visual row, the absolute storage index the
-/// renderer should draw there (`usize::MAX` = blank filler at the top when
-/// history ran out), or `None` when nothing folded is in play — the everyday
+/// renderer should draw there (`usize::MAX` = blank filler, which trails once
+/// history runs out), or `None` when nothing folded is in play — the everyday
 /// fast path, which must stay allocation-free.
 ///
 /// Built by walking upward from the viewport's bottom row, skipping every row
-/// inside a folded block's output range, until the screen is full — which is
-/// exactly "the rows compact and more scrollback shows" (ROADMAP, WS-E).
+/// inside a folded block's output range (half-open, from [`fold_range`]), until
+/// the screen is full — which is exactly "the rows compact and more scrollback
+/// shows" (ROADMAP, WS-E). What remains after history is exhausted is padded
+/// *after* the reversal, so the content sits at the top and the blanks below
+/// it; padding first put them above and sank the whole view.
 #[must_use]
 pub fn fold_row_map(
     term: &Terminal,
