@@ -242,6 +242,13 @@ entry stay). The resulting work items, measurements in the handoff README:
 - [ ] Settings as a tab (README §11), replacing the ⌘, overlay.
 - [ ] Profiles — launch targets (README §12): its own work item; per-session
       palette and per-tab host routes cut across WS-A and the control plane.
+- [x] Per-session palette machinery (README §12's chrome-vs-grid rule) →
+      [#162](https://github.com/zesterm/zesterm/issues/162): a tab carries the
+      resolved identity of the profile it launched from; its grid keeps its
+      own scheme, selection wash and opacity across window theme changes and
+      config reloads, and the chip's 2px rule + glyph tile resolve
+      profile-vs-host accent per `color_from`. Launch semantics — what sets
+      the identity — is the next §12 item.
 
 - [x] **The fleet has no face on the desktop.** → [#23](https://github.com/zesterm/zesterm/issues/23) — **closed**; the sequence below is its record.
       The phone and the web client are both planned to list sessions and attach

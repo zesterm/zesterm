@@ -5,9 +5,39 @@
 //! window, or the network — that is what makes the layout tests meaningful.
 
 use zest_config::settings::TabsPosition;
+use zest_config::ColorFrom;
 use zest_proto::SessionAddr;
 
 use super::hit::HitRegion;
+use crate::tabs::ProfileIdentity;
+
+/// Where a tab chip's accent colour — the 2px rule and the glyph tile, the
+/// chrome's whole per-tab concession (design §12) — comes from.
+///
+/// A choice rather than a finished colour so the model stays theme-free:
+/// layout resolves it against `ChromeColors`, and a theme change repaints
+/// without rebuilding the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccentChoice {
+    /// The profile's own colour: an index into the theme's accent row.
+    Profile(u8),
+    /// A slot in the host-accent cycle (slot 0 is the local machine).
+    Host(usize),
+}
+
+/// Which accent a tab draws, per §12: the profile's own `tab_color` unless
+/// `color_from` says the host decides — and the host also decides when the
+/// profile never picked a colour, or the tab has no profile at all.
+#[must_use]
+pub fn tab_accent(identity: Option<&ProfileIdentity>, host_slot: usize) -> AccentChoice {
+    match identity {
+        Some(id) => match (id.color_from, id.tab_color) {
+            (Some(ColorFrom::Host), _) | (_, None) => AccentChoice::Host(host_slot),
+            (_, Some(color)) => AccentChoice::Profile(color),
+        },
+        None => AccentChoice::Host(host_slot),
+    }
+}
 
 /// How reachable a tab's host currently looks.
 ///
@@ -63,7 +93,12 @@ pub struct TabModel {
     /// Which slot of the host-accent cycle this tab's machine draws in.
     /// Slot 0 is always the local machine; remotes take the next slots in
     /// first-seen order, so a host keeps its colour while the window lives.
+    /// The sidebar's host grouping and the pane headers read this; the chip
+    /// itself draws `tab_accent`.
     pub accent: usize,
+    /// The chip's resolved accent choice — [`tab_accent`]'s answer for this
+    /// tab's identity and host slot. The 2px rule and the glyph tile take it.
+    pub tab_accent: AccentChoice,
     /// A command is currently running in this session — the sidebar's
     /// pulsing dot.
     pub running: bool,
@@ -454,5 +489,54 @@ impl ChromeMetrics {
             TabsPosition::Top => self.strip_height * self.scale,
             TabsPosition::Left => self.sidebar_width * self.scale,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn identity(color_from: Option<ColorFrom>, tab_color: Option<u8>) -> ProfileIdentity {
+        ProfileIdentity {
+            name: "test".into(),
+            scheme: None,
+            tab_color,
+            icon: None,
+            color_from,
+            opacity: None,
+            title: zest_config::TabTitle::FromShell,
+        }
+    }
+
+    #[test]
+    fn tab_accent_prefers_the_profiles_own_colour_unless_the_host_decides() {
+        // The §12 truth table. Getting the unset default wrong makes a
+        // profile that only set tab_color look like it never did.
+        use AccentChoice::{Host, Profile};
+        let cases = [
+            (Some(ColorFrom::Profile), Some(3), Profile(3)),
+            // A profile told to use its own colour without picking one has
+            // nothing to draw but its host's.
+            (Some(ColorFrom::Profile), None, Host(2)),
+            // Host wins even over a picked colour — that is what the
+            // fleet-reads-by-machine setting means.
+            (Some(ColorFrom::Host), Some(3), Host(2)),
+            (Some(ColorFrom::Host), None, Host(2)),
+            // Unset color_from defaults to the profile's own colour (§12).
+            (None, Some(3), Profile(3)),
+            (None, None, Host(2)),
+        ];
+        for (from, color, want) in cases {
+            assert_eq!(
+                tab_accent(Some(&identity(from, color)), 2),
+                want,
+                "color_from={from:?} tab_color={color:?}"
+            );
+        }
+        assert_eq!(
+            tab_accent(None, 2),
+            Host(2),
+            "a tab launched from no profile shows its host"
+        );
     }
 }

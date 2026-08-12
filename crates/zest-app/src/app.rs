@@ -1207,6 +1207,10 @@ impl App {
         // first prompt should wrap where the pane edge is.
         let (cols, rows) = self.split_pane_dims();
 
+        // Seeded with the tab's palette, not the window's: the pane shares
+        // its tab's identity until panes carry their own profile.
+        let seed = self.palette_for(self.tabs.active().and_then(|t| t.identity.as_ref()));
+
         let pane = match (&self.route, &self.client_identity) {
             (Some(route), Some(identity)) => {
                 self.next_placeholder += 1;
@@ -1236,7 +1240,7 @@ impl App {
                 match session {
                     Ok(session) => {
                         *cell.lock() = session.addr();
-                        session.terminal().lock().set_palette(self.palette.clone());
+                        session.terminal().lock().set_palette(seed);
                         let local = route.is_local();
                         crate::tabs::SplitPane::daemon(session, local, (cols, rows))
                     }
@@ -1257,7 +1261,7 @@ impl App {
                     wake_for(&self.proxy, cell, Arc::clone(&self.activity)),
                 ) {
                     Ok(session) => {
-                        session.terminal().lock().set_palette(self.palette.clone());
+                        session.terminal().lock().set_palette(seed);
                         crate::tabs::SplitPane::in_process(session, addr, (cols, rows))
                     }
                     Err(e) => {
@@ -2147,6 +2151,7 @@ impl App {
                     // reachable tab is simply online.
                     presence: TabPresence::Online,
                     accent,
+                    tab_accent: crate::chrome::model::tab_accent(tab.identity.as_ref(), accent),
                     running,
                     age,
                     // Dead tabs borrow the connecting style (faint text): not
@@ -3745,11 +3750,14 @@ impl App {
                         crate::chrome::layout::pane_body(lf, scale),
                         crate::chrome::layout::pane_body(rf, scale),
                     );
-                    let left_source = self
-                        .tabs
-                        .active()
-                        .expect("split implies an active tab")
-                        .source();
+                    let active_tab =
+                        self.tabs.active().expect("split implies an active tab");
+                    let left_source = active_tab.source();
+                    // Per pane, not per tab: a pane may later carry its own
+                    // profile, so each viewport derives its own selection and
+                    // opacity — today both read the tab's identity.
+                    let left_identity = active_tab.identity.as_ref();
+                    let right_identity = active_tab.identity.as_ref();
                     let term_l = left_source.terminal().lock();
                     let term_r = right_source.terminal().lock();
                     let preedit = self.ime.preedit().map(|p| {
@@ -3763,9 +3771,9 @@ impl App {
                             palette: term_l.palette(),
                             scroll_px: 0.0,
                             focused: self.focused && left_focused,
-                            opacity: self.config.opacity,
+                            opacity: pane_opacity(self.config.opacity, left_identity),
                             selection: term_l.selection(),
-                            selection_bg: self.selection_bg,
+                            selection_bg: pane_selection_bg(self.selection_bg, left_identity),
                             preedit: if left_focused { preedit } else { None },
                             cursor_on: caret_on,
                             row_map: if left_focused { fold_map.as_deref() } else { None },
@@ -3776,9 +3784,9 @@ impl App {
                             palette: term_r.palette(),
                             scroll_px: 0.0,
                             focused: self.focused && focus_right,
-                            opacity: self.config.opacity,
+                            opacity: pane_opacity(self.config.opacity, right_identity),
                             selection: term_r.selection(),
-                            selection_bg: self.selection_bg,
+                            selection_bg: pane_selection_bg(self.selection_bg, right_identity),
                             preedit: if focus_right { preedit } else { None },
                             cursor_on: caret_on,
                             row_map: if focus_right { fold_map.as_deref() } else { None },
@@ -3796,6 +3804,7 @@ impl App {
                     );
                 }
                 None => {
+                    let identity = self.tabs.active().and_then(|t| t.identity.as_ref());
                     let term = session.terminal().lock();
                     self.scene.build(
                         &gpu.device,
@@ -3810,9 +3819,9 @@ impl App {
                             palette: term.palette(),
                             scroll_px: 0.0,
                             focused: self.focused,
-                            opacity: self.config.opacity,
+                            opacity: pane_opacity(self.config.opacity, identity),
                             selection: term.selection(),
-                            selection_bg: self.selection_bg,
+                            selection_bg: pane_selection_bg(self.selection_bg, identity),
                             preedit: self.ime.preedit().map(|p| {
                                 zest_render_wgpu::Preedit { text: &p.text, cursor: p.cursor }
                             }),
@@ -3908,6 +3917,10 @@ impl App {
         self.settings = new.clone();
         self.config = Config::from(new);
         self.provenance = load.resolved.provenance;
+        // Before the invalidation acts: `apply_theme` below reseeds from the
+        // identities, and reseeding from stale ones would apply the *old*
+        // profile colours under the new config's name.
+        self.tabs.reresolve_identities(&self.settings);
         // The overlay, if open, is showing values that just moved under it.
         if self.settings_ui.is_some() {
             self.mark_chrome_dirty();
@@ -3949,6 +3962,16 @@ impl App {
         }
     }
 
+    /// The palette a session with this identity should be seeded with — the
+    /// identity's scheme when it names one that exists, the window's palette
+    /// otherwise (unknown warns and falls back; never a failure).
+    fn palette_for(
+        &self,
+        identity: Option<&crate::tabs::ProfileIdentity>,
+    ) -> zest_core::PaletteSnapshot {
+        seed_palette(&self.palette, identity)
+    }
+
     /// Re-resolve the theme into the live palette.
     fn apply_theme(&mut self) {
         let theme = zest_theme::builtin::get(&self.config.theme)
@@ -3967,9 +3990,24 @@ impl App {
         // `OSC 4` set before the theme change is deliberately lost -- a theme
         // change is exactly the moment the seed should win. Every tab: a
         // background grid repainted later with a stale palette is a bug
-        // nobody can reproduce on demand.
+        // nobody can reproduce on demand. Per terminal, through the seed
+        // seam: a profile tab keeps its own scheme across a window theme
+        // change, and a split's second pane is a terminal too — skipping it
+        // left it stranded on the old palette.
         for tab in self.tabs.iter() {
-            tab.source().terminal().lock().set_palette(self.palette.clone());
+            tab.source()
+                .terminal()
+                .lock()
+                .set_palette(seed_palette(&self.palette, tab.identity.as_ref()));
+            if let Some(split) = &tab.split {
+                // The pane borrows its tab's identity until panes carry their
+                // own profile; one seed call per terminal either way.
+                split
+                    .source()
+                    .terminal()
+                    .lock()
+                    .set_palette(seed_palette(&self.palette, tab.identity.as_ref()));
+            }
         }
         if let Some(w) = self.window.as_ref() {
             let bg = resolved.background;
@@ -5746,6 +5784,58 @@ fn resolve_text_tuning(config: &Config) -> zest_render_wgpu::TextTuning {
     }
 }
 
+/// An identity's colour scheme, resolved — `None` when the identity has no
+/// scheme *or* names one that does not exist. Unknown warns and falls back
+/// rather than failing (the never-crash rule): a deleted scheme must not
+/// take a running session's window down, it just follows the window again.
+fn scheme_resolved(
+    identity: Option<&crate::tabs::ProfileIdentity>,
+) -> Option<zest_theme::ResolvedPalette> {
+    let scheme = identity?.scheme.as_deref()?;
+    match zest_theme::builtin::get(scheme) {
+        Some(theme) => Some(zest_theme::resolve(&theme)),
+        None => {
+            tracing::warn!(scheme, "unknown colour scheme; the tab follows the window palette");
+            None
+        }
+    }
+}
+
+/// The palette one terminal should be seeded with: its identity's scheme when
+/// it has one, the window's otherwise.
+///
+/// The seam `apply_theme` reseeds through, one call per terminal — split
+/// panes included, because a pane may later carry its own profile. Pure so
+/// the reseed decision is testable without a window: this is where "a window
+/// theme change wiped every profile tab's scheme" lived.
+fn seed_palette(
+    window: &zest_core::PaletteSnapshot,
+    identity: Option<&crate::tabs::ProfileIdentity>,
+) -> zest_core::PaletteSnapshot {
+    scheme_resolved(identity).map_or_else(|| window.clone(), |r| to_core_palette(&r))
+}
+
+/// The selection wash for one viewport, from the same scheme its grid uses.
+///
+/// A profile grid selected in the *window's* selection colour can be
+/// unreadable — a dark window's wash over paper's light background — so the
+/// selection follows the scheme, not the window.
+fn pane_selection_bg(
+    window: zest_core::Rgb,
+    identity: Option<&crate::tabs::ProfileIdentity>,
+) -> zest_core::Rgb {
+    scheme_resolved(identity)
+        .map_or(window, |r| zest_core::Rgb::new(r.selection_bg.r, r.selection_bg.g, r.selection_bg.b))
+}
+
+/// The cell-background opacity for one viewport: the identity's override when
+/// it set one, the window's otherwise. Rides the viewport only — whether the
+/// *surface* can show the desktop through stays a window-level decision made
+/// at surface creation.
+fn pane_opacity(window: f32, identity: Option<&crate::tabs::ProfileIdentity>) -> f32 {
+    identity.and_then(|i| i.opacity).map_or(window, |o| o.clamp(0.0, 1.0))
+}
+
 /// `zest-theme` and `zest-core` deliberately do not depend on each other, so the
 /// app owns this conversion.
 fn to_core_palette(r: &zest_theme::ResolvedPalette) -> zest_core::PaletteSnapshot {
@@ -5762,6 +5852,119 @@ fn to_core_palette(r: &zest_theme::ResolvedPalette) -> zest_core::PaletteSnapsho
     }
 }
 
+
+#[cfg(test)]
+mod palette_tests {
+    use super::{pane_opacity, pane_selection_bg, seed_palette, to_core_palette};
+    use crate::tabs::ProfileIdentity;
+
+    /// An identity as the launcher will build one; only the palette-relevant
+    /// fields matter here.
+    fn identity(scheme: Option<&str>) -> ProfileIdentity {
+        ProfileIdentity {
+            name: "test".into(),
+            scheme: scheme.map(str::to_string),
+            tab_color: None,
+            icon: None,
+            color_from: None,
+            opacity: None,
+            title: zest_config::TabTitle::FromShell,
+        }
+    }
+
+    fn window() -> zest_core::PaletteSnapshot {
+        to_core_palette(&zest_theme::resolve(&zest_theme::builtin::obsidian()))
+    }
+
+    fn nord() -> zest_core::PaletteSnapshot {
+        to_core_palette(&zest_theme::resolve(&zest_theme::builtin::nord()))
+    }
+
+    #[test]
+    fn a_tab_with_a_scheme_keeps_it_across_a_window_theme_change() {
+        // THE bug this item exists for: apply_theme() reseeded every tab with
+        // the window palette, so switching the window theme silently wiped a
+        // profile tab's scheme. The reseed decision runs through this seam.
+        let seed = seed_palette(&window(), Some(&identity(Some("nord"))));
+        assert_eq!(
+            seed,
+            nord(),
+            "a profile tab's seed is its scheme's palette, not the window's"
+        );
+        assert_ne!(seed, window(), "nord and obsidian differ, or this test proves nothing");
+    }
+
+    #[test]
+    fn a_schemeless_tab_follows_the_window() {
+        assert_eq!(
+            seed_palette(&window(), Some(&identity(None))),
+            window(),
+            "an identity without a scheme is a window-palette tab"
+        );
+        assert_eq!(seed_palette(&window(), None), window(), "and so is a plain tab");
+    }
+
+    #[test]
+    fn an_unknown_scheme_falls_back_to_the_window_palette() {
+        // Never a failure: a profile naming a scheme that was deleted still
+        // launches and still repaints — the never-crash rule.
+        assert_eq!(seed_palette(&window(), Some(&identity(Some("no-such-scheme")))), window());
+    }
+
+    #[test]
+    fn split_panes_seed_independently() {
+        // One seed function, called per terminal: panes may later host
+        // different profiles, and the seam must already answer per pane
+        // rather than per tab.
+        let left = seed_palette(&window(), Some(&identity(Some("nord"))));
+        let right = seed_palette(&window(), Some(&identity(Some("paper"))));
+        assert_ne!(left, right, "two panes, two schemes, two seeds");
+    }
+
+    #[test]
+    fn selection_follows_the_scheme_not_the_window() {
+        let obsidian = zest_theme::resolve(&zest_theme::builtin::obsidian());
+        let win = zest_core::Rgb::new(
+            obsidian.selection_bg.r,
+            obsidian.selection_bg.g,
+            obsidian.selection_bg.b,
+        );
+        let paper = zest_theme::resolve(&zest_theme::builtin::paper());
+        let want =
+            zest_core::Rgb::new(paper.selection_bg.r, paper.selection_bg.g, paper.selection_bg.b);
+        assert_eq!(
+            pane_selection_bg(win, Some(&identity(Some("paper")))),
+            want,
+            "a light scheme selected in a dark window's wash is unreadable"
+        );
+        assert_eq!(pane_selection_bg(win, None), win, "plain tabs keep the window's");
+        assert_eq!(
+            pane_selection_bg(win, Some(&identity(Some("no-such-scheme")))),
+            win,
+            "unknown falls back, never fails"
+        );
+    }
+
+    #[test]
+    fn per_tab_opacity_rides_the_viewport_not_the_window() {
+        let mut id = identity(None);
+        id.opacity = Some(0.5);
+        assert!((pane_opacity(1.0, Some(&id)) - 0.5).abs() < f32::EPSILON);
+        assert!(
+            (pane_opacity(0.8, None) - 0.8).abs() < f32::EPSILON,
+            "no identity, no override"
+        );
+        assert!(
+            (pane_opacity(0.8, Some(&identity(None))) - 0.8).abs() < f32::EPSILON,
+            "an identity without an opacity follows the window"
+        );
+        id.opacity = Some(7.0);
+        assert!(
+            (pane_opacity(1.0, Some(&id)) - 1.0).abs() < f32::EPSILON,
+            "a hand-edited value is clamped, not trusted (never-crash rule)"
+        );
+    }
+}
 
 #[cfg(test)]
 mod value_picker_tests {
