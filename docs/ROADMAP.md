@@ -282,8 +282,35 @@ entry stay). The resulting work items, measurements in the handoff README:
       modal (`settings_overlay`, its scrim, its exclusive-overlay slot) is
       deleted. Path's `Browse…` is deliberately absent: the app has no file
       dialog yet, and §11 says skip rather than build one for this item.
-- [ ] Profiles — launch targets (README §12): its own work item; per-session
-      palette and per-tab host routes cut across WS-A and the control plane.
+- [x] The profiles editor (README §12), replacing the Profiles tab's
+      placeholder pane → [#176](https://github.com/zesterm/zesterm/issues/176):
+      `chrome/profiles_screen.rs` draws the 248px rail (Defaults pinned
+      first, a row per profile with glyph tile / `command · host` sub-line /
+      digit, dashed `＋ New profile`; NO discovery line — #145), the editor
+      header (34px tile, host chip, Duplicate / Delete — Defaults has no
+      Delete; rename rides Duplicate+Delete), the §12 live preview (the
+      chip in the window's chrome, only the body in the profile's scheme,
+      the caption saying so verbatim), and Launch / Appearance / Cursor
+      sections in the settings tab's row shape. `profiles_ui.rs` builds
+      rows, inheritance chips and actions in one pass from
+      `resolve_profile`: chips track `ProfileProvenance` exactly, the
+      launch trio (command / host / starting_directory) never chips, and
+      the modified dot appears only on an override — clicking it is
+      `remove_profile_value` → reload, never the root file. New §12 widgets
+      ride the shared `draw_control` vocabulary: the scheme swatch picker
+      (each builtin's normal ANSI row via `zest_theme::resolve`, never
+      re-typed), six accent swatches (dimmed AND inert when `color_from`
+      says the host decides), six atlas-safe icon tiles, and the host pill.
+      Every edit is `write_profile_value` → reload; open tabs restyle live
+      through the #162 re-resolve. Keyboard is the settings discipline
+      (↑↓ / ←→ / ⏎ / filter / Esc layering ending at close-the-tab), plus a
+      *leading* digit 1–9 jumping the rail — once a filter is live, digits
+      filter. Deliberately deferred: the fleet-picker-as-host-chooser (a
+      picker row launches today; choosing belongs to the cross-host item)
+      and `background_image` (#144).
+- [ ] Profiles — per-tab host routes (README §12's cross-host half): launch
+      on the profile's pinned host, the launcher host chips, and profile
+      discovery per host (#145) cut across WS-A and the control plane.
 - [x] Per-session palette machinery (README §12's chrome-vs-grid rule) →
       [#162](https://github.com/zesterm/zesterm/issues/162): a tab carries the
       resolved identity of the profile it launched from; its grid keeps its

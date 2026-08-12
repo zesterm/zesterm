@@ -250,10 +250,109 @@ pub struct PaneModel {
 pub enum ScreenModel {
     Fleet { cards: Vec<FleetCard> },
     Themes { cards: Vec<ThemeCard> },
-    /// The Profiles tab's pane: a placeholder naming its pending work item
-    /// (design §12, "Profiles — launch targets"), so `--screen profiles`
-    /// shows something honest until the editor lands.
-    Profiles,
+    /// The Profiles tab's pane: the §12 editor. Boxed because this variant
+    /// is an order of magnitude bigger than its siblings and `ScreenModel`
+    /// travels by value through the chrome model.
+    Profiles(Box<ProfilesScreenModel>),
+}
+
+/// The §12 inheritance chip on a profiles-editor row.
+///
+/// Not `SettingsRowModel`'s provenance tuple, whose `bool` means *warn*: the
+/// profiles chips are a different pair of treatments (accent-on-accentSoft
+/// for an override, faint-on-header-fill for inheritance), so they travel as
+/// their own type in a list parallel to the rows — same-pass built, the
+/// picker discipline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InheritChip {
+    /// Set on the profile itself: "overrides Defaults", accent on accentSoft,
+    /// and the only state that earns the 5px modified dot.
+    Overrides,
+    /// Fell through to `profiles.defaults`: "inherited from Defaults", faint.
+    Inherited,
+}
+
+/// One scheme option of the §12 swatch picker: a builtin theme's normal ANSI
+/// row in index order, read from `zest-theme` — never re-typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemeSwatch {
+    pub id: String,
+    pub ansi: [[u8; 3]; 8],
+}
+
+/// One row of the profiles editor's rail (design §12): a launch target.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProfileRailRow {
+    /// Display name — "Defaults" for the reserved parent.
+    pub name: String,
+    /// The 10px mono sub-line: `command · host`.
+    pub sub: String,
+    /// Glyph for the 24px tile; `None` draws the placeholder dot.
+    pub icon: Option<String>,
+    pub accent: AccentChoice,
+    /// `1..=9`, right-aligned; `None` on Defaults and past the ninth.
+    pub digit: Option<u8>,
+}
+
+/// The §12 live preview, as pure data: the mini tab-chip is drawn in the
+/// *window's* `ChromeColors` (panel fill, line border — that is the point the
+/// caption makes), carrying only the 2px rule and glyph in the profile's
+/// accent; the body block is the profile's scheme.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProfilePreviewModel {
+    /// The chip's title (the profile's name).
+    pub title: String,
+    pub icon: Option<String>,
+    /// The chip's 2px rule and glyph ink.
+    pub accent: AccentChoice,
+    /// The profile's scheme — the grid's colours, never the chrome's.
+    pub scheme_bg: [u8; 3],
+    pub scheme_fg: [u8; 3],
+    pub scheme_accent: [u8; 3],
+    /// The §12 caption, verbatim, naming the window's theme id.
+    pub caption: String,
+    /// Static content — a uname line in the §12 spirit; no live probe.
+    pub lines: Vec<String>,
+}
+
+/// The Profiles tab's screen (design §12): a 248px profile rail and an
+/// editor column, drawn over the grid area while the Profiles pane is up.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProfilesScreenModel {
+    /// Rail rows: Defaults pinned first, then one per profile.
+    pub rail: Vec<ProfileRailRow>,
+    /// Index into `rail` of the profile being edited.
+    pub selected_rail: usize,
+    /// Editor header: display name, resolved command line, pinned host.
+    pub name: String,
+    pub command: String,
+    pub host_chip: Option<String>,
+    pub icon: Option<String>,
+    pub accent: AccentChoice,
+    /// Defaults has no Delete (§12).
+    pub can_delete: bool,
+    pub preview: ProfilePreviewModel,
+    /// The field rows, sections as `Group` rows — same shape as Settings.
+    pub rows: Vec<SettingsRowModel>,
+    /// Inheritance chips, index-parallel to `rows` (`None` on non-field rows
+    /// and on the launch trio, which never chips).
+    pub chips: Vec<Option<InheritChip>>,
+    /// Index into `rows` the keyboard is on.
+    pub selected: usize,
+    pub filter: String,
+    /// Scroll offset of the rows pane, physical pixels; layout clamps it.
+    pub scroll: f32,
+    /// Bring the selection into view this pass — keyboard only.
+    pub ensure_visible: bool,
+    /// What to say when a filter matches nothing.
+    pub empty: Option<String>,
+    /// The footer's override-count sentence, singular handled; the
+    /// fall-through sentence on Defaults.
+    pub footer_sentence: String,
+    /// `[profiles.<name>]`, right-aligned mono in the footer.
+    pub table_name: String,
+    /// A dropdown menu open on one of `rows` (window.backdrop's).
+    pub menu: Option<SettingsMenuModel>,
 }
 
 /// Where the + launcher menu hangs from (design §1 / §2).
@@ -390,6 +489,21 @@ pub enum SettingsValueCell {
     /// grows a list is `settings_ui::EditBuffer`'s business — this cell only
     /// knows how to draw the text.
     Editing { buffer: String, error: bool },
+    /// The §12 host pill: status dot, host name, ▾. Clicking opens a typed
+    /// edit of the host label today; the fleet-picker chooser the ▾ implies
+    /// arrives with the cross-host launch item, which owns the picker's
+    /// pending-launch plumbing.
+    HostPill { name: String, online: bool },
+    /// The §12 scheme picker: one 60×14 eight-swatch chip per builtin theme,
+    /// name under it; `selected` is ringed accent on accentSoft.
+    SchemeSwatches { options: Vec<SchemeSwatch>, selected: Option<usize> },
+    /// The §12 tab-colour row: six 22px swatches from the window theme's
+    /// accent roster (resolved at draw time — the model stays theme-free).
+    /// `inert` dims them to 35% and drops their hit regions: the host
+    /// decides, and a control that acts while claiming not to would lie.
+    AccentSwatches { selected: Option<u8>, inert: bool },
+    /// The §12 icon row: 26px glyph tiles, one per roster entry.
+    Glyphs { options: Vec<String>, selected: Option<usize> },
 }
 
 /// One row of the settings tab, ready to draw.

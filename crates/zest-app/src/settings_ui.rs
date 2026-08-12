@@ -399,7 +399,7 @@ pub fn unit_of(key: &str) -> &'static str {
     }
 }
 
-fn value_cell(
+pub(crate) fn value_cell(
     field: &UiField,
     value: Option<&serde_json::Value>,
     installed: &[String],
@@ -783,7 +783,7 @@ pub fn humanize_key(key: &str) -> String {
 
 /// The doc comment's first line — the summary sentence, per the schema's own
 /// convention; the full text would not fit a row.
-fn first_line(description: &str) -> String {
+pub(crate) fn first_line(description: &str) -> String {
     description.lines().next().unwrap_or_default().to_string()
 }
 
