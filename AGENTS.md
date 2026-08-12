@@ -396,6 +396,10 @@ cargo run --profile fast -p zest-app           # the terminal, quick rebuild
 ./target/fast/zesterm --startup-probe          # time to first paint; fails over 100ms
 ./target/fast/zesterm --screenshot out.png     # one real frame to a PNG; no window is ever shown
 ./target/fast/zesterm --theme paper --screenshot-size 1200x800 --screenshot out.png
+./target/fast/zesterm --screen fleet --screenshot out.png
+                                               # open on a design screen: fleet|themes|settings|palette
+                                               # ('palette' = the ⌘K search); works without --screenshot too
+./target/fast/zesterm --tabs-position left     # tab strip placement override, top|left
 cargo build --release && ./target/release/zesterm   # the shipping build
 cargo run -p zest-app  --example headless      # a terminal with no window
 cargo run -p zest-font --example font_dump     # font sample sheet as a PNG
