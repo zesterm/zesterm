@@ -357,6 +357,11 @@ fn meta_with_presence(table: &toml::Table) -> (ProfileMeta, BTreeSet<&'static st
 
 fn str_key(table: &toml::Table, key: &str) -> Option<String> {
     match table.get(key)? {
+        // An empty string is the file's spelling of "unset": treating it as
+        // present would mark provenance OverridesDefaults for a key carrying
+        // nothing, and falling back to Defaults would then require a delete
+        // rather than clearing the field.
+        toml::Value::String(s) if s.is_empty() => None,
         toml::Value::String(s) => Some(s.clone()),
         other => {
             tracing::warn!(key, found = other.type_str(), "wrong type for profile key; ignoring");
@@ -437,7 +442,14 @@ pub fn fields() -> Vec<UiField> {
         },
         UiField {
             widget: Widget::Select,
-            description: "Where the tab's title comes from.".to_string(),
+            // Only the two fixed spellings are variants: a "custom" variant
+            // would be written back verbatim by any client that round-trips
+            // the selected value, setting the title to the literal string
+            // "custom". The custom segment is the editor's affordance — it
+            // writes the user's own text, which is any other string.
+            description: "Where the tab's title comes from: the shell, the profile's \
+                          name, or any other string used verbatim as a custom title."
+                .to_string(),
             variants: vec![
                 UiVariant {
                     value: "from-shell".to_string(),
@@ -446,10 +458,6 @@ pub fn fields() -> Vec<UiField> {
                 UiVariant {
                     value: "profile-name".to_string(),
                     description: "The profile's own name, fixed.".to_string(),
-                },
-                UiVariant {
-                    value: "custom".to_string(),
-                    description: "A literal title.".to_string(),
                 },
             ],
             default: serde_json::Value::String("from-shell".to_string()),
@@ -556,6 +564,31 @@ mod tests {
             ProfileMeta::from_table(&toml::Table::new()).tab_title,
             TabTitle::FromShell,
             "the shell's title is the default"
+        );
+    }
+
+    #[test]
+    fn an_empty_string_is_unset_not_an_override() {
+        // `command = ""` must fall through to Defaults exactly like an absent
+        // key: clearing a field in the editor writes an empty string, and a
+        // chip claiming OverridesDefaults over nothing would force the user
+        // to hand-delete the key to get inheritance back.
+        let mut root = toml::Table::new();
+        let profiles: toml::Table = toml::from_str(
+            "defaults = { command = \"zsh -l\" }\nx = { command = \"\" }\n",
+        )
+        .expect("literal profiles table parses");
+        root.insert("profiles".into(), toml::Value::Table(profiles));
+        let r = resolve_profile(&root, "x");
+        assert_eq!(
+            r.meta.command.as_deref(),
+            Some("zsh -l"),
+            "the empty override falls through to Defaults"
+        );
+        assert_eq!(
+            r.provenance_of("command"),
+            ProfileProvenance::InheritedFromDefaults,
+            "and the chip says inherited, not overridden"
         );
     }
 
