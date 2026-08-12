@@ -166,6 +166,46 @@ without the override.
 Sign-in locally also needs the **second** OAuth app: a GitHub OAuth app accepts
 exactly one callback URL, so production cannot also serve `localhost`.
 
+## Seeing the relay work, without a daemon that can dial it
+
+The daemon's outbound leg is the one piece of the relay path with no Rust yet,
+so two scripts stand in for the ends and everything between them is real: a real
+Durable Object under workerd, a real attach ticket, real `zest-proto` framing,
+and the ADR-008 sealed channel the relay cannot read.
+
+```sh
+# 1. the relay Worker, under a real runtime
+pnpm -C cloud --filter @zesterm/relay-worker exec wrangler dev --port 8787
+
+# 2. a real daemon with a WebSocket port for the fake host to reach
+./target/fast/zest-daemon --ephemeral --listen-ws --ws-port 7718
+
+# 3. the daemon's relay leg: parks a control link, dials back on `open`
+node cloud/packages/relay/tools/fake-host.mjs --relay http://127.0.0.1:8787
+
+# 4. the browser's half: mints a ticket and attaches
+node cloud/packages/relay/tools/fake-browser.mjs \
+  --ticket-seed <64 hex> --host "$(node cloud/packages/relay/tools/fake-host.mjs --host-id)"
+```
+
+`--ephemeral` on the daemon is not optional on macOS, and the reason is in
+`AGENTS.md`: the Keychain binds its grant to the *binary* that asked, dev builds
+are ad-hoc signed, and every rebuild is a stranger to the ACL — so the daemon
+blocks on a prompt, the app gives up after 2s and silently falls back to an
+in-process pty, and whatever you thought you were testing through the daemon was
+not being tested at all.
+
+The host must have a row in the local D1, because the object checks `hosts`
+before it parks a control link. `wrangler d1 migrations apply zesterm --local`
+and insert one for the id `--host-id` prints.
+
+**These are tools, not tests**, in the tradition of `examples/attach.rs` and
+`mesh_probe`: they answer *which layer is wrong* without the layers above them.
+Nothing in CI runs them. What they have already earned is the thing no gate
+caught — see the header of `packages/relay/src/index.ts`, where a Worker that
+could not start survived nineteen green runs of `--dry-run`, which validates a
+deployment's shape without ever starting one.
+
 ## Deploying
 
 Nothing here deploys yet: there is no Cloudflare account wired up and
