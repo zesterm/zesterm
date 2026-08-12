@@ -1,7 +1,23 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { NO_FOLDS, toggle, isFolded, foldedFor } from '../src/state/folds.ts';
+
+test('the module source contains no control bytes besides newline', () => {
+  // The seam once shipped as a literal NUL byte that rendered as a space in
+  // every editor: git classified the file as binary, so the diff was
+  // unreviewable and the seam was one editor-normalization away from silently
+  // changing. Only \n is allowed so the file stays a text file to git.
+  const src = readFileSync(new URL('../src/state/folds.ts', import.meta.url), 'latin1');
+  for (let i = 0; i < src.length; i++) {
+    const c = src.charCodeAt(i);
+    assert.ok(
+      c === 0x0a || c >= 0x20,
+      `control byte 0x${c.toString(16)} at offset ${i} — invisible in editors, binary to git`,
+    );
+  }
+});
 
 test('toggle folds, toggle again unfolds', () => {
   const folded = toggle(NO_FOLDS, 'studio', '3', 'b1');
