@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test --disable-warning=ExperimentalWarning \"test/**/*.test.ts\"",
     "dry-run": "wrangler deploy --dry-run --outdir .wrangler/dry-run",
+    "boot": "node ../../scripts/boot-worker.mjs --path /api/bootstrap --status 200 --body-contains relayOrigin",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"
   },
