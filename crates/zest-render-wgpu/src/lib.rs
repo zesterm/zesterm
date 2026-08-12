@@ -71,12 +71,22 @@ impl TextTuning {
     /// said 1.3, and because nothing connected them the config's number was
     /// simply a lie.
     ///
-    /// 1.2 is small on purpose. Coverage is linearized in the shader now, which
-    /// is the correction that actually matters; this is the modest weight added
-    /// back afterwards, because fully gamma-correct light-on-dark text reads
-    /// thin. The old 1.3 was doing something else entirely — compensating for
-    /// the missing linearization, in the wrong direction.
-    pub const DEFAULT_GAMMA: f32 = 1.2;
+    /// Coverage is linearized in the shader, so the two steps compose to
+    /// `apparent = pow(coverage, 1/gamma)` — this knob is now exactly "how much
+    /// heavier than perceptually-linear should a stroke be", and nothing else.
+    ///
+    /// 2.0 rather than something timid, settled by looking rather than by
+    /// arithmetic: the aggregate measures barely move across 1.2 to 2.5 (41-42%
+    /// of inked pixels fully saturated throughout), and the difference is
+    /// plainly visible. Light text on a dark background needs a lot of it —
+    /// more coverage is more contrast, and contrast is what reads as sharp.
+    ///
+    /// **A light theme wants less.** Dark-on-light needs far less stem
+    /// darkening, and this is one number for both because a theme cannot
+    /// suggest one: `ThemeEffects::text_gamma` was removed for exactly that
+    /// reason (see the tombstone in `zest-theme`), since the generated settings
+    /// form has no way to express "follow the theme".
+    pub const DEFAULT_GAMMA: f32 = 2.0;
     pub const DEFAULT_CONTRAST: f32 = 0.0;
 }
 

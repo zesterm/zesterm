@@ -59,14 +59,14 @@
     "key": "appearance.text_gamma",
     "group": "Appearance",
     "widget": "number",
-    "description": "Stem darkening for text. 1.0 leaves coverage alone.\n\nApplied to glyph coverage each frame rather than baked into the atlas, so\ntuning it is a repaint rather than a re-rasterization. It affects text\nonly — backgrounds and chrome come out exactly as the theme specifies.\n\nThe default was 1.3, which was compensating for a bug rather than for\nanything about fonts: coverage was multiplied into a *linear* target and\nthen sRGB-encoded, so a fifth-covered pixel emerged half lit and every\nglyph read fat. Coverage is linearized properly now, and this went back\nto being what it says it is — a taste knob, off by default.\n\nThe default must stay equal to `zest_render_wgpu::TextTuning::DEFAULT_GAMMA`.\nIt cannot reference it — `zest-config` does not depend on the renderer —\nso `zest-app`'s `the_two_defaults_agree` asserts it instead. Before this\nwas wired the two numbers were 1.0 and 1.3 and nothing compared them, so\nthe schema documented a value the renderer never used.",
+    "description": "Stem darkening for text. 1.0 is perceptually linear; higher is heavier.\n\nApplied to glyph coverage each frame rather than baked into the atlas, so\ntuning it is a repaint rather than a re-rasterization. It affects text\nonly — backgrounds and chrome come out exactly as the theme specifies.\n\nCoverage is linearized in the shader, so this composes to\n`apparent = pow(coverage, 1/gamma)` and means exactly one thing: how\nmuch heavier than perceptually-linear a stroke should be. More coverage\nis more contrast, and contrast is what reads as sharpness — which is why\nthe default is 2.0 and not something cautious.\n\n**A light theme wants less**, because dark-on-light needs far less stem\ndarkening than light-on-dark. It is one number for both because a theme\ncannot suggest one; see the tombstone on `ThemeEffects`.\n\nThe default must stay equal to `zest_render_wgpu::TextTuning::DEFAULT_GAMMA`.\nIt cannot reference it — `zest-config` does not depend on the renderer —\nso `zest-app`'s `the_two_defaults_agree` asserts it instead. Before this\nwas wired the two numbers were 1.0 and 1.3 and nothing compared them, so\nthe schema documented a value the renderer never used.",
     "range": [
       0.5,
       2.5
     ],
     "integer": false,
     "variants": [],
-    "default": 1.2,
+    "default": 2.0,
     "restartHint": false
   },
   {
