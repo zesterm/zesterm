@@ -13,13 +13,7 @@
 import type { Host } from '@sigx/actors/host';
 import { generateIdentity, seedSigner } from '@zesterm/auth';
 import { ConnectionClient, type Dial } from '@zesterm/client';
-import {
-  LOCAL_DIRECTORY_KEY,
-  SessionDirectory,
-  type DataPlane,
-  type SessionEntry,
-} from '@zesterm/control';
-import type { SessionInfo } from '@zesterm/proto';
+import { LOCAL_DIRECTORY_KEY, SessionDirectory, sessionEntryOf, type DataPlane } from '@zesterm/control';
 
 export interface FeedOptions {
   readonly host: Host;
@@ -32,19 +26,6 @@ export interface FeedOptions {
   readonly dataPlane: DataPlane;
   readonly label?: string;
   readonly onLog?: (line: string) => void;
-}
-
-export function entryOf(info: SessionInfo): SessionEntry {
-  return {
-    host: info.addr.host,
-    session: info.addr.session.toString(),
-    title: info.title,
-    cwd: info.cwd,
-    cols: info.cols,
-    rows: info.rows,
-    altScreen: info.alt_screen,
-    attached: info.attached,
-  };
 }
 
 /** Start feeding. Returns a stop function. */
@@ -63,7 +44,7 @@ export function startFeed(options: FeedOptions): () => void {
     events: {
       onSessions: (sessions, created) => {
         void directory.replaceAll(
-          sessions.map(entryOf),
+          sessions.map(sessionEntryOf),
           created === null ? null : created.toString(),
         );
       },

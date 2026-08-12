@@ -18,7 +18,7 @@
 
 import { component, onMounted, onUnmounted, signal } from 'sigx';
 import type { ClientSigner } from '@zesterm/auth';
-import { SessionClient, type ConnectionState } from '@zesterm/client';
+import { SessionClient, type ConnectionState, type Dial } from '@zesterm/client';
 import {
   belongsToBrowser,
   encodeComposedText,
@@ -33,7 +33,6 @@ import { measureMetrics } from '@zesterm/render';
 import { resolveTerminalPalette, type Theme } from '@zesterm/theme';
 import type { SessionEntry } from '@zesterm/control';
 
-import { wsDial } from '../ws-dial.ts';
 import { GRID_FONT_SIZE, MONO_FAMILY } from '../chrome-model.ts';
 import { currentTheme, themeStore } from '../state/theme.ts';
 import { NO_FOLDS, foldedFor, toggle, type FoldsState } from '../state/folds.ts';
@@ -74,7 +73,15 @@ export interface TerminalHooks {
 
 export const TerminalView = component<{
   entry: SessionEntry;
-  dataPlaneUrl: string;
+  /**
+   * How to open the socket, rather than where it goes.
+   *
+   * A relay plane never becomes a URL: a ticket has to be minted first, and it
+   * rides the subprotocol of a socket this component does not construct. So
+   * the caller hands over a `Dial` — reusable, because `SessionClient` calls it
+   * again on every redial — and this file stops knowing which world it is in.
+   */
+  dial: Dial;
   signer: ClientSigner;
   theme: Theme;
   /** The tab chip owns the visible title now; this is how it learns it. */
@@ -84,7 +91,7 @@ export const TerminalView = component<{
   /** The palette's seam; called with null on unmount so the shell's map stays honest. */
   register?: (hooks: TerminalHooks | null) => void;
 }>((ctx) => {
-  const { entry, dataPlaneUrl, signer, theme } = ctx.props;
+  const { entry, dial, signer, theme } = ctx.props;
 
   const status = signal<{ state: ConnectionState; exited: number | null | false }>({
     state: { phase: 'connecting' },
@@ -136,7 +143,7 @@ export const TerminalView = component<{
   // the first render happens before mount. Nothing here touches the DOM —
   // the socket opens in connect(), below.
   const client = new SessionClient({
-    dial: wsDial(dataPlaneUrl),
+    dial,
     signer,
     label: 'zesterm-web',
     session: { host: entry.host, session: BigInt(entry.session) },

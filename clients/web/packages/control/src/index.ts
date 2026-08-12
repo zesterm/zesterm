@@ -6,6 +6,7 @@
 
 export {
   SessionDirectory,
+  sessionEntryOf,
   type SessionEntry,
   type HostInfo,
   type DataPlane,
