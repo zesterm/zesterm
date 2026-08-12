@@ -31,7 +31,11 @@ export type Widget =
   | 'path'
   | 'font-list'
   | 'tag-list'
-  | 'key-value';
+  | 'key-value'
+  | 'host-picker'
+  | 'scheme-picker'
+  | 'accent-picker'
+  | 'icon-picker';
 
 /** One option of a `select` field. */
 export interface UiVariant {

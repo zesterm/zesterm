@@ -106,7 +106,7 @@ pub fn resolve(layers: &[Layer]) -> Resolved {
 /// matters for `shell.env`: a profile that sets one variable must not have to
 /// restate the rest, but a profile that sets `typography.families` means *these*
 /// families, not "these appended to the previous ones".
-fn merge_into(
+pub(crate) fn merge_into(
     dst: &mut toml::Table,
     src: &toml::Table,
     source: &Source,
@@ -169,7 +169,7 @@ fn is_mergeable(path: &str) -> bool {
 }
 
 /// Keys present in the merged table that no setting corresponds to.
-fn unknown_in(merged: &toml::Table) -> Vec<String> {
+pub(crate) fn unknown_in(merged: &toml::Table) -> Vec<String> {
     let known: Vec<&str> = crate::invalidate::KEYS.iter().map(|(k, _)| *k).collect();
     let mut out = Vec::new();
     collect_leaves(merged, &mut String::new(), &mut out);
@@ -202,13 +202,31 @@ fn collect_leaves(table: &toml::Table, path: &mut String, out: &mut Vec<String>)
 /// for is how someone ends up typing into production believing they are not.
 #[must_use]
 pub fn profile_layer(config: &toml::Table, name: &str) -> Option<Layer> {
-    let table = config
+    let mut table = config
         .get("profiles")?
         .as_table()?
         .get(name)?
         .as_table()?
         .clone();
+    // Launcher and chrome inputs -- `command`, `icon`, `tab_color`, ... -- are
+    // not settings. Left in, every profile-tab launch would spray them into
+    // `unknown_keys` and the settings UI would warn about keys that are
+    // perfectly legal where they were written. `profiles::ProfileMeta` is the
+    // reader for these.
+    for key in crate::profiles::PROFILE_ONLY_KEYS {
+        table.remove(*key);
+    }
     Some(Layer::new(Source::Profile(name.to_string()), table))
+}
+
+/// The `profiles.defaults` table as a layer, to sit beneath a named profile.
+///
+/// `defaults` is a reserved name: every profile falls through to it, so it is
+/// hidden from ordinary listings ([`crate::profiles::list_profiles`]) and never
+/// launched on its own.
+#[must_use]
+pub fn defaults_layer(config: &toml::Table) -> Option<Layer> {
+    profile_layer(config, crate::profiles::RESERVED_PROFILE)
 }
 
 #[cfg(test)]
@@ -326,6 +344,66 @@ mod tests {
         let l = profile_layer(&table, "k8s-prod").expect("profile exists");
         assert_eq!(l.source, Source::Profile("k8s-prod".into()));
         assert!(profile_layer(&table, "nope").is_none());
+    }
+
+    #[test]
+    fn profile_only_keys_are_stripped_from_the_layer() {
+        // `command = "wsl.exe"` is a launch input, not a setting. Left in the
+        // layer it reaches the merged table as a root key the schema has never
+        // heard of, and every profile-tab launch warns about its own profile.
+        let table: toml::Table = "[profiles.wsl]\ncommand = \"wsl.exe\"\nicon = \"tux\"\n\
+                                  tab_color = 3\n[profiles.wsl.typography]\nsize_pt = 18.0\n"
+            .parse()
+            .expect("valid toml");
+        let l = profile_layer(&table, "wsl").expect("profile exists");
+        assert!(!l.table.contains_key("command"), "launch input leaked into the cascade");
+        assert!(!l.table.contains_key("icon"), "chrome input leaked into the cascade");
+
+        let r = resolve(&[l]);
+        assert!(
+            r.unknown_keys.is_empty(),
+            "profile-only keys sprayed unknown_keys: {:?}",
+            r.unknown_keys
+        );
+        assert!(
+            (r.settings.typography.size_pt - 18.0).abs() < f32::EPSILON,
+            "the settings half of the profile must still apply"
+        );
+    }
+
+    #[test]
+    fn the_defaults_layer_sits_between_user_and_the_named_profile() {
+        // The contract the profiles editor renders: user < profiles.defaults <
+        // profiles.<name> < workspace. Each step must beat the one below it,
+        // or an "overrides Defaults" chip would lie.
+        let config: toml::Table = "\
+            [profiles.defaults.typography]\nsize_pt = 12.0\nline_height = 1.9\n\
+            [profiles.k8s.typography]\nsize_pt = 14.0\n"
+            .parse()
+            .expect("valid toml");
+        let r = resolve(&[
+            layer(Source::User, "[typography]\nsize_pt = 10.0\nline_height = 1.1\ncell_width = 0.7\n"),
+            defaults_layer(&config).expect("defaults exists"),
+            profile_layer(&config, "k8s").expect("profile exists"),
+            layer(Source::Workspace, "[typography]\ncell_width = 0.9\n"),
+        ]);
+        assert!(
+            (r.settings.typography.size_pt - 14.0).abs() < f32::EPSILON,
+            "the named profile must beat profiles.defaults"
+        );
+        assert!(
+            (r.settings.typography.line_height - 1.9).abs() < f32::EPSILON,
+            "profiles.defaults must beat the user file"
+        );
+        assert!(
+            (r.settings.typography.cell_width - 0.9).abs() < f32::EPSILON,
+            "the workspace file must beat the named profile"
+        );
+        assert_eq!(
+            r.provenance.get("typography.line_height"),
+            Some(&Source::Profile("defaults".into())),
+            "provenance must name the defaults layer, so the UI can say so"
+        );
     }
 
     #[test]
