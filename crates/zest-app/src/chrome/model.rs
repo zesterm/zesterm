@@ -284,6 +284,14 @@ pub struct PaletteModel {
     pub ensure_visible: bool,
 }
 
+/// One face of a font-list cell.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettingsFace {
+    pub family: String,
+    /// Past the first resolvable face: dimmed and tagged `fallback` (§11).
+    pub fallback: bool,
+}
+
 /// The value half of a settings row, as it should be drawn.
 ///
 /// Which cell a field gets is the row builder's decision (from the schema's
@@ -291,21 +299,33 @@ pub struct PaletteModel {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SettingsValueCell {
     Toggle { on: bool },
-    /// A chosen option, e.g. a theme id or an enum variant.
+    /// ≤3 short, undocumented variants: the segmented control (§11).
+    /// `selected` is `None` when the file holds a value no variant matches.
+    Segmented { options: Vec<String>, selected: Option<usize> },
+    /// A chosen option behind a dropdown — >3 variants, documented ones, or
+    /// a roster the client brings (theme picker).
     Select { value: String },
     /// A bounded number: the filled fraction and its numeric text.
     Slider { frac: f32, text: String },
-    /// A scalar drawn as plain text (numbers, strings, paths).
+    /// The − / value / ＋ stepper; `text` carries the unit ("14 pt").
+    Stepper { text: String },
+    /// A scalar drawn as plain text (strings, paths).
     Text { text: String },
-    /// A list-shaped value the overlay displays but does not edit (yet);
-    /// drawn faint to say so.
+    /// A value the tab displays but does not edit here.
     ReadOnly { text: String },
+    /// Stacked font rows; order is the setting, drag is the edit.
+    FontList { faces: Vec<SettingsFace> },
+    /// Chips with a × each and a dashed add chip.
+    TagList { tags: Vec<String> },
+    /// Paired key/value cells; an empty value renders `unset` (it unsets).
+    KeyValue { entries: Vec<(String, String)> },
     /// A typed edit in progress; drawn as the buffer with a caret, in warn
-    /// colours after a failed parse.
+    /// colours after a failed parse. `append` grows a list instead of
+    /// replacing the value.
     Editing { buffer: String, error: bool },
 }
 
-/// One row of the settings overlay, ready to draw.
+/// One row of the settings tab, ready to draw.
 ///
 /// Display-only, like [`PickerRow`]: the app keeps a parallel action list
 /// built in the same pass, so index `n` means the same thing to the renderer
@@ -336,21 +356,77 @@ pub enum SettingsRowModel {
     },
     /// A banner pinned above the list — restart owed, or a failed write.
     Notice { text: String },
+    /// One key the cascade kept but the schema does not know (§11's ninth
+    /// category): the key in mono, which layer set it, and a suggestion when
+    /// one is close enough to be a plausible typo.
+    Unknown { key: String, source: String, suggestion: Option<String> },
 }
 
-/// The settings overlay, when open.
+/// One category of the settings tab's rail.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SettingsModel {
+pub struct SettingsCategoryModel {
+    pub label: String,
+    /// Fields in this group that differ from their defaults — the rail's
+    /// right-aligned count, blank at zero.
+    pub modified: usize,
+}
+
+/// One option of an open dropdown menu.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettingsMenuOption {
+    /// Humanized label ("Mica").
+    pub label: String,
+    /// The kebab wire value, drawn in mono ("mica").
+    pub value: String,
+    /// The variant's doc comment; empty draws nothing.
+    pub doc: String,
+}
+
+/// A dropdown menu open on one settings row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettingsMenuModel {
+    /// Row index the menu is anchored to.
+    pub row: usize,
+    pub options: Vec<SettingsMenuOption>,
+    /// Index of the current value (the ✓), when it matches an option.
+    pub current: Option<usize>,
+    /// Index the keyboard is on.
+    pub selected: usize,
+}
+
+/// The Settings tab's screen (design §11): category rail + content column,
+/// drawn over the grid area while the active tab is Settings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettingsScreenModel {
+    /// Rail rows, in GROUP_ORDER + "Unknown keys"; empty categories are
+    /// already hidden by the app when a filter is live.
+    pub categories: Vec<SettingsCategoryModel>,
+    /// Index into `categories`.
+    pub selected_category: usize,
+    /// Content header: the group's name, its dotted prefix, and a lede.
+    pub heading: String,
+    pub prefix: String,
+    pub lede: String,
+    /// Rows of the selected category (no group headers — the rail is the
+    /// grouping now), banners first.
     pub rows: Vec<SettingsRowModel>,
+    /// What to say when `rows` is empty (a clean unknown-keys category, or a
+    /// filter that matches nothing) — a blank panel reads as broken.
+    pub empty: Option<String>,
     /// Index into `rows` the keyboard is on.
     pub selected: usize,
     pub filter: String,
     /// Scroll offset, physical pixels; layout clamps it.
     pub scroll: f32,
-    /// Bring the selected row into view this pass. Set after keyboard
-    /// navigation only — the wheel must scroll freely without the view
-    /// snapping back to the selection.
+    /// Bring the selected row into view this pass. Keyboard only — the
+    /// wheel must scroll freely without snapping back.
     pub ensure_visible: bool,
+    /// Footer: how many settings differ from the defaults, fleet-wide over
+    /// every category, and where the file lives.
+    pub modified_total: usize,
+    pub config_path: String,
+    /// A dropdown menu open on one of `rows`, drawn over everything.
+    pub menu: Option<SettingsMenuModel>,
 }
 
 /// How a tab's host is currently reached, carried per tab since the status
@@ -447,13 +523,17 @@ pub struct ChromeModel {
     /// The palette pill's chord, platform-spelled ("⌘K") — composed by the
     /// app because the chrome does not know what a modifier is.
     pub palette_chord: String,
+    /// The settings chord ("⌘,"), for the vertical sidebar's pinned row.
+    pub settings_chord: String,
     /// The fleet picker, drawn over everything when open.
     pub picker: Option<PickerModel>,
     /// The command palette, likewise modal. The app enforces that at most
     /// one overlay is open, so layout never has to rank them.
     pub palette: Option<PaletteModel>,
-    /// The settings overlay, likewise modal and likewise exclusive.
-    pub settings: Option<SettingsModel>,
+    /// The Settings tab's screen — not an overlay: drawn over the grid area
+    /// (like `screen`) while the active tab is Settings, with the modals
+    /// still able to open above it.
+    pub settings: Option<SettingsScreenModel>,
 }
 
 /// The knobs `layout` reads, resolved to physical pixels by the caller.
