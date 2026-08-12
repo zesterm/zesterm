@@ -163,7 +163,11 @@ export const BlocksPane = component<{
         </button>
       </span>
       <span class="meta">
-        {h.folded ? <span class="lines">{h.foldedLineCount} lines</span> : null}
+        {h.folded ? (
+          <span class="lines">
+            {h.foldedLineCount} {h.foldedLineCount === 1 ? 'line' : 'lines'}
+          </span>
+        ) : null}
         {h.cwd !== '' ? <span class="cwd">{h.cwd}</span> : null}
         {h.durationText !== '' ? <span class="dur">{h.durationText}</span> : null}
         {outcomeEl(h.outcome)}

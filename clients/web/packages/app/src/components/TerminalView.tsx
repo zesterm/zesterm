@@ -193,7 +193,10 @@ export const TerminalView = component<{
     const text = target.outputRows
       .map((r) => rowText(expandRow(r, 0, client.grid.attrs)))
       .join('\n');
-    void navigator.clipboard.writeText(text);
+    // writeText rejects in insecure contexts and on denied permission; an
+    // unhandled rejection in the console for a copy that simply didn't take
+    // helps nobody, and there is no toast surface yet to say more.
+    navigator.clipboard.writeText(text).catch(() => {});
   };
 
   const reRun = (): void => {
