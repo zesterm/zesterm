@@ -43,6 +43,13 @@
           "x_zest_group": "Appearance",
           "x_zest_widget": "number"
         },
+        "text_hinting": {
+          "$ref": "#/$defs/TextHinting",
+          "default": "none",
+          "description": "Whether glyph outlines are snapped to the pixel grid.\n\nIndependent of `text_antialias`, and the mixed settings are the\ninteresting ones. Grid-fitting matters most where a stem is about one\npixel wide, so it decides everything at 9pt and almost nothing at 16px.\n\nMeasured against Windows Terminal at size 9: `grayscale` + `full` gives\n12.6% ink coverage and 43% fully-saturated pixels against its 11.7% and\n45%, which is as close as these get.",
+          "x_zest_group": "Appearance",
+          "x_zest_widget": "select"
+        },
         "theme": {
           "default": "obsidian",
           "description": "Theme id, from the built-ins or the user's theme directory.",
@@ -354,6 +361,21 @@
         }
       ]
     },
+    "TextHinting": {
+      "description": "Whether glyph outlines are snapped to the pixel grid.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Use outlines as drawn. Softer at small sizes, always faithful in shape.",
+          "type": "string"
+        },
+        {
+          "const": "full",
+          "description": "Grid-fit through the font's own TrueType bytecode.\n\nCrisper at small sizes, and what every Windows application looks like.\nThe cost is that swash pins its hinting target to horizontal LCD and\nwill not let it be chosen, so on a ClearType-aware face this grid-fits\nhorizontally too — sampled once per pixel that changes glyph shapes,\nwhich is what made `w` render as `W` at 13ppem.",
+          "type": "string"
+        }
+      ]
+    },
     "Typography": {
       "properties": {
         "builtin_box_drawing": {
@@ -512,6 +534,7 @@
         "text_antialias": "subpixel",
         "text_contrast": 0.0,
         "text_gamma": 1.2,
+        "text_hinting": "none",
         "theme": "obsidian"
       },
       "description": "Colours and the theme they come from."

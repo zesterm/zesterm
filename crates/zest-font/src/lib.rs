@@ -84,17 +84,43 @@ pub const SYNTHETIC_BOLD: u8 = 1 << 0;
 pub const SYNTHETIC_ITALIC: u8 = 1 << 1;
 
 /// How text is antialiased, and therefore what a mask texel means.
-///
-/// Not merely a quality knob: it also decides whether the outline is
-/// grid-fitted, because the two are the same decision made once. See
-/// [`Fonts::set_text_antialias`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum TextAntialias {
     /// Per-channel coverage sampled at thirds of a pixel, outlines unhinted.
     #[default]
     Subpixel,
-    /// One coverage value per pixel, outlines grid-fitted.
+    /// One coverage value per pixel.
+    ///
+    /// What Windows Terminal does by default, and measured to match it closely
+    /// when paired with [`Hinting::Full`]: at 12px, 12.6% ink coverage against
+    /// its 11.7%, and 43% of inked pixels fully saturated against its 45%.
     Grayscale,
+}
+
+/// Whether outlines are grid-fitted before rasterization.
+///
+/// Kept separate from [`TextAntialias`] because the two really are independent,
+/// and the interesting configurations are the mixed ones. Grid-fitting snaps a
+/// stem onto whole pixels, so it is worth most where a stem is one pixel wide
+/// and almost nothing where it is three — which is why it looks irrelevant at
+/// 16px and decides everything at 9pt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Hinting {
+    /// Outlines are used as the designer drew them.
+    ///
+    /// Softer at small sizes, and the only option that is certainly faithful:
+    /// swash pins the hinting target to horizontal LCD and does not let it be
+    /// chosen, so `Full` means "grid-fit for a rasterizer with three times the
+    /// horizontal resolution" whether or not that is what we are.
+    #[default]
+    None,
+    /// Grid-fit through swash, which runs the font's own TrueType bytecode.
+    ///
+    /// Crisper at small sizes and what every Windows application looks like.
+    /// The cost is that a ClearType-aware face grid-fits horizontally too, and
+    /// sampled at one point per pixel that changes glyph *shapes* -- `w` at
+    /// 13ppem in Cascadia Mono is the case that started #100.
+    Full,
 }
 
 /// What one texel of [`GlyphImage::data`] means.
@@ -256,8 +282,10 @@ pub struct Fonts {
     cell: CellMetrics,
     /// Draw U+2500–U+259F at cell size instead of taking the font's glyphs.
     builtin_box_drawing: bool,
-    /// Antialiasing, which also decides whether outlines are grid-fitted.
+    /// Antialiasing: what a mask texel holds.
     antialias: TextAntialias,
+    /// Whether outlines are grid-fitted before rasterization.
+    hinting: Hinting,
     requested: Vec<String>,
     /// Families to try for Private Use Area codepoints, best first.
     symbol_families: Vec<String>,
@@ -289,6 +317,7 @@ impl Fonts {
             typo,
             builtin_box_drawing: true,
             antialias: TextAntialias::default(),
+            hinting: Hinting::default(),
             cell: CellMetrics {
                 cell_w: 1,
                 cell_h: 1,
@@ -449,6 +478,17 @@ impl Fonts {
     /// stack and the pixel size already are.
     pub fn set_text_antialias(&mut self, mode: TextAntialias) {
         self.antialias = mode;
+    }
+
+    /// Set grid-fitting. **The caller must clear the atlas afterwards**, for
+    /// the same reason as [`Fonts::set_text_antialias`].
+    pub fn set_hinting(&mut self, hinting: Hinting) {
+        self.hinting = hinting;
+    }
+
+    #[must_use]
+    pub fn hinting(&self) -> Hinting {
+        self.hinting
     }
 
     #[must_use]
@@ -698,24 +738,23 @@ impl Fonts {
         let font = face.font_ref()?;
         let px = f32::from(key.px) / 256.0;
 
-        // Hinting and coverage are one decision, not two.
+        // Hinting and coverage are independent, and the interesting
+        // configurations are the mixed ones.
         //
-        // swash does not let you choose a hinting *target*: it hard-codes
+        // swash does not let a caller choose a hinting *target*: it pins
         // `HintingMode::Smooth { lcd_subpixel: Some(LcdLayout::Horizontal), .. }`
-        // (`swash/src/scale/hinting_cache.rs`), and `hint(bool)` is the whole
-        // API. So hinting here always means "grid-fit for a rasterizer with 3x
-        // horizontal resolution". Pairing that with `Format::Alpha` is a
-        // mismatch that shows up as *shapes changing*, not as softness --
-        // measured on Cascadia Mono at 13ppem, `w` comes back as three vertical
-        // stems and reads as `W`, and `o c e C t` lose the baseline overshoot
-        // that `a` keeps, so "Close" reads clipped beside "tab". (#100.)
+        // (`swash/src/scale/hinting_cache.rs`) and `hint(bool)` is the whole
+        // API. So `Hinting::Full` always means "grid-fit for a rasterizer with
+        // three times the horizontal resolution", and pairing that with
+        // grayscale coverage is what changes glyph shapes rather than merely
+        // sharpening them -- `w` at 13ppem in Cascadia Mono came back as three
+        // vertical stems and read as `W`. (#100.)
         //
-        // Subpixel coverage recovers the horizontal detail but is powerless
-        // against the flattened overshoot, which is vertical -- so the fix for
-        // the shapes is to stop grid-fitting, and subpixel coverage is what
-        // pays for the sharpness that costs. Grayscale keeps hinting, because
-        // unhinted *and* grayscale is the blurry corner neither knob wants.
-        let hint = self.antialias == TextAntialias::Grayscale;
+        // That is a real cost and it is not the whole story: grid-fitting is
+        // worth most where a stem is one pixel wide, so at 9pt it is the
+        // difference between matching Windows Terminal and not, and at 16px it
+        // is nearly invisible. Hence a setting rather than a rule.
+        let hint = self.hinting == Hinting::Full;
         let format = match self.antialias {
             TextAntialias::Subpixel => swash::zeno::Format::Subpixel,
             TextAntialias::Grayscale => swash::zeno::Format::Alpha,

@@ -70,6 +70,26 @@
     "restartHint": false
   },
   {
+    "key": "appearance.text_hinting",
+    "group": "Appearance",
+    "widget": "select",
+    "description": "Whether glyph outlines are snapped to the pixel grid.\n\nIndependent of `text_antialias`, and the mixed settings are the\ninteresting ones. Grid-fitting matters most where a stem is about one\npixel wide, so it decides everything at 9pt and almost nothing at 16px.\n\nMeasured against Windows Terminal at size 9: `grayscale` + `full` gives\n12.6% ink coverage and 43% fully-saturated pixels against its 11.7% and\n45%, which is as close as these get.",
+    "range": null,
+    "integer": false,
+    "variants": [
+      {
+        "value": "none",
+        "description": "Use outlines as drawn. Softer at small sizes, always faithful in shape."
+      },
+      {
+        "value": "full",
+        "description": "Grid-fit through the font's own TrueType bytecode.\n\nCrisper at small sizes, and what every Windows application looks like.\nThe cost is that swash pins its hinting target to horizontal LCD and\nwill not let it be chosen, so on a ClearType-aware face this grid-fits\nhorizontally too — sampled once per pixel that changes glyph shapes,\nwhich is what made `w` render as `W` at 13ppem."
+      }
+    ],
+    "default": "none",
+    "restartHint": false
+  },
+  {
     "key": "appearance.theme",
     "group": "Appearance",
     "widget": "theme-picker",

@@ -79,6 +79,8 @@ pub const KEYS: &[(&str, Invalidation)] = &[
     // many bytes a mask texel holds and whether the outline was grid-fitted at
     // all, so every cached bitmap is wrong rather than merely stale.
     ("appearance.text_antialias", Invalidation::AtlasBump),
+    // Same reason: grid-fitting changes the bitmap, not how it is composited.
+    ("appearance.text_hinting", Invalidation::AtlasBump),
     ("window.opacity", Invalidation::SurfaceRebuild),
     ("window.chrome_opacity", Invalidation::Free),
     ("window.backdrop", Invalidation::SurfaceRebuild),

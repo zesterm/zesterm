@@ -200,6 +200,33 @@ pub struct Appearance {
     /// changes glyph *shapes* rather than merely softening them.
     #[schemars(extend("x_zest_group" = "Appearance", "x_zest_widget" = "select"))]
     pub text_antialias: TextAntialias,
+    /// Whether glyph outlines are snapped to the pixel grid.
+    ///
+    /// Independent of `text_antialias`, and the mixed settings are the
+    /// interesting ones. Grid-fitting matters most where a stem is about one
+    /// pixel wide, so it decides everything at 9pt and almost nothing at 16px.
+    ///
+    /// Measured against Windows Terminal at size 9: `grayscale` + `full` gives
+    /// 12.6% ink coverage and 43% fully-saturated pixels against its 11.7% and
+    /// 45%, which is as close as these get.
+    #[schemars(extend("x_zest_group" = "Appearance", "x_zest_widget" = "select"))]
+    pub text_hinting: TextHinting,
+}
+
+/// Whether glyph outlines are snapped to the pixel grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum TextHinting {
+    /// Use outlines as drawn. Softer at small sizes, always faithful in shape.
+    None,
+    /// Grid-fit through the font's own TrueType bytecode.
+    ///
+    /// Crisper at small sizes, and what every Windows application looks like.
+    /// The cost is that swash pins its hinting target to horizontal LCD and
+    /// will not let it be chosen, so on a ClearType-aware face this grid-fits
+    /// horizontally too — sampled once per pixel that changes glyph shapes,
+    /// which is what made `w` render as `W` at 13ppem.
+    Full,
 }
 
 /// How glyph coverage is sampled.
@@ -228,6 +255,7 @@ impl Default for Appearance {
             text_gamma: 1.2,
             text_contrast: 0.0,
             text_antialias: TextAntialias::Subpixel,
+            text_hinting: TextHinting::None,
         }
     }
 }

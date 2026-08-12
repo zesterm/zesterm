@@ -56,6 +56,7 @@ pub struct Config {
     /// Extra contrast on glyph coverage.
     pub text_contrast: f32,
     pub text_antialias: zest_font::TextAntialias,
+    pub text_hinting: zest_font::Hinting,
     pub theme: String,
     pub scrollback: usize,
     pub opacity: f32,
@@ -111,6 +112,10 @@ impl From<&zest_config::Settings> for Config {
             text_antialias: match s.appearance.text_antialias {
                 zest_config::TextAntialias::Subpixel => zest_font::TextAntialias::Subpixel,
                 zest_config::TextAntialias::Grayscale => zest_font::TextAntialias::Grayscale,
+            },
+            text_hinting: match s.appearance.text_hinting {
+                zest_config::TextHinting::None => zest_font::Hinting::None,
+                zest_config::TextHinting::Full => zest_font::Hinting::Full,
             },
             theme: s.appearance.theme.clone(),
             scrollback: s.scrolling.scrollback,
@@ -3835,6 +3840,7 @@ impl App {
             Ok(mut fonts) => {
                 fonts.set_builtin_box_drawing(self.config.builtin_box_drawing);
                 fonts.set_text_antialias(antialias);
+                fonts.set_hinting(self.config.text_hinting);
                 self.fonts = Some(fonts);
             }
             Err(e) => {
@@ -4079,6 +4085,7 @@ impl ApplicationHandler<Wakeup> for App {
         let mut fonts = Fonts::new(&self.config.font_families, typo).expect("no usable font");
         fonts.set_builtin_box_drawing(self.config.builtin_box_drawing);
         fonts.set_text_antialias(self.effective_antialias());
+        fonts.set_hinting(self.config.text_hinting);
         let metrics = fonts.cell_metrics();
         tracing::debug!(elapsed_ms = t0.elapsed().as_millis(), "fonts ready");
 
@@ -4185,6 +4192,7 @@ impl ApplicationHandler<Wakeup> for App {
         // blend per channel. The rasterizer follows it, never the config —
         // see `sync_antialias` for what going the other way costs.
         fonts.set_text_antialias(gpu.renderer.text_antialias());
+        fonts.set_hinting(self.config.text_hinting);
 
         // The surface may have landed on a slightly different size than the
         // window reported, so reconcile before the first frame.
@@ -5545,6 +5553,32 @@ mod tuning_tests {
             s.appearance.text_antialias = from;
             assert_eq!(Config::from(&s).text_antialias, want, "{from:?} must survive");
         }
+    }
+
+    #[test]
+    fn the_hinting_setting_reaches_the_font_system() {
+        for (from, want) in [
+            (zest_config::TextHinting::None, zest_font::Hinting::None),
+            (zest_config::TextHinting::Full, zest_font::Hinting::Full),
+        ] {
+            let mut s = zest_config::Settings::default();
+            s.appearance.text_hinting = from;
+            assert_eq!(Config::from(&s).text_hinting, want, "{from:?} must survive");
+        }
+    }
+
+    #[test]
+    fn hinting_is_independent_of_antialiasing() {
+        // The point of the setting: all four combinations are reachable. They
+        // used to be welded together, which hid the one that matters -- at 9pt
+        // it is grayscale + full that matches Windows Terminal, and that pair
+        // was not expressible.
+        let mut s = zest_config::Settings::default();
+        s.appearance.text_antialias = zest_config::TextAntialias::Grayscale;
+        s.appearance.text_hinting = zest_config::TextHinting::Full;
+        let c = Config::from(&s);
+        assert_eq!(c.text_antialias, zest_font::TextAntialias::Grayscale);
+        assert_eq!(c.text_hinting, zest_font::Hinting::Full);
     }
 
     #[test]
