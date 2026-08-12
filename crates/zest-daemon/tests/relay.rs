@@ -813,23 +813,36 @@ fn a_link_that_parked_and_then_died_redials_at_the_shortest_delay() {
     // rather than a few milliseconds away from one that does not.
     d.start_relay_with(&relay.url(), plaintext_dialler(), FIRST, Duration::from_secs(4));
 
+    // Each gap on its own, compared with the others rather than with the clock.
+    //
+    // The first version asserted the total against `FIRST * 5` and failed on a
+    // CI runner at 688ms — three 100ms delays plus ~390ms of scheduling, which
+    // is indistinguishable from a climbing ladder if you only look at the sum.
+    // A gap *ratio* is not: constant overhead lands on every gap equally, so a
+    // ladder shows up as growth however slow the machine is, and this repo has
+    // already paid three times for tests that assert wall-clock on a loaded
+    // runner.
     relay.next_parked().send(Say::Abort).expect("the first link is up");
-    let from_the_first_park = Instant::now();
-    for _ in 0..2 {
-        relay.next_parked().send(Say::Abort).expect("and it came back");
+    let mut gaps = Vec::new();
+    for _ in 0..3 {
+        let at = Instant::now();
+        let link = relay.next_parked();
+        gaps.push(at.elapsed());
+        link.send(Say::Abort).ok();
     }
-    relay.next_parked();
-    let elapsed = from_the_first_park.elapsed();
 
+    let first = gaps[0];
+    let last = gaps[2];
     assert!(
-        elapsed >= FIRST * 2,
-        "three redials in {elapsed:?} is no delay at all: a relay that is down is down for \
-         every daemon in the fleet, and they all retry at once"
+        first >= FIRST,
+        "a redial after {first:?} is no delay at all: a relay that is down is down for every \
+         daemon in the fleet, and they would all retry at once"
     );
     assert!(
-        elapsed < FIRST * 5,
-        "three redials took {elapsed:?}, which is the ladder climbing — a link that parked \
-         must redial at the shortest delay however it then died, or a machine is unreachable \
-         for the whole of the ladder an earlier outage built"
+        last < first * 2,
+        "the gaps grew — {gaps:?} — which is the ladder climbing. A link that parked must \
+         redial at the shortest delay however it then died, or a machine is unreachable for \
+         the whole of the ladder an earlier outage built. Doubling is the ladder's own step, \
+         so anything short of it is scheduling noise and anything past it is the bug"
     );
 }
