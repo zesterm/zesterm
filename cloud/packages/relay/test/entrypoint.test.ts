@@ -30,15 +30,28 @@ import assert from 'node:assert/strict';
 
 import * as entrypoint from '../src/index.ts';
 
+/**
+ * A function, or an object with a `fetch` — the two the runtime names.
+ *
+ * Both, not just the first: the error quoted above says "function or
+ * ExportedHandler", and a guard stricter than the rule it enforces refuses
+ * something that would deploy. A class is a function, so Durable Object exports
+ * pass on the first arm.
+ */
+function mountable(value: unknown): boolean {
+  if (typeof value === 'function') return true;
+  return typeof (value as { fetch?: unknown } | null)?.fetch === 'function';
+}
+
 test('every named export of the entrypoint is something workerd can mount', () => {
   for (const [name, value] of Object.entries(entrypoint)) {
     if (name === 'default') continue;
-    assert.equal(
-      typeof value,
-      'function',
+    assert.ok(
+      mountable(value),
       `\`${name}\` is a ${typeof value}, and workerd mounts every named export here as an ` +
-        `entrypoint — a non-function is "not of type 'function or ExportedHandler'" and the ` +
-        `whole Worker refuses to start. Import it from the module that declares it instead.`,
+        `entrypoint — anything that is not a function or an ExportedHandler is "not of type ` +
+        `'function or ExportedHandler'" and the whole Worker refuses to start. Import it from ` +
+        `the module that declares it instead.`,
     );
   }
 });
