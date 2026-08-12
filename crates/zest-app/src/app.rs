@@ -498,6 +498,9 @@ pub struct App {
     screenshot: Option<Screenshot>,
     /// When that frame may be taken. Armed once the window exists.
     screenshot_at: Option<std::time::Instant>,
+    /// `--screen`: the surface to open the window on. Dispatched once, in
+    /// `resumed`, after the session exists and before the first frame.
+    start_screen: Option<StartScreen>,
     /// Set once the PNG is written (or has failed to write); the event loop
     /// exits at the next opportunity and `main` returns this.
     exit_code: Option<u8>,
@@ -529,6 +532,23 @@ impl Default for Screenshot {
             size: (960.0, 600.0),
         }
     }
+}
+
+/// What `--screen` opens the window on.
+///
+/// Not `AppScreen`, deliberately: two of these are overlays rather than
+/// full-pane screens, and the flag promises a *surface*, not a rendering
+/// mechanism. `Settings` is today's ⌘, overlay and becomes the settings tab
+/// when that work item lands, through the same call, with no flag change;
+/// `Palette` is the ⌘K fleet picker (design screen 6) — not the keymap's
+/// "command palette" (⌘⇧P), which is a different overlay with a confusingly
+/// adjacent name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartScreen {
+    Fleet,
+    Themes,
+    Settings,
+    Palette,
 }
 
 impl App {
@@ -620,6 +640,7 @@ impl App {
             attach_addr: None,
             screenshot: None,
             screenshot_at: None,
+            start_screen: None,
             exit_code: None,
         }
     }
@@ -692,6 +713,16 @@ impl App {
     #[must_use]
     pub fn with_attach_addr(mut self, addr: String) -> Self {
         self.attach_addr = Some(addr);
+        self
+    }
+
+    /// Open the window on this surface instead of the terminal.
+    ///
+    /// Composes with `--screenshot` so every design screen is capturable
+    /// headlessly, and stands alone for demos — the window simply opens there.
+    #[must_use]
+    pub fn with_start_screen(mut self, screen: StartScreen) -> Self {
+        self.start_screen = Some(screen);
         self
     }
 
@@ -4391,6 +4422,20 @@ impl ApplicationHandler<Wakeup> for App {
             self.spawn_tab_worker_pinned(route, Some(saved.addr), expect, false);
         }
         self.window = Some(window);
+
+        // `--screen`: dispatched here — window and session exist, the first
+        // real frame has not been built — so the frame a screenshot captures
+        // (and the first one a user sees) is already the asked-for surface,
+        // never the terminal with a screen flashed over it. Each arm is the
+        // exact call the keyboard makes, so the flag can never show a state
+        // the user could not have reached.
+        match self.start_screen {
+            Some(StartScreen::Fleet) => self.show_screen(AppScreen::Fleet),
+            Some(StartScreen::Themes) => self.show_screen(AppScreen::Themes),
+            Some(StartScreen::Settings) => self.toggle_settings(),
+            Some(StartScreen::Palette) => self.toggle_picker(),
+            None => {}
+        }
 
         // The window is already visible and painted with the theme background
         // (see init_gpu). Present the first real frame on top of it.

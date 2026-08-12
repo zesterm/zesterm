@@ -111,6 +111,42 @@ fn screenshot_from(
     }
 }
 
+/// `--screen`'s value, or the message to refuse it with.
+///
+/// `launcher` and `profiles` are recognized and refused separately from typos:
+/// they are real design screens whose work items have not landed, and "not
+/// implemented" tells the caller to wait where "unknown" sends them hunting for
+/// a misspelling that is not there. Each becomes a one-line `Ok` arm when its
+/// screen exists.
+fn screen_from(value: Option<&str>) -> Result<app::StartScreen, String> {
+    match value.map(str::trim) {
+        Some("fleet") => Ok(app::StartScreen::Fleet),
+        Some("themes") => Ok(app::StartScreen::Themes),
+        Some("settings") => Ok(app::StartScreen::Settings),
+        Some("palette") => Ok(app::StartScreen::Palette),
+        Some(s @ ("launcher" | "profiles")) => {
+            Err(format!("--screen {s} is not implemented yet — it lands with its work item"))
+        }
+        _ => Err("--screen needs one of fleet|themes|settings|palette|launcher|profiles".into()),
+    }
+}
+
+/// `--tabs-position`'s value — exactly the two spellings `tabs.position`
+/// deserializes.
+///
+/// Validated here rather than passed through like `--theme` because the
+/// cascade's typed merge fails *wholesale* on a bad enum value: every setting
+/// would silently fall back to its default. A theme name that does not exist
+/// degrades to the default theme and nothing else; a position that does not
+/// exist would take the whole config down with it, so it is refused out loud.
+fn tabs_position_from(value: Option<&str>) -> Result<&'static str, &'static str> {
+    match value.map(str::trim) {
+        Some("top") => Ok("top"),
+        Some("left") => Ok("left"),
+        _ => Err("--tabs-position needs top or left"),
+    }
+}
+
 /// Command-line flags, collected as a settings layer.
 ///
 /// Built as a `toml::Table` rather than by mutating the resolved config, so a
@@ -164,40 +200,50 @@ impl CliLayer {
     }
 }
 
-fn main() -> std::process::ExitCode {
-    console::attach_to_parent();
+/// Everything the argument loop collected, parsed but not yet acted on.
+#[derive(Default)]
+struct Flags {
+    cli: CliLayer,
+    profile: Option<String>,
+    startup_probe: bool,
+    no_daemon: bool,
+    attach_probe: bool,
+    new_session: bool,
+    attach_addr: Option<String>,
+    // Collected separately and assembled by `screenshot_from` afterwards, so
+    // the modifiers do not depend on argument order and cannot conjure
+    // screenshot mode on their own — `--screenshot-delay 400` alone used to
+    // write `zesterm.png`.
+    shot_path: Option<std::path::PathBuf>,
+    shot_delay: Option<std::time::Duration>,
+    shot_size: Option<(f64, f64)>,
+    screen: Option<app::StartScreen>,
+}
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("ZESTERM_LOG")
-                .unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+/// The parse ended without producing a run.
+enum EarlyExit {
+    /// An informational flag (`--help`, `--themes`, ...) printed its answer;
+    /// exit cleanly.
+    Handled,
+    /// A flag was refused; print this to stderr and exit 2.
+    Refused(String),
+}
 
-    // Flags become the strongest layer of the settings cascade rather than
-    // mutating a config directly. That is what lets `--size 20` show up in the
-    // settings UI as "set by command line" instead of as an unexplained value
-    // the config file disagrees with.
-    let mut cli = CliLayer::default();
-    let mut profile = None;
-    let mut startup_probe = false;
-    let mut no_daemon = false;
-    let mut attach_probe = false;
-    let mut new_session = false;
-    let mut attach_addr: Option<String> = None;
-    // Collected separately and assembled after the loop, so the modifiers do
-    // not depend on argument order and cannot conjure screenshot mode on their
-    // own — `--screenshot-delay 400` alone used to write `zesterm.png`.
-    let mut shot_path: Option<std::path::PathBuf> = None;
-    let mut shot_delay: Option<std::time::Duration> = None;
-    let mut shot_size: Option<(f64, f64)> = None;
-    let args: Vec<String> = std::env::args().skip(1).collect();
+/// The argument loop, as a function so tests can drive it.
+///
+/// Flag *composition* is loop behaviour — `--screen` beside `--screenshot`,
+/// in either order — and a loop inlined in `main` leaves exactly that
+/// untestable. The informational arms print from here; refusals are returned
+/// instead of calling `process::exit`, because a test asserting on a refusal
+/// must not take the test runner down with it.
+fn parse_args(args: &[String]) -> Result<Flags, EarlyExit> {
+    let mut f = Flags::default();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--theme" => {
                 if let Some(v) = args.get(i + 1) {
-                    cli.set_str("appearance.theme", v);
+                    f.cli.set_str("appearance.theme", v);
                 }
                 i += 2;
             }
@@ -208,79 +254,98 @@ fn main() -> std::process::ExitCode {
                     // a usable terminal rather than an empty stack.
                     let mut families = vec![v.clone()];
                     families.extend(zest_config::Typography::default().families);
-                    cli.set_array("typography.families", &families);
+                    f.cli.set_array("typography.families", &families);
                 }
                 i += 2;
             }
             "--size" => {
                 if let Some(v) = args.get(i + 1).and_then(|s| s.parse::<f64>().ok()) {
-                    cli.set_float("typography.size_pt", v);
+                    f.cli.set_float("typography.size_pt", v);
                 }
                 i += 2;
             }
             "--opacity" => {
                 if let Some(v) = args.get(i + 1).and_then(|s| s.parse::<f64>().ok()) {
-                    cli.set_float("window.opacity", v);
+                    f.cli.set_float("window.opacity", v);
+                }
+                i += 2;
+            }
+            "--tabs-position" => {
+                match tabs_position_from(args.get(i + 1).map(String::as_str)) {
+                    // The same mechanism `--theme` uses: a CommandLine-layer
+                    // write, so the override wins the cascade and is
+                    // *recorded* as having won.
+                    Ok(v) => f.cli.set_str("tabs.position", v),
+                    Err(msg) => return Err(EarlyExit::Refused(msg.into())),
+                }
+                i += 2;
+            }
+            "--screen" => {
+                match screen_from(args.get(i + 1).map(String::as_str)) {
+                    Ok(s) => f.screen = Some(s),
+                    Err(msg) => return Err(EarlyExit::Refused(msg)),
                 }
                 i += 2;
             }
             "--profile" => {
-                profile = args.get(i + 1).cloned();
+                f.profile = args.get(i + 1).cloned();
                 i += 2;
             }
             "--startup-probe" => {
-                startup_probe = true;
+                f.startup_probe = true;
                 i += 1;
             }
             "--no-daemon" => {
-                no_daemon = true;
+                f.no_daemon = true;
                 i += 1;
             }
             "--attach-probe" => {
-                attach_probe = true;
+                f.attach_probe = true;
                 i += 1;
             }
             "--new-session" => {
-                new_session = true;
+                f.new_session = true;
                 i += 1;
             }
             "--attach" => {
-                attach_addr = args.get(i + 1).cloned();
-                if attach_addr.is_none() {
-                    eprintln!("--attach needs <host:port> (see zest-daemon --listen-lan)");
-                    std::process::exit(2);
+                match args.get(i + 1) {
+                    Some(v) => f.attach_addr = Some(v.clone()),
+                    None => {
+                        return Err(EarlyExit::Refused(
+                            "--attach needs <host:port> (see zest-daemon --listen-lan)".into(),
+                        ));
+                    }
                 }
                 i += 2;
             }
             "--scroll-on-output" => {
-                cli.set_bool("scrolling.scroll_on_output", true);
+                f.cli.set_bool("scrolling.scroll_on_output", true);
                 i += 1;
             }
             "--screenshot" => {
                 let Some(v) = args.get(i + 1) else {
-                    eprintln!("--screenshot needs a path");
-                    std::process::exit(2);
+                    return Err(EarlyExit::Refused("--screenshot needs a path".into()));
                 };
-                shot_path = Some(v.into());
+                f.shot_path = Some(v.into());
                 i += 2;
             }
             "--screenshot-delay" => {
                 let Some(d) = args.get(i + 1).and_then(|s| parse_delay(s)) else {
-                    eprintln!(
+                    return Err(EarlyExit::Refused(format!(
                         "--screenshot-delay needs milliseconds, at most \
                          {MAX_SCREENSHOT_DELAY_MS}"
-                    );
-                    std::process::exit(2);
+                    )));
                 };
-                shot_delay = Some(d);
+                f.shot_delay = Some(d);
                 i += 2;
             }
             "--screenshot-size" => {
                 let Some(size) = args.get(i + 1).and_then(|s| parse_size(s)) else {
-                    eprintln!("--screenshot-size needs <width>x<height> in logical pixels");
-                    std::process::exit(2);
+                    return Err(EarlyExit::Refused(
+                        "--screenshot-size needs <width>x<height> in logical pixels".into(),
+                    ));
                 };
-                shot_size = Some(size);
+                f.shot_size = Some(size);
                 i += 2;
             }
             "--config" => {
@@ -291,11 +356,11 @@ fn main() -> std::process::ExitCode {
                         None => println!("no config directory available"),
                     },
                 }
-                return std::process::ExitCode::SUCCESS;
+                return Err(EarlyExit::Handled);
             }
             "--schema" => {
                 println!("{}", zest_config::schema::json_schema_string());
-                return std::process::ExitCode::SUCCESS;
+                return Err(EarlyExit::Handled);
             }
             // Everything after -e is the command, as xterm and alacritty do.
             //
@@ -306,17 +371,16 @@ fn main() -> std::process::ExitCode {
             "-e" | "--command" => {
                 let rest: Vec<String> = args[i + 1..].to_vec();
                 if rest.is_empty() {
-                    eprintln!("-e needs a command");
-                    std::process::exit(2);
+                    return Err(EarlyExit::Refused("-e needs a command".into()));
                 }
-                cli.set_str("shell.command", &join_command(&rest));
+                f.cli.set_str("shell.command", &join_command(&rest));
                 break;
             }
             "--themes" => {
                 for t in zest_theme::builtin::all() {
                     println!("{:<10} {}", t.id, t.name);
                 }
-                return std::process::ExitCode::SUCCESS;
+                return Err(EarlyExit::Handled);
             }
             // The escape hatch for everything injection cannot reach: ssh,
             // tmux, a container, a shell started inside another shell. Prints
@@ -326,16 +390,15 @@ fn main() -> std::process::ExitCode {
                 match zest_pty::shell_integration::Shell::detect(&name) {
                     Some(shell) => print!("{}", zest_pty::shell_integration::hook(shell)),
                     None => {
-                        eprintln!(
+                        return Err(EarlyExit::Refused(format!(
                             "no shell integration for {name:?}.\n\
                              zsh and PowerShell (pwsh, powershell) are supported; \
                              bash and fish are not yet, and cmd.exe has no hook to \
                              offer — see docs/ROADMAP.md, WS-E."
-                        );
-                        std::process::exit(2);
+                        )));
                     }
                 }
-                return std::process::ExitCode::SUCCESS;
+                return Err(EarlyExit::Handled);
             }
             "--help" | "-h" => {
                 println!(
@@ -344,6 +407,8 @@ fn main() -> std::process::ExitCode {
                      --font <family>   preferred font family\n\
                      --size <pt>       font size in points\n\
                      --opacity <0..1>  window background opacity\n\
+                     --tabs-position <top|left>\n\
+                     \x20                 tab strip along the top, or a sidebar on the left\n\
                      --profile <name>  apply a named profile from the config\n\
                      --scroll-on-output\n\
                      \x20                 jump to the bottom on new output\n\
@@ -358,6 +423,12 @@ fn main() -> std::process::ExitCode {
                      --attach-probe    report what attaching to the daemon cost, then exit\n\
                      --no-daemon       own the pty in this process, do not attach\n\
                      --new-session     start a fresh shell instead of restoring your tabs\n\
+                     --screen <name>   open on fleet|themes|settings|palette instead of\n\
+                     \x20                 the terminal ('palette' is the ⌘K search, not the\n\
+                     \x20                 keymap's command palette). Composes with\n\
+                     \x20                 --screenshot; screen content is live state, and\n\
+                     \x20                 --screenshot already implies --no-daemon, which\n\
+                     \x20                 keeps captures stable\n\
                      --screenshot <path>\n\
                      \x20                 render one frame to a PNG and exit, without ever\n\
                      \x20                 showing the window (no screen-capture permission)\n\
@@ -372,14 +443,51 @@ fn main() -> std::process::ExitCode {
                      Flags are the strongest layer of the settings cascade;\n\
                      everything else lives in the config file."
                 );
-                return std::process::ExitCode::SUCCESS;
+                return Err(EarlyExit::Handled);
             }
             other => {
-                eprintln!("unknown argument: {other}\ntry --help");
-                std::process::exit(2);
+                return Err(EarlyExit::Refused(format!("unknown argument: {other}\ntry --help")));
             }
         }
     }
+    Ok(f)
+}
+
+fn main() -> std::process::ExitCode {
+    console::attach_to_parent();
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("ZESTERM_LOG")
+                .unwrap_or_else(|_| "info".into()),
+        )
+        .init();
+
+    // Flags become the strongest layer of the settings cascade rather than
+    // mutating a config directly. That is what lets `--size 20` show up in the
+    // settings UI as "set by command line" instead of as an unexplained value
+    // the config file disagrees with.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let Flags {
+        cli,
+        profile,
+        startup_probe,
+        no_daemon,
+        attach_probe,
+        new_session,
+        attach_addr,
+        shot_path,
+        shot_delay,
+        shot_size,
+        screen,
+    } = match parse_args(&args) {
+        Ok(flags) => flags,
+        Err(EarlyExit::Handled) => return std::process::ExitCode::SUCCESS,
+        Err(EarlyExit::Refused(msg)) => {
+            eprintln!("{msg}");
+            return std::process::ExitCode::from(2);
+        }
+    };
 
     // Validated here, before anything is built: a contradiction between flags
     // is knowable from the arguments alone, and finding it out after a config
@@ -457,6 +565,9 @@ fn main() -> std::process::ExitCode {
         }
         app = app.with_attach_addr(addr);
     }
+    if let Some(screen) = screen {
+        app = app.with_start_screen(screen);
+    }
     event_loop.run_app(&mut app).expect("run");
 
     // The screenshot's exit code, carried out of the event loop rather than
@@ -471,7 +582,10 @@ fn main() -> std::process::ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{app, join_command, parse_delay, parse_size, screenshot_from};
+    use super::{
+        app, join_command, parse_args, parse_delay, parse_size, screen_from, screenshot_from,
+        tabs_position_from, CliLayer, EarlyExit,
+    };
     use std::time::Duration;
 
     #[test]
@@ -537,6 +651,106 @@ mod tests {
         assert_eq!(parse_size("-100x600"), None);
         assert_eq!(parse_size("1200"), None, "no separator at all");
         assert_eq!(parse_size("widexhigh"), None);
+    }
+
+    #[test]
+    fn every_shipped_screen_parses() {
+        use app::StartScreen as S;
+        // The four arms below are the four surfaces that exist today; a value
+        // that stops parsing is a screenshot pipeline that silently stops
+        // covering that screen.
+        assert_eq!(screen_from(Some("fleet")), Ok(S::Fleet));
+        assert_eq!(screen_from(Some("themes")), Ok(S::Themes));
+        assert_eq!(screen_from(Some("settings")), Ok(S::Settings));
+        assert_eq!(screen_from(Some("palette")), Ok(S::Palette));
+    }
+
+    #[test]
+    fn the_unbuilt_screens_are_refused_as_pending_not_as_typos() {
+        // `launcher` and `profiles` are real design screens whose work items
+        // have not landed. "not implemented" tells the caller to wait;
+        // "needs one of" tells them to fix their spelling -- conflating the
+        // two sends someone hunting for a typo that is not there.
+        for pending in ["launcher", "profiles"] {
+            let msg = screen_from(Some(pending)).unwrap_err();
+            assert!(msg.contains("not implemented"), "{pending} is pending, not unknown: {msg}");
+        }
+        let unknown = screen_from(Some("flet")).unwrap_err();
+        assert!(unknown.contains("needs one of"), "a typo lists the valid values: {unknown}");
+        let missing = screen_from(None).unwrap_err();
+        assert!(missing.contains("needs one of"), "a bare --screen lists them too: {missing}");
+    }
+
+    #[test]
+    fn tabs_position_takes_exactly_what_the_setting_does() {
+        // "top" and "left" are the two spellings `tabs.position` deserializes.
+        // Anything else written into the CommandLine layer would fail the
+        // cascade's typed merge *wholesale* -- every setting silently back to
+        // its default -- so junk is refused here, out loud, with exit 2.
+        assert_eq!(tabs_position_from(Some("top")), Ok("top"));
+        assert_eq!(tabs_position_from(Some("left")), Ok("left"));
+        assert!(tabs_position_from(Some("right")).is_err());
+        assert!(tabs_position_from(Some("Top")).is_err(), "the setting is case-sensitive, so the flag is too");
+        assert!(tabs_position_from(None).is_err(), "a bare --tabs-position is refused, not defaulted");
+    }
+
+    #[test]
+    fn the_tabs_position_override_wins_the_cascade_and_is_recorded() {
+        // The flag writes the CommandLine layer -- the same mechanism --theme
+        // uses -- rather than mutating resolved settings: a config-file save
+        // re-runs the cascade and replays the flags, so an override living
+        // anywhere else would vanish on the user's first edit.
+        let mut cli = CliLayer::default();
+        cli.set_str("tabs.position", tabs_position_from(Some("left")).expect("valid"));
+        let user = zest_config::Layer::parse(zest_config::Source::User, "[tabs]\nposition = \"top\"\n")
+            .expect("well-formed user layer");
+        let flags = zest_config::Layer::new(zest_config::Source::CommandLine, cli.into_table());
+        let r = zest_config::cascade::resolve(&[user, flags]);
+        assert_eq!(
+            r.settings.tabs.position,
+            zest_config::settings::TabsPosition::Left,
+            "the command line must beat the user's file"
+        );
+        assert_eq!(
+            r.provenance.get("tabs.position"),
+            Some(&zest_config::Source::CommandLine),
+            "provenance is what lets the settings UI say 'set by command line'"
+        );
+    }
+
+    #[test]
+    fn a_screen_and_a_screenshot_compose_in_either_order() {
+        // Each flag is collected into its own slot and assembled after the
+        // loop, so order cannot matter -- but "cannot" is exactly the kind of
+        // claim that stops being true when an arm learns to consume an extra
+        // argument, so both orders are pinned.
+        for order in [
+            v(&["--screen", "fleet", "--screenshot", "out.png"]),
+            v(&["--screenshot", "out.png", "--screen", "fleet"]),
+            v(&["--tabs-position", "left", "--screenshot", "out.png", "--screen", "fleet"]),
+        ] {
+            let f = parse_args(&order).unwrap_or_else(|_| panic!("valid together: {order:?}"));
+            assert_eq!(f.screen, Some(app::StartScreen::Fleet));
+            assert_eq!(f.shot_path.as_deref(), Some(std::path::Path::new("out.png")));
+        }
+    }
+
+    #[test]
+    fn a_bad_screen_or_position_is_a_refusal_not_a_run() {
+        // Exit 2, exactly like the sibling flags -- a window that opens on
+        // the wrong screen is a worse answer to a typo than an error is.
+        for bad in [
+            v(&["--screen", "bogus"]),
+            v(&["--screen"]),
+            v(&["--screen", "launcher"]),
+            v(&["--tabs-position", "middle"]),
+            v(&["--tabs-position"]),
+        ] {
+            assert!(
+                matches!(parse_args(&bad), Err(EarlyExit::Refused(_))),
+                "{bad:?} must be refused"
+            );
+        }
     }
 
     #[test]
