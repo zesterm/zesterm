@@ -4022,9 +4022,34 @@ impl App {
     }
 
     /// The value a profiles row currently SHOWS — the profile's resolved
-    /// value, or the window's where the profile is silent — so an edit
-    /// steps from what is on screen, exactly like the Settings tab.
+    /// value, or the window's where the profile is silent — so an arrow
+    /// press or slider drag steps from what is on screen, exactly like the
+    /// Settings tab. Not the typed-edit seed: that is [`Self::profiles_seed_of`].
     fn profiles_value_of(&self, field_idx: usize) -> Option<serde_json::Value> {
+        self.profiles_eval(field_idx, crate::profiles_ui::effective_value)
+    }
+
+    /// The value a typed edit opens with — the launch strings seed the
+    /// profile's own resolved value (empty when unset), never the display
+    /// fallback: `effective_value` captions an unset `command` with
+    /// `shell_fallback()` (on a remote route, "the host's default shell")
+    /// and an unset `host` with a label no fleet entry carries, and seeding
+    /// either puts two Enters between the caption and a real
+    /// `[profiles.<name>]` value a launch would spawn verbatim.
+    fn profiles_seed_of(&self, field_idx: usize) -> Option<serde_json::Value> {
+        self.profiles_eval(field_idx, crate::profiles_ui::edit_seed_value)
+    }
+
+    fn profiles_eval(
+        &self,
+        field_idx: usize,
+        eval: fn(
+            &zest_config::ui::UiField,
+            &zest_config::profiles::ProfileResolved,
+            &serde_json::Value,
+            &crate::profiles_ui::ProfileRowContext,
+        ) -> serde_json::Value,
+    ) -> Option<serde_json::Value> {
         use crate::profiles_ui as pui;
         let ui = self.profiles_ui.as_ref()?;
         let field = ui.fields.get(field_idx)?;
@@ -4033,8 +4058,11 @@ impl App {
         let overrides = pui::overrides_json(&resolved);
         let window_values = serde_json::to_value(&self.settings).ok()?;
         let fallback = self.shell_fallback();
-        // hosts/schemes are display-only inputs `effective_value` never
-        // reads (its doc pins that), so the input path skips the snapshot.
+        // hosts/schemes are display-only inputs neither evaluator reads
+        // (their docs pin that), so the input path skips the snapshot. The
+        // placeholder `local_host` is likewise never written: the launch
+        // strings it captions refuse arrow-adjust (`adjust_profile` returns
+        // `None`) and seed through `edit_seed_value`, which ignores it.
         let ctx = pui::ProfileRowContext {
             window_values: &window_values,
             window_theme: &self.config.theme,
@@ -4044,7 +4072,7 @@ impl App {
             schemes: &[],
             is_defaults: ui.profile == zest_config::profiles::RESERVED_PROFILE,
         };
-        Some(pui::effective_value(field, &resolved, &overrides, &ctx))
+        Some(eval(field, &resolved, &overrides, &ctx))
     }
 
     /// Write one edited value into `[profiles.<name>]`, then reload — never
@@ -4179,9 +4207,10 @@ impl App {
         self.mark_chrome_dirty();
     }
 
-    /// Open a typed edit on a profiles field, seeded with what the row shows.
+    /// Open a typed edit on a profiles field, seeded with the profile's own
+    /// value — see `profiles_seed_of` for why not with what the row shows.
     fn profiles_begin_edit(&mut self, idx: usize) {
-        let current = self.profiles_value_of(idx);
+        let current = self.profiles_seed_of(idx);
         let seed = match &current {
             // Strings seed verbatim whatever the widget (host, tab_title,
             // command); numbers go through the settings seeding.

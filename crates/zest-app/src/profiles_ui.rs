@@ -217,6 +217,9 @@ pub fn overrides_json(resolved: &ProfileResolved) -> serde_json::Value {
 /// resolved value shown"). Only `window_values`, `window_theme`,
 /// `fallback_command` and `local_host` are consulted from `ctx` — an input
 /// path that has no fleet snapshot may pass empty `hosts`/`schemes`.
+///
+/// Display only: the unset launch strings come back as captions, not values
+/// — a typed edit must seed from [`edit_seed_value`] instead.
 #[must_use]
 pub fn effective_value(
     field: &UiField,
@@ -264,6 +267,31 @@ pub fn effective_value(
             .to_string(),
         ),
         _ => serde_json::Value::Null,
+    }
+}
+
+/// The value a typed edit opens with: [`effective_value`] everywhere except
+/// the launch strings, which seed the profile's *resolved* value — empty when
+/// unset — never the display fallback. `effective_value`'s unset `command` is
+/// a caption (on a remote route, literally "the host's default shell") and
+/// its unset `host` a display label, so a buffer seeded from the display path
+/// is two Enters from committing a caption verbatim as a real override that a
+/// launch would then spawn. An emptied buffer commits `""`, which resolution
+/// treats exactly like an absent key (profiles.rs pins that), so the
+/// untouched round trip stays unset.
+#[must_use]
+pub fn edit_seed_value(
+    field: &UiField,
+    resolved: &ProfileResolved,
+    overrides: &serde_json::Value,
+    ctx: &ProfileRowContext,
+) -> serde_json::Value {
+    match field.key.as_str() {
+        "command" => {
+            serde_json::Value::String(resolved.meta.command.clone().unwrap_or_default())
+        }
+        "host" => serde_json::Value::String(resolved.meta.host.clone().unwrap_or_default()),
+        _ => effective_value(field, resolved, overrides, ctx),
     }
 }
 
@@ -715,6 +743,68 @@ mod tests {
         assert!(
             matches!(cell("tab_color"), SettingsValueCell::AccentSwatches { selected: None, inert: false }),
             "an unset tab colour rings nothing"
+        );
+    }
+
+    #[test]
+    fn the_edit_seed_never_fabricates_the_display_fallbacks() {
+        // `effective_value`'s unset command/host are display captions — on a
+        // remote-routed window `fallback_command` is literally the string
+        // "the host's default shell" — and `app::profiles_begin_edit` seeds
+        // the typed edit from this module, so a caption-seeded buffer is two
+        // Enters from being committed verbatim as a real [profiles.<name>]
+        // value that a launch would then try to spawn.
+        let all = fields();
+        let field = |key: &str| all.iter().find(|f| f.key == key).expect("field");
+        let values = window_values();
+        let schemes = scheme_swatches();
+        let ctx = ctx(&values, &schemes, false);
+
+        // Unset: the row still captions the fallback, but the seed is EMPTY —
+        // "" is the file's spelling of unset (profiles.rs pins that), so an
+        // untouched buffer round-trips to unset instead of inventing a value.
+        let r = resolve_profile(&toml::Table::new(), "bare");
+        let overrides = overrides_json(&r);
+        assert_eq!(
+            effective_value(field("command"), &r, &overrides, &ctx),
+            serde_json::json!("pwsh -NoLogo"),
+            "the display keeps its caption — the fix is the seed, not the row"
+        );
+        assert_eq!(
+            edit_seed_value(field("command"), &r, &overrides, &ctx),
+            serde_json::json!(""),
+            "an unset command seeds empty, never the fallback caption"
+        );
+        assert_eq!(
+            edit_seed_value(field("host"), &r, &overrides, &ctx),
+            serde_json::json!(""),
+            "an unset host seeds empty, never a display label like 'this machine'"
+        );
+
+        // Set (directly or through Defaults): the resolved value, verbatim —
+        // the buffer must agree with the row it opened from.
+        let c = config(
+            "[profiles.defaults]\nhost = \"mini\"\n[profiles.mac]\ncommand = \"zsh -l\"\n",
+        );
+        let r = resolve_profile(&c, "mac");
+        let overrides = overrides_json(&r);
+        assert_eq!(
+            edit_seed_value(field("command"), &r, &overrides, &ctx),
+            serde_json::json!("zsh -l"),
+            "a set command seeds its stored value"
+        );
+        assert_eq!(
+            edit_seed_value(field("host"), &r, &overrides, &ctx),
+            serde_json::json!("mini"),
+            "a host inherited from Defaults is a real value, so it seeds"
+        );
+
+        // Every other key keeps the settings-tab discipline — its fallback
+        // is the window's resolved value, a real value worth stepping from.
+        assert_eq!(
+            edit_seed_value(field("color_scheme"), &r, &overrides, &ctx),
+            effective_value(field("color_scheme"), &r, &overrides, &ctx),
+            "non-launch keys still seed what the row shows"
         );
     }
 
