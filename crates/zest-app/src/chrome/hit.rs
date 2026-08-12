@@ -106,17 +106,42 @@ pub enum HitRegion {
     PalettePanel,
     /// The dimmed backdrop behind the palette; clicking it dismisses.
     PaletteScrim,
-    /// One row of the settings overlay, by index; clicking selects it.
+    /// One row of the settings tab, by index; clicking selects it.
     SettingsRow(usize),
     /// A toggle's track inside its settings row; clicking flips the value.
     SettingsToggle(usize),
     /// A slider's grab band inside its settings row; click or drag sets the
     /// value from the pointer's position along the track.
     SettingsSlider(usize),
-    /// The settings panel between rows (filter line, headers) — swallows.
+    /// The settings tab's ground (rail, headers, the space between rows) —
+    /// swallows, so a click cannot fall through to the grid beneath.
     SettingsPanel,
-    /// The dimmed backdrop behind the settings overlay; clicking dismisses.
-    SettingsScrim,
+    /// One row of the settings tab's category rail; clicking selects it.
+    SettingsCategory(usize),
+    /// A settings row's modified dot: clicking *resets* — deletes the key
+    /// from the config file (design §11, "it is the reset button"). Hittable
+    /// only while the row is modified; a transparent dot takes no clicks.
+    SettingsReset(usize),
+    /// The rail's filter pill; typing already filters, so a click only says
+    /// "yes, this is where the characters go".
+    SettingsFilter,
+    /// The footer's "Edit as TOML": open the config file externally.
+    SettingsEditToml,
+    /// One segment of a segmented select, by (row, variant index).
+    SettingsSegment(usize, usize),
+    /// A number stepper's − / ＋, by row; `true` steps up.
+    SettingsStep(usize, bool),
+    /// A long select's dropdown pill; clicking opens its menu.
+    SettingsSelect(usize),
+    /// One option of the open dropdown menu, by variant index.
+    SettingsMenuRow(usize),
+    /// A list item's × (font stack, tags, env entries), by (row, item).
+    SettingsListRemove(usize, usize),
+    /// A list widget's dashed add affordance, by row.
+    SettingsListAdd(usize),
+    /// A font-list item's body, by (row, item) — the drag-to-reorder handle
+    /// and drop target: order IS the setting (§11).
+    SettingsListItem(usize, usize),
     /// A caption button we drew ourselves, on the borderless path.
     CaptionButton(CaptionButton),
     /// The window's own edge. Pushed last of everything, so it outranks even

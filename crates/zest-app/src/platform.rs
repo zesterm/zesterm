@@ -157,3 +157,26 @@ pub fn native_control_inset(window: &winit::window::Window) -> Option<(f64, f64)
 pub fn native_control_inset(_window: &winit::window::Window) -> Option<(f64, f64)> {
     None
 }
+
+/// Hand a file to the OS's default handler — "Edit as TOML" (design §11).
+///
+/// One call, fire-and-forget: the settings tab must not block on an editor,
+/// and a handler that fails does so in the OS's own UI. `cmd /c start` on
+/// Windows (`start` is a cmd built-in, not a program), `open` on macOS,
+/// `xdg-open` elsewhere.
+pub fn open_path(path: &std::path::Path) {
+    #[cfg(windows)]
+    // The empty quoted argument is start's window title slot: without it a
+    // quoted *path* is parsed as the title and nothing opens.
+    let result = std::process::Command::new("cmd")
+        .args(["/c", "start", ""])
+        .arg(path)
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open").arg(path).spawn();
+    if let Err(e) = result {
+        tracing::warn!(error = %e, path = %path.display(), "could not open the file externally");
+    }
+}

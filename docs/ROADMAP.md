@@ -230,7 +230,11 @@ menu, the status bar is deleted, and the layout toggle leaves the chrome
 entry stay). The resulting work items, measurements in the handoff README:
 
 - [ ] `TabContent` — tabs that aren't sessions (Settings, Profiles), without
-      touching the `SessionAddr`-keyed hit machinery.
+      touching the `SessionAddr`-keyed hit machinery. *Settings half landed
+      with [#169](https://github.com/zesterm/zesterm/issues/169)*: the strip
+      holds one app tab behind a reserved `SessionAddr`
+      (`tabs::settings_addr()`), so every hit region and activation path
+      stayed put; the Profiles tab reuses the same mechanism when §12 lands.
 - [x] Screens 1–2 reconciliation → [#149](https://github.com/zesterm/zesterm/issues/149):
       title-only chips (closes #51 structurally), status-bar deletion,
       layout-pill removal, full-width vertical header, horizontal strip scroll
@@ -239,14 +243,34 @@ entry stay). The resulting work items, measurements in the handoff README:
 - [x] `--screen <fleet|themes|settings|palette|launcher|profiles>`, composing
       with `--screenshot`, so every design screen is capturable headlessly
       → [#161](https://github.com/zesterm/zesterm/issues/161). Each arm makes
-      the exact call the keyboard would; `settings` opens today's overlay and
-      will open the tab when §11 lands, with no flag change. `launcher` and
+      the exact call the keyboard would; `settings` opens the §11 tab (it
+      opened the old overlay before #169, through the same call — the flag
+      never changed). `launcher` and
       `profiles` parse but refuse with "not implemented" until their work
       items land — a one-line arm each, then. `--tabs-position <top|left>`
       landed alongside it: a CommandLine-layer override like `--theme`, so
       both chip orientations (handoff README §§1–2) are capturable too.
 - [ ] The `+` launcher menu (README §1).
-- [ ] Settings as a tab (README §11), replacing the ⌘, overlay.
+- [x] Settings as a tab (README §11), replacing the ⌘, overlay →
+      [#169](https://github.com/zesterm/zesterm/issues/169): ⌘, opens or
+      activates the singleton tab (closing it is closing a tab — ⌘W, or Esc
+      past the filter); `chrome/settings_screen.rs` draws the 214px category
+      rail (per-group modified counts, `/` filter, `Unknown keys` with
+      Levenshtein did-you-mean suggestions from `Resolved::unknown_keys`),
+      the per-category content column with the §11 responsive wrap, the
+      modified dot as the reset button (`remove_value` → reload; the file
+      stays the single source of truth), and the footer (modified-count
+      sentence, config path, `Edit as TOML` via `platform::open_path`). The
+      widget vocabulary landed with it: segmented selects (≤3 variants),
+      the 288px dropdown with doc comments (`window.backdrop`), the − / ＋
+      stepper with units, click-to-seek sliders, font rows with ×,
+      drag-to-reorder and an append picker (fallback-tagged past the first
+      resolvable face), tag chips (a leading `-` kept verbatim), and env
+      key/value cells where an empty value renders `unset` and unsets. Every
+      edit still goes write-value → reload through the cascade; the old
+      modal (`settings_overlay`, its scrim, its exclusive-overlay slot) is
+      deleted. Path's `Browse…` is deliberately absent: the app has no file
+      dialog yet, and §11 says skip rather than build one for this item.
 - [ ] Profiles — launch targets (README §12): its own work item; per-session
       palette and per-tab host routes cut across WS-A and the control plane.
 - [x] Per-session palette machinery (README §12's chrome-vs-grid rule) →
