@@ -445,6 +445,10 @@ pub struct App {
     cursor: winit::window::CursorIcon,
     /// Tab strip scroll offset, physical pixels; layout clamps it.
     strip_scroll: f32,
+    /// Bring the active chip into the strip's viewport on the next layout.
+    /// Set on activation paths only and cleared once consumed, so wheel
+    /// scrolling never snaps back — the overlays' ensure-visible discipline.
+    strip_ensure_visible: bool,
     /// Pointer position in physical pixels, for chrome hit tests.
     pointer_pos: (f64, f64),
     /// Debounce for double-clicking the drag area to zoom.
@@ -588,6 +592,7 @@ impl App {
             chrome_hover: None,
             cursor: winit::window::CursorIcon::Default,
             strip_scroll: 0.0,
+            strip_ensure_visible: false,
             pointer_pos: (0.0, 0.0),
             last_drag_click: None,
             window_title: String::new(),
@@ -1596,63 +1601,6 @@ impl App {
         self.mark_chrome_dirty();
     }
 
-    /// The status bar's model: the active session's facts, plus how its host
-    /// is reached. Never blocks — everything here is memory or one small
-    /// file read (the git HEAD).
-    fn build_status(
-        &self,
-        fleet_hosts: &[crate::fleet::FleetHost],
-    ) -> Option<crate::chrome::model::StatusModel> {
-        use crate::chrome::model::{LinkKind, StatusModel};
-        let tab = self.tabs.active()?;
-        let (cwd_raw, blocks) = {
-            let term = tab.source().terminal();
-            let term = term.lock();
-            let cwd = if term.cwd().is_empty() {
-                term.blocks().last().map(|b| b.cwd.clone()).unwrap_or_default()
-            } else {
-                term.cwd().to_string()
-            };
-            (cwd, term.blocks().blocks().len())
-        };
-
-        let origin = tab.source().origin();
-        let (link, latency_ms, cwd, branch) = match &origin {
-            Origin::Daemon { host, local: false } => {
-                let fleet = fleet_hosts.iter().find(|h| &h.label == host);
-                let link = match fleet.and_then(|h| h.reachability) {
-                    Some(zest_mesh::Reachability::Cloud) => LinkKind::Tunnel,
-                    Some(zest_mesh::Reachability::Loopback) => LinkKind::Loopback,
-                    _ => LinkKind::Lan,
-                };
-                // Another machine's paths: no home shortening, no git probe —
-                // both would be guesses about a filesystem we cannot see.
-                (link, fleet.and_then(|h| h.rtt_ms), cwd_raw, None)
-            }
-            _ => {
-                let branch = (!cwd_raw.is_empty())
-                    .then(|| crate::status::git_branch(std::path::Path::new(&cwd_raw)))
-                    .flatten();
-                (LinkKind::Loopback, None, crate::status::shorten_home(&cwd_raw), branch)
-            }
-        };
-
-        // A dropped link outranks whatever path the host normally takes.
-        let link = if self.link_down { LinkKind::Reconnecting } else { link };
-        Some(StatusModel {
-            cwd,
-            branch,
-            blocks,
-            theme: if zest_theme::builtin::get(&self.config.theme).is_some() {
-                self.config.theme.clone()
-            } else {
-                zest_theme::builtin::DEFAULT_DARK.to_string()
-            },
-            link,
-            latency_ms,
-        })
-    }
-
     /// Page the scrollback by one screen less a line of overlap — the overlap
     /// is what makes paged reading continuous rather than guessing where the
     /// seam was.
@@ -1894,16 +1842,15 @@ impl App {
                 }
                 zest_config::settings::TabsPosition::Left => {
                     insets.left += self.config.tabs.sidebar_width as f32 * scale;
-                    // The slim title bar over the main column: the vertical
-                    // layout's counterpart of the strip, and it was once
-                    // forgotten here — the grid painted its first two rows
-                    // straight over the session name.
-                    insets.top += crate::chrome::layout::SLIM_BAR_H * scale;
+                    // The full-width header over the sidebar + pane row: the
+                    // vertical layout's counterpart of the strip, and it was
+                    // once forgotten here — the grid painted its first two
+                    // rows straight over the session name.
+                    insets.top += crate::chrome::layout::HEADER_H * scale;
                 }
             }
-            // The status bar comes with the chrome: same latch, same layout
-            // pass, so the grid and the bar cannot disagree about the edge.
-            insets.bottom += crate::chrome::layout::STATUS_H * scale;
+            // Nothing reserves the bottom edge: the status bar is gone
+            // (design §1), so below the grid there is only `window.padding`.
         }
         insets
     }
@@ -2058,13 +2005,9 @@ impl App {
             },
         );
 
-        // Built before the font borrow below: the status reads tabs, fleet
-        // and the filesystem, never the fonts.
+        // Built before the font borrow below: these read tabs, fleet and the
+        // filesystem, never the fonts.
         let fleet_hosts = self.fleet.as_ref().map(|f| f.snapshot()).unwrap_or_default();
-        // Only when the strip shows: `insets_at` reserves the bar's edge under
-        // the same condition, and a bar the grid does not know about would
-        // paint over the last row.
-        let status = if self.strip_shown() { self.build_status(&fleet_hosts) } else { None };
         let screen_model = self.build_screen_model(&fleet_hosts);
         let panes = self.build_panes_model(&fleet_hosts);
         let grid_area = early_geometry.map_or([0.0; 4], |(scale, size)| {
@@ -2168,8 +2111,34 @@ impl App {
                     .get(&tab.addr)
                     .map(|t| crate::status::age_label(t.elapsed()))
                     .unwrap_or_default();
+                // How this tab's host is reached — the fact the chip's glyph
+                // tile inks when it degrades (the status bar's old job). A
+                // dropped daemon link outranks whatever path the host
+                // normally takes.
+                let link = if self.link_down {
+                    crate::chrome::model::LinkKind::Reconnecting
+                } else {
+                    match &origin {
+                        TabOrigin::Remote { host_label } => {
+                            let fleet = fleet_hosts.iter().find(|h| &h.label == host_label);
+                            match fleet.and_then(|h| h.reachability) {
+                                Some(zest_mesh::Reachability::Cloud) => {
+                                    crate::chrome::model::LinkKind::Tunnel
+                                }
+                                Some(zest_mesh::Reachability::Loopback) => {
+                                    crate::chrome::model::LinkKind::Loopback
+                                }
+                                _ => crate::chrome::model::LinkKind::Lan,
+                            }
+                        }
+                        TabOrigin::Local => crate::chrome::model::LinkKind::Loopback,
+                    }
+                };
                 TabModel {
                     addr: tab.addr,
+                    // Settings/Profiles become app tabs with screen 11's work
+                    // item; every tab this window opens today is a session.
+                    kind: crate::chrome::model::TabKind::Session,
                     title: if tab.dead { format!("{title} · ended") } else { title },
                     host: host_label,
                     cwd,
@@ -2183,6 +2152,7 @@ impl App {
                     // Dead tabs borrow the connecting style (faint text): not
                     // live, not interactive, still present.
                     connecting: tab.dead,
+                    link,
                 }
             })
             .collect();
@@ -2239,16 +2209,15 @@ impl App {
             active: self.tabs.active_index(),
             position: self.config.tabs.position,
             strip_scroll: self.strip_scroll,
+            ensure_active_visible: self.strip_ensure_visible,
             hover: self.chrome_hover,
             controls,
             focused: self.focused,
-            status,
             sidebar,
             screen: screen_model,
             panes,
             grid_area,
             anim,
-            toggle_chord: keymap::chord_for(keymap::Action::ToggleTabLayout),
             palette_chord: keymap::chord_for(keymap::Action::ToggleFleetPicker),
             picker: picker_model,
             // The picker wins: it opens *over* the settings overlay.
@@ -2262,6 +2231,9 @@ impl App {
         };
         let laid = crate::chrome::layout::layout(&model, &colors, &metrics, &mut measure);
         self.strip_scroll = laid.strip_scroll;
+        // One layout consumed the request; the wheel is free again — the
+        // same discipline as the overlays' scroll_to_selected below.
+        self.strip_ensure_visible = false;
         if let Some(state) = self.picker.as_mut() {
             state.scroll = laid.picker_scroll;
             // One layout consumed the request; the wheel is free again.
@@ -2319,9 +2291,6 @@ impl App {
             (HitRegion::NewTab, MouseButton::Left) => {
                 self.new_tab();
             }
-            (HitRegion::LayoutPill, MouseButton::Left) => {
-                self.perform(keymap::Action::ToggleTabLayout, el);
-            }
             (HitRegion::PalettePill, MouseButton::Left)
             | (HitRegion::SidebarSearch, MouseButton::Left) => {
                 self.perform(keymap::Action::ToggleFleetPicker, el);
@@ -2351,9 +2320,6 @@ impl App {
                     self.apply_theme_choice(id);
                 }
             }
-            // The status bar swallows clicks like the strip does; nothing on
-            // it is a control yet.
-            (HitRegion::Status, _) => {}
             (HitRegion::BlockFold(id), MouseButton::Left) => {
                 if let Some(tab) = self.tabs.active() {
                     let set = self.folded_blocks.entry(tab.focused_addr()).or_default();
@@ -3352,6 +3318,9 @@ impl App {
         // view activated the session *invisibly* — and the only way out of
         // the screen was knowing about Esc.
         self.screen = AppScreen::Terminal;
+        // …and the chip must be in view: activation from the keyboard or the
+        // picker can land on a tab the strip has scrolled past.
+        self.strip_ensure_visible = true;
         // A drag cannot span a tab switch, and half a selection drag leaking
         // into another tab's grid would.
         self.mouse.release();
