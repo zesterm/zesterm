@@ -29,10 +29,12 @@ import {
   shellChord,
 } from '@zesterm/input';
 import { expandRow, rowText, sliceBlocks } from '@zesterm/proto';
+import { measureMetrics, type Metrics } from '@zesterm/render';
 import { resolveTerminalPalette, type Theme } from '@zesterm/theme';
 import type { SessionEntry } from '@zesterm/control';
 
 import { wsDial } from '../ws-dial.ts';
+import { MONO_FAMILY } from '../chrome-model.ts';
 import { currentTheme, themeStore } from '../state/theme.ts';
 import { NO_FOLDS, foldedFor, toggle, type FoldsState } from '../state/folds.ts';
 import {
@@ -42,6 +44,7 @@ import {
   type LinkHealth,
   type RenderItem,
 } from '../blocks-pane-model.ts';
+import type { LinkState } from '../state/tabs.ts';
 import { GridPane, type GridPaneHooks } from './GridPane.tsx';
 import { BlocksPane } from './BlocksPane.tsx';
 
@@ -53,13 +56,17 @@ import { BlocksPane } from './BlocksPane.tsx';
 let folds: FoldsState = NO_FOLDS;
 
 /**
- * ConnectionState → the pane's link health. 'stalled' has no producer yet —
- * the client exposes no delta-silence detection — so today's mapping is
- * two-valued; when stall detection lands it slots in here and the model and
- * pane already render it.
+ * ConnectionState → link health, one mapping feeding two consumers: the pane
+ * model (§4's degraded states) and the tab chip via onLink. connecting /
+ * awaiting-approval / failed all read as stalled — a tab must not claim live
+ * before the link ever existed, and a hard failure must not leave it frozen
+ * in whatever it last showed. LinkHealth and LinkState share the same values
+ * by design; delta-silence stall detection slots in here when it exists.
  */
-function linkOf(state: ConnectionState): LinkHealth {
-  return state.phase === 'reconnecting' ? 'reconnecting' : 'live';
+function linkOf(state: ConnectionState): LinkHealth & LinkState {
+  if (state.phase === 'connected') return 'live';
+  if (state.phase === 'reconnecting') return 'reconnecting';
+  return 'stalled';
 }
 
 export const TerminalView = component<{
@@ -67,14 +74,16 @@ export const TerminalView = component<{
   dataPlaneUrl: string;
   signer: ClientSigner;
   theme: Theme;
-  onBack?: () => void;
+  /** The tab chip owns the visible title now; this is how it learns it. */
+  onTitle?: (title: string) => void;
+  /** Link health surfaces on the tab, not on a status bar the design removed. */
+  onLink?: (link: LinkState) => void;
 }>((ctx) => {
   const { entry, dataPlaneUrl, signer, theme } = ctx.props;
 
-  const status = signal<{ state: ConnectionState; exited: number | null | false; title: string }>({
+  const status = signal<{ state: ConnectionState; exited: number | null | false }>({
     state: { phase: 'connecting' },
     exited: false,
-    title: entry.title,
   });
   const pane = signal<{
     alt: boolean;
@@ -137,8 +146,10 @@ export const TerminalView = component<{
         if (!client.grid.altScreen) scheduleModel();
       },
       onTitle: (title) => {
-        status.title = title;
+        // The tab chip owns the visible title now (the in-pane header is
+        // gone); the document title keeps naming the browser tab.
         document.title = title === '' ? 'zesterm' : `${title} — zesterm`;
+        ctx.props.onTitle?.(title);
       },
       onConnection: (state) => {
         status.state = state;
@@ -148,6 +159,9 @@ export const TerminalView = component<{
           pane.link = link;
           scheduleModel();
         }
+        // The same value feeds the tab chip — link health surfaces there,
+        // not on a status bar the design removed.
+        ctx.props.onLink?.(link);
         if (state.phase === 'connected') gridHooks?.schedulePaint('all');
       },
       onExited: (code) => {
@@ -333,16 +347,6 @@ export const TerminalView = component<{
     const palette = resolveTerminalPalette(currentTheme(theme).ui);
     return (
       <div class="terminal-view">
-        <header class="term-header">
-          <button class="back" onClick={() => ctx.props.onBack?.()}>
-            ← sessions
-          </button>
-          <span class="term-title">{status.title === '' ? 'shell' : status.title}</span>
-          {banner(status.state, status.exited) !== null ? (
-            <span class="term-banner">{banner(status.state, status.exited)}</span>
-          ) : null}
-        </header>
-  
         <div
           class="term-wrap"
           onMouseDown={() => {
@@ -352,6 +356,12 @@ export const TerminalView = component<{
             setTimeout(() => inputEl?.focus(), 0);
           }}
         >
+          {/* The header row this used to carry belongs to the tab chrome now
+              (the chip owns the title via onTitle); connection state keeps a
+              small overlay so a reconnect is never silent inside a pane. */}
+          {banner(status.state, status.exited) !== null ? (
+            <div class="term-banner">{banner(status.state, status.exited)}</div>
+          ) : null}
           {pane.alt ? (
             <GridPane
               client={client}

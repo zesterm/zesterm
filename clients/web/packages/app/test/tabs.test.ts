@@ -8,6 +8,8 @@ import {
   activate,
   openSingleton,
   groupByHost,
+  setLink,
+  setTitle,
   type Tab,
   type TabsState,
 } from '../src/state/tabs.ts';
@@ -136,4 +138,38 @@ test('groupByHost keeps order of first appearance and loses no tab', () => {
 
 test('groupByHost of nothing is nothing', () => {
   assert.deepEqual(groupByHost([]), [], 'an empty window renders no host groups');
+});
+
+test('setTitle renames only the named tab and keeps focus where it was', () => {
+  const s = activate(withTabs(tab('a'), tab('b')), 'a');
+  const renamed = setTitle(s, 'b', 'vim');
+  assert.equal(
+    renamed.tabs.find((t) => t.id === 'b')?.title,
+    'vim',
+    'the OSC title arriving after open must reach the chip',
+  );
+  assert.equal(
+    renamed.tabs.find((t) => t.id === 'a')?.title,
+    'a',
+    'a background session naming itself must not touch other tabs',
+  );
+  assert.equal(renamed.activeId, 'a', 'a title change never moves focus');
+});
+
+test('setTitle is a no-op by reference for unknown ids and unchanged titles', () => {
+  const s = withTabs(tab('a'));
+  assert.equal(setTitle(s, 'ghost', 'x'), s, 'same reference, so no signal fires for a no-op');
+  assert.equal(setTitle(s, 'a', 'a'), s, 'an unchanged title must not cause a re-render');
+});
+
+test('setLink flips only the named tab and no-ops by reference otherwise', () => {
+  const s = withTabs(tab('a'), tab('b'));
+  const cut = setLink(s, 'a', 'reconnecting');
+  assert.equal(
+    cut.tabs.find((t) => t.id === 'a')?.link,
+    'reconnecting',
+    'link health surfaces on the affected tab — the design has no status bar',
+  );
+  assert.equal(cut.tabs.find((t) => t.id === 'b')?.link, 'live', 'only the cut tab degrades');
+  assert.equal(setLink(s, 'a', 'live'), s, 'an unchanged link must not cause a re-render');
 });

@@ -18,8 +18,8 @@ import { GridPainter, measureMetrics, type Metrics } from '@zesterm/render';
 import { resolveTerminalPalette, type Theme } from '@zesterm/theme';
 
 import { currentTheme, themeStore } from '../state/theme.ts';
+import { MONO_FAMILY } from '../chrome-model.ts';
 
-const FONT_FAMILY = 'ui-monospace, "SF Mono", Menlo, Consolas, monospace';
 const FONT_SIZE = 13;
 
 export interface GridPaneHooks {
@@ -82,7 +82,7 @@ export const GridPane = component<{
     if (!ctx2d) return;
 
     const dpr = window.devicePixelRatio || 1;
-    const m = measureMetrics(ctx2d, FONT_FAMILY, FONT_SIZE, dpr);
+    const m = measureMetrics(ctx2d, MONO_FAMILY, FONT_SIZE, dpr);
     metrics = m;
     // currentTheme, not the prop: the prop is `store.theme` captured once at
     // boot, so a view mounted after a setTheme would paint the grid in the

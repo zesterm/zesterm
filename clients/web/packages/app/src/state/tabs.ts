@@ -83,6 +83,34 @@ export function openSingleton(
   return openTab(state, mk());
 }
 
+/**
+ * The session's OSC title arriving after the tab opened — a tab created from
+ * a fresh session has an empty title until the shell names itself. A no-op
+ * (unknown id, unchanged title) returns the same reference so no signal fires.
+ */
+export function setTitle(state: TabsState, id: string, title: string): TabsState {
+  const tab = state.tabs.find((t) => t.id === id);
+  if (tab === undefined || tab.title === title) return state;
+  return {
+    tabs: state.tabs.map((t) => (t.id === id ? { ...t, title } : t)),
+    activeId: state.activeId,
+  };
+}
+
+/**
+ * Link health surfacing on the tab — the handoff has no status bar, so the
+ * tab's dot is where "reconnecting" is allowed to show. Same no-op contract
+ * as `setTitle`.
+ */
+export function setLink(state: TabsState, id: string, link: LinkState): TabsState {
+  const tab = state.tabs.find((t) => t.id === id);
+  if (tab === undefined || tab.link === link) return state;
+  return {
+    tabs: state.tabs.map((t) => (t.id === id ? { ...t, link } : t)),
+    activeId: state.activeId,
+  };
+}
+
 export interface HostGroup {
   readonly hostId: string;
   readonly tabs: readonly Tab[];

@@ -16,11 +16,17 @@ body,
   margin: 0;
 }
 
+/*
+ * UI face per the handoff: Geist where installed, system-ui otherwise — no
+ * webfont ships. The mono stack lives in ONE place, chrome-model.ts's
+ * MONO_FAMILY, which entry-client mirrors into --zt-mono; every mono rule
+ * below reads the variable so the chrome cannot drift from the grid's font.
+ */
 body {
   background: var(--zt-bg);
   color: var(--zt-fg);
   font:
-    13px/1.45 ui-sans-serif,
+    12.5px/1.4 Geist,
     system-ui,
     sans-serif;
 }
@@ -160,33 +166,18 @@ body {
   min-height: 0;
 }
 
-.term-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 6px 10px;
-  background: var(--zt-chrome);
-  border-bottom: 1px solid var(--zt-line);
-  flex: none;
-}
-
-.back {
-  background: none;
-  border: none;
-  color: var(--zt-accent);
-  font: inherit;
-  cursor: pointer;
-  padding: 2px 4px;
-}
-
-.term-title {
-  font-weight: 600;
-}
-
+/* The connection-state overlay — the old header row's one surviving job. */
 .term-banner {
-  margin-left: auto;
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 5;
   font-size: 12px;
   color: var(--zt-warn);
+  background: var(--zt-panel);
+  border: 1px solid var(--zt-line);
+  border-radius: 7px;
+  padding: 4px 10px;
 }
 
 .term-wrap {
@@ -309,7 +300,8 @@ body {
   white-space: nowrap;
 }
 
-/* Command in the state colour when finished, plain fg while running (§3). */
+/* Command in the state colour when finished, plain fg while running (§3).
+   The old .block-chip rail these rules replace is gone with the rail itself. */
 .block-header.success .cmd {
   color: var(--zt-success);
 }
@@ -498,7 +490,7 @@ body {
 
 .fineprint code,
 .card code {
-  font-family: ui-monospace, monospace;
+  font-family: var(--zt-mono, ui-monospace, monospace);
   color: var(--zt-fg);
 }
 
@@ -634,4 +626,566 @@ body {
 
 .warn {
   color: var(--zt-warn);
+}
+
+/* --- tabbed chrome (design §1–§2) ---------------------------------------- */
+
+.pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Both hosted views fill the pane. The terminal never scrolls as a whole —
+   its wrap owns the canvas; the session list scrolls (invariant 10). */
+.pane > .terminal-view {
+  flex: 1;
+  min-height: 0;
+}
+
+.pane > .session-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Horizontal: the 46px title bar, chips bottom-aligned so the active tab's
+   fill meets the pane through the -1px overlap. */
+.titlebar {
+  display: flex;
+  align-items: flex-end;
+  height: 46px;
+  flex: none;
+  padding: 0 10px;
+  background: var(--zt-titlebar);
+  border-bottom: 1px solid var(--zt-hairline);
+}
+
+/* The scrolling row holds every tab; the + is a sibling OUTSIDE it (its menu
+   would be clipped inside), then the spacer, then the one right-aligned
+   thing: the ⌘K pill. */
+.tabs-scroll {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none; /* a bar drawn across the tabs costs more than it explains */
+}
+
+.tabs-scroll::-webkit-scrollbar {
+  height: 0;
+}
+
+.tab-chip {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 34px;
+  flex: 0 1 168px;
+  min-width: 104px; /* below this the label degrades to a letter; the row scrolls instead */
+  max-width: 232px;
+  padding: 0 11px;
+  border-radius: 9px 9px 0 0;
+  margin-bottom: -1px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  color: var(--zt-dim);
+  font-size: 12.5px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.tab-chip:hover {
+  background: var(--zt-sel-soft);
+}
+
+.tab-chip.active {
+  background: var(--zt-bg);
+  border-color: var(--zt-line);
+  /* the 2px accent rule along the top edge, inside the 1px line border */
+  box-shadow: inset 0 2px var(--zt-accent);
+  color: var(--zt-fg);
+}
+
+.tab-chip.active:hover {
+  background: var(--zt-bg);
+}
+
+.tab-glyph {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  font-family: var(--zt-mono, ui-monospace, monospace);
+  font-size: 10px;
+  color: var(--zt-faint); /* inactive: faint ink, no wash */
+}
+
+.tab-chip.active .tab-glyph {
+  color: var(--tab-color, var(--zt-accent));
+  background: color-mix(in srgb, var(--tab-color, var(--zt-accent)) 12%, transparent);
+}
+
+.tab-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-close {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--zt-faint);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tab-close:hover {
+  background: var(--zt-line);
+  color: var(--zt-fg);
+}
+
+.launcher-anchor {
+  position: relative;
+  align-self: flex-end;
+  flex: none;
+}
+
+.tab-new {
+  width: 32px;
+  height: 30px;
+  /* the strip is align-items:flex-end for the chips; without this the +
+     drops to the strip floor and reads as misaligned */
+  margin-bottom: 6px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  color: var(--zt-dim);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tab-new:hover {
+  background: var(--zt-sel-soft);
+}
+
+.tab-new.open {
+  background: var(--zt-sel-soft);
+  color: var(--zt-accent);
+}
+
+.strip-spacer {
+  flex: 1;
+}
+
+.kbd-pill {
+  height: 26px;
+  align-self: center;
+  flex: none;
+  padding: 0 10px;
+  border: 1px solid var(--zt-line);
+  border-radius: 7px;
+  background: none;
+  color: var(--zt-dim);
+  font-family: var(--zt-mono, ui-monospace, monospace);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.kbd-pill:hover {
+  border-color: var(--zt-accent);
+  color: var(--zt-fg);
+}
+
+/* --- launcher menu -------------------------------------------------------- */
+
+.launcher {
+  position: absolute;
+  top: 40px;
+  width: 318px;
+  z-index: 30;
+  padding: 6px;
+  background: var(--zt-panel);
+  border: 1px solid var(--zt-line);
+  border-radius: 12px;
+  /* the mock's rgba(0,0,0,.62): tone from the shadow token, strength as
+     alpha here — per tokens.ts, strength is a rendering concern, never a
+     colour of the stylesheet's own */
+  box-shadow: 0 20px 50px color-mix(in srgb, var(--zt-shadow) 62%, transparent);
+}
+
+.launcher.strip {
+  right: 0; /* right-anchored under the strip's + */
+}
+
+.launcher.sidebar {
+  left: 0; /* opens rightwards over the pane, staying inside the window */
+}
+
+.launcher-head {
+  padding: 6px 10px;
+  font-family: var(--zt-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  color: var(--zt-faint);
+}
+
+.launcher-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 9px;
+  background: none;
+  color: var(--zt-fg);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.launcher-row:hover,
+.launcher-row:focus-visible {
+  background: var(--zt-sel-soft);
+  outline: none;
+}
+
+.launcher-row .row-tile {
+  width: 24px;
+  height: 24px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  font-family: var(--zt-mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--zt-accent);
+  background: color-mix(in srgb, var(--zt-accent) 12%, transparent);
+}
+
+.launcher-row .row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.launcher-row .row-name {
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.launcher-row .row-sub {
+  font-family: var(--zt-mono, ui-monospace, monospace);
+  font-size: 10px;
+  color: var(--zt-faint);
+}
+
+.default-tag {
+  flex: none;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: var(--zt-accent-soft);
+  color: var(--zt-accent);
+  font-size: 10px;
+}
+
+.host-chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border: 1px solid var(--zt-line);
+  border-radius: 6px;
+  background: var(--zt-panel);
+  color: var(--zt-dim);
+  font-size: 10.5px;
+}
+
+.row-chord {
+  flex: none;
+  font-family: var(--zt-mono, ui-monospace, monospace);
+  font-size: 10px;
+  color: var(--zt-faint);
+}
+
+.launcher-divider {
+  height: 1px;
+  margin: 6px 4px;
+  background: var(--zt-hairline);
+}
+
+/* --- vertical layout ------------------------------------------------------ */
+
+.v-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 46px;
+  flex: none;
+  padding: 0 12px;
+  background: var(--zt-titlebar);
+  border-bottom: 1px solid var(--zt-hairline);
+}
+
+.v-title {
+  font-size: 12.5px;
+  color: var(--zt-fg);
+}
+
+.v-cwd {
+  font-family: var(--zt-mono, ui-monospace, monospace);
+  font-size: 10px;
+  color: var(--zt-faint);
+}
+
+.v-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.sidebar {
+  width: 262px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: var(--zt-titlebar);
+  border-right: 1px solid var(--zt-line);
+}
+
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  flex: none;
+}
+
+.search-pill {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border: 1px solid var(--zt-line);
+  border-radius: 7px;
+  background: var(--zt-panel);
+  font: inherit;
+  cursor: pointer;
+}
+
+.search-key {
+  flex: none;
+  font-family: var(--zt-mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--zt-dim);
+}
+
+.search-hint {
+  font-size: 12px;
+  color: var(--zt-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The sidebar's + sits in a 30px row, not on a chip baseline. */
+.search-row .launcher-anchor {
+  align-self: center;
+}
+
+.tab-new.in-sidebar {
+  margin-bottom: 0;
+}
+
+.host-groups {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.host-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 6px;
+  min-width: 0;
+}
+
+.host-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--zt-success);
+}
+
+.host-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--zt-dim);
+  white-space: nowrap;
+}
+
+.host-sub {
+  font-family: var(--zt-mono, ui-monospace, monospace);
+  font-size: 10px;
+  color: var(--zt-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--zt-fg);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.side-row:hover {
+  background: var(--zt-sel-soft);
+}
+
+.side-row.selected {
+  background: var(--zt-accent-soft);
+}
+
+.link-dot {
+  width: 5px;
+  height: 5px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--zt-faint);
+}
+
+.link-dot.live {
+  background: var(--zt-success);
+}
+
+.link-dot.stalled {
+  background: var(--zt-warn);
+}
+
+.link-dot.reconnecting {
+  background: var(--zt-danger);
+}
+
+.side-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.side-title {
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-cwd {
+  font-family: var(--zt-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  color: var(--zt-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-footer {
+  height: 42px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  border-top: 1px solid var(--zt-hairline);
+}
+
+.hosts-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--zt-dim);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.hosts-link:hover {
+  background: var(--zt-sel-soft);
+  color: var(--zt-fg);
+}
+
+/* Below ~900px the sidebar collapses to a 48px icon rail: host dots (and
+   dot-only session rows) with tooltips carrying the names. The breakpoint is
+   mirrored by ICON_RAIL_MAX_WIDTH in chrome-model.ts — keep them together. */
+@media (max-width: 900px) {
+  .sidebar {
+    width: 48px;
+  }
+
+  .search-pill,
+  .host-label,
+  .host-sub,
+  .side-text,
+  .hosts-label {
+    display: none;
+  }
+
+  .search-row,
+  .host-head,
+  .side-row,
+  .sidebar-footer {
+    justify-content: center;
+  }
 }
