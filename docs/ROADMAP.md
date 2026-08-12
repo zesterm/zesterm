@@ -219,6 +219,28 @@ M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
 high-fidelity handoff for the tabbed chrome, command blocks, palette, fleet and
 theme screens. Colours, sizes and spacing come from there, not from this file.
 
+**Handoff v2 (2026-08-12, #127)** widened the reference to 12 screens: it adds
+§11 (Settings as a tab) and §12 (Profiles — launch targets), a bundle
+[AGENTS.md](design/client-ui/AGENTS.md) carrying the invariant checklist and
+verification protocol, a runnable `zesterm-demo.html`, and `screenshots/` (one
+rendered PNG per screen). It also *revises* screens 1–2 against what shipped,
+deliberately: tab chips carry the title only, the `+` opens a profile launcher
+menu, the status bar is deleted, and the layout toggle leaves the chrome
+(`tabs.position` is the single source of truth; the ⌘⇧E chord and its palette
+entry stay). The resulting work items, measurements in the handoff README:
+
+- [ ] `TabContent` — tabs that aren't sessions (Settings, Profiles), without
+      touching the `SessionAddr`-keyed hit machinery.
+- [ ] Screens 1–2 reconciliation: title-only chips (closes #51 structurally),
+      status-bar deletion, layout-pill removal, full-width vertical header,
+      strip scroll keeping the active tab in view.
+- [ ] `--screen <fleet|themes|settings|palette|launcher|profiles>`, composing
+      with `--screenshot`, so every design screen is capturable headlessly.
+- [ ] The `+` launcher menu (README §1).
+- [ ] Settings as a tab (README §11), replacing the ⌘, overlay.
+- [ ] Profiles — launch targets (README §12): its own work item; per-session
+      palette and per-tab host routes cut across WS-A and the control plane.
+
 - [x] **The fleet has no face on the desktop.** → [#23](https://github.com/zesterm/zesterm/issues/23) — **closed**; the sequence below is its record.
       The phone and the web client are both planned to list sessions and attach
       to a chosen one; the app most people will use can only take a `--attach
