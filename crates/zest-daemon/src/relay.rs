@@ -505,6 +505,37 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
+/// What a refusal from the relay says, given which host was refused.
+///
+/// `unknown-host` gets the **full** id, because it is the one refusal whose
+/// remedy is mechanical — enrol this key — and the id is otherwise not
+/// obtainable from a running daemon at all. Every place it surfaces is the
+/// eight-hex short form (the startup line, the dial line, `mesh_probe`, the
+/// DNS-SD instance name), `--identity` mints a *different* key under
+/// `--ephemeral` and exits, and the one wire field that carries it is a query
+/// string, which `wrangler tail` redacts. So a machine could be told exactly
+/// what was wrong and still have no way to find the value that fixes it.
+///
+/// Disclosing it costs nothing: it is a public key, and it has already been
+/// sent to the relay in the clear-to-the-relay part of this very connection.
+///
+/// The other codes keep the short form deliberately. Naming the key does not
+/// help someone whose clock is wrong, and a 64-hex string in every reconnect
+/// message is noise that trains people to skim the line.
+fn refusal_message(code: &str, host_hex: &str) -> String {
+    if code == "unknown-host" {
+        format!(
+            "the relay refused this host: unknown-host. \
+             This machine is not enrolled in the account the relay serves. \
+             Its id is {}; enrol it with --enroll <code>, using a code from \
+             the account's devices screen.",
+            host_hex
+        )
+    } else {
+        format!("the relay refused this host: {code}")
+    }
+}
+
 fn unhex(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
         return None;
@@ -831,7 +862,7 @@ impl Relay {
                 Down::Error { code } => {
                     break Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
-                        format!("the relay refused this host: {code}"),
+                        refusal_message(&code, &hex(&self.identity.host_id().0)),
                     ));
                 }
                 Down::Unknown => {
@@ -1359,5 +1390,38 @@ mod tests {
             distinct.len() > 1,
             "a constant `jitter` spreads nothing, and every daemon still arrives together"
         );
+    }
+
+    #[test]
+    fn unknown_host_names_the_key_that_has_to_be_enrolled() {
+        let id = "9e".repeat(32);
+        let msg = refusal_message("unknown-host", &id);
+        assert!(
+            msg.contains(&id),
+            "the one refusal whose remedy is `enrol this key` has to say which key, \
+             because a running daemon has no other way to report it: every other \
+             surface is the eight-hex short form, and --identity mints a different \
+             key under --ephemeral. Got: {msg}"
+        );
+        assert!(
+            msg.contains("--enroll"),
+            "an id with no instruction is a hex string someone has to go and look up. Got: {msg}"
+        );
+    }
+
+    #[test]
+    fn other_refusals_do_not_carry_the_key() {
+        // Naming the key does not help someone whose clock is wrong, and a
+        // 64-hex string on every reconnect is what trains people to skim the
+        // line that will later matter.
+        let id = "9e".repeat(32);
+        for code in ["bad-signature", "stale", "unsupported-version"] {
+            let msg = refusal_message(code, &id);
+            assert!(
+                !msg.contains(&id),
+                "{code} does not become actionable by naming the key. Got: {msg}"
+            );
+            assert!(msg.contains(code), "the code is the diagnosis; {msg} drops it");
+        }
     }
 }
