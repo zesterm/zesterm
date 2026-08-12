@@ -418,3 +418,23 @@ fleet off its link on deploy. A `v` that is not 1 is refused by name on both sid
 
 Consumers: `zest-daemon` and `cloud/packages/relay`. Frozen in the sense that matters — the two
 implementations are already deployed against each other's tests.
+
+### Additive again, for the profiles editor: four `Widget` variants
+
+`zest_config::ui::Widget` is a multi-consumer contract — its kebab-case
+serde names are mirrored by hand in
+`clients/web/packages/settings/src/fields.ts`, and `check-export-web` only
+catches drift in the *generated* files, not that union. The §12 profiles
+editor added `host-picker`, `scheme-picker`, `accent-picker` and
+`icon-picker` (#135). They appear only in `profiles::fields()`, which is
+hand-authored and not part of the schema walk, so `ui-fields.json` did not
+change and old web clients decode nothing new — but any future
+`profile-fields.json` export must land the fields.ts union update in the
+same PR, or the browser's settings package fails to typecheck against a
+widget it has never heard of.
+
+The create-session frame's `cwd` deserves a line for what did *not* happen:
+the §12 launch work (#178) needed a working directory on the wire and found
+the field already present and daemon-consumed since the frame was born — no
+growth, no bump, one new round-trip test pinning a `\wsl$` path through
+the real framing. Check for the field you need before growing a frame.

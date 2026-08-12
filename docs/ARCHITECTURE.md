@@ -646,3 +646,63 @@ Aggregate metrics. Mid-tone fraction, ink coverage and saturated-pixel share eac
 that was obvious on the screen — three separate times. The measurements that worked were the
 per-stem intensity profile and the per-element peak brightness, both of which look at a few
 pixels rather than averaging millions. Prefer them.
+
+## ADR-012 — Chrome tokens are the window's; the ANSI palette is the session's
+
+A theme file carries two halves — the 24 chrome `UiTokens` and the ANSI
+palette — and the client-UI handoff's profiles feature (§12) forced the
+question of which half a profile may override. The answer shipped across
+#162, #167, #171, #176 and #178: **the chrome half belongs to the window
+alone; a profile's `color_scheme` reseeds only its sessions' grids.**
+
+### The rule, and its mechanism
+
+One resolved `UiTokens` → one `ChromeColors` per window, converted to
+premultiplied linear once per theme change and never per frame. A profile's
+scheme resolves to a palette *seed* applied per terminal — ADR-002's own
+mechanism, which is why this cost nothing structural: the render path was
+already per-terminal (`Viewport { palette: term.palette() }`), scrollback
+stores unresolved colors, and a reseed never rewrites history. The one
+per-frame fact a scheme contributes (the selection wash) is cached on the
+tab's resolved identity, so the redraw path does a field read, not a theme
+resolution — resolving there charged an allocation per pane per frame and
+made a deleted scheme warn on every caret blink.
+
+Per-tab identity in the chrome is exactly one accent and one glyph
+(`tab_color`, `icon`), chosen by `color_from`: the profile's own colour
+unless it says the host decides. That is the whole §12 concession, and it is
+cheap because it is data on the tab model, not a token resolution.
+
+### Rejected: per-tab `UiTokens`
+
+A tab switch would re-resolve chrome colour and repaint the titlebar, strip
+and every panel — per switch, forever. Windows Terminal keeps its app theme
+separate from its colour schemes for the same reason, and the handoff cites
+it. Nothing in the shipped code path can express a per-tab chrome token,
+which is the point: the mistake is now unrepresentable, not merely avoided.
+
+### Decisions that rode in with the feature
+
+- **`profiles.defaults` is a reserved cascade layer** beneath the named
+  profile (`user < defaults < named < workspace`), not the root config: it
+  must hold profile-only keys the root has no home for, its name is the
+  footer's `[profiles.defaults]`, and "every profile falls through to this
+  one" is then literally the cascade. The editor's inheritance chips are a
+  two-table lookup, honest by construction.
+- **Launch-command precedence:** profile `command` > Defaults `command` >
+  `""` for a remote host (the far machine picks its own shell — a local
+  shell path sent across the wire is the #20 trap's wire variant) or the
+  resolved local shell at home. Pinned by test.
+- **⌘1–9 stay tab activation.** The design asked for profile launch; the
+  chords were shipped, documented muscle-memory. Plain digits launch while
+  the launcher menu is open, which honours the design's intent at zero cost
+  to fingers that already know the strip.
+- **`Mods::SuperShift` is mac-only, enforced.** Ctrl+Shift structurally
+  cannot spell a shifted-comma chord (Shift is spent on the modifier), and
+  on Windows `super` is the Win key — a chord that fires with an empty label
+  is undiscoverable, so off macOS it falls through to the Desktop row's
+  shift-blind meaning instead of running something no chip names.
+- **App tabs address by reserved sentinels** on the all-zero host: Settings
+  `u64::MAX`, Profiles `u64::MAX - 1`. Two parallel work items independently
+  picked `u64::MAX`; a test now asserts the pair differs, because the
+  collision was not hypothetical — it happened, in review, on the same day.
