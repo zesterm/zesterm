@@ -512,7 +512,10 @@ impl TermState {
     /// while a full-screen program is up `grid()` answers for the alternate
     /// screen, whose ids restart at zero.
     fn oldest_retained_line(&self) -> LineId {
-        self.grid.row(0).id.saturating_sub(self.grid.scrollback_len() as LineId)
+        // Active space: this counts back from the top of the *live* screen, so
+        // reading it through the display would move the eviction horizon every
+        // time someone scrolled.
+        self.grid.active_row(0).id.saturating_sub(self.grid.scrollback_len() as LineId)
     }
 
     /// Drop blocks whose lines have all fallen out of scrollback.

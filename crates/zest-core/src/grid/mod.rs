@@ -236,6 +236,11 @@ impl Grid {
     }
 
     /// Index into storage of the first visible row, honoring scroll position.
+    ///
+    /// **Display space.** This is where the *reader* is looking, which is not
+    /// where the program is printing whenever they have scrolled back. Only
+    /// rendering, hit-testing and selection may use it — see
+    /// [`Self::active_base`], and the rule stated there.
     #[inline]
     fn viewport_base(&self) -> usize {
         self.storage
@@ -243,24 +248,63 @@ impl Grid {
             .saturating_sub(self.rows + self.display_offset)
     }
 
-    /// A visible row, 0 being the top of the viewport.
+    /// Index into storage of the first row of the *live* screen.
+    ///
+    /// **Active space**, and the default: scrolling back must not move the rows
+    /// a program prints onto. `scroll_screen_up` deliberately advances
+    /// `display_offset` in step with storage so a reader's view holds still,
+    /// which also freezes `viewport_base` — so every mutation that resolved
+    /// through it landed on the rows being read, while the fresh rows at the
+    /// tail stayed blank. Scroll up during a build and it overwrote your
+    /// scrollback; scroll back down and the output was gone.
+    ///
+    /// The rule that keeps this fixed, by what the caller is *for* rather than
+    /// by which file it lives in: **the VT parser, the wire encoder and the
+    /// retention horizon are active space**. They speak for the session, and
+    /// the session does not know anyone scrolled.
+    ///
+    /// Pointing is the other half and is display space on purpose — selection,
+    /// hit-testing and `Terminal::abs_pos` translate where the *reader* clicked,
+    /// which is exactly the row they are looking at. Both kinds live in
+    /// `term.rs`, so the split is not a per-file rule.
+    ///
+    /// Every mutating accessor here resolves through this one regardless, so a
+    /// write cannot reach scrollback even if someone forgets.
+    #[inline]
+    fn active_base(&self) -> usize {
+        self.storage.len().saturating_sub(self.rows)
+    }
+
+    /// A visible row, 0 being the top of the viewport. Display space.
     #[must_use]
     pub fn row(&self, row: usize) -> &Row {
         self.storage.row(self.viewport_base() + row)
     }
 
+    /// A row of the live screen, 0 being its top. Active space.
+    #[must_use]
+    pub fn active_row(&self, row: usize) -> &Row {
+        self.storage.row(self.active_base() + row)
+    }
+
     pub fn row_mut(&mut self, row: usize) -> &mut Row {
-        let base = self.viewport_base();
+        let base = self.active_base();
         self.storage.row_mut(base + row)
     }
 
     /// The absolute storage index of a viewport row — the inverse of what
     /// [`Self::line`] consumes. Public for the fold row-map: a compacted
     /// view names rows absolutely, and the cursor's viewport row must be
-    /// findable inside it.
+    /// findable inside it. Display space.
     #[must_use]
     pub fn abs_index(&self, row: usize) -> usize {
         self.viewport_base() + row
+    }
+
+    /// [`Self::abs_index`] for the live screen. Active space.
+    #[must_use]
+    pub fn active_abs_index(&self, row: usize) -> usize {
+        self.active_base() + row
     }
 
     /// A row by absolute index across scrollback plus viewport.
@@ -351,7 +395,7 @@ impl Grid {
     /// A scroll region smaller than the screen cannot use ring rotation --
     /// rotating would move rows outside the region too. Move within the region.
     fn scroll_region_up(&mut self, n: usize, template: &Cell) {
-        let base = self.viewport_base();
+        let base = self.active_base();
         let (top, bottom) = (self.region.top, self.region.bottom);
 
         for row in top..=bottom {
@@ -374,7 +418,7 @@ impl Grid {
         }
         let (top, bottom) = (self.region.top, self.region.bottom);
         let n = n.min(bottom - top + 1);
-        let base = self.viewport_base();
+        let base = self.active_base();
 
         for row in (top..=bottom).rev() {
             if row >= top + n {
@@ -654,7 +698,10 @@ impl Grid {
 
     /// Storage index of the row the cursor is on.
     fn storage_index_of_cursor(&self, total: usize) -> usize {
-        total.saturating_sub(self.rows + self.display_offset) + self.cursor.row
+        // Active space: the cursor sits on the live screen, wherever the reader
+        // has scrolled to. Reflow must carry *that* row across, or a resize
+        // performed while scrolled back re-anchors the cursor into history.
+        total.saturating_sub(self.rows) + self.cursor.row
     }
 
     // --- editing ---------------------------------------------------------
@@ -1183,6 +1230,60 @@ mod tests {
         // And the bottom is still reachable afterwards.
         g.scroll_to_bottom();
         assert_eq!(g.display_offset(), 0);
+    }
+
+    #[test]
+    fn output_written_while_scrolled_back_lands_on_the_live_screen() {
+        // The other half of the test above, and the one that was missing: the
+        // view holding still must not hold the *writes* still with it. Every
+        // mutating accessor went through `viewport_base`, so while a reader was
+        // scrolled up a running build printed over the very rows they were
+        // reading -- and the fresh rows at the tail stayed blank, so the output
+        // was gone when they scrolled back down.
+        let mut g = Grid::new(20, 3, 100);
+        write(&mut g, 0, "keep me");
+        for _ in 0..3 {
+            g.scroll_up(1, &Cell::default());
+        }
+        g.scroll_display(3);
+        assert_eq!(g.row(0).text(), "keep me", "scrolled onto the line to read");
+
+        // A program prints while the reader is up here.
+        let last = g.rows() - 1;
+        for i in 0..3 {
+            g.scroll_up(1, &Cell::default());
+            write(&mut g, last, &format!("line {i}"));
+        }
+
+        assert_eq!(g.row(0).text(), "keep me", "output overwrote what was being read");
+
+        g.scroll_to_bottom();
+        assert_eq!(
+            (g.row(0).text(), g.row(1).text(), g.row(2).text()),
+            ("line 0".into(), "line 1".into(), "line 2".into()),
+            "output written while scrolled back never reached the live screen"
+        );
+    }
+
+    #[test]
+    fn editing_while_scrolled_back_leaves_the_reader_untouched() {
+        // Erase, insert and delete all reach the row through `row_mut` too, so
+        // they had the same reach into scrollback that printing did.
+        let mut g = Grid::new(20, 3, 100);
+        write(&mut g, 0, "precious");
+        for _ in 0..3 {
+            g.scroll_up(1, &Cell::default());
+        }
+        g.scroll_display(3);
+        assert_eq!(g.row(0).text(), "precious");
+
+        g.erase_rows(0, 2, &Cell::default());
+        assert_eq!(g.row(0).text(), "precious", "an erase reached into scrollback");
+
+        g.cursor.row = 0;
+        g.cursor.col = 0;
+        g.insert_cells(4, &Cell::default());
+        assert_eq!(g.row(0).text(), "precious", "an insert reached into scrollback");
     }
 
     #[test]

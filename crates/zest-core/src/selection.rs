@@ -131,10 +131,21 @@ fn is_separator(ch: char) -> bool {
 }
 
 impl Grid {
-    /// The absolute id of a viewport row.
+    /// The absolute id of a viewport row. Display space — what the reader is
+    /// pointing at, which is what a selection means.
     #[must_use]
     pub fn line_id_at(&self, row: usize) -> Option<LineId> {
         (row < self.rows()).then(|| self.row(row).id)
+    }
+
+    /// The absolute id of a row of the *live* screen. Active space.
+    ///
+    /// What the parser means by "the cursor's line": a shell emitting an OSC
+    /// 133 marker is naming the row it is printing on, never the row someone
+    /// happens to have scrolled to.
+    #[must_use]
+    pub fn active_line_id_at(&self, row: usize) -> Option<LineId> {
+        (row < self.rows()).then(|| self.active_row(row).id)
     }
 
     /// Where a line currently sits in the viewport, if it is visible.

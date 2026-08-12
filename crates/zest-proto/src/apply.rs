@@ -416,6 +416,39 @@ mod tests {
     }
 
     #[test]
+    fn a_client_scrolled_back_still_applies_onto_its_live_screen() {
+        // A client is a reader with a grid of its own, so it is the *client*
+        // that is scrolled while the host streams. `write_row` resolved its row
+        // through the display, so an applied row landed in the reader's
+        // scrollback -- and, worse, stamped the host's fresh `LineId` onto it,
+        // breaking the ordering `BlockIndex::upsert`, `block_at` and
+        // `evict_before` all document as a precondition.
+        let mut p = Pair::new(20, 3);
+        for i in 0..6 {
+            p.feed(format!("early {i}\r\n").as_bytes());
+        }
+        p.client.scroll_display(4);
+        let reading = p.client.screen_text();
+
+        for i in 0..4 {
+            p.feed(format!("late {i}\r\n").as_bytes());
+        }
+        assert_eq!(p.client.screen_text(), reading, "applying moved the reader's view");
+
+        let ids: Vec<u64> = (0..p.client.grid().total_lines())
+            .filter_map(|i| p.client.grid().line(i))
+            .map(|r| r.id)
+            .collect();
+        assert!(
+            ids.windows(2).all(|w| w[0] < w[1]),
+            "line ids must ascend across storage, got {ids:?}"
+        );
+
+        p.client.scroll_to_bottom();
+        p.assert_same("after the reader scrolled back to the bottom");
+    }
+
+    #[test]
     fn entering_the_alternate_screen_does_not_corrupt_the_primary_one() {
         // The regression this whole ordering rule exists for. Before the fix
         // the rows describing the alt screen were written into the primary

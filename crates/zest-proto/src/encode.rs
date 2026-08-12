@@ -158,7 +158,10 @@ impl Encoder {
     }
 
     fn encode_all_rows(&mut self, grid: &Grid) -> Vec<RowPayload> {
-        (0..grid.rows()).map(|r| self.encode_row(grid.row(r))).collect()
+        // Active space throughout the encoder: the wire carries the session's
+        // live screen. A host whose own window happens to be scrolled back must
+        // not send its subscribers the rows it is reading.
+        (0..grid.rows()).map(|r| self.encode_row(grid.active_row(r))).collect()
     }
 
     /// The whole state, and the subscriber's new baseline.
@@ -297,7 +300,7 @@ impl Encoder {
         // Scroll first, and by absolute line id rather than by content. Emitting
         // rows before the scroll that moves them writes into positions the
         // scroll is about to overwrite.
-        let new_first = grid.row(0).id;
+        let new_first = grid.active_row(0).id;
         if let Some(old_first) = self.seen.first().map(|r| r.line) {
             let moved = i64::try_from(new_first).unwrap_or(i64::MAX) - old_first;
             let height = i64::try_from(self.seen.len()).unwrap_or(i64::MAX);
