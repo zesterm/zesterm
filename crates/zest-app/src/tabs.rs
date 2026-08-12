@@ -518,11 +518,20 @@ impl TabStrip {
     /// so the app tab takes its turn in the cycle like the ordinary tab §11
     /// says it is.
     pub fn activate_next(&mut self) -> bool {
-        self.activate_display((self.display_active() + 1) % self.display_len())
+        // A window can be alive with zero tabs (a failed first spawn warns
+        // and returns), and `% 0` panics — cycling nothing is a no-op.
+        let len = self.display_len();
+        if len == 0 {
+            return false;
+        }
+        self.activate_display((self.display_active() + 1) % len)
     }
 
     pub fn activate_prev(&mut self) -> bool {
         let len = self.display_len();
+        if len == 0 {
+            return false;
+        }
         self.activate_display((self.display_active() + len - 1) % len)
     }
 
@@ -774,6 +783,23 @@ mod tests {
         for tab in [placeholder_addr(1), placeholder_addr(2)] {
             strip.close(tab).expect("tab exists").kill();
         }
+    }
+
+    #[test]
+    fn cycling_an_empty_strip_is_a_no_op_not_a_panic() {
+        // A live window can hold zero tabs: `new_tab()` warns and returns
+        // when the spawn fails, so Ctrl+Tab reaches next/prev with
+        // `display_len() == 0` — which used to be a remainder-by-zero panic.
+        let mut strip = TabStrip::default();
+        assert!(!strip.activate_next(), "nothing to cycle to");
+        assert!(!strip.activate_prev(), "in either direction");
+
+        // And a strip holding only the Settings tab is a cycle of one:
+        // still a no-op, never a change.
+        strip.open_settings();
+        assert!(!strip.activate_next(), "a lone tab has no next");
+        assert!(!strip.activate_prev(), "nor a prev");
+        assert!(strip.settings_active(), "and it keeps the keyboard");
     }
 
     #[test]

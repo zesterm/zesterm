@@ -257,6 +257,28 @@ struct SettingsUiState {
     list_drag: Option<(usize, usize)>,
 }
 
+impl SettingsUiState {
+    /// Composed (IME) text, routed exactly where a typed character goes:
+    /// the open dropdown swallows it (the key path's arm ignores
+    /// `Key::Character` there too), an open edit buffer takes it, and
+    /// otherwise it lands in the filter. The Settings tab holds the
+    /// keyboard — a commit written to the concealed session would type a
+    /// composed word into a shell the user cannot see.
+    fn commit_text(&mut self, text: &str) {
+        if self.menu.is_some() {
+            return;
+        }
+        if let Some(edit) = self.editing.as_mut() {
+            edit.buffer.push_str(text);
+            edit.error = false;
+        } else {
+            self.filter.push_str(text);
+            self.selected = 0;
+            self.scroll_to_selected = true;
+        }
+    }
+}
+
 /// Choosing one value from a long list, drawn through the command palette's
 /// overlay because it is the same shape of thing: a filtered, scrollable list
 /// with one selection.
@@ -1707,17 +1729,39 @@ impl App {
             }
             Ime::Commit(text) => {
                 self.ime.commit();
-                if let Some(session) = self.tabs.active_source() {
-                    if !text.is_empty() {
-                        // Straight through as UTF-8, exactly as a physical
-                        // keyboard would have delivered it. Not `encode_paste`:
-                        // this is typing, and bracketing it would make a program
-                        // that reads paste-mode treat a composed word as pasted.
-                        session.write(text.into_bytes());
-                        let mut term = session.terminal().lock();
-                        term.scroll_to_bottom();
-                        term.set_selection(None);
+                if text.is_empty() {
+                    // Nothing composed; nothing to route.
+                } else if self.picker.is_none()
+                    && self.palette_ui.is_none()
+                    && self.settings_tab_active()
+                    && self.screen == AppScreen::Terminal
+                {
+                    // The same gate — and the same precedence — as the
+                    // KeyboardInput handler: the Settings tab holds the
+                    // keyboard, so composed text must go where keystrokes
+                    // go, never to the concealed session's shell. The
+                    // picker and palette are checked first because the key
+                    // path hands them the keys before the tab.
+                    if let Some(p) = self.value_picker.as_mut() {
+                        // The value picker takes the keys from the tab
+                        // (see the key path's ordering); a composed family
+                        // name belongs to its filter.
+                        p.filter.push_str(&text);
+                        p.selected = 0;
+                        p.scroll_to_selected = true;
+                    } else if let Some(ui) = self.settings_ui.as_mut() {
+                        ui.commit_text(&text);
                     }
+                    self.mark_chrome_dirty();
+                } else if let Some(session) = self.tabs.active_source() {
+                    // Straight through as UTF-8, exactly as a physical
+                    // keyboard would have delivered it. Not `encode_paste`:
+                    // this is typing, and bracketing it would make a program
+                    // that reads paste-mode treat a composed word as pasted.
+                    session.write(text.into_bytes());
+                    let mut term = session.terminal().lock();
+                    term.scroll_to_bottom();
+                    term.set_selection(None);
                 }
             }
         }
@@ -2646,11 +2690,17 @@ impl App {
                 self.adjust_selected_setting(if up { 1 } else { -1 });
             }
             (HitRegion::SettingsSelect(row), MouseButton::Left) => {
+                // Select first, then act through the keyboard's path (Enter)
+                // — one dispatch per widget, however the request arrives.
+                // Arming `ui.menu` directly here left the theme pill dead:
+                // ThemePicker's options are a roster, not `field.variants`,
+                // so the same-pass menu resolution discarded the menu and
+                // the click opened nothing. Enter already knows the picker
+                // is that widget's dropdown.
                 if let Some(ui) = self.settings_ui.as_mut() {
                     ui.selected = row;
-                    ui.menu = Some((row, 0));
                 }
-                self.mark_chrome_dirty();
+                self.activate_selected_setting();
             }
             (HitRegion::SettingsMenuRow(opt), MouseButton::Left) => {
                 let row = self.settings_ui.as_ref().and_then(|ui| ui.menu).map(|(r, _)| r);
@@ -6731,6 +6781,68 @@ mod palette_tests {
             (pane_opacity(1.0, Some(&id)) - 1.0).abs() < f32::EPSILON,
             "a hand-edited value is clamped, not trusted (never-crash rule)"
         );
+    }
+}
+
+#[cfg(test)]
+mod settings_ime_tests {
+    use super::SettingsUiState;
+
+    fn state() -> SettingsUiState {
+        SettingsUiState {
+            selected: 3,
+            category: "Appearance".into(),
+            filter: String::new(),
+            scroll: 0.0,
+            scroll_to_selected: false,
+            actions: Vec::new(),
+            fields: Vec::new(),
+            editing: None,
+            installed: Vec::new(),
+            menu: None,
+            list_drag: None,
+        }
+    }
+
+    #[test]
+    fn composed_text_lands_in_the_filter_like_a_keystroke() {
+        // The review finding this seam exists for: `on_ime` wrote the commit
+        // into `tabs.active_source()` — the concealed session — while the
+        // Settings tab held the keyboard, so an IME user typing into the
+        // filter typed into the hidden shell instead.
+        let mut ui = state();
+        ui.commit_text("設定");
+        assert_eq!(ui.filter, "設定", "no edit open: the filter is where characters go");
+        assert_eq!(ui.selected, 0, "a filter edit resets the selection, exactly like typing");
+        assert!(ui.scroll_to_selected, "and brings it into view");
+    }
+
+    #[test]
+    fn composed_text_feeds_an_open_edit_buffer_before_the_filter() {
+        let mut ui = state();
+        ui.editing = Some(crate::settings_ui::EditBuffer {
+            field_idx: 0,
+            buffer: "nu ".into(),
+            error: true,
+            append: false,
+        });
+        ui.commit_text("シェル");
+        let edit = ui.editing.as_ref().expect("still editing");
+        assert_eq!(edit.buffer, "nu シェル", "a typed edit owns the characters, as the key path says");
+        assert!(!edit.error, "new input clears a stale parse error, as typing does");
+        assert!(ui.filter.is_empty(), "nothing leaks into the filter");
+    }
+
+    #[test]
+    fn an_open_dropdown_swallows_composed_text() {
+        // The key path's dropdown arm ignores `Key::Character`; the IME
+        // route must agree, or a commit would edit a filter the user cannot
+        // see behind the menu.
+        let mut ui = state();
+        ui.menu = Some((1, 0));
+        ui.commit_text("あ");
+        assert!(ui.filter.is_empty(), "the menu owns the keys");
+        assert!(ui.editing.is_none());
     }
 }
 

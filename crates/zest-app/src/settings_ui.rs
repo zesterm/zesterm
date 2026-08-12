@@ -1237,6 +1237,30 @@ mod tests {
     }
 
     #[test]
+    fn the_theme_pill_is_a_roster_select_with_no_variants() {
+        // Why the mouse must route a Select-pill click through the Enter
+        // dispatch instead of arming `ui.menu` directly: these fields draw
+        // the same pill as a documented Select, but their options are a
+        // roster (`zest_theme::builtin`, gathered at open) rather than
+        // `field.variants` — a menu armed for them resolves against an
+        // empty variant list and is discarded same-pass, so the pill would
+        // open nothing and the theme would be unreachable by mouse.
+        let fields = fields();
+        for key in ["appearance.theme", "appearance.light_theme"] {
+            let f = fields.iter().find(|f| f.key == key).unwrap_or_else(|| panic!("{key} in schema"));
+            assert_eq!(f.widget, Widget::ThemePicker, "{key} is the roster widget");
+            assert!(
+                matches!(value_cell(f, None, &[]), SettingsValueCell::Select { .. }),
+                "{key} draws the dropdown pill a click will land on"
+            );
+            assert!(
+                f.variants.is_empty(),
+                "{key} carries no variants — `ui.menu` would resolve to nothing for it"
+            );
+        }
+    }
+
+    #[test]
     fn font_faces_past_the_first_resolvable_are_fallback() {
         // The first face that resolves is the one the atlas shapes with;
         // everything after it is along for coverage, and the row should say
