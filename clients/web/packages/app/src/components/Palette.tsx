@@ -10,7 +10,10 @@
  * focus and moves it here, which is also what keeps every keystroke out of
  * the shell behind the scrim; dismissal restores it — normally the terminal
  * textarea. Row mousedown is cancelled like every chrome click, so clicking
- * a row never parks focus on <body> first.
+ * a row never parks focus on <body> first, and Tab is trapped (keys.ts says
+ * why) — with both routes closed, focus cannot leave the input while open.
+ * The key handler sits on the scrim, not the input, so a key struck while
+ * focus is somewhere unexpected inside the dialog still reaches it.
  *
  * The footer advertises ↑↓ ⏎ esc and deliberately NOT ⇧⏎ run-on-host: the
  * launcher exposes no host-chooser hook yet, and a dead advertised chord
@@ -19,6 +22,7 @@
 
 import { component, onMounted, onUnmounted, onUpdated } from 'sigx';
 
+import { handlePaletteKey } from '../palette/keys.ts';
 import { flattenResults, type PaletteGroup } from '../palette/rank.ts';
 import type { PaletteItem } from '../palette/sources.ts';
 
@@ -62,29 +66,15 @@ export const Palette = component<{
     return flat[Math.min(ctx.props.selection, flat.length - 1)];
   };
 
-  const onKeyDown = (e: KeyboardEvent): void => {
-    if (e.isComposing) return;
-    switch (e.key) {
-      case 'ArrowDown':
-        e.preventDefault();
-        ctx.props.onMove(1);
-        return;
-      case 'ArrowUp':
-        e.preventDefault();
-        ctx.props.onMove(-1);
-        return;
-      case 'Enter': {
-        e.preventDefault();
+  const onKeyDown = (e: KeyboardEvent): void =>
+    handlePaletteKey(e, {
+      move: (delta) => ctx.props.onMove(delta),
+      run: () => {
         const item = selectedItem();
         if (item !== undefined) ctx.props.onRun(item);
-        return;
-      }
-      case 'Escape':
-        e.preventDefault();
-        ctx.props.onDismiss();
-        return;
-    }
-  };
+      },
+      dismiss: () => ctx.props.onDismiss(),
+    });
 
   return () => {
     const flat = flattenResults(ctx.props.groups);
@@ -98,6 +88,7 @@ export const Palette = component<{
     return (
       <div
         class="palette-scrim"
+        onKeyDown={onKeyDown}
         onMouseDown={(e: MouseEvent) => {
           // Scrim click dismisses; a click inside the panel must not — the
           // guard is target identity, not bubbling, so nothing in the panel
@@ -130,7 +121,6 @@ export const Palette = component<{
               autoComplete="off"
               spellCheck={false}
               onInput={() => ctx.props.onQuery(inputEl?.value ?? '')}
-              onKeyDown={onKeyDown}
             />
             <span class="p-count">
               {n} host{n === 1 ? '' : 's'} searched

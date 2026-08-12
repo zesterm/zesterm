@@ -1371,8 +1371,10 @@ is now unblocked and building.
       gate and only on the active tab (a background tab activates and does
       nothing destructive), a session activates or opens, a host takes the
       launcher's create path, an action dispatches. While open the palette
-      owns the keyboard (chords are claimed but only the toggle acts), and
-      dismissal restores focus to whatever held it — the terminal textarea.
+      owns the keyboard (chords are claimed but only the toggle acts, and Tab
+      is trapped — the hidden input is the dialog's only tab stop, so focus
+      cannot walk out to the pty behind the scrim), and dismissal restores
+      focus to whatever held it — the terminal textarea.
       The footer omits ⇧⏎ run-on-host: no host-chooser hook exists yet, and a
       dead advertised chord reads as broken.
 - [ ] Local echo prediction for high-latency links (mosh's other trick): predict
