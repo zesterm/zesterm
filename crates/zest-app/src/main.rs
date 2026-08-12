@@ -229,6 +229,17 @@ enum EarlyExit {
     Refused(String),
 }
 
+/// The value for a flag that requires one. A missing value — or a next token
+/// that is itself a flag — is a refusal: silently consuming `--screenshot`
+/// as a theme name would mis-parse everything after it, and the error the
+/// user then sees names the wrong flag.
+fn value_of<'a>(flag: &str, next: Option<&'a String>) -> Result<&'a str, EarlyExit> {
+    match next {
+        Some(v) if !v.starts_with("--") => Ok(v),
+        _ => Err(EarlyExit::Refused(format!("{flag} needs a value"))),
+    }
+}
+
 /// The argument loop, as a function so tests can drive it.
 ///
 /// Flag *composition* is loop behaviour — `--screen` beside `--screenshot`,
@@ -242,31 +253,36 @@ fn parse_args(args: &[String]) -> Result<Flags, EarlyExit> {
     while i < args.len() {
         match args[i].as_str() {
             "--theme" => {
-                if let Some(v) = args.get(i + 1) {
-                    f.cli.set_str("appearance.theme", v);
-                }
+                f.cli.set_str("appearance.theme", value_of("--theme", args.get(i + 1))?);
                 i += 2;
             }
             "--font" => {
-                if let Some(v) = args.get(i + 1) {
-                    // Prepended, not substituted. `--font "Some Font"` for a
-                    // font that turns out not to be installed must still leave
-                    // a usable terminal rather than an empty stack.
-                    let mut families = vec![v.clone()];
-                    families.extend(zest_config::Typography::default().families);
-                    f.cli.set_array("typography.families", &families);
-                }
+                // Prepended, not substituted. `--font "Some Font"` for a
+                // font that turns out not to be installed must still leave
+                // a usable terminal rather than an empty stack.
+                let v = value_of("--font", args.get(i + 1))?;
+                let mut families = vec![v.to_string()];
+                families.extend(zest_config::Typography::default().families);
+                f.cli.set_array("typography.families", &families);
                 i += 2;
             }
             "--size" => {
-                if let Some(v) = args.get(i + 1).and_then(|s| s.parse::<f64>().ok()) {
-                    f.cli.set_float("typography.size_pt", v);
+                let v = value_of("--size", args.get(i + 1))?;
+                match v.parse::<f64>() {
+                    Ok(pt) => f.cli.set_float("typography.size_pt", pt),
+                    Err(_) => {
+                        return Err(EarlyExit::Refused("--size needs a number of points".into()));
+                    }
                 }
                 i += 2;
             }
             "--opacity" => {
-                if let Some(v) = args.get(i + 1).and_then(|s| s.parse::<f64>().ok()) {
-                    f.cli.set_float("window.opacity", v);
+                let v = value_of("--opacity", args.get(i + 1))?;
+                match v.parse::<f64>() {
+                    Ok(a) => f.cli.set_float("window.opacity", a),
+                    Err(_) => {
+                        return Err(EarlyExit::Refused("--opacity needs a number".into()));
+                    }
                 }
                 i += 2;
             }
@@ -288,7 +304,7 @@ fn parse_args(args: &[String]) -> Result<Flags, EarlyExit> {
                 i += 2;
             }
             "--profile" => {
-                f.profile = args.get(i + 1).cloned();
+                f.profile = Some(value_of("--profile", args.get(i + 1))?.to_string());
                 i += 2;
             }
             "--startup-probe" => {
@@ -425,7 +441,9 @@ fn parse_args(args: &[String]) -> Result<Flags, EarlyExit> {
                      --new-session     start a fresh shell instead of restoring your tabs\n\
                      --screen <name>   open on fleet|themes|settings|palette instead of\n\
                      \x20                 the terminal ('palette' is the ⌘K search, not the\n\
-                     \x20                 keymap's command palette). Composes with\n\
+                     \x20                 keymap's command palette; launcher and profiles\n\
+                     \x20                 are recognized but pending their work items).\n\
+                     \x20                 Composes with\n\
                      \x20                 --screenshot; screen content is live state, and\n\
                      \x20                 --screenshot already implies --no-daemon, which\n\
                      \x20                 keeps captures stable\n\
@@ -749,6 +767,28 @@ mod tests {
             assert!(
                 matches!(parse_args(&bad), Err(EarlyExit::Refused(_))),
                 "{bad:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_flag_never_eats_the_flag_after_it() {
+        // `--theme --screenshot out.png` once set the theme to "--screenshot"
+        // and then choked on `out.png` — an error naming the wrong flag,
+        // after mis-parsing everything behind it. A value-taking flag whose
+        // next token is another flag (or missing) refuses instead.
+        for bad in [
+            v(&["--theme", "--screenshot", "out.png"]),
+            v(&["--theme"]),
+            v(&["--font", "--theme", "paper"]),
+            v(&["--size", "--opacity", "0.9"]),
+            v(&["--size", "abc"]),
+            v(&["--opacity", "much"]),
+            v(&["--profile", "--no-daemon"]),
+        ] {
+            assert!(
+                matches!(parse_args(&bad), Err(EarlyExit::Refused(_))),
+                "{bad:?} must be refused, not silently mis-parsed"
             );
         }
     }
