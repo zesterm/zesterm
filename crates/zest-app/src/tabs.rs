@@ -11,11 +11,116 @@
 //! string, not a `HostId`), so the tab owns the key and the trait stays as
 //! the renderer's read surface.
 
+use zest_config::{ColorFrom, TabTitle};
 use zest_proto::{HostId, SessionAddr, SessionId};
 
 use crate::remote::RemoteSession;
 use crate::session::Session;
 use crate::source::SessionSource;
+
+/// The appearance half of the profile a tab was launched from, resolved.
+///
+/// Carried on the tab rather than looked up per frame because a profile can
+/// be renamed or deleted while its sessions live on — the tab keeps the look
+/// it launched with until a config reload re-resolves it by name. Per §12's
+/// chrome-vs-grid rule the scheme applies to the grid only; the chrome's one
+/// concession is the accent and glyph.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProfileIdentity {
+    /// The profile's name — the key a config reload re-resolves by.
+    pub name: String,
+    /// Colour scheme id: the ANSI half of a theme, for this tab's grid.
+    pub scheme: Option<String>,
+    /// The scheme's selection wash, resolved *here* rather than per frame.
+    /// `None` means no scheme (or one that no longer exists): follow the
+    /// window's. The redraw path reads this field per pane per frame, so
+    /// resolving there made a deleted scheme warn on every caret blink —
+    /// unbounded log growth for a non-event — and charged a full theme
+    /// resolve + allocation per pane per frame for a valid one.
+    pub selection_bg: Option<zest_core::Rgb>,
+    /// Index into the theme's accents for the chip's rule and glyph tile.
+    pub tab_color: Option<u8>,
+    /// Glyph for the tab's icon tile.
+    pub icon: Option<String>,
+    /// Whether the accent is the profile's own or its host's.
+    pub color_from: Option<ColorFrom>,
+    /// `window.opacity` override, riding this tab's viewport only.
+    pub opacity: Option<f32>,
+    /// Where the tab's title comes from.
+    pub title: TabTitle,
+}
+
+impl ProfileIdentity {
+    /// Resolve a profile's appearance identity through Defaults.
+    ///
+    /// Goes through `resolve_profile` so inheritance cannot drift from what
+    /// the profiles editor shows; a name that no longer exists resolves as
+    /// empty-over-Defaults rather than failing (the never-crash rule).
+    #[must_use]
+    pub fn resolve(settings: &zest_config::Settings, name: &str) -> Self {
+        let mut profiles = toml::Table::new();
+        for (key, table) in &settings.profiles {
+            profiles.insert(key.clone(), toml::Value::Table(table.clone()));
+        }
+        let mut root = toml::Table::new();
+        root.insert("profiles".into(), toml::Value::Table(profiles));
+        let resolved = zest_config::profiles::resolve_profile(&root, name);
+
+        // Lenient like the rest of the profile keys: a wrong-typed opacity is
+        // ignored, an integer one (`opacity = 1`) is accepted — TOML has no
+        // float coercion, and `1` is how a hand edit spells "opaque".
+        let opacity = resolved
+            .overrides
+            .get("window")
+            .and_then(toml::Value::as_table)
+            .and_then(|w| w.get("opacity"))
+            .and_then(|v| match v {
+                toml::Value::Float(f) => Some(*f as f32),
+                toml::Value::Integer(i) => Some(*i as f32),
+                _ => None,
+            })
+            // TOML admits `nan`, and clamp preserves it — a non-finite value
+            // must degrade to None (the window's opacity), not ride NaN into
+            // the render path.
+            .filter(|o| o.is_finite())
+            .map(|o| o.clamp(0.0, 1.0));
+
+        let scheme = resolved.meta.color_scheme;
+        Self {
+            name: name.to_string(),
+            selection_bg: scheme.as_deref().and_then(scheme_selection_wash),
+            scheme,
+            tab_color: resolved.meta.tab_color,
+            icon: resolved.meta.icon,
+            color_from: resolved.meta.color_from,
+            opacity,
+            title: resolved.meta.tab_title,
+        }
+    }
+}
+
+/// A colour scheme id resolved to its palette — `None` for a name that does
+/// not exist. Unknown warns and falls back rather than failing (the
+/// never-crash rule): a deleted scheme must not take a running session's
+/// window down, its tab just follows the window again. Called at identity
+/// (re-)resolve and terminal (re-)seed time only — never per frame, so the
+/// warn fires once per transition instead of once per redraw.
+pub(crate) fn resolve_scheme(scheme: &str) -> Option<zest_theme::ResolvedPalette> {
+    match zest_theme::builtin::get(scheme) {
+        Some(theme) => Some(zest_theme::resolve(&theme)),
+        None => {
+            tracing::warn!(scheme, "unknown colour scheme; the tab follows the window palette");
+            None
+        }
+    }
+}
+
+/// The scheme's selection wash — the one colour the per-frame render path
+/// needs, extracted here so it can be cached on the identity.
+pub(crate) fn scheme_selection_wash(scheme: &str) -> Option<zest_core::Rgb> {
+    let r = resolve_scheme(scheme)?;
+    Some(zest_core::Rgb::new(r.selection_bg.r, r.selection_bg.g, r.selection_bg.b))
+}
 
 /// Where a tab's terminal actually lives.
 ///
@@ -53,6 +158,9 @@ pub struct Tab {
     /// persisted so a restore can reach the host even before discovery has
     /// found it again.
     pub dial_hint: Option<String>,
+    /// The profile this tab was launched from, when it was launched from one.
+    /// `None` is every plain tab: it follows the window's palette and accent.
+    pub identity: Option<ProfileIdentity>,
 }
 
 /// The right-hand pane of a split tab: a session with the little state a
@@ -102,12 +210,20 @@ impl Tab {
             dead: false,
             sized,
             dial_hint: None,
+            identity: None,
         }
     }
 
     #[must_use]
     pub fn with_dial_hint(mut self, hint: Option<String>) -> Self {
         self.dial_hint = hint;
+        self
+    }
+
+    #[must_use]
+    #[allow(dead_code, reason = "the profile launcher sets it; the next §12 work item")]
+    pub fn with_identity(mut self, identity: Option<ProfileIdentity>) -> Self {
+        self.identity = identity;
         self
     }
 
@@ -121,6 +237,7 @@ impl Tab {
             dead: false,
             sized,
             dial_hint: None,
+            identity: None,
         }
     }
 
@@ -283,6 +400,19 @@ impl TabStrip {
         self.tabs.iter_mut().find(|t| t.addr == addr)
     }
 
+    /// Re-resolve every profile-launched tab's identity against a reloaded
+    /// config. By name: the file is the truth for what "ubuntu" looks like,
+    /// and a tab holding a stale copy would repaint with colours the editor
+    /// no longer shows. A deleted profile resolves as empty-over-Defaults,
+    /// so the tab degrades to Defaults' look rather than freezing.
+    pub fn reresolve_identities(&mut self, settings: &zest_config::Settings) {
+        for tab in &mut self.tabs {
+            if let Some(identity) = &mut tab.identity {
+                *identity = ProfileIdentity::resolve(settings, &identity.name);
+            }
+        }
+    }
+
     /// Add a tab and make it active — a new tab is something the user just
     /// asked for, so it takes the keyboard.
     pub fn push(&mut self, tab: Tab) {
@@ -410,6 +540,84 @@ mod tests {
             placeholder_addr(2),
             "closing the last, active tab moves to its left neighbour"
         );
+    }
+
+    #[test]
+    fn a_config_reload_reresolves_identities_by_name() {
+        // The tab holds a *copy* of its profile's appearance, so an edit to
+        // [profiles.ubuntu] must reach open tabs at reload or the editor and
+        // the window disagree about what "ubuntu" looks like.
+        let settings = |scheme: &str, opacity: f64| {
+            let mut s = zest_config::Settings::default();
+            let table: toml::Table = format!(
+                "color_scheme = \"{scheme}\"\ntab_color = 2\n[window]\nopacity = {opacity}\n"
+            )
+            .parse()
+            .expect("valid toml");
+            s.profiles.insert("ubuntu".into(), table);
+            s
+        };
+
+        let before = settings("nord", 0.9);
+        let mut strip = TabStrip::default();
+        strip.push(fake(1).with_identity(Some(ProfileIdentity::resolve(&before, "ubuntu"))));
+        strip.push(fake(2)); // a plain tab, to prove reresolve leaves it alone
+
+        let id = strip.iter().next().unwrap().identity.as_ref().expect("identity set");
+        assert_eq!(id.scheme.as_deref(), Some("nord"));
+
+        strip.reresolve_identities(&settings("paper", 0.5));
+        let id = strip.iter().next().unwrap().identity.as_ref().expect("identity kept");
+        assert_eq!(id.scheme.as_deref(), Some("paper"), "the reload's scheme wins");
+        assert_eq!(
+            id.selection_bg,
+            scheme_selection_wash("paper"),
+            "the cached wash follows the re-resolve — the render path reads \
+             only the cache, so a stale one selects in the old scheme's colour"
+        );
+        assert_eq!(id.opacity, Some(0.5), "and so does its opacity");
+        assert_eq!(id.tab_color, Some(2), "unchanged keys survive the re-resolve");
+        assert!(
+            strip.iter().nth(1).unwrap().identity.is_none(),
+            "a tab launched from no profile must not grow one on reload"
+        );
+        for tab in [placeholder_addr(1), placeholder_addr(2)] {
+            strip.close(tab).expect("tab exists").kill();
+        }
+    }
+
+    #[test]
+    fn a_nan_opacity_degrades_to_the_window_not_into_the_render_path() {
+        // TOML admits `nan`, and f32::clamp preserves it — an identity that
+        // carried it would hand every fill computation a non-finite alpha.
+        let mut s = zest_config::Settings::default();
+        let table: toml::Table = "[window]\nopacity = nan\n".parse().expect("toml allows nan");
+        s.profiles.insert("odd".into(), table);
+        let id = ProfileIdentity::resolve(&s, "odd");
+        assert_eq!(
+            id.opacity, None,
+            "a non-finite opacity is the file's problem, not the frame's — \
+             None falls through to the window's value"
+        );
+    }
+
+    #[test]
+    fn identity_resolution_inherits_through_defaults() {
+        // The §12 fleet story: color_from on Defaults reads by machine for
+        // every profile that does not say otherwise.
+        let mut s = zest_config::Settings::default();
+        s.profiles.insert(
+            "defaults".into(),
+            "color_from = \"host\"\nicon = \"circle\"\n".parse().expect("valid toml"),
+        );
+        s.profiles
+            .insert("ubuntu".into(), "icon = \"tux\"\n".parse().expect("valid toml"));
+        let id = ProfileIdentity::resolve(&s, "ubuntu");
+        assert_eq!(id.color_from, Some(zest_config::ColorFrom::Host), "fell through Defaults");
+        assert_eq!(id.icon.as_deref(), Some("tux"), "own keys shadow Defaults'");
+        assert_eq!(id.scheme, None, "unset stays unset — the window palette's cue");
+        assert_eq!(id.selection_bg, None, "no scheme, no cached wash: render falls back live");
+        assert_eq!(id.opacity, None);
     }
 
     #[test]

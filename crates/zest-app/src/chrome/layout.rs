@@ -14,7 +14,7 @@ use zest_config::settings::TabsPosition;
 use zest_render_wgpu::{LinearRgba, RectInstance};
 
 use super::hit::{CaptionButton, ChromeHitMap, HitRegion, ResizeEdge};
-use super::model::{ChromeMetrics, ChromeModel, LinkKind, TabKind, TabPresence};
+use super::model::{AccentChoice, ChromeMetrics, ChromeModel, LinkKind, TabKind, TabPresence};
 use super::theme::ChromeColors;
 
 /// One run of UI text, to be shaped and emitted at redraw.
@@ -182,6 +182,26 @@ fn baseline_in(band_y: f32, band_h: f32, px: f32) -> f32 {
 /// generalized. Wraps rather than running out.
 fn host_accent(colors: &ChromeColors, slot: usize) -> LinearRgba {
     [colors.success, colors.info, colors.magenta, colors.warn][slot % 4]
+}
+
+/// A chip's accent choice, resolved to ink (design §12).
+///
+/// The profile row is the theme's accent-picker order — `accent` first, then
+/// the state colours — because the theme carries no separate accents list;
+/// these six are what its swatches show. Wraps rather than running out, like
+/// the host cycle: a hand-edited `tab_color = 250` still draws something.
+fn accent_color(colors: &ChromeColors, choice: AccentChoice) -> LinearRgba {
+    match choice {
+        AccentChoice::Profile(i) => [
+            colors.accent,
+            colors.success,
+            colors.warn,
+            colors.danger,
+            colors.info,
+            colors.magenta,
+        ][usize::from(i) % 6],
+        AccentChoice::Host(slot) => host_accent(colors, slot),
+    }
 }
 
 /// A little status dot, as the SDF pipeline draws circles: a square rect
@@ -1670,6 +1690,9 @@ fn horizontal(
             // 3. The inset accent: a 2px inner ring on the fill's geometry,
             //    clipped to the corner region, so it traces the top edge and
             //    bends around both curves exactly as the inset shadow does.
+            //    In the tab's own accent (§12): the rule is the chrome's one
+            //    per-tab concession, and it must agree with the glyph tile
+            //    below or the chip names two identities at once.
             let inset_clip = [
                 chip[0],
                 chip[1],
@@ -1678,7 +1701,7 @@ fn horizontal(
             ];
             out.rects.push(RectInstance {
                 radii: [(TAB_RADIUS - HAIRLINE) * s, (TAB_RADIUS - HAIRLINE) * s, 0.0, 0.0],
-                border: colors.accent,
+                border: accent_color(colors, tab.tab_accent),
                 border_width: ACCENT_RULE * s,
                 ..RectInstance::filled(
                     [
@@ -1716,7 +1739,7 @@ fn horizontal(
         let ink = match (tab.kind, tab.link) {
             (TabKind::Session, LinkKind::Stalled) => colors.warn,
             (TabKind::Session, LinkKind::Reconnecting) => colors.danger,
-            _ if active => host_accent(colors, tab.accent),
+            _ if active => accent_color(colors, tab.tab_accent),
             _ => colors.text_faint,
         };
         if active && tab.kind == TabKind::Session {
@@ -2300,6 +2323,9 @@ mod tests {
             origin,
             presence,
             accent: usize::from(n),
+            // What the builder computes for an identity-less tab: the chip
+            // shows its host.
+            tab_accent: AccentChoice::Host(usize::from(n)),
             running: false,
             age: "2m".into(),
             connecting: false,
@@ -3332,6 +3358,29 @@ mod tests {
                 "{link:?} must ink a rect in the strip with its state colour"
             );
         }
+    }
+
+    #[test]
+    fn a_profile_accent_reaches_the_rule_and_the_tile() {
+        // §12's one per-tab chrome concession: the 2px inset rule and the
+        // glyph tile draw the tab's own accent. Both, from one choice — a
+        // chip whose rule and tile disagree names two identities at once.
+        let c = colors();
+        let mut tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
+        // Index 3 of the theme's accent row is `danger` — the k8s-prod red.
+        tabs[0].tab_accent = AccentChoice::Profile(3);
+        let m = metrics(1200.0, 800.0, 1.0);
+        let l = layout(&model(tabs, TabsPosition::Top), &c, &m, &mut measure);
+        assert!(
+            l.rects
+                .iter()
+                .any(|r| r.border == c.danger && (r.border_width - ACCENT_RULE).abs() < 1e-6),
+            "the active chip's 2px rule takes the profile's colour"
+        );
+        assert!(
+            l.rects.iter().any(|r| r.fill == c.danger && r.rect[1] < 46.0),
+            "and so does the glyph tile's ink"
+        );
     }
 
     #[test]
