@@ -800,6 +800,26 @@ Each of these cost real time and is documented where it bites:
   quietly fatal inside a polling loop, where the empty result is
   indistinguishable from "the job hasn't finished yet" and the loop waits out
   its timeout reporting nothing. Use `gh … --jq` / `-q`, which is gh's own.
+- **rustls refuses a `CA:TRUE` certificate as an end-entity, and the error names
+  the extension rather than the mistake.** Putting a TLS terminator in front of
+  something locally, the one-liner everybody reaches for — self-sign with
+  `basicConstraints=critical,CA:TRUE`, install it, serve it — fails the dial
+  with `invalid peer certificate: Other(OtherError(ExtensionValueInvalid))`,
+  which reads as a malformed extension *value* and actually means "this is a CA
+  and you served it as a server". `curl` and every browser accept the same
+  certificate, so the natural next suspect is the Rust client. rustls is right:
+  a chain wants a CA in the trust store and a **leaf** signed by it, `CA:FALSE`,
+  `serverAuth`, with the SAN. Sign the leaf with the CA already installed and no
+  second trust prompt is needed — which matters, because:
+- **Windows will not let a non-interactive shell add *or remove* a root
+  certificate.** `Import-Certificate -CertStoreLocation Cert:\CurrentUser\Root`
+  fails with `UI is not allowed in this operation.`, and the `Remove-Item` that
+  undoes it fails with `The operation is on user root store and UI is not
+  allowed.` The protected-root dialog cannot be suppressed in either direction,
+  so anything needing a locally-trusted CA needs a human at the keyboard twice —
+  once to trust it, once to clean up. It cannot be scripted into CI, and an
+  attempt that gets halfway leaves the certificate installed. (Both from #126,
+  standing a `wss://` relay up on loopback to exercise `TlsDuplex` on Winsock.)
 
 ## Related work on this machine
 
