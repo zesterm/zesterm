@@ -20,10 +20,17 @@ import { RouterView } from '@sigx/router';
 import { component } from 'sigx';
 
 import { fetchBootstrap } from './bootstrap.ts';
+import { MONO_FAMILY } from './chrome-model.ts';
 import { deviceKey } from './device-key.ts';
 import { routerPlugin } from './routes.tsx';
 import { initThemeStore } from './state/theme.ts';
 import './style.css';
+
+// The grid's font constant, mirrored into a CSS variable so the chrome's mono
+// text (cwd lines, key caps) is the SAME stack the canvas measures — the
+// handoff forbids shipping a second mono for chrome. CSS cannot import a TS
+// constant, so this property is the bridge.
+document.documentElement.style.setProperty('--zt-mono', MONO_FAMILY);
 
 // The theme store owns the whole choice lifecycle — the localStorage read,
 // the fallback, the CSS vars (tokens plus derived chrome surfaces), and the
