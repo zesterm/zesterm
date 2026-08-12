@@ -3841,6 +3841,7 @@ impl App {
                 fonts.set_builtin_box_drawing(self.config.builtin_box_drawing);
                 fonts.set_text_antialias(antialias);
                 fonts.set_hinting(self.config.text_hinting);
+                fonts.set_grid_antialias(self.config.text_antialias);
                 self.fonts = Some(fonts);
             }
             Err(e) => {
@@ -3897,11 +3898,19 @@ impl App {
     }
 
     /// As [`App::effective_antialias`], against a config alone so it is testable.
+    /// What the *renderer* should composite, which is a capability question
+    /// and not a preference one.
+    ///
+    /// `appearance.text_antialias` deliberately does not appear here. It is the
+    /// terminal grid's setting and reaches the rasterizer through
+    /// `Fonts::set_grid_antialias`; the chrome is pinned to whatever the
+    /// renderer can actually do, so that turning the grid down to grayscale
+    /// does not drag the window's own furniture with it.
     fn antialias_for(config: &Config) -> zest_font::TextAntialias {
         if config.opacity < 1.0 {
             return zest_font::TextAntialias::Grayscale;
         }
-        config.text_antialias
+        zest_font::TextAntialias::Subpixel
     }
 
     fn resize_surface(&mut self, width: u32, height: u32) {
@@ -4086,6 +4095,7 @@ impl ApplicationHandler<Wakeup> for App {
         fonts.set_builtin_box_drawing(self.config.builtin_box_drawing);
         fonts.set_text_antialias(self.effective_antialias());
         fonts.set_hinting(self.config.text_hinting);
+        fonts.set_grid_antialias(self.config.text_antialias);
         let metrics = fonts.cell_metrics();
         tracing::debug!(elapsed_ms = t0.elapsed().as_millis(), "fonts ready");
 
@@ -4193,6 +4203,7 @@ impl ApplicationHandler<Wakeup> for App {
         // see `sync_antialias` for what going the other way costs.
         fonts.set_text_antialias(gpu.renderer.text_antialias());
         fonts.set_hinting(self.config.text_hinting);
+        fonts.set_grid_antialias(self.config.text_antialias);
 
         // The surface may have landed on a slightly different size than the
         // window reported, so reconcile before the first frame.

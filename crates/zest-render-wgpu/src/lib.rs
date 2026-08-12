@@ -985,6 +985,11 @@ mod tests {
             px: 13 * 256,
             subpx_x: 0,
             synthetic: 0,
+            raster: if mask.format == zest_font::GlyphFormat::SubpixelMask {
+                zest_font::RASTER_SUBPIXEL
+            } else {
+                0
+            },
         };
         let cached = renderer.atlas.insert(&device, &queue, key, mask)?;
         let crate::Cached::Entry(e) = cached else { return None };

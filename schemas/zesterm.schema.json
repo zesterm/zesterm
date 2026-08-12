@@ -18,7 +18,7 @@
         },
         "text_antialias": {
           "$ref": "#/$defs/TextAntialias",
-          "default": "subpixel",
+          "default": "grayscale",
           "description": "How text is antialiased.\n\nAlso decides whether outlines are grid-fitted, because the two are one\ndecision: swash hard-codes an LCD hinting target and does not let it be\nchosen, so hinting always means \"grid-fit for a rasterizer with three\ntimes the horizontal resolution\". Pairing that with grayscale coverage\nchanges glyph *shapes* rather than merely softening them.",
           "x_zest_group": "Appearance",
           "x_zest_widget": "select"
@@ -45,7 +45,7 @@
         },
         "text_hinting": {
           "$ref": "#/$defs/TextHinting",
-          "default": "none",
+          "default": "full",
           "description": "Whether glyph outlines are snapped to the pixel grid.\n\nIndependent of `text_antialias`, and the mixed settings are the\ninteresting ones. Grid-fitting matters most where a stem is about one\npixel wide, so it decides everything at 9pt and almost nothing at 16px.\n\nMeasured against Windows Terminal at size 9: `grayscale` + `full` gives\n12.6% ink coverage and 43% fully-saturated pixels against its 11.7% and\n45%, which is as close as these get.",
           "x_zest_group": "Appearance",
           "x_zest_widget": "select"
@@ -351,12 +351,12 @@
       "oneOf": [
         {
           "const": "subpixel",
-          "description": "Per-channel coverage at thirds of a pixel, outlines left unhinted.\n\nSharper on an ordinary 1x display, and it keeps each glyph the shape its\ndesigner drew. Needs an RGB-striped panel and a GPU that can blend per\nchannel; where either is missing, grayscale is used instead.",
+          "description": "Per-channel coverage at thirds of a pixel.\n\nKeeps horizontal detail a single sample per pixel throws away. Needs an\nRGB-striped panel and a GPU that can blend per channel; where either is\nmissing, grayscale is used instead.",
           "type": "string"
         },
         {
           "const": "grayscale",
-          "description": "One coverage value per pixel, outlines grid-fitted.\n\nThe right choice on a rotated or non-RGB panel, where sampling at\nthirds of a pixel is simply wrong.",
+          "description": "One coverage value per pixel. **The default.**\n\nWhat Windows Terminal does — measurably: its channel spread on inked\npixels is zero. Paired with `text_hinting = \"full\"` it matches it\nclosely at small sizes, 12.6% ink coverage against 11.7% and 43% of\ninked pixels fully saturated against 45%. Also the right choice on a\nrotated or non-RGB panel, where thirds of a pixel are simply wrong.",
           "type": "string"
         }
       ]
@@ -366,12 +366,12 @@
       "oneOf": [
         {
           "const": "none",
-          "description": "Use outlines as drawn. Softer at small sizes, always faithful in shape.",
+          "description": "Use outlines as drawn. Softer at small sizes, always faithful in shape.\n\nWorth choosing on a HiDPI display, where a stem is several pixels wide\nand there is nothing for grid-fitting to buy.",
           "type": "string"
         },
         {
           "const": "full",
-          "description": "Grid-fit through the font's own TrueType bytecode.\n\nCrisper at small sizes, and what every Windows application looks like.\nThe cost is that swash pins its hinting target to horizontal LCD and\nwill not let it be chosen, so on a ClearType-aware face this grid-fits\nhorizontally too — sampled once per pixel that changes glyph shapes,\nwhich is what made `w` render as `W` at 13ppem.",
+          "description": "Grid-fit through the font's own TrueType bytecode. **The default.**\n\nCrisper at small sizes, and what every Windows application looks like.\nThis is what makes a one-pixel stem land on one pixel instead of\nspreading over two, which is the whole difference at 9pt and nearly\nnothing at 16px.\nThe cost is that swash pins its hinting target to horizontal LCD and\nwill not let it be chosen, so on a ClearType-aware face this grid-fits\nhorizontally too — sampled once per pixel that changes glyph shapes,\nwhich is what made `w` render as `W` at 13ppem.",
           "type": "string"
         }
       ]
@@ -531,10 +531,10 @@
       "default": {
         "follow_system_theme": false,
         "light_theme": "",
-        "text_antialias": "subpixel",
+        "text_antialias": "grayscale",
         "text_contrast": 0.0,
         "text_gamma": 1.2,
-        "text_hinting": "none",
+        "text_hinting": "full",
         "theme": "obsidian"
       },
       "description": "Colours and the theme they come from."
