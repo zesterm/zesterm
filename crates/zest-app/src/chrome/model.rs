@@ -320,8 +320,9 @@ pub enum SettingsValueCell {
     /// Paired key/value cells; an empty value renders `unset` (it unsets).
     KeyValue { entries: Vec<(String, String)> },
     /// A typed edit in progress; drawn as the buffer with a caret, in warn
-    /// colours after a failed parse. `append` grows a list instead of
-    /// replacing the value.
+    /// colours after a failed parse. Whether the edit replaces the value or
+    /// grows a list is `settings_ui::EditBuffer`'s business — this cell only
+    /// knows how to draw the text.
     Editing { buffer: String, error: bool },
 }
 

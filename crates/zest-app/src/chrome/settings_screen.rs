@@ -130,12 +130,15 @@ fn control_height(cell: &SettingsValueCell) -> f32 {
         SettingsValueCell::Text { .. }
         | SettingsValueCell::ReadOnly { .. }
         | SettingsValueCell::Editing { .. } => 18.0,
+        // Gaps sit BETWEEN rows and before the add row, not after it —
+        // (n+1) rows carry only n gaps, and charging one more here left a
+        // blank stripe under every list.
         SettingsValueCell::FontList { faces } => {
-            (faces.len() + 1) as f32 * (LIST_ROW_H + LIST_GAP)
+            (faces.len() + 1) as f32 * LIST_ROW_H + faces.len() as f32 * LIST_GAP
         }
         SettingsValueCell::TagList { .. } => CHIP_H,
         SettingsValueCell::KeyValue { entries } => {
-            (entries.len() + 1) as f32 * (LIST_ROW_H + LIST_GAP)
+            (entries.len() + 1) as f32 * LIST_ROW_H + entries.len() as f32 * LIST_GAP
         }
     }
 }

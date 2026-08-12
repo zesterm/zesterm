@@ -6087,35 +6087,42 @@ impl ApplicationHandler<Wakeup> for App {
                     }
                     return;
                 }
-                // Over the settings tab's content, the wheel scrolls its
-                // rows — the hit test is what says "over".
-                if matches!(
-                    self.chrome_hit(self.pointer_pos.0, self.pointer_pos.1),
+                // Over ANY of the settings tab's regions, the wheel belongs
+                // to settings — a gap in this list sent the scroll to the
+                // strip or the session behind the tab. An open dropdown menu
+                // swallows it without scrolling: moving the rows would slide
+                // the menu's anchor out from under it.
+                match self.chrome_hit(self.pointer_pos.0, self.pointer_pos.1) {
+                    Some(HitRegion::SettingsMenuRow(_)) => return,
                     Some(
                         HitRegion::SettingsPanel
-                            | HitRegion::SettingsRow(_)
-                            | HitRegion::SettingsToggle(_)
-                            | HitRegion::SettingsSlider(_)
-                            | HitRegion::SettingsReset(_)
-                            | HitRegion::SettingsSegment(..)
-                            | HitRegion::SettingsStep(..)
-                            | HitRegion::SettingsSelect(_)
-                            | HitRegion::SettingsListRemove(..)
-                            | HitRegion::SettingsListAdd(_)
-                            | HitRegion::SettingsListItem(..)
-                    )
-                ) {
-                    let px = match delta {
-                        MouseScrollDelta::LineDelta(_, y) => y * 40.0,
-                        MouseScrollDelta::PixelDelta(p) => p.y as f32,
-                    };
-                    if px != 0.0 {
-                        if let Some(ui) = self.settings_ui.as_mut() {
-                            ui.scroll -= px;
+                        | HitRegion::SettingsRow(_)
+                        | HitRegion::SettingsToggle(_)
+                        | HitRegion::SettingsSlider(_)
+                        | HitRegion::SettingsReset(_)
+                        | HitRegion::SettingsCategory(_)
+                        | HitRegion::SettingsFilter
+                        | HitRegion::SettingsEditToml
+                        | HitRegion::SettingsSegment(..)
+                        | HitRegion::SettingsStep(..)
+                        | HitRegion::SettingsSelect(_)
+                        | HitRegion::SettingsListRemove(..)
+                        | HitRegion::SettingsListAdd(_)
+                        | HitRegion::SettingsListItem(..),
+                    ) => {
+                        let px = match delta {
+                            MouseScrollDelta::LineDelta(_, y) => y * 40.0,
+                            MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                        };
+                        if px != 0.0 {
+                            if let Some(ui) = self.settings_ui.as_mut() {
+                                ui.scroll -= px;
+                            }
+                            self.mark_chrome_dirty();
                         }
-                        self.mark_chrome_dirty();
+                        return;
                     }
-                    return;
+                    _ => {}
                 }
                 // Over the strip, the wheel scrolls the strip.
                 if self.chrome_hit(self.pointer_pos.0, self.pointer_pos.1).is_some() {
