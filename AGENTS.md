@@ -530,6 +530,29 @@ Each of these cost real time and is documented where it bites:
   on every platform while the server's own reader is still parked. Assert on the
   side that has to wake up. (#99.)
 
+  **Both cases measured, because a rig hides the difference completely.** What
+  the *peer* does when you cut decides what you observe, and the two answers are
+  indistinguishable in a log (Windows 11 26220, #126):
+
+  | the peer, when your `shutdown` reaches it | reader with no poll | reader with the poll armed |
+  |---|---|---|
+  | stays up and says nothing | **parked for ever** | wakes at the next poll boundary |
+  | closes its half, sending a FIN back | wakes in 0.3ms | wakes in 0.3ms |
+
+  Only the top row is your cut working. The bottom one is the peer ending your
+  read — a remote close, which needs no help from anything local and would look
+  identical if `cut` did nothing at all. And the bottom row is the one you get by
+  default: Node, Python and every shell one-liner close on EOF, so a stand-in
+  peer quietly answers the wrong question and answers it green. #126 measured ten
+  clean cycles that way, at millisecond resolution, and concluded the poll was
+  redundant; deleting that one line then left a relay control link parked for
+  ever against a peer that stayed up, which is #99 again. `connected_pair()`
+  holds its `_client` open for exactly this reason — load-bearing, not
+  housekeeping. **So the poll is the mechanism and not a fallback**, and the
+  entry that says otherwise is the one somebody deletes as redundant. Cross the
+  two cases before believing either:
+  `cargo run -p zest-cloud --example shutdown_probe`.
+
   Two more edges, both measured on this box rather than reasoned about:
   - **A read timeout is per *handle* on Windows, not per socket.** A
     `try_clone`d handle inherits the value at the moment it is duplicated and is
@@ -544,6 +567,12 @@ Each of these cost real time and is documented where it bites:
     end-of-stream, or the log grows spurious errors for the watchdog doing its
     job and the test has to accept two answers. In `tls.rs` that failure was
     also *latched*, poisoning the writer along with it. (#101.)
+
+    Two orderings, one arm each, and **only one of them has ever been observed**:
+    #101 measured this one — a read issued *after* the cut — while every cut in
+    #126 landed on a reader already parked, which comes back as a clean end of
+    stream. A run that exercises one arm says nothing about the other, so the
+    `ConnectionAborted` arm is held by that single measurement and by reading.
 - **On macOS, `TIOCSWINSZ` on the pty master fails with `ENOTTY` until the slave
   has been opened once.** Setting the initial size right after `unlockpt` — the
   obvious place, and what Linux accepts — therefore fails with an error saying
