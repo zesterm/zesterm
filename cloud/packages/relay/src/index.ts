@@ -48,6 +48,30 @@
  * class must be exported from the script named by `main`, and the migration in
  * `wrangler.jsonc` names it by string — `test/wrangler-config.test.ts` imports
  * this module and checks the two agree, because nothing else does.
+ *
+ * # Nothing else may be exported from here, and it is not a style rule
+ *
+ * workerd reads **every named export of the entrypoint module** as an
+ * entrypoint — a handler, a Durable Object class, a WorkerEntrypoint — so a
+ * plain `export const` beside them is a type error in that map and the whole
+ * Worker refuses to start:
+ *
+ * ```
+ * Uncaught TypeError: Incorrect type for map entry 'ATTACH_PATH':
+ *   the provided value is not of type 'function or ExportedHandler'.
+ * ```
+ *
+ * Not one route failing — no Worker at all, in production, on deploy. And
+ * `wrangler deploy --dry-run` does **not** catch it: it bundles and validates
+ * the config without ever starting a runtime, so the six-gate suite was green
+ * across nineteen merged PRs while this module could not boot. It was found by
+ * pointing `tools/fake-host.mjs` at a real `wrangler dev`, which is the whole
+ * argument for that script existing.
+ *
+ * Constants a *reader* wants gathered — the close codes especially — must
+ * therefore stay in the modules that declare them and be imported from there.
+ * `test/entrypoint.test.ts` enforces the rule, since only a running workerd
+ * otherwise would.
  */
 
 import { fromHex } from '@zesterm/cloud-shared';
@@ -57,6 +81,7 @@ import { ATTACH_JTI_PARAM, ATTACH_PATH, CONTROL_PATH, PIPE_PATH, roomName } from
 import { HOST_ID_BYTES } from './room/control.ts';
 import { pipeIdIsWellFormed } from './room/pipe.ts';
 import {
+  CLOSE_TICKET_REFUSED,
   RELAY_SUBPROTOCOL,
   ticketFromSubprotocols,
   ticketPublicKeys,
@@ -64,24 +89,6 @@ import {
 } from './ticket.ts';
 
 export { RelayRoom } from './room.ts';
-export { ATTACH_PATH, CONTROL_PATH, PIPE_PATH } from './routes.ts';
-// The room's refusals live with the room. Re-exported because every code a
-// *browser* can be given belongs beside `CLOSE_TICKET_REFUSED` in anyone's head.
-export { CLOSE_HOST_ABSENT } from './room/control.ts';
-export {
-  CLOSE_PIPE_DIAL_TIMEOUT,
-  CLOSE_PIPE_FLOOD,
-  CLOSE_PIPE_PEER_GONE,
-  CLOSE_TICKET_REPLAYED,
-} from './room/pipe.ts';
-
-/**
- * The ticket was missing, malformed, expired, signed by a key we do not hold,
- * or minted for a different room. One code for all of them on purpose: telling
- * them apart is worth more to whoever is guessing than to the holder of a real
- * ticket, who has none of these problems.
- */
-export const CLOSE_TICKET_REFUSED = 4401;
 
 /**
  * What the edge should do with an attach request.

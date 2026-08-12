@@ -32,6 +32,19 @@ import { verifyAsync } from '@noble/ed25519';
 export const TICKET_KEY_LEN = 32;
 
 /**
+ * The ticket was missing, malformed, expired, signed by a key we do not hold,
+ * or minted for a different room. One code for all of them on purpose: telling
+ * them apart is worth more to whoever is guessing than to the holder of a real
+ * ticket, who has none of these problems.
+ *
+ * Here rather than in `index.ts`, where it sat until the entrypoint turned out
+ * to be unable to export a constant at all without stopping the Worker from
+ * starting — that module's header has the failure. This is the file the
+ * refusal is decided in, so it is where the code belongs anyway.
+ */
+export const CLOSE_TICKET_REFUSED = 4401;
+
+/**
  * The subprotocol the browser offers first; the ticket is the second entry.
  *
  * Two tokens rather than one joined string, because a WebSocket subprotocol
