@@ -26,9 +26,11 @@ import {
   type AttachTicket,
 } from '@zesterm/cloud-shared';
 
-import { attachVerdict, ATTACH_PATH, CLOSE_TICKET_REFUSED } from '../src/index.ts';
+import { attachVerdict } from '../src/index.ts';
 import type { Env } from '../src/env.ts';
+import { ATTACH_PATH } from '../src/routes.ts';
 import {
+  CLOSE_TICKET_REFUSED,
   RELAY_SUBPROTOCOL,
   ticketFromSubprotocols,
   ticketPublicKeys,
