@@ -3995,19 +3995,15 @@ impl App {
         // change, and a split's second pane is a terminal too — skipping it
         // left it stranded on the old palette.
         for tab in self.tabs.iter() {
-            tab.source()
-                .terminal()
-                .lock()
-                .set_palette(seed_palette(&self.palette, tab.identity.as_ref()));
+            // One resolve per tab, not per terminal: a split's pane borrows
+            // its tab's identity until panes carry their own profile, so a
+            // second seed_palette call would repeat the scheme resolve (and
+            // its unknown-scheme warn) for the same answer.
+            let seed = seed_palette(&self.palette, tab.identity.as_ref());
             if let Some(split) = &tab.split {
-                // The pane borrows its tab's identity until panes carry their
-                // own profile; one seed call per terminal either way.
-                split
-                    .source()
-                    .terminal()
-                    .lock()
-                    .set_palette(seed_palette(&self.palette, tab.identity.as_ref()));
+                split.source().terminal().lock().set_palette(seed.clone());
             }
+            tab.source().terminal().lock().set_palette(seed);
         }
         if let Some(w) = self.window.as_ref() {
             let bg = resolved.background;

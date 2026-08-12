@@ -79,6 +79,10 @@ impl ProfileIdentity {
                 toml::Value::Integer(i) => Some(*i as f32),
                 _ => None,
             })
+            // TOML admits `nan`, and clamp preserves it — a non-finite value
+            // must degrade to None (the window's opacity), not ride NaN into
+            // the render path.
+            .filter(|o| o.is_finite())
             .map(|o| o.clamp(0.0, 1.0));
 
         let scheme = resolved.meta.color_scheme;
@@ -580,6 +584,21 @@ mod tests {
         for tab in [placeholder_addr(1), placeholder_addr(2)] {
             strip.close(tab).expect("tab exists").kill();
         }
+    }
+
+    #[test]
+    fn a_nan_opacity_degrades_to_the_window_not_into_the_render_path() {
+        // TOML admits `nan`, and f32::clamp preserves it — an identity that
+        // carried it would hand every fill computation a non-finite alpha.
+        let mut s = zest_config::Settings::default();
+        let table: toml::Table = "[window]\nopacity = nan\n".parse().expect("toml allows nan");
+        s.profiles.insert("odd".into(), table);
+        let id = ProfileIdentity::resolve(&s, "odd");
+        assert_eq!(
+            id.opacity, None,
+            "a non-finite opacity is the file's problem, not the frame's — \
+             None falls through to the window's value"
+        );
     }
 
     #[test]
