@@ -102,7 +102,9 @@ export interface HostCardContext {
    * and the card says `unknown` rather than inventing an answer. When present
    * it also supplies the session count, so the two can never disagree.
    */
-  readonly status?: DirectoryStatus;
+  // `| undefined` explicitly: `exactOptionalPropertyTypes` is on, and the
+  // caller passes the absent case as a value rather than omitting the key.
+  readonly status?: DirectoryStatus | undefined;
   readonly now: number;
 }
 

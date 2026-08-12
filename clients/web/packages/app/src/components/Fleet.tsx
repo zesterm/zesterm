@@ -76,8 +76,17 @@ export const Fleet = component<{
    * one browser key was removed.
    */
   const relay = relayAccess(bootstrap);
-  const live = liveDirectory({ openLink: relayLinks(device.signer, relay) });
-  onUnmounted(() => live.close());
+  /**
+   * `null` when this deployment has no relay, and then nothing is watched.
+   *
+   * Driving the directory anyway would put every machine into `failed` with
+   * `NO_RELAY` — collapsing "nobody asked" into "we asked and it went wrong",
+   * which is precisely the distinction `presenceOf` exists to keep. A card
+   * whose deployment cannot reach any machine should say nothing, not accuse
+   * each one in turn.
+   */
+  const live = relay === null ? null : liveDirectory({ openLink: relayLinks(device.signer, relay) });
+  onUnmounted(() => live?.close());
 
   const load = (): void => {
     fetchRegistry()
@@ -85,7 +94,7 @@ export const Fleet = component<{
         state.load = { phase: 'ready', hosts: r.hosts, devices: r.devices };
         // Only the machines still in the account: a revoked host's connection
         // is closed by the same call that stops listing it.
-        live.setHosts(r.hosts.map((h) => ({ id: h.id, label: h.label })));
+        live?.setHosts(r.hosts.map((h) => ({ id: h.id, label: h.label })));
       })
       .catch((e: unknown) => {
         state.load = { phase: 'failed', error: e instanceof Error ? e.message : String(e) };
@@ -124,16 +133,29 @@ export const Fleet = component<{
   return () => {
     if (state.session !== null) {
       const target = state.session;
+      // The terminal keeps the chrome, and the way back is the point: a
+      // full-bleed pane with no header is a screen the user can only leave by
+      // reloading the page, which drops every pipe this tab is holding.
       return (
-        <TerminalView
-          entry={target.entry}
-          dial={target.dial}
-          signer={device.signer}
-          theme={theme}
-        />
+        <div class="shell">
+          <header class="topbar">
+            <span class="brand">zesterm</span>
+            <button class="button subtle" onClick={() => (state.session = null)}>
+              ← sessions
+            </button>
+            <span class="grow" />
+            <AccountMenu user={user} />
+          </header>
+          <TerminalView
+            entry={target.entry}
+            dial={target.dial}
+            signer={device.signer}
+            theme={theme}
+          />
+        </div>
       );
     }
-    if (state.open !== null) {
+    if (state.open !== null && live !== null) {
       const machine = state.open;
       return (
         <div class="shell">
@@ -217,7 +239,9 @@ export const Fleet = component<{
                     const card = hostCard(h, {
                       localHostId: null,
                       now: Date.now(),
-                      status: live.statusFor(h.id),
+                      // `undefined` where nothing is watching, which is what
+                      // makes the dot read `unknown` rather than `asleep`.
+                      status: live?.statusFor(h.id),
                     });
                     return (
                       <li

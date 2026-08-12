@@ -169,3 +169,17 @@ test('a live count outranks a supplied one, and the card cannot contradict its d
   assert.equal(card.rows.find((r) => r.label === 'sessions')?.value, '3');
   assert.ok(card.presence.text.includes('3 sessions'));
 });
+
+test('a deployment with no relay says nothing, rather than accusing every machine', () => {
+  // The bug this catches, found in review: driving the live directory with no
+  // relay configured puts every host into `failed` with a NO_RELAY message —
+  // one deployment-level fact, repeated once per machine as though each had
+  // been asked and each had gone wrong. The fleet passes `undefined` instead.
+  const card = hostCard(HOST, { localHostId: null, now: 0, status: undefined });
+  assert.equal(card.presence.kind, 'unknown');
+  assert.equal(card.presence.text, '');
+  assert.ok(
+    !card.rows.some((r) => r.label === 'sessions'),
+    'no relay means no session count either — 0 would claim knowledge',
+  );
+});
