@@ -59,7 +59,16 @@ export function createThemeStore(el: StyleTarget, storage: StorageLike): ThemeSt
     }
   };
 
-  let current = themeById(storage.getItem(THEME_KEY) ?? '') ?? fallback;
+  // The read is best-effort like the writes below: a privacy mode that
+  // blocks localStorage throws on getItem too, and a crash here is a blank
+  // page before the fallback theme ever applies.
+  let stored: string | null = null;
+  try {
+    stored = storage.getItem(THEME_KEY);
+  } catch {
+    // The default theme stands.
+  }
+  let current = themeById(stored ?? '') ?? fallback;
   apply(current);
 
   return {

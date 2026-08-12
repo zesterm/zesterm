@@ -142,6 +142,25 @@ test('a storage that throws on write (private mode) does not break the switch', 
   assert.deepEqual(heard, ['paper'], 'and still notifies — persistence is best-effort');
 });
 
+test('a storage that throws on read (blocked localStorage) still boots the default theme', () => {
+  const el = fakeTarget();
+  const storage: StorageLike = {
+    getItem: () => {
+      throw new Error('SecurityError');
+    },
+    setItem: () => {
+      throw new Error('SecurityError');
+    },
+  };
+  const store = createThemeStore(el, storage);
+  assert.equal(
+    store.theme.id,
+    'obsidian',
+    'a blocked read is a fresh visit, not a crash before the first paint',
+  );
+  assert.equal(el.props.get('--zt-bg'), store.theme.ui.bg, 'and the default theme is applied');
+});
+
 test('initThemeStore registers the app-wide store themeStore() hands out', () => {
   assert.equal(themeStore(), null, 'before boot there is no store, and callers must tolerate that');
   assert.equal(
