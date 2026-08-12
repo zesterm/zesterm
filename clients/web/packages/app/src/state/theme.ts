@@ -100,3 +100,14 @@ export function initThemeStore(el: StyleTarget, storage: StorageLike): ThemeStor
 export function themeStore(): ThemeStore | null {
   return active;
 }
+
+/**
+ * The theme to paint with *right now*. entry-client captures `store.theme`
+ * once and threads it as a prop, so the prop is frozen at boot — a component
+ * mounted after a setTheme that painted from it would render the stale theme
+ * (new chrome, old grid) until the next switch. Callers pass the prop as the
+ * fallback for the pre-boot case only.
+ */
+export function currentTheme(fallback: Theme): Theme {
+  return active?.theme ?? fallback;
+}

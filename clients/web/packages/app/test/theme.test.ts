@@ -4,6 +4,7 @@ import { themeById, DEFAULT_DARK, type Theme } from '@zesterm/theme';
 
 import {
   createThemeStore,
+  currentTheme,
   initThemeStore,
   themeStore,
   type StorageLike,
@@ -143,10 +144,29 @@ test('a storage that throws on write (private mode) does not break the switch', 
 
 test('initThemeStore registers the app-wide store themeStore() hands out', () => {
   assert.equal(themeStore(), null, 'before boot there is no store, and callers must tolerate that');
+  assert.equal(
+    currentTheme(themeById('paper')!).id,
+    'paper',
+    'with no store yet, the caller-supplied theme is all there is — it must be used as-is',
+  );
   const store = initThemeStore(fakeTarget(), fakeStorage());
   assert.equal(
     themeStore(),
     store,
     'components without props access (TerminalView) must find the same instance boot made',
+  );
+});
+
+test('currentTheme tracks the live store, not the theme frozen at boot', () => {
+  const store = initThemeStore(fakeTarget(), fakeStorage());
+  const bootProp = store.theme; // what entry-client captures once and threads as a prop
+
+  store.setTheme('paper');
+
+  assert.notEqual(bootProp.id, 'paper', 'the scenario needs the prop and the store to disagree');
+  assert.equal(
+    currentTheme(bootProp).id,
+    'paper',
+    'a TerminalView mounted after a switch must paint its grid in the CURRENT theme, not the boot-frozen prop — chrome-new/grid-stale is the half-switched state #133 exists to remove',
   );
 });

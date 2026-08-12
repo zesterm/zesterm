@@ -29,7 +29,7 @@ import { resolveTerminalPalette, type Theme } from '@zesterm/theme';
 import type { SessionEntry } from '@zesterm/control';
 
 import { wsDial } from '../ws-dial.ts';
-import { themeStore } from '../state/theme.ts';
+import { currentTheme, themeStore } from '../state/theme.ts';
 
 const FONT_FAMILY = 'ui-monospace, "SF Mono", Menlo, Consolas, monospace';
 const FONT_SIZE = 13;
@@ -110,10 +110,13 @@ export const TerminalView = component<{
     const dpr = window.devicePixelRatio || 1;
     const m = measureMetrics(ctx2d, FONT_FAMILY, FONT_SIZE, dpr);
     metrics = m;
+    // currentTheme, not the prop: the prop is `store.theme` captured once at
+    // boot, so a view mounted after a setTheme would paint the grid in the
+    // stale theme until the NEXT switch (#133).
     painter = new GridPainter({
       ctx: ctx2d,
       metrics: m,
-      palette: resolveTerminalPalette(theme.ui),
+      palette: resolveTerminalPalette(currentTheme(theme).ui),
     });
 
     // A theme switch REBUILDS the painter rather than mutating it: its palette
