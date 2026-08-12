@@ -285,11 +285,10 @@ pub enum LauncherRow {
         /// `shell.command` (or the platform default) when the profile
         /// carries none.
         command: String,
-        /// The profile's pinned host. Carried for the cross-host item (the
-        /// NEXT §12 slice); v1 does not honor a profile's host key, so
-        /// layout deliberately draws NO host chip — a chip naming a machine
-        /// the row will not use is the design's dead-affordance rule
-        /// inverted.
+        /// The profile's pinned host, drawn as the row's host chip. The
+        /// launch honours it (issue #175), so the chip tells the truth:
+        /// present exactly when the profile pins a machine, absent when the
+        /// row rides the window's route.
         host_label: Option<String>,
         /// The row ⏎ runs, tagged `default` on accentSoft.
         default: bool,

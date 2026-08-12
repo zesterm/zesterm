@@ -1252,12 +1252,6 @@ fn launcher_overlay(
 
         match row {
             LauncherRow::Profile { name, command, host_label, default, digit, active, accent } => {
-                // v1 launches on the window's route, so the host chip is
-                // omitted rather than shown and ignored (the design's
-                // dead-affordance rule); the field waits for the cross-host
-                // item.
-                let _ = host_label;
-
                 // Glyph tile: the row's accent on a 12%-alpha wash of it —
                 // the same recipe as the tab chips, so a profile looks like
                 // the tab it is about to become.
@@ -1287,6 +1281,39 @@ fn launcher_overlay(
                         tracking: 0.0,
                     });
                     right -= hw + 8.0 * s;
+                }
+
+                // The host chip, left of the digit: drawn only when the
+                // profile pins a machine, because the launch now honours the
+                // pin (issue #175) — a bordered pill, text not colour alone,
+                // per the design's origin rule.
+                if let Some(host) = host_label {
+                    let chip_px = 10.0 * s;
+                    let tw = measure(host, chip_px, false, 0.0);
+                    let chip_h = 16.0 * s;
+                    let chip = [
+                        right - tw - 12.0 * s,
+                        rect[1] + (rh - chip_h) / 2.0,
+                        tw + 12.0 * s,
+                        chip_h,
+                    ];
+                    out.rects.push(RectInstance {
+                        radii: [4.0 * s; 4],
+                        border: colors.line,
+                        border_width: HAIRLINE * s,
+                        ..RectInstance::filled(chip, LinearRgba::TRANSPARENT, panel)
+                    });
+                    out.texts.push(TextRun {
+                        text: host.clone(),
+                        pos: [chip[0] + 6.0 * s, baseline_in(chip[1], chip[3], chip_px)],
+                        max_width: tw + 2.0,
+                        color: colors.text_inactive,
+                        clip: panel,
+                        px: chip_px,
+                        bold: false,
+                        tracking: 0.0,
+                    });
+                    right -= chip[2] + 8.0 * s;
                 }
 
                 let name_px = UI_BODY * s;
@@ -3574,6 +3601,48 @@ mod tests {
                 && (r.rect[0] - nt[0]).abs() < 0.5
                 && (r.rect[1] - nt[1]).abs() < 0.5),
             "open: the button carries the selSoft fill"
+        );
+    }
+
+    #[test]
+    fn a_launcher_row_draws_its_host_chip_exactly_when_pinned() {
+        // The chip now tells the truth (issue #175): the launch honours the
+        // profile's host key, so a pinned row names its machine — as text,
+        // per the design's origin rule — and an unpinned row draws nothing,
+        // the dead-affordance rule.
+        use super::super::model::{LauncherAnchor, LauncherModel, LauncherRow};
+        let row = |host_label: Option<&str>| LauncherRow::Profile {
+            name: "ubuntu".into(),
+            command: "wsl.exe".into(),
+            host_label: host_label.map(str::to_string),
+            default: false,
+            digit: Some(1),
+            active: false,
+            accent: AccentChoice::Profile(0),
+        };
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut mo = model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+
+        mo.launcher = Some(LauncherModel {
+            rows: vec![row(Some("forge"))],
+            selected: 0,
+            anchor: LauncherAnchor::Strip,
+        });
+        let pinned = layout(&mo, &colors(), &m, &mut measure);
+        assert!(
+            pinned.texts.iter().any(|t| t.text == "forge"),
+            "a pinned profile's row carries its host as text"
+        );
+
+        mo.launcher = Some(LauncherModel {
+            rows: vec![row(None)],
+            selected: 0,
+            anchor: LauncherAnchor::Strip,
+        });
+        let unpinned = layout(&mo, &colors(), &m, &mut measure);
+        assert!(
+            !unpinned.texts.iter().any(|t| t.text == "forge"),
+            "no pin, no chip — a chip naming a machine the launch will not use"
         );
     }
 

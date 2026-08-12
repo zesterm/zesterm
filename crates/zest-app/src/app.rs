@@ -210,6 +210,12 @@ struct PickerState {
     /// Bring the selection into view on the next layout — keyboard only.
     scroll_to_selected: bool,
     actions: Vec<PickerAction>,
+    /// A profile waiting for this picker to choose its host (`ask_host`,
+    /// design §12): picking a host row launches the profile there instead
+    /// of a bare shell. On the picker's state, not the app's, so it dies
+    /// with the picker — a stale pending launch surviving a dismissal would
+    /// hijack the next ⌘K's host row.
+    pending_profile: Option<String>,
 }
 
 /// The command palette's transient state while it is open, and the action
@@ -395,6 +401,13 @@ fn wake_for(
 type ActivityMap =
     Arc<parking_lot::Mutex<std::collections::HashMap<zest_proto::SessionAddr, std::time::Instant>>>;
 
+/// Settled profile launches, parked by workers for `Wakeup::TabsChanged` —
+/// the connecting tab's placeholder address, and the session (or the error
+/// its pane will carry).
+type PendingLaunches = Arc<
+    parking_lot::Mutex<Vec<(zest_proto::SessionAddr, Result<crate::remote::RemoteSession, String>)>>,
+>;
+
 /// The live GPU state, created once the window exists.
 struct Gpu {
     surface: wgpu::Surface<'static>,
@@ -481,6 +494,10 @@ pub struct App {
     /// them (`Wakeup::TabsChanged`). The flag says whether the tab takes the
     /// keyboard: picked tabs do, restored ones arrive in the background.
     pending_tabs: Arc<parking_lot::Mutex<Vec<(Tab, bool)>>>,
+    /// Profile launches whose worker finished dialling, keyed by the
+    /// connecting tab's placeholder address, waiting for the event loop to
+    /// settle them live or failed (`Wakeup::TabsChanged`, issue #175).
+    pending_launches: PendingLaunches,
     /// The persisted identity used for hosts that are not this machine,
     /// loaded lazily on first need so the keychain stays off the startup
     /// path (and off it entirely for people who never leave loopback).
@@ -675,6 +692,7 @@ impl App {
             settings_error: None,
             slider_drag: None,
             pending_tabs: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            pending_launches: Arc::new(parking_lot::Mutex::new(Vec::new())),
             remote_identity: None,
             fonts: None,
             palette,
@@ -896,6 +914,7 @@ impl App {
             // anything. The daemon is better placed to choose anyway: it is the
             // process that will do the spawning.
             command: self.config.shell.as_deref().unwrap_or_default(),
+            cwd: "",
             cols,
             rows,
             scrollback: self.config.scrollback,
@@ -1055,6 +1074,7 @@ impl App {
                 // Empty means the *host's* default shell. The local command
                 // line would ask a Mac to run this machine's PowerShell.
                 command: "",
+                cwd: "",
                 cols,
                 rows,
                 scrollback: self.config.scrollback,
@@ -1344,6 +1364,7 @@ impl App {
                         identity,
                         label: "zesterm",
                         command: &command,
+                        cwd: "",
                         cols,
                         rows,
                         scrollback: self.config.scrollback,
@@ -2550,8 +2571,9 @@ impl App {
                     running,
                     age,
                     // Dead tabs borrow the connecting style (faint text): not
-                    // live, not interactive, still present.
-                    connecting: tab.dead,
+                    // live, not interactive, still present. A launching tab
+                    // wears it for real (issue #175).
+                    connecting: tab.dead || tab.connecting,
                     link,
                 }
             })
@@ -3069,6 +3091,7 @@ impl App {
                     scroll: 0.0,
                     scroll_to_selected: false,
                     actions: Vec::new(),
+                    pending_profile: None,
                 })
             }
         };
@@ -3894,6 +3917,11 @@ impl App {
 
     /// Act on a picker row. Every action closes the picker: the user chose.
     fn run_picker_action(&mut self, action: PickerAction, el: &ActiveEventLoop, shift: bool) {
+        // A pending ask_host launch rides exactly one picker choice: a host
+        // row launches the profile there, anything else abandons it (and
+        // dismissing the picker abandons it structurally — it lives on the
+        // picker's own state).
+        let pending_profile = self.picker.as_mut().and_then(|p| p.pending_profile.take());
         match action {
             PickerAction::None => return,
             PickerAction::RunBlock { origin, command } => {
@@ -3934,6 +3962,31 @@ impl App {
             PickerAction::Create { host, route } => {
                 self.picker = None;
                 self.screen = AppScreen::Terminal;
+                // The ask_host flow (design §12): the picker was opened to
+                // choose this profile's host, and this row is the choice.
+                if let Some(name) = pending_profile {
+                    let meta = crate::launcher::profile_meta(&self.settings, &name);
+                    let target = match &route {
+                        HostRoute::Tcp(addr) => {
+                            crate::launch::HostTarget::Remote { host, addr: addr.clone() }
+                        }
+                        HostRoute::LocalSocket(_) => crate::launch::HostTarget::Local,
+                    };
+                    // The picked host's display name, for the provenance
+                    // line — the profile itself pinned none (that is what
+                    // ask_host means).
+                    let label = self
+                        .fleet
+                        .as_ref()
+                        .map(|f| f.snapshot())
+                        .unwrap_or_default()
+                        .iter()
+                        .find(|h| h.host == host)
+                        .map(|h| h.label.clone())
+                        .unwrap_or_default();
+                    self.launch_profile_at(&name, &meta, target, label);
+                    return;
+                }
                 // Pin remote creates to the host the roster named: the
                 // address came from an advertisement, which is a claim.
                 let expect = (!route.is_local()).then_some(host);
@@ -4013,6 +4066,7 @@ impl App {
                 identity: &identity,
                 label: "zesterm",
                 command: &command,
+                cwd: "",
                 cols,
                 rows,
                 scrollback,
@@ -4077,17 +4131,184 @@ impl App {
     /// button used to do this directly and now opens the launcher instead —
     /// the chord is how the default stays one keystroke away).
     fn new_tab(&mut self) {
-        self.open_shell_tab(None, None);
+        self.open_shell_tab(None, None, None);
     }
 
-    /// Launch a named profile (a launcher row, or its digit): v1 runs the
-    /// profile's command through the ordinary new-tab machinery on the
-    /// WINDOW's current route — a profile's `host` key is the next §12 item,
-    /// which is also why the launcher draws no host chip yet.
+    /// Launch a named profile (a launcher row, or its digit) on the host its
+    /// `host` key pins — the window's route when it pins none (issue #175,
+    /// design §12's launch semantics).
     fn launch_profile(&mut self, name: &str) {
+        let meta = crate::launcher::profile_meta(&self.settings, name);
+        if meta.ask_host {
+            // Host-agnostic profile: the fleet picker chooses the machine,
+            // and its Create action carries this launch there.
+            if self.picker.is_none() {
+                self.toggle_picker();
+            }
+            if let Some(p) = self.picker.as_mut() {
+                p.pending_profile = Some(name.to_string());
+            }
+            return;
+        }
+        let fleet = self.fleet.as_ref().map(|f| f.snapshot()).unwrap_or_default();
+        let target = crate::launch::resolve_host(meta.host.as_deref(), &fleet);
+        let host_label = meta.host.clone().unwrap_or_default();
+        self.launch_profile_at(name, &meta, target, host_label);
+    }
+
+    /// The launch itself, host already decided. Local targets run inline on
+    /// the window's proven route (sub-millisecond, exactly like ⌘T); remote
+    /// and unroutable ones go up immediately as a connecting tab and settle
+    /// off a worker — a cold host must cost a placeholder, never a frozen
+    /// event loop or a silent `warn!`.
+    fn launch_profile_at(
+        &mut self,
+        name: &str,
+        meta: &zest_config::profiles::ProfileMeta,
+        target: crate::launch::HostTarget,
+        host_label: String,
+    ) {
         let identity = crate::tabs::ProfileIdentity::resolve(&self.settings, name);
-        let command = crate::launcher::profile_command(&self.settings, name);
-        self.open_shell_tab(command, Some(identity));
+        let cwd = meta.starting_directory.clone();
+        match target {
+            crate::launch::HostTarget::Local => {
+                self.open_shell_tab(meta.command.clone(), Some(identity), cwd);
+            }
+            target => {
+                let command = crate::launch::launch_command(
+                    meta.command.clone(),
+                    false,
+                    self.config.shell.as_deref(),
+                );
+                self.spawn_connecting_tab(
+                    name,
+                    identity,
+                    command,
+                    cwd.unwrap_or_default(),
+                    host_label,
+                    target,
+                );
+            }
+        }
+    }
+
+    /// Push a connecting tab for a remote (or unroutable) launch and let a
+    /// worker dial with bounded retries (issue #175).
+    ///
+    /// The tab appears NOW: placeholder address, the chrome's connecting
+    /// treatment, and a provenance line in the pane — "New session ·
+    /// profile on host · command" in the scheme's dim colour (§12). It
+    /// settles live when an attach succeeds, or into the dead-tab treatment
+    /// carrying the error after [`crate::launch::MAX_DIALS`] failures.
+    fn spawn_connecting_tab(
+        &mut self,
+        name: &str,
+        identity: crate::tabs::ProfileIdentity,
+        command: String,
+        cwd: String,
+        host_label: String,
+        target: crate::launch::HostTarget,
+    ) {
+        let Some(client) = self.remote_identity() else {
+            tracing::warn!("no identity to dial with; cannot launch the profile");
+            return;
+        };
+
+        let (cols, rows) = self.current_dims();
+        let seed = self.palette_for(Some(&identity));
+        let shown_command = if command.is_empty() { "the host's default shell" } else { &command };
+        let provenance = format!("New session \u{b7} {name} on {host_label} \u{b7} {shown_command}");
+        let pending = crate::tabs::PendingSession::new(
+            cols,
+            rows,
+            seed.clone(),
+            name,
+            &provenance,
+            &host_label,
+        );
+        self.next_placeholder += 1;
+        let placeholder = crate::tabs::placeholder_addr(self.next_placeholder);
+        let hint = match &target {
+            crate::launch::HostTarget::Remote { addr, .. } => Some(addr.clone()),
+            _ => None,
+        };
+        self.tabs.push(
+            Tab::connecting(placeholder, pending, (cols, rows))
+                .with_identity(Some(identity))
+                .with_dial_hint(hint),
+        );
+        self.after_activation();
+        self.relayout_grid();
+
+        let cell = Arc::new(parking_lot::Mutex::new(placeholder));
+        let proxy = self.proxy.clone();
+        let activity = Arc::clone(&self.activity);
+        let outcomes = Arc::clone(&self.pending_launches);
+        let scrollback = self.config.scrollback;
+        let spawned = std::thread::Builder::new().name("zest-profile-launch".into()).spawn(
+            move || {
+                let mut failures = 0u32;
+                let outcome = loop {
+                    let attempt = match &target {
+                        crate::launch::HostTarget::Remote { host, addr } => {
+                            let route = HostRoute::Tcp(addr.clone());
+                            let wake = wake_for(&proxy, Arc::clone(&cell), Arc::clone(&activity));
+                            crate::remote::RemoteSession::create_and_attach(
+                                route.dialer(),
+                                &crate::remote::AttachOptions {
+                                    identity: &client,
+                                    label: "zesterm",
+                                    command: &command,
+                                    cwd: &cwd,
+                                    cols,
+                                    rows,
+                                    scrollback,
+                                    adopt: false,
+                                    local: false,
+                                    // The address came from an advertisement,
+                                    // which is a claim; pin the identity it
+                                    // claimed, like the picker's creates do.
+                                    expect_host: Some(*host),
+                                },
+                                wake,
+                            )
+                            .map_err(|e| e.to_string())
+                        }
+                        crate::launch::HostTarget::Unroutable { error } => Err(error.clone()),
+                        // Local never comes here; launch_profile_at ran it
+                        // inline. Treated as a failure rather than a panic —
+                        // the never-crash rule.
+                        crate::launch::HostTarget::Local => {
+                            Err("local launches do not dial".to_string())
+                        }
+                    };
+                    match attempt {
+                        Ok(session) => {
+                            *cell.lock() = session.addr();
+                            session.terminal().lock().set_palette(seed.clone());
+                            break Ok(session);
+                        }
+                        Err(e) => {
+                            failures += 1;
+                            match crate::launch::verdict_after(failures) {
+                                crate::launch::DialVerdict::RetryAfter(pause) => {
+                                    std::thread::sleep(pause);
+                                }
+                                crate::launch::DialVerdict::GiveUp => break Err(e),
+                            }
+                        }
+                    }
+                };
+                outcomes.lock().push((placeholder, outcome));
+                let _ = proxy.send_event(Wakeup::TabsChanged);
+            },
+        );
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "could not start the launch worker");
+            if let Some(tab) = self.tabs.find_mut(placeholder) {
+                tab.resolve_failed("no thread for the launch worker");
+            }
+        }
     }
 
     /// Open a tab running `command` (the configured shell when `None`),
@@ -4103,6 +4324,7 @@ impl App {
         &mut self,
         command: Option<String>,
         identity: Option<crate::tabs::ProfileIdentity>,
+        cwd: Option<String>,
     ) {
         let (cols, rows) = self.current_dims();
         // Seeded before the first byte arrives, so the grid never flashes
@@ -4119,20 +4341,20 @@ impl App {
                 // Empty means the host's default shell — for a remote host,
                 // its shell, never this machine's command line. A profile's
                 // command travels as written: it is what the profile means,
-                // whichever machine runs it.
-                let command = match (&command, route) {
-                    (Some(c), _) => c.clone(),
-                    (None, HostRoute::LocalSocket(_)) => {
-                        self.config.shell.clone().unwrap_or_default()
-                    }
-                    (None, HostRoute::Tcp(_)) => String::new(),
-                };
+                // whichever machine runs it. (`launch_command` is the tested
+                // statement of this rule.)
+                let command = crate::launch::launch_command(
+                    command.clone(),
+                    route.is_local(),
+                    self.config.shell.as_deref(),
+                );
                 let session = crate::remote::RemoteSession::create_and_attach(
                     route.dialer(),
                     &crate::remote::AttachOptions {
                         identity: client,
                         label: "zesterm",
                         command: &command,
+                        cwd: cwd.as_deref().unwrap_or_default(),
                         cols,
                         rows,
                         scrollback: self.config.scrollback,
@@ -4166,6 +4388,12 @@ impl App {
                 let mut spec = self.build_spec();
                 if let Some(c) = &command {
                     spec.command_line = c.clone();
+                }
+                // The profile's starting_directory, resolved by the machine
+                // that spawns — here, this one (§12: the daemon path sends
+                // it over the wire instead).
+                if let Some(dir) = cwd.as_deref().filter(|d| !d.is_empty()) {
+                    spec.cwd = Some(dir.into());
                 }
                 match Session::spawn(
                     &spec,
@@ -5448,6 +5676,7 @@ impl ApplicationHandler<Wakeup> for App {
                 let mut fresh = self.pending_tabs.lock();
                 let tabs: Vec<(Tab, bool)> = fresh.drain(..).collect();
                 drop(fresh);
+                let pushed = !tabs.is_empty();
                 for (tab, focus) in tabs {
                     if focus {
                         self.tabs.push(tab);
@@ -5455,8 +5684,52 @@ impl ApplicationHandler<Wakeup> for App {
                         self.tabs.push_background(tab);
                     }
                 }
-                self.after_activation();
-                self.relayout_grid();
+                // Profile launches settling (issue #175): the connecting tab
+                // is already in the strip, so this swaps its session in (or
+                // marks it dead carrying the error) rather than pushing.
+                let settled: Vec<_> = self.pending_launches.lock().drain(..).collect();
+                let dims = self.current_dims();
+                for (placeholder, outcome) in settled {
+                    match outcome {
+                        Ok(session) => match self.tabs.find_mut(placeholder) {
+                            Some(tab) => {
+                                tab.resolve_live(session, false);
+                                // The window may have resized while the dial
+                                // was in flight, and the lazy-resize path
+                                // only catches *activation* — this tab is
+                                // most likely already the active one.
+                                if tab.sized != dims {
+                                    tab.source().resize(dims.0, dims.1);
+                                    tab.sized = dims;
+                                }
+                                tab.source().mark_dirty();
+                            }
+                            // Closed while dialling: dropping detaches, the
+                            // shell stays on its host for the picker to find.
+                            None => drop(session),
+                        },
+                        Err(error) => {
+                            tracing::warn!(%placeholder, error, "profile launch failed");
+                            if let Some(tab) = self.tabs.find_mut(placeholder) {
+                                tab.resolve_failed(&error);
+                            }
+                        }
+                    }
+                }
+                if pushed {
+                    // A worker-opened tab takes the keyboard, so this is an
+                    // activation. A settling launch is not: its tab was
+                    // activated when it was pushed, and after_activation()
+                    // here would yank a full-pane screen out from under the
+                    // user because a background dial finished.
+                    self.after_activation();
+                    self.relayout_grid();
+                } else {
+                    self.mark_chrome_dirty();
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                }
                 self.persist_tabs();
             }
             // The picker's data moved. Consume the latch; the chrome decides

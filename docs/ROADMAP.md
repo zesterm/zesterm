@@ -261,7 +261,8 @@ entry stay). The resulting work items, measurements in the handoff README:
       `--screen launcher|profiles` now work). Launches seed the tab's palette
       through the #162 identity, so a profile's scheme shows on frame one.
       v1 launches on the window's route: a profile's `host` key (and its row
-      chip, per the dead-affordance rule) waits for the cross-host item.
+      chip, per the dead-affordance rule) waited for the cross-host item,
+      which landed as #175 below.
 - [x] Settings as a tab (README §11), replacing the ⌘, overlay →
       [#169](https://github.com/zesterm/zesterm/issues/169): ⌘, opens or
       activates the singleton tab (closing it is closing a tab — ⌘W, or Esc
@@ -282,8 +283,27 @@ entry stay). The resulting work items, measurements in the handoff README:
       modal (`settings_overlay`, its scrim, its exclusive-overlay slot) is
       deleted. Path's `Browse…` is deliberately absent: the app has no file
       dialog yet, and §11 says skip rather than build one for this item.
-- [ ] Profiles — launch targets (README §12): its own work item; per-session
-      palette and per-tab host routes cut across WS-A and the control plane.
+- [x] Cross-host profile launch (README §12's launch semantics) →
+      [#175](https://github.com/zesterm/zesterm/issues/175): `launch_profile`
+      resolves `ProfileMeta.host` against the fleet snapshot into a per-tab
+      route (`launch.rs` is the pure seam: local/unset stays on the window's
+      route, a remote label dials its advertised address, an unknown label is
+      a launch that will fail, never a panic). Remote launches push the tab
+      **immediately** in a connecting state — placeholder address, the
+      chrome's connecting treatment, a provenance line in the pane ("New
+      session · profile on host · command", scheme-dim) — and a worker dials
+      with three bounded-backoff tries, settling the tab live on attach or
+      into the dead-tab treatment carrying the error (the old path was one
+      silent `warn!`). `ask_host` preloads the fleet picker with the pending
+      launch; its host row launches the profile there. `starting_directory`
+      rides `CommandSpec.cwd` locally and the *existing* `CreateSession.cwd`
+      field over the wire (no frame growth was needed). Launch-command
+      precedence is pinned by test: profile > Defaults > "" remote / resolved
+      local shell. The launcher rows regained their host chip, which now
+      tells the truth.
+- [ ] Profiles — launch targets (README §12): the editor screen (rail,
+      inheritance chips, live preview) remains; per-session palette and
+      launch semantics have landed (#162, #175).
 - [x] Per-session palette machinery (README §12's chrome-vs-grid rule) →
       [#162](https://github.com/zesterm/zesterm/issues/162): a tab carries the
       resolved identity of the profile it launched from; its grid keeps its

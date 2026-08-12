@@ -15,6 +15,7 @@ mod daemon;
 mod fair_mutex;
 mod fleet;
 mod keymap;
+mod launch;
 mod launcher;
 mod pipeline_cache;
 mod platform;

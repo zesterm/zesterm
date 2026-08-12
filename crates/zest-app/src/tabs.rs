@@ -131,6 +131,100 @@ pub(crate) fn scheme_selection_wash(scheme: &str) -> Option<zest_core::Rgb> {
 pub enum TabSession {
     Daemon(RemoteSession),
     InProcess(Session),
+    /// A launch worker is still dialling the host (design §12): the tab is
+    /// already in the strip, showing a provenance line, so a cold host costs
+    /// the user a placeholder rather than a frozen event loop or a silent
+    /// `warn!` in a log nobody reads (issue #175).
+    Pending(PendingSession),
+}
+
+/// The pane behind a connecting tab: a real local [`Terminal`] holding one
+/// provenance line, so the renderer needs no special case. Keystrokes are
+/// dropped — there is nothing to type into yet, and buffering them would
+/// replay half-considered input into a shell that arrives seconds later
+/// (the same reasoning as the reconnect path's resize-only replay).
+pub struct PendingSession {
+    terminal: std::sync::Arc<crate::fair_mutex::FairMutex<zest_core::Terminal>>,
+    dirty: std::sync::atomic::AtomicBool,
+    origin: crate::source::Origin,
+}
+
+impl PendingSession {
+    /// Build the placeholder pane: profile palette seeded first (the grid
+    /// must never flash the window's scheme under a profile's), the profile
+    /// name as the title, and the provenance line in the scheme's dim colour
+    /// (SGR 2 — the palette decides what "dim" looks like).
+    #[must_use]
+    pub fn new(
+        cols: u16,
+        rows: u16,
+        seed: zest_core::PaletteSnapshot,
+        title: &str,
+        provenance: &str,
+        host_label: &str,
+    ) -> Self {
+        let mut term = zest_core::Terminal::new(usize::from(cols), usize::from(rows), 0);
+        term.set_palette(seed);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"\x1b]2;");
+        bytes.extend_from_slice(sanitize(title).as_bytes());
+        bytes.extend_from_slice(b"\x07\x1b[2m");
+        bytes.extend_from_slice(sanitize(provenance).as_bytes());
+        bytes.extend_from_slice(b"\x1b[0m\r\n");
+        term.advance(&bytes);
+        Self {
+            terminal: std::sync::Arc::new(crate::fair_mutex::FairMutex::new(term)),
+            dirty: std::sync::atomic::AtomicBool::new(true),
+            origin: crate::source::Origin::Daemon { host: host_label.to_string(), local: false },
+        }
+    }
+
+    /// The worker gave up: the error joins the provenance line, in danger
+    /// ink, so the dead tab *carries* its reason instead of pointing at a
+    /// log.
+    fn show_error(&self, error: &str) {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"\x1b[31mcould not open the session: ");
+        bytes.extend_from_slice(sanitize(error).as_bytes());
+        bytes.extend_from_slice(b"\x1b[0m\r\n");
+        self.terminal.lock().advance(&bytes);
+        self.dirty.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Strip control bytes before feeding externally-sourced text to the pane's
+/// terminal — an error message carrying a stray escape would repaint or
+/// retitle the very pane trying to report it (the raw-VT trap from the test
+/// guide, applied to the UI).
+fn sanitize(text: &str) -> String {
+    text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+}
+
+impl crate::source::SessionSource for PendingSession {
+    fn terminal(&self) -> &std::sync::Arc<crate::fair_mutex::FairMutex<zest_core::Terminal>> {
+        &self.terminal
+    }
+
+    fn write(&self, _bytes: Vec<u8>) {
+        // Dropped on purpose; see the struct doc.
+    }
+
+    fn resize(&self, cols: u16, rows: u16) {
+        self.terminal.lock().resize(usize::from(cols), usize::from(rows));
+        self.dirty.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn take_dirty(&self) -> bool {
+        self.dirty.swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    fn mark_dirty(&self) {
+        self.dirty.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn origin(&self) -> crate::source::Origin {
+        self.origin.clone()
+    }
 }
 
 pub struct Tab {
@@ -150,6 +244,10 @@ pub struct Tab {
     /// longer exists. The tab stays put saying so rather than vanishing —
     /// or worse, silently becoming a different shell.
     pub dead: bool,
+    /// A launch worker is still dialling this tab's host. The chip borrows
+    /// the connecting style and the pane shows the provenance line; resolved
+    /// by [`Tab::resolve_live`] or [`Tab::resolve_failed`], never both.
+    pub connecting: bool,
     /// The last `(cols, rows)` this tab's pty was told. Background tabs are
     /// resized lazily on activation, so a window drag costs one resize for
     /// the visible grid instead of N network messages per frame.
@@ -187,6 +285,9 @@ impl SplitPane {
         match &self.session {
             TabSession::Daemon(r) => r,
             TabSession::InProcess(s) => s,
+            // Never constructed for a pane; renders honestly if promotion
+            // ever puts one here.
+            TabSession::Pending(p) => p,
         }
     }
 
@@ -195,6 +296,9 @@ impl SplitPane {
         match self.session {
             TabSession::Daemon(r) => r.kill(),
             TabSession::InProcess(s) => drop(s),
+            // Panes are never pending — only tabs launch through a worker —
+            // but a pane promoted from one would still have nothing to kill.
+            TabSession::Pending(p) => drop(p),
         }
     }
 }
@@ -208,9 +312,51 @@ impl Tab {
             focus_right: false,
             local,
             dead: false,
+            connecting: false,
             sized,
             dial_hint: None,
             identity: None,
+        }
+    }
+
+    /// A tab whose session is still being opened by a worker: pushed
+    /// immediately under a placeholder address so the launch is visible from
+    /// its first frame, then settled by [`Tab::resolve_live`] /
+    /// [`Tab::resolve_failed`] when the dial finishes (issue #175).
+    pub fn connecting(addr: SessionAddr, pending: PendingSession, sized: (u16, u16)) -> Self {
+        Self {
+            addr,
+            session: TabSession::Pending(pending),
+            split: None,
+            focus_right: false,
+            // Remote until proven otherwise: closing a connecting tab must
+            // never kill anything, because there is nothing of ours to kill.
+            local: false,
+            dead: false,
+            connecting: true,
+            sized,
+            dial_hint: None,
+            identity: None,
+        }
+    }
+
+    /// The worker's session arrived: swap it in under the same strip slot.
+    /// The tab's address becomes real here — every hit region and wakeup
+    /// keyed on the placeholder is re-keyed by the caller reading `addr`.
+    pub fn resolve_live(&mut self, remote: RemoteSession, local: bool) {
+        self.addr = remote.addr();
+        self.session = TabSession::Daemon(remote);
+        self.local = local;
+        self.connecting = false;
+    }
+
+    /// The worker gave up: the existing dead-tab treatment, carrying the
+    /// error in the pane rather than in a log (issue #175's whole point).
+    pub fn resolve_failed(&mut self, error: &str) {
+        self.connecting = false;
+        self.dead = true;
+        if let TabSession::Pending(p) = &self.session {
+            p.show_error(error);
         }
     }
 
@@ -234,6 +380,7 @@ impl Tab {
             focus_right: false,
             local: true,
             dead: false,
+            connecting: false,
             sized,
             dial_hint: None,
             identity: None,
@@ -244,6 +391,7 @@ impl Tab {
         match &self.session {
             TabSession::Daemon(r) => r,
             TabSession::InProcess(s) => s,
+            TabSession::Pending(p) => p,
         }
     }
 
@@ -293,6 +441,7 @@ impl Tab {
                 match old {
                     TabSession::Daemon(r) => r.kill(),
                     TabSession::InProcess(s) => drop(s),
+                    TabSession::Pending(p) => drop(p),
                 }
             }
         }
@@ -313,6 +462,10 @@ impl Tab {
         match self.session {
             TabSession::Daemon(r) => r.kill(),
             TabSession::InProcess(s) => drop(s),
+            // Nothing exists to kill; a session the worker later delivers
+            // for a closed tab is dropped by the resolution path (drop
+            // detaches, the daemon keeps the shell).
+            TabSession::Pending(p) => drop(p),
         }
     }
 }
@@ -752,6 +905,77 @@ mod tests {
         assert_eq!(id.scheme, None, "unset stays unset — the window palette's cue");
         assert_eq!(id.selection_bg, None, "no scheme, no cached wash: render falls back live");
         assert_eq!(id.opacity, None);
+    }
+
+    #[test]
+    fn a_connecting_tab_shows_provenance_and_settles_failed_with_the_error() {
+        // The issue-#175 path: the tab exists before any socket does,
+        // showing where the launch is going, and a host that never answers
+        // turns it into the dead-tab treatment *carrying the reason* — the
+        // pane says what failed, not a log line nobody reads.
+        let pending = PendingSession::new(
+            40,
+            6,
+            zest_core::Terminal::new(2, 2, 0).palette().clone(),
+            "Ubuntu",
+            "New session \u{b7} Ubuntu on forge \u{b7} wsl.exe",
+            "forge",
+        );
+        let mut tab = Tab::connecting(placeholder_addr(1), pending, (40, 6));
+        assert!(tab.connecting && !tab.dead);
+        assert!(
+            !tab.local,
+            "closing a connecting tab must detach-by-drop, never kill anything"
+        );
+        {
+            let term = tab.source().terminal();
+            let term = term.lock();
+            assert_eq!(term.title(), "Ubuntu", "the chip reads the profile, not 'shell'");
+            assert!(
+                term.screen_text().contains("New session \u{b7} Ubuntu on forge"),
+                "the provenance line is in the pane: {}",
+                term.screen_text()
+            );
+        }
+        assert_eq!(
+            tab.source().origin(),
+            crate::source::Origin::Daemon { host: "forge".into(), local: false },
+            "the chrome groups and inks this tab by the host it is dialling"
+        );
+
+        tab.resolve_failed("host 'forge' is not in the fleet");
+        assert!(!tab.connecting && tab.dead, "failed is the dead-tab treatment");
+        assert!(
+            tab.source().terminal().lock().screen_text().contains("is not in the fleet"),
+            "and the error rides in the pane"
+        );
+        tab.kill();
+    }
+
+    #[test]
+    fn a_pending_pane_neutralizes_control_bytes_in_what_it_is_fed() {
+        // An error (or profile name) carrying a stray escape would repaint
+        // or retitle the very pane reporting it — the raw-VT trap, in the UI.
+        let pending = PendingSession::new(
+            40,
+            6,
+            zest_core::Terminal::new(2, 2, 0).palette().clone(),
+            "bad\x1b]2;evil\x07name",
+            "line\x1b[2Jwiped",
+            "host",
+        );
+        let tab = Tab::connecting(placeholder_addr(2), pending, (40, 6));
+        let term = tab.source().terminal();
+        assert!(
+            !term.lock().title().contains("evil"),
+            "the embedded OSC never executed as a retitle: {:?}",
+            term.lock().title()
+        );
+        assert!(
+            term.lock().screen_text().contains("line [2Jwiped"),
+            "the clear-screen never executed: {}",
+            term.lock().screen_text()
+        );
     }
 
     #[test]
