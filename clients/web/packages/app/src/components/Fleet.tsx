@@ -10,21 +10,30 @@
  * appears in a fleet listing because it serves no sessions, so this is the only
  * place one can be seen or revoked.
  *
- * Enrolment is the spine here, not discovery. It is durable and account-scoped
- * and survives a machine being asleep; presence will decorate it once there is
- * a relay to learn presence from. Until then `last seen` is the only honest
- * thing to show, and it comes from the enrolment record. The same honesty
- * shapes what each card OMITS — see `fleet-model.ts` and the note below.
+ * **Enrolment is still the spine, and presence now decorates it.** The registry
+ * is durable and account-scoped and survives a machine being asleep;
+ * `liveDirectory` dials each enrolled machine through the relay and says which
+ * of them are actually there. `last seen` stays the registry's answer and is
+ * the only thing worth showing for a machine that is not.
+ *
+ * The same honesty shapes what each card OMITS — see `fleet-model.ts` — and it
+ * is why `asleep` is not painted as a fault: over the relay most of a fleet is
+ * asleep most of the time, and a screen that shows the ordinary case in red is
+ * one people stop reading, taking the real faults with it.
  */
 
-import { component, signal } from 'sigx';
+import { component, onUnmounted, signal } from 'sigx';
 import type { Theme } from '@zesterm/theme';
 
 import type { Bootstrap, User } from '../bootstrap.ts';
 import type { DeviceKey } from '../device-key.ts';
 import { ago, hostCard } from '../fleet-model.ts';
+import { liveDirectory, relayLinks } from '../live-directory.ts';
+import { relayAccess } from '../relay-access.ts';
 import { fetchRegistry, revoke, type Device, type Host } from '../registry.ts';
 import { AccountMenu } from './AccountMenu.tsx';
+import { SessionList, type OpenTarget } from './SessionList.tsx';
+import { TerminalView } from './TerminalView.tsx';
 import { Shell } from './Shell.tsx';
 
 type Load =
@@ -44,14 +53,49 @@ export const Fleet = component<{
     return () => <Shell device={device} theme={theme} />;
   }
 
-  const state = signal<{ load: Load; busy: string | null }>({
+  const state = signal<{
+    load: Load;
+    busy: string | null;
+    /** Which machine's sessions are showing, if any. */
+    open: { readonly id: string; readonly label: string } | null;
+    /** Which session is attached, if any. */
+    session: OpenTarget | null;
+  }>({
     load: { phase: 'loading' },
     busy: null,
+    open: null,
+    session: null,
   });
+
+  /**
+   * One connection per enrolled machine, held for as long as this screen is.
+   *
+   * Built once rather than per load: `setHosts` is idempotent for a machine
+   * already watched, and the fleet refetches `/api/hosts` after every revoke —
+   * rebuilding here would drop and redial every pipe in the account because
+   * one browser key was removed.
+   */
+  const relay = relayAccess(bootstrap);
+  /**
+   * `null` when this deployment has no relay, and then nothing is watched.
+   *
+   * Driving the directory anyway would put every machine into `failed` with
+   * `NO_RELAY` — collapsing "nobody asked" into "we asked and it went wrong",
+   * which is precisely the distinction `presenceOf` exists to keep. A card
+   * whose deployment cannot reach any machine should say nothing, not accuse
+   * each one in turn.
+   */
+  const live = relay === null ? null : liveDirectory({ openLink: relayLinks(device.signer, relay) });
+  onUnmounted(() => live?.close());
 
   const load = (): void => {
     fetchRegistry()
-      .then((r) => (state.load = { phase: 'ready', hosts: r.hosts, devices: r.devices }))
+      .then((r) => {
+        state.load = { phase: 'ready', hosts: r.hosts, devices: r.devices };
+        // Only the machines still in the account: a revoked host's connection
+        // is closed by the same call that stops listing it.
+        live?.setHosts(r.hosts.map((h) => ({ id: h.id, label: h.label })));
+      })
       .catch((e: unknown) => {
         state.load = { phase: 'failed', error: e instanceof Error ? e.message : String(e) };
       });
@@ -77,7 +121,76 @@ export const Fleet = component<{
 
   const user = bootstrap.user as User;
 
-  return () => (
+  /**
+   * Three screens rather than three routes.
+   *
+   * The route table already points `/hosts`, `/h/:id` and `/h/:id/s/:id` at
+   * this component, so switching here is what exists today; making them real
+   * routes is a separate change with its own argument about deep links, and
+   * doing it inside this one would bury the part that matters.
+   */
+
+  return () => {
+    if (state.session !== null) {
+      const target = state.session;
+      // The terminal keeps the chrome, and the way back is the point: a
+      // full-bleed pane with no header is a screen the user can only leave by
+      // reloading the page, which drops every pipe this tab is holding.
+      return (
+        <div class="shell">
+          <header class="topbar">
+            <span class="brand">zesterm</span>
+            <button class="button subtle" onClick={() => (state.session = null)}>
+              ← sessions
+            </button>
+            <span class="grow" />
+            <AccountMenu user={user} />
+          </header>
+          <TerminalView
+            entry={target.entry}
+            dial={target.dial}
+            signer={device.signer}
+            theme={theme}
+          />
+        </div>
+      );
+    }
+    if (state.open !== null && live !== null) {
+      const machine = state.open;
+      return (
+        <div class="shell">
+          <header class="topbar">
+            <span class="brand">zesterm</span>
+            <button class="button subtle" onClick={() => (state.open = null)}>
+              ← fleet
+            </button>
+            <span class="grow" />
+            <AccountMenu user={user} />
+          </header>
+          <div class="fleet-page">
+            <SessionList
+              source={live.sourceFor(machine.id)}
+              relay={relay}
+              title={machine.label}
+              connectingLabel="reaching this machine…"
+              deviceKind={device.kind}
+              onOpen={(t: OpenTarget) => (state.session = t)}
+              onCreate={() =>
+                live
+                  .createSession(machine.id, { cols: 120, rows: 32 })
+                  .catch((e: unknown) => {
+                    state.load = {
+                      phase: 'failed',
+                      error: e instanceof Error ? e.message : String(e),
+                    };
+                  })
+              }
+            />
+          </div>
+        </div>
+      );
+    }
+    return (
     <div class="shell">
       <header class="topbar">
         <span class="brand">zesterm</span>
@@ -123,14 +236,26 @@ export const Fleet = component<{
                       localHostId is null: on the hosted path the browser is a
                       DEVICE, so no host is identifiably this machine. */}
                   {state.load.hosts.map((h) => {
-                    const card = hostCard(h, { localHostId: null, now: Date.now() });
+                    const card = hostCard(h, {
+                      localHostId: null,
+                      now: Date.now(),
+                      // `undefined` where nothing is watching, which is what
+                      // makes the dot read `unknown` rather than `asleep`.
+                      status: live?.statusFor(h.id),
+                    });
                     return (
-                      <li key={h.id} class={`host-card${card.local ? ' local' : ''}`}>
+                      <li
+                        key={h.id}
+                        class={`host-card${card.local ? ' local' : ''}${
+                          card.presence.reachable ? ' reachable' : ''
+                        }`}
+                      >
                         <div class="card-head">
-                          {/* Faint on purpose: presence is unknown until the
-                              relay exists — a green dot would claim liveness
-                              the directory cannot know. */}
-                          <span class="card-dot" />
+                          {/* The dot states what the socket says and nothing
+                              more. `unknown` keeps the faint dot it always had:
+                              a deployment with no relay has not learned that a
+                              machine is absent, it has not asked. */}
+                          <span class={`card-dot ${card.presence.kind}`} />
                           <span class="card-name">{card.name}</span>
                           {card.local ? <span class="card-note">this machine</span> : null}
                           <span class="grow" />
@@ -150,18 +275,26 @@ export const Fleet = component<{
                             </div>
                           ))}
                         </div>
+                        <div class="card-foot">
+                          <span class={`presence ${card.presence.kind}`}>{card.presence.text}</span>
+                          <span class="grow" />
+                          {/* Only a machine that answered offers a way in. A
+                              button that opens a screen saying "asleep" is a
+                              worse answer than no button. */}
+                          {card.presence.reachable ? (
+                            <button
+                              class="button"
+                              onClick={() => (state.open = { id: h.id, label: h.label })}
+                            >
+                              open
+                            </button>
+                          ) : null}
+                        </div>
                       </li>
                     );
                   })}
                 </ul>
               )}
-              {/* Honest about the gap: enrolled is not the same as reachable. */}
-              {state.load.hosts.length > 0 ? (
-                <p class="fineprint">
-                  Enrolled, but not yet reachable from here — the relay that carries terminal
-                  traffic between your machines is not built.
-                </p>
-              ) : null}
             </section>
 
             <section>
@@ -202,5 +335,6 @@ export const Fleet = component<{
         ) : null}
       </div>
     </div>
-  );
+    );
+  };
 });

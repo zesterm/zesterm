@@ -128,6 +128,7 @@ pub fn screen_overlay(
     screen: &ScreenModel,
     area: [f32; 4],
     colors: &ChromeColors,
+    hover: Option<HitRegion>,
     s: f32,
     measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
     out: &mut ChromeLayout,
@@ -135,40 +136,12 @@ pub fn screen_overlay(
     match screen {
         ScreenModel::Fleet { cards } => fleet(cards, area, colors, s, measure, out),
         ScreenModel::Themes { cards } => themes(cards, area, colors, s, measure, out),
-        ScreenModel::Profiles => profiles_placeholder(area, colors, s, measure, out),
+        // Hover matters only here (the Delete button's danger tint); the
+        // card screens keep the design's instant, hoverless surfaces.
+        ScreenModel::Profiles(model) => super::profiles_screen::profiles_screen(
+            model, area, colors, hover, s, measure, out,
+        ),
     }
-}
-
-/// The Profiles tab's pane, until the editor exists: one honest line naming
-/// the pending work item, so `--screen profiles` never captures a blank pane
-/// and nobody mistakes the placeholder for a broken screen.
-fn profiles_placeholder(
-    area: [f32; 4],
-    colors: &ChromeColors,
-    s: f32,
-    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
-    out: &mut ChromeLayout,
-) {
-    out.rects.push(RectInstance::filled(area, colors.bg_opaque, area));
-    out.hit.push(area, HitRegion::ScreenPanel);
-
-    let line = "Profiles — launch targets (design §12) are their own work item; \
-                the + menu already runs what the config defines.";
-    let px = 12.5 * s;
-    let w = measure(line, px, false, 0.0).min(area[2] - 36.0 * s);
-    out.texts.push(TextRun {
-        text: line.into(),
-        pos: [
-            area[0] + ((area[2] - w) / 2.0).max(18.0 * s),
-            area[1] + area[3] / 2.0 + px * 0.36,
-        ],
-        max_width: w,
-        color: colors.text_faint,
-        clip: area,
-        px,
-        bold: false,
-        tracking: 0.0,
-    });
 }
 
 fn fleet(
@@ -549,6 +522,7 @@ mod tests {
             &ScreenModel::Themes { cards },
             area,
             &colors(),
+            None,
             1.0,
             &mut measure,
             &mut out,

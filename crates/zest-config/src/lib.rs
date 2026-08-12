@@ -306,6 +306,38 @@ pub fn remove_profile(path: &Path, name: &str) -> std::io::Result<()> {
 }
 
 #[cfg(feature = "fs")]
+/// Create an empty profile table (`[profiles.<name>]`), comments preserved.
+///
+/// The profiles editor's "＋ New profile": a profile with no keys is a valid
+/// launch target (everything falls through Defaults), so creating one writes
+/// only the header. A profile that already exists is left alone — creating is
+/// idempotent, never destructive.
+pub fn create_profile(path: &Path, name: &str) -> std::io::Result<()> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = existing
+        .parse()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e}")))?;
+
+    if doc.get("profiles").and_then(|p| p.get(name)).is_some() {
+        return Ok(());
+    }
+    if doc.get("profiles").is_none() {
+        // Implicit, so an empty [profiles] header never prints on its own —
+        // the same rule write_at applies to intermediate tables.
+        let mut table = toml_edit::Table::new();
+        table.set_implicit(true);
+        doc["profiles"] = toml_edit::Item::Table(table);
+    }
+    // Explicit, unlike the parents above: the header IS the profile.
+    doc["profiles"][name] = toml_edit::Item::Table(toml_edit::Table::new());
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, doc.to_string())
+}
+
+#[cfg(feature = "fs")]
 /// Duplicate a profile under a new name, comments and all.
 ///
 /// Unlike the removals, a missing source is an error: "Duplicate" acting on a
@@ -575,6 +607,37 @@ mod tests {
             copy_profile(&path, "ghost", "ghost-2").is_err(),
             "copying a profile that is not there means the caller is stale; say so"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn creating_a_profile_writes_only_its_header_and_is_idempotent() {
+        // "＋ New profile" (design §12): an empty table is a valid launch
+        // target, so creation writes the header alone — and re-creating an
+        // existing profile must never truncate what the user put in it.
+        let path = temp("create-profile");
+        std::fs::write(&path, "# my terminal\n[typography]\nsize_pt = 14.0\n").expect("write");
+
+        create_profile(&path, "new-profile-1").expect("create");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains("# my terminal"), "lost a comment: {text}");
+        assert!(text.contains("[profiles.new-profile-1]"), "no header: {text}");
+        let table: toml::Table = text.parse().expect("still valid toml");
+        assert!(
+            table["profiles"]["new-profile-1"].as_table().is_some_and(toml::Table::is_empty),
+            "a new profile starts empty: {text}"
+        );
+
+        write_profile_value(
+            &path,
+            "new-profile-1",
+            "icon",
+            toml_edit::value("★").into_value().unwrap(),
+        )
+        .expect("edit");
+        create_profile(&path, "new-profile-1").expect("re-create");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains("icon"), "re-creating truncated the profile: {text}");
         let _ = std::fs::remove_file(&path);
     }
 

@@ -56,6 +56,10 @@ pub struct ChromeLayout {
     /// The settings overlay's scroll, clamped — and possibly *adjusted*, when
     /// the model asked for the selection to be brought into view.
     pub settings_scroll: f32,
+    /// The profiles editor's rows-pane scroll, same discipline. Its own
+    /// field because the Settings tab can be open (inactive) underneath the
+    /// Profiles screen, and two panes sharing one scroll would fight.
+    pub profiles_scroll: f32,
     /// Slider tracks by row index, exactly as drawn — a click's fraction is
     /// computed against these, so pointer and pixels cannot disagree.
     pub settings_tracks: Vec<(usize, [f32; 4])>,
@@ -185,7 +189,7 @@ fn baseline_in(band_y: f32, band_h: f32, px: f32) -> f32 {
 /// The host-accent cycle: slot 0 (the local machine) is `success`, then
 /// `info`, `magenta`, `warn` — the design's studio/crate/forge assignment
 /// generalized. Wraps rather than running out.
-fn host_accent(colors: &ChromeColors, slot: usize) -> LinearRgba {
+pub(super) fn host_accent(colors: &ChromeColors, slot: usize) -> LinearRgba {
     [colors.success, colors.info, colors.magenta, colors.warn][slot % 4]
 }
 
@@ -195,7 +199,7 @@ fn host_accent(colors: &ChromeColors, slot: usize) -> LinearRgba {
 /// the state colours — because the theme carries no separate accents list;
 /// these six are what its swatches show. Wraps rather than running out, like
 /// the host cycle: a hand-edited `tab_color = 250` still draws something.
-fn accent_color(colors: &ChromeColors, choice: AccentChoice) -> LinearRgba {
+pub(super) fn accent_color(colors: &ChromeColors, choice: AccentChoice) -> LinearRgba {
     match choice {
         AccentChoice::Profile(i) => [
             colors.accent,
@@ -218,7 +222,7 @@ fn dot(rects: &mut Vec<RectInstance>, cx: f32, cy: f32, d: f32, color: LinearRgb
 /// The colour at a fraction of its own alpha. Colours here are premultiplied,
 /// so scaling every channel is the correct alpha multiply — the glyph tile's
 /// 12% wash is its ink through this.
-fn washed(c: LinearRgba, f: f32) -> LinearRgba {
+pub(super) fn washed(c: LinearRgba, f: f32) -> LinearRgba {
     LinearRgba([c.0[0] * f, c.0[1] * f, c.0[2] * f, c.0[3] * f])
 }
 
@@ -251,7 +255,15 @@ pub fn layout(
         // Over the grid (and over the settings tab's content — Esc returns),
         // under the modals: a screen is window content, not an overlay, so
         // the picker can still open above it.
-        super::screens::screen_overlay(screen, model.grid_area, colors, m.scale, measure, &mut out);
+        super::screens::screen_overlay(
+            screen,
+            model.grid_area,
+            colors,
+            model.hover,
+            m.scale,
+            measure,
+            &mut out,
+        );
     }
     // Everything below is the overlay layer; everything above must have its
     // text drawn before an overlay's panel covers it.

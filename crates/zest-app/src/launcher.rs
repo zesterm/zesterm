@@ -30,9 +30,10 @@ pub enum LauncherAction {
 }
 
 /// `Settings::profiles` re-rooted as the `toml::Table` the resolver walks —
-/// the same shape `ProfileIdentity::resolve` builds, kept private to each so
-/// neither grows a public contract for an encoding detail.
-fn profiles_root(settings: &Settings) -> toml::Table {
+/// the same shape `ProfileIdentity::resolve` builds. Crate-visible for the
+/// profiles editor (`profiles_ui`), which resolves the same way the launcher
+/// does — one encoding, one place.
+pub(crate) fn profiles_root(settings: &Settings) -> toml::Table {
     let mut table = toml::Table::new();
     for (key, profile) in &settings.profiles {
         table.insert(key.clone(), toml::Value::Table(profile.clone()));

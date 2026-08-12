@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ago, fingerprintDisplay, hostCard } from '../src/fleet-model.ts';
+import { ago, fingerprintDisplay, hostCard, presenceOf } from '../src/fleet-model.ts';
+import type { DirectoryStatus } from '../src/directory-source.ts';
 import type { Host } from '../src/registry.ts';
 
 test('fingerprintDisplay keeps head and tail of a long key', () => {
@@ -94,4 +95,91 @@ test('ago is rough on purpose and pure over the given clock', () => {
   assert.equal(ago(now - 5 * 60_000, now), '5m ago');
   assert.equal(ago(now - 3 * 3_600_000, now), '3h ago');
   assert.equal(ago(now - 48 * 3_600_000, now), '2d ago');
+});
+
+/** A `ready` status carrying `n` sessions, and nothing else a card reads. */
+function ready(n: number): DirectoryStatus {
+  return {
+    kind: 'ready',
+    view: {
+      sessions: Array.from({ length: n }, (_, i) => ({ session: String(i) })),
+    },
+  } as unknown as DirectoryStatus;
+}
+
+test('a machine nobody asked about says so, rather than claiming to be asleep', () => {
+  // The distinction the whole type exists for: "not asked" and "asked, no
+  // answer" look identical on a boolean and mean opposite things. The local
+  // path and a deployment with no relay both land here.
+  const p = presenceOf(undefined);
+  assert.equal(p.kind, 'unknown');
+  assert.equal(p.reachable, false);
+  assert.equal(p.text, '', 'an unknown machine has nothing to say, not something reassuring');
+});
+
+test('asleep is its own state and is not a fault', () => {
+  const p = presenceOf({ kind: 'offline' });
+  assert.equal(
+    p.kind,
+    'asleep',
+    'over the relay most of a fleet is asleep most of the time; painting that as degraded is how a screen stops being read',
+  );
+  assert.notEqual(p.kind, 'degraded');
+  assert.equal(p.reachable, false, 'a sleeping machine leads nowhere, so its card must not');
+});
+
+test('pairing shows the code, because the code IS the instruction', () => {
+  const p = presenceOf({ kind: 'pairing', code: '481920' });
+  assert.ok(
+    p.text.includes('481920'),
+    'the code has to be compared against what the machine is showing; without it this is a wait with no way out',
+  );
+  assert.equal(p.reachable, false);
+});
+
+test('an error says what went wrong rather than a fixed sentence', () => {
+  const p = presenceOf({ kind: 'error', message: 'the relay refused this browser' });
+  assert.ok(p.text.includes('refused'), 'the two worlds fail differently and the status knows how');
+  assert.equal(p.kind, 'degraded');
+});
+
+test('only a machine that answered is reachable', () => {
+  assert.equal(presenceOf(ready(0)).reachable, true);
+  for (const s of [
+    { kind: 'pending' } as const,
+    { kind: 'offline' } as const,
+    { kind: 'error', message: 'x' } as const,
+    { kind: 'pairing', code: '1' } as const,
+  ]) {
+    assert.equal(presenceOf(s).reachable, false, `${s.kind} must not offer a way in`);
+  }
+});
+
+test('the session count is pluralised and comes off the live view', () => {
+  assert.equal(presenceOf(ready(1)).text, 'online · 1 session');
+  assert.equal(presenceOf(ready(3)).text, 'online · 3 sessions');
+  assert.equal(presenceOf(ready(0)).text, 'online · 0 sessions');
+});
+
+test('a live count outranks a supplied one, and the card cannot contradict its dot', () => {
+  // Same fact from two places: the registry hint and the socket. A card
+  // reading `online · 3 sessions` beside a row saying `sessions 7` is worse
+  // than either number alone.
+  const card = hostCard(HOST, { localHostId: null, sessions: 7, now: 0, status: ready(3) });
+  assert.equal(card.rows.find((r) => r.label === 'sessions')?.value, '3');
+  assert.ok(card.presence.text.includes('3 sessions'));
+});
+
+test('a deployment with no relay says nothing, rather than accusing every machine', () => {
+  // The bug this catches, found in review: driving the live directory with no
+  // relay configured puts every host into `failed` with a NO_RELAY message —
+  // one deployment-level fact, repeated once per machine as though each had
+  // been asked and each had gone wrong. The fleet passes `undefined` instead.
+  const card = hostCard(HOST, { localHostId: null, now: 0, status: undefined });
+  assert.equal(card.presence.kind, 'unknown');
+  assert.equal(card.presence.text, '');
+  assert.ok(
+    !card.rows.some((r) => r.label === 'sessions'),
+    'no relay means no session count either — 0 would claim knowledge',
+  );
 });

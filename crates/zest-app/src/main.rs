@@ -19,6 +19,7 @@ mod launch;
 mod launcher;
 mod pipeline_cache;
 mod platform;
+mod profiles_ui;
 mod remote;
 mod session;
 mod settings_ui;

@@ -151,6 +151,20 @@ pub enum HitRegion {
     /// A font-list item's body, by (row, item) — the drag-to-reorder handle
     /// and drop target: order IS the setting (§11).
     SettingsListItem(usize, usize),
+    /// One row of the profiles editor's rail (design §12); clicking edits
+    /// that profile (only the launcher launches — two different verbs).
+    ProfilesRailRow(usize),
+    /// The rail footer's dashed "＋ New profile".
+    ProfilesNew,
+    /// The editor header's Duplicate button.
+    ProfilesDuplicate,
+    /// The editor header's Delete button (absent on Defaults).
+    ProfilesDelete,
+    /// One option of a direct-choice cell in the profiles editor — a scheme
+    /// swatch, an accent swatch, or an icon tile — by (row, option index).
+    /// The row's cell decides what the index means; the parallel action
+    /// list resolves the field, so the pair cannot drift.
+    ProfilesChoice(usize, usize),
     /// A caption button we drew ourselves, on the borderless path.
     CaptionButton(CaptionButton),
     /// The window's own edge. Pushed last of everything, so it outranks even
