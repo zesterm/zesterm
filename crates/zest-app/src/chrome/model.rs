@@ -489,8 +489,10 @@ pub enum SettingsValueCell {
     /// grows a list is `settings_ui::EditBuffer`'s business — this cell only
     /// knows how to draw the text.
     Editing { buffer: String, error: bool },
-    /// The §12 host pill: status dot, host name, ▾ — clicking opens the
-    /// fleet picker (the roster comes from the fleet, not the schema).
+    /// The §12 host pill: status dot, host name, ▾. Clicking opens a typed
+    /// edit of the host label today; the fleet-picker chooser the ▾ implies
+    /// arrives with the cross-host launch item, which owns the picker's
+    /// pending-launch plumbing.
     HostPill { name: String, online: bool },
     /// The §12 scheme picker: one 60×14 eight-swatch chip per builtin theme,
     /// name under it; `selected` is ringed accent on accentSoft.

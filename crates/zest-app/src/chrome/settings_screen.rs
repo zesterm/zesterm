@@ -933,7 +933,9 @@ pub(super) fn draw_control(
         SettingsValueCell::HostPill { name, online } => {
             // The §12 host pill: the Select pill's geometry with a status dot
             // — clicking routes through the same SettingsSelect dispatch,
-            // which the profiles editor answers with the fleet picker.
+            // which the profiles editor answers with a typed edit of the
+            // label today (the fleet-picker chooser rides the cross-host
+            // launch item).
             let pill = [right - SELECT_W * s, top, SELECT_W * s, SELECT_H * s];
             out.rects.push(RectInstance {
                 radii: [8.0 * s; 4],
