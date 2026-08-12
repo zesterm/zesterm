@@ -227,14 +227,16 @@ rendered PNG per screen). It also *revises* screens 1–2 against what shipped,
 deliberately: tab chips carry the title only, the `+` opens a profile launcher
 menu, the status bar is deleted, and the layout toggle leaves the chrome
 (`tabs.position` is the single source of truth; the ⌘⇧E chord and its palette
-entry stay). The resulting work items, measurements in the handoff README:
+entry stay). The resulting work items, measurements in the handoff README — **all landed** (the native run of #149–#178; ADR-012 records the architectural rule they established):
 
-- [ ] `TabContent` — tabs that aren't sessions (Settings, Profiles), without
-      touching the `SessionAddr`-keyed hit machinery. *Settings half landed
-      with [#169](https://github.com/zesterm/zesterm/issues/169)*: the strip
-      holds one app tab behind a reserved `SessionAddr`
-      (`tabs::settings_addr()`), so every hit region and activation path
-      stayed put; the Profiles tab reuses the same mechanism when §12 lands.
+- [x] `TabContent` — tabs that aren't sessions (Settings, Profiles), without
+      touching the `SessionAddr`-keyed hit machinery. Settings landed with
+      [#169](https://github.com/zesterm/zesterm/issues/169), Profiles with
+      [#168](https://github.com/zesterm/zesterm/issues/168)/[#176](https://github.com/zesterm/zesterm/issues/176):
+      each app tab lives behind a reserved `SessionAddr` on the all-zero
+      host (`settings_addr()` = `u64::MAX`, `profiles_tab_addr()` =
+      `u64::MAX − 1` — a test pins that the pair differs, ADR-012 records
+      why), so every hit region and activation path stayed put.
 - [x] Screens 1–2 reconciliation → [#149](https://github.com/zesterm/zesterm/issues/149):
       title-only chips (closes #51 structurally), status-bar deletion,
       layout-pill removal, full-width vertical header, horizontal strip scroll
