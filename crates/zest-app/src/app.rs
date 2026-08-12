@@ -226,9 +226,14 @@ struct PaletteState {
     actions: Vec<Option<keymap::Action>>,
 }
 
-/// The settings overlay's transient state while it is open.
+/// The Settings tab's state — created when the tab opens, dropped when it
+/// closes, surviving activation changes in between: the tab is a place you
+/// sit in (design §11), and its selection, filter and buffers belong to it.
 struct SettingsUiState {
     selected: usize,
+    /// The rail's selected category, by label — a label, not an index,
+    /// because the filter hides empty categories and an index would slide.
+    category: String,
     filter: String,
     scroll: f32,
     /// Bring the selection into view on the next layout — set by keyboard
@@ -237,10 +242,41 @@ struct SettingsUiState {
     /// Parallel to the drawn rows, same-pass built (the picker discipline).
     actions: Vec<crate::settings_ui::RowAction>,
     /// The schema walk, cached at open: the schema cannot change while the
-    /// overlay is up, and re-walking it per hover would be pure waste.
+    /// tab is open, and re-walking it per hover would be pure waste.
     fields: Vec<zest_config::ui::UiField>,
     /// A typed edit in progress; while `Some`, characters belong to it.
     editing: Option<crate::settings_ui::EditBuffer>,
+    /// Installed families, scanned once at open — the font rows' fallback
+    /// tags read this instead of re-scanning the system per rebuild.
+    installed: Vec<String>,
+    /// An open dropdown menu: (row index, keyboard selection).
+    menu: Option<(usize, usize)>,
+    /// A font-list drag in progress: (row index, item being dragged).
+    /// Order is the setting; crossing another item reorders through the
+    /// same write path as everything else.
+    list_drag: Option<(usize, usize)>,
+}
+
+impl SettingsUiState {
+    /// Composed (IME) text, routed exactly where a typed character goes:
+    /// the open dropdown swallows it (the key path's arm ignores
+    /// `Key::Character` there too), an open edit buffer takes it, and
+    /// otherwise it lands in the filter. The Settings tab holds the
+    /// keyboard — a commit written to the concealed session would type a
+    /// composed word into a shell the user cannot see.
+    fn commit_text(&mut self, text: &str) {
+        if self.menu.is_some() {
+            return;
+        }
+        if let Some(edit) = self.editing.as_mut() {
+            edit.buffer.push_str(text);
+            edit.error = false;
+        } else {
+            self.filter.push_str(text);
+            self.selected = 0;
+            self.scroll_to_selected = true;
+        }
+    }
 }
 
 /// The + launcher menu's transient state while it is open (design §1), and
@@ -261,8 +297,11 @@ struct LauncherState {
 /// Cycling with the arrow keys is fine for five themes and useless for 266
 /// installed font families, which is what this exists for.
 struct ValuePickerState {
-    /// Index into the settings overlay's `fields`.
+    /// Index into the settings tab's `fields`.
     field: usize,
+    /// Append the choice to a list value (the font stack's add row) instead
+    /// of replacing it.
+    append: bool,
     /// Everything choosable, unfiltered and in display order.
     options: Vec<String>,
     /// Parallel to the drawn rows, same-pass built — the picker discipline
@@ -425,8 +464,11 @@ pub struct App {
     /// state the launcher's Manage-profiles row and ⌘⇧, both go through.
     app_tabs: crate::tabs::AppTabs,
     /// Where each non-default setting came from, kept from the last resolve —
-    /// the settings overlay's "set by profile `k8s`" chips read it.
+    /// the settings tab's "set by profile `k8s`" chips read it.
     provenance: std::collections::BTreeMap<String, zest_config::Source>,
+    /// Keys the cascade kept that the schema does not know — the settings
+    /// tab's ninth category. Kept from the last resolve, like provenance.
+    unknown_keys: Vec<String>,
     /// Restart-class keys edited this run. On `App` rather than the overlay
     /// state: closing and reopening the overlay does not un-owe the restart.
     restart_pending: std::collections::BTreeSet<String>,
@@ -586,8 +628,9 @@ impl App {
     ) -> Self {
         // Taken whole rather than as bare settings: provenance is the part
         // of a resolve that is easy to drop and expensive to add back — the
-        // settings overlay's "set by ..." chips are built from it.
-        let zest_config::Resolved { settings, provenance, .. } = resolved;
+        // settings tab's "set by ..." chips are built from it, and its
+        // unknown-keys category from the keys the cascade kept.
+        let zest_config::Resolved { settings, provenance, unknown_keys } = resolved;
         let config = Config::from(&settings);
         let theme = zest_theme::builtin::get(&config.theme)
             .unwrap_or_else(zest_theme::builtin::obsidian);
@@ -627,6 +670,7 @@ impl App {
             launcher: None,
             app_tabs: crate::tabs::AppTabs::default(),
             provenance,
+            unknown_keys,
             restart_pending: std::collections::BTreeSet::new(),
             settings_error: None,
             slider_drag: None,
@@ -1187,9 +1231,13 @@ impl App {
         match action {
             Action::NewTab => self.new_tab(),
             Action::CloseTab => {
-                // The Profiles tab first, when it holds the pane: closing it
-                // is closing a tab (design §11's rule for app tabs), and it
-                // has no chip × to close from.
+                // App tabs first, whichever holds the pane: closing one is
+                // closing a tab (§11's rule), and their chips deliberately
+                // draw no × — ⌘W is the close affordance.
+                if self.settings_tab_active() {
+                    self.close_settings_tab();
+                    return;
+                }
                 if self.screen == AppScreen::Profiles {
                     self.app_tabs.close_profiles();
                     self.show_screen(AppScreen::Terminal);
@@ -1249,7 +1297,7 @@ impl App {
             Action::ScrollPageUp => self.scroll_page(1),
             Action::ScrollPageDown => self.scroll_page(-1),
             Action::TogglePalette => self.toggle_palette(),
-            Action::ToggleSettings => self.toggle_settings(),
+            Action::ToggleSettings => self.open_settings_tab(),
             Action::OpenProfiles => self.open_profiles_tab(),
             Action::ToggleTabLayout => self.toggle_tab_layout(),
             Action::SplitRight => self.split_right(),
@@ -1650,11 +1698,12 @@ impl App {
     }
 
     /// Open or close a full-pane screen; closing always lands on the grid.
+    /// The settings *tab* survives — a screen draws over it and Esc returns,
+    /// exactly as over a session's grid.
     fn show_screen(&mut self, screen: AppScreen) {
         self.screen = screen;
         self.picker = None;
         self.palette_ui = None;
-        self.settings_ui = None;
         self.launcher = None;
         self.mark_chrome_dirty();
     }
@@ -1678,10 +1727,11 @@ impl App {
             Some(_) => None,
             None => {
                 // One modal at a time — the exclusivity rule every overlay
-                // toggle enforces, so the input blocks stay order-free.
+                // toggle enforces, so the input blocks stay order-free. The
+                // settings TAB is not in this set: it is a place, not an
+                // overlay (§11), and the menu floats over it like any pane.
                 self.picker = None;
                 self.palette_ui = None;
-                self.settings_ui = None;
                 self.value_picker = None;
                 Some(LauncherState {
                     // Row 0 is the default row by construction, so opening
@@ -1798,17 +1848,39 @@ impl App {
             }
             Ime::Commit(text) => {
                 self.ime.commit();
-                if let Some(session) = self.tabs.active_source() {
-                    if !text.is_empty() {
-                        // Straight through as UTF-8, exactly as a physical
-                        // keyboard would have delivered it. Not `encode_paste`:
-                        // this is typing, and bracketing it would make a program
-                        // that reads paste-mode treat a composed word as pasted.
-                        session.write(text.into_bytes());
-                        let mut term = session.terminal().lock();
-                        term.scroll_to_bottom();
-                        term.set_selection(None);
+                if text.is_empty() {
+                    // Nothing composed; nothing to route.
+                } else if self.picker.is_none()
+                    && self.palette_ui.is_none()
+                    && self.settings_tab_active()
+                    && self.screen == AppScreen::Terminal
+                {
+                    // The same gate — and the same precedence — as the
+                    // KeyboardInput handler: the Settings tab holds the
+                    // keyboard, so composed text must go where keystrokes
+                    // go, never to the concealed session's shell. The
+                    // picker and palette are checked first because the key
+                    // path hands them the keys before the tab.
+                    if let Some(p) = self.value_picker.as_mut() {
+                        // The value picker takes the keys from the tab
+                        // (see the key path's ordering); a composed family
+                        // name belongs to its filter.
+                        p.filter.push_str(&text);
+                        p.selected = 0;
+                        p.scroll_to_selected = true;
+                    } else if let Some(ui) = self.settings_ui.as_mut() {
+                        ui.commit_text(&text);
                     }
+                    self.mark_chrome_dirty();
+                } else if let Some(session) = self.tabs.active_source() {
+                    // Straight through as UTF-8, exactly as a physical
+                    // keyboard would have delivered it. Not `encode_paste`:
+                    // this is typing, and bracketing it would make a program
+                    // that reads paste-mode treat a composed word as pasted.
+                    session.write(text.into_bytes());
+                    let mut term = session.terminal().lock();
+                    term.scroll_to_bottom();
+                    term.set_selection(None);
                 }
             }
         }
@@ -2037,8 +2109,8 @@ impl App {
         if !self.strip_shown()
             && self.picker.is_none()
             && self.palette_ui.is_none()
-            && self.settings_ui.is_none()
             && self.launcher.is_none()
+            && !self.tabs.settings_open()
             && self.screen == AppScreen::Terminal
         {
             self.chrome_layout = None;
@@ -2173,38 +2245,163 @@ impl App {
             }
         });
 
-        // Inputs gathered before the &mut borrow of the overlay state below;
-        // the clone is a handful of provenance entries, on an event-driven
-        // rebuild, not a frame path.
-        let settings_inputs = self.settings_ui.is_some().then(|| {
+        // The Settings tab's screen, built only while it holds the grid area
+        // (its state persists while it is a background chip). Inputs gathered
+        // before the &mut borrow of the tab state below; the clone is a
+        // handful of provenance entries, on an event-driven rebuild.
+        let settings_inputs = self.settings_tab_active().then(|| {
             (
                 serde_json::to_value(&self.settings).unwrap_or(serde_json::Value::Null),
                 self.provenance.clone(),
                 self.restart_pending.clone(),
                 self.settings_error.clone(),
+                self.unknown_keys.clone(),
+                // The rail's visible categories — computed outside the &mut
+                // borrow, by the same helper the click handler resolves
+                // `SettingsCategory(i)` with, so a click can never land on
+                // a different list than was drawn.
+                self.visible_categories(),
             )
         });
         let settings_model = self.settings_ui.as_mut().zip(settings_inputs).map(
-            |(ui, (values, provenance, restart_pending, error))| {
-                let (rows, actions) = crate::settings_ui::build_rows(
-                    &ui.fields,
-                    &values,
-                    &provenance,
-                    &ui.filter,
-                    ui.editing.as_ref(),
-                    &restart_pending,
-                    error.as_deref(),
-                );
+            |(ui, (values, provenance, restart_pending, error, unknown_keys, visible_cats))| {
+                use crate::settings_ui as sui;
+                // The footer counts every category; the rail badges only the
+                // visible ones (§11: the filter hides empty categories).
+                let (_, total) =
+                    sui::modified_counts(&ui.fields, &values, &sui::categories(&ui.fields));
+                let (counts, _) = sui::modified_counts(&ui.fields, &values, &visible_cats);
+                let visible: Vec<(String, usize)> =
+                    visible_cats.into_iter().zip(counts).collect();
+                if !visible.iter().any(|(g, _)| *g == ui.category) {
+                    if let Some((first, _)) = visible.first() {
+                        ui.category = first.clone();
+                        ui.selected = 0;
+                        ui.scroll = 0.0;
+                    }
+                }
+                let selected_category = visible
+                    .iter()
+                    .position(|(g, _)| *g == ui.category)
+                    .unwrap_or(0);
+
+                let (rows, actions, empty) = if ui.category == sui::UNKNOWN_CATEGORY {
+                    let (mut rows, mut actions) = sui::build_unknown_rows(
+                        &unknown_keys,
+                        &provenance,
+                        &ui.filter,
+                        &zest_config::schema::keys(),
+                    );
+                    let empty = rows.is_empty().then(|| {
+                        if unknown_keys.is_empty() {
+                            "Every key in your files is a setting this build knows.".to_string()
+                        } else {
+                            format!("nothing matches \u{201c}{}\u{201d}", ui.filter)
+                        }
+                    });
+                    if !rows.is_empty() {
+                        // The §11 warn banner: a key from a newer version is
+                        // indistinguishable from a typo, so these warn
+                        // rather than fail — and the rest of the file
+                        // applied normally.
+                        let n = rows.len();
+                        let text = format!(
+                            "{n} key{} in your config {} not settings. Kept rather than \
+                             discarded, and warned about rather than failed on: a key from \
+                             a newer version is indistinguishable from a typo. The rest of \
+                             the file applied normally.",
+                            if n == 1 { "" } else { "s" },
+                            if n == 1 { "is" } else { "are" },
+                        );
+                        rows.insert(0, crate::chrome::model::SettingsRowModel::Notice { text });
+                        actions.insert(0, sui::RowAction::None);
+                    }
+                    (rows, actions, empty)
+                } else {
+                    let (rows, actions) = sui::build_category_rows(
+                        &ui.fields,
+                        &values,
+                        &provenance,
+                        &ui.category,
+                        &ui.filter,
+                        ui.editing.as_ref(),
+                        &restart_pending,
+                        error.as_deref(),
+                        &ui.installed,
+                    );
+                    let empty = rows
+                        .is_empty()
+                        .then(|| format!("nothing matches \u{201c}{}\u{201d}", ui.filter));
+                    (rows, actions, empty)
+                };
                 ui.actions = actions;
-                // A filter edit can strand the selection on a header or past
+                // A filter edit can strand the selection on a banner or past
                 // the end; land it on the nearest real row instead.
-                ui.selected = crate::settings_ui::nearest_field(&ui.actions, ui.selected);
-                crate::chrome::model::SettingsModel {
+                ui.selected = sui::nearest_field(&ui.actions, ui.selected);
+
+                // The open dropdown, resolved against the selected row's
+                // variants — same-pass, so the menu can never outlive the
+                // row it hangs off.
+                let menu = ui.menu.and_then(|(row, selected)| {
+                    let field_idx = match ui.actions.get(row) {
+                        Some(sui::RowAction::Field(i)) => *i,
+                        _ => return None,
+                    };
+                    let field = ui.fields.get(field_idx)?;
+                    if field.variants.is_empty() {
+                        return None;
+                    }
+                    let current = zest_config::ui::value_at(&values, &field.key)
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|v| field.variants.iter().position(|o| o.value == v));
+                    Some(crate::chrome::model::SettingsMenuModel {
+                        row,
+                        options: field
+                            .variants
+                            .iter()
+                            .map(|v| crate::chrome::model::SettingsMenuOption {
+                                label: sui::humanize_value(&v.value),
+                                value: v.value.clone(),
+                                doc: v.description.lines().next().unwrap_or_default().to_string(),
+                            })
+                            .collect(),
+                        current,
+                        selected: selected.min(field.variants.len().saturating_sub(1)),
+                    })
+                });
+
+                let config_path = zest_config::paths::config_file()
+                    .or_else(|| {
+                        zest_config::paths::config_dir()
+                            .map(|d| d.join(zest_config::paths::CONFIG_FILE))
+                    })
+                    .map(|p| crate::status::shorten_home(&p.display().to_string()))
+                    .unwrap_or_default();
+
+                crate::chrome::model::SettingsScreenModel {
+                    categories: visible
+                        .into_iter()
+                        .map(|(label, modified)| {
+                            crate::chrome::model::SettingsCategoryModel { label, modified }
+                        })
+                        .collect(),
+                    selected_category,
+                    heading: ui.category.clone(),
+                    prefix: if ui.category == sui::UNKNOWN_CATEGORY {
+                        "\u{2014}".to_string()
+                    } else {
+                        sui::category_prefix(&ui.fields, &ui.category)
+                    },
+                    lede: sui::category_lede(&ui.category).to_string(),
                     rows,
+                    empty,
                     selected: ui.selected,
                     filter: ui.filter.clone(),
                     scroll: ui.scroll,
                     ensure_visible: ui.scroll_to_selected,
+                    modified_total: total,
+                    config_path,
+                    menu,
                 }
             },
         );
@@ -2340,8 +2537,6 @@ impl App {
                 };
                 TabModel {
                     addr: tab.addr,
-                    // Settings/Profiles become app tabs with screen 11's work
-                    // item; every tab this window opens today is a session.
                     kind: crate::chrome::model::TabKind::Session,
                     title: if tab.dead { format!("{title} · ended") } else { title },
                     host: host_label,
@@ -2362,13 +2557,63 @@ impl App {
             })
             .collect();
 
+        // App tabs after the session tabs, in §1's order: sessions, then
+        // Profiles, then Settings, then the `+`. One list, so the strip,
+        // the sidebar's pinned row and the hit map all agree what exists.
+        // Profiles is horizontal-only for now: the vertical design pins app
+        // tabs above the sidebar footer, which is §11's pinned-rows shape —
+        // a chip grouped under a fake host would be worse than none.
+        let mut tab_models = tab_models;
+        let profiles_chip = self.app_tabs.profiles_open()
+            && self.config.tabs.position == zest_config::settings::TabsPosition::Top;
+        if profiles_chip {
+            tab_models.push(TabModel {
+                addr: crate::tabs::profiles_tab_addr(),
+                kind: crate::chrome::model::TabKind::Profiles,
+                title: "Profiles".into(),
+                host: local_label.clone(),
+                cwd: String::new(),
+                origin: TabOrigin::Local,
+                presence: TabPresence::Online,
+                accent: 0,
+                // Accent index 0 is the theme's own accent: an app tab is a
+                // place, not a shell on a host.
+                tab_accent: crate::chrome::model::AccentChoice::Profile(0),
+                running: false,
+                age: String::new(),
+                connecting: false,
+                link: crate::chrome::model::LinkKind::Loopback,
+            });
+        }
+        if self.tabs.settings_open() {
+            tab_models.push(TabModel {
+                addr: crate::tabs::settings_addr(),
+                kind: crate::chrome::model::TabKind::Settings,
+                title: "Settings".to_string(),
+                host: String::new(),
+                cwd: String::new(),
+                origin: TabOrigin::Local,
+                presence: TabPresence::Online,
+                accent: 0,
+                tab_accent: crate::chrome::model::tab_accent(None, 0),
+                running: false,
+                age: String::new(),
+                connecting: false,
+                link: crate::chrome::model::LinkKind::Loopback,
+            });
+        }
+
         // The sidebar's host grouping, built from the same tab models the
-        // strip draws — one pass, one truth.
+        // strip draws — one pass, one truth. App tabs are places with no
+        // host; the vertical layout pins them above the footer instead.
         let sidebar = (self.config.tabs.position == zest_config::settings::TabsPosition::Left)
             .then(|| {
                 use zest_mesh::discovery::Presence;
                 let mut groups: Vec<crate::chrome::model::HostGroup> = Vec::new();
                 for (i, tm) in tab_models.iter().enumerate() {
+                    if tm.kind != crate::chrome::model::TabKind::Session {
+                        continue;
+                    }
                     if let Some(g) = groups.iter_mut().find(|g| g.label == tm.host) {
                         g.tabs.push(i);
                         continue;
@@ -2410,34 +2655,15 @@ impl App {
         self.anim_pulse = tab_models.iter().any(|t| t.running)
             && self.config.tabs.position == zest_config::settings::TabsPosition::Left;
 
-        // The Profiles app tab, after the session tabs (§1's order: sessions,
-        // then Profiles, then the +). Horizontal only for now: the vertical
-        // design pins app tabs above the sidebar footer, which is §11's
-        // pinned-rows work — a chip grouped under a fake host would be worse
-        // than none. The pane itself shows in both orientations.
-        let mut tab_models = tab_models;
-        let profiles_chip = self.app_tabs.profiles_open()
-            && self.config.tabs.position == zest_config::settings::TabsPosition::Top;
-        if profiles_chip {
-            tab_models.push(TabModel {
-                addr: crate::tabs::profiles_tab_addr(),
-                kind: crate::chrome::model::TabKind::Profiles,
-                title: "Profiles".into(),
-                host: local_label.clone(),
-                cwd: String::new(),
-                origin: TabOrigin::Local,
-                presence: TabPresence::Online,
-                accent: 0,
-                // Accent index 0 is the theme's own accent: an app tab is a
-                // place, not a shell on a host.
-                tab_accent: crate::chrome::model::AccentChoice::Profile(0),
-                running: false,
-                age: String::new(),
-                connecting: false,
-                link: crate::chrome::model::LinkKind::Loopback,
-            });
-        }
+        // Which chip is lit — exactly one (invariant 9). The Profiles pane
+        // wins while its screen is up (its chip sits right after the
+        // sessions), the Settings tab while it holds the keyboard (its chip
+        // is last), else the active session. Computed here rather than via
+        // display_active(): that helper predates the Profiles chip and
+        // assumes Settings is the only insertion.
         let active = if profiles_chip && self.screen == AppScreen::Profiles {
+            self.tabs.len()
+        } else if self.tabs.settings_active() {
             tab_models.len() - 1
         } else {
             self.tabs.active_index()
@@ -2458,8 +2684,9 @@ impl App {
             grid_area,
             anim,
             palette_chord: keymap::chord_for(keymap::Action::ToggleFleetPicker),
+            settings_chord: keymap::chord_for(keymap::Action::ToggleSettings),
             picker: picker_model,
-            // The picker wins: it opens *over* the settings overlay.
+            // The picker wins: it opens *over* the settings tab's content.
             palette: value_picker_model.or(palette_model),
             settings: settings_model,
             launcher: launcher_model,
@@ -2514,6 +2741,16 @@ impl App {
     ) {
         if state != ElementState::Pressed {
             return;
+        }
+        // An open dropdown menu closes on any settings click that is not one
+        // of its own rows — choosing elsewhere means "never mind".
+        if self.settings_ui.as_ref().is_some_and(|ui| ui.menu.is_some())
+            && !matches!(region, HitRegion::SettingsMenuRow(_))
+        {
+            if let Some(ui) = self.settings_ui.as_mut() {
+                ui.menu = None;
+            }
+            self.mark_chrome_dirty();
         }
         match (region, button) {
             (HitRegion::Tab(addr), MouseButton::Left) => {
@@ -2670,8 +2907,70 @@ impl App {
                 self.slider_drag = Some(i);
                 self.apply_slider_at(i, self.pointer_pos.0 as f32);
             }
-            (HitRegion::SettingsScrim, MouseButton::Left) => {
-                self.settings_ui = None;
+            (HitRegion::SettingsCategory(i), MouseButton::Left) => {
+                self.select_settings_category(i);
+            }
+            (HitRegion::SettingsReset(i), MouseButton::Left) => {
+                // THE DOT RESETS (§11): delete the key from the file, then
+                // reload through the cascade — the file stays the single
+                // source of truth, exactly like every other edit.
+                self.reset_setting_row(i);
+            }
+            (HitRegion::SettingsEditToml, MouseButton::Left) => {
+                self.open_config_externally();
+            }
+            // Typing already goes to the filter; the pill's click only says
+            // "yes, this is where the characters go".
+            (HitRegion::SettingsFilter, MouseButton::Left) => {}
+            (HitRegion::SettingsSegment(row, opt), MouseButton::Left) => {
+                if let Some(ui) = self.settings_ui.as_mut() {
+                    ui.selected = row;
+                }
+                self.apply_variant(row, opt);
+            }
+            (HitRegion::SettingsStep(row, up), MouseButton::Left) => {
+                // Select first, then step through the keyboard's path — one
+                // code path per change, however it arrives.
+                if let Some(ui) = self.settings_ui.as_mut() {
+                    ui.selected = row;
+                }
+                self.adjust_selected_setting(if up { 1 } else { -1 });
+            }
+            (HitRegion::SettingsSelect(row), MouseButton::Left) => {
+                // Select first, then act through the keyboard's path (Enter)
+                // — one dispatch per widget, however the request arrives.
+                // Arming `ui.menu` directly here left the theme pill dead:
+                // ThemePicker's options are a roster, not `field.variants`,
+                // so the same-pass menu resolution discarded the menu and
+                // the click opened nothing. Enter already knows the picker
+                // is that widget's dropdown.
+                if let Some(ui) = self.settings_ui.as_mut() {
+                    ui.selected = row;
+                }
+                self.activate_selected_setting();
+            }
+            (HitRegion::SettingsMenuRow(opt), MouseButton::Left) => {
+                let row = self.settings_ui.as_ref().and_then(|ui| ui.menu).map(|(r, _)| r);
+                if let Some(ui) = self.settings_ui.as_mut() {
+                    ui.menu = None;
+                }
+                if let Some(row) = row {
+                    self.apply_variant(row, opt);
+                }
+            }
+            (HitRegion::SettingsListRemove(row, item), MouseButton::Left) => {
+                self.remove_list_item(row, item);
+            }
+            (HitRegion::SettingsListAdd(row), MouseButton::Left) => {
+                self.begin_list_add(row);
+            }
+            (HitRegion::SettingsListItem(row, item), MouseButton::Left) => {
+                // Drag-to-reorder begins here; crossing another item applies
+                // the move (order IS the setting, §11). Release ends it.
+                if let Some(ui) = self.settings_ui.as_mut() {
+                    ui.selected = row;
+                    ui.list_drag = Some((row, item));
+                }
                 self.mark_chrome_dirty();
             }
             // PalettePanel and SettingsPanel deliberately have no arm: the
@@ -2760,9 +3059,9 @@ impl App {
             None => {
                 // One modal at a time: opening any overlay closes the
                 // others, which is what keeps the modal input blocks
-                // order-independent.
+                // order-independent. The settings *tab* is not an overlay
+                // and stays put underneath.
                 self.palette_ui = None;
-                self.settings_ui = None;
                 self.launcher = None;
                 Some(PickerState {
                     selected: 0,
@@ -2782,7 +3081,6 @@ impl App {
             Some(_) => None,
             None => {
                 self.picker = None;
-                self.settings_ui = None;
                 self.launcher = None;
                 Some(PaletteState {
                     selected: 0,
@@ -2807,26 +3105,53 @@ impl App {
         self.perform(action, el);
     }
 
-    /// Toggle the settings overlay (⌘,).
-    fn toggle_settings(&mut self) {
-        self.settings_ui = match self.settings_ui {
-            Some(_) => None,
-            None => {
-                self.picker = None;
-                self.palette_ui = None;
-                self.launcher = None;
-                Some(SettingsUiState {
-                    selected: 0,
-                    filter: String::new(),
-                    scroll: 0.0,
-                    scroll_to_selected: true,
-                    actions: Vec::new(),
-                    fields: zest_config::ui::fields(),
-                    editing: None,
-                })
-            }
-        };
+    /// Open the Settings tab, or activate the one that exists (⌘, — §11:
+    /// "if it is already open it activates that tab rather than opening a
+    /// second"). Never a toggle: closing it is closing a tab.
+    fn open_settings_tab(&mut self) {
+        // A tab activation leaves any full-pane screen, like every other
+        // activation path; the modals close because the tab takes the
+        // keyboard they were holding.
+        self.leave_screen();
+        self.picker = None;
+        self.palette_ui = None;
+        self.value_picker = None;
+        self.launcher = None;
+        if self.settings_ui.is_none() {
+            // The scan is a real cost, paid once at open — the font rows'
+            // fallback tags read the cached roster from then on.
+            let installed =
+                self.fonts.as_mut().map(Fonts::installed_families).unwrap_or_default();
+            self.settings_ui = Some(SettingsUiState {
+                selected: 0,
+                category: crate::settings_ui::GROUP_ORDER[0].to_string(),
+                filter: String::new(),
+                scroll: 0.0,
+                scroll_to_selected: true,
+                actions: Vec::new(),
+                fields: zest_config::ui::fields(),
+                editing: None,
+                installed,
+                menu: None,
+                list_drag: None,
+            });
+        }
+        self.tabs.open_settings();
         self.mark_chrome_dirty();
+    }
+
+    /// Close the Settings tab — its state lives as long as the tab (§11),
+    /// so closing drops it; the keyboard returns to the session underneath.
+    fn close_settings_tab(&mut self) {
+        self.settings_ui = None;
+        self.value_picker = None;
+        self.tabs.close_settings();
+        self.after_activation();
+    }
+
+    /// The Settings tab holds the keyboard and the grid area.
+    fn settings_tab_active(&self) -> bool {
+        self.tabs.settings_active() && self.settings_ui.is_some()
     }
 
     /// Open the long-list picker on the selected settings row.
@@ -2867,6 +3192,7 @@ impl App {
 
         self.value_picker = Some(ValuePickerState {
             field: idx,
+            append: false,
             visible: options.clone(),
             options,
             selected,
@@ -2888,9 +3214,24 @@ impl App {
             return;
         };
         let value = if field.widget == zest_config::ui::Widget::FontList {
-            // The chosen face, and only it -- see `settings_ui::adjust` for why
-            // a tail is neither needed nor harmless.
-            serde_json::Value::Array(vec![serde_json::Value::String(chosen)])
+            if state.append {
+                // The add row grows the stack (§11: the dashed row opens
+                // this picker); choosing a face already present is a no-op,
+                // not a duplicate — the Curlz MT lesson, again.
+                let mut arr = self
+                    .settings_value_of(state.field)
+                    .and_then(|v| v.as_array().cloned())
+                    .unwrap_or_default();
+                if arr.iter().any(|v| v.as_str() == Some(chosen.as_str())) {
+                    return;
+                }
+                arr.push(serde_json::Value::String(chosen));
+                serde_json::Value::Array(arr)
+            } else {
+                // The chosen face, and only it -- see `settings_ui::adjust`
+                // for why a tail is neither needed nor harmless.
+                serde_json::Value::Array(vec![serde_json::Value::String(chosen)])
+            }
         } else {
             serde_json::Value::String(chosen)
         };
@@ -2954,9 +3295,26 @@ impl App {
         };
         match widget {
             // One keypress, one change: instant for the widgets whose next
-            // value is unambiguous.
-            Widget::Toggle | Widget::Select => {
+            // value is unambiguous — a toggle, or a segmented control.
+            Widget::Toggle => {
                 self.adjust_selected_setting(1);
+            }
+            Widget::Select => {
+                let segmented = self
+                    .settings_ui
+                    .as_ref()
+                    .and_then(|ui| ui.fields.get(idx))
+                    .is_some_and(crate::settings_ui::select_is_segmented);
+                if segmented {
+                    self.adjust_selected_setting(1);
+                } else {
+                    // The documented/long selects open their menu (§11) —
+                    // the doc comments are the reason the menu exists.
+                    let row = self.settings_ui.as_ref().map(|ui| ui.selected);
+                    if let (Some(ui), Some(row)) = (self.settings_ui.as_mut(), row) {
+                        ui.menu = Some((row, 0));
+                    }
+                }
             }
             // Long lists open a filtered picker instead of cycling. Stepping is
             // fine for a handful of themes and useless for 266 installed font
@@ -2986,16 +3344,22 @@ impl App {
                         field_idx: idx,
                         buffer,
                         error: false,
+                        append: false,
                     });
                 }
             }
-            // The remaining list widgets have no inline editor; their rows say
-            // where the edit happens instead. The profile pickers belong to
-            // the profiles editor (#130), which this overlay does not render —
-            // when it does, they open rosters the way ThemePicker does.
-            Widget::TagList
-            | Widget::KeyValue
-            | Widget::HostPicker
+            // Enter on a list row means "add one" — the add affordance's
+            // keyboard spelling.
+            Widget::TagList | Widget::KeyValue => {
+                let row = self.settings_ui.as_ref().map(|ui| ui.selected);
+                if let Some(row) = row {
+                    self.begin_list_add(row);
+                }
+            }
+            // The profile pickers belong to the profiles editor (#130),
+            // which this tab does not render — when it does, they open
+            // rosters the way ThemePicker does.
+            Widget::HostPicker
             | Widget::SchemePicker
             | Widget::AccentPicker
             | Widget::IconPicker => {}
@@ -3076,6 +3440,228 @@ impl App {
             }
         }
         self.mark_chrome_dirty();
+    }
+
+    /// Where an edit lands: the user's config file, existing or about to.
+    fn config_target() -> Option<std::path::PathBuf> {
+        zest_config::paths::config_file().or_else(|| {
+            zest_config::paths::config_dir().map(|d| d.join(zest_config::paths::CONFIG_FILE))
+        })
+    }
+
+    /// The field index a settings row stands for, when it is a real field.
+    fn settings_field_of_row(&self, row: usize) -> Option<usize> {
+        match self.settings_ui.as_ref()?.actions.get(row) {
+            Some(crate::settings_ui::RowAction::Field(i)) => Some(*i),
+            _ => None,
+        }
+    }
+
+    /// The rail's visible categories under the live filter — the click
+    /// handler resolves `SettingsCategory(i)` against exactly what the model
+    /// showed, or filtered-away rows would take clicks for their neighbours.
+    fn visible_categories(&self) -> Vec<String> {
+        use crate::settings_ui as sui;
+        let Some(ui) = self.settings_ui.as_ref() else { return Vec::new() };
+        sui::categories(&ui.fields)
+            .into_iter()
+            .filter(|g| {
+                // Only a live filter hides categories (§11) — the unknown
+                // category included: clean, unfiltered, it stays in the rail
+                // and its page carries the empty-state line.
+                ui.filter.is_empty()
+                    || sui::category_matches(&ui.fields, g, &ui.filter, &self.unknown_keys)
+            })
+            .collect()
+    }
+
+    /// Select the rail's `i`-th visible category; selection and scroll reset
+    /// — a category is a fresh page, not a continuation.
+    fn select_settings_category(&mut self, i: usize) {
+        let Some(label) = self.visible_categories().get(i).cloned() else { return };
+        if let Some(ui) = self.settings_ui.as_mut() {
+            if ui.category != label {
+                ui.category = label;
+                ui.selected = 0;
+                ui.scroll = 0.0;
+                ui.scroll_to_selected = true;
+                ui.editing = None;
+                ui.menu = None;
+            }
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// The modified dot's click: delete the key from the file, reload — the
+    /// dot is the reset button (§11), and the file stays the single source
+    /// of truth. Idempotent because `remove_value` is.
+    fn reset_setting_row(&mut self, row: usize) {
+        let Some(key) = self
+            .settings_field_of_row(row)
+            .and_then(|i| self.settings_ui.as_ref()?.fields.get(i).map(|f| f.key.clone()))
+        else {
+            return;
+        };
+        let Some(target) = Self::config_target() else {
+            self.settings_error = Some("no config directory on this system".to_string());
+            self.mark_chrome_dirty();
+            return;
+        };
+        match zest_config::remove_value(&target, &key) {
+            Ok(()) => {
+                self.settings_error = None;
+                self.reload_config();
+            }
+            Err(e) => {
+                tracing::error!(error = %e, key = %key, "could not reset the setting");
+                self.settings_error = Some(format!("could not reset {key}: {e}"));
+            }
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// "Edit as TOML": hand the config file to the OS handler.
+    fn open_config_externally(&mut self) {
+        let Some(target) = Self::config_target() else { return };
+        platform::open_path(&target);
+    }
+
+    /// Write one of a select field's variants — segmented segments and
+    /// dropdown rows both land here, and from here in `apply_edit`.
+    fn apply_variant(&mut self, row: usize, opt: usize) {
+        let Some((idx, value)) = self.settings_field_of_row(row).and_then(|i| {
+            let field = self.settings_ui.as_ref()?.fields.get(i)?;
+            let variant = field.variants.get(opt)?;
+            Some((i, serde_json::Value::String(variant.value.clone())))
+        }) else {
+            return;
+        };
+        self.apply_edit(idx, value);
+    }
+
+    /// A list item's ×: fonts and tags lose the item, an env entry loses its
+    /// key. The whole new value goes through `apply_edit` — no second path.
+    fn remove_list_item(&mut self, row: usize, item: usize) {
+        use zest_config::ui::Widget;
+        let Some(idx) = self.settings_field_of_row(row) else { return };
+        let Some(widget) =
+            self.settings_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| f.widget)
+        else {
+            return;
+        };
+        let Some(current) = self.settings_value_of(idx) else { return };
+        let next = match widget {
+            Widget::FontList | Widget::TagList => {
+                let mut arr = current.as_array().cloned().unwrap_or_default();
+                if item >= arr.len() {
+                    return;
+                }
+                arr.remove(item);
+                serde_json::Value::Array(arr)
+            }
+            Widget::KeyValue => {
+                let Some(map) = current.as_object() else { return };
+                let Some(key) = map.keys().nth(item).cloned() else { return };
+                let mut map = map.clone();
+                map.remove(&key);
+                serde_json::Value::Object(map)
+            }
+            _ => return,
+        };
+        self.apply_edit(idx, next);
+    }
+
+    /// The dashed add affordance: fonts open the existing value picker (in
+    /// append mode); tags and env entries open a typed buffer whose Enter
+    /// appends.
+    fn begin_list_add(&mut self, row: usize) {
+        use zest_config::ui::Widget;
+        let Some(idx) = self.settings_field_of_row(row) else { return };
+        let Some(widget) =
+            self.settings_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| f.widget)
+        else {
+            return;
+        };
+        if let Some(ui) = self.settings_ui.as_mut() {
+            ui.selected = row;
+        }
+        match widget {
+            Widget::FontList => {
+                if self.open_value_picker() {
+                    if let Some(p) = self.value_picker.as_mut() {
+                        p.append = true;
+                    }
+                }
+            }
+            Widget::TagList | Widget::KeyValue => {
+                if let Some(ui) = self.settings_ui.as_mut() {
+                    ui.editing = Some(crate::settings_ui::EditBuffer {
+                        field_idx: idx,
+                        buffer: String::new(),
+                        error: false,
+                        append: true,
+                    });
+                }
+            }
+            _ => {}
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// Commit an append buffer: a tag verbatim (a leading `-` disables and
+    /// is kept), or a `KEY=VALUE` env entry — a bare `KEY` gets an empty
+    /// value, which *unsets* under the wholesale-replace semantics. Returns
+    /// false when the input cannot be an entry (shown as a buffer error).
+    fn commit_list_append(&mut self, idx: usize, text: &str) -> bool {
+        use zest_config::ui::Widget;
+        let Some(widget) =
+            self.settings_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| f.widget)
+        else {
+            return false;
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            // Committing nothing is closing the buffer, not an error.
+            return true;
+        }
+        let Some(current) = self.settings_value_of(idx) else { return false };
+        let next = match widget {
+            Widget::TagList => {
+                let mut arr = current.as_array().cloned().unwrap_or_default();
+                arr.push(serde_json::Value::String(text.to_string()));
+                serde_json::Value::Array(arr)
+            }
+            Widget::KeyValue => {
+                let (key, value) = match text.split_once('=') {
+                    Some((k, v)) => (k.trim(), v.trim()),
+                    None => (text, ""),
+                };
+                if key.is_empty() {
+                    return false;
+                }
+                let mut map = current.as_object().cloned().unwrap_or_default();
+                map.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+                serde_json::Value::Object(map)
+            }
+            _ => return false,
+        };
+        self.apply_edit(idx, next);
+        true
+    }
+
+    /// Drag-to-reorder on a font row: move `from` to `to` — order is the
+    /// setting, so the move writes through the file like every other edit.
+    fn reorder_list_item(&mut self, row: usize, from: usize, to: usize) {
+        let Some(idx) = self.settings_field_of_row(row) else { return };
+        let Some(current) = self.settings_value_of(idx) else { return };
+        let Some(arr) = current.as_array() else { return };
+        if from >= arr.len() || to >= arr.len() || from == to {
+            return;
+        }
+        let mut arr = arr.clone();
+        let moved = arr.remove(from);
+        arr.insert(to, moved);
+        self.apply_edit(idx, serde_json::Value::Array(arr));
     }
 
     /// The picker's rows and their actions, from the fleet snapshot.
@@ -3610,6 +4196,12 @@ impl App {
     /// `already_exited` marks the child as gone (a `TabExited` wakeup), where
     /// there is nothing left to kill. The last tab closing closes the window.
     fn close_tab(&mut self, addr: zest_proto::SessionAddr, already_exited: bool, el: &ActiveEventLoop) {
+        // The Settings tab has no session to kill or detach; closing it is
+        // dropping its state and returning the keyboard (§11).
+        if addr == crate::tabs::settings_addr() {
+            self.close_settings_tab();
+            return;
+        }
         let was_active = self.tabs.is_active(addr);
         let Some(tab) = self.tabs.close(addr) else { return };
         if already_exited || tab.dead || !tab.local {
@@ -3717,8 +4309,9 @@ impl App {
     /// labels. One short terminal lock; plain data out.
     fn build_block_views(&self) -> Vec<crate::chrome::blocks::BlockView> {
         // A full-pane screen covers the grid; headers floating above the
-        // fleet directory would be chrome over the wrong content.
-        if self.screen != AppScreen::Terminal {
+        // fleet directory would be chrome over the wrong content. The
+        // settings tab covers it the same way.
+        if self.screen != AppScreen::Terminal || self.tabs.settings_active() {
             return Vec::new();
         }
         let Some(tab) = self.tabs.active() else { return Vec::new() };
@@ -4224,6 +4817,17 @@ impl App {
         let class = zest_config::diff(&self.settings, new);
         let changed = zest_config::invalidate::changed_keys(&self.settings, new);
         if class == zest_config::Invalidation::None {
+            // No live value moved, but the *files* may still have: a typo key
+            // added or removed changes the unknown-keys category (and its
+            // provenance) with no settings diff — the open tab must not keep
+            // warning about a key the user just fixed.
+            if self.unknown_keys != load.resolved.unknown_keys {
+                self.unknown_keys = load.resolved.unknown_keys;
+                self.provenance = load.resolved.provenance;
+                if self.tabs.settings_open() {
+                    self.mark_chrome_dirty();
+                }
+            }
             return;
         }
         tracing::info!(?class, keys = ?changed, "config changed");
@@ -4231,6 +4835,7 @@ impl App {
         self.settings = new.clone();
         self.config = Config::from(new);
         self.provenance = load.resolved.provenance;
+        self.unknown_keys = load.resolved.unknown_keys;
         // Before the invalidation acts: `apply_theme` below reseeds from the
         // identities, and reseeding from stale ones would apply the *old*
         // profile colours under the new config's name.
@@ -4749,7 +5354,7 @@ impl ApplicationHandler<Wakeup> for App {
         match self.start_screen {
             Some(StartScreen::Fleet) => self.show_screen(AppScreen::Fleet),
             Some(StartScreen::Themes) => self.show_screen(AppScreen::Themes),
-            Some(StartScreen::Settings) => self.toggle_settings(),
+            Some(StartScreen::Settings) => self.open_settings_tab(),
             Some(StartScreen::Palette) => self.toggle_picker(),
             // Over the default screen, exactly as clicking the + would.
             Some(StartScreen::Launcher) => self.toggle_launcher(),
@@ -5077,7 +5682,7 @@ impl ApplicationHandler<Wakeup> for App {
                                 return;
                             }
                             keymap::Action::ToggleSettings => {
-                                self.toggle_settings();
+                                self.open_settings_tab();
                                 return;
                             }
                             _ => {}
@@ -5293,7 +5898,7 @@ impl ApplicationHandler<Wakeup> for App {
                                 .map(|b| b.action)
                             {
                                 Some(keymap::Action::TogglePalette) => self.palette_ui = None,
-                                Some(keymap::Action::ToggleSettings) => self.toggle_settings(),
+                                Some(keymap::Action::ToggleSettings) => self.open_settings_tab(),
                                 Some(keymap::Action::ToggleFleetPicker) => self.toggle_picker(),
                                 _ => {
                                     if !self.modifiers.control_key()
@@ -5314,9 +5919,60 @@ impl ApplicationHandler<Wakeup> for App {
                     return;
                 }
 
-                // And the open settings overlay, the same way.
-                if self.settings_ui.is_some() {
+                // And the Settings tab, while it holds the grid area — the
+                // full-pane screens (Esc returns) are checked below, so a
+                // fleet view open over the tab keeps its own keys.
+                if self.settings_tab_active() && self.screen == AppScreen::Terminal {
                     use winit::keyboard::{Key, NamedKey};
+
+                    // The open dropdown menu owns the keys before everything.
+                    if self.settings_ui.as_ref().is_some_and(|ui| ui.menu.is_some()) {
+                        let options = self
+                            .settings_ui
+                            .as_ref()
+                            .and_then(|ui| {
+                                let (row, _) = ui.menu?;
+                                let i = match ui.actions.get(row) {
+                                    Some(crate::settings_ui::RowAction::Field(i)) => *i,
+                                    _ => return None,
+                                };
+                                ui.fields.get(i).map(|f| f.variants.len())
+                            })
+                            .unwrap_or(0);
+                        match &event.logical_key {
+                            Key::Named(NamedKey::Escape) => {
+                                if let Some(ui) = self.settings_ui.as_mut() {
+                                    ui.menu = None;
+                                }
+                            }
+                            Key::Named(NamedKey::Enter) => {
+                                let menu = self.settings_ui.as_ref().and_then(|ui| ui.menu);
+                                if let Some(ui) = self.settings_ui.as_mut() {
+                                    ui.menu = None;
+                                }
+                                if let Some((row, sel)) = menu {
+                                    self.apply_variant(row, sel);
+                                }
+                            }
+                            Key::Named(NamedKey::ArrowDown) => {
+                                if let Some((_, sel)) =
+                                    self.settings_ui.as_mut().and_then(|ui| ui.menu.as_mut())
+                                {
+                                    *sel = (*sel + 1).min(options.saturating_sub(1));
+                                }
+                            }
+                            Key::Named(NamedKey::ArrowUp) => {
+                                if let Some((_, sel)) =
+                                    self.settings_ui.as_mut().and_then(|ui| ui.menu.as_mut())
+                                {
+                                    *sel = sel.saturating_sub(1);
+                                }
+                            }
+                            _ => {}
+                        }
+                        self.mark_chrome_dirty();
+                        return;
+                    }
 
                     // A typed edit owns the keys before the list does — while
                     // a buffer is open, a digit is a digit, never a filter.
@@ -5328,31 +5984,54 @@ impl ApplicationHandler<Wakeup> for App {
                                 }
                             }
                             Key::Named(NamedKey::Enter) => {
-                                let parsed = self.settings_ui.as_ref().and_then(|ui| {
+                                let edit = self.settings_ui.as_ref().and_then(|ui| {
                                     let edit = ui.editing.as_ref()?;
-                                    let field = ui.fields.get(edit.field_idx)?;
-                                    Some((
-                                        edit.field_idx,
-                                        crate::settings_ui::parse_input(field, &edit.buffer),
-                                    ))
+                                    Some((edit.field_idx, edit.buffer.clone(), edit.append))
                                 });
-                                match parsed {
-                                    Some((idx, Some(value))) => {
-                                        if let Some(ui) = self.settings_ui.as_mut() {
-                                            ui.editing = None;
-                                        }
-                                        self.apply_edit(idx, value);
-                                    }
-                                    // A failed parse keeps the buffer and
-                                    // marks it: silently dropping typed input
-                                    // reads as a broken Enter key.
-                                    Some((_, None)) => {
-                                        if let Some(edit) = self
+                                match edit {
+                                    // The add buffers append to the list;
+                                    // everything else replaces the value.
+                                    Some((idx, buffer, true)) => {
+                                        if self.commit_list_append(idx, &buffer) {
+                                            if let Some(ui) = self.settings_ui.as_mut() {
+                                                ui.editing = None;
+                                            }
+                                        } else if let Some(edit) = self
                                             .settings_ui
                                             .as_mut()
                                             .and_then(|ui| ui.editing.as_mut())
                                         {
                                             edit.error = true;
+                                        }
+                                    }
+                                    Some((idx, buffer, false)) => {
+                                        let parsed = self
+                                            .settings_ui
+                                            .as_ref()
+                                            .and_then(|ui| ui.fields.get(idx))
+                                            .and_then(|field| {
+                                                crate::settings_ui::parse_input(field, &buffer)
+                                            });
+                                        match parsed {
+                                            Some(value) => {
+                                                if let Some(ui) = self.settings_ui.as_mut() {
+                                                    ui.editing = None;
+                                                }
+                                                self.apply_edit(idx, value);
+                                            }
+                                            // A failed parse keeps the buffer
+                                            // and marks it: silently dropping
+                                            // typed input reads as a broken
+                                            // Enter key.
+                                            None => {
+                                                if let Some(edit) = self
+                                                    .settings_ui
+                                                    .as_mut()
+                                                    .and_then(|ui| ui.editing.as_mut())
+                                                {
+                                                    edit.error = true;
+                                                }
+                                            }
                                         }
                                     }
                                     None => {}
@@ -5407,18 +6086,21 @@ impl ApplicationHandler<Wakeup> for App {
                             self.adjust_selected_setting(-1);
                         }
                         Key::Named(NamedKey::Escape) => {
-                            // Layered: a search in progress clears first, a
-                            // second Escape closes. A settings filter is a
-                            // navigation the user built, not the picker's
-                            // throwaway two letters.
-                            if let Some(ui) = self.settings_ui.as_mut() {
-                                if ui.filter.is_empty() {
-                                    self.settings_ui = None;
-                                } else {
+                            // Layered: edit and menu were handled above, so
+                            // here a filter clears first, and a second Esc
+                            // CLOSES THE TAB — closing it is closing a tab.
+                            let filtered = self
+                                .settings_ui
+                                .as_ref()
+                                .is_some_and(|ui| !ui.filter.is_empty());
+                            if filtered {
+                                if let Some(ui) = self.settings_ui.as_mut() {
                                     ui.filter.clear();
                                     ui.selected = 0;
                                     ui.scroll_to_selected = true;
                                 }
+                            } else {
+                                self.close_settings_tab();
                             }
                         }
                         Key::Named(NamedKey::ArrowDown) => {
@@ -5460,11 +6142,29 @@ impl ApplicationHandler<Wakeup> for App {
                             match keymap::lookup(&event.logical_key, event.physical_key, self.modifiers)
                                 .map(|b| b.action)
                             {
-                                Some(keymap::Action::ToggleSettings) => self.toggle_settings(),
-                                Some(keymap::Action::ToggleFleetPicker) => self.toggle_picker(),
-                                Some(keymap::Action::TogglePalette) => self.toggle_palette(),
+                                // ⌘, on the active settings tab is already
+                                // where it goes; swallow rather than reopen.
+                                Some(keymap::Action::ToggleSettings) => {}
+                                // A tab is not a modal: the tab-management
+                                // chords keep working over it — including
+                                // ⌘W, which is how this tab closes (§11).
+                                Some(
+                                    action @ (keymap::Action::ToggleFleetPicker
+                                    | keymap::Action::TogglePalette
+                                    | keymap::Action::CloseTab
+                                    | keymap::Action::NewTab
+                                    | keymap::Action::ToggleTabLayout
+                                    | keymap::Action::ActivateTab(_)
+                                    | keymap::Action::ActivateLastTab
+                                    | keymap::Action::PrevTab
+                                    | keymap::Action::NextTab),
+                                ) => self.perform(action, el),
                                 _ => {
-                                    if !self.modifiers.control_key()
+                                    // '/' focuses the filter (§11) — which is
+                                    // where every other character already
+                                    // goes, so focusing is swallowing it.
+                                    if c.as_str() != "/"
+                                        && !self.modifiers.control_key()
                                         && !key::belongs_to_desktop(self.modifiers)
                                     {
                                         if let Some(ui) = self.settings_ui.as_mut() {
@@ -5546,6 +6246,24 @@ impl ApplicationHandler<Wakeup> for App {
                     return;
                 }
 
+                // A held font row reorders as it crosses its siblings: order
+                // IS the setting, and each crossing writes through the same
+                // path as every other edit (§11).
+                if let Some((row, from)) = self.settings_ui.as_ref().and_then(|ui| ui.list_drag)
+                {
+                    if let Some(HitRegion::SettingsListItem(r, to)) =
+                        self.chrome_hit(position.x, position.y)
+                    {
+                        if r == row && to != from {
+                            self.reorder_list_item(row, from, to);
+                            if let Some(ui) = self.settings_ui.as_mut() {
+                                ui.list_drag = Some((row, to));
+                            }
+                        }
+                    }
+                    return;
+                }
+
                 // The chrome sees the pointer first — unless a grid drag is in
                 // progress, which keeps the grid: a selection that wanders
                 // into the strip must not die there.
@@ -5612,10 +6330,18 @@ impl ApplicationHandler<Wakeup> for App {
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
-                // A slider drag ends when any button releases, wherever the
-                // pointer wandered to in the meantime.
-                if state == ElementState::Released && self.slider_drag.take().is_some() {
-                    return;
+                // A slider or list drag ends when any button releases,
+                // wherever the pointer wandered to in the meantime.
+                if state == ElementState::Released {
+                    let slider = self.slider_drag.take().is_some();
+                    let list = self
+                        .settings_ui
+                        .as_mut()
+                        .and_then(|ui| ui.list_drag.take())
+                        .is_some();
+                    if slider || list {
+                        return;
+                    }
                 }
                 // Chrome clicks never reach the grid. A drag in progress keeps
                 // the grid for symmetry with CursorMoved.
@@ -5709,8 +6435,11 @@ impl ApplicationHandler<Wakeup> for App {
                 if self.launcher.is_some() {
                     return;
                 }
-                // An open modal overlay takes the wheel wholesale.
-                if self.picker.is_some() || self.palette_ui.is_some() || self.settings_ui.is_some() {
+                // An open modal overlay takes the wheel wholesale. The
+                // settings tab is below: not modal, so it scrolls only under
+                // the pointer, by hit region, like the strip does.
+                if self.picker.is_some() || self.palette_ui.is_some() || self.value_picker.is_some()
+                {
                     let px = match delta {
                         MouseScrollDelta::LineDelta(_, y) => y * 40.0,
                         MouseScrollDelta::PixelDelta(p) => p.y as f32,
@@ -5722,12 +6451,49 @@ impl ApplicationHandler<Wakeup> for App {
                         if let Some(p) = self.palette_ui.as_mut() {
                             p.scroll -= px;
                         }
-                        if let Some(ui) = self.settings_ui.as_mut() {
-                            ui.scroll -= px;
+                        if let Some(p) = self.value_picker.as_mut() {
+                            p.scroll -= px;
                         }
                         self.mark_chrome_dirty();
                     }
                     return;
+                }
+                // Over ANY of the settings tab's regions, the wheel belongs
+                // to settings — a gap in this list sent the scroll to the
+                // strip or the session behind the tab. An open dropdown menu
+                // swallows it without scrolling: moving the rows would slide
+                // the menu's anchor out from under it.
+                match self.chrome_hit(self.pointer_pos.0, self.pointer_pos.1) {
+                    Some(HitRegion::SettingsMenuRow(_)) => return,
+                    Some(
+                        HitRegion::SettingsPanel
+                        | HitRegion::SettingsRow(_)
+                        | HitRegion::SettingsToggle(_)
+                        | HitRegion::SettingsSlider(_)
+                        | HitRegion::SettingsReset(_)
+                        | HitRegion::SettingsCategory(_)
+                        | HitRegion::SettingsFilter
+                        | HitRegion::SettingsEditToml
+                        | HitRegion::SettingsSegment(..)
+                        | HitRegion::SettingsStep(..)
+                        | HitRegion::SettingsSelect(_)
+                        | HitRegion::SettingsListRemove(..)
+                        | HitRegion::SettingsListAdd(_)
+                        | HitRegion::SettingsListItem(..),
+                    ) => {
+                        let px = match delta {
+                            MouseScrollDelta::LineDelta(_, y) => y * 40.0,
+                            MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                        };
+                        if px != 0.0 {
+                            if let Some(ui) = self.settings_ui.as_mut() {
+                                ui.scroll -= px;
+                            }
+                            self.mark_chrome_dirty();
+                        }
+                        return;
+                    }
+                    _ => {}
                 }
                 // Over the strip, the wheel scrolls the strip.
                 if self.chrome_hit(self.pointer_pos.0, self.pointer_pos.1).is_some() {
@@ -6397,12 +7163,75 @@ mod palette_tests {
 }
 
 #[cfg(test)]
+mod settings_ime_tests {
+    use super::SettingsUiState;
+
+    fn state() -> SettingsUiState {
+        SettingsUiState {
+            selected: 3,
+            category: "Appearance".into(),
+            filter: String::new(),
+            scroll: 0.0,
+            scroll_to_selected: false,
+            actions: Vec::new(),
+            fields: Vec::new(),
+            editing: None,
+            installed: Vec::new(),
+            menu: None,
+            list_drag: None,
+        }
+    }
+
+    #[test]
+    fn composed_text_lands_in_the_filter_like_a_keystroke() {
+        // The review finding this seam exists for: `on_ime` wrote the commit
+        // into `tabs.active_source()` — the concealed session — while the
+        // Settings tab held the keyboard, so an IME user typing into the
+        // filter typed into the hidden shell instead.
+        let mut ui = state();
+        ui.commit_text("設定");
+        assert_eq!(ui.filter, "設定", "no edit open: the filter is where characters go");
+        assert_eq!(ui.selected, 0, "a filter edit resets the selection, exactly like typing");
+        assert!(ui.scroll_to_selected, "and brings it into view");
+    }
+
+    #[test]
+    fn composed_text_feeds_an_open_edit_buffer_before_the_filter() {
+        let mut ui = state();
+        ui.editing = Some(crate::settings_ui::EditBuffer {
+            field_idx: 0,
+            buffer: "nu ".into(),
+            error: true,
+            append: false,
+        });
+        ui.commit_text("シェル");
+        let edit = ui.editing.as_ref().expect("still editing");
+        assert_eq!(edit.buffer, "nu シェル", "a typed edit owns the characters, as the key path says");
+        assert!(!edit.error, "new input clears a stale parse error, as typing does");
+        assert!(ui.filter.is_empty(), "nothing leaks into the filter");
+    }
+
+    #[test]
+    fn an_open_dropdown_swallows_composed_text() {
+        // The key path's dropdown arm ignores `Key::Character`; the IME
+        // route must agree, or a commit would edit a filter the user cannot
+        // see behind the menu.
+        let mut ui = state();
+        ui.menu = Some((1, 0));
+        ui.commit_text("あ");
+        assert!(ui.filter.is_empty(), "the menu owns the keys");
+        assert!(ui.editing.is_none());
+    }
+}
+
+#[cfg(test)]
 mod value_picker_tests {
     use super::ValuePickerState;
 
     fn picker(options: &[&str], filter: &str) -> ValuePickerState {
         ValuePickerState {
             field: 0,
+            append: false,
             options: options.iter().map(|s| (*s).to_string()).collect(),
             visible: Vec::new(),
             selected: 0,

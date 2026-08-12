@@ -235,9 +235,22 @@ pub fn layout(
     if let Some(panes) = &model.panes {
         panes_overlay(panes, model.grid_area, colors, m, measure, &mut out);
     }
+    if let Some(settings) = &model.settings {
+        // The Settings tab's content — window content like a screen, not an
+        // overlay: it replaces the grid area while that tab is active.
+        super::settings_screen::settings_screen(
+            settings,
+            model.grid_area,
+            colors,
+            m,
+            measure,
+            &mut out,
+        );
+    }
     if let Some(screen) = &model.screen {
-        // Over the grid, under the modals: a screen is window content, not
-        // an overlay, so the picker can still open above it.
+        // Over the grid (and over the settings tab's content — Esc returns),
+        // under the modals: a screen is window content, not an overlay, so
+        // the picker can still open above it.
         super::screens::screen_overlay(screen, model.grid_area, colors, m.scale, measure, &mut out);
     }
     // Everything below is the overlay layer; everything above must have its
@@ -249,14 +262,9 @@ pub fn layout(
         // wins the hit lookup — the same fact, stated once.
         picker_overlay(picker, colors, m, measure, &mut out);
     }
-    if let Some(settings) = &model.settings {
-        settings_overlay(settings, colors, m, measure, &mut out);
-    }
-    // After the settings overlay, not before: the palette is also how a
-    // long-list *value* is chosen, and that picker opens on top of the
-    // settings screen it was opened from. The command palette and the settings
-    // screen remain mutually exclusive, so this reordering changes nothing for
-    // them -- it only decides who wins when both are deliberately open.
+    // The palette after the picker: it is also how a long-list *value* is
+    // chosen from the settings tab, and that list opens on top of the
+    // content it was opened from.
     if let Some(palette) = &model.palette {
         palette_overlay(palette, colors, m, measure, &mut out);
     }
@@ -1366,390 +1374,6 @@ fn launcher_overlay(
     }
 }
 
-// Settings overlay geometry, logical px. Two-line rows: label + value on the
-// first line, description + tags on the second.
-const SETTINGS_W: f32 = 720.0;
-const SETTINGS_H: f32 = 560.0;
-const SETTINGS_ROW_H: f32 = 48.0;
-const SETTINGS_HEADER_H: f32 = 38.0;
-const SETTINGS_NOTICE_H: f32 = 32.0;
-const TOGGLE_W: f32 = 36.0;
-const TOGGLE_H: f32 = 20.0;
-const TRACK_W: f32 = 120.0;
-const TRACK_H: f32 = 4.0;
-
-fn settings_overlay(
-    settings: &super::model::SettingsModel,
-    colors: &ChromeColors,
-    m: &ChromeMetrics,
-    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
-    out: &mut ChromeLayout,
-) {
-    use super::model::{SettingsRowModel, SettingsValueCell};
-
-    let s = m.scale;
-    let no_clip = [0.0, 0.0, m.width, m.height];
-
-    out.rects.push(RectInstance::filled(no_clip, colors.scrim, no_clip));
-    out.hit.push(no_clip, HitRegion::SettingsScrim);
-
-    let w = (SETTINGS_W * s).min(m.width - PICKER_MARGIN * s);
-    let h = (SETTINGS_H * s).min(m.height - PICKER_MARGIN * s);
-    let panel = [(m.width - w) / 2.0, (m.height - h) / 2.5, w, h];
-    let mut panel_rect = RectInstance::rounded(panel, PICKER_RADIUS * s, colors.panel_bg, no_clip);
-    panel_rect.shadow_blur = 24.0 * s;
-    panel_rect.shadow_alpha = colors.shadow_alpha;
-    out.rects.push(panel_rect);
-    // Swallow panel clicks that miss every row: dismissing what the user is
-    // reading because they clicked a header would be hostile.
-    out.hit.push(panel, HitRegion::SettingsPanel);
-
-    let filter_h = m.line_height + 2.0 * PICKER_PAD * s;
-    let (filter_text, filter_color) = if settings.filter.is_empty() {
-        ("type to filter settings".to_string(), colors.text_faint)
-    } else {
-        (settings.filter.clone(), colors.text_active)
-    };
-    out.texts.push(TextRun {
-        px: m.font_px,
-        bold: false,
-            tracking: 0.0,
-        text: filter_text,
-        pos: [panel[0] + PICKER_PAD * s, text_baseline(m, panel[1], filter_h)],
-        max_width: w - 2.0 * PICKER_PAD * s,
-        color: filter_color,
-        clip: panel,
-    });
-    out.rects.push(RectInstance::filled(
-        [panel[0], panel[1] + filter_h, w, HAIRLINE * s],
-        colors.line,
-        no_clip,
-    ));
-
-    let rows_clip =
-        [panel[0], panel[1] + filter_h + HAIRLINE * s, w, h - filter_h - HAIRLINE * s];
-
-    let row_h = |row: &SettingsRowModel| match row {
-        SettingsRowModel::Group { .. } => SETTINGS_HEADER_H * s,
-        SettingsRowModel::Setting { .. } => SETTINGS_ROW_H * s,
-        SettingsRowModel::Notice { .. } => SETTINGS_NOTICE_H * s,
-    };
-    // Row offsets before any drawing, because ensure-visible needs the
-    // selected row's extent to decide the scroll it draws with.
-    let mut tops = Vec::with_capacity(settings.rows.len());
-    let mut content_h = 0.0f32;
-    for row in &settings.rows {
-        tops.push(content_h);
-        content_h += row_h(row);
-    }
-    let max_scroll = (content_h - rows_clip[3]).max(0.0);
-    let mut scroll = settings.scroll.clamp(0.0, max_scroll);
-    if settings.ensure_visible {
-        if let (Some(top), Some(row)) =
-            (tops.get(settings.selected), settings.rows.get(settings.selected))
-        {
-            let bottom = top + row_h(row);
-            if *top < scroll {
-                scroll = *top;
-            } else if bottom > scroll + rows_clip[3] {
-                scroll = bottom - rows_clip[3];
-            }
-            scroll = scroll.clamp(0.0, max_scroll);
-        }
-    }
-    out.settings_scroll = scroll;
-
-    // A filter that matches nothing must say so — a silently blank panel
-    // reads as broken, not as empty.
-    if settings.rows.is_empty() && !settings.filter.is_empty() {
-        out.texts.push(TextRun {
-        px: m.font_px,
-        bold: false,
-            tracking: 0.0,
-            text: format!("nothing matches \u{201c}{}\u{201d}", settings.filter),
-            pos: [panel[0] + PICKER_PAD * s, text_baseline(m, rows_clip[1], SETTINGS_ROW_H * s)],
-            max_width: w - 2.0 * PICKER_PAD * s,
-            color: colors.text_faint,
-            clip: rows_clip,
-        });
-    }
-
-    let left = panel[0] + PICKER_PAD * s;
-    let right = panel[0] + w - PICKER_PAD * s;
-    for (i, row) in settings.rows.iter().enumerate() {
-        let y = rows_clip[1] + tops[i] - scroll;
-        let band = [panel[0], y, w, row_h(row)];
-        let Some(visible) = intersect(band, rows_clip) else { continue };
-
-        match row {
-            SettingsRowModel::Notice { text } => {
-                // A warn-tinted band across the panel: pinned truth, not a row.
-                let band_rect = [panel[0] + 4.0 * s, y + 2.0 * s, w - 8.0 * s, band[3] - 4.0 * s];
-                out.rects.push(RectInstance::rounded(
-                    band_rect,
-                    RADIUS * s,
-                    colors.pill_warn_bg,
-                    rows_clip,
-                ));
-                out.texts.push(TextRun {
-        px: m.font_px,
-        bold: false,
-            tracking: 0.0,
-                    text: text.clone(),
-                    pos: [left, text_baseline(m, y, band[3])],
-                    max_width: w - 2.0 * PICKER_PAD * s,
-                    color: colors.pill_warn_text,
-                    clip: rows_clip,
-                });
-            }
-            SettingsRowModel::Group { title } => {
-                out.texts.push(TextRun {
-        px: m.font_px,
-        bold: false,
-            tracking: 0.0,
-                    text: title.clone(),
-                    pos: [
-                        left,
-                        text_baseline(
-                            m,
-                            y + (SETTINGS_HEADER_H - 24.0) * s,
-                            24.0 * s,
-                        ),
-                    ],
-                    max_width: w - 2.0 * PICKER_PAD * s,
-                    color: colors.text_faint,
-                    clip: rows_clip,
-                });
-            }
-            SettingsRowModel::Setting {
-                label,
-                key,
-                description,
-                value,
-                provenance,
-                restart,
-                inert,
-                modified,
-            } => {
-                if i == settings.selected {
-                    let chip =
-                        [panel[0] + 4.0 * s, y + 2.0 * s, w - 8.0 * s, band[3] - 4.0 * s];
-                    out.rects.push(RectInstance::rounded(
-                        chip,
-                        RADIUS * s,
-                        colors.accent_soft,
-                        rows_clip,
-                    ));
-                }
-                out.hit.push(visible, HitRegion::SettingsRow(i));
-
-                let line1_h = band[3] / 2.0;
-                let baseline1 = text_baseline(m, y, line1_h);
-                let baseline2 = text_baseline(m, y + line1_h, line1_h);
-
-                // The modified dot: a small accent square beside the label.
-                // Text markers survive what colour alone does not, but this
-                // one pairs with reset-to-default later; keep it visual.
-                if *modified {
-                    let dot = [left, y + (line1_h - 6.0 * s) / 2.0, 6.0 * s, 6.0 * s];
-                    out.rects.push(RectInstance::rounded(dot, 3.0 * s, colors.accent, rows_clip));
-                }
-                let label_x = left + 14.0 * s;
-                out.texts.push(TextRun {
-        px: m.font_px,
-        bold: false,
-            tracking: 0.0,
-                    text: label.clone(),
-                    pos: [label_x, baseline1],
-                    max_width: w * 0.4,
-                    color: colors.text_active,
-                    clip: rows_clip,
-                });
-
-                // Second line: tags right, then the description in whatever
-                // room is left — tags are the truth-telling part and must
-                // never be overwritten by a long doc comment.
-                let mut tag_x = right;
-                let mut push_tag = |text: String, color, tag_x: &mut f32| {
-                    let tw = measure(&text, m.font_px, false, 0.0).min(w * 0.35);
-                    *tag_x -= tw;
-                    out.texts.push(TextRun {
-        px: m.font_px,
-        bold: false,
-            tracking: 0.0,
-                        text,
-                        pos: [*tag_x, baseline2],
-                        max_width: w * 0.35,
-                        color,
-                        clip: rows_clip,
-                    });
-                    *tag_x -= 12.0 * s;
-                };
-                if *inert {
-                    push_tag("not applied yet".to_string(), colors.text_faint, &mut tag_x);
-                }
-                if *restart {
-                    push_tag("applies on next launch".to_string(), colors.text_faint, &mut tag_x);
-                }
-                if let Some((text, warn)) = provenance {
-                    let color = if *warn { colors.pill_warn_text } else { colors.text_faint };
-                    push_tag(text.clone(), color, &mut tag_x);
-                }
-
-                // The dotted key rides with the description so the user can
-                // grep their config for exactly what this row is.
-                let desc = if description.is_empty() {
-                    key.clone()
-                } else {
-                    format!("{key} — {description}")
-                };
-                out.texts.push(TextRun {
-        px: m.font_px,
-        bold: false,
-            tracking: 0.0,
-                    text: desc,
-                    pos: [label_x, baseline2],
-                    max_width: (tag_x - label_x - 12.0 * s).max(0.0),
-                    color: colors.text_faint,
-                    clip: rows_clip,
-                });
-
-                // The value cell, right-aligned on the first line.
-                match value {
-                    SettingsValueCell::Toggle { on } => {
-                        let track = [
-                            right - TOGGLE_W * s,
-                            y + (line1_h - TOGGLE_H * s) / 2.0,
-                            TOGGLE_W * s,
-                            TOGGLE_H * s,
-                        ];
-                        let fill = if *on { colors.accent } else { colors.line };
-                        out.rects.push(RectInstance::rounded(
-                            track,
-                            TOGGLE_H * s / 2.0,
-                            fill,
-                            rows_clip,
-                        ));
-                        let knob_d = (TOGGLE_H - 4.0) * s;
-                        let knob_x = if *on {
-                            track[0] + track[2] - knob_d - 2.0 * s
-                        } else {
-                            track[0] + 2.0 * s
-                        };
-                        out.rects.push(RectInstance::rounded(
-                            [knob_x, track[1] + 2.0 * s, knob_d, knob_d],
-                            knob_d / 2.0,
-                            colors.text_active,
-                            rows_clip,
-                        ));
-                        // Pushed after the row, so the track outranks it: a
-                        // click here flips, a click elsewhere only selects.
-                        if let Some(hit) = intersect(track, rows_clip) {
-                            out.hit.push(hit, HitRegion::SettingsToggle(i));
-                        }
-                    }
-                    SettingsValueCell::Select { value } => {
-                        let vw = measure(value, m.font_px, false, 0.0).min(w * 0.3);
-                        out.texts.push(TextRun {
-        px: m.font_px,
-        bold: false,
-            tracking: 0.0,
-                            text: value.clone(),
-                            pos: [right - vw, baseline1],
-                            max_width: w * 0.3,
-                            color: colors.text_active,
-                            clip: rows_clip,
-                        });
-                    }
-                    SettingsValueCell::Slider { frac, text } => {
-                        let track = [
-                            right - TRACK_W * s,
-                            y + (line1_h - TRACK_H * s) / 2.0,
-                            TRACK_W * s,
-                            TRACK_H * s,
-                        ];
-                        out.settings_tracks.push((i, track));
-                        // The hit band is the first line's height, not the
-                        // 4px track: nobody can click a hairline.
-                        let grab = [track[0] - 6.0 * s, y, track[2] + 12.0 * s, line1_h];
-                        if let Some(hit) = intersect(grab, rows_clip) {
-                            out.hit.push(hit, HitRegion::SettingsSlider(i));
-                        }
-                        out.rects.push(RectInstance::rounded(
-                            track,
-                            TRACK_H * s / 2.0,
-                            colors.line,
-                            rows_clip,
-                        ));
-                        out.rects.push(RectInstance::rounded(
-                            [track[0], track[1], track[2] * frac.clamp(0.0, 1.0), track[3]],
-                            TRACK_H * s / 2.0,
-                            colors.accent,
-                            rows_clip,
-                        ));
-                        let tw = measure(text, m.font_px, false, 0.0).min(w * 0.15);
-                        out.texts.push(TextRun {
-        px: m.font_px,
-        bold: false,
-            tracking: 0.0,
-                            text: text.clone(),
-                            pos: [track[0] - tw - 8.0 * s, baseline1],
-                            max_width: w * 0.15,
-                            color: colors.text_active,
-                            clip: rows_clip,
-                        });
-                    }
-                    SettingsValueCell::Text { text } => {
-                        let vw = measure(text, m.font_px, false, 0.0).min(w * 0.35);
-                        out.texts.push(TextRun {
-        px: m.font_px,
-        bold: false,
-            tracking: 0.0,
-                            text: text.clone(),
-                            pos: [right - vw, baseline1],
-                            max_width: w * 0.35,
-                            color: colors.text_active,
-                            clip: rows_clip,
-                        });
-                    }
-                    SettingsValueCell::ReadOnly { text } => {
-                        let vw = measure(text, m.font_px, false, 0.0).min(w * 0.35);
-                        out.texts.push(TextRun {
-        px: m.font_px,
-        bold: false,
-            tracking: 0.0,
-                            text: text.clone(),
-                            pos: [right - vw, baseline1],
-                            max_width: w * 0.35,
-                            color: colors.text_faint,
-                            clip: rows_clip,
-                        });
-                    }
-                    SettingsValueCell::Editing { buffer, error } => {
-                        // The caret is a character, not a rect: it inherits
-                        // the text clip and colour for free, and this is not
-                        // a text editor — there is no selection to draw.
-                        let text = format!("{buffer}▏");
-                        let vw = measure(&text, m.font_px, false, 0.0).min(w * 0.35);
-                        let color =
-                            if *error { colors.pill_warn_text } else { colors.text_active };
-                        out.texts.push(TextRun {
-        px: m.font_px,
-        bold: false,
-            tracking: 0.0,
-                            text,
-                            pos: [right - vw, baseline1],
-                            max_width: w * 0.35,
-                            color,
-                            clip: rows_clip,
-                        });
-                    }
-                }
-            }
-        }
-    }
-}
-
 fn intersect(r: [f32; 4], c: [f32; 4]) -> Option<[f32; 4]> {
     let x0 = r[0].max(c[0]);
     let y0 = r[1].max(c[1]);
@@ -1901,6 +1525,14 @@ fn horizontal(
 
         let active = i == model.active;
         let hovered = model.hover == Some(HitRegion::Tab(tab.addr));
+        // A session chip's rule and glyph take the tab's own accent (§12);
+        // an app tab is a place, not a shell — it takes `ui.accent`, per
+        // §11's "2px ui.accent inset top rule".
+        let chip_accent = if tab.kind == TabKind::Session {
+            accent_color(colors, tab.tab_accent)
+        } else {
+            colors.accent
+        };
         if active {
             // The mock's recipe, translated from CSS: `border: 1px line` with
             // `border-bottom: none`, and `box-shadow: inset 0 2px 0 accent` —
@@ -1949,7 +1581,7 @@ fn horizontal(
             ];
             out.rects.push(RectInstance {
                 radii: [(TAB_RADIUS - HAIRLINE) * s, (TAB_RADIUS - HAIRLINE) * s, 0.0, 0.0],
-                border: accent_color(colors, tab.tab_accent),
+                border: chip_accent,
                 border_width: ACCENT_RULE * s,
                 ..RectInstance::filled(
                     [
@@ -1987,22 +1619,42 @@ fn horizontal(
         let ink = match (tab.kind, tab.link) {
             (TabKind::Session, LinkKind::Stalled) => colors.warn,
             (TabKind::Session, LinkKind::Reconnecting) => colors.danger,
-            _ if active => accent_color(colors, tab.tab_accent),
+            _ if active => chip_accent,
             _ => colors.text_faint,
         };
         if active && tab.kind == TabKind::Session {
             out.rects.push(RectInstance::rounded(tile, TILE_RADIUS * s, washed(ink, 0.12), clip));
         }
-        // The icon is a placeholder dot until profiles carry real glyphs;
-        // the tile's box is what the design fixes (§Assets).
-        dot(
-            &mut out.rects,
-            tile[0] + tile[2] / 2.0,
-            tile[1] + tile[3] / 2.0,
-            DOT * s,
-            ink,
-            clip,
-        );
+        if tab.kind == TabKind::Session {
+            // The icon is a placeholder dot until profiles carry real
+            // glyphs; the tile's box is what the design fixes (§Assets).
+            dot(
+                &mut out.rects,
+                tile[0] + tile[2] / 2.0,
+                tile[1] + tile[3] / 2.0,
+                DOT * s,
+                ink,
+                clip,
+            );
+        } else {
+            // App tabs carry their own glyph (§11: ⚙ + "Settings") — BMP,
+            // reached by ordinary font fallback, unlike PUA icons.
+            let gear_px = 12.0 * s;
+            let gw = measure("\u{2699}", gear_px, false, 0.0);
+            out.texts.push(TextRun {
+                text: "\u{2699}".into(),
+                pos: [
+                    tile[0] + (tile[2] - gw) / 2.0,
+                    baseline_in(tile[1], tile[3], gear_px),
+                ],
+                max_width: tile[2] + 2.0,
+                color: ink,
+                clip,
+                px: gear_px,
+                bold: false,
+                tracking: 0.0,
+            });
+        }
 
         // Session chips carry their close affordance, as the mock draws it;
         // app tabs do not — closing Settings is closing a tab, but from its
@@ -2232,8 +1884,9 @@ fn vertical(
             x += detail_w + 10.0 * s;
         }
 
-        // The host chip: where this shell runs, said in a pill.
-        if x + chip_w <= budget_right {
+        // The host chip: where this shell runs, said in a pill. An app tab
+        // has no host — a pill with an empty label is chrome lint.
+        if !tab.host.is_empty() && x + chip_w <= budget_right {
             let chip_h = 20.0 * s;
             let chip = [x, (header_h - chip_h) / 2.0, chip_w, chip_h];
             out.rects.push(RectInstance::rounded(chip, 6.0 * s, colors.accent_soft, no_clip));
@@ -2339,8 +1992,13 @@ fn vertical(
     }
 
     let footer_h = FOOTER_H * s;
+    // The pinned Settings row (§11): directly above the fleet footer,
+    // separated by its own divider, whenever the Settings tab exists.
+    let settings_tab = model.tabs.iter().position(|t| t.kind == TabKind::Settings);
+    let pinned_h = if settings_tab.is_some() { 37.0 * s } else { 0.0 };
     let rows_top = search[1] + search[3] + SEARCH_PAD * s;
-    let rows_clip = [0.0, rows_top, sw, (m.height - rows_top - footer_h).max(0.0)];
+    let rows_clip =
+        [0.0, rows_top, sw, (m.height - rows_top - footer_h - pinned_h).max(0.0)];
 
     // Geometry per group: a header line, then its session rows.
     let group_header_h = GROUP_HEADER_H * s;
@@ -2352,6 +2010,11 @@ fn vertical(
     let fallback: Vec<super::model::HostGroup> = {
         let mut gs: Vec<super::model::HostGroup> = Vec::new();
         for (i, t) in model.tabs.iter().enumerate() {
+            // App tabs are places, not sessions: they have no host to group
+            // under — Settings gets the pinned row below instead.
+            if t.kind != TabKind::Session {
+                continue;
+            }
             if let Some(g) = gs.iter_mut().find(|g| g.label == t.host) {
                 g.tabs.push(i);
             } else {
@@ -2506,6 +2169,59 @@ fn vertical(
         y += GROUP_GAP * s;
     }
 
+    // The pinned Settings row (§11): ⚙, "Settings", the chord right-aligned
+    // in mono; selected takes the accentSoft fill and accent text.
+    if let Some(ti) = settings_tab {
+        let tab = &model.tabs[ti];
+        let py = m.height - footer_h - pinned_h;
+        out.rects.push(RectInstance::filled(
+            [0.0, py, sw, HAIRLINE * s],
+            colors.hairline_soft,
+            no_clip,
+        ));
+        let row = [ROW_HPAD * s, py + 4.0 * s, sw - 2.0 * ROW_HPAD * s, 30.0 * s];
+        let selected = ti == model.active;
+        let hovered = model.hover == Some(HitRegion::Tab(tab.addr));
+        if selected {
+            out.rects.push(RectInstance::rounded(row, 8.0 * s, colors.accent_soft, no_clip));
+        } else if hovered {
+            out.rects.push(RectInstance::rounded(row, 8.0 * s, colors.tab_hover_bg, no_clip));
+        }
+        out.hit.push(row, HitRegion::Tab(tab.addr));
+        let ink = if selected { colors.accent } else { colors.text_inactive };
+        out.texts.push(TextRun {
+            text: "\u{2699}".into(),
+            pos: [row[0] + 10.0 * s, baseline_in(row[1], row[3], 12.0 * s)],
+            max_width: 16.0 * s,
+            color: ink,
+            clip: no_clip,
+            px: 12.0 * s,
+            bold: false,
+            tracking: 0.0,
+        });
+        out.texts.push(TextRun {
+            text: tab.title.clone(),
+            pos: [row[0] + 28.0 * s, baseline_in(row[1], row[3], UI_BODY * s)],
+            max_width: row[2] - 70.0 * s,
+            color: ink,
+            clip: no_clip,
+            px: UI_BODY * s,
+            bold: false,
+            tracking: 0.0,
+        });
+        let chord_w = measure(&model.settings_chord, UI_CHORD * s, false, 0.0);
+        out.texts.push(TextRun {
+            text: model.settings_chord.clone(),
+            pos: [row[0] + row[2] - 10.0 * s - chord_w, baseline_in(row[1], row[3], UI_CHORD * s)],
+            max_width: chord_w + 2.0,
+            color: colors.text_faint,
+            clip: no_clip,
+            px: UI_CHORD * s,
+            bold: false,
+            tracking: 0.0,
+        });
+    }
+
     // Footer: fleet counts, and the door to the fleet view.
     {
         let fy = m.height - footer_h;
@@ -2623,6 +2339,7 @@ mod tests {
             anim: super::super::model::AnimPhase::default(),
             grid_area: [0.0, 46.0, 1200.0, 726.0],
             palette_chord: "⌘K".into(),
+            settings_chord: "\u{2318},".into(),
             picker: None,
             palette: None,
             settings: None,
@@ -3226,80 +2943,97 @@ mod tests {
 
     fn settings_rows(n: usize) -> Vec<crate::chrome::model::SettingsRowModel> {
         use crate::chrome::model::{SettingsRowModel, SettingsValueCell};
-        let mut rows = vec![SettingsRowModel::Group { title: "Text".into() }];
-        rows.extend((0..n).map(|i| SettingsRowModel::Setting {
-            label: format!("Setting {i}"),
-            key: format!("group.key_{i}"),
-            description: "a setting".into(),
-            value: SettingsValueCell::Toggle { on: i % 2 == 0 },
-            provenance: None,
-            restart: false,
-            inert: false,
-            modified: false,
-        }));
-        rows
+        (0..n)
+            .map(|i| SettingsRowModel::Setting {
+                label: format!("Setting {i}"),
+                key: format!("group.key_{i}"),
+                description: "a setting".into(),
+                value: SettingsValueCell::Toggle { on: i % 2 == 0 },
+                provenance: None,
+                restart: false,
+                inert: false,
+                modified: false,
+            })
+            .collect()
+    }
+
+    fn settings_screen_model(
+        rows: Vec<crate::chrome::model::SettingsRowModel>,
+        selected: usize,
+        ensure_visible: bool,
+    ) -> crate::chrome::model::SettingsScreenModel {
+        use crate::chrome::model::{SettingsCategoryModel, SettingsScreenModel};
+        SettingsScreenModel {
+            categories: vec![SettingsCategoryModel { label: "Text".into(), modified: 0 }],
+            selected_category: 0,
+            heading: "Text".into(),
+            prefix: "typography".into(),
+            lede: "Fonts and cells.".into(),
+            rows,
+            empty: None,
+            selected,
+            filter: String::new(),
+            scroll: 0.0,
+            ensure_visible,
+            modified_total: 0,
+            config_path: "~/.config/zesterm/config.toml".into(),
+            menu: None,
+        }
     }
 
     #[test]
-    fn the_settings_overlay_is_modal_like_the_picker() {
-        // The same definition of modal the picker and the sheet answer to:
-        // every point resolves to a settings region, nothing falls through.
-        use crate::chrome::model::SettingsModel;
+    fn the_settings_tab_swallows_the_grid_area_beneath_it() {
+        // Not a modal — no scrim, the strip stays live — but inside the grid
+        // area every point must resolve to a settings region: the session
+        // underneath must not take clicks through its own settings screen.
         let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
         let m = metrics(1200.0, 800.0, 1.0);
         let mut mo = model(tabs, TabsPosition::Top);
-        mo.settings = Some(SettingsModel {
-            rows: settings_rows(3),
-            selected: 1,
-            filter: String::new(),
-            scroll: 0.0,
-            ensure_visible: false,
-        });
+        mo.grid_area = [0.0, 46.0, 1200.0, 754.0];
+        mo.settings = Some(settings_screen_model(settings_rows(3), 1, false));
         let l = layout(&mo, &colors(), &m, &mut measure);
 
         let mut seen_rows = std::collections::HashSet::new();
-        let mut scrim_hits = 0u32;
         for x in (0..1200).step_by(4) {
-            for y in (0..800).step_by(4) {
+            for y in (50..800).step_by(4) {
                 match l.hit.hit(x as f32, y as f32) {
                     Some(HitRegion::SettingsRow(i) | HitRegion::SettingsToggle(i)) => {
                         seen_rows.insert(i);
                     }
-                    Some(HitRegion::SettingsPanel) => {}
-                    Some(HitRegion::SettingsScrim) => scrim_hits += 1,
+                    Some(
+                        HitRegion::SettingsPanel
+                        | HitRegion::SettingsCategory(_)
+                        | HitRegion::SettingsFilter
+                        | HitRegion::SettingsReset(_)
+                        | HitRegion::SettingsEditToml
+                        | HitRegion::Resize(_),
+                    ) => {}
                     Some(other) => {
-                        panic!("a click at ({x},{y}) escaped the settings overlay: {other:?}")
+                        panic!("a click at ({x},{y}) fell through the settings tab: {other:?}")
                     }
-                    None => panic!("({x},{y}) hit nothing; the scrim must cover the window"),
+                    None => panic!("({x},{y}) hit nothing inside the settings tab"),
                 }
             }
         }
         assert_eq!(
             seen_rows,
-            [1usize, 2, 3].into(),
-            "every setting row must be clickable; the header (row 0) must not be"
+            [0usize, 1, 2].into(),
+            "every setting row must be clickable"
         );
-        assert!(scrim_hits > 0, "the scrim must be reachable around the panel");
     }
 
     #[test]
     fn keyboard_navigation_never_acts_on_an_offscreen_row() {
-        // Forty rows overflow the panel. With the selection at the end and
+        // Forty rows overflow the column. With the selection at the end and
         // the scroll at the top, ensure_visible must move the scroll so the
         // selected row is actually hittable — otherwise arrows act on rows
         // the user cannot see.
-        use crate::chrome::model::SettingsModel;
         let m = metrics(1200.0, 800.0, 1.0);
         let rows = settings_rows(40);
         let selected = rows.len() - 1;
         let mut mo = model(Vec::new(), TabsPosition::Top);
-        mo.settings = Some(SettingsModel {
-            rows,
-            selected,
-            filter: String::new(),
-            scroll: 0.0,
-            ensure_visible: true,
-        });
+        mo.grid_area = [0.0, 46.0, 1200.0, 754.0];
+        mo.settings = Some(settings_screen_model(rows, selected, true));
         let l = layout(&mo, &colors(), &m, &mut measure);
         assert!(l.settings_scroll > 0.0, "the view must have moved to the selection");
         let found = (0..1200).step_by(4).any(|x| {
@@ -3327,37 +3061,33 @@ mod tests {
         // The click-to-set fraction is computed against `settings_tracks`;
         // if the reported rect and the drawn one could differ, the pointer
         // would set values the pixels never showed.
-        use crate::chrome::model::{SettingsModel, SettingsRowModel, SettingsValueCell};
+        use crate::chrome::model::{SettingsRowModel, SettingsValueCell};
         let m = metrics(1200.0, 800.0, 1.0);
         let mut mo = model(Vec::new(), TabsPosition::Top);
-        mo.settings = Some(SettingsModel {
-            rows: vec![
-                SettingsRowModel::Group { title: "Window".into() },
-                SettingsRowModel::Setting {
-                    label: "Opacity".into(),
-                    key: "window.opacity".into(),
-                    description: "background opacity".into(),
-                    value: SettingsValueCell::Slider { frac: 0.5, text: "0.5".into() },
-                    provenance: None,
-                    restart: false,
-                    inert: false,
-                    modified: false,
-                },
-            ],
-            selected: 1,
-            filter: String::new(),
-            scroll: 0.0,
-            ensure_visible: false,
-        });
+        mo.grid_area = [0.0, 46.0, 1200.0, 754.0];
+        mo.settings = Some(settings_screen_model(
+            vec![SettingsRowModel::Setting {
+                label: "Opacity".into(),
+                key: "window.opacity".into(),
+                description: "background opacity".into(),
+                value: SettingsValueCell::Slider { frac: 0.5, text: "0.5".into() },
+                provenance: None,
+                restart: false,
+                inert: false,
+                modified: false,
+            }],
+            0,
+            false,
+        ));
         let l = layout(&mo, &colors(), &m, &mut measure);
         let (row, track) =
             *l.settings_tracks.first().expect("the slider row must report its track");
-        assert_eq!(row, 1);
+        assert_eq!(row, 0);
         // The centre of the reported track must answer as that slider.
         let (cx, cy) = (track[0] + track[2] / 2.0, track[1] + track[3] / 2.0);
         assert_eq!(
             l.hit.hit(cx, cy),
-            Some(HitRegion::SettingsSlider(1)),
+            Some(HitRegion::SettingsSlider(0)),
             "the grab band must cover the track it reports"
         );
     }
@@ -3592,6 +3322,39 @@ mod tests {
         assert!(
             l.texts.iter().any(|t| t.text == "Settings"),
             "the app tab carries its label"
+        );
+    }
+
+    #[test]
+    fn the_vertical_sidebar_pins_settings_above_the_fleet_footer() {
+        // §11: in the vertical layout Settings is a pinned row directly
+        // above the fleet footer with the ⌘, chord — never a session row
+        // grouped under a host it does not have.
+        let mut settings = tab(9, TabOrigin::Local, TabPresence::Online);
+        settings.kind = TabKind::Settings;
+        settings.title = "Settings".into();
+        settings.host = String::new();
+        let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online), settings];
+        let m = metrics(800.0, 600.0, 1.0);
+        let l = layout(&model(tabs, TabsPosition::Left), &colors(), &m, &mut measure);
+
+        let hits: Vec<f32> = (0..600)
+            .map(|y| y as f32)
+            .filter(|&y| l.hit.hit(30.0, y) == Some(HitRegion::Tab(addr(9))))
+            .collect();
+        assert!(!hits.is_empty(), "the pinned row answers as the settings tab");
+        let footer_top = 600.0 - FOOTER_H;
+        assert!(
+            hits.iter().all(|&y| y > footer_top - 40.0 && y < footer_top),
+            "the row sits directly above the footer, not among the session rows: {hits:?}"
+        );
+        assert!(
+            l.texts.iter().any(|t| t.text == "\u{2318},"),
+            "the chord rides the pinned row"
+        );
+        assert!(
+            l.texts.iter().filter(|t| t.text == "Settings").count() == 1,
+            "settings appears once — pinned, not also grouped under a host"
         );
     }
 

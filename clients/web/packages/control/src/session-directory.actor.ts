@@ -36,6 +36,45 @@ export interface SessionEntry {
   readonly attached: boolean;
 }
 
+/**
+ * A daemon's session listing, projected into the entry a directory holds.
+ *
+ * Beside `SessionEntry` rather than beside either writer, because there are
+ * now two of them: the sidecar's feed on loopback, and — on the hosted path,
+ * which has no sidecar — the browser's own connection per machine. Two copies
+ * of one projection is how the two worlds start disagreeing about what a
+ * session is, and the disagreement would show up as a field that is blank in
+ * one client and right in the other.
+ *
+ * The parameter is **structural**, not `@zesterm/proto`'s `SessionInfo`. This
+ * package depends on `@sigx/actors` and nothing else on purpose; a dependency
+ * added for one argument's type is a dependency every actors host then
+ * carries. The shape is `SessionInfo`'s, and a drift in it fails at both call
+ * sites rather than here.
+ */
+export function sessionEntryOf(info: {
+  readonly addr: { readonly host: string; readonly session: bigint };
+  readonly title: string;
+  readonly cwd: string;
+  readonly cols: number;
+  readonly rows: number;
+  readonly alt_screen: boolean;
+  readonly attached: boolean;
+}): SessionEntry {
+  return {
+    host: info.addr.host,
+    // A `bigint` on the wire; a string here, for the reason `SessionEntry`
+    // gives — the actor wire is JSON and the UI only compares and displays.
+    session: info.addr.session.toString(),
+    title: info.title,
+    cwd: info.cwd,
+    cols: info.cols,
+    rows: info.rows,
+    altScreen: info.alt_screen,
+    attached: info.attached,
+  };
+}
+
 export interface HostInfo {
   /** 64 hex chars. */
   readonly id: string;

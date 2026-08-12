@@ -1,9 +1,9 @@
-//! The settings overlay's rows, built from the schema walk.
+//! The settings tab's rows, built from the schema walk.
 //!
 //! Pure on purpose, like `chrome::layout`: fields, values and provenance in,
 //! display rows and a parallel action list out. Nothing here touches the
 //! window, the fonts or the filesystem, which is what lets the coverage test
-//! hold the overlay to the schema without opening a window.
+//! hold the tab to the schema without opening a window.
 //!
 //! The row list and the action list are built in one pass — the picker's
 //! discipline — so a drawn row and its meaning cannot drift.
@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use zest_config::ui::{UiField, Widget};
 use zest_config::Source;
 
-use crate::chrome::model::{SettingsRowModel, SettingsValueCell};
+use crate::chrome::model::{SettingsFace, SettingsRowModel, SettingsValueCell};
 
 /// What a settings row means to the input path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +33,9 @@ pub struct EditBuffer {
     pub buffer: String,
     /// The last Enter did not parse; drawn as an error until the text changes.
     pub error: bool,
+    /// Enter *appends* to a list field (a new tag, a new env entry) instead
+    /// of replacing the value — the add-chip's mode.
+    pub append: bool,
 }
 
 /// Settings the schema declares but the app does not consume yet.
@@ -64,19 +67,125 @@ pub const NOT_YET_WIRED: &[&str] = &[
 /// Display order of the groups. The schema's alphabetical property order is
 /// an artifact; this is the order a person tunes a terminal in. Groups the
 /// list does not name append at the end rather than vanishing.
-const GROUP_ORDER: &[&str] =
+pub const GROUP_ORDER: &[&str] =
     &["Text", "Appearance", "Window", "Tabs", "Shell", "Scrolling", "Cursor", "Motion"];
 
-/// Build the overlay's rows and their actions, one pass.
+/// The fixed ninth category (§11): the one the schema cannot express.
+pub const UNKNOWN_CATEGORY: &str = "Unknown keys";
+
+/// Every category, in rail order: `GROUP_ORDER`, any group the schema grew
+/// that the list does not name (appended rather than vanishing), then
+/// "Unknown keys".
 #[must_use]
-pub fn build_rows(
+pub fn categories(fields: &[UiField]) -> Vec<String> {
+    let mut out: Vec<String> = GROUP_ORDER.iter().map(|g| (*g).to_string()).collect();
+    for field in fields {
+        if !out.iter().any(|g| g == &field.group) {
+            out.push(field.group.clone());
+        }
+    }
+    out.push(UNKNOWN_CATEGORY.to_string());
+    out
+}
+
+/// The category's dotted prefix — the settings-tree branch its fields live
+/// under ("typography" for Text), drawn in mono beside the heading. Empty
+/// when the group's keys do not share one (or the group has no fields).
+#[must_use]
+pub fn category_prefix(fields: &[UiField], group: &str) -> String {
+    let mut prefix: Option<&str> = None;
+    for field in fields.iter().filter(|f| f.group == group) {
+        let head = field.key.split('.').next().unwrap_or(&field.key);
+        match prefix {
+            None => prefix = Some(head),
+            Some(p) if p == head => {}
+            Some(_) => return String::new(),
+        }
+    }
+    prefix.unwrap_or_default().to_string()
+}
+
+/// The category ledes — designed copy (docs/design/client-ui, §11's mock),
+/// keyed by group name. A group the design never met gets an honest generic.
+#[must_use]
+pub fn category_lede(group: &str) -> &'static str {
+    match group {
+        "Text" => "Font stack, size, and the cell geometry that follows from them.",
+        "Appearance" => {
+            "Which theme, and how glyph coverage is sampled before it reaches the frame."
+        }
+        "Window" => "Shape, transparency, and who draws the titlebar.",
+        "Tabs" => "Where the strip lives and what comes back on the next launch.",
+        "Shell" => "What runs, where it runs, and the environment it inherits.",
+        "Scrolling" => "How much history is kept and what moves the view.",
+        "Cursor" => "Shape, blink, and motion between cells.",
+        "Motion" => "Animation, and how much of it.",
+        UNKNOWN_CATEGORY => "Keys your files set that this schema does not know.",
+        _ => "Settings the schema added after this build's rail was written.",
+    }
+}
+
+/// Fields of `group` that differ from their schema defaults — the rail's
+/// per-category count. `values` must already be f32-narrowed (the callers
+/// below do it once for every group).
+fn modified_in(fields: &[UiField], values: &serde_json::Value, group: &str) -> usize {
+    fields
+        .iter()
+        .filter(|f| f.group == group)
+        .filter(|f| {
+            zest_config::ui::value_at(values, &f.key).is_some_and(|v| *v != f.default)
+        })
+        .count()
+}
+
+/// Per-category modified counts plus the total, one pass — the rail's
+/// badges and the footer's sentence must agree by construction.
+#[must_use]
+pub fn modified_counts(
+    fields: &[UiField],
+    values: &serde_json::Value,
+    groups: &[String],
+) -> (Vec<usize>, usize) {
+    let mut normalized = values.clone();
+    zest_config::schema::narrow_f32_literals(&mut normalized);
+    let counts: Vec<usize> =
+        groups.iter().map(|g| modified_in(fields, &normalized, g)).collect();
+    let total = counts.iter().sum();
+    (counts, total)
+}
+
+/// Whether a category has anything to show under `filter` — what lets the
+/// rail hide empty categories while a filter is live (§11).
+#[must_use]
+pub fn category_matches(
+    fields: &[UiField],
+    group: &str,
+    filter: &str,
+    unknown_keys: &[String],
+) -> bool {
+    let filter = filter.to_lowercase();
+    if group == UNKNOWN_CATEGORY {
+        return unknown_keys.iter().any(|k| k.to_lowercase().contains(&filter));
+    }
+    fields.iter().any(|f| f.group == group && matches_filter(f, &filter))
+}
+
+/// Build one category's rows and their actions, one pass — no group headers;
+/// the rail is the grouping now (§11). Banners pin to the top, above any
+/// filter's result: a write that failed or a restart owed is true whatever
+/// the user is searching for.
+#[must_use]
+#[allow(clippy::too_many_arguments, reason = "one build, one pass; a params struct would be ceremony")]
+pub fn build_category_rows(
     fields: &[UiField],
     values: &serde_json::Value,
     provenance: &BTreeMap<String, Source>,
+    group: &str,
     filter: &str,
     editing: Option<&EditBuffer>,
     restart_pending: &std::collections::BTreeSet<String>,
     error: Option<&str>,
+    installed: &[String],
 ) -> (Vec<SettingsRowModel>, Vec<RowAction>) {
     // Both sides of the "modified" comparison have to be spelled the same way.
     // Every float in `Settings` is an `f32` and JSON has only `f64`, so a live
@@ -91,8 +200,6 @@ pub fn build_rows(
     let mut rows = Vec::new();
     let mut actions = Vec::new();
 
-    // Banners pin to the top, above any filter's result: a write that
-    // failed or a restart owed is true whatever the user is searching for.
     if let Some(error) = error {
         rows.push(SettingsRowModel::Notice { text: error.to_string() });
         actions.push(RowAction::None);
@@ -107,28 +214,104 @@ pub fn build_rows(
         actions.push(RowAction::None);
     }
 
-    let mut groups: Vec<&str> = GROUP_ORDER.to_vec();
-    for field in fields {
-        if !groups.contains(&field.group.as_str()) {
-            groups.push(&field.group);
-        }
+    for (index, field) in fields
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.group == group && matches_filter(f, &filter))
+    {
+        let editing = editing.filter(|e| e.field_idx == index);
+        rows.push(setting_row(field, values, provenance, editing, installed));
+        actions.push(RowAction::Field(index));
     }
+    (rows, actions)
+}
 
-    for group in groups {
-        let members: Vec<(usize, &UiField)> = fields
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| f.group == group && matches_filter(f, &filter))
-            .collect();
-        if members.is_empty() {
+/// The unknown-keys category's rows: the key in mono, which layer set it,
+/// and a suggestion when a schema key is within a plausible-typo distance.
+#[must_use]
+pub fn build_unknown_rows(
+    unknown_keys: &[String],
+    provenance: &BTreeMap<String, Source>,
+    filter: &str,
+    schema_keys: &[String],
+) -> (Vec<SettingsRowModel>, Vec<RowAction>) {
+    let filter = filter.to_lowercase();
+    let mut rows = Vec::new();
+    let mut actions = Vec::new();
+    for key in unknown_keys {
+        if !key.to_lowercase().contains(&filter) {
             continue;
         }
-        rows.push(SettingsRowModel::Group { title: group.to_string() });
+        rows.push(SettingsRowModel::Unknown {
+            key: key.clone(),
+            // The cascade records provenance for every leaf it merged,
+            // unknown ones included — that is where "which file did this"
+            // comes from.
+            source: provenance
+                .get(key)
+                .map_or_else(|| "config file".to_string(), std::string::ToString::to_string),
+            suggestion: suggest_key(key, schema_keys),
+        });
         actions.push(RowAction::None);
-        for (index, field) in members {
-            let editing = editing.filter(|e| e.field_idx == index);
-            rows.push(setting_row(field, values, provenance, editing));
-            actions.push(RowAction::Field(index));
+    }
+    (rows, actions)
+}
+
+/// Build every category's rows with headers — the whole-schema view the
+/// coverage tests hold to the schema. The tab itself renders one category at
+/// a time via [`build_category_rows`]; this is that, concatenated, so the
+/// two cannot disagree about which rows exist.
+#[allow(dead_code, reason = "the coverage tests' whole-schema view; production renders per category")]
+#[must_use]
+pub fn build_rows(
+    fields: &[UiField],
+    values: &serde_json::Value,
+    provenance: &BTreeMap<String, Source>,
+    filter: &str,
+    editing: Option<&EditBuffer>,
+    restart_pending: &std::collections::BTreeSet<String>,
+    error: Option<&str>,
+) -> (Vec<SettingsRowModel>, Vec<RowAction>) {
+    let mut rows = Vec::new();
+    let mut actions = Vec::new();
+    let mut first = true;
+    for group in categories(fields) {
+        if group == UNKNOWN_CATEGORY {
+            continue;
+        }
+        // Banners belong to the panel, not to a group: only the first
+        // category carries them, or they would repeat eight times.
+        let (banner_pending, banner_error) = if first {
+            (restart_pending.clone(), error)
+        } else {
+            (std::collections::BTreeSet::new(), None)
+        };
+        let (mut group_rows, group_actions) = build_category_rows(
+            fields,
+            values,
+            provenance,
+            &group,
+            filter,
+            editing,
+            &banner_pending,
+            banner_error,
+            &[],
+        );
+        first = false;
+        let banners =
+            group_rows.iter().take_while(|r| matches!(r, SettingsRowModel::Notice { .. })).count();
+        if group_rows.len() > banners {
+            rows.extend(group_rows.drain(..banners));
+            actions.extend(group_actions[..banners].iter().copied());
+            rows.push(SettingsRowModel::Group { title: group.clone() });
+            actions.push(RowAction::None);
+            rows.extend(group_rows);
+            actions.extend(group_actions[banners..].iter().copied());
+        } else {
+            // Only banners survived the filter for this group: keep them
+            // (they are pinned truth), drop the empty header.
+            rows.extend(group_rows);
+            actions.extend(group_actions);
         }
     }
     (rows, actions)
@@ -147,6 +330,7 @@ fn setting_row(
     values: &serde_json::Value,
     provenance: &BTreeMap<String, Source>,
     editing: Option<&EditBuffer>,
+    installed: &[String],
 ) -> SettingsRowModel {
     let value = zest_config::ui::value_at(values, &field.key);
     // Warn when the winning layer outranks the user's file: an edit written
@@ -161,20 +345,12 @@ fn setting_row(
             buffer: edit.buffer.clone(),
             error: edit.error,
         },
-        None => value_cell(field, value),
-    };
-    // List-shaped values have no inline editor yet; the row says where the
-    // edit happens instead of leaving Enter to silently do nothing.
-    let description = match field.widget {
-        Widget::TagList | Widget::KeyValue => {
-            format!("{} · edit in config.toml", first_line(&field.description))
-        }
-        _ => first_line(&field.description),
+        None => value_cell(field, value, installed),
     };
     SettingsRowModel::Setting {
         label: humanize_key(&field.key),
         key: field.key.clone(),
-        description,
+        description: first_line(&field.description),
         value: cell,
         provenance,
         restart: zest_config::invalidate::class_of(&field.key) == zest_config::Invalidation::Restart,
@@ -183,7 +359,51 @@ fn setting_row(
     }
 }
 
-fn value_cell(field: &UiField, value: Option<&serde_json::Value>) -> SettingsValueCell {
+/// A select is the segmented control when its variants are ≤3 (§11);
+/// otherwise the 288px dropdown, whose rows have room for the doc comments —
+/// `window.backdrop` is the case that earns it. Deliberately *not* "or
+/// documented ones": the mock draws two-variant documented selects
+/// (Antialiasing) segmented, and the reference screenshot is the tiebreaker.
+#[must_use]
+pub fn select_is_segmented(field: &UiField) -> bool {
+    field.widget == Widget::Select && field.variants.len() <= 3
+}
+
+/// `from-shell` → `From shell`: a variant's wire value as a label.
+#[must_use]
+pub fn humanize_value(value: &str) -> String {
+    let spaced = value.replace('-', " ");
+    let mut chars = spaced.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => spaced,
+    }
+}
+
+/// The unit a stepper's value carries (§11: "14 pt", "530 ms", "1.25 ×").
+/// From the key's spelling — the schema does not carry units, and the design
+/// writes them next to exactly these shapes of key.
+#[must_use]
+pub fn unit_of(key: &str) -> &'static str {
+    let last = key.rsplit('.').next().unwrap_or(key);
+    if last.ends_with("_pt") {
+        "pt"
+    } else if last.ends_with("_ms") {
+        "ms"
+    } else if last == "line_height" {
+        "×"
+    } else if last == "padding" {
+        "px"
+    } else {
+        ""
+    }
+}
+
+fn value_cell(
+    field: &UiField,
+    value: Option<&serde_json::Value>,
+    installed: &[String],
+) -> SettingsValueCell {
     let text_of = |v: Option<&serde_json::Value>| match v {
         Some(serde_json::Value::String(s)) if !s.is_empty() => s.clone(),
         Some(serde_json::Value::String(_)) | None => "—".to_string(),
@@ -193,6 +413,13 @@ fn value_cell(field: &UiField, value: Option<&serde_json::Value>) -> SettingsVal
         Widget::Toggle => SettingsValueCell::Toggle {
             on: value.and_then(serde_json::Value::as_bool).unwrap_or(false),
         },
+        Widget::Select if select_is_segmented(field) => {
+            let current = value.and_then(serde_json::Value::as_str).unwrap_or_default();
+            SettingsValueCell::Segmented {
+                options: field.variants.iter().map(|v| humanize_value(&v.value)).collect(),
+                selected: field.variants.iter().position(|v| v.value == current),
+            }
+        }
         // The profile pickers (#130) are string-valued choices from a roster
         // the client brings, exactly like ThemePicker; AccentPicker is the
         // integer-valued exception and lands with the plain-text widgets.
@@ -212,38 +439,65 @@ fn value_cell(field: &UiField, value: Option<&serde_json::Value>) -> SettingsVal
             #[allow(clippy::cast_possible_truncation)] // display fraction, not data
             SettingsValueCell::Slider { frac: frac as f32, text: format_number(v) }
         }
-        Widget::Number | Widget::Text | Widget::Path | Widget::AccentPicker => {
+        Widget::Number => {
+            let unit = unit_of(&field.key);
+            let text = match (value, unit) {
+                (None, _) => "—".to_string(),
+                (Some(v), "") => format_scalar(v),
+                (Some(v), unit) => format!("{} {unit}", format_scalar(v)),
+            };
+            SettingsValueCell::Stepper { text }
+        }
+        Widget::Text | Widget::Path | Widget::AccentPicker => {
             SettingsValueCell::Text { text: text_of(value) }
         }
-        // The primary face is the choice; the rest of the stack is fallback and
-        // would only make the row unreadable.
-        Widget::FontList => SettingsValueCell::Select {
-            value: value
+        Widget::FontList => {
+            let faces: Vec<String> = value
                 .and_then(serde_json::Value::as_array)
-                .and_then(|a| a.first())
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("—")
-                .to_string(),
+                .map(|a| {
+                    a.iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            // Rows past the first *resolvable* face are fallback (§11): the
+            // first that resolves is the one the atlas actually shapes with.
+            let first_resolvable = faces.iter().position(|f| {
+                installed.iter().any(|i| i.eq_ignore_ascii_case(f))
+            });
+            SettingsValueCell::FontList {
+                faces: faces
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, family)| SettingsFace {
+                        family,
+                        fallback: first_resolvable.is_some_and(|first| i > first),
+                    })
+                    .collect(),
+            }
+        }
+        Widget::TagList => SettingsValueCell::TagList {
+            tags: value
+                .and_then(serde_json::Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
         },
-        Widget::TagList => SettingsValueCell::ReadOnly {
-            text: match value.and_then(serde_json::Value::as_array) {
-                Some(items) if !items.is_empty() => items
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                _ => "—".to_string(),
-            },
-        },
-        Widget::KeyValue => SettingsValueCell::ReadOnly {
-            text: match value.and_then(serde_json::Value::as_object) {
-                Some(map) if !map.is_empty() => map
-                    .iter()
-                    .map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or_default()))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                _ => "—".to_string(),
-            },
+        Widget::KeyValue => SettingsValueCell::KeyValue {
+            entries: value
+                .and_then(serde_json::Value::as_object)
+                .map(|map| {
+                    map.iter()
+                        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
         },
     }
 }
@@ -421,8 +675,8 @@ pub fn slider_value(field: &UiField, frac: f64) -> Option<serde_json::Value> {
     Some(serde_json::json!(clean_float(min + steps * (max - min) / 20.0)))
 }
 
-/// A committed value as the TOML to write, or `None` for the widgets that
-/// cannot be edited inline yet (the list-shaped ones).
+/// A committed value as the TOML to write, or `None` when the value's shape
+/// does not fit the field (a caller bug, refused rather than mis-written).
 #[must_use]
 pub fn to_toml(
     field: &UiField,
@@ -446,17 +700,60 @@ pub fn to_toml(
         Widget::Number | Widget::Slider => {
             Some(zest_config::toml_edit::Value::from(clean_float(value.as_f64()?)))
         }
-        Widget::FontList => {
-            // The whole stack, primary first — writing only the primary would
-            // drop the fallbacks and turn a missing glyph into tofu.
+        Widget::FontList | Widget::TagList => {
+            // The whole list, in order — for fonts, writing only the primary
+            // would drop the fallbacks and turn a missing glyph into tofu;
+            // for tags, order is what the user wrote.
             let mut arr = zest_config::toml_edit::Array::new();
             for f in value.as_array()?.iter().filter_map(serde_json::Value::as_str) {
                 arr.push(f);
             }
             Some(zest_config::toml_edit::Value::Array(arr))
         }
-        Widget::TagList | Widget::KeyValue => None,
+        Widget::KeyValue => {
+            // An inline table, entries in the map's order. Empty values are
+            // written, not skipped: empty *unsets* the variable under the
+            // wholesale-replace merge (`shell.env` replaces, cascade.rs).
+            let mut table = zest_config::toml_edit::InlineTable::new();
+            for (k, v) in value.as_object()? {
+                table.insert(k, v.as_str().unwrap_or_default().into());
+            }
+            Some(zest_config::toml_edit::Value::InlineTable(table))
+        }
     }
+}
+
+/// Plain Levenshtein edit distance, for the unknown-keys suggestions. Small
+/// and in-crate on purpose: two dotted keys are ~25 characters, a config has
+/// a handful of unknowns, and a dependency for this would be all cost.
+#[must_use]
+pub fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// "did you mean `size_pt`?" — the nearest schema key when the distance is
+/// small enough to read as a typo (≤ 2 edits), else nothing: a stretch
+/// suggestion is worse than none.
+#[must_use]
+pub fn suggest_key(unknown: &str, schema_keys: &[String]) -> Option<String> {
+    schema_keys
+        .iter()
+        .map(|k| (levenshtein(unknown, k), k))
+        .filter(|(d, _)| *d <= 2)
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, k)| k.clone())
 }
 
 /// The f64 that *displays* as the f32 the user meant.
@@ -528,7 +825,7 @@ mod tests {
         rows.iter()
             .filter_map(|r| match r {
                 SettingsRowModel::Setting { key, .. } => Some(key.clone()),
-                SettingsRowModel::Group { .. } | SettingsRowModel::Notice { .. } => None,
+                _ => None,
             })
             .collect()
     }
@@ -592,7 +889,7 @@ mod tests {
                     assert!(key.contains("opacity"), "'{key}' does not match the filter");
                     expects_setting = false;
                 }
-                SettingsRowModel::Notice { .. } => {}
+                _ => {}
             }
         }
         assert!(!expects_setting, "a trailing group header has no rows");
@@ -758,7 +1055,17 @@ mod tests {
             .expect("a font stack is writable");
         assert_eq!(v.to_string().trim(), r#"["Meslo LG M", "Consolas"]"#, "the whole stack, in order");
         let features = field("typography.features");
-        assert!(to_toml(&features, &serde_json::json!([])).is_none(), "other lists still are not");
+        let v = to_toml(&features, &serde_json::json!(["calt", "-liga"]))
+            .expect("tag lists write as arrays now that the chips edit them");
+        assert_eq!(v.to_string().trim(), r#"["calt", "-liga"]"#, "a leading '-' is kept verbatim");
+        let env = field("shell.env");
+        let v = to_toml(&env, &serde_json::json!({"FOO": "bar", "GONE": ""}))
+            .expect("key-value maps write as inline tables");
+        assert_eq!(
+            v.to_string().trim(),
+            r#"{ FOO = "bar", GONE = "" }"#,
+            "an empty value is written, not skipped — empty unsets under wholesale replace"
+        );
     }
 
     #[test]
@@ -795,7 +1102,8 @@ mod tests {
     fn the_edited_field_shows_its_buffer_not_its_value() {
         let all = fields();
         let idx = all.iter().position(|f| f.key == "typography.size_pt").expect("exists");
-        let edit = EditBuffer { field_idx: idx, buffer: "18".to_string(), error: false };
+        let edit =
+            EditBuffer { field_idx: idx, buffer: "18".to_string(), error: false, append: false };
         let (rows, _) = build_rows(
             &all,
             &values(),
@@ -887,20 +1195,235 @@ mod tests {
     }
 
     #[test]
-    fn list_rows_say_where_the_edit_happens() {
+    fn every_widget_gets_the_cell_its_shape_asks_for() {
+        // §11's vocabulary, decided here so the layout can stay dumb: ≤3
+        // undocumented variants segment, documented ones drop down, numbers
+        // step, lists draw as lists.
         let (rows, _) = build(&values(), &BTreeMap::new(), "");
+        let cell_of = |wanted: &str| {
+            rows.iter()
+                .find_map(|r| match r {
+                    SettingsRowModel::Setting { key, value, .. } if key == wanted => {
+                        Some(value.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("'{wanted}' row exists"))
+        };
+        assert!(
+            matches!(cell_of("tabs.position"), SettingsValueCell::Segmented { ref options, selected: Some(_) } if options.len() == 2),
+            "two plain variants are a segmented control"
+        );
+        assert!(
+            matches!(cell_of("window.backdrop"), SettingsValueCell::Select { .. }),
+            "documented variants earn the dropdown — window.backdrop is the §11 case"
+        );
+        assert!(
+            matches!(cell_of("window.padding"), SettingsValueCell::Stepper { ref text } if text == "8 px"),
+            "a number is the stepper, value with its unit"
+        );
+        assert!(
+            matches!(cell_of("typography.families"), SettingsValueCell::FontList { .. }),
+            "the font stack draws as stacked rows — order is the setting"
+        );
+        assert!(
+            matches!(cell_of("typography.features"), SettingsValueCell::TagList { .. }),
+            "features are chips"
+        );
+        assert!(
+            matches!(cell_of("shell.env"), SettingsValueCell::KeyValue { .. }),
+            "env entries are paired cells"
+        );
+    }
+
+    #[test]
+    fn the_theme_pill_is_a_roster_select_with_no_variants() {
+        // Why the mouse must route a Select-pill click through the Enter
+        // dispatch instead of arming `ui.menu` directly: these fields draw
+        // the same pill as a documented Select, but their options are a
+        // roster (`zest_theme::builtin`, gathered at open) rather than
+        // `field.variants` — a menu armed for them resolves against an
+        // empty variant list and is discarded same-pass, so the pill would
+        // open nothing and the theme would be unreachable by mouse.
+        let fields = fields();
+        for key in ["appearance.theme", "appearance.light_theme"] {
+            let f = fields.iter().find(|f| f.key == key).unwrap_or_else(|| panic!("{key} in schema"));
+            assert_eq!(f.widget, Widget::ThemePicker, "{key} is the roster widget");
+            assert!(
+                matches!(value_cell(f, None, &[]), SettingsValueCell::Select { .. }),
+                "{key} draws the dropdown pill a click will land on"
+            );
+            assert!(
+                f.variants.is_empty(),
+                "{key} carries no variants — `ui.menu` would resolve to nothing for it"
+            );
+        }
+    }
+
+    #[test]
+    fn font_faces_past_the_first_resolvable_are_fallback() {
+        // The first face that resolves is the one the atlas shapes with;
+        // everything after it is along for coverage, and the row should say
+        // so instead of implying six co-equal choices.
+        let f = field("typography.families");
+        let value = serde_json::json!(["Ghost Grotesk", "Cascadia Mono", "Consolas"]);
+        let installed = vec!["cascadia mono".to_string(), "Consolas".to_string()];
+        let cell = value_cell(&f, Some(&value), &installed);
+        let SettingsValueCell::FontList { faces } = cell else {
+            panic!("font stack renders as FontList")
+        };
+        assert_eq!(
+            faces.iter().map(|f| f.fallback).collect::<Vec<_>>(),
+            [false, false, true],
+            "an unresolvable face before the winner is not 'fallback'; the one after it is \
+             (and resolvability compares case-insensitively)"
+        );
+    }
+
+    #[test]
+    fn unknown_keys_suggest_only_plausible_typos() {
+        let keys: Vec<String> = zest_config::schema::keys();
+        assert_eq!(
+            suggest_key("typography.size_px", &keys).as_deref(),
+            Some("typography.size_pt"),
+            "one edit away is the canonical did-you-mean"
+        );
+        assert_eq!(
+            suggest_key("window.blur_radius", &keys),
+            None,
+            "far from everything: no match beats a stretch"
+        );
+        // The ≤2 boundary itself, pinned with arithmetic rather than vibes.
+        assert_eq!(levenshtein("size_pt", "size_px"), 1);
+        assert_eq!(levenshtein("opacity", "opac"), 3);
+        assert_eq!(levenshtein("", "ab"), 2);
+        let (rows, actions) = build_unknown_rows(
+            &["typography.size_px".to_string(), "window.blur_radius".to_string()],
+            &BTreeMap::new(),
+            "",
+            &keys,
+        );
+        assert_eq!(rows.len(), 2);
+        assert!(actions.iter().all(|a| *a == RowAction::None), "unknown rows run nothing");
+        assert!(
+            matches!(&rows[0], SettingsRowModel::Unknown { suggestion: Some(s), .. } if s == "typography.size_pt")
+        );
+        assert!(matches!(&rows[1], SettingsRowModel::Unknown { suggestion: None, .. }));
+        let (rows, _) = build_unknown_rows(
+            &["typography.size_px".to_string()],
+            &BTreeMap::new(),
+            "blur",
+            &keys,
+        );
+        assert!(rows.is_empty(), "the filter reaches the unknown keys too");
+    }
+
+    #[test]
+    fn rows_scope_to_their_category_and_counts_add_up() {
+        // The rail's contract: one category's rows are exactly its group's
+        // fields, and the per-group badges sum to the footer's sentence.
+        let all = fields();
+        let mut settings = zest_config::Settings::default();
+        settings.typography.size_pt = 15.0;
+        settings.window.opacity = 0.5;
+        settings.window.padding = 12;
+        let values = serde_json::to_value(settings).expect("serializes");
+
+        let (rows, actions) = build_category_rows(
+            &all,
+            &values,
+            &BTreeMap::new(),
+            "Text",
+            "",
+            None,
+            &no_pending(),
+            None,
+            &[],
+        );
+        assert_eq!(rows.len(), actions.len(), "parallel by construction");
         for row in &rows {
-            if let SettingsRowModel::Setting { key, description, .. } = row {
-                let listy = matches!(
-                    field(key).widget,
-                    Widget::TagList | Widget::KeyValue
-                );
-                assert_eq!(
-                    description.contains("edit in config.toml"),
-                    listy,
-                    "'{key}': exactly the uneditable rows must point at the file"
-                );
+            match row {
+                SettingsRowModel::Setting { key, .. } => assert!(
+                    field(key).group == "Text",
+                    "'{key}' leaked into the Text category"
+                ),
+                SettingsRowModel::Group { .. } => {
+                    panic!("category views have no group headers — the rail is the grouping")
+                }
+                _ => {}
             }
+        }
+
+        let groups = categories(&all);
+        assert_eq!(groups.first().map(String::as_str), Some("Text"));
+        assert_eq!(
+            groups.last().map(String::as_str),
+            Some(UNKNOWN_CATEGORY),
+            "the ninth category is fixed at the end"
+        );
+        let (counts, total) = modified_counts(&all, &values, &groups);
+        let text_idx = groups.iter().position(|g| g == "Text").expect("exists");
+        let window_idx = groups.iter().position(|g| g == "Window").expect("exists");
+        assert_eq!(counts[text_idx], 1, "size_pt differs");
+        assert_eq!(counts[window_idx], 2, "opacity and padding differ");
+        assert_eq!(total, 3, "the footer's sentence is the badges' sum");
+        assert_eq!(
+            counts.iter().sum::<usize>(),
+            total,
+            "no category counts what another already did"
+        );
+    }
+
+    #[test]
+    fn the_reset_dot_resolves_its_row_to_the_right_key_and_the_file_loses_it() {
+        // The dot IS the reset button (§11). remove_value's own tests cover
+        // the file mechanics; this covers the wiring the click handler uses:
+        // row index → parallel action → field → key, then the temp-file
+        // round trip — write, reset, key gone, comments elsewhere intact.
+        let all = fields();
+        let mut settings = zest_config::Settings::default();
+        settings.typography.size_pt = 15.0;
+        let values = serde_json::to_value(settings).expect("serializes");
+        let (rows, actions) = build_category_rows(
+            &all,
+            &values,
+            &BTreeMap::new(),
+            "Text",
+            "",
+            None,
+            &no_pending(),
+            None,
+            &[],
+        );
+        let row = rows
+            .iter()
+            .position(|r| matches!(r, SettingsRowModel::Setting { key, modified: true, .. } if key == "typography.size_pt"))
+            .expect("the modified row exists");
+        let RowAction::Field(idx) = actions[row] else { panic!("a setting row maps to a field") };
+        let key = &all[idx].key;
+        assert_eq!(key, "typography.size_pt", "the parallel lists agree about the row's meaning");
+
+        let path = std::env::temp_dir().join("zesterm-settings-tab-reset-test.toml");
+        std::fs::write(
+            &path,
+            "# my terminal\n[typography]\n# I like it big\nsize_pt = 15.0\nline_height = 1.5\n",
+        )
+        .expect("write");
+        zest_config::remove_value(&path, key).expect("reset");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(!text.contains("size_pt"), "the key is gone: {text}");
+        assert!(text.contains("# my terminal"), "comments elsewhere survive: {text}");
+        assert!(text.contains("line_height = 1.5"), "siblings survive: {text}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn category_prefixes_and_ledes_exist_for_every_rail_row() {
+        let all = fields();
+        assert_eq!(category_prefix(&all, "Text"), "typography", "the dotted prefix beside the heading");
+        assert_eq!(category_prefix(&all, "Window"), "window");
+        for group in categories(&all) {
+            assert!(!category_lede(&group).is_empty(), "'{group}' has no lede");
         }
     }
 
@@ -926,7 +1449,7 @@ mod tests {
             .expect("the spring_response row exists");
         assert_eq!(
             cell,
-            SettingsValueCell::Text { text: "0.16".to_string() },
+            SettingsValueCell::Stepper { text: "0.16".to_string() },
             "the noisiest f32 in the schema must render as what the user wrote"
         );
     }

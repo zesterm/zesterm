@@ -40,7 +40,8 @@ pub enum Action {
     /// never list a chord that does not exist, and every row it lists runs
     /// through the same dispatch the chord does.
     TogglePalette,
-    /// The settings overlay (⌘, — the desktop's own convention).
+    /// The Settings tab (⌘, — the desktop's own convention). Opens it, or
+    /// activates the one that exists; closing it is closing a tab (§11).
     ToggleSettings,
     /// The Profiles tab (⌘⇧, — the settings chord, shifted, per design §12).
     /// Opens the singleton tab, or activates it when it is already open.

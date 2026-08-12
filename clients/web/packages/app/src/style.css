@@ -78,6 +78,13 @@ body {
   color: var(--zt-warn);
 }
 
+/* Not `warn`. A machine with its lid shut is the ordinary state of most of a
+   fleet, and a row painted amber for it teaches people to ignore amber. */
+.link-state.asleep {
+  color: var(--zt-dim);
+  font-style: italic;
+}
+
 /* Dim in both states on purpose: which key backs the device is worth saying
    and not worth a green tick — a reassuring colour on the seed path would be
    the untrue half of the message. */
@@ -800,6 +807,26 @@ body {
 
 .row-name {
   font-weight: 600;
+}
+
+/* The machine's name and its live state, as one target: the whole point of
+   the row is that it opens that machine's sessions. */
+.row-open {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.row-open:hover .row-name {
+  text-decoration: underline;
 }
 
 .row-meta {

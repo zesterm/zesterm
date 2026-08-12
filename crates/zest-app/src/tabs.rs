@@ -334,20 +334,34 @@ pub fn is_placeholder(addr: SessionAddr) -> bool {
     addr.host == HostId::from_bytes([0; 32])
 }
 
-/// The Profiles chip's address in the strip's hit map — a placeholder no
-/// session can collide with: real placeholder ids count up from 1, this one
-/// sits at the far end of the space.
+/// The Settings tab's address (design §11): an app tab is a place, not a
+/// shell, but the strip's hit machinery is keyed by `SessionAddr` and staying
+/// inside that key is what keeps this change from retouching every hit
+/// region (#23's lesson). All-zero host — no real host, it is a key
+/// fingerprint — plus a `SessionId` the placeholder counter can never
+/// count up to.
 #[must_use]
-pub fn profiles_tab_addr() -> SessionAddr {
-    placeholder_addr(u64::MAX)
+pub fn settings_addr() -> SessionAddr {
+    SessionAddr::new(HostId::from_bytes([0; 32]), SessionId(u64::MAX))
 }
 
-/// The window's app tabs (design §§11–12): places, not shells. Only Profiles
-/// exists today, as a placeholder pane; Settings joins with §11's work item.
+/// The Profiles chip's address (design §12), one below Settings' — the top
+/// two ids on the all-zero host are the app tabs', reserved as a pair so the
+/// two chips can never collide, and real placeholder ids count up from 1 so
+/// neither is reachable by opening tabs.
+#[must_use]
+pub fn profiles_tab_addr() -> SessionAddr {
+    SessionAddr::new(HostId::from_bytes([0; 32]), SessionId(u64::MAX - 1))
+}
+
+/// The window's Profiles tab (design §12): a place, not a shell, as a
+/// placeholder pane until its work item lands. Settings has its own strip
+/// machinery (§11, landed with #172); Profiles keeps this thinner shape
+/// until the editor replaces the placeholder.
 ///
-/// At most one of each — the singleton rule (`⌘⇧,` on an already-open
-/// Profiles tab activates it rather than opening a second; the web client's
-/// `openSingleton` pins the same rule). A `bool` per kind makes duplication
+/// At most one — the singleton rule (`⌘⇧,` on an already-open Profiles tab
+/// activates it rather than opening a second; the web client's
+/// `openSingleton` pins the same rule). A `bool` makes duplication
 /// unrepresentable rather than merely checked.
 #[derive(Default)]
 pub struct AppTabs {
@@ -372,10 +386,20 @@ impl AppTabs {
 }
 
 /// The window's open tabs, and which one the keyboard belongs to.
+///
+/// Beside the session tabs the strip can hold one *app tab* — Settings
+/// (design §11) — which is a place rather than a shell: it has no session,
+/// so it lives as two flags instead of a `Tab`. `active` always names a
+/// session tab; while `settings_active` the keyboard belongs to the
+/// Settings tab and the session keeps its slot to return to on close.
 #[derive(Default)]
 pub struct TabStrip {
     tabs: Vec<Tab>,
     active: usize,
+    /// The Settings tab exists (at most one, per §11).
+    settings_open: bool,
+    /// ...and holds the keyboard/display.
+    settings_active: bool,
 }
 
 impl TabStrip {
@@ -420,7 +444,47 @@ impl TabStrip {
     /// the pointer.
     #[must_use]
     pub fn is_active(&self, addr: SessionAddr) -> bool {
-        self.active().is_some_and(|t| t.addr == addr)
+        if addr == settings_addr() {
+            return self.settings_active;
+        }
+        !self.settings_active && self.active().is_some_and(|t| t.addr == addr)
+    }
+
+    /// The Settings tab exists in the strip.
+    #[must_use]
+    pub fn settings_open(&self) -> bool {
+        self.settings_open
+    }
+
+    /// The Settings tab holds the keyboard and the grid area.
+    #[must_use]
+    pub fn settings_active(&self) -> bool {
+        self.settings_active
+    }
+
+    /// Open the Settings tab, or activate the one that exists — ⌘, never
+    /// opens a second (design §11: "at most one exists at a time").
+    pub fn open_settings(&mut self) {
+        self.settings_open = true;
+        self.settings_active = true;
+    }
+
+    /// Close the Settings tab; the keyboard returns to the session tab that
+    /// held it before.
+    pub fn close_settings(&mut self) {
+        self.settings_open = false;
+        self.settings_active = false;
+    }
+
+    /// Index into the drawn tab list (sessions, then Settings when open) of
+    /// the tab that is lit — the chrome model's `active`.
+    #[must_use]
+    pub fn display_active(&self) -> usize {
+        if self.settings_active {
+            self.tabs.len()
+        } else {
+            self.active
+        }
     }
 
     /// The tab holding `addr` as its *split* pane, if any.
@@ -450,10 +514,11 @@ impl TabStrip {
     }
 
     /// Add a tab and make it active — a new tab is something the user just
-    /// asked for, so it takes the keyboard.
+    /// asked for, so it takes the keyboard (from the Settings tab too).
     pub fn push(&mut self, tab: Tab) {
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
+        self.settings_active = false;
     }
 
     /// Add a tab without taking the keyboard — restored tabs arrive in the
@@ -463,34 +528,65 @@ impl TabStrip {
         self.tabs.push(tab);
     }
 
-    /// Returns true when the active tab changed.
+    /// Returns true when the active tab changed. Activating a session takes
+    /// the keyboard back from the Settings tab, which stays open in place.
     pub fn activate(&mut self, index: usize) -> bool {
-        if index >= self.tabs.len() || index == self.active {
+        if index >= self.tabs.len() || (index == self.active && !self.settings_active) {
             return false;
         }
+        self.settings_active = false;
         self.active = index;
         true
     }
 
     pub fn activate_addr(&mut self, addr: SessionAddr) -> bool {
+        if addr == settings_addr() {
+            if !self.settings_open || self.settings_active {
+                return false;
+            }
+            self.settings_active = true;
+            return true;
+        }
         match self.tabs.iter().position(|t| t.addr == addr) {
             Some(i) => self.activate(i),
             None => false,
         }
     }
 
+    /// Next/prev walk the drawn order — sessions, then Settings when open —
+    /// so the app tab takes its turn in the cycle like the ordinary tab §11
+    /// says it is.
     pub fn activate_next(&mut self) -> bool {
-        if self.tabs.len() < 2 {
+        // A window can be alive with zero tabs (a failed first spawn warns
+        // and returns), and `% 0` panics — cycling nothing is a no-op.
+        let len = self.display_len();
+        if len == 0 {
             return false;
         }
-        self.activate((self.active + 1) % self.tabs.len())
+        self.activate_display((self.display_active() + 1) % len)
     }
 
     pub fn activate_prev(&mut self) -> bool {
-        if self.tabs.len() < 2 {
+        let len = self.display_len();
+        if len == 0 {
             return false;
         }
-        self.activate((self.active + self.tabs.len() - 1) % self.tabs.len())
+        self.activate_display((self.display_active() + len - 1) % len)
+    }
+
+    fn display_len(&self) -> usize {
+        self.tabs.len() + usize::from(self.settings_open)
+    }
+
+    fn activate_display(&mut self, index: usize) -> bool {
+        if index == self.display_active() {
+            return false;
+        }
+        if index == self.tabs.len() && self.settings_open {
+            self.settings_active = true;
+            return true;
+        }
+        self.activate(index)
     }
 
     /// Remove a tab, keeping the active index on the tab the user was
@@ -509,6 +605,8 @@ impl TabStrip {
     pub fn clear(&mut self) {
         self.tabs.clear();
         self.active = 0;
+        self.settings_open = false;
+        self.settings_active = false;
     }
 }
 
@@ -679,10 +777,104 @@ mod tests {
     #[test]
     fn the_profiles_chip_address_is_a_placeholder_no_session_reaches() {
         // Persistence and the picker skip placeholders, so the chip can
-        // never be saved as a session; and real placeholders count up from
-        // 1, so a collision would take u64::MAX tabs opened in one window.
+        // never be saved as a session; real placeholders count up from 1,
+        // and the two app tabs' reserved ids must never collide with each
+        // other either — both branches once picked u64::MAX independently.
         assert!(is_placeholder(profiles_tab_addr()));
         assert_ne!(profiles_tab_addr(), placeholder_addr(1));
+        assert_ne!(
+            profiles_tab_addr(),
+            settings_addr(),
+            "Settings and Profiles are different tabs and need different keys"
+        );
+    }
+
+    #[test]
+    fn the_settings_tab_is_a_singleton_that_activates_in_place() {
+        // §11: ⌘, opens it; if it is already open it activates that tab
+        // rather than opening a second. Closing it hands the keyboard back
+        // to the session it took it from.
+        let mut strip = TabStrip::default();
+        for n in 1..=2 {
+            strip.push(fake(n));
+        }
+        strip.activate(0);
+        assert!(!strip.settings_open(), "nothing opens it but the user");
+
+        strip.open_settings();
+        assert!(strip.settings_open() && strip.settings_active());
+        assert_eq!(
+            strip.display_active(),
+            2,
+            "the settings chip sits after the session tabs and is the lit one"
+        );
+        assert!(strip.is_active(settings_addr()));
+        assert_eq!(
+            strip.active().expect("session kept").addr,
+            placeholder_addr(1),
+            "the session tab keeps its slot underneath"
+        );
+
+        strip.open_settings();
+        assert!(strip.settings_open(), "a second ⌘, is an activation, not a second tab");
+
+        strip.close_settings();
+        assert!(!strip.settings_open() && !strip.settings_active());
+        assert!(
+            strip.is_active(placeholder_addr(1)),
+            "closing the settings tab returns the keyboard to the session it took it from"
+        );
+        for tab in [placeholder_addr(1), placeholder_addr(2)] {
+            strip.close(tab).expect("tab exists").kill();
+        }
+    }
+
+    #[test]
+    fn tab_cycling_takes_the_settings_tab_in_its_turn() {
+        // §11: an ordinary tab in the strip, after the session tabs — so
+        // next/prev include it, in that position.
+        let mut strip = TabStrip::default();
+        for n in 1..=2 {
+            strip.push(fake(n));
+        }
+        strip.open_settings();
+        strip.activate(0);
+        assert!(!strip.settings_active(), "activating a session takes the keyboard back");
+
+        strip.activate_next();
+        assert_eq!(strip.display_active(), 1);
+        strip.activate_next();
+        assert!(strip.settings_active(), "settings takes its turn after the last session");
+        strip.activate_next();
+        assert_eq!(strip.display_active(), 0, "and the cycle wraps past it");
+        strip.activate_prev();
+        assert!(strip.settings_active(), "prev wraps back onto it");
+
+        assert!(
+            !strip.activate_addr(settings_addr()),
+            "activating the already-active settings tab is not a change"
+        );
+        for tab in [placeholder_addr(1), placeholder_addr(2)] {
+            strip.close(tab).expect("tab exists").kill();
+        }
+    }
+
+    #[test]
+    fn cycling_an_empty_strip_is_a_no_op_not_a_panic() {
+        // A live window can hold zero tabs: `new_tab()` warns and returns
+        // when the spawn fails, so Ctrl+Tab reaches next/prev with
+        // `display_len() == 0` — which used to be a remainder-by-zero panic.
+        let mut strip = TabStrip::default();
+        assert!(!strip.activate_next(), "nothing to cycle to");
+        assert!(!strip.activate_prev(), "in either direction");
+
+        // And a strip holding only the Settings tab is a cycle of one:
+        // still a no-op, never a change.
+        strip.open_settings();
+        assert!(!strip.activate_next(), "a lone tab has no next");
+        assert!(!strip.activate_prev(), "nor a prev");
+        assert!(strip.settings_active(), "and it keeps the keyboard");
+
     }
 
     #[test]
