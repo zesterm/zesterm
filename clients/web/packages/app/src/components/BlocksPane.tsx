@@ -11,11 +11,18 @@
  * values unresolved.
  */
 
-import { component } from 'sigx';
+import { component, onMounted, onUpdated } from 'sigx';
 import { CellFlags, hasFlag, type Color, type Span } from '@zesterm/proto';
 import type { TerminalPalette } from '@zesterm/theme';
 
-import type { HeaderItem, LinkHealth, Outcome, PaneRow, RenderItem } from '../blocks-pane-model.ts';
+import {
+  followsOutput,
+  type HeaderItem,
+  type LinkHealth,
+  type Outcome,
+  type PaneRow,
+  type RenderItem,
+} from '../blocks-pane-model.ts';
 
 const UNDERLINE_FLAGS =
   CellFlags.UNDERLINE | CellFlags.DOUBLE_UNDERLINE | CellFlags.UNDERCURL;
@@ -68,6 +75,33 @@ export const BlocksPane = component<{
   onCopyOutput: () => void;
   onReRun: () => void;
 }>((ctx) => {
+  let paneEl: HTMLElement | null = null;
+
+  // The pane follows output: pinned to the bottom so the live prompt stays
+  // in view as history grows — a DOM scroller left alone holds position and
+  // new content lands below the fold, which for a terminal means typing into
+  // an input you cannot see. The user scrolling up releases the pin
+  // (followsOutput decides, and is tested); returning to the bottom
+  // re-engages it. Programmatic pinning lands *at* the bottom, so the scroll
+  // event it fires re-derives `follow` as true rather than fighting this.
+  let follow = true;
+
+  const onScroll = (): void => {
+    const el = paneEl;
+    if (el !== null) follow = followsOutput(el.scrollTop, el.clientHeight, el.scrollHeight);
+  };
+
+  const pin = (): void => {
+    const el = paneEl;
+    if (el !== null && follow) el.scrollTop = el.scrollHeight;
+  };
+
+  // Both hooks: onUpdated covers every re-render (new output, folds, link),
+  // onMounted covers the first paint and each alt→primary mode switch, which
+  // remounts the pane with history already long.
+  onMounted(pin);
+  onUpdated(pin);
+
   // Two shapes rather than style={maybeUndefined}: exactOptionalPropertyTypes
   // is right that an explicit undefined is not the same as no attribute.
   const spanEl = (s: Span, palette: TerminalPalette) => {
@@ -201,6 +235,16 @@ export const BlocksPane = component<{
       }
     }
 
-    return <div class={`blocks-pane${link === 'reconnecting' ? ' degraded' : ''}`}>{out}</div>;
+    return (
+      <div
+        class={`blocks-pane${link === 'reconnecting' ? ' degraded' : ''}`}
+        ref={(el: HTMLElement) => {
+          paneEl = el;
+        }}
+        onScroll={onScroll}
+      >
+        {out}
+      </div>
+    );
   };
 });

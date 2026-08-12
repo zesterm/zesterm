@@ -126,6 +126,44 @@ export function mostRecentBlockWithOutput(layout: BlocksLayout): BlockSlice | nu
 }
 
 /**
+ * Whether the shell itself is reading — the trailing block open in prompt
+ * state, the same shape `paneModel` renders as the prompt line. ⌘⇧R *types*,
+ * so this is its gate: during a running command the "most recent block with
+ * output" is that very command, and the replayed text plus CR would land in
+ * its stdin rather than re-run anything; with no blocks at all there is no
+ * prompt to trust. Copy needs no such gate — a clipboard write disturbs
+ * nothing.
+ */
+export function atShellPrompt(blocks: readonly BlockPayload[]): boolean {
+  const last = blocks[blocks.length - 1];
+  return last !== undefined && last.end_line === null && last.state.state === 'prompt';
+}
+
+/**
+ * Browser zoom and DPR scaling leave fractional-pixel gaps between
+ * `scrollTop + clientHeight` and `scrollHeight` even when the user never
+ * scrolled, so "at the bottom" needs slack — but well under one row (~21px),
+ * or a deliberate one-row nudge upward would be overridden.
+ */
+const FOLLOW_SLACK_PX = 8;
+
+/**
+ * Whether the pane should keep pinning its scroll to the bottom as output
+ * appends. The canvas mode always showed the live screen; a DOM scroller
+ * does not — browser scroll anchoring *holds* position, it never follows
+ * appended content — so the pane must follow explicitly, and must stop the
+ * moment the user scrolls up to read (being yanked to the bottom mid-read is
+ * the opposite bug). Pure so the decision is provable without a DOM.
+ */
+export function followsOutput(
+  scrollTop: number,
+  clientHeight: number,
+  scrollHeight: number,
+): boolean {
+  return scrollHeight - scrollTop - clientHeight <= FOLLOW_SLACK_PX;
+}
+
+/**
  * Everything the blocks pane draws, in document order.
  *
  * `nowMs` exists for the running counter ('running 4.2s' needs a clock) and

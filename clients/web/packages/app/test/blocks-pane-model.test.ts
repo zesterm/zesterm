@@ -31,6 +31,8 @@ import {
 } from '@zesterm/proto';
 
 import {
+  atShellPrompt,
+  followsOutput,
   formatDuration,
   isInterrupted,
   mostRecentBlockWithOutput,
@@ -348,6 +350,42 @@ test('mostRecentBlockWithOutput skips a last block that printed nothing', () => 
     mostRecentBlockWithOutput(sliceBlocks({ ...view, blocks: [] })),
     null,
     'no blocks, no target — the chords must be able to decline',
+  );
+});
+
+test('atShellPrompt: re-run may type only into a shell that is reading', () => {
+  const finished = synthBlock(0, 0n, 1n, 1n, { state: 'finished', exit_code: 0 }, 'echo hi');
+  const running = synthBlock(1, 2n, 3n, null, { state: 'running' }, 'sleep 99');
+  const prompt = synthBlock(2, 4n, null, null, { state: 'prompt' }, '');
+
+  assert.ok(
+    atShellPrompt([finished, prompt]),
+    'a trailing open prompt is the one state where typed bytes reach the shell',
+  );
+  assert.ok(
+    !atShellPrompt([finished, running]),
+    "⌘⇧R during a running command would land in that command's stdin, not the shell's",
+  );
+  assert.ok(!atShellPrompt([]), 'no shell integration means no prompt to trust — decline');
+  assert.ok(
+    !atShellPrompt([finished]),
+    'a finished trailing block (D received, next A not yet) is mid-transition, not a prompt',
+  );
+});
+
+test('followsOutput: at (or near) the bottom follows, scrolled away does not', () => {
+  assert.ok(followsOutput(900, 100, 1000), 'exactly at the bottom keeps following new output');
+  assert.ok(
+    followsOutput(897, 100, 1000),
+    'sub-row rounding slack still follows — browser zoom leaves fractional-pixel gaps',
+  );
+  assert.ok(
+    !followsOutput(500, 100, 1000),
+    'reading history must not be yanked back down by every delta',
+  );
+  assert.ok(
+    followsOutput(0, 200, 150),
+    'content shorter than the viewport always follows — there is nowhere to scroll away to',
   );
 });
 

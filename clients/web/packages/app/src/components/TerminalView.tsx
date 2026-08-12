@@ -36,6 +36,7 @@ import { wsDial } from '../ws-dial.ts';
 import { currentTheme, themeStore } from '../state/theme.ts';
 import { NO_FOLDS, foldedFor, toggle, type FoldsState } from '../state/folds.ts';
 import {
+  atShellPrompt,
   mostRecentBlockWithOutput,
   paneModel,
   type LinkHealth,
@@ -196,6 +197,14 @@ export const TerminalView = component<{
   };
 
   const reRun = (): void => {
+    // Re-run TYPES, so it may fire only when the shell is the thing reading:
+    // primary screen, trailing block an open prompt (atShellPrompt, tested).
+    // During a running command the selected block IS that command, and the
+    // replay would land in its stdin; in the alt screen it would land in the
+    // full-screen app's document. Both callers — the ⌘⇧R chord and the
+    // header chip — pass through here, so the gate covers a chip clicked on
+    // a running block's header too.
+    if (client.grid.altScreen || !atShellPrompt(client.grid.blocks)) return;
     const target = mostRecentBlockWithOutput(sliceBlocks(client.grid));
     if (target === null || target.block.command === '') return;
     const bytes = encodeComposedText(target.block.command);
@@ -220,7 +229,10 @@ export const TerminalView = component<{
     // table (palette, split, tabs) is the app shell's to wire when the
     // tab-strip work lands, and claiming them from inside one session's view
     // would strand them when a second view exists.
-    const action = shellChord(e, mods, platform);
+    // Claimed only on the primary screen: the block actions are meaningless
+    // over a full-screen app, and a claimed-but-swallowed chord would eat a
+    // keystroke the app (kitty-protocol aware or not) was entitled to see.
+    const action = client.grid.altScreen ? null : shellChord(e, mods, platform);
     if (action !== null && (action.kind === 'copy-output' || action.kind === 're-run')) {
       e.preventDefault();
       if (action.kind === 'copy-output') copyOutput();
