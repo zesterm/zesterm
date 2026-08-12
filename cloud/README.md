@@ -174,6 +174,9 @@ way to park a control link. It stays, because a stand-in for one end is how you
 find out which end is wrong; but the run below is the real one.
 
 ```sh
+# 0. the relay's own secret — without it every control link is refused
+cp cloud/packages/relay/.dev.vars.example cloud/packages/relay/.dev.vars
+
 # 1. the relay Worker, under a real runtime
 pnpm -C cloud --filter @zesterm/relay-worker exec wrangler dev --port 8787
 
@@ -183,6 +186,25 @@ pnpm -C cloud --filter @zesterm/relay-worker exec wrangler dev --port 8787
 # 3. the browser's half: mints a ticket and attaches
 node cloud/packages/relay/tools/fake-browser.mjs \
   --ticket-seed <64 lowercase hex> --host <the daemon's host id>
+```
+
+**Step 0 is not optional and its failure names nothing.** `RELAY_SIGNING_KEY` is
+the relay's own Ed25519 seed; with no `.dev.vars` the daemon dials, is
+challenged, and is refused `unconfigured` — the Worker behaving correctly
+(`room.ts` refuses rather than failing to start, deliberately), but a code that
+is neither `unknown-host` nor documented anywhere a person is looking. It is
+gitignored, so a machine that has run this before has one and never had to be
+told. `TICKET_PUBLIC_KEYS` matters only once a browser attaches; the control
+link needs the seed alone.
+
+On Windows, if a real `zesterm` is running, give the test daemon its own socket.
+Both want `\\.\pipe\zesterm-<user>` and the loser exits with
+`could not listen error=transport failed: Access is denied. (os error 5)`, which
+reads as a permissions problem rather than a name already taken:
+
+```powershell
+.\target\fast\zest-daemon.exe --ephemeral --socket \\.\pipe\zesterm-relaytest `
+  --relay http://127.0.0.1:8787
 ```
 
 `--ephemeral` mints a fresh key every start, so the `hosts` row has to name
