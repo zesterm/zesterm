@@ -93,3 +93,5 @@ export {
 } from './wire.ts';
 export { type Cell, BLANK, expandRow, rowText } from './cells.ts';
 export { GridView, type KeyframeState, NO_LINE } from './grid-view.ts';
+export { type BlockSlice, type BlocksLayout, sliceBlocks, outputLineCount } from './blocks-view.ts';
+export { type Span, rowSpans } from './spans.ts';

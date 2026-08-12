@@ -86,6 +86,18 @@ export class GridView {
 
   /** Replace everything with a complete state. */
   applyKeyframe(k: KeyframeState): void {
+    // A width change reflowed the host's grid, and reflow *renumbers* line ids
+    // (`zest_core` grid/mod.rs: rewrapping changes how many rows a logical
+    // line occupies, so old ids cannot survive). The keyframe's rows and
+    // blocks arrive under the new numbering; everything this client kept —
+    // scrollback rows, and blocks the host evicted before the resize — still
+    // carries the old one, and the wire has no mapping between the two. Stale
+    // state cannot be re-anchored, only discarded: joined with reanchored
+    // blocks it hands pre-resize rows to a live command and pushes live rows
+    // past their block (see `sliceBlocks`), which misrenders worse than a
+    // shorter history reads.
+    const renumbered = this.cols !== 0 && k.cols !== this.cols;
+    if (renumbered) this.scrollback = [];
     this.cols = k.cols;
     this.rows = [...k.rows_data];
     // Merged, not replaced. A keyframe re-sends every attribute it uses, but the
@@ -101,9 +113,12 @@ export class GridView {
     // `cls` erasing the rows it described. Below it are blocks the host merely
     // evicted, which a client keeping longer history than the host keeps.
     const from = k.blocks_from ?? 0;
-    this.blocks = [...this.blocks.filter((b) => b.id < from), ...(k.blocks ?? [])];
-    // `title` and `scrollback` are deliberately not cleared: neither is part of
-    // the state a keyframe describes.
+    // Kept-because-evicted blocks are anchored in the old numbering too, so a
+    // renumbering keyframe drops them along with the scrollback they described.
+    const kept = renumbered ? [] : this.blocks.filter((b) => b.id < from);
+    this.blocks = [...kept, ...(k.blocks ?? [])];
+    // `title`, and `scrollback` at an unchanged width, are deliberately not
+    // cleared: neither is part of the state a keyframe describes.
   }
 
   /**
