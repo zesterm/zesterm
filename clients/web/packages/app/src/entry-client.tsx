@@ -18,25 +18,19 @@ import { actorsPlugin } from '@sigx/actors/app';
 import { socketTransport } from '@sigx/actors-ws/client';
 import { RouterView } from '@sigx/router';
 import { component } from 'sigx';
-import { applyCssVars, obsidian, themeById } from '@zesterm/theme';
 
 import { fetchBootstrap } from './bootstrap.ts';
 import { deviceKey } from './device-key.ts';
 import { routerPlugin } from './routes.tsx';
+import { initThemeStore } from './state/theme.ts';
 import './style.css';
 
-// The mockup's client-side state list says themeId is the client's to keep.
-const themeId = localStorage.getItem('zesterm.theme') ?? 'obsidian';
-const theme = themeById(themeId) ?? obsidian;
-applyCssVars(theme.ui, document.documentElement);
-
-// Cache the resolved background for the next load's first paint. index.html
-// replays it before this bundle exists, so a light theme does not flash dark.
-try {
-  localStorage.setItem('zesterm.boot-bg', theme.ui.bg);
-} catch {
-  // Private modes throw on write; the inline fallback stands.
-}
+// The theme store owns the whole choice lifecycle — the localStorage read,
+// the fallback, the CSS vars (tokens plus derived chrome surfaces), and the
+// boot-bg cache index.html replays before this bundle exists. Constructed
+// here because this is the one place that may hand it the real DOM.
+const store = initThemeStore(document.documentElement, window.localStorage);
+const theme = store.theme;
 
 const socketUrl =
   (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/_sigx/socket';

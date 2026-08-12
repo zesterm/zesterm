@@ -20,7 +20,14 @@ export {
   DEFAULT_DARK,
   DEFAULT_LIGHT,
 } from './builtin.ts';
-export { cssVarName, cssVarsOf, applyCssVars, type StyleTarget } from './css.ts';
+export {
+  cssVarName,
+  cssVarsOf,
+  applyCssVars,
+  derivedCssVars,
+  applyThemeCss,
+  type StyleTarget,
+} from './css.ts';
 export { toSigxTheme, type SigxTheme } from './sigx.ts';
 export { resolveTerminalPalette, type TerminalPalette } from './palette.ts';
 export { titlebarFill, blockHeaderFill, softHairline } from './derived.ts';
