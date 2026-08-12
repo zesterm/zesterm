@@ -173,20 +173,50 @@ so two scripts stand in for the ends and everything between them is real: a real
 Durable Object under workerd, a real attach ticket, real `zest-proto` framing,
 and the ADR-008 sealed channel the relay cannot read.
 
+**Run the scripts from `cloud/packages/relay`, not from the repo root.** They
+import `@noble/ed25519`, which pnpm installs into that package — from anywhere
+else Node resolves nothing and the failure names the package rather than the
+cwd. This block said otherwise until someone ran it.
+
 ```sh
+cd cloud/packages/relay
+pnpm -C ../.. install                       # once: the tools need @noble/ed25519
+
+# The Worker needs both secrets, and `--public` prints the half it checks.
+node tools/fake-browser.mjs --ticket-seed <64 lowercase hex> --public   # -> TICKET_PUBLIC_KEYS
+cat > .dev.vars <<'EOF'
+TICKET_PUBLIC_KEYS="<the printed key>"
+RELAY_SIGNING_KEY="<any 64 hex>"
+EOF
+
+# The room checks `hosts` before it parks a control link, so the id must exist.
+pnpm exec wrangler d1 migrations apply zesterm --local
+pnpm exec wrangler d1 execute zesterm --local --command \
+  "INSERT INTO users (id,email,display_name,created_at,updated_at)
+     VALUES ('u1','a@b.c','dev',1,1);
+   INSERT INTO hosts (id,user_id,label,platform,enrolled_at)
+     VALUES ('$(node tools/fake-host.mjs --host-id)','u1','fake-host','macos',1);"
+
 # 1. the relay Worker, under a real runtime
-pnpm -C cloud --filter @zesterm/relay-worker exec wrangler dev --port 8787
+pnpm exec wrangler dev --port 8787 --ip 127.0.0.1
 
 # 2. a real daemon with a WebSocket port for the fake host to reach
-./target/fast/zest-daemon --ephemeral --listen-ws --ws-port 7718
+../../../target/fast/zest-daemon --ephemeral --socket /tmp/zt-e2e.sock \
+  --listen-ws --ws-bind 127.0.0.1 --ws-port 7718 --no-prompt
 
 # 3. the daemon's relay leg: parks a control link, dials back on `open`
-node cloud/packages/relay/tools/fake-host.mjs --relay http://127.0.0.1:8787
+node tools/fake-host.mjs --relay http://127.0.0.1:8787 --daemon ws://127.0.0.1:7718
 
-# 4. the browser's half: mints a ticket and attaches
-node cloud/packages/relay/tools/fake-browser.mjs \
-  --ticket-seed <64 hex> --host "$(node cloud/packages/relay/tools/fake-host.mjs --host-id)"
+# 4. the browser's half: mints a ticket, attaches, and pushes a framed message
+node tools/fake-browser.mjs --ticket-seed <64 lowercase hex> \
+  --host "$(node tools/fake-host.mjs --host-id)" --send 01000000c0
 ```
+
+`--send 01000000c0` is a u32-LE length of 1 followed by MessagePack `nil`: a
+well-framed message the daemon parses, fails to decode as a `ClientMessage`, and
+answers. Sending `deadbeef` instead is also worth doing once — the daemon reads
+it as a 4,022,250,974-byte length prefix and refuses it against `MAX_FRAME`,
+which is the byte path proving itself in the error text.
 
 `--ephemeral` on the daemon is not optional on macOS, and the reason is in
 `AGENTS.md`: the Keychain binds its grant to the *binary* that asked, dev builds
@@ -201,10 +231,37 @@ and insert one for the id `--host-id` prints.
 
 **These are tools, not tests**, in the tradition of `examples/attach.rs` and
 `mesh_probe`: they answer *which layer is wrong* without the layers above them.
-Nothing in CI runs them. What they have already earned is the thing no gate
-caught — see the header of `packages/relay/src/index.ts`, where a Worker that
-could not start survived nineteen green runs of `--dry-run`, which validates a
-deployment's shape without ever starting one.
+Nothing in CI runs them.
+
+## What the first full run proved, and what it did not
+
+Run on 2026-08-12 against `51e6c74`, everything real but the daemon's outbound
+leg:
+
+- A ticket minted with the web Worker's key **verified statelessly at the edge**
+  and routed to `idFromName('host:' + host)`.
+- The control link **parked** — challenge, an Ed25519 signature over the nonce,
+  `ready` — with the `hosts` row read from a real D1.
+- A browser attach **allocated a pipe, sent `open`, and waited**; the host
+  dialled `/v1/pipe` and the 101 went out only once both ends existed.
+- Bytes crossed to a **real `zest-daemon`**, whose own `zest-proto` frame reader
+  parsed them, and **155 bytes of its reply crossed back** — a MessagePack
+  `{t:'error', …}` frame. Both directions, through every layer.
+- **The keepalive woke nothing.** `wrangler dev` logged five requests across the
+  session — one `/v1/control`, two `/v1/attach`, two `/v1/pipe` — and not one for
+  any ping, which is `setWebSocketAutoResponse` doing what ADR-009's cost model
+  assumes and what no unit test can observe.
+
+What it did **not** prove: no `zest-proto` handshake completed, because the fake
+browser does not hold a client key or speak the ADR-008 sealed channel — it
+pushes bytes and reads what comes back. So the pipe is proven to carry a real
+protocol's framing in both directions; a *session* over it is not yet
+demonstrated.
+
+And these tools had already earned their place before any of that: see the header
+of `packages/relay/src/index.ts`, where a Worker that could not start survived
+nineteen green runs of `--dry-run`, which validates a deployment's shape without
+ever starting one.
 
 ## Deploying
 
