@@ -158,7 +158,10 @@ impl Encoder {
     }
 
     fn encode_all_rows(&mut self, grid: &Grid) -> Vec<RowPayload> {
-        (0..grid.rows()).map(|r| self.encode_row(grid.row(r))).collect()
+        // Active space throughout the encoder: the wire carries the session's
+        // live screen. A host whose own window happens to be scrolled back must
+        // not send its subscribers the rows it is reading.
+        (0..grid.rows()).map(|r| self.encode_row(grid.active_row(r))).collect()
     }
 
     /// The whole state, and the subscriber's new baseline.
@@ -196,9 +199,43 @@ impl Encoder {
             attrs,
             cursor,
             modes,
+            blocks_from: blocks.authoritative_from(),
             blocks: self.seen_blocks.clone(),
             title: title.to_string(),
         }
+    }
+
+    /// Whether the host has lost a block a delta cannot describe.
+    ///
+    /// `diff_blocks` can add and update, never remove, and eviction is
+    /// deliberately silent — a client keeping more history than the host should
+    /// keep it. That reasoning covers exactly a *prefix* trim from the oldest
+    /// end. Anything else is destruction: `cls` erasing the rows a block
+    /// described, and the client must be resynced or it shows a command that no
+    /// longer exists, over the row the user is typing on.
+    ///
+    /// A keyframe is the right price for it. The whole screen just changed.
+    ///
+    /// Measured against [`BlockIndex::authoritative_from`], **not** against the
+    /// host's oldest surviving block. By the time anyone asks, the shell has
+    /// usually printed its next prompt, so the host holds a *newer* block and
+    /// its oldest id is above everything the clear destroyed — which read as
+    /// "those are merely evicted, leave them alone", and the client kept
+    /// showing a command over the row being typed on. Verified against a real
+    /// daemon before believing it: `cls` produced no keyframe at all.
+    ///
+    /// A merge over two ascending lists, like `diff_blocks`, and bounded the
+    /// same way — eviction keeps the index to what scrollback holds.
+    #[must_use]
+    pub fn blocks_need_keyframe(&self, blocks: &BlockIndex) -> bool {
+        let floor = blocks.authoritative_from();
+        let mut fresh = blocks.blocks().iter().map(|b| b.id.0).peekable();
+        self.seen_blocks.iter().filter(|o| o.id >= floor).any(|o| {
+            while fresh.peek().is_some_and(|&id| id < o.id) {
+                fresh.next();
+            }
+            fresh.next_if_eq(&o.id).is_none()
+        })
     }
 
     /// Encode rows of history, self-contained.
@@ -297,7 +334,7 @@ impl Encoder {
         // Scroll first, and by absolute line id rather than by content. Emitting
         // rows before the scroll that moves them writes into positions the
         // scroll is about to overwrite.
-        let new_first = grid.row(0).id;
+        let new_first = grid.active_row(0).id;
         if let Some(old_first) = self.seen.first().map(|r| r.line) {
             let moved = i64::try_from(new_first).unwrap_or(i64::MAX) - old_first;
             let height = i64::try_from(self.seen.len()).unwrap_or(i64::MAX);
@@ -380,6 +417,21 @@ pub struct Keyframe {
     /// has no other way to learn about a command that finished before it
     /// arrived.
     pub blocks: Vec<BlockPayload>,
+    /// The id from which `blocks` is authoritative.
+    ///
+    /// Everything the host still holds has an id at or above this, so a client
+    /// may drop what it holds from here up and take `blocks` instead. Without
+    /// it a keyframe could only *add*: the applier upserts, `diff_blocks` has
+    /// no removal op, and a block the host destroyed — `cls` erasing the rows
+    /// it described — stayed on the client for ever, painting a stale header
+    /// over the live prompt.
+    ///
+    /// It is [`zest_core::BlockIndex::authoritative_from`], which rises past
+    /// what scrollback eviction took (not the client's business) and falls to
+    /// what a screen clear destroyed (very much the client's business). Blocks
+    /// *below* it are the client's own longer history, which it keeps
+    /// deliberately — see `diff_blocks`.
+    pub blocks_from: u32,
     /// The title at this instant. The encoder always knew it (its shadow
     /// tracked it for `DeltaOp::Title`) and simply never put it in the
     /// keyframe — which left a freshly attached tab unlabeled until the host

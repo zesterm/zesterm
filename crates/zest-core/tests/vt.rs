@@ -702,6 +702,117 @@ fn a_full_reset_clears_the_block_index() {
 }
 
 #[test]
+fn clearing_the_screen_drops_the_blocks_it_erased() {
+    // `cls` blanks cells in place, so line ids survive and the shell reuses
+    // them for the next prompt. Every block anchored there kept claiming rows
+    // whose content was gone, and since a stale block *has* an `output_line`
+    // while a fresh prompt does not, the header pass drew the stale one -- an
+    // opaque band over the row the user was typing on. RIS already does this;
+    // ED is the same situation.
+    let mut t = Terminal::new(20, 4, 100);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\nout\r\n\x1b]133;D;0\x07");
+    assert_eq!(t.blocks().blocks().len(), 1, "the command ran");
+
+    // What `Clear-Host` emits under ConPTY: erase the display, cursor home.
+    t.advance(b"\x1b[2J\x1b[H");
+    assert!(t.blocks().blocks().is_empty(), "the blocks described rows that were erased");
+
+    // And the prompt that follows is a clean block of its own, covering the
+    // live row with nothing stale over it.
+    t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    let live = t.grid().active_line_id_at(0).expect("a live row");
+    let covering: Vec<_> = t.blocks().blocks().iter().filter(|b| b.contains(live)).collect();
+    assert_eq!(covering.len(), 1, "exactly one block owns the prompt row: {covering:?}");
+    assert!(covering[0].output_line.is_none(), "the prompt block has printed nothing yet");
+}
+
+#[test]
+fn a_clear_leaves_the_blocks_that_scrolled_out_of_reach() {
+    // Only what was erased is gone. A command whose output is already in
+    // scrollback was not touched by the clear and is still real history.
+    let mut t = Terminal::new(20, 3, 100);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07old\x1b]133;C\x07\r\nout\r\n\x1b]133;D;0\x07");
+    for _ in 0..6 {
+        t.advance(b"filler\r\n");
+    }
+    assert_eq!(t.blocks().blocks().len(), 1);
+
+    t.advance(b"\x1b[2J\x1b[H");
+    assert_eq!(
+        t.blocks().blocks().len(),
+        1,
+        "a block sitting entirely in scrollback survives a screen clear"
+    );
+}
+
+#[test]
+fn erasing_below_the_cursor_leaves_the_index_alone() {
+    // ED 0 is what a line editor emits on every keystroke -- PSReadLine repaints
+    // with it constantly. Invalidating there would delete the block the user is
+    // typing into, over and over.
+    let mut t = Terminal::new(20, 4, 100);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\nout\r\n\x1b]133;D;0\x07");
+    assert_eq!(t.blocks().blocks().len(), 1);
+    t.advance(b"\x1b[J");
+    assert_eq!(t.blocks().blocks().len(), 1, "an erase-to-end is not a screen clear");
+}
+
+#[test]
+fn output_arriving_while_the_reader_scrolled_back_is_not_lost() {
+    // The whole-terminal statement of the grid bug: a build streaming output
+    // while someone reads their scrollback used to print onto the rows being
+    // read, leaving the live screen blank. Nothing about it is recoverable
+    // afterwards -- the text is simply gone.
+    let mut t = Terminal::new(20, 3, 100);
+    t.advance(b"anchor\r\n");
+    for _ in 0..5 {
+        t.advance(b"filler\r\n");
+    }
+    t.scroll_display(5);
+    let read_before = t.screen_text();
+
+    t.advance(b"one\r\ntwo");
+    assert_eq!(t.screen_text(), read_before, "output moved or overwrote what was being read");
+
+    t.scroll_to_bottom();
+    let after = t.screen_text();
+    for line in ["one", "two"] {
+        assert!(after.contains(line), "{line:?} never reached the live screen: {after:?}");
+    }
+}
+
+#[test]
+fn block_markers_name_the_live_line_not_the_scrolled_one() {
+    // `block_line` read the cursor's row through the display, so every OSC 133
+    // marker emitted while the user was scrolled back named the line they had
+    // scrolled *to*. A block then straddled thousands of lines, and the header
+    // pass -- which matches an id range against the visible rows -- painted one
+    // opaque band over the entire pane.
+    let mut t = Terminal::new(20, 3, 100);
+    for _ in 0..8 {
+        t.advance(b"old\r\n");
+    }
+    t.scroll_display(6);
+
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07x\x1b]133;C\x07\r\nout\r\n\x1b]133;D;0\x07");
+
+    let b = t.blocks().blocks().last().expect("a block");
+    let oldest_live = t.grid().active_row(0).id;
+    assert!(
+        b.prompt_line >= oldest_live,
+        "the prompt was recorded at line {} but the live screen starts at {oldest_live}",
+        b.prompt_line
+    );
+    let (o, e) = (b.output_line.expect("output"), b.end_line.expect("end"));
+    assert!(e >= o, "a block that printed a line must not end before it began");
+    assert!(
+        e - b.prompt_line < t.grid().rows() as u64,
+        "a one-command block spanned {} lines",
+        e - b.prompt_line
+    );
+}
+
+#[test]
 fn a_session_past_its_scrollback_bound_does_not_grow_its_index() {
     // The leak with a long fuse: a fleet makes a session that has been running
     // for weeks the normal case, and an index that only ever grows is how that

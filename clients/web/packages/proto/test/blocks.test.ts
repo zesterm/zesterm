@@ -111,6 +111,48 @@ test('a keyframe replaces the block list rather than merging it', () => {
   assert.deepEqual(v.blocks.map((b) => b.id), [3]);
 });
 
+test('blocks_from separates what the host evicted from what it destroyed', () => {
+  // Two reasons a block is missing from a keyframe, and only one of them is
+  // this client's business. Below the floor the host merely evicted — its
+  // scrollback bound, not ours, and a client holding more history keeps it.
+  // At or above it the host is complete, so anything else there is gone: a
+  // screen clear erased the rows it described, and keeping it would paint a
+  // stale command over the row the user is typing on.
+  const v = new GridView();
+  v.applyDelta({ attrs: [], ops: [], blocks: [block(1), block(2), block(3), block(4)] });
+  v.applyKeyframe({
+    cols: 80,
+    rows_data: [],
+    attrs: [],
+    cursor: { row: 0, col: 0, visible: true, shape: 0 },
+    modes: 0,
+    blocks: [block(3)],
+    blocks_from: 3,
+  });
+  assert.deepEqual(
+    v.blocks.map((b) => b.id),
+    [1, 2, 3],
+    '1 and 2 are below the floor and stay; 4 was destroyed and goes',
+  );
+});
+
+test('a keyframe carrying no blocks still says the host has none', () => {
+  // The case an empty list alone cannot express, and the one `cls` on a fresh
+  // session produces: the host destroyed everything it had.
+  const v = new GridView();
+  v.applyDelta({ attrs: [], ops: [], blocks: [block(1), block(2)] });
+  v.applyKeyframe({
+    cols: 80,
+    rows_data: [],
+    attrs: [],
+    cursor: { row: 0, col: 0, visible: true, shape: 0 },
+    modes: 0,
+    blocks: [],
+    blocks_from: 1,
+  });
+  assert.deepEqual(v.blocks, [], 'nothing survives a floor below every block held');
+});
+
 test('exit_code null is preserved as null, never coerced to success', () => {
   // `None` is not zero: a shell that emits OSC 133 D without the status
   // parameter is common, and a green tick for a command that actually failed

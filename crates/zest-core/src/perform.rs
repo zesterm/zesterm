@@ -359,7 +359,23 @@ impl TermState {
             }
             // 2 clears the screen; 3 also clears scrollback. Treated alike here
             // because scrollback trimming is a separate concern from painting.
-            2 | 3 => self.grid_mut().erase_rows(0, rows - 1, &t),
+            2 | 3 => {
+                self.grid_mut().erase_rows(0, rows - 1, &t);
+                // The blocks that described those rows describe nothing now.
+                // Line ids survive an erase, so the shell reuses the very ids
+                // the old blocks still claim and a stale header lands on the
+                // live prompt -- opaque, and it eats the click too.
+                //
+                // Only modes 2 and 3. Mode 0 is what a line editor emits on
+                // every keystroke (PSReadLine repaints with `ESC[J` constantly),
+                // and invalidating there would delete the block being typed
+                // into over and over.
+                if let Some(first) = self.grid.active_line_id_at(0) {
+                    self.blocks.erase_screen(first);
+                }
+                self.prompt_end = None;
+                self.pending_command = None;
+            }
             _ => {}
         }
         self.touch_full();
@@ -577,7 +593,7 @@ impl TermState {
         if self.alt_grid.is_some() {
             return None;
         }
-        self.grid.line_id_at(self.grid.cursor.row)
+        self.grid.active_line_id_at(self.grid.cursor.row)
     }
 
     fn block_prompt_start(&mut self) {
@@ -647,7 +663,7 @@ impl TermState {
     /// command would shift everything after it.
     fn command_text(&self) -> String {
         let Some((start_line, start_col)) = self.prompt_end else { return String::new() };
-        let Some(end_line) = self.grid.line_id_at(self.grid.cursor.row) else {
+        let Some(end_line) = self.grid.active_line_id_at(self.grid.cursor.row) else {
             return String::new();
         };
 

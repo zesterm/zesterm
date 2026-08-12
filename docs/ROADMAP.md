@@ -219,6 +219,28 @@ M1 steps 11–13. Owns `zest-app/src/chrome/`, `motion/`, `platform.rs`, and
 high-fidelity handoff for the tabbed chrome, command blocks, palette, fleet and
 theme screens. Colours, sizes and spacing come from there, not from this file.
 
+**Handoff v2 (2026-08-12, #127)** widened the reference to 12 screens: it adds
+§11 (Settings as a tab) and §12 (Profiles — launch targets), a bundle
+[AGENTS.md](design/client-ui/AGENTS.md) carrying the invariant checklist and
+verification protocol, a runnable `zesterm-demo.html`, and `screenshots/` (one
+rendered PNG per screen). It also *revises* screens 1–2 against what shipped,
+deliberately: tab chips carry the title only, the `+` opens a profile launcher
+menu, the status bar is deleted, and the layout toggle leaves the chrome
+(`tabs.position` is the single source of truth; the ⌘⇧E chord and its palette
+entry stay). The resulting work items, measurements in the handoff README:
+
+- [ ] `TabContent` — tabs that aren't sessions (Settings, Profiles), without
+      touching the `SessionAddr`-keyed hit machinery.
+- [ ] Screens 1–2 reconciliation: title-only chips (closes #51 structurally),
+      status-bar deletion, layout-pill removal, full-width vertical header,
+      strip scroll keeping the active tab in view.
+- [ ] `--screen <fleet|themes|settings|palette|launcher|profiles>`, composing
+      with `--screenshot`, so every design screen is capturable headlessly.
+- [ ] The `+` launcher menu (README §1).
+- [ ] Settings as a tab (README §11), replacing the ⌘, overlay.
+- [ ] Profiles — launch targets (README §12): its own work item; per-session
+      palette and per-tab host routes cut across WS-A and the control plane.
+
 - [x] **The fleet has no face on the desktop.** → [#23](https://github.com/zesterm/zesterm/issues/23) — **closed**; the sequence below is its record.
       The phone and the web client are both planned to list sessions and attach
       to a chosen one; the app most people will use can only take a `--attach
@@ -906,6 +928,18 @@ and the palette's block rows are specified in
       their hidden lines; ranges are inclusive because the parser already
       pulled `D` back onto the last output row (a one-line output folds).
 
+      Three things the first cut got wrong, all found by using it (#124).
+      `fold_row_map` padded its blank filler *before* reversing, so the filler
+      landed at the top and the surviving rows sank by exactly the number of
+      lines hidden — fold the only command in a fresh session, where there is
+      no scrollback to pull in, and the header ended up on the last rows of an
+      empty screen. The chevron was drawn and its hit region pushed
+      unconditionally, while the fold declines a block with no `end_line` or no
+      output, so `cd ..` and every running command offered an affordance that
+      did nothing; `fold_range` is now the single predicate both read. And
+      `ESC[2J` left the index describing rows it had erased — see the `cls`
+      note below.
+
       Still **not blocked on WS-A**, which is worth stating because it looks as
       though it should be.
       The renderer already has the rect pipeline, `Chrome { rects, glyphs }` and
@@ -919,6 +953,27 @@ and the palette's block rows are specified in
       the sensible split is keyboard first, clickable when WS-A lands. The one
       genuine renderer change is folding — skipping folded rows while building
       the viewport, which is `zest-app`'s grid extract rather than chrome.
+
+- [x] **What `cls` destroys** (#124). `ESC[2J` blanks cells without renumbering,
+      so every block kept claiming line ids whose content was gone — and the
+      shell reuses those very ids for the next prompt. A stale block *has* an
+      `output_line` where a fresh prompt does not, so the header pass drew the
+      old command over the row being typed on: opaque, and it ate the click
+      too. It reads exactly as "I can't type any more". RIS already cleared the
+      index and said why in a comment; ED is the same situation.
+      `BlockIndex::erase_screen` keeps only what lies entirely above the erased
+      region, and **modes 2 and 3 only** — a line editor emits mode 0 on every
+      keystroke, and invalidating there would delete the block being typed
+      into. `finish` also had to stop reopening an already-finished block,
+      since pwsh emits `133;D` from its prompt function, which runs *after*
+      `Clear-Host` deleted the block that `D` was for.
+
+      The wire half is not optional: the window is a client of its own daemon,
+      `diff_blocks` cannot express a removal and the applier only upserted, so
+      the fix was invisible in the app until `Keyframe.blocks_from` carried it.
+      See CONTRACTS — the interesting part is that eviction and destruction had
+      to become distinguishable, which one number does by rising for the first
+      and falling for the second.
 
 > The strongest reason this project owns its grid rather than depending on
 > `alacritty_terminal`: blocks need new row fields, a side index surviving

@@ -195,4 +195,22 @@ jobs:
       # renamed entrypoint, or a Durable Object with no migration — all of
       # which are otherwise only wrong at deploy time, which is the worst
       # possible moment to find out.
+      #
+      # What it does *not* do is start anything, which is what the step below
+      # is for.
       - run: pnpm -r dry-run
+
+      # ...and this one starts each Worker under a real workerd and makes one
+      # request. `--dry-run` above validates the *shape* of a deployment; only
+      # this notices a script that cannot boot at all — which is what
+      # `packages/relay/src/index.ts` could not do for nineteen merged PRs,
+      # every one of them green here. → #113.
+      #
+      # In the same job on purpose rather than a new one: a new check-run name
+      # would have to be added to main's branch-protection list as a follow-up
+      # commit after it first reports (AGENTS.md says why), and `cloud workers`
+      # already runs everything in this project. It also needs the app's dist/
+      # that the step above built, and no credentials or network of its own.
+      # Both Workers together take six to eight seconds locally, nearly all of
+      # it loading wrangler rather than running workerd.
+      - run: pnpm -r boot

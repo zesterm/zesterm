@@ -118,6 +118,17 @@ impl Block {
 pub struct BlockIndex {
     blocks: Vec<Block>,
     next_id: u32,
+    /// The lowest id from which this index is complete.
+    ///
+    /// Two different reasons a block is absent, and a client has to tell them
+    /// apart. **Evicted** — its lines fell out of scrollback — is not the
+    /// client's business: one keeping more history than the host should keep
+    /// it, so the floor *rises* past what was evicted. **Destroyed** — a screen
+    /// clear erased the rows it described — must reach the client, so the floor
+    /// *falls* to the lowest id that went, and a keyframe carrying that floor
+    /// says "nothing here any more" in the one case an empty list otherwise
+    /// could not distinguish from "nothing changed".
+    authoritative_from: u32,
 }
 
 impl BlockIndex {
@@ -184,8 +195,19 @@ impl BlockIndex {
     }
 
     /// A command finished (OSC 133;D).
+    ///
+    /// A block finishes once. The guard is not defensive tidiness: a screen
+    /// clear can delete the block a `D` was about to close — pwsh's hook emits
+    /// `D` from its prompt function, which runs *after* `Clear-Host` — and
+    /// `last_mut` is then somebody else's block, sitting untouched in
+    /// scrollback. Reopening it would move its `end_line` onto a post-clear
+    /// line, and since `contains` is `line >= prompt_line && line <= end`, it
+    /// would go on to claim every row printed afterwards.
     pub fn finish(&mut self, line: LineId, exit_code: Option<i32>, now_ms: Option<u64>) {
         if let Some(b) = self.blocks.last_mut() {
+            if matches!(b.state, BlockState::Finished { .. }) {
+                return;
+            }
             b.end_line = Some(line);
             b.state = BlockState::Finished { exit_code };
             b.ended_ms = now_ms;
@@ -259,7 +281,54 @@ impl BlockIndex {
     /// that matters most in a fleet — the one that has been running for weeks.
     pub fn evict_before(&mut self, oldest_line: LineId) {
         self.blocks.retain(|b| b.end_line.is_none_or(|end| end >= oldest_line));
+        // Rises: what fell out of scrollback here is not something a client
+        // has to be told to forget.
+        let floor = self.blocks.first().map_or(self.next_id, |b| b.id.0);
+        self.authoritative_from = self.authoritative_from.max(floor);
     }
+
+    /// Forget every block the screen just erased, keeping those wholly above it.
+    ///
+    /// `ESC[2J` blanks cells where RIS blanks everything, but the consequence
+    /// for the index is identical: a block anchored at a line whose content is
+    /// gone describes nothing. Worse than nothing, in fact — line ids survive
+    /// an erase, so the shell reuses the very ids the old blocks still claim,
+    /// and the header pass then paints a stale command over the live prompt.
+    ///
+    /// The rule is "entirely above the erased region", and `end_line` alone
+    /// decides it: [`Self::finish`] clamps `end_line` to at least `prompt_line`,
+    /// so a block ending below `first` began above it too. A block with no
+    /// `end_line` is still open, which means it lives on the screen that was
+    /// just wiped.
+    ///
+    /// The caller must pass the first *erased* line, and must only call this
+    /// for a full-screen erase — see the note in `erase_in_display`.
+    pub fn erase_screen(&mut self, first: LineId) {
+        let before = self.blocks.len();
+        self.blocks.retain(|b| b.end_line.is_some_and(|end| end < first));
+        if self.blocks.len() == before {
+            return;
+        }
+        // Falls to the lowest id that went. Survivors are a prefix — every
+        // block below the erased region ends below it — so that is one past
+        // the last survivor.
+        let lowest_gone = self.blocks.last().map_or(0, |b| b.id.0 + 1);
+        self.authoritative_from = self.authoritative_from.min(lowest_gone);
+    }
+
+    /// The lowest id from which this index is complete; see
+    /// [`Self::authoritative_from`](BlockIndex::authoritative_from).
+    #[must_use]
+    pub fn authoritative_from(&self) -> u32 {
+        self.authoritative_from
+    }
+
+    /// Keep only blocks older than `first`, for a keyframe about to restate the
+    /// rest. See [`crate::RemoteWriter::drop_blocks_from`].
+    pub fn retain_below(&mut self, first: BlockId) {
+        self.blocks.retain(|b| b.id < first);
+    }
+
 }
 
 #[cfg(test)]

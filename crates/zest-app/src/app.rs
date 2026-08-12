@@ -3453,12 +3453,21 @@ impl App {
                 // never overlaid.
                 let out_line = b.output_line?;
                 let header = (b.prompt_line, out_line.max(b.prompt_line + 1));
+                // The *first contiguous run* of matching rows, not the span
+                // from the first match to the last. Taking min and max meant a
+                // block naming a wide id range -- which a corrupt index can
+                // produce -- covered every row between its two ends, and the
+                // header band is opaque and eats clicks. One bad block would
+                // then paint over the whole pane and, through the overlap
+                // de-dup below, delete every other header with it.
                 let mut first = None;
                 let mut last = None;
                 for (r, line) in row_lines.iter().enumerate() {
                     if line.is_some_and(|l| l >= header.0 && l < header.1) {
                         first.get_or_insert(r);
                         last = Some(r + 1);
+                    } else if first.is_some() {
+                        break;
                     }
                 }
                 let rows = (first?, last?);
@@ -3505,6 +3514,7 @@ impl App {
                     exit_label,
                     running_label,
                     folded: is_folded,
+                    foldable: block_actions::fold_range(b).is_some(),
                     folded_lines: b
                         .end_line
                         .map_or(0, |e| (e + 1).saturating_sub(out_line) as usize),

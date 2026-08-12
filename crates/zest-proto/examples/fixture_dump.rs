@@ -342,6 +342,7 @@ fn replay(
             cursor: k.cursor,
             modes: k.modes.bits(),
             blocks: k.blocks.clone(),
+            blocks_from: k.blocks_from,
             title: k.title.clone(),
         })
         .expect("a keyframe frames")),

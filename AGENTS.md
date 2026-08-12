@@ -289,16 +289,21 @@ pnpm -C clients/web -r typecheck
 pnpm -C clients/web -r test
 ```
 
-And if you touched `cloud/`, that project too. `dry-run` is the one worth
-knowing about: it bundles and validates `wrangler.jsonc` with no credentials
-and no network, which is what catches a binding whose class is never exported
-or a renamed entrypoint — otherwise only ever wrong at deploy time.
+And if you touched `cloud/`, that project too. The last two are the ones worth
+knowing about, and they are two halves rather than one check twice. `dry-run`
+bundles and validates `wrangler.jsonc` with no credentials and no network,
+which is what catches a binding whose class is never exported or a renamed
+entrypoint — otherwise only ever wrong at deploy time. It never starts a
+runtime, which is how a relay Worker that could not boot at all stayed green
+across nineteen merged PRs (#113); `boot` is the answer to that — it starts
+each Worker under a real workerd and makes one request, in a few seconds.
 
 ```
 pnpm -C cloud install
 pnpm -C cloud -r typecheck
 pnpm -C cloud -r test
 pnpm -C cloud -r dry-run        # needs clients/web/packages/app/dist built first
+pnpm -C cloud -r boot           # same; starts each Worker and asks it something
 ```
 
 CI runs all of it on Windows, macOS and Linux plus the wasm32 build — see
@@ -419,6 +424,7 @@ cargo run -p zest-mesh   --example mesh_probe  # advertise and browse the fleet
 cargo run -p zest-daemon --example pair -- --addr <host:port>   # pair with a host
 
 pnpm -C cloud -r dry-run                       # validate the Worker configs, no credentials needed
+pnpm -C cloud -r boot                          # start each Worker under workerd and make one request
 pnpm -C cloud --filter @zesterm/web-worker dev # the hosted client under workerd, port 8787
 
 pnpm wt new <N-slug>                           # a worktree for issue #N

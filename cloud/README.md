@@ -286,7 +286,40 @@ and insert one for the id `--host-id` prints.
 Nothing in CI runs them. What they have already earned is the thing no gate
 caught — see the header of `packages/relay/src/index.ts`, where a Worker that
 could not start survived nineteen green runs of `--dry-run`, which validates a
-deployment's shape without ever starting one.
+deployment's shape without ever starting one. That particular gap is now a gate:
+`pnpm -C cloud -r boot` starts both Workers under workerd on every PR. These
+stay tools regardless, because a pipe between two ends is not something a gate
+can stand up.
+
+## What the first full run proved, and what it did not
+
+Run on 2026-08-12 against `51e6c74`, everything real but the daemon's outbound
+leg:
+
+- A ticket minted with the web Worker's key **verified statelessly at the edge**
+  and routed to `idFromName('host:' + host)`.
+- The control link **parked** — challenge, an Ed25519 signature over the nonce,
+  `ready` — with the `hosts` row read from a real D1.
+- A browser attach **allocated a pipe, sent `open`, and waited**; the host
+  dialled `/v1/pipe` and the 101 went out only once both ends existed.
+- Bytes crossed to a **real `zest-daemon`**, whose own `zest-proto` frame reader
+  parsed them, and **155 bytes of its reply crossed back** — a MessagePack
+  `{t:'error', …}` frame. Both directions, through every layer.
+- **The keepalive woke nothing.** `wrangler dev` logged five requests across the
+  session — one `/v1/control`, two `/v1/attach`, two `/v1/pipe` — and not one for
+  any ping, which is `setWebSocketAutoResponse` doing what ADR-009's cost model
+  assumes and what no unit test can observe.
+
+What it did **not** prove: no `zest-proto` handshake completed, because the fake
+browser does not hold a client key or speak the ADR-008 sealed channel — it
+pushes bytes and reads what comes back. So the pipe is proven to carry a real
+protocol's framing in both directions; a *session* over it is not yet
+demonstrated.
+
+And these tools had already earned their place before any of that: see the header
+of `packages/relay/src/index.ts`, where a Worker that could not start survived
+nineteen green runs of `--dry-run`, which validates a deployment's shape without
+ever starting one.
 
 ## Deploying
 
@@ -301,6 +334,7 @@ pnpm -C cloud install
 pnpm -C cloud -r typecheck
 pnpm -C cloud -r test        # node --test; no workerd needed, the routing is pure
 pnpm -C cloud -r dry-run     # wrangler bundles and validates the config
+pnpm -C cloud -r boot        # each Worker starts under a real workerd and answers one request
 ```
 
 `test` covers the security-shaped code — cookies, sessions, the OAuth flow —
@@ -313,8 +347,34 @@ against the narrow interfaces in `packages/relay/src/room/state.ts`, so
 runtime — including its limits, which it enforces, and its eviction, which it
 simulates by handing out a fresh state over the same durable data.
 
-`dry-run` is the one that earns its keep. It validates `wrangler.jsonc` with no
-credentials and no network — a binding with no matching migration, a missing
-entrypoint, a renamed class. Without it a wrangler config is only ever wrong at
-deploy time, which is the worst possible moment to find out. It needs the app's
-`dist/`, so build that first; CI does, which also proves the two trees agree.
+**`dry-run` and `boot` cover different halves and the split is worth knowing,
+because getting it wrong is what let a Worker that could not start survive
+nineteen green runs.**
+
+`dry-run` validates the *shape of a deployment*, with no credentials and no
+network: a binding with no matching migration, a missing entrypoint, a renamed
+class. It bundles the script and never starts a runtime — so a module that
+compiles and deploys and then refuses to boot passes it, which is exactly what
+happened (→ #113, and the header of `packages/relay/src/index.ts`). Without it
+a wrangler config is only ever wrong at deploy time, which is the worst possible
+moment to find out.
+
+`boot` is the other half: `scripts/boot-worker.mjs` starts each Worker under a
+real workerd via wrangler's `unstable_startWorker`, makes **one** request, and
+asserts a status and a substring of the body — so a runtime that refuses to come
+up fails, and so does a response that did not come from the Worker's own code.
+It needs no credentials and no network either; the relay's two key bindings are
+supplied as throwaway values, which is not so that anything verifies (nothing
+does, on the route it asks for) but so that the check ignores whatever sits in
+an uncommitted `.dev.vars`. It is deliberately shallow: what a route *decides*
+is settled by `test`, against a plain `Request` and far faster. The script's
+header says which other vehicles were surveyed and why they were rejected, and
+what the check costs — six to eight seconds for both Workers, nearly all of it
+loading wrangler rather than running workerd.
+
+Both stumble on a missing `clients/web/packages/app/dist` — the web Worker
+serves that directory — so build it first; CI does, which also proves the two
+trees agree. The probes are declared in each package's `boot` script, as a path,
+a status and one substring of the body; the substring is a single word with no
+quotes in it because a package script is handed to whatever shell pnpm found,
+and on Windows that is not one that understands `'…'`.

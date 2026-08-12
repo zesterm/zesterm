@@ -55,6 +55,15 @@ modes: number,
  */
 blocks: Array<BlockPayload>, 
 /**
+ * The id from which `blocks` is authoritative; see
+ * [`Keyframe::blocks_from`](crate::Keyframe::blocks_from).
+ *
+ * Additive, so an older peer still decodes. Its default of 0 makes a
+ * keyframe from a host that predates this replace the client's list
+ * wholesale, which is what the browser's `GridView` already did.
+ */
+blocks_from: number, 
+/**
  * The session's title at this instant.
  *
  * A keyframe is a complete state, and the title was the one piece of
