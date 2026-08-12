@@ -7,10 +7,15 @@
  * a command starts, because a client that re-parsed the grid for its own
  * prompts would be the second VT interpretation ADR-004 exists to avoid.
  *
- * All line comparisons are `bigint` against `bigint`. Line ids are absolute
- * for the life of a session and exceed 2^53 in a long one, which is exactly
- * the session a fleet cares about — coercing to `number` here works in every
- * test and fails in week three.
+ * All line comparisons are `bigint` against `bigint`. Line ids exceed 2^53 in
+ * a long session, which is exactly the session a fleet cares about — coercing
+ * to `number` here works in every test and fails in week three.
+ *
+ * Line ids are absolute *between reflows*, not for the life of a session: a
+ * width change renumbers every one (`zest_core` grid/mod.rs). This join is
+ * only sound because `GridView.applyKeyframe` discards the state it kept under
+ * the old numbering at that boundary — everything walked here shares one
+ * numbering with the blocks, by construction there, not by nature.
  */
 
 import { NO_LINE } from './grid-view.ts';
