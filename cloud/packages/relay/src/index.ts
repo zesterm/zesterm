@@ -193,7 +193,20 @@ export function roomRequest(request: Request, jti: string): Request {
   // The upgrade this carries is the point of the whole request, and it is the
   // headers that carry it — so the request is rebuilt from the original rather
   // than constructed field by field.
-  return new Request(url, request);
+  const forwarded = new Request(url, request);
+  // ...minus the one header that is a credential.
+  //
+  // `sec-websocket-protocol` carries the whole attach ticket, and every comment
+  // around here says the room never sees it — which was not true while the
+  // header rode along. The room has no use for it: the edge has already
+  // verified the signature, the audience, the expiry and the room, and passes
+  // on the one field it decided, the `jti`.
+  //
+  // Removing it is not tidiness. A ticket that reaches a component with no
+  // reason to hold it is a ticket that can be logged by one, and this one is a
+  // bearer credential good for thirty seconds against a live shell.
+  forwarded.headers.delete('sec-websocket-protocol');
+  return forwarded;
 }
 
 /** A socket this Worker owns, opened only to say why it is closing. */

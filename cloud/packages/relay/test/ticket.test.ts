@@ -321,6 +321,11 @@ test('the verified jti reaches the room, on a request that is still an upgrade',
     'and `?host=` survives, which is the only thing binding the object’s name to a machine',
   );
   assert.equal(
+    forwarded.headers.get('sec-websocket-protocol'),
+    null,
+    'the ticket rides in that header, and every comment around `roomRequest` says the room never sees it — which was untrue while it rode along. The edge has already checked the signature, the audience, the expiry and the room, and forwards the one field it decided; a bearer credential good for thirty seconds against a live shell has no business reaching a component with no use for it, where something can log it',
+  );
+  assert.equal(
     forwarded.headers.get('upgrade'),
     'websocket',
     'the upgrade is the point of the request, and the room refuses anything that is not one. (Node’s `Request` keeps the header; workerd’s is not exercised here, and only a deploy proves that half)',
