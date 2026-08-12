@@ -216,19 +216,21 @@ impl Encoder {
     ///
     /// A keyframe is the right price for it. The whole screen just changed.
     ///
+    /// Measured against [`BlockIndex::authoritative_from`], **not** against the
+    /// host's oldest surviving block. By the time anyone asks, the shell has
+    /// usually printed its next prompt, so the host holds a *newer* block and
+    /// its oldest id is above everything the clear destroyed — which read as
+    /// "those are merely evicted, leave them alone", and the client kept
+    /// showing a command over the row being typed on. Verified against a real
+    /// daemon before believing it: `cls` produced no keyframe at all.
+    ///
     /// A merge over two ascending lists, like `diff_blocks`, and bounded the
     /// same way — eviction keeps the index to what scrollback holds.
     #[must_use]
     pub fn blocks_need_keyframe(&self, blocks: &BlockIndex) -> bool {
-        let Some(&oldest) = blocks.blocks().first().map(|b| &b.id.0) else {
-            // The host holds nothing, so there is no oldest id to measure
-            // against and anything the client still has may be stale. A
-            // session that merely evicted its last block pays one keyframe
-            // here; it cannot repeat, because the shadow is empty afterwards.
-            return !self.seen_blocks.is_empty();
-        };
+        let floor = blocks.authoritative_from();
         let mut fresh = blocks.blocks().iter().map(|b| b.id.0).peekable();
-        self.seen_blocks.iter().filter(|o| o.id >= oldest).any(|o| {
+        self.seen_blocks.iter().filter(|o| o.id >= floor).any(|o| {
             while fresh.peek().is_some_and(|&id| id < o.id) {
                 fresh.next();
             }

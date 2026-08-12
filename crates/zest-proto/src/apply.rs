@@ -425,6 +425,35 @@ mod tests {
     }
 
     #[test]
+    fn the_next_prompt_does_not_hide_the_removal() {
+        // The real sequence, and the one a live daemon caught after the tests
+        // above passed. pwsh emits its prompt straight after `Clear-Host`, so
+        // by the time anyone asks, the host holds a *newer* block and its
+        // oldest id sits above everything the clear destroyed. Measured
+        // against that id the removal looks like ordinary eviction, no
+        // keyframe is sent, and the client keeps drawing a dead command over
+        // the row being typed on. `authoritative_from` is what tells them
+        // apart.
+        let mut p = Pair::new(20, 4);
+        p.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\nout\r\n\x1b]133;D;0\x07");
+        assert_eq!(p.client.blocks().blocks().len(), 1);
+
+        // Clear *and* the prompt that follows it, in one advance.
+        p.host.advance(b"\x1b[2J\x1b[H\x1b]133;A\x07$ \x1b]133;B\x07");
+        assert_eq!(p.host.blocks().blocks().len(), 1, "the host has a fresh prompt block");
+        assert!(
+            p.enc.blocks_need_keyframe(p.host.blocks()),
+            "a newer block must not disguise the destroyed one as evicted"
+        );
+
+        let k = p.enc.keyframe(p.host.grid(), cursor(), p.host.modes(), "", p.host.blocks());
+        p.seq += 1;
+        p.app.apply_keyframe(&mut p.client, &k, p.seq);
+        let ids: Vec<u32> = p.client.blocks().blocks().iter().map(|b| b.id.0).collect();
+        assert_eq!(ids, [1], "only the live prompt block survives");
+    }
+
+    #[test]
     fn a_clear_removes_only_what_it_erased_from_the_client() {
         // The floor is a boundary, not a reset: the command whose output is
         // already in scrollback was not erased and must survive on both sides.
