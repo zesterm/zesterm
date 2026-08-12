@@ -29,7 +29,9 @@ import {
   type HostChoice,
 } from '../chrome-model.ts';
 import { createSessionOverDataPlane } from '../create-session.ts';
+import type { DirectoryView } from '@zesterm/control';
 import { dataPlaneUrl } from '../data-plane-url.ts';
+import { wsDial } from '../ws-dial.ts';
 import type { DeviceKey } from '../device-key.ts';
 import { actorDirectorySource } from '../directory-source.ts';
 import {
@@ -191,7 +193,7 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
         store.error = null;
         openTarget(
           {
-            dataPlaneUrl: url,
+            dial: wsDial(url),
             entry: {
               host: addr.host,
               session: addr.session.toString(),
@@ -283,7 +285,7 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
           (e) => e.host === target.hostId && e.session === target.sessionId,
         );
         const url = dataPlaneUrl(dir.view.dataPlane);
-        if (entry !== undefined && url !== null) openTarget({ entry, dataPlaneUrl: url }, true);
+        if (entry !== undefined && url !== null) openTarget({ entry, dial: wsDial(url) }, true);
         break;
       }
       case 'create-session':
@@ -319,7 +321,7 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
     const entry = dir.view.sessions.find((e) => e.host === h && e.session === s);
     const url = dataPlaneUrl(dir.view.dataPlane);
     if (entry === undefined || url === null) return;
-    openTarget({ entry, dataPlaneUrl: url }, false);
+    openTarget({ entry, dial: wsDial(url) }, false);
   };
 
   const routeWatch = watch(
@@ -402,7 +404,7 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
           <TerminalView
             key={id}
             entry={target.entry}
-            dataPlaneUrl={target.dataPlaneUrl}
+            dial={target.dial}
             signer={device.signer}
             theme={theme}
             onTitle={(title: string) => (store.tabs = setTitle(store.tabs, id, title))}
@@ -419,7 +421,13 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
           source={actorDirectorySource}
           deviceKind={device.kind}
           onOpen={(t: OpenTarget) => openTarget(t, true)}
-          onCreate={createAt}
+          // The seam hands over the whole view rather than a URL, because the
+          // hosted path has no URL to hand: it creates on the connection it is
+          // already holding. Loopback answers it the way it always has.
+          onCreate={(view: DirectoryView) => {
+            const url = dataPlaneUrl(view.dataPlane);
+            if (url !== null) createAt(url);
+          }}
         />
       );
     })();

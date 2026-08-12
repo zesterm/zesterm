@@ -31,12 +31,21 @@
  * subscribed for as long as the shell is mounted. Passing a source as a
  * *function* is what keeps that lifetime where it already was.
  *
- * **Only the actor-backed half exists today.** The hosted half — one
- * `ConnectionClient({ watchSessions: true })` per host, dialled through
- * `dialFor`, writing into a store keyed by `HostId` — is blocked on the relay
- * ticket endpoint (`relay-dial.ts` says why it is injected) and on there being
- * any notion of which hosts are online. It widens the `ready` arm below from
- * one view to a keyed set; nothing else here moves.
+ * **Both halves exist now.** The hosted one is `live-directory.ts` — one
+ * `ConnectionClient({ watchSessions: true })` per machine in the account,
+ * dialled through `dialFor`, writing into a store keyed by `HostId`.
+ *
+ * It is *not* the shape this file predicted, and the difference is worth
+ * recording because the prediction reads plausibly. The note here said the
+ * hosted half "widens the `ready` arm from one view to a keyed set". It does
+ * not: a source is **per host**, the keying lives inside the store that hands
+ * them out, and `DirectoryStatus` still describes exactly one machine. Hoisting
+ * the key into the status would have moved every per-host state — connecting,
+ * pairing, asleep, refused — inside the `ready` arm, so "the list is ready" and
+ * "this machine is ready" would have become the same word; and it would have
+ * rewritten `SessionList`'s rendering for the benefit of the path that does not
+ * need it. What did change is two new arms below, which the loopback path can
+ * never produce.
  */
 
 import { useActorState } from '@sigx/actors/app';
@@ -45,12 +54,29 @@ import { LOCAL_DIRECTORY_KEY, SessionDirectory, type DirectoryView } from '@zest
 /**
  * What the list can be told at any moment.
  *
- * Three arms rather than sigx's five: `idle` and `refreshing` are collapsed by
- * the dispatch this maps through, and a source that is a live socket has no
- * honest meaning for either.
+ * The first three are sigx's five, collapsed: `idle` and `refreshing` fold
+ * into `pending` and `ready` by the dispatch `directoryStatusOf` maps through,
+ * and a source that is a live socket has no honest meaning for either.
+ *
+ * The last two only ever come from the hosted path, and both exist because
+ * `error` would be a lie:
+ *
+ * - **`offline`** — the machine did not answer. Over the relay this is the
+ *   *common* case, not a fault: most machines are asleep most of the time, and
+ *   a fleet screen that paints half its rows red is one nobody reads. Nothing
+ *   here claims to know *why* — the browser cannot: `ByteLinkHandlers` has no
+ *   error channel, so a relay that closed `4404` (nobody home) and one that
+ *   closed `4401` (the ticket was refused) arrive identically. See
+ *   `relay-dial.ts`, which names that as a deliberate v1 cut.
+ * - **`pairing`** — the daemon is waiting for someone to approve this browser
+ *   at the machine, and the code has to be shown or the wait is unexplained.
+ *   Enrolling a browser with the *account* does not make its device key
+ *   trusted by a *daemon*; the first attach to each machine stops here.
  */
 export type DirectoryStatus =
   | { readonly kind: 'pending' }
+  | { readonly kind: 'pairing'; readonly code: string }
+  | { readonly kind: 'offline' }
   | { readonly kind: 'error'; readonly message: string }
   | { readonly kind: 'ready'; readonly view: DirectoryView };
 

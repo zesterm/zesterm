@@ -4,5 +4,5 @@
  */
 
 export { defaultSocketPath, socketDial } from './net-link.ts';
-export { startFeed, entryOf, type FeedOptions } from './feed.ts';
+export { startFeed, type FeedOptions } from './feed.ts';
 export { startServer, type SidecarServerOptions } from './server.ts';
