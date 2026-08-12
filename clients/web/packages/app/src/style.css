@@ -953,6 +953,8 @@ body {
   /* the mock's rgba(5,7,13,.66): tone from the shadow token, strength as
      alpha — the launcher shadow's rule */
   background: color-mix(in srgb, var(--zt-shadow) 66%, transparent);
+  /* Safari (macOS and iOS) still requires the prefix for blur. */
+  -webkit-backdrop-filter: blur(3px);
   backdrop-filter: blur(3px);
 }
 

@@ -99,7 +99,7 @@ export const Palette = component<{
           }
         }}
       >
-        <div class="palette" role="dialog" aria-label="command palette">
+        <div class="palette" role="dialog" aria-modal="true" aria-label="command palette">
           <div
             class="palette-query"
             onMouseDown={(e: MouseEvent) => {
@@ -114,6 +114,7 @@ export const Palette = component<{
             </span>
             <input
               class="palette-input"
+              aria-label="Search sessions, blocks, hosts"
               ref={(el: HTMLInputElement) => {
                 inputEl = el;
               }}
