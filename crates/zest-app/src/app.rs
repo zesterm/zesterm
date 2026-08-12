@@ -2090,11 +2090,18 @@ impl App {
         // can change under an open menu via the config watcher, and rows
         // and actions must come from one pass or a click runs the wrong row.
         let launcher_rows = self.launcher.is_some().then(|| {
-            let fallback = self
-                .config
-                .shell
-                .clone()
-                .unwrap_or_else(|| CommandSpec::default_shell().command_line);
+            // On a remote route, a command-less launch sends an empty command
+            // and the far host runs its own default shell — showing this
+            // machine's shell.command there would caption the row with a
+            // command that will not run.
+            let fallback = match self.route {
+                Some(HostRoute::Tcp(_)) => "the host's default shell".to_string(),
+                _ => self
+                    .config
+                    .shell
+                    .clone()
+                    .unwrap_or_else(|| CommandSpec::default_shell().command_line),
+            };
             let active_profile = self
                 .tabs
                 .active()

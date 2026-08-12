@@ -320,7 +320,13 @@ fn mods_match(m: Mods, s: ModifiersState) -> Option<Form> {
         Mods::Ctrl => (s.control_key() && !s.shift_key()).then_some(Form::Plain),
         Mods::CtrlShift => (s.control_key() && s.shift_key()).then_some(Form::Plain),
         Mods::Shift => s.shift_key().then_some(Form::Plain),
-        Mods::SuperShift => (s.super_key() && s.shift_key()).then_some(Form::Super),
+        // Guarded to macOS: on Windows `super` is the Win key, so Win+Shift+,
+        // would run an action whose chord_label deliberately prints nothing
+        // there — a chord that fires but cannot be discovered or documented.
+        // The mac-only intent is enforced, not just described.
+        Mods::SuperShift => {
+            (cfg!(target_os = "macos") && s.super_key() && s.shift_key()).then_some(Form::Super)
+        }
     }
 }
 
@@ -816,11 +822,24 @@ mod tests {
         // profiles row must sit before the settings row (Desktop ignores
         // Shift under Super) or ⌘⇧, silently stays Settings — the state it
         // was in before this binding existed.
-        assert_eq!(
-            action_at(&char_key("<"), KeyCode::Comma, SUPER.union(SHIFT)),
-            Some(Action::OpenProfiles),
-            "⌘⇧, opens the Profiles tab"
-        );
+        if MAC {
+            assert_eq!(
+                action_at(&char_key("<"), KeyCode::Comma, SUPER.union(SHIFT)),
+                Some(Action::OpenProfiles),
+                "⌘⇧, opens the Profiles tab"
+            );
+        } else {
+            // Off macOS `super` is the Win key, and the SuperShift row is
+            // deliberately inert: Win+Shift+, firing an action whose label
+            // prints nothing would be a chord that runs but cannot be
+            // discovered. It falls through to Desktop's shift-blind comma —
+            // the Settings meaning the unshifted chord already has.
+            assert_eq!(
+                action_at(&char_key("<"), KeyCode::Comma, SUPER.union(SHIFT)),
+                Some(Action::ToggleSettings),
+                "Win+Shift+, must not fire the undiscoverable Profiles chord"
+            );
+        }
         assert_eq!(
             action_at(&char_key(","), KeyCode::Comma, SUPER),
             Some(Action::ToggleSettings),
