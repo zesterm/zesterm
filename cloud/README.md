@@ -183,7 +183,7 @@ cd cloud/packages/relay
 pnpm -C ../.. install                       # once: the tools need @noble/ed25519
 
 # The Worker needs both secrets, and `--public` prints the half it checks.
-node tools/fake-browser.mjs --ticket-seed <64 hex> --public   # -> TICKET_PUBLIC_KEYS
+node tools/fake-browser.mjs --ticket-seed <64 lowercase hex> --public   # -> TICKET_PUBLIC_KEYS
 cat > .dev.vars <<'EOF'
 TICKET_PUBLIC_KEYS="<the printed key>"
 RELAY_SIGNING_KEY="<any 64 hex>"
@@ -208,7 +208,7 @@ pnpm exec wrangler dev --port 8787 --ip 127.0.0.1
 node tools/fake-host.mjs --relay http://127.0.0.1:8787 --daemon ws://127.0.0.1:7718
 
 # 4. the browser's half: mints a ticket, attaches, and pushes a framed message
-node tools/fake-browser.mjs --ticket-seed <64 hex> \
+node tools/fake-browser.mjs --ticket-seed <64 lowercase hex> \
   --host "$(node tools/fake-host.mjs --host-id)" --send 01000000c0
 ```
 
