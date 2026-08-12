@@ -522,14 +522,14 @@ fn hex(bytes: &[u8]) -> String {
 /// The other codes keep the short form deliberately. Naming the key does not
 /// help someone whose clock is wrong, and a 64-hex string in every reconnect
 /// message is noise that trains people to skim the line.
-fn refusal_message(code: &str, host_hex: &str) -> String {
+fn refusal_message(code: &str, host: &[u8]) -> String {
     if code == "unknown-host" {
         format!(
             "the relay refused this host: unknown-host. \
              This machine is not enrolled in the account the relay serves. \
              Its id is {}; enrol it with --enroll <code>, using a code from \
              the account's devices screen.",
-            host_hex
+            hex(host)
         )
     } else {
         format!("the relay refused this host: {code}")
@@ -862,7 +862,7 @@ impl Relay {
                 Down::Error { code } => {
                     break Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
-                        refusal_message(&code, &hex(&self.identity.host_id().0)),
+                        refusal_message(&code, &self.identity.host_id().0),
                     ));
                 }
                 Down::Unknown => {
@@ -1394,8 +1394,9 @@ mod tests {
 
     #[test]
     fn unknown_host_names_the_key_that_has_to_be_enrolled() {
+        let key = [0x9eu8; 32];
         let id = "9e".repeat(32);
-        let msg = refusal_message("unknown-host", &id);
+        let msg = refusal_message("unknown-host", &key);
         assert!(
             msg.contains(&id),
             "the one refusal whose remedy is `enrol this key` has to say which key, \
@@ -1414,9 +1415,10 @@ mod tests {
         // Naming the key does not help someone whose clock is wrong, and a
         // 64-hex string on every reconnect is what trains people to skim the
         // line that will later matter.
+        let key = [0x9eu8; 32];
         let id = "9e".repeat(32);
         for code in ["bad-signature", "stale", "unsupported-version"] {
-            let msg = refusal_message(code, &id);
+            let msg = refusal_message(code, &key);
             assert!(
                 !msg.contains(&id),
                 "{code} does not become actionable by naming the key. Got: {msg}"
