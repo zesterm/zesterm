@@ -34,8 +34,11 @@ pub enum HostTarget {
 
 /// Resolve a profile's `host` label against the fleet.
 ///
-/// Labels are mDNS display names, so the match is case-insensitive — a
-/// profile hand-written as `Forge` must find the host advertising `forge`.
+/// Labels are mDNS display names, so the match is ASCII case-insensitive —
+/// a profile hand-written as `Forge` must find the host advertising `forge`.
+/// ASCII only, deliberately: a Unicode fold needs a table this crate does
+/// not carry, and a host label that differs only by non-ASCII case is a
+/// hostname nobody can type reliably anyway.
 #[must_use]
 pub fn resolve_host(label: Option<&str>, fleet: &[FleetHost]) -> HostTarget {
     let Some(label) = label.map(str::trim).filter(|l| !l.is_empty()) else {

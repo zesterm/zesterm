@@ -4288,6 +4288,18 @@ impl App {
                             session.terminal().lock().set_palette(seed.clone());
                             break Ok(session);
                         }
+                        // Nothing to dial means nothing to retry: an unknown
+                        // label or an empty address set cannot come back in
+                        // two seconds, and the backoff would only delay the
+                        // honest failure the tab exists to show.
+                        Err(e)
+                            if !matches!(
+                                &target,
+                                crate::launch::HostTarget::Remote { .. }
+                            ) =>
+                        {
+                            break Err(e);
+                        }
                         Err(e) => {
                             failures += 1;
                             match crate::launch::verdict_after(failures) {
