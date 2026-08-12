@@ -81,12 +81,11 @@ impl TextTuning {
     /// plainly visible. Light text on a dark background needs a lot of it —
     /// more coverage is more contrast, and contrast is what reads as sharp.
     ///
-    /// **A light theme wants less.** Dark-on-light needs far less stem
-    /// darkening, and this is one number for both because a theme cannot
-    /// suggest one: `ThemeEffects::text_gamma` was removed for exactly that
-    /// reason (see the tombstone in `zest-theme`), since the generated settings
-    /// form has no way to express "follow the theme".
-    pub const DEFAULT_GAMMA: f32 = 2.0;
+    /// The same number suits a light background and a dark one, which the
+    /// theory says it should not: dark-on-light is meant to need far less stem
+    /// darkening. Tested on both and preferred on both, so the per-theme value
+    /// `ThemeEffects` still has a comment proposing is not needed.
+    pub const DEFAULT_GAMMA: f32 = 2.5;
     pub const DEFAULT_CONTRAST: f32 = 0.0;
 }
 

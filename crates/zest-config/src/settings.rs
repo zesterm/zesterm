@@ -194,16 +194,19 @@ pub struct Appearance {
     /// is more contrast, and contrast is what reads as sharpness — which is why
     /// the default is 2.0 and not something cautious.
     ///
-    /// **A light theme wants less**, because dark-on-light needs far less stem
-    /// darkening than light-on-dark. It is one number for both because a theme
-    /// cannot suggest one; see the tombstone on `ThemeEffects`.
+    /// One number serves light and dark alike. That is not what the theory
+    /// predicts — dark-on-light is supposed to need far less stem darkening
+    /// than light-on-dark, and there is a comment on `ThemeEffects` proposing a
+    /// per-theme value on exactly that basis — but 2.5 was tested against a
+    /// white background and a dark one and preferred on both. Measured beats
+    /// predicted, so there is no per-theme value and no reason to add one.
     ///
     /// The default must stay equal to `zest_render_wgpu::TextTuning::DEFAULT_GAMMA`.
     /// It cannot reference it — `zest-config` does not depend on the renderer —
     /// so `zest-app`'s `the_two_defaults_agree` asserts it instead. Before this
     /// was wired the two numbers were 1.0 and 1.3 and nothing compared them, so
     /// the schema documented a value the renderer never used.
-    #[schemars(range(min = 0.5, max = 2.5))]
+    #[schemars(range(min = 0.5, max = 4.0))]
     #[schemars(extend("x_zest_group" = "Appearance", "x_zest_widget" = "number"))]
     pub text_gamma: f32,
     /// Additional contrast applied to glyph coverage, not to the frame.
@@ -280,7 +283,7 @@ impl Default for Appearance {
             theme: "obsidian".to_string(),
             light_theme: String::new(),
             follow_system_theme: false,
-            text_gamma: 2.0,
+            text_gamma: 2.5,
             text_contrast: 0.0,
             text_antialias: TextAntialias::Grayscale,
             text_hinting: TextHinting::Full,

@@ -5755,7 +5755,7 @@ fn clear_to(
 /// and a gamma of zero is a division by zero in the shader.
 fn resolve_text_tuning(config: &Config) -> zest_render_wgpu::TextTuning {
     zest_render_wgpu::TextTuning {
-        gamma: config.text_gamma.clamp(0.5, 2.5),
+        gamma: config.text_gamma.clamp(0.5, 4.0),
         contrast: config.text_contrast.clamp(0.0, 1.0),
     }
 }

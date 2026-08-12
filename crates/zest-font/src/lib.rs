@@ -532,7 +532,21 @@ impl Fonts {
     /// Keyed off `ui_px` because that is already exactly "is this chrome text".
     fn raster_mode(&self) -> u8 {
         let (aa, hint) = if self.ui_px.is_some() {
-            (self.available, Hinting::None)
+            // Chrome is pinned to the configuration that reads best on this
+            // platform — grayscale coverage, grid-fitted — and not to whatever
+            // the terminal is set to. The window's own furniture has one right
+            // answer; the settings are for the grid.
+            //
+            // It was briefly pinned to *unhinted* subpixel coverage instead, on
+            // the argument that grid-fitting at chrome sizes flattens the
+            // baseline overshoot on `o c e` while leaving it on `a` — the
+            // "Close reads a pixel short beside tab" defect that opened #100.
+            // That traded an obvious blur for a subtle one-pixel win: the tab
+            // strip and sidebar came out visibly softer than the grid an inch
+            // away, which is how it was reported twice. Grid-fitting plus stem
+            // darkening is what makes text look right here, and the chrome
+            // should not be the one thing opting out of it.
+            (TextAntialias::Grayscale, Hinting::Full)
         } else {
             // Never above what the renderer can composite.
             let aa = match (self.available, self.grid_antialias) {
@@ -1692,20 +1706,29 @@ mod tests {
             // how #100 was opened, and would come straight back the first time
             // anyone set text_hinting = "full" for the grid.
             let Some(mut f) = fonts() else { return };
-            f.set_grid_antialias(TextAntialias::Grayscale);
-            f.set_hinting(Hinting::Full);
+            // Ask the grid for the *opposite* of chrome's pinned pair, so the
+            // test fails if chrome ever starts following the settings.
+            f.set_text_antialias(TextAntialias::Subpixel);
+            f.set_grid_antialias(TextAntialias::Subpixel);
+            f.set_hinting(Hinting::None);
 
             let Some((font, gid)) = f.glyph_for('o', Style::default()) else { return };
 
             let grid = f.key(font, gid);
-            assert_eq!(grid.raster & RASTER_HINTED, RASTER_HINTED, "the grid asked for hinting");
-            assert_eq!(grid.raster & RASTER_SUBPIXEL, 0, "and for grayscale");
+            assert_eq!(grid.raster & RASTER_HINTED, 0, "the grid asked for no hinting");
+            assert_eq!(grid.raster & RASTER_SUBPIXEL, RASTER_SUBPIXEL, "and for subpixel");
 
             f.set_ui_px(Some(12.5));
             let chrome = f.key(font, gid);
             f.set_ui_px(None);
 
-            assert_eq!(chrome.raster & RASTER_HINTED, 0, "chrome is never grid-fitted");
+            // Chrome is pinned to the configuration that reads best here,
+            // whatever the terminal is set to.
+            assert_eq!(
+                chrome.raster,
+                RASTER_HINTED,
+                "chrome is grayscale and grid-fitted regardless of the grid's settings"
+            );
             assert_ne!(grid.raster, chrome.raster, "and so the two cannot share a cache entry");
         }
 
@@ -1725,10 +1748,19 @@ mod tests {
             );
         }
 
+        /// The shape half of #100, asserted where it still holds.
+        ///
+        /// Unhinted, round letters keep the overshoot their designer drew.
+        /// Grid-fitting flattens it — and flattens it on `o c e` while leaving
+        /// it on `a`, which is the inconsistency that made "Close" read a pixel
+        /// short beside "tab". Chrome is grid-fitted deliberately now, so this
+        /// measures the unhinted path and `hinting_flattens_the_overshoot`
+        /// below records what the other choice costs.
         #[test]
-        fn round_letters_keep_their_baseline_overshoot() {
+        fn round_letters_keep_their_baseline_overshoot_when_unhinted() {
             let Some(mut f) = fonts() else { return };
-            f.set_ui_px(Some(12.5));
+            f.set_hinting(Hinting::None);
+            f.set_typography(Typography { size_pt: 9.375, ..f.typography() });
 
             // Flat-bottomed controls first: if these ever overshoot, the metric
             // is measuring something other than what it claims and every
