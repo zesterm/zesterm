@@ -22,6 +22,7 @@ import { component, signal } from 'sigx';
 import type { Dial } from '@zesterm/client';
 import { type DirectoryView, type SessionEntry } from '@zesterm/control';
 
+import { runExclusive } from '../busy-guard.ts';
 import { dialFor, type RelayAccess } from '../dial-for.ts';
 import { describeDeviceKey, type DeviceKeyKind } from '../device-key.ts';
 import type { DirectorySource, DirectoryStatus } from '../directory-source.ts';
@@ -58,8 +59,11 @@ export const SessionList = component<{
    * differently: loopback opens a short-lived second connection, and the
    * hosted path writes down the connection already watching the machine —
    * over the relay a second connection is a second ticket and a second pipe.
+   *
+   * Return the promise if you have one: it is what keeps the button held for
+   * as long as the create is actually running. See `create` below.
    */
-  onCreate?: (view: DirectoryView) => void;
+  onCreate?: (view: DirectoryView) => void | Promise<unknown>;
 }>((ctx) => {
   const directory = ctx.props.source();
   const creating = signal({ busy: false });
@@ -72,14 +76,19 @@ export const SessionList = component<{
   const dialOf = (view: DirectoryView): Dial | null =>
     dialFor(view.dataPlane, ctx.props.relay ?? null);
 
+  /**
+   * Held until the create *settles*, not until the call returns.
+   *
+   * Creating a session is asynchronous everywhere — a round trip to the daemon
+   * on loopback, a ticket and a pipe over the relay — so a flag cleared in a
+   * `finally` on the synchronous call guards nothing at all: the second click
+   * lands while the first is still in flight and the account gets two shells it
+   * did not ask for. That is why `onCreate` may return a promise; a handler
+   * that returns nothing is taken at its word and unlocks at once.
+   */
   const create = (view: DirectoryView): void => {
-    if (dialOf(view) === null || creating.busy) return;
-    creating.busy = true;
-    try {
-      ctx.props.onCreate?.(view);
-    } finally {
-      creating.busy = false;
-    }
+    if (dialOf(view) === null) return;
+    runExclusive(creating, () => ctx.props.onCreate?.(view));
   };
 
   const linkState = (status: DirectoryStatus) => {
@@ -124,7 +133,11 @@ export const SessionList = component<{
       case 'offline':
         return <p class="empty">nothing to show until this machine wakes up</p>;
       case 'error':
-        return <p class="empty">the control plane is not answering</p>;
+        // The status carries what actually went wrong, and the two worlds fail
+        // differently — a sidecar that is not answering, versus a relay that
+        // refused this browser. One fixed sentence is right for at most one of
+        // them and misleading for the other.
+        return <p class="empty">{status.message}</p>;
       case 'ready': {
         const view = status.view;
         return (

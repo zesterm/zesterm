@@ -186,9 +186,12 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
   // The existing create path, unchanged underneath: a one-shot data-plane
   // connection creates the session, then the new tab opens on the address the
   // daemon confirmed.
-  const createAt = (url: string): void => {
+  // Returns the chain so `SessionList` can hold its button for the whole round
+  // trip rather than for the synchronous call — a create is asynchronous in
+  // both worlds, so a guard that clears on return guards nothing.
+  const createAt = (url: string): Promise<void> => {
     store.launcherOpen = false;
-    createSessionOverDataPlane({ url, signer: device.signer, cols: 120, rows: 32 })
+    return createSessionOverDataPlane({ url, signer: device.signer, cols: 120, rows: 32 })
       .then((addr) => {
         store.error = null;
         openTarget(
@@ -426,7 +429,7 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
           // already holding. Loopback answers it the way it always has.
           onCreate={(view: DirectoryView) => {
             const url = dataPlaneUrl(view.dataPlane);
-            if (url !== null) createAt(url);
+            return url === null ? undefined : createAt(url);
           }}
         />
       );
