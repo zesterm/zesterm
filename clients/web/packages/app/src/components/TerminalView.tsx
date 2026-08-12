@@ -29,6 +29,7 @@ import { resolveTerminalPalette, type Theme } from '@zesterm/theme';
 import type { SessionEntry } from '@zesterm/control';
 
 import { wsDial } from '../ws-dial.ts';
+import { currentTheme, themeStore } from '../state/theme.ts';
 
 const FONT_FAMILY = 'ui-monospace, "SF Mono", Menlo, Consolas, monospace';
 const FONT_SIZE = 13;
@@ -63,6 +64,7 @@ export const TerminalView = component<{
   let metrics: Metrics | null = null;
   let client: SessionClient | null = null;
   let observer: ResizeObserver | null = null;
+  let unsubTheme: (() => void) | null = null;
 
   // Dirty rows accumulate between animation frames; one paint per frame no
   // matter how many deltas landed inside it.
@@ -106,12 +108,30 @@ export const TerminalView = component<{
     if (!ctx2d) return;
 
     const dpr = window.devicePixelRatio || 1;
-    metrics = measureMetrics(ctx2d, FONT_FAMILY, FONT_SIZE, dpr);
+    const m = measureMetrics(ctx2d, FONT_FAMILY, FONT_SIZE, dpr);
+    metrics = m;
+    // currentTheme, not the prop: the prop is `store.theme` captured once at
+    // boot, so a view mounted after a setTheme would paint the grid in the
+    // stale theme until the NEXT switch (#133).
     painter = new GridPainter({
       ctx: ctx2d,
-      metrics,
-      palette: resolveTerminalPalette(theme.ui),
+      metrics: m,
+      palette: resolveTerminalPalette(currentTheme(theme).ui),
     });
+
+    // A theme switch REBUILDS the painter rather than mutating it: its palette
+    // is readonly, and its only other state is a cached font/fill string — a
+    // setter would add mutable state for one call site. The rAF in
+    // schedulePaint re-reads `painter`, so the next frame paints the new one.
+    unsubTheme =
+      themeStore()?.onThemeChange((next) => {
+        painter = new GridPainter({
+          ctx: ctx2d,
+          metrics: m,
+          palette: resolveTerminalPalette(next.ui),
+        });
+        schedulePaint('all');
+      }) ?? null;
 
     const { cols, rows } = sizeToWrapper();
     client = new SessionClient({
@@ -151,6 +171,7 @@ export const TerminalView = component<{
   });
 
   onUnmounted(() => {
+    unsubTheme?.();
     observer?.disconnect();
     client?.close();
     document.title = 'zesterm';

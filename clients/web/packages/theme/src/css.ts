@@ -12,6 +12,7 @@
 
 import type { UiTokens } from './tokens.ts';
 import { TOKEN_KEYS } from './tokens.ts';
+import { blockHeaderFill, softHairline, titlebarFill } from './derived.ts';
 
 /** `accentSoft` → `--zt-accent-soft`. */
 export function cssVarName(token: keyof UiTokens): string {
@@ -38,6 +39,34 @@ export interface StyleTarget {
 /** Apply all 24 variables to an element (typically `document.documentElement`). */
 export function applyCssVars(tokens: UiTokens, el: StyleTarget): void {
   for (const [name, value] of Object.entries(cssVarsOf(tokens))) {
+    el.style.setProperty(name, value);
+  }
+}
+
+/**
+ * The three derived chrome surfaces as CSS variables. Separate from
+ * `cssVarsOf` because these are not tokens — they are computed from tokens
+ * (`derived.ts`), and stylesheets that reach for `--zt-titlebar` must get the
+ * per-theme derivation, never a literal that would paint a dark bar onto
+ * `paper`.
+ */
+export function derivedCssVars(ui: UiTokens): Record<string, string> {
+  return {
+    '--zt-titlebar': titlebarFill(ui),
+    '--zt-block-header': blockHeaderFill(ui),
+    '--zt-hairline': softHairline(ui),
+  };
+}
+
+/**
+ * The full theme, onto an element: the 24 token variables plus the 3 derived
+ * surfaces — 27 properties. This is the one call a theme *switch* re-runs;
+ * `applyCssVars` alone would leave the chrome surfaces painted in the old
+ * theme's derivation.
+ */
+export function applyThemeCss(ui: UiTokens, el: StyleTarget): void {
+  applyCssVars(ui, el);
+  for (const [name, value] of Object.entries(derivedCssVars(ui))) {
     el.style.setProperty(name, value);
   }
 }
