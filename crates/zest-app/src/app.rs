@@ -2536,11 +2536,21 @@ impl App {
     fn adjust_selected_setting(&mut self, dir: i32) {
         let Some(idx) = self.selected_settings_field() else { return };
         let Some(current) = self.settings_value_of(idx) else { return };
+        // Enumerating installed families is a real scan, so it happens only on
+        // the keypress that needs it and only for the field that needs it.
+        let installed: Vec<String> = self
+            .settings_ui
+            .as_ref()
+            .and_then(|ui| ui.fields.get(idx))
+            .filter(|f| f.widget == zest_config::ui::Widget::FontList)
+            .and(self.fonts.as_mut())
+            .map(Fonts::installed_families)
+            .unwrap_or_default();
         let next = self.settings_ui.as_ref().and_then(|ui| {
             let field = ui.fields.get(idx)?;
             let themes: Vec<String> =
                 zest_theme::builtin::all().into_iter().map(|t| t.id).collect();
-            crate::settings_ui::adjust(field, &current, dir, &themes)
+            crate::settings_ui::adjust(field, &current, dir, &themes, &installed)
         });
         if let Some(value) = next {
             self.apply_edit(idx, value);

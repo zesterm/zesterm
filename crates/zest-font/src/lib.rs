@@ -987,6 +987,11 @@ impl Fonts {
     }
 
     /// Families consulted for Private Use Area glyphs, best first.
+    /// Every installed family, for a settings UI that wants to offer a choice.
+    pub fn installed_families(&mut self) -> Vec<String> {
+        installed_families(&mut self.collection)
+    }
+
     #[must_use]
     pub fn symbol_families(&self) -> &[String] {
         &self.symbol_families
@@ -1022,6 +1027,39 @@ fn is_private_use(ch: char) -> bool {
 /// Nerd Font to make their prompt work should not then have to name it in a
 /// config file for the terminal to find it. Mono variants sort first: they are
 /// designed to occupy one cell, which is what a grid wants.
+/// Every installed family that is plausibly usable as a terminal face.
+///
+/// The settings UI needs a roster it can cycle, and the schema cannot carry one
+/// — the same problem the theme picker has, solved the same way: the caller
+/// brings the list.
+///
+/// fontique does not expose a monospace flag, so this cannot be an exact
+/// answer. It is a *widened* one on purpose: too few entries means the font
+/// someone wants is unreachable from the UI, while too many only means a couple
+/// of extra presses. Faces that are certainly not terminal candidates — the
+/// icon-only and symbol-only fonts — are dropped, and the rest is offered.
+#[must_use]
+pub fn installed_families(collection: &mut fontique::Collection) -> Vec<String> {
+    let mut found: Vec<String> = collection
+        .family_names()
+        .filter(|name| {
+            let lower = name.to_ascii_lowercase();
+            // Icon fonts have no letters at all; offering them would render the
+            // whole terminal as tofu.
+            !(lower.contains("symbols only")
+                || lower.starts_with("segoe fluent icons")
+                || lower.starts_with("segoe mdl2")
+                || lower.starts_with("marlett")
+                || lower.starts_with("webdings")
+                || lower.starts_with("wingdings"))
+        })
+        .map(str::to_string)
+        .collect();
+    found.sort_by_key(|n| n.to_ascii_lowercase());
+    found.dedup();
+    found
+}
+
 fn discover_symbol_families(collection: &mut fontique::Collection) -> Vec<String> {
     let mut found: Vec<String> = collection
         .family_names()
