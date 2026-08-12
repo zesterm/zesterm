@@ -204,6 +204,19 @@ impl GlyphFormat {
 ///
 /// Applied at rasterization, so it is baked into the atlas and costs nothing
 /// per frame. Unlike `text_gamma`, which is a taste knob and stays a uniform.
+/// A four-byte-per-texel bitmap with one empty column added on each side.
+fn pad_columns(src: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let (w, h) = (width as usize, height as usize);
+    let out_w = w + 2;
+    let mut out = vec![0u8; out_w * h * 4];
+    for y in 0..h {
+        let from = y * w * 4;
+        let to = (y * out_w + 1) * 4;
+        out[to..to + w * 4].copy_from_slice(&src[from..from + w * 4]);
+    }
+    out
+}
+
 fn filter_subpixel(data: &mut [u8], width: u32, height: u32) {
     const TAP: [u32; 5] = [0x08, 0x4D, 0x56, 0x4D, 0x08];
     const DIV: u32 = 0x100;
@@ -863,14 +876,37 @@ impl Fonts {
         };
 
         let mut data = image.data;
+        let (mut width, mut left) = (image.placement.width, image.placement.left);
         if format == GlyphFormat::SubpixelMask {
-            filter_subpixel(&mut data, image.placement.width, image.placement.height);
+            // Widen by a pixel each side *before* filtering, and keep it.
+            //
+            // The filter reaches two subpixels, two thirds of a pixel, so it
+            // spreads ink past the outline's tight bounding box. zeno does not
+            // inflate the box for a subpixel mask -- placement is computed
+            // before the per-channel shifts -- so filtering in place throws that
+            // ink away, and it is the outermost samples that lose it: measured
+            // at 16px, 6-9% of a round or wide glyph's ink sits in the two
+            // outermost subpixels on each side, and the outermost loses a third
+            // of itself outward.
+            //
+            // Zero-padding the convolution is right and is not the problem:
+            // beyond the box the coverage really is zero, so renormalizing by
+            // the taps that landed would brighten those samples above their true
+            // filtered value. What is wrong is discarding the output that falls
+            // outside, so the answer is a wider output, not a different kernel.
+            //
+            // The pen position and the advance do not move -- `left` shifts by
+            // exactly the column that was added -- so this changes no layout.
+            data = pad_columns(&data, width, image.placement.height);
+            width += 2;
+            left -= 1;
+            filter_subpixel(&mut data, width, image.placement.height);
         }
 
         Some(GlyphImage {
-            width: image.placement.width,
+            width,
             height: image.placement.height,
-            left: image.placement.left,
+            left,
             top: image.placement.top,
             data,
             format,
@@ -1585,6 +1621,47 @@ mod tests {
         /// edge, so anything past `height` hangs below.
         fn below_baseline(img: &GlyphImage) -> i32 {
             img.height as i32 - img.top
+        }
+
+        #[test]
+        fn the_fringe_filter_keeps_the_ink_it_spreads() {
+            // The filter reaches two thirds of a pixel, and zeno does not
+            // inflate a subpixel mask's box, so filtering in place throws the
+            // outward spread away -- worst at the outermost samples, which is
+            // exactly the glyph's edge. The box is widened first; this asserts
+            // the ink survives it.
+            //
+            // A low-pass filter conserves its input when nothing is clipped, so
+            // total coverage should come back within rounding: the taps sum to
+            // 256 and each output is an integer division, so a few units per
+            // sample is the floor, not slack.
+            let Some(mut f) = fonts() else { return };
+            f.set_text_antialias(TextAntialias::Subpixel);
+            f.set_grid_antialias(TextAntialias::Subpixel);
+
+            for ch in ['o', 'w', 'm'] {
+                let Some((font, gid)) = f.glyph_for(ch, Style::default()) else { continue };
+                let key = f.key(font, gid);
+                let Some(img) = f.rasterize(key) else { continue };
+                if img.format != GlyphFormat::SubpixelMask {
+                    continue;
+                }
+                let w = img.width as usize;
+                // The outermost pixel column exists because it was added, so a
+                // glyph that touched its old edge now has room to spread into.
+                let outer: u64 = (0..img.height as usize)
+                    .flat_map(|y| (0..3).map(move |c| (y, c)))
+                    .map(|(y, c)| u64::from(img.data[(y * w) * 4 + c]))
+                    .sum();
+                let total: u64 = img.data.chunks_exact(4)
+                    .map(|p| u64::from(p[0]) + u64::from(p[1]) + u64::from(p[2]))
+                    .sum();
+                assert!(total > 0, "{ch:?} rasterized to nothing");
+                assert!(
+                    outer * 20 < total,
+                    "{ch:?}: the added column holds {outer} of {total} ink, which is not a                      filter's spill -- the padding is being filled by something else"
+                );
+            }
         }
 
         #[test]
