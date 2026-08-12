@@ -182,7 +182,7 @@ pnpm -C cloud --filter @zesterm/relay-worker exec wrangler dev --port 8787
 
 # 3. the browser's half: mints a ticket and attaches
 node cloud/packages/relay/tools/fake-browser.mjs \
-  --ticket-seed <64 hex> --host <the daemon's host id>
+  --ticket-seed <64 lowercase hex> --host <the daemon's host id>
 ```
 
 `--ephemeral` mints a fresh key every start, so the `hosts` row has to name
@@ -229,12 +229,24 @@ right — but a person approving a device still cannot tell *which* device, and
 Still the fastest way to isolate a failure to one end, and it needs no Rust at
 all:
 
+**From `cloud/packages/relay`, not the repo root** — the tools import
+`@noble/ed25519`, which pnpm installs into that package, and from anywhere else
+Node resolves nothing and names the package rather than the directory.
+
 ```sh
-./target/fast/zest-daemon --ephemeral --listen-ws --ws-port 7718
-node cloud/packages/relay/tools/fake-host.mjs --relay http://127.0.0.1:8787
-node cloud/packages/relay/tools/fake-browser.mjs \
-  --ticket-seed <64 hex> --host "$(node cloud/packages/relay/tools/fake-host.mjs --host-id)"
+cd cloud/packages/relay
+../../../target/fast/zest-daemon --ephemeral --socket /tmp/zt-e2e.sock \
+  --listen-ws --ws-bind 127.0.0.1 --ws-port 7718 --no-prompt
+node tools/fake-host.mjs --relay http://127.0.0.1:8787 --daemon ws://127.0.0.1:7718
+node tools/fake-browser.mjs --ticket-seed <64 lowercase hex> \
+  --host "$(node tools/fake-host.mjs --host-id)" --send 01000000c0
 ```
+
+`--send 01000000c0` is a u32-LE length of 1 and MessagePack `nil`: a well-framed
+message the daemon parses, fails to decode, and answers. Sending `deadbeef`
+instead is worth doing once — the daemon reads it as a 4,022,250,974-byte length
+prefix and refuses it against `MAX_FRAME`, which is the byte path proving itself
+in an error message.
 
 `--ephemeral` on the daemon is not optional on macOS, and the reason is in
 `AGENTS.md`: the Keychain binds its grant to the *binary* that asked, dev builds

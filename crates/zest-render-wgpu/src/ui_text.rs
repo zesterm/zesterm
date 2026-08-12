@@ -276,8 +276,27 @@ fn push_glyph(
     let Cached::Entry(e) = cached else { return };
 
     out.push(GlyphInstance {
-        // Bearing baked in on the CPU, exactly as the grid path does.
-        pos: [x + f32::from(e.left), baseline - f32::from(e.top)],
+        // Bearing baked in on the CPU, exactly as the grid path does — and then
+        // snapped to whole pixels, which the grid path gets for free and this
+        // one does not.
+        //
+        // The atlas sampler is `Nearest`, on the stated assumption that glyphs
+        // are blitted 1:1. That holds for the grid, where a pen sits at
+        // `ox + col * cell_w` and `cell_w` is an integer by construction. Chrome
+        // text is *freely positioned*: it accumulates the shaper's fractional
+        // advances at a fractional size (`UI_BODY` is 12.5), so a quad lands on
+        // a fractional pixel, `Nearest` resamples the bitmap at that offset, and
+        // every carefully computed subpixel coverage value is read from the
+        // wrong texel. Stems smear across two pixels and the whole label goes
+        // soft while the grid beside it stays sharp — which is exactly how this
+        // was reported, twice, as "the tabs and the chrome look blurry".
+        //
+        // Snapping costs sub-pixel evenness in inter-glyph spacing, which at
+        // 9.5-21px is not visible, and buys back the 1:1 blit the sampler was
+        // chosen for. The quarter-pixel buckets in `GlyphKey::subpx_x` are the
+        // other answer — rasterize per phase instead of snapping — and they are
+        // still unimplemented; this is the cheap half of that idea.
+        pos: [(x + f32::from(e.left)).round(), (baseline - f32::from(e.top)).round()],
         uv: [f32::from(e.uv[0]), f32::from(e.uv[1])],
         size: [f32::from(e.size[0]), f32::from(e.size[1])],
         color,

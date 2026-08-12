@@ -99,7 +99,8 @@ async fn run() {
             .map(|s| s.to_string())
             .collect(),
     };
-    let typo = Typography { size_pt: 16.0, line_height: 1.25, ..Default::default() };
+    let size_pt = opt("--size").map_or(16.0, |v| v.parse::<f32>().expect("--size takes points"));
+    let typo = Typography { size_pt, line_height: 1.25, ..Default::default() };
     let mut fonts = Fonts::new(&families, typo).expect("no usable font");
     let metrics = fonts.cell_metrics();
 
