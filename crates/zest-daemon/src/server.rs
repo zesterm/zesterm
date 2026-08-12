@@ -1749,8 +1749,17 @@ mod tests {
         }
     }
 
+    /// The same deadline `session.rs`'s copy carries, for the same measured
+    /// reason: on a contended Windows runner a `wait_for(|| has_exited())` can
+    /// burn ten seconds while PowerShell is still starting, and the assertion
+    /// that then fires names whatever came after it rather than the child that
+    /// never ran (#80). #92 raised it there; this copy was missed, and
+    /// `an_ended_session_sends_its_last_output_in_front_of_the_exit` failed on
+    /// Windows CI in exactly that shape.
+    ///
+    /// Generous costs nothing: only a run that was going to fail pays for it.
     fn wait_for(mut f: impl FnMut() -> bool) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
             if f() {
                 return true;
