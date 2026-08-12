@@ -401,7 +401,19 @@ enum Down {
     /// browser is told the host did not come back, which is the truthful answer
     /// and does not depend on anyone's clock.
     #[serde(rename = "open")]
-    Open { v: u16, pipe: String },
+    Open {
+        v: u16,
+        pipe: String,
+        /// Parsed and deliberately not enforced — see above for why a clock
+        /// comparison is the wrong tool here.
+        ///
+        /// Carried anyway because the doc above says this message has it: a
+        /// field the contract names and the type drops is a shape change
+        /// nothing would notice, and `#[serde(other)]` below would swallow the
+        /// whole message rather than the field.
+        #[serde(default)]
+        exp: Option<u64>,
+    },
     /// No `v`, deliberately: a refusal is the one message worth reading from a
     /// relay this build cannot otherwise talk to, and `code` is a string under
     /// any version.
@@ -584,6 +596,19 @@ pub struct Relay {
     max_backoff: Duration,
 }
 
+/// A [`Watchdog`] that disarms when it goes out of scope.
+///
+/// A `Deref` would be tidier and is deliberately not used: the point is that
+/// the only way to keep it armed is to keep it alive, and a transparent wrapper
+/// invites someone to reach for `disarm` by hand again.
+struct DisarmOnDrop(Watchdog);
+
+impl Drop for DisarmOnDrop {
+    fn drop(&mut self) {
+        self.0.disarm();
+    }
+}
+
 impl Relay {
     /// Point a leg at `url`, or say why it cannot be dialled.
     ///
@@ -684,6 +709,16 @@ impl Relay {
         // it and stands the read poll down, which is what keeps an idle daemon
         // idle.
         let watchdog = Watchdog::start_with(Arc::clone(&wire.cut), HANDSHAKE_TIMEOUT);
+        // Disarmed however this function leaves, not only where it succeeds.
+        //
+        // Six `?` sit between here and the disarm at the bottom -- the upgrade,
+        // the version checks, the signature, the send -- and each is a path
+        // that would leave a thread waiting to cut a connection already gone.
+        // That is the false-positive warning `disarm` exists to prevent, plus a
+        // thread per failed dial, and a relay that accepts TCP and then fails
+        // the handshake produces one every time the ladder retries. A guard is
+        // the only shape that covers the path nobody remembers to.
+        let watchdog = DisarmOnDrop(watchdog);
         let path = format!("{CONTROL_PATH}?host={}", hex(&self.identity.host_id().0));
         let (mut reader, writer) = ws::client::connect_messages_to(
             wire.reader,
@@ -754,7 +789,7 @@ impl Relay {
                     *parked = true;
                     // Only now: the handshake is what the deadline covers, and
                     // a parked link that is quiet is the healthy case.
-                    watchdog.handle().completed();
+                    watchdog.0.handle().completed();
                     tracing::info!(
                         relay = %self.origin,
                         host = %self.identity.host_id().short(),
@@ -764,8 +799,20 @@ impl Relay {
                         keepalive = Some(start_keepalive(writer, KEEPALIVE_INTERVAL));
                     }
                 }
-                Down::Open { v, pipe } => {
+                Down::Open { v, pipe, exp } => {
                     check_version(v)?;
+                    // Logged, not obeyed. A deadline in absolute epoch ms is
+                    // the relay's clock, and a laptop ten seconds out would
+                    // refuse every attach it was offered — but a person reading
+                    // why a dial-back was too late wants to see the number the
+                    // relay actually set, and the relay's own 404 is what
+                    // enforces it.
+                    tracing::debug!(
+                        relay = %self.origin,
+                        pipe = %&pipe[..pipe.len().min(8)],
+                        exp = exp.unwrap_or_default(),
+                        "the relay asked for a pipe"
+                    );
                     if !*parked {
                         break Err(io::Error::new(
                             io::ErrorKind::InvalidData,
@@ -794,7 +841,7 @@ impl Relay {
         };
 
         drop(keepalive);
-        watchdog.disarm();
+        // `watchdog` is the guard; dropping it disarms.
         outcome
     }
 
