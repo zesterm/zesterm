@@ -184,7 +184,6 @@ body {
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  padding: 8px;
   outline: none;
   background: var(--zt-bg);
 }
@@ -193,7 +192,14 @@ body {
   position: relative;
 }
 
-.term-wrap canvas {
+/* The alt-screen canvas pane; the 8px was .term-wrap's until the blocks mode
+   arrived with its own §3 padding. */
+.grid-pane {
+  height: 100%;
+  padding: 8px;
+}
+
+.grid-pane canvas {
   display: block;
 }
 
@@ -220,42 +226,221 @@ body {
   overflow: hidden;
 }
 
-.block-rail {
-  display: flex;
-  gap: 8px;
-  padding: 6px 10px;
-  background: var(--zt-panel);
-  border-top: 1px solid var(--zt-line);
-  overflow-x: auto;
-  flex: none;
+/* --- blocks pane (#151, design §3–§4) ------------------------------------
+
+   The command-blocks mode of the primary screen. Every colour is a theme
+   variable; the two derived surfaces (--zt-block-header) come from
+   @zesterm/theme's derivation, never a literal. */
+
+.blocks-pane {
+  height: 100%;
+  overflow-y: auto;
+  padding-top: 16px;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.62;
+  color: var(--zt-dim);
 }
 
-.block-chip {
+.blocks-pane .pane-row {
+  /* Invariant 11: output WRAPS — a clipped line loses the word that carries
+     its meaning. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.pane-rows {
+  margin: 0 18px 12px;
+}
+
+.block {
+  margin: 0 18px 12px;
+}
+
+.block-header {
   display: flex;
-  flex-direction: column;
-  padding: 4px 10px;
-  border-radius: 6px;
-  border: 1px solid var(--zt-line);
-  background: var(--zt-chrome);
-  font-size: 11px;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  border-left: 2px solid var(--zt-faint);
+  background: var(--zt-block-header);
+}
+
+.block-header.is-running {
+  background: var(--zt-panel);
+}
+
+.block-header.success {
+  border-left-color: var(--zt-success);
+}
+
+.block-header.danger {
+  border-left-color: var(--zt-danger);
+}
+
+.block-header.warn {
+  border-left-color: var(--zt-warn);
+}
+
+.block-header .fold {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--zt-faint);
+  cursor: pointer;
+}
+
+.block-header .cmd {
+  font-size: 12.5px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.block-chip .cmd {
-  font-family: var(--zt-mono, ui-monospace, monospace);
+/* Command in the state colour when finished, plain fg while running (§3).
+   The old .block-chip rail these rules replace is gone with the rail itself. */
+.block-header.success .cmd {
+  color: var(--zt-success);
+}
+
+.block-header.danger .cmd {
+  color: var(--zt-danger);
+}
+
+.block-header.faint .cmd {
+  color: var(--zt-faint);
+}
+
+.block-header.warn .cmd {
   color: var(--zt-fg);
 }
 
-.block-chip .verdict {
+/* Hover/focus reveals the two action chips; ≤120ms per the animation budget. */
+.block-header .chips {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease-out;
+}
+
+.block-header:hover .chips,
+.block-header:focus-within .chips {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.chip {
+  padding: 2px 7px;
+  border: none;
+  border-radius: 5px;
+  background: var(--zt-accent-soft);
+  color: var(--zt-accent);
+  font-family: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.block-header .meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  font-size: 11px;
+}
+
+.block-header .cwd,
+.block-header .dur,
+.block-header .lines {
+  color: var(--zt-faint);
+}
+
+.block-header .outcome.ok {
+  color: var(--zt-success);
+}
+
+.block-header .outcome.bad {
+  color: var(--zt-danger);
+}
+
+.block-header .outcome.unknown,
+.block-header .outcome.interrupted {
+  color: var(--zt-faint);
+}
+
+.block-header .outcome.running {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--zt-warn);
+}
+
+/* The 3/4 ring: transparent top, 0.9s linear spin. */
+.spinner {
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid var(--zt-warn);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: zt-spin 0.9s linear infinite;
+}
+
+.block-body {
+  padding: 8px 12px 0 24px;
   color: var(--zt-dim);
 }
 
-.block-chip.running .verdict {
-  color: var(--zt-info);
+.prompt-line {
+  padding: 4px 30px 18px;
 }
 
-.block-chip.finished .verdict {
-  color: var(--zt-dim);
+.prompt-line .prompt-row {
+  display: block;
+  white-space: pre-wrap;
+}
+
+.caret {
+  display: inline-block;
+  width: 8px;
+  height: 16px;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--zt-accent);
+  animation: zt-caret 1.1s step-end infinite;
+}
+
+.pane-overlay {
+  padding: 4px 30px 18px;
+  font-size: 11px;
+  color: var(--zt-warn);
+}
+
+.pane-overlay.stalled {
+  color: var(--zt-faint);
+}
+
+/* §4: while reconnecting the pane's text dims one step. Opacity rather than a
+   colour override because spans carry their own SGR colours. */
+.blocks-pane.degraded .pane-rows,
+.blocks-pane.degraded .block-body,
+.blocks-pane.degraded .prompt-line {
+  opacity: 0.7;
+}
+
+@keyframes zt-caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+@keyframes zt-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 

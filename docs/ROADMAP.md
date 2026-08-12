@@ -1335,6 +1335,26 @@ is now unblocked and building.
       thing to show. A seed-backed key is named as such on screen — a browser
       on the fallback path is working, not secure, and a row that looks like
       every other row is a comfortable lie about the one that matters.
+- [x] **The primary screen renders as command blocks** (#151) — the design
+      README's §3–§4 in DOM. `TerminalView` becomes a mode switch on
+      `altScreen`: `BlocksPane` for the shell, the extracted canvas `GridPane`
+      for full-screen apps, with the hidden IME textarea, focus handling and
+      the connection banner shared so switching screens drops neither focus
+      nor a mid-flight composition. Every header decision — rail colour,
+      'exit ?' never a green tick, foldable only with output, the interrupted
+      predicate, the three duration shapes — lives in a pure `paneModel`
+      under `node --test`, proven on the `blocks-zsh` recording as well as
+      synthetic states; the component only turns items into elements. ⌘⇧O and
+      ⌘⇧R ride one selector (`mostRecentBlockWithOutput`) so copy and re-run
+      can never disagree about their target, and re-run types only while the
+      trailing block is an open prompt — mid-command, the replay would land
+      in that command's stdin. The pane follows output (pinned to the bottom
+      until the user scrolls up to read, re-engaging when they return — a DOM
+      scroller holds position where the canvas always showed the live
+      screen); folds key on the full (host, session) pair. Degraded states
+      per §4: reconnecting dims the body and appends the overlay, an open
+      running block reads interrupted; 'stalled' is modelled but has no
+      producer until delta-silence detection lands.
 - [ ] Local echo prediction for high-latency links (mosh's other trick): predict
       printable-char echo when not in alt-screen, render dim, reconcile on delta
       arrival. The largest perceived-latency win available.
