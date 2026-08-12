@@ -18,10 +18,13 @@
  * attach ticket on `Sec-WebSocket-Protocol`, and that ticket is verified
  * **here rather than inside the Durable Object**: a refused attach must not
  * cost a room wake-up, or an unauthenticated caller can bill the account by
- * dialling garbage. The ticket is verified statelessly, so there is nothing
- * the object knows that this needs. Only a ticket that verifies reaches the
- * room — where it either becomes a pipe or is told which of the two things
- * went wrong: nobody is home, or the host is home and did not dial back.
+ * dialling garbage. Everything a signature settles is settled statelessly, so
+ * there is nothing the object knows that this needs. Only a ticket that
+ * verifies reaches the room — where it is spent (a ticket admits one attach,
+ * and the set of spent ids is the one thing only a single-instance object can
+ * hold → `room/replay.ts`) and then either becomes a pipe or is told which of
+ * the two things went wrong: nobody is home, or the host is home and did not
+ * dial back.
  *
  * `GET /v1/pipe?host=<id>&pipe=<id>` is the daemon's second connection, made
  * because the room asked it to. The id is the credential and there is no other:
@@ -74,7 +77,7 @@
 import { fromHex } from '@zesterm/cloud-shared';
 
 import type { Env } from './env.ts';
-import { ATTACH_PATH, CONTROL_PATH, PIPE_PATH, roomName } from './routes.ts';
+import { ATTACH_JTI_PARAM, ATTACH_PATH, CONTROL_PATH, PIPE_PATH, roomName } from './routes.ts';
 import { HOST_ID_BYTES } from './room/control.ts';
 import { pipeIdIsWellFormed } from './room/pipe.ts';
 import {
@@ -98,8 +101,16 @@ export { RelayRoom } from './room.ts';
 export type AttachVerdict =
   | { readonly kind: 'http'; readonly status: number; readonly body: string }
   | { readonly kind: 'close'; readonly code: number; readonly reason: string }
-  /** Verified. Only now may a room be named, let alone woken. */
-  | { readonly kind: 'room'; readonly host: string };
+  /**
+   * Verified. Only now may a room be named, let alone woken.
+   *
+   * `jti` travels with the host because the room needs it and must not have to
+   * re-derive it: it is the ticket's replay key, and the room refuses a second
+   * attach carrying one it has already seen. That check cannot be made here —
+   * the edge has no state, and two colos would not see each other's — so this
+   * is the one claim that is verified in one place and *spent* in another.
+   */
+  | { readonly kind: 'room'; readonly host: string; readonly jti: string };
 
 export async function attachVerdict(
   request: Request,
@@ -131,7 +142,7 @@ export async function attachVerdict(
     return { kind: 'close', code: CLOSE_TICKET_REFUSED, reason: 'attach ticket refused' };
   }
 
-  return { kind: 'room', host: verified.host };
+  return { kind: 'room', host: verified.host, jti: verified.jti };
 }
 
 /**
@@ -156,6 +167,53 @@ function subprotocolHeaders(request: Request): Record<string, string> {
   return offered.includes(RELAY_SUBPROTOCOL)
     ? { 'sec-websocket-protocol': RELAY_SUBPROTOCOL }
     : {};
+}
+
+/**
+ * The attach request as the room sees it: the same request, with the verified
+ * ticket's `jti` on the query string.
+ *
+ * A query parameter, like `?host=` — which is already the only thing binding
+ * the object's name to a machine — and read back the same way. Both are the
+ * *Worker's* word rather than the caller's, which is what makes that safe: a
+ * Durable Object is reachable only through its binding, so nothing outside this
+ * Worker can address the room at all, let alone choose what these say.
+ *
+ * Handing the room one verified field rather than the ticket keeps the check in
+ * one place: this file decides whether a ticket is real, the room decides
+ * whether it has been spent, and there is no second verifier to disagree with
+ * the first. The `jti` is a replay key and not a secret (the mint says so where
+ * it makes one), so unlike the ticket it costs nothing to put in a URL that
+ * never leaves the edge.
+ *
+ * Exported for its test, which is the only thing that can check it: the `fetch`
+ * that calls it is the one function here that cannot be unit-tested.
+ */
+export function roomRequest(request: Request, jti: string): Request {
+  const url = new URL(request.url);
+  // `set`, not an interpolated string: a `jti` is whatever our own mint signed,
+  // and percent-encoding it here is what makes `searchParams.get` in the room
+  // hand back the same characters rather than a truncated or re-split value.
+  // `set` also replaces any the caller invented, rather than appending beside
+  // it — `searchParams.get` returns the first, which would be theirs.
+  url.searchParams.set(ATTACH_JTI_PARAM, jti);
+  // The upgrade this carries is the point of the whole request, and it is the
+  // headers that carry it — so the request is rebuilt from the original rather
+  // than constructed field by field.
+  const forwarded = new Request(url, request);
+  // ...minus the one header that is a credential.
+  //
+  // `sec-websocket-protocol` carries the whole attach ticket, and every comment
+  // around here says the room never sees it — which was not true while the
+  // header rode along. The room has no use for it: the edge has already
+  // verified the signature, the audience, the expiry and the room, and passes
+  // on the one field it decided, the `jti`.
+  //
+  // Removing it is not tidiness. A ticket that reaches a component with no
+  // reason to hold it is a ticket that can be logged by one, and this one is a
+  // bearer credential good for thirty seconds against a live shell.
+  forwarded.headers.delete('sec-websocket-protocol');
+  return forwarded;
 }
 
 /** A socket this Worker owns, opened only to say why it is closing. */
@@ -218,7 +276,7 @@ export default {
 
     const response = await env.RELAY_ROOM.get(
       env.RELAY_ROOM.idFromName(roomName(verdict.host)),
-    ).fetch(request);
+    ).fetch(roomRequest(request, verdict.jti));
     const socket = response.webSocket;
     if (socket === null) return response;
     // Rebuilt rather than returned as-is, because the subprotocol is the

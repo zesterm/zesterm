@@ -26,9 +26,9 @@ import {
   type AttachTicket,
 } from '@zesterm/cloud-shared';
 
-import { attachVerdict } from '../src/index.ts';
+import { attachVerdict, roomRequest } from '../src/index.ts';
 import type { Env } from '../src/env.ts';
-import { ATTACH_PATH } from '../src/routes.ts';
+import { ATTACH_JTI_PARAM, ATTACH_PATH, attachJti } from '../src/routes.ts';
 import {
   CLOSE_TICKET_REFUSED,
   RELAY_SUBPROTOCOL,
@@ -302,8 +302,45 @@ const attach = (ticket: string | null, host = HOST, upgrade = true) =>
 test('a verified attach is the only thing that may name a room', async () => {
   assert.deepEqual(
     await attachVerdict(attach(await mint()), env(ACCOUNT.publicHex), IAT),
-    { kind: 'room', host: HOST },
+    { kind: 'room', host: HOST, jti: claims().jti },
     'the ticket is what the edge checks; whether the daemon is connected is the room’s to answer, and the room is not woken until the ticket has verified',
+  );
+});
+
+test('the verified jti reaches the room, on a request that is still an upgrade', async () => {
+  const original = attach(await mint());
+  const forwarded = roomRequest(original, claims().jti);
+
+  assert.equal(
+    attachJti(new URL(forwarded.url)),
+    claims().jti,
+    'written by the edge and read by the room, and this is the only assertion that puts the two halves together: `fetch` is untestable on both sides, so two ends naming different parameters would refuse every attach in the fleet with a green suite',
+  );
+  assert.equal(
+    new URL(forwarded.url).searchParams.get('host'),
+    HOST,
+    'and `?host=` survives, which is the only thing binding the object’s name to a machine',
+  );
+  assert.equal(
+    forwarded.headers.get('sec-websocket-protocol'),
+    null,
+    'the ticket rides in that header, and every comment around `roomRequest` says the room never sees it — which was untrue while it rode along. The edge has already checked the signature, the audience, the expiry and the room, and forwards the one field it decided; a bearer credential good for thirty seconds against a live shell has no business reaching a component with no use for it, where something can log it',
+  );
+  assert.equal(
+    forwarded.headers.get('upgrade'),
+    'websocket',
+    'the upgrade is the point of the request, and the room refuses anything that is not one. (Node’s `Request` keeps the header; workerd’s is not exercised here, and only a deploy proves that half)',
+  );
+  assert.equal(
+    new URL(original.url).searchParams.get(ATTACH_JTI_PARAM),
+    null,
+    'and the caller’s own request is untouched, so nothing downstream reads a URL this Worker rewrote under it',
+  );
+
+  assert.equal(
+    attachJti(new URL(roomRequest(attach(await mint(), `${HOST}&jti=mine`), 'ours').url)),
+    'ours',
+    '`set` replaces rather than appends: `searchParams.get` returns the first, so an appended id would let the caller choose which ticket the room spends',
   );
 });
 

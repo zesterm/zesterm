@@ -204,7 +204,7 @@ test('the ticket names the host, the account and the session, and dies in thirty
   db.close();
 });
 
-test('two mints for the same host differ, so a future replay set can tell them apart', async () => {
+test('two mints for the same host differ, so the relay’s replay set can tell them apart', async () => {
   const db = testDb();
   const cookie = await signedIn(db, 'user-a');
   seedHost(db, { id: MAC, userId: 'user-a', label: 'andy-mac' });
@@ -217,7 +217,7 @@ test('two mints for the same host differ, so a future replay set can tell them a
   assert.notEqual(
     await jti(one),
     await jti(two),
-    'nothing consumes a jti yet, but a mint that repeated one would make the replay set that lands later refuse the second honest attach of a pair',
+    'the relay spends a jti once, so a mint that repeated one would refuse the second honest attach of a pair — two tabs on one machine, and the second never opens',
   );
   db.close();
 });

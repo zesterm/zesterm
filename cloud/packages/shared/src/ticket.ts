@@ -53,12 +53,11 @@ export const ATTACH_TICKET_AUDIENCE = 'relay';
  * connection still lands; short enough that a ticket captured from a log is
  * worthless by the time anyone reads it.
  *
- * **The window is the whole defence today.** Nothing yet remembers a spent
- * `jti`, so a ticket captured inside its thirty seconds can be presented more
- * than once — and what that buys is a second pipe to a host that will still run
- * the `zest-proto` handshake and still refuse an unpaired client. When the
- * replay set lands in the room's storage it need only remember `jti` for this
- * long, which is why the constant is here rather than there.
+ * **The window is no longer the whole defence.** The relay's room remembers the
+ * `jti` of every ticket it spends, so a captured one buys nothing even inside
+ * its thirty seconds — `packages/relay/src/room/replay.ts`. The constant is here
+ * rather than there because the set need only remember an id for as long as the
+ * ticket it names can live, and that is this number.
  */
 export const ATTACH_TICKET_TTL_MS = 30_000;
 
@@ -90,7 +89,7 @@ export const MAX_ATTACH_TICKET_CHARS = 1024;
  */
 export interface AttachTicket {
   readonly v: typeof ATTACH_TICKET_VERSION;
-  /** Unique per mint. Carried for the replay set; nothing reads it yet. */
+  /** Unique per mint. The relay's room spends it once and refuses it after. */
   readonly jti: string;
   readonly aud: typeof ATTACH_TICKET_AUDIENCE;
   /** The host id, 64 lowercase hex — the room this ticket admits its holder to. */

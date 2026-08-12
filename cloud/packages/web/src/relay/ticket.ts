@@ -31,13 +31,14 @@ export const SIGNING_KEY_LEN = 32;
 /**
  * 128 bits of `jti`.
  *
- * It is a replay key, not a secret. **Nothing consumes it yet** — the relay
- * has no storage-backed set of spent ids, so one mint currently buys any number
- * of attaches inside the thirty-second window. It is minted unguessably anyway,
- * because the alternative is a counter that whoever lands the replay set has to
- * make unguessable retroactively, and a jti an attacker can predict lets them
- * pre-burn one a future mint would use. Short enough, too, that the whole
- * ticket stays a comfortable header value.
+ * It is a replay key, not a secret: the relay's room records it and refuses the
+ * second attach that carries it, so one mint buys exactly one pipe.
+ *
+ * Unguessable rather than a counter, which matters *because* something consumes
+ * it now: an id an attacker can predict lets them pre-burn one a future mint
+ * would use, turning a replay defence into a way to deny a user their own
+ * machine. Short enough, too, that the whole ticket stays a comfortable header
+ * value.
  */
 export const JTI_BYTES = 16;
 

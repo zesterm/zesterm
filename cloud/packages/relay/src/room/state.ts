@@ -17,9 +17,10 @@
  * every handler call — and that is only cheap if constructing the state is
  * cheap, which is only true if the state is one of these.
  *
- * Deliberately the *narrow* subset. Alarms and `blockConcurrencyWhile` are
- * absent because nothing uses them yet; adding one is a visible decision rather
- * than a discovery.
+ * Deliberately the *narrow* subset. `blockConcurrencyWhile`, `deleteAlarm` and
+ * `transaction` are absent because nothing uses them; adding one is a visible
+ * decision rather than a discovery. The alarm members below were added the same
+ * way, by the replay set that needed them.
  */
 
 /**
@@ -44,16 +45,34 @@ export interface Sock {
 /**
  * The object's own storage.
  *
- * Present for the attach ticket's replay set, which is the one thing that has
- * to persist. **Not for the data path** — a write there costs a request per
- * message and, worse, keeps the object awake, which converts the dominant cost
- * term from zero into continuous. The fake counts writes so that stays
- * assertable.
+ * Here for the attach ticket's replay set, which is the one thing that has to
+ * persist, and for the host-lookup cache. **Not for the data path** — a write
+ * there costs a request per message and, worse, keeps the object awake, which
+ * converts the dominant cost term from zero into continuous. The fake counts
+ * writes so that stays assertable.
  */
 export interface RoomStorage {
   get<T>(key: string): Promise<T | undefined>;
   put(key: string, value: unknown): Promise<void>;
   delete(key: string): Promise<boolean>;
+  /**
+   * Every key under `options.prefix`, in key order.
+   *
+   * The replay set's sweep, and nothing else: a scan is a read of everything it
+   * matches, so it belongs on an alarm that fires once per ticket lifetime and
+   * never on a path a peer can drive.
+   */
+  list<T>(options?: { prefix?: string }): Promise<Map<string, T>>;
+  /**
+   * When the alarm is due, or `null` if none is set.
+   *
+   * Read before arming, because there is one alarm per object: setting a second
+   * replaces the first, so "is one already pending" is the only way to add work
+   * to a schedule without silently moving it. → `room/replay.ts`.
+   */
+  getAlarm(): Promise<number | null>;
+  /** Absolute epoch milliseconds, and a write like any other. */
+  setAlarm(scheduledTime: number): Promise<void>;
 }
 
 /**

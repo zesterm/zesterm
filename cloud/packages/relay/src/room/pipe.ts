@@ -123,17 +123,16 @@ export function openMessage(args: { pipe: string; exp: number }): string {
 // --- close codes -----------------------------------------------------------
 
 /**
- * The ticket was already spent.
+ * The ticket was already spent — or could not be recorded as spent, which comes
+ * to the same answer and is deliberately the same code.
  *
  * Distinct from `4401`, and the usual "one code for every refusal" argument
  * does not apply: reaching this at all requires a ticket that verified, so it
  * tells a guesser nothing they did not already hold. What it tells the holder
  * is the difference between "your ticket is bad" and "your client dialled twice
- * with one ticket", which are fixed in different files.
- *
- * **Nothing sends it yet.** The `jti` replay set that would is its own change;
- * the number is reserved here so that change does not have to pick one out of a
- * range whose other members are already spoken for.
+ * with one ticket", which are fixed in different files. The close *reason*
+ * separates a replay from a claim the object could not make; the code does not,
+ * because both mean this ticket admits nobody. → `room/replay.ts`.
  */
 export const CLOSE_TICKET_REPLAYED = 4402;
 
