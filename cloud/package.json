@@ -10,7 +10,8 @@
   "scripts": {
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
-    "dry-run": "pnpm -r dry-run"
+    "dry-run": "pnpm -r dry-run",
+    "boot": "pnpm -r boot"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test --disable-warning=ExperimentalWarning \"test/**/*.test.ts\"",
     "dry-run": "wrangler deploy --dry-run --outdir .wrangler/dry-run",
+    "boot": "node ../../scripts/boot-worker.mjs --path /v1/control --status 426 --body-contains WebSocket --var TICKET_PUBLIC_KEYS=0000000000000000000000000000000000000000000000000000000000000000 --var RELAY_SIGNING_KEY=0000000000000000000000000000000000000000000000000000000000000000",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"
   },
