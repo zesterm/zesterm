@@ -122,6 +122,29 @@ export function launcherKeyOf(key: string, shift: boolean, focusInMenu: boolean)
   return focusInMenu ? 'none' : 'run-default';
 }
 
+/**
+ * The launcher menu's width. `style.css`'s `.launcher { width: 318px }` is
+ * the same number, and a test pins the two against drifting apart — the
+ * alignment predicate below is only correct while they agree.
+ */
+export const LAUNCHER_WIDTH = 318;
+
+/** Which edge of its `+` button the open launcher menu hangs from. */
+export type LauncherAlign = 'left' | 'right';
+
+/**
+ * The strip's menu hangs right-under its `+` by design (§1) — but with zero
+ * or one tabs that button sits within 318px of the window's LEFT edge, so a
+ * right-anchored menu runs past the viewport and is clipped: the defect
+ * class invariant 5 names for the sidebar's anchor, on the other edge. So
+ * the menu right-anchors only when it fits between the viewport's left edge
+ * and the button, and opens rightwards otherwise. `anchorRight` is the `+`
+ * anchor's right edge in viewport coordinates.
+ */
+export function launcherAlign(anchorRight: number): LauncherAlign {
+  return anchorRight >= LAUNCHER_WIDTH ? 'right' : 'left';
+}
+
 /** A horizontal extent — a chip's or its scroll viewport's, in any shared coordinates. */
 export interface Extent {
   readonly left: number;

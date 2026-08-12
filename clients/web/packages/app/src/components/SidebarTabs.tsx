@@ -98,7 +98,7 @@ export const SidebarTabs = component<{
           {ctx.props.launcherOpen ? (
             <LauncherMenu
               rows={ctx.props.launcherRows}
-              anchor="sidebar"
+              align="left"
               onRun={ctx.props.onLaunch}
               onDismiss={ctx.props.onLauncherDismiss}
             />

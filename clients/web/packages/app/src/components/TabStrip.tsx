@@ -11,6 +11,7 @@ import { component, onMounted, onUpdated } from 'sigx';
 import {
   chipTitle,
   chipTooltip,
+  launcherAlign,
   shouldScrollIntoView,
   type LauncherRow,
 } from '../chrome-model.ts';
@@ -31,6 +32,7 @@ export const TabStrip = component<{
   onPalette: () => void;
 }>((ctx) => {
   let scrollEl: HTMLElement | null = null;
+  let anchorEl: HTMLElement | null = null;
   const chipEls = new Map<string, HTMLElement>();
 
   // Keep the active chip in view — the pure predicate decides, the DOM call
@@ -109,7 +111,12 @@ export const TabStrip = component<{
           </div>
         ))}
       </div>
-      <div class="launcher-anchor">
+      <div
+        class="launcher-anchor"
+        ref={(el: HTMLElement) => {
+          anchorEl = el;
+        }}
+      >
         <button
           class={`tab-new${ctx.props.launcherOpen ? ' open' : ''}`}
           title="new session"
@@ -121,7 +128,13 @@ export const TabStrip = component<{
         {ctx.props.launcherOpen ? (
           <LauncherMenu
             rows={ctx.props.launcherRows}
-            anchor="strip"
+            // Measured per render, not fixed: with few tabs the + sits within
+            // 318px of the window's left edge and a right-anchored menu would
+            // be clipped off-viewport. The anchor is already laid out here —
+            // it existed before the click that opened the menu — and a render
+            // while open (a retitle shifting the +) re-measures. The null
+            // fallback opens rightwards, the edge that always fits.
+            align={launcherAlign(anchorEl?.getBoundingClientRect().right ?? 0)}
             onRun={ctx.props.onLaunch}
             onDismiss={ctx.props.onLauncherDismiss}
           />

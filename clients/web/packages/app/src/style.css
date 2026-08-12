@@ -651,12 +651,16 @@ body {
   box-shadow: 0 20px 50px color-mix(in srgb, var(--zt-shadow) 62%, transparent);
 }
 
-.launcher.strip {
-  right: 0; /* right-anchored under the strip's + */
+/* Which edge the menu hangs from is decided per open, not per anchor: the
+   strip's + sits ~42px from the window's LEFT edge with zero tabs, where a
+   right-anchored 318px menu is mostly off-viewport — launcherAlign() picks
+   the edge that keeps it inside (the sidebar's always opens rightwards). */
+.launcher.align-right {
+  right: 0;
 }
 
-.launcher.sidebar {
-  left: 0; /* opens rightwards over the pane, staying inside the window */
+.launcher.align-left {
+  left: 0;
 }
 
 .launcher-head {

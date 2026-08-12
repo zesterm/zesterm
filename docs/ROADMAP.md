@@ -185,7 +185,7 @@ below means "do not touch this file".
 | **D** | [Linux host](#ws-d) | Linux platform + packaging | Open — C1 landed `unix.rs` | [#9](https://github.com/zesterm/zesterm/issues/9) |
 | **E** | [Command blocks](#ws-e) | `zest-core/src/blocks.rs`, OSC 133, shell integration | Open | [#6](https://github.com/zesterm/zesterm/issues/6) |
 | **F** | [`zest-proto` + `zest-daemon`](#ws-f) | `crates/zest-proto/`, `crates/zest-daemon/` | Protocol + daemon ✅ · **applier, app attach, LAN listener next** | [#4](https://github.com/zesterm/zesterm/issues/4) |
-| **G** | [Web client](#ws-g) | `clients/web/`, `zest-proto/fixtures/` | Decoder + fixtures ✅ · renderer next, transport blocked | [#8](https://github.com/zesterm/zesterm/issues/8) |
+| **G** | [Web client](#ws-g) | `clients/web/`, `zest-proto/fixtures/` | Decoder, renderer, app, deploy, accounts, fleet, tabbed chrome ✅ · **devices screen, local echo next** | [#8](https://github.com/zesterm/zesterm/issues/8) |
 | **H** | [Mesh identity, discovery, transports](#ws-h) | `crates/zest-mesh/`, `crates/zest-cloud/`, `cloud/` | Identity, discovery, pairing, accounts ✅ · the relay Worker and the daemon's `--relay` leg ✅ · **the web client's second data plane next** ([#59](https://github.com/zesterm/zesterm/issues/59)) | [#7](https://github.com/zesterm/zesterm/issues/7) |
 
 **Ordering that mattered, and is now settled.** B landed before A, so `zest-app`
@@ -1335,6 +1335,23 @@ is now unblocked and building.
       thing to show. A seed-backed key is named as such on screen — a browser
       on the fallback path is working, not secure, and a row that looks like
       every other row is a comfortable lie about the one that matters.
+- [x] **The tabbed chrome** (#150; `docs/design/client-ui/` §1–§2) — the shell
+      rewritten around one `TabsState` signal and the pure reducers: the
+      horizontal strip (46px title bar, 34px chips, the active one kept in
+      view by a tested predicate), the vertical layout's 262px sidebar whose
+      host groups derive from the SAME tab list the strip renders (invariant
+      6 — a second array cannot show the session just started), and the `+`
+      launcher menu, the one way to start a session, `⏎` running the default.
+      Two orderings are load-bearing: chords are claimed at window *capture*
+      before the terminal's encode path can see them, and navigation is an
+      EFFECT of activation — the route watcher behind `/h/:hostId/s/:sessionId`
+      only ever activates, one direction, so the URL and the tabs cannot chase
+      each other. Everything decidable without a DOM — chip labels, launcher
+      rows, the scroll-into-view and menu-alignment predicates, the icon-rail
+      breakpoint — lives in `chrome-model.ts` under `node --test`, and the
+      mock's fabricated data (latency, ages, profile rows) is omitted rather
+      than faked, the spec's own rule. Still ahead here: the palette the ⌘K
+      affordances dispatch to, and the blocks pane — each its own item.
 - [ ] Local echo prediction for high-latency links (mosh's other trick): predict
       printable-char echo when not in alt-screen, render dim, reconcile on delta
       arrival. The largest perceived-latency win available.

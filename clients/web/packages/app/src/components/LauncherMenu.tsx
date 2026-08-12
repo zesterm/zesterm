@@ -14,16 +14,19 @@
 
 import { component, onMounted, onUnmounted } from 'sigx';
 
-import { launcherKeyOf, type LauncherRow } from '../chrome-model.ts';
+import { launcherKeyOf, type LauncherAlign, type LauncherRow } from '../chrome-model.ts';
 
 export const LauncherMenu = component<{
   rows: readonly LauncherRow[];
   /**
-   * Which `+` opened it. The strip's menu is right-anchored under its button;
-   * the sidebar's opens rightwards (`left: 0`) so it stays inside the window
-   * instead of running off the left edge (invariant 5).
+   * Which edge of the `+` the menu hangs from, so it stays inside the window
+   * instead of running off either edge (invariant 5's defect class): the
+   * sidebar's always opens rightwards, the strip's is measured per open by
+   * `launcherAlign` — right-anchored as designed once the tabs push the `+`
+   * far enough from the window's left edge for 318px to fit, rightwards
+   * before that.
    */
-  anchor: 'strip' | 'sidebar';
+  align: LauncherAlign;
   onRun: (hostId: string) => void;
   onDismiss: () => void;
 }>((ctx) => {
@@ -88,7 +91,7 @@ export const LauncherMenu = component<{
   });
 
   return () => (
-    <div class={`launcher ${ctx.props.anchor}`} role="menu">
+    <div class={`launcher align-${ctx.props.align}`} role="menu">
       <div class="launcher-head">⏎ runs the default</div>
       {ctx.props.rows.map((r, i) => (
         <button

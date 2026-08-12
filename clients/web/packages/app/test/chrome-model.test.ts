@@ -4,9 +4,11 @@ import assert from 'node:assert/strict';
 import {
   MONO_FAMILY,
   ICON_RAIL_MAX_WIDTH,
+  LAUNCHER_WIDTH,
   chipTitle,
   chipTooltip,
   isIconRail,
+  launcherAlign,
   launcherKeyOf,
   launcherRows,
   shouldScrollIntoView,
@@ -150,6 +152,32 @@ test('⏎ yields to a row that already holds focus', () => {
     launcherKeyOf('a', false, false),
     'none',
     'ordinary typing is not the menu’s to claim',
+  );
+});
+
+test('the strip launcher opens rightwards when the + sits near the left edge', () => {
+  assert.equal(
+    launcherAlign(42),
+    'left',
+    'zero tabs put the + ~42px from the left edge — right-anchored, 276px of the 318px menu would be off-viewport and clipped',
+  );
+  assert.equal(
+    launcherAlign(213),
+    'left',
+    'one tab still leaves a right-anchored menu 105px past the left viewport edge',
+  );
+});
+
+test('the strip launcher keeps the designed right anchor once it fits', () => {
+  assert.equal(
+    launcherAlign(LAUNCHER_WIDTH),
+    'right',
+    'a flush fit right-anchors — the menu left edge lands exactly on the viewport edge',
+  );
+  assert.equal(
+    launcherAlign(900),
+    'right',
+    'a full strip hangs the menu right-under the + as the design draws it',
   );
 });
 
