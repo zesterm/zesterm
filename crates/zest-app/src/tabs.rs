@@ -221,7 +221,6 @@ impl Tab {
     }
 
     #[must_use]
-    #[allow(dead_code, reason = "the profile launcher sets it; the next §12 work item")]
     pub fn with_identity(mut self, identity: Option<ProfileIdentity>) -> Self {
         self.identity = identity;
         self
@@ -333,6 +332,43 @@ pub fn placeholder_addr(n: u64) -> SessionAddr {
 #[allow(dead_code, reason = "the picker and persistence skip placeholder tabs, next in #23")]
 pub fn is_placeholder(addr: SessionAddr) -> bool {
     addr.host == HostId::from_bytes([0; 32])
+}
+
+/// The Profiles chip's address in the strip's hit map — a placeholder no
+/// session can collide with: real placeholder ids count up from 1, this one
+/// sits at the far end of the space.
+#[must_use]
+pub fn profiles_tab_addr() -> SessionAddr {
+    placeholder_addr(u64::MAX)
+}
+
+/// The window's app tabs (design §§11–12): places, not shells. Only Profiles
+/// exists today, as a placeholder pane; Settings joins with §11's work item.
+///
+/// At most one of each — the singleton rule (`⌘⇧,` on an already-open
+/// Profiles tab activates it rather than opening a second; the web client's
+/// `openSingleton` pins the same rule). A `bool` per kind makes duplication
+/// unrepresentable rather than merely checked.
+#[derive(Default)]
+pub struct AppTabs {
+    profiles: bool,
+}
+
+impl AppTabs {
+    /// Open the Profiles tab. `false` means it already existed — the reopen
+    /// is then an activation, which the caller performs by showing it.
+    pub fn open_profiles(&mut self) -> bool {
+        !core::mem::replace(&mut self.profiles, true)
+    }
+
+    #[must_use]
+    pub fn profiles_open(&self) -> bool {
+        self.profiles
+    }
+
+    pub fn close_profiles(&mut self) {
+        self.profiles = false;
+    }
 }
 
 /// The window's open tabs, and which one the keyboard belongs to.
@@ -618,6 +654,35 @@ mod tests {
         assert_eq!(id.scheme, None, "unset stays unset — the window palette's cue");
         assert_eq!(id.selection_bg, None, "no scheme, no cached wash: render falls back live");
         assert_eq!(id.opacity, None);
+    }
+
+    #[test]
+    fn the_profiles_tab_opens_once_and_reopening_is_an_activation() {
+        // The singleton rule: `⌘⇧,` (or the launcher's Manage-profiles row)
+        // on an already-open Profiles tab must activate it, never grow a
+        // second chip — the state itself makes a duplicate unrepresentable,
+        // and this pins the open/reopen answers the caller branches on.
+        let mut tabs = AppTabs::default();
+        assert!(!tabs.profiles_open(), "nothing is open until asked");
+        assert!(tabs.open_profiles(), "the first open reports newly created");
+        assert!(tabs.profiles_open());
+        assert!(
+            !tabs.open_profiles(),
+            "the second open reports already-there: an activation, not a duplicate"
+        );
+        assert!(tabs.profiles_open(), "…and it is still open, exactly once");
+        tabs.close_profiles();
+        assert!(!tabs.profiles_open(), "closing it is closing a tab");
+        assert!(tabs.open_profiles(), "and it can come back");
+    }
+
+    #[test]
+    fn the_profiles_chip_address_is_a_placeholder_no_session_reaches() {
+        // Persistence and the picker skip placeholders, so the chip can
+        // never be saved as a session; and real placeholders count up from
+        // 1, so a collision would take u64::MAX tabs opened in one window.
+        assert!(is_placeholder(profiles_tab_addr()));
+        assert_ne!(profiles_tab_addr(), placeholder_addr(1));
     }
 
     #[test]

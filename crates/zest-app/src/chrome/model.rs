@@ -250,6 +250,72 @@ pub struct PaneModel {
 pub enum ScreenModel {
     Fleet { cards: Vec<FleetCard> },
     Themes { cards: Vec<ThemeCard> },
+    /// The Profiles tab's pane: a placeholder naming its pending work item
+    /// (design §12, "Profiles — launch targets"), so `--screen profiles`
+    /// shows something honest until the editor lands.
+    Profiles,
+}
+
+/// Where the + launcher menu hangs from (design §1 / §2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LauncherAnchor {
+    /// The horizontal strip's `+`: right-anchored under the button. The `+`
+    /// sits at the strip's right end since #156, so right-anchoring fits by
+    /// construction — the layout still clamps into the window.
+    Strip,
+    /// The sidebar's `+`: `top: 40, left: 0` from the button, opening
+    /// rightwards over the pane (§2's rule) — right-anchored it runs off
+    /// the window's left edge.
+    Sidebar,
+}
+
+/// One row of the + launcher menu (design §1), ready to draw.
+///
+/// Display-only, the picker discipline: the app keeps a parallel list of
+/// actions built in the same pass, so row index `n` here and there mean the
+/// same thing by construction.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LauncherRow {
+    /// A launch target. The accent arrives ON the row, resolved to a choice
+    /// with [`tab_accent`]'s logic by the app — layout stays pure and a
+    /// theme change repaints without rebuilding the menu.
+    Profile {
+        name: String,
+        /// The command line the row runs, resolved through Defaults —
+        /// `shell.command` (or the platform default) when the profile
+        /// carries none.
+        command: String,
+        /// The profile's pinned host. Carried for the cross-host item (the
+        /// NEXT §12 slice); v1 does not honor a profile's host key, so
+        /// layout deliberately draws NO host chip — a chip naming a machine
+        /// the row will not use is the design's dead-affordance rule
+        /// inverted.
+        host_label: Option<String>,
+        /// The row ⏎ runs, tagged `default` on accentSoft.
+        default: bool,
+        /// 1–9: the plain-digit chord while the menu is open.
+        digit: Option<u8>,
+        /// A tab launched from this profile holds the keyboard now.
+        active: bool,
+        accent: AccentChoice,
+    },
+    /// The hairline between the launch targets and the two actions.
+    Divider,
+    /// "Run on another host…" — the fleet picker (⇧⏎).
+    RunOnHost,
+    /// "Manage profiles" — the Profiles tab. The chord arrives
+    /// platform-spelled from the keymap; empty draws no chip (Windows has
+    /// no reachable spelling — see `keymap::Mods::SuperShift`).
+    ManageProfiles { chord: String },
+}
+
+/// The + launcher menu, when open.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LauncherModel {
+    pub rows: Vec<LauncherRow>,
+    /// Index into `rows` the keyboard is on; always an actionable row.
+    pub selected: usize,
+    pub anchor: LauncherAnchor,
 }
 
 /// One row of the command palette, ready to draw.
@@ -454,6 +520,10 @@ pub struct ChromeModel {
     pub palette: Option<PaletteModel>,
     /// The settings overlay, likewise modal and likewise exclusive.
     pub settings: Option<SettingsModel>,
+    /// The + launcher menu — it joins the at-most-one-overlay set the app
+    /// enforces, so layout never has to rank it against the others. While
+    /// it is open the `+` wears selSoft fill and accent ink (design §1).
+    pub launcher: Option<LauncherModel>,
 }
 
 /// The knobs `layout` reads, resolved to physical pixels by the caller.
