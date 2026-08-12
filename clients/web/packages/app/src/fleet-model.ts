@@ -17,9 +17,10 @@ import type { Host } from './registry.ts';
  *
  * Pure string surgery — no hashing here. `hosts.id` IS the enrolled Ed25519
  * public key (ADR-006: identities are public keys, no fingerprinting), so
- * what the row shows is the head and tail of the key itself. A key short
- * enough that truncating saves nothing is shown whole: `abc…def` for a
- * nine-char key hides one character behind one ellipsis.
+ * what the row shows is the head and tail of the key itself. A key within
+ * one character of the visible budget is shown whole — the ellipsis itself
+ * costs a character, so truncating there would hide one character behind
+ * one ellipsis and save nothing.
  */
 export function fingerprintDisplay(key: string, visible = 8): string {
   const head = Math.ceil(visible / 2);

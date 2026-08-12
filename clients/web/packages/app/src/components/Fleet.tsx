@@ -125,7 +125,7 @@ export const Fleet = component<{
                   {state.load.hosts.map((h) => {
                     const card = hostCard(h, { localHostId: null, now: Date.now() });
                     return (
-                      <li class={`host-card${card.local ? ' local' : ''}`}>
+                      <li key={h.id} class={`host-card${card.local ? ' local' : ''}`}>
                         <div class="card-head">
                           {/* Faint on purpose: presence is unknown until the
                               relay exists — a green dot would claim liveness
@@ -175,7 +175,7 @@ export const Fleet = component<{
               ) : (
                 <ul class="rows">
                   {state.load.devices.map((d) => (
-                    <li class="row">
+                    <li key={d.id} class="row">
                       <span class="row-name">{d.label}</span>
                       <span class="row-meta">
                         {d.kind} · last seen {ago(d.lastSeenAt, Date.now())}
