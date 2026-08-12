@@ -13,6 +13,8 @@
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Geist:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 html,body{margin:0;padding:0;background:#05070d;-webkit-font-smoothing:antialiased}
+image-slot{display:block}
+[data-tabstrip]::-webkit-scrollbar{height:0;width:0}
 *{box-sizing:border-box}
 a{color:#6ea8ff;text-decoration:none}
 a:hover{color:#9cc4ff}
@@ -20,9 +22,18 @@ a:hover{color:#9cc4ff}
 @keyframes zpulse{0%,100%{opacity:1}50%{opacity:.35}}
 @keyframes zspin{to{transform:rotate(360deg)}}
 </style>
+<script src="./image-slot.js"></script>
 </helmet>
 
-<div style="min-height:100vh;background:#05070d;font-family:Geist,system-ui,sans-serif;color:#d7dcea;display:flex;flex-direction:column;padding:22px 22px 84px;gap:18px">
+<template id="__bundler_thumbnail">
+  <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
+    <rect width="120" height="120" rx="18" fill="#0b0f1a"></rect>
+    <rect x="34" y="34" width="52" height="52" rx="12" fill="#6ea8ff"></rect>
+    <text x="60" y="73" text-anchor="middle" font-family="monospace" font-size="32" font-weight="700" fill="#0b0f1a">z</text>
+  </svg>
+</template>
+
+<div style="height:100vh;min-height:660px;background:#05070d;font-family:Geist,system-ui,sans-serif;color:#d7dcea;display:flex;flex-direction:column;padding:22px 22px 84px;gap:18px">
 
   <div style="display:flex;align-items:center;gap:14px;flex:none">
     <div style="display:flex;align-items:center;gap:9px">
@@ -33,74 +44,97 @@ a:hover{color:#9cc4ff}
   </div>
 
   <sc-if value="{{ isApp }}" hint-placeholder-val="{{ true }}">
-  <div style="flex:1;display:flex;min-height:660px;border-radius:12px;overflow:hidden;background:#0b0f1a;border:1px solid #2a3350;box-shadow:0 24px 70px rgba(0,0,0,.6);position:relative">
+  <div data-shot="screen" style="flex:1;display:flex;flex-direction:column;min-height:660px;border-radius:12px;overflow:hidden;background:#0b0f1a;border:1px solid #2a3350;box-shadow:0 24px 70px rgba(0,0,0,.6);position:relative">
 
     <sc-if value="{{ isTabsV }}" hint-placeholder-val="{{ false }}">
-      <div style="width:262px;flex:none;background:#0d121f;border-right:1px solid #2a3350;display:flex;flex-direction:column">
-        <div style="height:44px;flex:none;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid #1b2338">
-          <div style="display:flex;gap:7px;align-items:center">
-            <div style="width:11px;height:11px;border-radius:50%;background:#e0606a"></div>
-            <div style="width:11px;height:11px;border-radius:50%;background:#e0b341"></div>
-            <div style="width:11px;height:11px;border-radius:50%;background:#5fd17f"></div>
+      <div style="flex:none;height:46px;display:flex;align-items:center;gap:12px;padding:0 12px;background:#0d121f;border-bottom:1px solid #2a3350">
+        <div style="display:flex;gap:7px;align-items:center;flex:none;padding-right:2px">
+          <div style="width:11px;height:11px;border-radius:50%;background:#e0606a"></div>
+          <div style="width:11px;height:11px;border-radius:50%;background:#e0b341"></div>
+          <div style="width:11px;height:11px;border-radius:50%;background:#5fd17f"></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;min-width:0">
+          <span style="font-size:13px;font-weight:500;white-space:nowrap">{{ active.title }}</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#8b93a7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ active.cwd }}</span>
+          <div style="height:20px;padding:0 8px;border-radius:6px;background:#16203a;color:#6ea8ff;font-size:10.5px;display:flex;align-items:center;gap:6px;flex:none">
+            <div style="{{ active.dotStyle }}"></div>{{ active.host }}
           </div>
         </div>
-        <div style="padding:10px 10px 8px">
-          <div style="display:flex;align-items:center;gap:8px;height:30px;padding:0 9px;border-radius:7px;background:#121829;border:1px solid #2a3350;font-size:12px;color:#4a516a">
+        <div style="flex:1"></div>
+        <div onClick="{{ openPalette }}" style="height:26px;padding:0 9px;border-radius:7px;border:1px solid #2a3350;display:flex;align-items:center;font-family:'JetBrains Mono',monospace;font-size:10px;color:#8b93a7;cursor:pointer;flex:none" style-hover="border-color:#6ea8ff;color:#d7dcea">⌘K</div>
+      </div>
+    </sc-if>
+
+    <div style="flex:1;display:flex;min-height:0">
+
+    <sc-if value="{{ isTabsV }}" hint-placeholder-val="{{ false }}">
+      <div style="width:262px;flex:none;min-height:0;background:#0d121f;border-right:1px solid #2a3350;display:flex;flex-direction:column">
+        <div style="padding:10px 10px 8px;display:flex;align-items:center;gap:6px;position:relative">
+          <div style="flex:1;min-width:0;display:flex;align-items:center;gap:8px;height:30px;padding:0 9px;border-radius:7px;background:#121829;border:1px solid #2a3350;font-size:12px;color:#4a516a">
             <span style="font-family:'JetBrains Mono',monospace;font-size:11px">⌘K</span>
-            <span>Search sessions, blocks, hosts</span>
+            <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Search sessions, blocks, hosts</span>
           </div>
+        <div style="display:flex;align-items:center;flex:none;position:relative;height:30px">
+          <div onClick="{{ toggleNewTab }}" title="New tab — pick a profile" style="{{ newDefaultStyle }}">+</div>
+          <sc-if value="{{ newTabOpen }}" hint-placeholder-val="{{ false }}">
+            <div style="position:absolute;top:40px;left:0;width:322px;padding:6px;border-radius:12px;background:#121829;border:1px solid #2a3350;box-shadow:0 20px 50px rgba(0,0,0,.62);z-index:30;display:flex;flex-direction:column;gap:1px">
+              <div style="display:flex;align-items:center;gap:8px;padding:6px 10px 4px">
+                <span style="font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:#4a516a;flex:1">Launch a profile</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a">⏎ runs the default</span>
+              </div>
+              <sc-for list="{{ launchers }}" as="l" hint-placeholder-count="3">
+                <div onClick="{{ l.onSelect }}" style="{{ l.style }}">
+                  <span style="{{ l.glyphStyle }}">{{ l.glyph }}</span>
+                  <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:1px">
+                    <span style="font-size:12.5px;color:#d7dcea">{{ l.name }}</span>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ l.sub }}</span>
+                  </div>
+                  <span style="{{ l.tagStyle }}">{{ l.tag }}</span>
+                  <span style="{{ l.hostStyle }}">{{ l.host }}</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a">{{ l.key }}</span>
+                </div>
+              </sc-for>
+              <div onClick="{{ pickHost }}" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;cursor:pointer" style-hover="background:#161d33">
+                <span style="width:16px;text-align:center;color:#4a516a;font-size:11px">⌂</span>
+                <span style="font-size:12.5px;color:#8b93a7;flex:1">Run on another host…</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a">⇧⏎</span>
+              </div>
+              <div style="height:1px;background:#1b2338;margin:5px 4px"></div>
+              <div onClick="{{ profilesTab.onSelect }}" style="{{ menuProfilesStyle }}">
+                <span style="width:16px;text-align:center;color:#4a516a;font-size:11px">◇</span>
+                <span style="font-size:12.5px;flex:1">Profiles</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a">⌘⇧,</span>
+              </div>
+              <div onClick="{{ settingsTab.onSelect }}" style="{{ menuSettingsStyle }}">
+                <span style="width:16px;text-align:center;color:#4a516a;font-size:11px">⚙</span>
+                <span style="font-size:12.5px;flex:1">Settings</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a">⌘,</span>
+              </div>
+            </div>
+          </sc-if>
+        </div>
         </div>
 
-        <div style="flex:1;overflow:hidden;padding:0 8px 8px;display:flex;flex-direction:column;gap:14px">
-          <div style="display:flex;flex-direction:column;gap:2px">
-            <div style="display:flex;align-items:center;gap:7px;padding:6px 8px">
-              <div style="width:6px;height:6px;border-radius:50%;background:#5fd17f"></div>
-              <span style="font-size:10.5px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:#8b93a7">studio</span>
-              <span style="font-size:10px;color:#4a516a;font-family:'JetBrains Mono',monospace">macOS · LAN 0.3ms</span>
-            </div>
-            <sc-for list="{{ vtabs }}" as="t" hint-placeholder-count="3">
-              <div onClick="{{ t.onSelect }}" style="{{ t.rowStyle }}">
-                <div style="{{ t.dotStyle }}"></div>
-                <div style="flex:1;min-width:0">
-                  <div style="{{ t.titleStyle }}">{{ t.title }}</div>
-                  <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ t.cwd }}</div>
+        <div style="flex:1;min-height:0;overflow-y:auto;padding:0 8px 8px;display:flex;flex-direction:column;gap:14px">
+          <sc-for list="{{ hostGroups }}" as="g" hint-placeholder-count="3">
+            <div style="display:flex;flex-direction:column;gap:2px">
+              <div style="display:flex;align-items:center;gap:7px;padding:6px 8px">
+                <div style="{{ g.dotStyle }}"></div>
+                <span style="font-size:10.5px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:#8b93a7">{{ g.host }}</span>
+                <span style="font-size:10px;color:#4a516a;font-family:'JetBrains Mono',monospace">{{ g.meta }}</span>
+              </div>
+              <sc-for list="{{ g.rows }}" as="t" hint-placeholder-count="2">
+                <div onClick="{{ t.onSelect }}" style="{{ t.rowStyle }}">
+                  <span style="{{ t.glyphStyle }}">{{ t.glyph }}</span>
+                  <div style="flex:1;min-width:0">
+                    <div style="{{ t.titleStyle }}">{{ t.title }}</div>
+                    <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ t.cwd }}</div>
+                  </div>
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a">{{ t.age }}</div>
                 </div>
-                <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a">{{ t.age }}</div>
-              </div>
-            </sc-for>
-          </div>
-
-          <div style="display:flex;flex-direction:column;gap:2px">
-            <div style="display:flex;align-items:center;gap:7px;padding:6px 8px">
-              <div style="width:6px;height:6px;border-radius:50%;background:#5fc4e0"></div>
-              <span style="font-size:10.5px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:#8b93a7">crate</span>
-              <span style="font-size:10px;color:#4a516a;font-family:'JetBrains Mono',monospace">ubuntu · LAN 0.4ms</span>
+              </sc-for>
             </div>
-            <div style="display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:8px;cursor:pointer" style-hover="background:#121829">
-              <div style="width:5px;height:5px;border-radius:50%;background:#e0b341;animation:zpulse 1.6s ease-in-out infinite"></div>
-              <div style="flex:1;min-width:0">
-                <div style="font-size:12.5px;color:#8b93a7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">journalctl -fu zestd</div>
-                <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">/var/log</div>
-              </div>
-              <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a">31d</div>
-            </div>
-          </div>
-
-          <div style="display:flex;flex-direction:column;gap:2px">
-            <div style="display:flex;align-items:center;gap:7px;padding:6px 8px">
-              <div style="width:6px;height:6px;border-radius:50%;background:#b07cff"></div>
-              <span style="font-size:10.5px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:#8b93a7">forge</span>
-              <span style="font-size:10px;color:#4a516a;font-family:'JetBrains Mono',monospace">win11 · tunnel 41ms</span>
-            </div>
-            <div style="display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:8px;cursor:pointer" style-hover="background:#121829">
-              <div style="width:5px;height:5px;border-radius:50%;background:#4a516a"></div>
-              <div style="flex:1;min-width:0">
-                <div style="font-size:12.5px;color:#8b93a7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">pwsh</div>
-                <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">C:\src\zesterm</div>
-              </div>
-              <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a">12h</div>
-            </div>
-          </div>
+          </sc-for>
         </div>
 
         <div onClick="{{ goFleet }}" style="flex:none;height:42px;border-top:1px solid #1b2338;display:flex;align-items:center;gap:8px;padding:0 12px;cursor:pointer" style-hover="background:#121829">
@@ -110,7 +144,7 @@ a:hover{color:#9cc4ff}
       </div>
     </sc-if>
 
-    <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+    <div style="flex:1;display:flex;flex-direction:column;min-width:0;min-height:0">
 
       <sc-if value="{{ isTabsH }}" hint-placeholder-val="{{ true }}">
         <div style="flex:none;height:46px;display:flex;align-items:flex-end;gap:0;padding:0 12px;background:#0d121f;border-bottom:1px solid #2a3350">
@@ -119,40 +153,60 @@ a:hover{color:#9cc4ff}
             <div style="width:11px;height:11px;border-radius:50%;background:#e0b341"></div>
             <div style="width:11px;height:11px;border-radius:50%;background:#5fd17f"></div>
           </div>
-          <div style="display:flex;align-items:flex-end;gap:3px;flex:1;min-width:0;overflow:hidden">
-            <sc-for list="{{ htabs }}" as="t" hint-placeholder-count="3">
-              <div onClick="{{ t.onSelect }}" style="{{ t.tabStyle }}">
-                <div style="{{ t.dotStyle }}"></div>
-                <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:1px">
+          <div style="display:flex;align-items:flex-end;gap:3px;flex:1;min-width:0">
+            <div style="display:flex;align-items:flex-end;gap:3px;flex:0 1 auto;min-width:0;overflow-x:auto;overflow-y:hidden;scrollbar-width:none" data-tabstrip="">
+              <sc-for list="{{ htabs }}" as="t" hint-placeholder-count="3">
+                <div onClick="{{ t.onSelect }}" title="{{ t.tip }}" style="{{ t.tabStyle }}">
+                  <span style="{{ t.glyphStyle }}">{{ t.glyph }}</span>
                   <div style="{{ t.titleStyle }}">{{ t.title }}</div>
-                  <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4a516a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ t.host }} · {{ t.cwd }}</div>
+                  <div style="width:16px;height:16px;flex:none;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:12px;color:#4a516a" style-hover="background:#2a3350;color:#d7dcea">×</div>
                 </div>
-                <div style="width:16px;height:16px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:12px;color:#4a516a" style-hover="background:#2a3350;color:#d7dcea">×</div>
-              </div>
-            </sc-for>
-            <div style="width:28px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:7px;color:#8b93a7;font-size:16px;cursor:pointer;margin-bottom:4px" style-hover="background:#161d33;color:#d7dcea">+</div>
+              </sc-for>
+            </div>
+            <div style="display:flex;align-items:center;flex:none;position:relative;height:30px;margin-bottom:1px">
+              <div onClick="{{ toggleNewTab }}" title="New tab — pick a profile" style="{{ newDefaultStyle }}">+</div>
+              <sc-if value="{{ newTabOpen }}" hint-placeholder-val="{{ false }}">
+                <div style="position:absolute;top:34px;right:0;width:322px;padding:6px;border-radius:12px;background:#121829;border:1px solid #2a3350;box-shadow:0 20px 50px rgba(0,0,0,.62);z-index:30;display:flex;flex-direction:column;gap:1px">
+                  <div style="display:flex;align-items:center;gap:8px;padding:6px 10px 4px">
+                    <span style="font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:#4a516a;flex:1">Launch a profile</span>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a">⏎ runs the default</span>
+                  </div>
+                  <sc-for list="{{ launchers }}" as="l" hint-placeholder-count="3">
+                    <div onClick="{{ l.onSelect }}" style="{{ l.style }}">
+                      <span style="{{ l.glyphStyle }}">{{ l.glyph }}</span>
+                      <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:1px">
+                        <span style="font-size:12.5px;color:#d7dcea">{{ l.name }}</span>
+                        <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ l.sub }}</span>
+                      </div>
+                      <span style="{{ l.tagStyle }}">{{ l.tag }}</span>
+                      <span style="{{ l.hostStyle }}">{{ l.host }}</span>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a">{{ l.key }}</span>
+                    </div>
+                  </sc-for>
+                  <div onClick="{{ pickHost }}" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;cursor:pointer" style-hover="background:#161d33">
+                    <span style="width:16px;text-align:center;color:#4a516a;font-size:11px">⌂</span>
+                    <span style="font-size:12.5px;color:#8b93a7;flex:1">Run on another host…</span>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a">⇧⏎</span>
+                  </div>
+                  <div style="height:1px;background:#1b2338;margin:5px 4px"></div>
+                  <div onClick="{{ profilesTab.onSelect }}" style="{{ menuProfilesStyle }}">
+                    <span style="width:16px;text-align:center;color:#4a516a;font-size:11px">◇</span>
+                    <span style="font-size:12.5px;flex:1">Profiles</span>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a">⌘⇧,</span>
+                  </div>
+                  <div onClick="{{ settingsTab.onSelect }}" style="{{ menuSettingsStyle }}">
+                    <span style="width:16px;text-align:center;color:#4a516a;font-size:11px">⚙</span>
+                    <span style="font-size:12.5px;flex:1">Settings</span>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a">⌘,</span>
+                  </div>
+                </div>
+              </sc-if>
+            </div>
+            <div style="flex:1"></div>
           </div>
           <div style="display:flex;align-items:center;gap:6px;height:46px;padding-left:12px">
-            <div onClick="{{ goTabsV }}" title="Vertical tabs" style="height:26px;padding:0 9px;border-radius:7px;border:1px solid #2a3350;display:flex;align-items:center;gap:6px;font-size:11px;color:#8b93a7;cursor:pointer" style-hover="border-color:#6ea8ff;color:#d7dcea">
-              <span style="font-family:'JetBrains Mono',monospace;font-size:10px">⌘⇧E</span>
-              <span>Vertical</span>
-            </div>
-            <div onClick="{{ openPalette }}" style="height:26px;padding:0 9px;border-radius:7px;border:1px solid #2a3350;display:flex;align-items:center;gap:6px;font-size:11px;color:#8b93a7;cursor:pointer" style-hover="border-color:#6ea8ff;color:#d7dcea">
-              <span style="font-family:'JetBrains Mono',monospace;font-size:10px">⌘K</span>
-            </div>
+            <div onClick="{{ openPalette }}" style="height:26px;padding:0 9px;border-radius:7px;border:1px solid #2a3350;display:flex;align-items:center;font-family:'JetBrains Mono',monospace;font-size:10px;color:#8b93a7;cursor:pointer" style-hover="border-color:#6ea8ff;color:#d7dcea">⌘K</div>
           </div>
-        </div>
-      </sc-if>
-
-      <sc-if value="{{ isTabsV }}" hint-placeholder-val="{{ false }}">
-        <div style="flex:none;height:44px;display:flex;align-items:center;gap:10px;padding:0 14px;background:#0d121f;border-bottom:1px solid #2a3350">
-          <span style="font-size:13px;font-weight:500">zsh</span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#8b93a7">~/dev/zesterm</span>
-          <div style="height:20px;padding:0 8px;border-radius:6px;background:#16203a;color:#6ea8ff;font-size:10.5px;display:flex;align-items:center;gap:6px">
-            <div style="width:5px;height:5px;border-radius:50%;background:#5fd17f"></div>studio
-          </div>
-          <div style="flex:1"></div>
-          <div onClick="{{ goTabsH }}" style="height:26px;padding:0 9px;border-radius:7px;border:1px solid #2a3350;display:flex;align-items:center;font-size:11px;color:#8b93a7;cursor:pointer" style-hover="border-color:#6ea8ff;color:#d7dcea">Horizontal tabs</div>
         </div>
       </sc-if>
 
@@ -240,7 +294,7 @@ zest-core: builds for wasm32-unknown-unknown
               <div style="flex:1"></div>
               <span style="font-size:10px;color:#6ea8ff">focused</span>
             </div>
-            <div style="flex:1;padding:12px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.65;color:#8b93a7;white-space:pre">❯ cargo run --profile fast -p zest-app
+            <div style="flex:1;padding:12px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.65;color:#8b93a7;white-space:pre-wrap;overflow-wrap:anywhere">❯ cargo run --profile fast -p zest-app
    <span style="color:#5fd17f">Finished</span> `fast` profile in 3.61s
     <span style="color:#5fc4e0">Running</span> `target/fast/zesterm`
 <span style="color:#4a516a">·</span> window visible at <span style="color:#5fd17f">43 ms</span>
@@ -254,12 +308,12 @@ zest-core: builds for wasm32-unknown-unknown
               <span style="font-size:11px;color:#8b93a7">forge</span>
               <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">C:\src\zesterm · tunnel 41 ms</span>
             </div>
-            <div style="flex:1;padding:12px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.65;color:#8b93a7;white-space:pre">PS C:\src\zesterm&gt; cargo test -p zest-core
+            <div style="flex:1;padding:12px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.65;color:#8b93a7;white-space:pre-wrap;overflow-wrap:anywhere">PS C:\src\zesterm&gt; cargo test -p zest-core
 <span style="color:#5fd17f">running 77 tests</span>
 test grid::tests::wide_cjk_advances ... <span style="color:#5fd17f">ok</span>
 test vt::tests::decstbm_scroll_region ... <span style="color:#5fd17f">ok</span>
 test osc::tests::osc4_query_roundtrip ... <span style="color:#5fd17f">ok</span>
-test blocks::tests::reanchor_after_reflow ... <span style="color:#e0b341">FAILED</span></div><div style="padding:0 12px 12px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.65;color:#8b93a7;white-space:pre">
+test blocks::tests::reanchor_after_reflow ... <span style="color:#e0b341">FAILED</span></div><div style="padding:0 12px 12px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.65;color:#8b93a7;white-space:pre-wrap;overflow-wrap:anywhere">
 <span style="color:#e0606a">failures:</span>
     reanchor_after_reflow
 PS C:\src\zesterm&gt; <span style="color:#4a516a">▍</span></div>
@@ -267,20 +321,1148 @@ PS C:\src\zesterm&gt; <span style="color:#4a516a">▍</span></div>
         </div>
       </sc-if>
 
-      <sc-if value="{{ showStatus }}" hint-placeholder-val="{{ true }}">
-        <div style="flex:none;height:28px;display:flex;align-items:center;gap:0;padding:0 14px;background:#0d121f;border-top:1px solid #1b2338;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">
-          <span style="color:#8b93a7">~/dev/zesterm</span>
-          <span style="padding:0 8px">·</span>
-          <span style="color:#5fd17f">⎇ main*</span>
-          <span style="padding:0 8px">·</span>
-          <span>3 blocks</span>
-          <div style="flex:1"></div>
-          <span>obsidian</span>
-          <span style="padding:0 8px">·</span>
-          <span style="color:#5fd17f">● LAN direct</span>
-          <span style="padding-left:6px">0.3 ms</span>
+      <sc-if value="{{ isFresh }}" hint-placeholder-val="{{ false }}">
+        <div style="{{ fresh.bodyStyle }}">
+          <div style="{{ fresh.noteStyle }}">{{ fresh.note }}</div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="{{ fresh.promptStyle }}">{{ fresh.prompt }}</span>
+            <span style="{{ fresh.caretStyle }}"></span>
+          </div>
         </div>
       </sc-if>
+
+      <sc-if value="{{ isProfiles }}" hint-placeholder-val="{{ false }}">
+        <div style="flex:1;display:flex;min-height:0;background:#0b0f1a">
+
+          <div style="width:248px;flex:none;min-height:0;background:#0f1526;border-right:1px solid #1b2338;display:flex;flex-direction:column">
+            <div style="flex:none;padding:14px 14px 10px">
+              <div style="font-size:10.5px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:#8b93a7">Launch targets</div>
+              <div style="font-size:11px;color:#4a516a;margin-top:4px;line-height:1.5">What to run, which machine it runs on, and how it looks.</div>
+            </div>
+            <div style="flex:1;min-height:0;overflow-y:auto;padding:0 8px;display:flex;flex-direction:column;gap:2px">
+              <sc-for list="{{ plist }}" as="p" hint-placeholder-count="4">
+                <div onClick="{{ p.onSelect }}" style="{{ p.rowStyle }}">
+                  <span style="{{ p.glyphStyle }}">{{ p.glyph }}</span>
+                  <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:1px">
+                    <div style="{{ p.nameStyle }}">{{ p.name }}</div>
+                    <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ p.sub }}</div>
+                  </div>
+                  <span style="{{ p.badgeStyle }}">{{ p.badge }}</span>
+                </div>
+              </sc-for>
+            </div>
+            <div style="flex:none;padding:8px;border-top:1px solid #1b2338;display:flex;flex-direction:column;gap:5px">
+              <div style="height:30px;border-radius:8px;border:1px dashed #2a3350;display:flex;align-items:center;justify-content:center;font-size:11.5px;color:#8b93a7;cursor:pointer" style-hover="border-color:#6ea8ff;color:#d7dcea">＋ New profile</div>
+              <div style="font-size:10.5px;color:#4a516a;line-height:1.5;padding:2px 4px 2px">Found on this fleet: 2 WSL distros, 1 SSH host. <span style="color:#6ea8ff;cursor:pointer">Generate profiles</span></div>
+            </div>
+          </div>
+
+          <div style="flex:1;min-width:0;min-height:0;display:flex;flex-direction:column">
+            <div style="flex:none;padding:18px 30px 16px;border-bottom:1px solid #1b2338;display:flex;align-items:center;gap:14px">
+              <span style="{{ pv.headGlyphStyle }}">{{ pv.glyph }}</span>
+              <div style="flex:1;min-width:0">
+                <div style="display:flex;align-items:center;gap:10px">
+                  <h3 style="margin:0;font-size:17px;font-weight:600;letter-spacing:-.01em">{{ pv.name }}</h3>
+                  <span style="{{ pv.hostChipStyle }}">{{ pv.hostLabel }}</span>
+                </div>
+                <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#4a516a;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ pv.command }}</div>
+              </div>
+              <div style="display:flex;gap:6px;flex:none">
+                <div style="height:28px;padding:0 11px;border-radius:7px;border:1px solid #2a3350;display:flex;align-items:center;font-size:11.5px;color:#8b93a7;cursor:pointer" style-hover="border-color:#6ea8ff;color:#d7dcea">Duplicate</div>
+                <div style="height:28px;padding:0 11px;border-radius:7px;border:1px solid #2a3350;display:flex;align-items:center;font-size:11.5px;color:#8b93a7;cursor:pointer" style-hover="border-color:#e0606a;color:#e0606a">Delete</div>
+              </div>
+            </div>
+
+            <div style="flex:1;min-height:0;overflow-y:auto;padding:0 30px 30px">
+
+              <div style="{{ pv.previewStyle }}">
+                <div style="{{ pv.previewTabStyle }}">
+                  <span style="{{ pv.previewTabGlyph }}">{{ pv.glyph }}</span>
+                  <span style="font-size:11px">{{ pv.name }}</span>
+                </div>
+                <div style="{{ pv.previewBodyStyle }}">
+                  <div><span style="{{ pv.previewPromptStyle }}">{{ pv.previewPrompt }}</span> <span style="{{ pv.previewCmdStyle }}">uname -sr</span></div>
+                  <div style="{{ pv.previewOutStyle }}">{{ pv.previewOut }}</div>
+                  <div><span style="{{ pv.previewPromptStyle }}">{{ pv.previewPrompt }}</span> <span style="{{ pv.previewCaretStyle }}"></span></div>
+                </div>
+              </div>
+
+              <div style="display:flex;align-items:center;gap:8px;padding:8px 2px 0">
+                <span style="font-size:10.5px;color:#8b93a7">Chrome is the window's theme (obsidian). Only the grid follows this profile's scheme.</span>
+              </div>
+
+              <div style="display:flex;align-items:center;gap:10px;padding:22px 2px 4px">
+                <span style="font-size:10.5px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:#8b93a7">Launch</span>
+                <div style="flex:1;height:1px;background:#1b2338"></div>
+              </div>
+
+              <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                  <div style="{{ pv.command_.dot }}"></div>
+                  <div style="display:flex;flex-direction:column;gap:3px">
+                    <div style="font-size:13px;color:#d7dcea">Command line</div>
+                    <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">Run on the host below, not here. A profile pointing at a shell that does not exist there is the one thing this editor cannot check for you.</div>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">command</span>
+                  </div>
+                </div>
+                <div style="flex:0 1 300px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                  <div style="width:100%;min-height:32px;padding:7px 11px;border-radius:8px;background:#121829;border:1px solid #2a3350;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#d7dcea;line-height:1.45;overflow-wrap:anywhere">{{ pv.command }}</div>
+                </div>
+              </div>
+
+              <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                  <div style="{{ pv.host_.dot }}"></div>
+                  <div style="display:flex;flex-direction:column;gap:3px">
+                    <div style="font-size:13px;color:#d7dcea">Host</div>
+                    <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">The machine this profile launches on. Pinning it is what makes “Ubuntu on forge” a single thing you can open — and what a local terminal cannot express.</div>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">host</span>
+                  </div>
+                </div>
+                <div style="flex:0 1 300px;min-width:0;margin-left:auto;display:flex;flex-direction:column;gap:5px;align-items:flex-end">
+                  <div style="width:100%;height:32px;padding:0 11px;border-radius:8px;background:#121829;border:1px solid #2a3350;display:flex;align-items:center;gap:9px;cursor:pointer" style-hover="border-color:#6ea8ff">
+                    <div style="{{ pv.hostDotStyle }}"></div>
+                    <span style="font-size:12.5px;color:#d7dcea;flex:1">{{ pv.host }}</span>
+                    <span style="{{ pv.hostPathStyle }}">{{ pv.hostPath }}</span>
+                    <span style="color:#4a516a;font-size:10px">▾</span>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:7px">
+                    <div onClick="{{ pv.anyHost.toggle }}" style="{{ pv.anyHost.track }}"><div style="{{ pv.anyHost.knob }}"></div></div>
+                    <span style="font-size:11px;color:#8b93a7">Ask which host at launch</span>
+                  </div>
+                </div>
+              </div>
+
+              <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                  <div style="{{ pv.dir_.dot }}"></div>
+                  <div style="display:flex;flex-direction:column;gap:3px">
+                    <div style="font-size:13px;color:#d7dcea">Starting directory</div>
+                    <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">Resolved on the host, so it may be a path this machine has never heard of.</div>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">starting_directory</span>
+                  </div>
+                </div>
+                <div style="flex:0 1 300px;min-width:0;margin-left:auto;display:flex;gap:6px;justify-content:flex-end">
+                  <div style="flex:1;min-width:0;min-height:32px;padding:7px 11px;border-radius:8px;background:#121829;border:1px solid #2a3350;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#d7dcea;line-height:1.45;overflow-wrap:anywhere">{{ pv.dir }}</div>
+                  <div style="height:32px;padding:0 10px;border-radius:8px;border:1px solid #2a3350;display:flex;align-items:center;font-size:11.5px;color:#8b93a7;cursor:pointer;flex:none" style-hover="border-color:#6ea8ff;color:#d7dcea">Browse…</div>
+                </div>
+              </div>
+
+              <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px">
+                <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                  <div style="{{ pv.title.dot }}"></div>
+                  <div style="display:flex;flex-direction:column;gap:3px">
+                    <div style="font-size:13px;color:#d7dcea">Tab title</div>
+                    <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">Programs set titles with OSC 0. Locking it to the profile name ignores them.</div>
+                    <div style="display:flex;align-items:center;gap:8px;padding-top:2px">
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">tab_title</span>
+                      <span style="{{ pv.title.chipStyle }}">{{ pv.title.chip }}</span>
+                    </div>
+                  </div>
+                </div>
+                <div style="flex:0 1 300px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                  <div style="display:flex;gap:3px;padding:3px;border-radius:9px;background:#121829;border:1px solid #2a3350">
+                    <sc-for list="{{ pv.title.opts }}" as="o" hint-placeholder-count="3">
+                      <div onClick="{{ o.onSelect }}" style="{{ o.style }}">{{ o.label }}</div>
+                    </sc-for>
+                  </div>
+                </div>
+              </div>
+
+              <div style="display:flex;align-items:center;gap:10px;padding:22px 2px 4px">
+                <span style="font-size:10.5px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:#8b93a7">Appearance</span>
+                <div style="flex:1;height:1px;background:#1b2338"></div>
+                <span style="font-size:10.5px;color:#4a516a">Unset rows fall through to Defaults</span>
+              </div>
+
+              <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                  <div style="{{ pv.theme.dot }}"></div>
+                  <div style="display:flex;flex-direction:column;gap:3px">
+                    <div style="font-size:13px;color:#d7dcea">Colour scheme</div>
+                    <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">The <em style="font-style:normal;color:#d7dcea">grid's</em> palette: 16 ANSI colours plus background, foreground and cursor. The window's chrome keeps its own theme, so switching tabs never repaints the window — a profile is recognised by its tab colour instead.</div>
+                    <div style="display:flex;align-items:center;gap:8px;padding-top:2px">
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">color_scheme</span>
+                      <span style="{{ pv.theme.chipStyle }}">{{ pv.theme.chip }}</span>
+                    </div>
+                  </div>
+                </div>
+                <div style="flex:0 1 300px;min-width:0;margin-left:auto;display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end">
+                  <sc-for list="{{ pv.theme.opts }}" as="o" hint-placeholder-count="5">
+                    <div onClick="{{ o.onSelect }}" title="{{ o.label }}" style="{{ o.style }}">
+                      <div style="{{ o.stripStyle }}">
+                        <div style="{{ o.s0 }}"></div><div style="{{ o.s1 }}"></div><div style="{{ o.s2 }}"></div><div style="{{ o.s3 }}"></div><div style="{{ o.s4 }}"></div><div style="{{ o.s5 }}"></div><div style="{{ o.s6 }}"></div><div style="{{ o.s7 }}"></div>
+                      </div>
+                      <span style="{{ o.labelStyle }}">{{ o.label }}</span>
+                    </div>
+                  </sc-for>
+                </div>
+              </div>
+
+              <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                  <div style="{{ pv.font.dot }}"></div>
+                  <div style="display:flex;flex-direction:column;gap:3px">
+                    <div style="font-size:13px;color:#d7dcea">Font</div>
+                    <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">A remote profile can want a different face — the host's glyph coverage is not this machine's.</div>
+                    <div style="display:flex;align-items:center;gap:8px;padding-top:2px">
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">typography.families · size_pt</span>
+                      <span style="{{ pv.font.chipStyle }}">{{ pv.font.chip }}</span>
+                    </div>
+                  </div>
+                </div>
+                <div style="flex:0 1 300px;min-width:0;margin-left:auto;display:flex;gap:6px;justify-content:flex-end">
+                  <div style="flex:1;min-width:0;height:32px;padding:0 11px;border-radius:8px;background:#121829;border:1px solid #2a3350;display:flex;align-items:center;gap:8px;cursor:pointer" style-hover="border-color:#6ea8ff">
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#d7dcea;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ pv.fontName }}</span>
+                    <span style="color:#4a516a;font-size:10px">▾</span>
+                  </div>
+                  <div style="display:flex;align-items:center;height:32px;border:1px solid #2a3350;border-radius:8px;overflow:hidden;background:#121829;flex:none">
+                    <div onClick="{{ pv.size.dec }}" style="width:26px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:13px;user-select:none" style-hover="background:#161d33;color:#d7dcea">−</div>
+                    <div style="min-width:52px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:12px;color:#d7dcea">{{ pv.size.label }}</div>
+                    <div onClick="{{ pv.size.inc }}" style="width:26px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:13px;user-select:none" style-hover="background:#161d33;color:#d7dcea">＋</div>
+                  </div>
+                </div>
+              </div>
+
+              <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                  <div style="{{ pv.opacity.dot }}"></div>
+                  <div style="display:flex;flex-direction:column;gap:3px">
+                    <div style="font-size:13px;color:#d7dcea">Opacity and backdrop</div>
+                    <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">The backdrop is the compositor's, so it is the local window's material — not the host's.</div>
+                    <div style="display:flex;align-items:center;gap:8px;padding-top:2px">
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">window.opacity · backdrop</span>
+                      <span style="{{ pv.opacity.chipStyle }}">{{ pv.opacity.chip }}</span>
+                    </div>
+                  </div>
+                </div>
+                <div style="flex:0 1 300px;min-width:0;margin-left:auto;display:flex;flex-direction:column;gap:8px;align-items:flex-end">
+                  <div style="display:flex;align-items:center;gap:12px">
+                    <div onMouseDown="{{ pv.opacity.onDown }}" style="width:150px;height:4px;border-radius:2px;background:#2a3350;position:relative;cursor:pointer">
+                      <div style="{{ pv.opacity.fill }}"></div>
+                      <div style="{{ pv.opacity.knobPos }}"></div>
+                    </div>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#d7dcea;min-width:44px;text-align:right">{{ pv.opacity.label }}</span>
+                  </div>
+                  <div style="display:flex;gap:3px;padding:3px;border-radius:9px;background:#121829;border:1px solid #2a3350">
+                    <sc-for list="{{ pv.backdrop.opts }}" as="o" hint-placeholder-count="4">
+                      <div onClick="{{ o.onSelect }}" style="{{ o.style }}">{{ o.label }}</div>
+                    </sc-for>
+                  </div>
+                </div>
+              </div>
+
+              <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                  <div style="{{ pv.bg.dot }}"></div>
+                  <div style="display:flex;flex-direction:column;gap:3px">
+                    <div style="font-size:13px;color:#d7dcea">Background image</div>
+                    <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">Drawn behind the cells at the dimming below. A watermark in the corner reads better than a full-bleed photo behind text.</div>
+                    <div style="display:flex;align-items:center;gap:8px;padding-top:2px">
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">background_image</span>
+                      <span style="{{ pv.bg.chipStyle }}">{{ pv.bg.chip }}</span>
+                    </div>
+                  </div>
+                </div>
+                <div style="flex:0 1 300px;min-width:0;margin-left:auto;display:flex;flex-direction:column;gap:8px">
+                  <div style="width:100%;height:96px;border-radius:9px;overflow:hidden;border:1px solid #2a3350;position:relative">
+                    <image-slot id="profile-bg" shape="rect" placeholder="Drop a background"></image-slot>
+                  </div>
+                  <div style="display:flex;gap:3px;padding:3px;border-radius:9px;background:#121829;border:1px solid #2a3350;align-self:flex-end">
+                    <sc-for list="{{ pv.bgFit.opts }}" as="o" hint-placeholder-count="3">
+                      <div onClick="{{ o.onSelect }}" style="{{ o.style }}">{{ o.label }}</div>
+                    </sc-for>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:12px;align-self:flex-end">
+                    <span style="font-size:11px;color:#8b93a7">Dim</span>
+                    <div onMouseDown="{{ pv.bgDim.onDown }}" style="width:120px;height:4px;border-radius:2px;background:#2a3350;position:relative;cursor:pointer">
+                      <div style="{{ pv.bgDim.fill }}"></div>
+                      <div style="{{ pv.bgDim.knobPos }}"></div>
+                    </div>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#d7dcea;min-width:44px;text-align:right">{{ pv.bgDim.label }}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                  <div style="{{ pv.color.dot }}"></div>
+                  <div style="display:flex;flex-direction:column;gap:3px">
+                    <div style="font-size:13px;color:#d7dcea">Tab colour and icon</div>
+                    <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">How this profile is recognised in the strip, the sidebar, the palette and the phone. Colour it by the profile, or by the host it runs on — set that on Defaults and the whole fleet reads by machine.</div>
+                    <div style="display:flex;align-items:center;gap:8px;padding-top:2px">
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">tab_color · icon</span>
+                      <span style="{{ pv.color.chipStyle }}">{{ pv.color.chip }}</span>
+                    </div>
+                  </div>
+                </div>
+                <div style="flex:0 1 300px;min-width:0;margin-left:auto;display:flex;flex-direction:column;gap:8px;align-items:flex-end">
+                  <div style="display:flex;gap:3px;padding:3px;border-radius:9px;background:#121829;border:1px solid #2a3350">
+                    <sc-for list="{{ pv.colorFrom.opts }}" as="o" hint-placeholder-count="2">
+                      <div onClick="{{ o.onSelect }}" style="{{ o.style }}">{{ o.label }}</div>
+                    </sc-for>
+                  </div>
+                  <div style="{{ pv.colorFrom.swatchRow }}">
+                    <sc-for list="{{ pv.color.opts }}" as="o" hint-placeholder-count="6">
+                      <div onClick="{{ o.onSelect }}" style="{{ o.style }}"></div>
+                    </sc-for>
+                  </div>
+                  <div style="display:flex;gap:5px">
+                    <sc-for list="{{ pv.icon.opts }}" as="o" hint-placeholder-count="6">
+                      <div onClick="{{ o.onSelect }}" style="{{ o.style }}">{{ o.label }}</div>
+                    </sc-for>
+                  </div>
+                </div>
+              </div>
+
+              <div style="display:flex;align-items:center;gap:10px;padding:22px 2px 4px">
+                <span style="font-size:10.5px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:#8b93a7">Cursor</span>
+                <div style="flex:1;height:1px;background:#1b2338"></div>
+              </div>
+
+              <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                  <div style="{{ pv.cursor.dot }}"></div>
+                  <div style="display:flex;flex-direction:column;gap:3px">
+                    <div style="font-size:13px;color:#d7dcea">Shape</div>
+                    <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">Unless the program sets one with DECSCUSR.</div>
+                    <div style="display:flex;align-items:center;gap:8px;padding-top:2px">
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">cursor.shape</span>
+                      <span style="{{ pv.cursor.chipStyle }}">{{ pv.cursor.chip }}</span>
+                    </div>
+                  </div>
+                </div>
+                <div style="flex:0 1 300px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                  <div style="display:flex;gap:3px;padding:3px;border-radius:9px;background:#121829;border:1px solid #2a3350">
+                    <sc-for list="{{ pv.cursor.opts }}" as="o" hint-placeholder-count="3">
+                      <div onClick="{{ o.onSelect }}" style="{{ o.style }}">{{ o.label }}</div>
+                    </sc-for>
+                  </div>
+                </div>
+              </div>
+
+              <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px">
+                <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                  <div style="{{ pv.blink.dot }}"></div>
+                  <div style="display:flex;flex-direction:column;gap:3px">
+                    <div style="font-size:13px;color:#d7dcea">Blink</div>
+                    <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">Stops on focus loss and wakes on a timer, never spins.</div>
+                    <div style="display:flex;align-items:center;gap:8px;padding-top:2px">
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">cursor.blink</span>
+                      <span style="{{ pv.blink.chipStyle }}">{{ pv.blink.chip }}</span>
+                    </div>
+                  </div>
+                </div>
+                <div style="flex:0 1 300px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                  <div onClick="{{ pv.blink.toggle }}" style="{{ pv.blink.track }}"><div style="{{ pv.blink.knob }}"></div></div>
+                </div>
+              </div>
+            </div>
+
+            <div style="flex:none;height:42px;display:flex;align-items:center;gap:12px;padding:0 30px;border-top:1px solid #1b2338;background:#0f1526">
+              <div style="{{ pv.footDotStyle }}"></div>
+              <span style="font-size:11px;color:#8b93a7">{{ pv.footNote }}</span>
+              <div style="flex:1"></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">{{ pv.footKey }}</span>
+              <span style="font-size:11.5px;color:#8b93a7;cursor:pointer" style-hover="color:#d7dcea">Edit as TOML</span>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isSettings }}" hint-placeholder-val="{{ false }}">
+        <div style="flex:1;display:flex;min-height:0;background:#0b0f1a">
+
+          <div style="width:214px;flex:none;min-height:0;background:#0f1526;border-right:1px solid #1b2338;display:flex;flex-direction:column">
+            <div style="padding:12px 10px 10px">
+              <div style="display:flex;align-items:center;gap:8px;height:30px;padding:0 9px;border-radius:7px;background:#121829;border:1px solid #2a3350;font-size:12px;color:#4a516a">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:11px">/</span>
+                <span>Filter settings</span>
+              </div>
+            </div>
+            <div style="flex:1;min-height:0;overflow-y:auto;padding:0 8px;display:flex;flex-direction:column;gap:1px">
+              <sc-for list="{{ cats }}" as="c" hint-placeholder-count="9">
+                <div onClick="{{ c.onSelect }}" style="{{ c.style }}">
+                  <span style="flex:1;min-width:0">{{ c.label }}</span>
+                  <span style="{{ c.countStyle }}">{{ c.count }}</span>
+                </div>
+              </sc-for>
+            </div>
+            <div style="flex:none;padding:12px 14px;border-top:1px solid #1b2338;font-size:10.5px;color:#4a516a;line-height:1.55">
+              Every field is generated from the config schema — a new setting appears here with no UI change.
+            </div>
+          </div>
+
+          <div style="flex:1;min-width:0;min-height:0;display:flex;flex-direction:column">
+            <div style="flex:none;padding:22px 30px 16px;border-bottom:1px solid #1b2338">
+              <div style="display:flex;align-items:center;gap:12px">
+                <h3 style="margin:0;font-size:17px;font-weight:600;letter-spacing:-.01em">{{ catLabel }}</h3>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">{{ catKey }}</span>
+              </div>
+              <p style="margin:6px 0 0;font-size:12px;color:#8b93a7;line-height:1.55;max-width:520px;text-wrap:pretty">{{ catLede }}</p>
+            </div>
+
+            <sc-if value="{{ needsRestart }}" hint-placeholder-val="{{ false }}">
+              <div style="flex:none;margin:14px 30px 0;padding:10px 13px;border-radius:9px;background:rgba(224,179,65,.1);border:1px solid rgba(224,179,65,.35);display:flex;align-items:center;gap:10px">
+                <div style="width:5px;height:5px;border-radius:50%;background:#e0b341;flex:none"></div>
+                <span style="font-size:12px;color:#e0b341;flex:1">Saved. Titlebar ownership applies on the next launch.</span>
+                <span style="font-size:11.5px;color:#8b93a7;cursor:pointer" style-hover="color:#d7dcea">Relaunch now</span>
+              </div>
+            </sc-if>
+
+            <div style="flex:1;min-height:0;overflow-y:auto;padding:6px 30px 30px">
+
+              <sc-if value="{{ catText }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.typography_families.onReset }}" style="{{ w.typography_families.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Font families</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">Preference order — the first family with a glyph wins.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">typography.families</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;flex-direction:column;gap:4px">
+                    <div style="display:flex;align-items:center;gap:9px;height:30px;padding:0 10px;border-radius:8px;background:#121829;border:1px solid #2a3350">
+                      <span style="color:#4a516a;font-size:11px;cursor:grab">⠿</span>
+                      <span style="flex:1;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#d7dcea">Cascadia Mono</span>
+                      <span style="font-size:11px;color:#4a516a;cursor:pointer" style-hover="color:#e0606a">×</span>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:9px;height:30px;padding:0 10px;border-radius:8px;background:#121829;border:1px solid #2a3350">
+                      <span style="color:#4a516a;font-size:11px;cursor:grab">⠿</span>
+                      <span style="flex:1;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#d7dcea">JetBrainsMono Nerd Font</span>
+                      <span style="font-size:11px;color:#4a516a;cursor:pointer" style-hover="color:#e0606a">×</span>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:9px;height:30px;padding:0 10px;border-radius:8px;background:#0f1526;border:1px solid #1b2338">
+                      <span style="color:#4a516a;font-size:11px;cursor:grab">⠿</span>
+                      <span style="flex:1;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#8b93a7">Menlo</span>
+                      <span style="font-size:10px;color:#4a516a">fallback</span>
+                    </div>
+                    <div style="height:30px;border-radius:8px;border:1px dashed #2a3350;display:flex;align-items:center;justify-content:center;gap:6px;font-size:11.5px;color:#8b93a7;cursor:pointer" style-hover="border-color:#6ea8ff;color:#d7dcea">＋ Add a family</div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.typography_size_pt.onReset }}" style="{{ w.typography_size_pt.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Size</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">Font size in points.</div>
+                      <div style="display:flex;align-items:center;gap:8px;padding-top:2px">
+                        <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">typography.size_pt</span>
+                        <span style="font-size:10px;color:#6ea8ff;padding:1px 6px;border-radius:5px;background:#16203a">set by config file</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div style="display:flex;align-items:center;height:30px;border:1px solid #2a3350;border-radius:8px;overflow:hidden;background:#121829">
+                      <div onClick="{{ w.typography_size_pt.dec }}" style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:14px;user-select:none" style-hover="background:#161d33;color:#d7dcea">−</div>
+                      <div style="min-width:74px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#d7dcea">{{ w.typography_size_pt.label }}</div>
+                      <div onClick="{{ w.typography_size_pt.inc }}" style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:14px;user-select:none" style-hover="background:#161d33;color:#d7dcea">＋</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.typography_line_height.onReset }}" style="{{ w.typography_line_height.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Line height</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">A multiple of the font's natural height. Geometry — changing it resizes the pty.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">typography.line_height</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div style="display:flex;align-items:center;height:30px;border:1px solid #2a3350;border-radius:8px;overflow:hidden;background:#121829">
+                      <div onClick="{{ w.typography_line_height.dec }}" style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:14px;user-select:none" style-hover="background:#161d33;color:#d7dcea">−</div>
+                      <div style="min-width:74px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#d7dcea">{{ w.typography_line_height.label }}</div>
+                      <div onClick="{{ w.typography_line_height.inc }}" style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:14px;user-select:none" style-hover="background:#161d33;color:#d7dcea">＋</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.typography_features.onReset }}" style="{{ w.typography_features.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">OpenType features</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">Prefix with <span style="font-family:'JetBrains Mono',monospace">-</span> to disable one.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">typography.features</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end">
+                    <div style="height:26px;padding:0 8px 0 10px;border-radius:7px;background:#16203a;border:1px solid #2a3350;display:flex;align-items:center;gap:7px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#6ea8ff">calt<span style="color:#4a516a;cursor:pointer" style-hover="color:#e0606a">×</span></div>
+                    <div style="height:26px;padding:0 8px 0 10px;border-radius:7px;background:#16203a;border:1px solid #2a3350;display:flex;align-items:center;gap:7px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#6ea8ff">-liga<span style="color:#4a516a;cursor:pointer" style-hover="color:#e0606a">×</span></div>
+                    <div style="height:26px;padding:0 10px;border-radius:7px;border:1px dashed #2a3350;display:flex;align-items:center;font-size:11.5px;color:#8b93a7;cursor:pointer" style-hover="border-color:#6ea8ff;color:#d7dcea">＋ tag</div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.typography_ligatures.onReset }}" style="{{ w.typography_ligatures.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Programming ligatures</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">A per-run decision, so turning it on later costs nothing.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">typography.ligatures</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div onClick="{{ w.typography_ligatures.toggle }}" style="{{ w.typography_ligatures.track }}"><div style="{{ w.typography_ligatures.knob }}"></div></div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.typography_builtin_box_drawing.onReset }}" style="{{ w.typography_builtin_box_drawing.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Built-in box drawing</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">Draw box and block characters at cell size. Off, a run of █ shows seams at every cell boundary.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">typography.builtin_box_drawing</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div onClick="{{ w.typography_builtin_box_drawing.toggle }}" style="{{ w.typography_builtin_box_drawing.track }}"><div style="{{ w.typography_builtin_box_drawing.knob }}"></div></div>
+                  </div>
+                </div>
+              </sc-if>
+
+              <sc-if value="{{ catAppearance }}" hint-placeholder-val="{{ true }}">
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.appearance_theme.onReset }}" style="{{ w.appearance_theme.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Theme</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">Styles the window — titlebar, tabs, panels, status bar — and supplies the default grid palette. A profile may override the palette; nothing overrides the chrome.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">appearance.theme</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div onClick="{{ goThemes }}" style="height:32px;padding:0 10px;border-radius:8px;background:#121829;border:1px solid #2a3350;display:flex;align-items:center;gap:10px;cursor:pointer" style-hover="border-color:#6ea8ff">
+                      <div style="display:flex;height:14px;width:60px;border-radius:3px;overflow:hidden">
+                        <div style="flex:1;background:#0b0f1a"></div><div style="flex:1;background:#e0606a"></div><div style="flex:1;background:#5fd17f"></div><div style="flex:1;background:#6ea8ff"></div><div style="flex:1;background:#b07cff"></div>
+                      </div>
+                      <span style="font-size:12.5px;color:#d7dcea;flex:1">obsidian</span>
+                      <span style="color:#4a516a;font-size:10px">▾</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.appearance_light_theme.onReset }}" style="{{ w.appearance_light_theme.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Light theme</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">Used when the OS reports a light appearance. Unset means follow the theme above regardless.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">appearance.light_theme</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div onClick="{{ goThemes }}" style="height:32px;padding:0 10px;border-radius:8px;background:#121829;border:1px dashed #2a3350;display:flex;align-items:center;gap:10px;cursor:pointer" style-hover="border-color:#6ea8ff">
+                      <span style="font-size:12.5px;color:#4a516a;flex:1">not set</span>
+                      <span style="color:#4a516a;font-size:10px">▾</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.appearance_follow_system_theme.onReset }}" style="{{ w.appearance_follow_system_theme.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Follow system appearance</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">Switch between the two themes above with the OS.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">appearance.follow_system_theme</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div onClick="{{ w.appearance_follow_system_theme.toggle }}" style="{{ w.appearance_follow_system_theme.track }}"><div style="{{ w.appearance_follow_system_theme.knob }}"></div></div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.appearance_text_gamma.onReset }}" style="{{ w.appearance_text_gamma.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Stem darkening</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">Applied to glyph coverage each frame, so tuning it is a repaint. Text only — chrome comes out exactly as the theme says.</div>
+                      <div style="display:flex;align-items:center;gap:8px;padding-top:2px">
+                        <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">appearance.text_gamma</span>
+                        <span style="font-size:10px;color:#b07cff;padding:1px 6px;border-radius:5px;background:rgba(176,124,255,.12)">set by profile k8s-prod</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;align-items:center;justify-content:flex-end;gap:12px">
+                    <div onMouseDown="{{ w.appearance_text_gamma.onDown }}" style="width:150px;height:4px;border-radius:2px;background:#2a3350;position:relative;cursor:pointer">
+                      <div style="{{ w.appearance_text_gamma.fill }}"></div>
+                      <div style="{{ w.appearance_text_gamma.knobPos }}"></div>
+                    </div>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#d7dcea;min-width:44px;text-align:right">{{ w.appearance_text_gamma.label }}</span>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.appearance_text_contrast.onReset }}" style="{{ w.appearance_text_contrast.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Text contrast</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">Extra contrast on coverage, not on the frame.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">appearance.text_contrast</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;align-items:center;justify-content:flex-end;gap:12px">
+                    <div onMouseDown="{{ w.appearance_text_contrast.onDown }}" style="width:150px;height:4px;border-radius:2px;background:#2a3350;position:relative;cursor:pointer">
+                      <div style="{{ w.appearance_text_contrast.fill }}"></div>
+                      <div style="{{ w.appearance_text_contrast.knobPos }}"></div>
+                    </div>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#d7dcea;min-width:44px;text-align:right">{{ w.appearance_text_contrast.label }}</span>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.appearance_text_antialias.onReset }}" style="{{ w.appearance_text_antialias.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Antialiasing</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">Also decides grid fitting — the two are one decision. Grayscale is right on a rotated or non-RGB panel.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">appearance.text_antialias</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div style="display:flex;gap:3px;padding:3px;border-radius:9px;background:#121829;border:1px solid #2a3350">
+                      <sc-for list="{{ w.appearance_text_antialias.opts }}" as="o" hint-placeholder-count="2">
+                        <div onClick="{{ o.onSelect }}" style="{{ o.style }}">{{ o.label }}</div>
+                      </sc-for>
+                    </div>
+                  </div>
+                </div>
+              </sc-if>
+
+              <sc-if value="{{ catWindow }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.window_opacity.onReset }}" style="{{ w.window_opacity.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Background opacity</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">Applied only to cells with a default background, so ls colours and TUI panels stay solid.</div>
+                      <div style="display:flex;align-items:center;gap:8px;padding-top:2px">
+                        <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">window.opacity</span>
+                        <span style="font-size:10px;color:#6ea8ff;padding:1px 6px;border-radius:5px;background:#16203a">set by config file</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;align-items:center;justify-content:flex-end;gap:12px">
+                    <div onMouseDown="{{ w.window_opacity.onDown }}" style="width:150px;height:4px;border-radius:2px;background:#2a3350;position:relative;cursor:pointer">
+                      <div style="{{ w.window_opacity.fill }}"></div>
+                      <div style="{{ w.window_opacity.knobPos }}"></div>
+                    </div>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#d7dcea;min-width:44px;text-align:right">{{ w.window_opacity.label }}</span>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.window_chrome_opacity.onReset }}" style="{{ w.window_chrome_opacity.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Chrome opacity</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">Independent of the grid's, so opaque chrome over a see-through grid is expressible.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">window.chrome_opacity</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;align-items:center;justify-content:flex-end;gap:12px">
+                    <div onMouseDown="{{ w.window_chrome_opacity.onDown }}" style="width:150px;height:4px;border-radius:2px;background:#2a3350;position:relative;cursor:pointer">
+                      <div style="{{ w.window_chrome_opacity.fill }}"></div>
+                      <div style="{{ w.window_chrome_opacity.knobPos }}"></div>
+                    </div>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#d7dcea;min-width:44px;text-align:right">{{ w.window_chrome_opacity.label }}</span>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.window_backdrop.onReset }}" style="{{ w.window_backdrop.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Backdrop material</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">What the compositor puts behind the window.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">window.backdrop</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end;position:relative">
+                    <div onClick="{{ w.window_backdrop.onOpen }}" style="width:180px;height:32px;padding:0 11px;border-radius:8px;background:#121829;border:1px solid #2a3350;display:flex;align-items:center;gap:8px;cursor:pointer" style-hover="border-color:#6ea8ff">
+                      <span style="font-size:12.5px;color:#d7dcea;flex:1">{{ w.window_backdrop.label }}</span>
+                      <span style="color:#4a516a;font-size:10px">▾</span>
+                    </div>
+                    <sc-if value="{{ backdropOpen }}" hint-placeholder-val="{{ false }}">
+                      <div style="{{ backdropMenuStyle }}">
+                        <sc-for list="{{ w.window_backdrop.opts }}" as="o" hint-placeholder-count="5">
+                          <div onClick="{{ o.onSelect }}" style="{{ o.menuStyle }}">
+                            <div style="display:flex;align-items:center;gap:8px">
+                              <span style="{{ o.checkStyle }}">✓</span>
+                              <span style="font-size:12.5px;color:#d7dcea;flex:1">{{ o.label }}</span>
+                              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a516a">{{ o.value }}</span>
+                            </div>
+                            <div style="font-size:11px;color:#8b93a7;line-height:1.45;padding-left:20px">{{ o.description }}</div>
+                          </div>
+                        </sc-for>
+                      </div>
+                    </sc-if>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.window_custom_chrome.onReset }}" style="{{ w.window_custom_chrome.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Draw our own titlebar</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">Auto is borderless on Windows and a transparent full-size titlebar on macOS.</div>
+                      <div style="display:flex;align-items:center;gap:8px;padding-top:2px">
+                        <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">window.custom_chrome</span>
+                        <span style="font-size:10px;color:#e0b341;padding:1px 6px;border-radius:5px;background:rgba(224,179,65,.12)">needs a restart</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div style="display:flex;gap:3px;padding:3px;border-radius:9px;background:#121829;border:1px solid #2a3350">
+                      <sc-for list="{{ w.window_custom_chrome.opts }}" as="o" hint-placeholder-count="3">
+                        <div onClick="{{ o.onSelect }}" style="{{ o.style }}">{{ o.label }}</div>
+                      </sc-for>
+                    </div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.window_padding.onReset }}" style="{{ w.window_padding.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Padding</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">Between the window edge and the grid.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">window.padding</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div style="display:flex;align-items:center;height:30px;border:1px solid #2a3350;border-radius:8px;overflow:hidden;background:#121829">
+                      <div onClick="{{ w.window_padding.dec }}" style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:14px;user-select:none" style-hover="background:#161d33;color:#d7dcea">−</div>
+                      <div style="min-width:74px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#d7dcea">{{ w.window_padding.label }}</div>
+                      <div onClick="{{ w.window_padding.inc }}" style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:14px;user-select:none" style-hover="background:#161d33;color:#d7dcea">＋</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.window_columns.onReset }}" style="{{ w.window_columns.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Initial size</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">In cells, not pixels — the window is sized to fit the grid.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">window.columns · window.rows</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;align-items:center;justify-content:flex-end;gap:8px">
+                    <div style="display:flex;align-items:center;height:30px;border:1px solid #2a3350;border-radius:8px;overflow:hidden;background:#121829">
+                      <div onClick="{{ w.window_columns.dec }}" style="width:26px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:13px;user-select:none" style-hover="background:#161d33;color:#d7dcea">−</div>
+                      <div style="min-width:48px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#d7dcea">{{ w.window_columns.label }}</div>
+                      <div onClick="{{ w.window_columns.inc }}" style="width:26px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:13px;user-select:none" style-hover="background:#161d33;color:#d7dcea">＋</div>
+                    </div>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#4a516a">×</span>
+                    <div style="display:flex;align-items:center;height:30px;border:1px solid #2a3350;border-radius:8px;overflow:hidden;background:#121829">
+                      <div onClick="{{ w.window_rows.dec }}" style="width:26px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:13px;user-select:none" style-hover="background:#161d33;color:#d7dcea">−</div>
+                      <div style="min-width:48px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#d7dcea">{{ w.window_rows.label }}</div>
+                      <div onClick="{{ w.window_rows.inc }}" style="width:26px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:13px;user-select:none" style-hover="background:#161d33;color:#d7dcea">＋</div>
+                    </div>
+                  </div>
+                </div>
+              </sc-if>
+
+              <sc-if value="{{ catTabs }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.tabs_position.onReset }}" style="{{ w.tabs_position.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Position</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">A horizontal strip at the top, or a vertical sidebar wide enough to show each tab's host. This one applies live — watch the chrome.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">tabs.position</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div style="display:flex;gap:3px;padding:3px;border-radius:9px;background:#121829;border:1px solid #2a3350">
+                      <sc-for list="{{ w.tabs_position.opts }}" as="o" hint-placeholder-count="2">
+                        <div onClick="{{ o.onSelect }}" style="{{ o.style }}">{{ o.label }}</div>
+                      </sc-for>
+                    </div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.tabs_strip_height.onReset }}" style="{{ w.tabs_strip_height.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Strip height</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">Of the horizontal strip, in logical pixels.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">tabs.strip_height</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div style="display:flex;align-items:center;height:30px;border:1px solid #2a3350;border-radius:8px;overflow:hidden;background:#121829">
+                      <div onClick="{{ w.tabs_strip_height.dec }}" style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:14px;user-select:none" style-hover="background:#161d33;color:#d7dcea">−</div>
+                      <div style="min-width:74px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#d7dcea">{{ w.tabs_strip_height.label }}</div>
+                      <div onClick="{{ w.tabs_strip_height.inc }}" style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:14px;user-select:none" style-hover="background:#161d33;color:#d7dcea">＋</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.tabs_sidebar_width.onReset }}" style="{{ w.tabs_sidebar_width.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Sidebar width</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">Of the vertical sidebar, in logical pixels.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">tabs.sidebar_width</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div style="display:flex;align-items:center;height:30px;border:1px solid #2a3350;border-radius:8px;overflow:hidden;background:#121829">
+                      <div onClick="{{ w.tabs_sidebar_width.dec }}" style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:14px;user-select:none" style-hover="background:#161d33;color:#d7dcea">−</div>
+                      <div style="min-width:74px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#d7dcea">{{ w.tabs_sidebar_width.label }}</div>
+                      <div onClick="{{ w.tabs_sidebar_width.inc }}" style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:14px;user-select:none" style-hover="background:#161d33;color:#d7dcea">＋</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.tabs_show_single_tab.onReset }}" style="{{ w.tabs_show_single_tab.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Show the strip with one tab</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">On by default: the strip doubles as the titlebar, and chrome that appears and disappears is unsettling.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">tabs.show_single_tab</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div onClick="{{ w.tabs_show_single_tab.toggle }}" style="{{ w.tabs_show_single_tab.track }}"><div style="{{ w.tabs_show_single_tab.knob }}"></div></div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.tabs_restore.onReset }}" style="{{ w.tabs_restore.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Reattach tabs on launch</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">Off, every launch starts with one fresh local shell and existing sessions are reachable through the picker.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">tabs.restore</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div onClick="{{ w.tabs_restore.toggle }}" style="{{ w.tabs_restore.track }}"><div style="{{ w.tabs_restore.knob }}"></div></div>
+                  </div>
+                </div>
+              </sc-if>
+
+              <sc-if value="{{ catShell }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.shell_command.onReset }}" style="{{ w.shell_command.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Command</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">Empty runs the platform default. This is why a workspace config is never trusted automatically.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">shell.command</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div style="width:100%;height:32px;padding:0 11px;border-radius:8px;background:#121829;border:1px solid #2a3350;display:flex;align-items:center;font-family:'JetBrains Mono',monospace;font-size:12px;color:#4a516a">/bin/zsh -l</div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.shell_cwd.onReset }}" style="{{ w.shell_cwd.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Working directory</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">Empty inherits from the launching process.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">shell.cwd</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;gap:6px;justify-content:flex-end">
+                    <div style="flex:1;height:32px;padding:0 11px;border-radius:8px;background:#121829;border:1px solid #2a3350;display:flex;align-items:center;font-family:'JetBrains Mono',monospace;font-size:12px;color:#d7dcea;overflow:hidden">~/dev</div>
+                    <div style="height:32px;padding:0 11px;border-radius:8px;border:1px solid #2a3350;display:flex;align-items:center;font-size:11.5px;color:#8b93a7;cursor:pointer;flex:none" style-hover="border-color:#6ea8ff;color:#d7dcea">Browse…</div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.shell_env.onReset }}" style="{{ w.shell_env.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Environment</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">An empty value unsets the variable. Replaced wholesale by a profile, never merged — so a profile can clear an inherited entry.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">shell.env</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;flex-direction:column;gap:4px">
+                    <div style="display:flex;gap:4px">
+                      <div style="flex:1;height:30px;padding:0 10px;border-radius:8px 0 0 8px;background:#121829;border:1px solid #2a3350;display:flex;align-items:center;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#6ea8ff">EDITOR</div>
+                      <div style="flex:1;height:30px;padding:0 10px;border-radius:0 8px 8px 0;background:#121829;border:1px solid #2a3350;display:flex;align-items:center;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#d7dcea">nvim</div>
+                    </div>
+                    <div style="display:flex;gap:4px">
+                      <div style="flex:1;height:30px;padding:0 10px;border-radius:8px 0 0 8px;background:#121829;border:1px solid #2a3350;display:flex;align-items:center;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#6ea8ff">PAGER</div>
+                      <div style="flex:1;height:30px;padding:0 10px;border-radius:0 8px 8px 0;background:#121829;border:1px solid #2a3350;display:flex;align-items:center;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#4a516a">unset</div>
+                    </div>
+                    <div style="height:30px;border-radius:8px;border:1px dashed #2a3350;display:flex;align-items:center;justify-content:center;font-size:11.5px;color:#8b93a7;cursor:pointer" style-hover="border-color:#6ea8ff;color:#d7dcea">＋ Add a variable</div>
+                  </div>
+                </div>
+              </sc-if>
+
+              <sc-if value="{{ catScrolling }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.scrolling_scrollback.onReset }}" style="{{ w.scrolling_scrollback.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Scrollback</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">Lines of history retained per session.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">scrolling.scrollback</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div style="display:flex;align-items:center;height:30px;border:1px solid #2a3350;border-radius:8px;overflow:hidden;background:#121829">
+                      <div onClick="{{ w.scrolling_scrollback.dec }}" style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:14px;user-select:none" style-hover="background:#161d33;color:#d7dcea">−</div>
+                      <div style="min-width:82px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#d7dcea">{{ w.scrolling_scrollback.label }}</div>
+                      <div onClick="{{ w.scrolling_scrollback.inc }}" style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:14px;user-select:none" style-hover="background:#161d33;color:#d7dcea">＋</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.scrolling_lines_per_notch.onReset }}" style="{{ w.scrolling_lines_per_notch.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Lines per wheel notch</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">How far one notch moves the view.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">scrolling.lines_per_notch</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div style="display:flex;align-items:center;height:30px;border:1px solid #2a3350;border-radius:8px;overflow:hidden;background:#121829">
+                      <div onClick="{{ w.scrolling_lines_per_notch.dec }}" style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:14px;user-select:none" style-hover="background:#161d33;color:#d7dcea">−</div>
+                      <div style="min-width:74px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#d7dcea">{{ w.scrolling_lines_per_notch.label }}</div>
+                      <div onClick="{{ w.scrolling_lines_per_notch.inc }}" style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:14px;user-select:none" style-hover="background:#161d33;color:#d7dcea">＋</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.scrolling_scroll_on_output.onReset }}" style="{{ w.scrolling_scroll_on_output.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Scroll on output</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">Off by default: with it on, scrollback can't be read while anything is running.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">scrolling.scroll_on_output</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div onClick="{{ w.scrolling_scroll_on_output.toggle }}" style="{{ w.scrolling_scroll_on_output.track }}"><div style="{{ w.scrolling_scroll_on_output.knob }}"></div></div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.scrolling_scroll_on_keypress.onReset }}" style="{{ w.scrolling_scroll_on_keypress.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Scroll on keypress</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">Jump to the bottom when a key is pressed.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">scrolling.scroll_on_keypress</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div onClick="{{ w.scrolling_scroll_on_keypress.toggle }}" style="{{ w.scrolling_scroll_on_keypress.track }}"><div style="{{ w.scrolling_scroll_on_keypress.knob }}"></div></div>
+                  </div>
+                </div>
+              </sc-if>
+
+              <sc-if value="{{ catCursor }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.cursor_shape.onReset }}" style="{{ w.cursor_shape.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Shape</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">Unless the program sets one with DECSCUSR.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">cursor.shape</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;align-items:center;justify-content:flex-end;gap:12px">
+                    <div style="width:56px;height:26px;border-radius:6px;background:#0b0f1a;border:1px solid #1b2338;display:flex;align-items:center;justify-content:center">
+                      <span style="{{ cursorPreview }}"></span>
+                    </div>
+                    <div style="display:flex;gap:3px;padding:3px;border-radius:9px;background:#121829;border:1px solid #2a3350">
+                      <sc-for list="{{ w.cursor_shape.opts }}" as="o" hint-placeholder-count="3">
+                        <div onClick="{{ o.onSelect }}" style="{{ o.style }}">{{ o.label }}</div>
+                      </sc-for>
+                    </div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.cursor_blink.onReset }}" style="{{ w.cursor_blink.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Blink</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">Stops on focus loss and wakes on a timer, never spins — blinking is the usual way a terminal loses its idle claim.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">cursor.blink</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div onClick="{{ w.cursor_blink.toggle }}" style="{{ w.cursor_blink.track }}"><div style="{{ w.cursor_blink.knob }}"></div></div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.cursor_blink_interval_ms.onReset }}" style="{{ w.cursor_blink_interval_ms.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Blink interval</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">Half-period, in milliseconds.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">cursor.blink_interval_ms</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div style="display:flex;align-items:center;height:30px;border:1px solid #2a3350;border-radius:8px;overflow:hidden;background:#121829">
+                      <div onClick="{{ w.cursor_blink_interval_ms.dec }}" style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:14px;user-select:none" style-hover="background:#161d33;color:#d7dcea">−</div>
+                      <div style="min-width:74px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#d7dcea">{{ w.cursor_blink_interval_ms.label }}</div>
+                      <div onClick="{{ w.cursor_blink_interval_ms.inc }}" style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:14px;user-select:none" style-hover="background:#161d33;color:#d7dcea">＋</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.cursor_trail.onReset }}" style="{{ w.cursor_trail.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Motion between cells</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">Smear is the tapered trail. Deliberately not the default.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">cursor.trail</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div style="display:flex;gap:3px;padding:3px;border-radius:9px;background:#121829;border:1px solid #2a3350">
+                      <sc-for list="{{ w.cursor_trail.opts }}" as="o" hint-placeholder-count="3">
+                        <div onClick="{{ o.onSelect }}" style="{{ o.style }}">{{ o.label }}</div>
+                      </sc-for>
+                    </div>
+                  </div>
+                </div>
+              </sc-if>
+
+              <sc-if value="{{ catMotion }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.motion_enabled.onReset }}" style="{{ w.motion_enabled.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Animate at all</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">The OS accessibility setting can still override this.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">motion.enabled</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div onClick="{{ w.motion_enabled.toggle }}" style="{{ w.motion_enabled.track }}"><div style="{{ w.motion_enabled.knob }}"></div></div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.motion_respect_system_reduce_motion.onReset }}" style="{{ w.motion_respect_system_reduce_motion.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Respect reduce motion</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">Honour the OS accessibility setting.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">motion.respect_system_reduce_motion</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div onClick="{{ w.motion_respect_system_reduce_motion.toggle }}" style="{{ w.motion_respect_system_reduce_motion.track }}"><div style="{{ w.motion_respect_system_reduce_motion.knob }}"></div></div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.motion_smooth_scroll.onReset }}" style="{{ w.motion_smooth_scroll.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Smooth scrolling</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px;text-wrap:pretty">Suppressed in the alternate screen regardless — vim and less scroll by design, and animating that fights the program.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">motion.smooth_scroll</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div onClick="{{ w.motion_smooth_scroll.toggle }}" style="{{ w.motion_smooth_scroll.track }}"><div style="{{ w.motion_smooth_scroll.knob }}"></div></div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px;border-bottom:1px solid #1b2338">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.motion_spring_response.onReset }}" style="{{ w.motion_spring_response.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Spring response</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">Roughly, seconds to reach the target.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">motion.spring_response</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;justify-content:flex-end">
+                    <div style="display:flex;align-items:center;height:30px;border:1px solid #2a3350;border-radius:8px;overflow:hidden;background:#121829">
+                      <div onClick="{{ w.motion_spring_response.dec }}" style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:14px;user-select:none" style-hover="background:#161d33;color:#d7dcea">−</div>
+                      <div style="min-width:74px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#d7dcea">{{ w.motion_spring_response.label }}</div>
+                      <div onClick="{{ w.motion_spring_response.inc }}" style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;color:#8b93a7;cursor:pointer;font-size:14px;user-select:none" style-hover="background:#161d33;color:#d7dcea">＋</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 20px;padding:16px 2px">
+                  <div style="flex:1 1 260px;min-width:0;display:flex;gap:9px">
+                    <div onClick="{{ w.motion_spring_damping.onReset }}" style="{{ w.motion_spring_damping.dot }}"></div>
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <div style="font-size:13px;color:#d7dcea">Spring damping</div>
+                      <div style="font-size:11.5px;color:#8b93a7;line-height:1.5;max-width:420px">1.0 is critically damped; below that overshoots.</div>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a;padding-top:2px">motion.spring_damping</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 1 262px;min-width:0;margin-left:auto;display:flex;align-items:center;justify-content:flex-end;gap:12px">
+                    <div onMouseDown="{{ w.motion_spring_damping.onDown }}" style="width:150px;height:4px;border-radius:2px;background:#2a3350;position:relative;cursor:pointer">
+                      <div style="{{ w.motion_spring_damping.fill }}"></div>
+                      <div style="{{ w.motion_spring_damping.knobPos }}"></div>
+                    </div>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#d7dcea;min-width:44px;text-align:right">{{ w.motion_spring_damping.label }}</span>
+                  </div>
+                </div>
+              </sc-if>
+
+              <sc-if value="{{ catUnknown }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex;flex-direction:column;gap:12px;padding:16px 2px">
+                  <div style="padding:12px 14px;border-radius:10px;background:rgba(224,179,65,.08);border:1px solid rgba(224,179,65,.3)">
+                    <div style="display:flex;align-items:center;gap:9px">
+                      <div style="width:5px;height:5px;border-radius:50%;background:#e0b341"></div>
+                      <span style="font-size:12.5px;color:#e0b341;flex:1">2 keys in your config file are not settings</span>
+                    </div>
+                    <p style="margin:8px 0 0;font-size:11.5px;color:#8b93a7;line-height:1.55;max-width:470px;text-wrap:pretty">Kept rather than discarded, and warned about rather than failed on: a key from a newer version looks exactly like a typo. The rest of the file applied normally.</p>
+                  </div>
+                  <div style="display:flex;flex-direction:column;gap:6px">
+                    <div style="display:flex;align-items:center;gap:12px;padding:11px 14px;border-radius:9px;background:#121829;border:1px solid #2a3350">
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#d7dcea;flex:1">typography.size_px</span>
+                      <span style="font-size:11px;color:#4a516a">config file, line 4</span>
+                      <span style="font-size:11px;color:#6ea8ff;cursor:pointer" style-hover="color:#9cc4ff">did you mean size_pt?</span>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:12px;padding:11px 14px;border-radius:9px;background:#121829;border:1px solid #2a3350">
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#d7dcea;flex:1">window.blur_radius</span>
+                      <span style="font-size:11px;color:#4a516a">workspace config</span>
+                      <span style="font-size:11px;color:#4a516a">no match in schema 1</span>
+                    </div>
+                  </div>
+                </div>
+              </sc-if>
+            </div>
+
+            <div style="flex:none;height:42px;display:flex;align-items:center;gap:12px;padding:0 30px;border-top:1px solid #1b2338;background:#0f1526">
+              <div style="width:5px;height:5px;border-radius:50%;background:#6ea8ff"></div>
+              <span style="font-size:11px;color:#8b93a7">{{ modifiedNote }}</span>
+              <div style="flex:1"></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4a516a">~/.config/zesterm/config.toml</span>
+              <span style="font-size:11.5px;color:#8b93a7;cursor:pointer" style-hover="color:#d7dcea">Edit as TOML</span>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+    </div>
     </div>
 
     <sc-if value="{{ palette }}" hint-placeholder-val="{{ false }}">
@@ -332,7 +1514,7 @@ PS C:\src\zesterm&gt; <span style="color:#4a516a">▍</span></div>
   </sc-if>
 
   <sc-if value="{{ isFleet }}" hint-placeholder-val="{{ false }}">
-    <div style="flex:1;min-height:660px;border-radius:12px;background:#0b0f1a;border:1px solid #2a3350;box-shadow:0 24px 70px rgba(0,0,0,.6);padding:34px 38px;overflow:hidden">
+    <div data-shot="screen" style="flex:1;min-height:660px;border-radius:12px;background:#0b0f1a;border:1px solid #2a3350;box-shadow:0 24px 70px rgba(0,0,0,.6);padding:34px 38px;overflow-y:auto">
       <div style="display:flex;align-items:baseline;gap:14px;margin-bottom:6px">
         <h2 style="margin:0;font-size:19px;font-weight:600;letter-spacing:-.01em">Your fleet</h2>
         <span style="font-size:12px;color:#4a516a">every machine is a host · every window, tab and phone is a client</span>
@@ -399,12 +1581,12 @@ PS C:\src\zesterm&gt; <span style="color:#4a516a">▍</span></div>
   </sc-if>
 
   <sc-if value="{{ isThemes }}" hint-placeholder-val="{{ false }}">
-    <div style="flex:1;min-height:660px;border-radius:12px;background:#0b0f1a;border:1px solid #2a3350;box-shadow:0 24px 70px rgba(0,0,0,.6);padding:34px 38px;overflow:hidden">
+    <div data-shot="screen" style="flex:1;min-height:660px;border-radius:12px;background:#0b0f1a;border:1px solid #2a3350;box-shadow:0 24px 70px rgba(0,0,0,.6);padding:34px 38px;overflow-y:auto">
       <div style="display:flex;align-items:baseline;gap:14px;margin-bottom:6px">
         <h2 style="margin:0;font-size:19px;font-weight:600;letter-spacing:-.01em">Themes</h2>
         <span style="font-size:12px;color:#4a516a">one file styles the chrome and any TUI running inside it</span>
       </div>
-      <p style="margin:0 0 26px;font-size:12px;color:#8b93a7;max-width:660px;text-wrap:pretty">Brights are derived in OKLCH, never hand-authored, so no bright drifts out of its theme's colour family.</p>
+      <p style="margin:0 0 26px;font-size:12px;color:#8b93a7;max-width:660px;text-wrap:pretty">A theme is two things in one file: the chrome tokens, which are the window's alone, and the ANSI palette, which is the default grid scheme and the part a profile may override. Brights are derived in OKLCH, never hand-authored, so no bright drifts out of its family.</p>
 
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(268px,1fr));gap:18px">
         <div style="border-radius:12px;overflow:hidden;border:1px solid #6ea8ff">
@@ -483,7 +1665,7 @@ PS C:\src\zesterm&gt; <span style="color:#4a516a">▍</span></div>
   </sc-if>
 
   <sc-if value="{{ isMobile }}" hint-placeholder-val="{{ false }}">
-    <div style="flex:1;min-height:660px;border-radius:12px;background:#0b0f1a;border:1px solid #2a3350;box-shadow:0 24px 70px rgba(0,0,0,.6);padding:34px 38px;overflow:hidden;display:flex;gap:44px">
+    <div data-shot="screen" style="flex:1;min-height:660px;border-radius:12px;background:#0b0f1a;border:1px solid #2a3350;box-shadow:0 24px 70px rgba(0,0,0,.6);padding:34px 38px;overflow-y:auto;display:flex;gap:44px">
       <div style="max-width:300px;padding-top:8px">
         <h2 style="margin:0 0 6px;font-size:19px;font-weight:600;letter-spacing:-.01em">On the go</h2>
         <p style="margin:0 0 18px;font-size:12px;color:#8b93a7;line-height:1.7;text-wrap:pretty">A phone is bad at a 120×34 grid and excellent at a list. So the mobile client is blocks-first: scroll what ran, tap to expand output, long-press to run it again.</p>
@@ -610,15 +1792,154 @@ rendering grid …</div>
 </div>
 
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props="{&quot;showStatus&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Chrome&quot;}}">
+<script type="text/x-dc" data-dc-script data-props="{}">
 class Component extends DCLogic {
-  state = { screen: 'tabsH', tab: 0, palette: false, folded: true };
+  state = {
+    screen: 'tabsH', tab: 0, palette: false, folded: true,
+    cat: 'Appearance', menu: null, profile: 'ubuntu', pvals: {}, newTabOpen: false, extraTabs: [],
+    // Seeded as if a config file and a profile had already written these, so
+    // provenance chips and the modified dots have something honest to show.
+    vals: { 'window.opacity': 0.94, 'typography.size_pt': 14, 'appearance.text_gamma': 1.45 }
+  };
+
+  // The settings tree, as zest-config's schema walk hands it over: dotted key,
+  // widget, range, default. Labels and copy live in the template.
+  F = {
+    'typography.size_pt': { k: 'num', d: 13, min: 4, max: 144, step: 1, dp: 0, unit: ' pt' },
+    'typography.line_height': { k: 'num', d: 1.25, min: 0.5, max: 3, step: 0.05, dp: 2, unit: ' ×' },
+    'typography.letter_spacing': { k: 'num', d: 0, min: -5, max: 20, step: 0.5, dp: 1, unit: ' px' },
+    'typography.families': { k: 'list', d: 6 },
+    'typography.features': { k: 'list', d: 0 },
+    'typography.ligatures': { k: 'bool', d: false },
+    'typography.builtin_box_drawing': { k: 'bool', d: true },
+    'appearance.theme': { k: 'str', d: 'obsidian' },
+    'appearance.light_theme': { k: 'str', d: '' },
+    'appearance.follow_system_theme': { k: 'bool', d: false },
+    'appearance.text_gamma': { k: 'slider', d: 1.3, min: 0.5, max: 2.5, step: 0.05, dp: 2 },
+    'appearance.text_contrast': { k: 'slider', d: 0, min: 0, max: 1, step: 0.05, dp: 2 },
+    'appearance.text_antialias': { k: 'sel', d: 'subpixel', o: [['subpixel', 'Subpixel'], ['grayscale', 'Grayscale']] },
+    'window.opacity': { k: 'slider', d: 1, min: 0, max: 1, step: 0.01, dp: 2 },
+    'window.chrome_opacity': { k: 'slider', d: 1, min: 0, max: 1, step: 0.01, dp: 2 },
+    'window.backdrop': {
+      k: 'sel', d: 'none', o: [
+        ['none', 'None', 'No platform backdrop; opacity alone decides.'],
+        ['mica', 'Mica', 'Windows 11 Mica.'],
+        ['mica-alt', 'Mica Alt', 'The tabbed-app variant.'],
+        ['acrylic', 'Acrylic', 'Blur. Undocumented on Windows; best-effort on Linux.'],
+        ['vibrancy', 'Vibrancy', 'macOS NSVisualEffectView vibrancy.']
+      ]
+    },
+    'window.custom_chrome': { k: 'sel', d: 'auto', o: [['auto', 'Auto'], ['on', 'On'], ['off', 'Off']] },
+    'window.padding': { k: 'num', d: 8, min: 0, max: 64, step: 1, dp: 0, unit: ' px' },
+    'window.columns': { k: 'num', d: 100, min: 20, max: 400, step: 5, dp: 0, unit: '' },
+    'window.rows': { k: 'num', d: 30, min: 5, max: 200, step: 2, dp: 0, unit: '' },
+    'tabs.position': { k: 'sel', d: 'top', o: [['top', 'Top'], ['left', 'Left']] },
+    'tabs.strip_height': { k: 'num', d: 46, min: 24, max: 64, step: 1, dp: 0, unit: ' px' },
+    'tabs.sidebar_width': { k: 'num', d: 262, min: 120, max: 400, step: 2, dp: 0, unit: ' px' },
+    'tabs.show_single_tab': { k: 'bool', d: true },
+    'tabs.restore': { k: 'bool', d: true },
+    'shell.command': { k: 'str', d: '' },
+    'shell.cwd': { k: 'str', d: '' },
+    'shell.env': { k: 'list', d: 0 },
+    'scrolling.scrollback': { k: 'num', d: 10000, min: 0, max: 10000000, step: 1000, dp: 0, unit: '' },
+    'scrolling.lines_per_notch': { k: 'num', d: 3, min: 1, max: 50, step: 1, dp: 0, unit: '' },
+    'scrolling.scroll_on_output': { k: 'bool', d: false },
+    'scrolling.scroll_on_keypress': { k: 'bool', d: true },
+    'cursor.shape': { k: 'sel', d: 'block', o: [['block', 'Block'], ['underline', 'Underline'], ['bar', 'Bar']] },
+    'cursor.blink': { k: 'bool', d: true },
+    'cursor.blink_interval_ms': { k: 'num', d: 530, min: 100, max: 5000, step: 10, dp: 0, unit: ' ms' },
+    'cursor.trail': { k: 'sel', d: 'none', o: [['none', 'None'], ['smooth', 'Smooth'], ['smear', 'Smear']] },
+    'motion.enabled': { k: 'bool', d: true },
+    'motion.respect_system_reduce_motion': { k: 'bool', d: true },
+    'motion.smooth_scroll': { k: 'bool', d: true },
+    'motion.spring_response': { k: 'num', d: 0.16, min: 0.01, max: 2, step: 0.01, dp: 2, unit: ' s' },
+    'motion.spring_damping': { k: 'slider', d: 1, min: 0.1, max: 2, step: 0.05, dp: 2 }
+  };
+
+  // A profile is a launch target: what to run, which machine runs it, how it looks.
+  // `own` holds only what this profile overrides; everything else falls through
+  // to Defaults, exactly as the cascade resolves it.
+  PDEF = {
+    theme: 'obsidian', font: 'Cascadia Mono', size: 13, opacity: 1, backdrop: 'none',
+    bgFit: 'fill', bgDim: 0.7, color: '#6ea8ff', colorFrom: 'profile', icon: '◆', cursor: 'block', blink: true,
+    title: 'shell', bg: false
+  };
+
+  PROFILES = [
+    {
+      id: 'defaults', name: 'Defaults', badge: 'inherited by all', host: '', hostDot: '#4a516a',
+      hostPath: '', command: 'the platform default shell', dir: 'inherits from the launcher', own: {}
+    },
+    {
+      id: 'ubuntu', name: 'Ubuntu', badge: '⌘1', host: 'forge', hostDot: '#b07cff',
+      hostPath: 'tunnel · 41 ms', command: 'wsl.exe -d Ubuntu-24.04 --cd ~',
+      dir: '\\\\wsl$\\Ubuntu-24.04\\home\\ekdahl',
+      own: { theme: 'gum', font: 'JetBrainsMono Nerd Font', size: 14, opacity: 0.94, backdrop: 'acrylic', color: '#e0b341', icon: '⬢', cursor: 'bar', bg: true }
+    },
+    {
+      id: 'pwsh', name: 'PowerShell', badge: '⌘2', host: 'forge', hostDot: '#b07cff',
+      hostPath: 'tunnel · 41 ms', command: 'pwsh.exe -NoLogo', dir: 'C:\\src\\zesterm',
+      own: { backdrop: 'mica', color: '#b07cff', icon: '▲' }
+    },
+    {
+      id: 'zsh', name: 'zsh', badge: '⌘3', host: 'studio', hostDot: '#5fd17f',
+      hostPath: 'loopback · 0.08 ms', command: '/bin/zsh -l', dir: '~/dev/zesterm',
+      own: { size: 14, color: '#5fd17f', icon: '⌘' }
+    }
+  ];
+
+  // Colour schemes: the grid half of a theme file. `strip` is the normal ANSI row in
+  // index order, straight from builtin.rs — the chrome's UiTokens are not a profile's
+  // business, so nothing here touches them.
+  THEMES = {
+    obsidian: { bg: '#0b0f1a', fg: '#d7dcea', accent: '#6ea8ff', ok: '#5fd17f', dim: '#8b93a7', strip: ['#0b0f1a', '#e0606a', '#5fd17f', '#e0b341', '#6ea8ff', '#b07cff', '#5fc4e0', '#d7dcea'] },
+    nord: { bg: '#2e3440', fg: '#d8dee9', accent: '#81a1c1', ok: '#a3be8c', dim: '#8b98ab', strip: ['#3b4252', '#bf616a', '#a3be8c', '#ebcb8b', '#81a1c1', '#b48ead', '#88c0d0', '#e5e9f0'] },
+    gum: { bg: '#1f1b2a', fg: '#e6e1f0', accent: '#7aa2ff', ok: '#5ce6a8', dim: '#9a90b0', strip: ['#2b2536', '#ff5c8a', '#5ce6a8', '#ffc857', '#7aa2ff', '#c792ea', '#5fd7e0', '#e6e1f0'] },
+    classic: { bg: '#000000', fg: '#e5e5e5', accent: '#5c5cff', ok: '#00cd00', dim: '#8a8a8a', strip: ['#000000', '#cd0000', '#00cd00', '#cdcd00', '#0000ee', '#cd00cd', '#00cdcd', '#e5e5e5'] },
+    paper: { bg: '#faf9f5', fg: '#24292f', accent: '#1f6feb', ok: '#27803a', dim: '#6e7781', strip: ['#2b2b2b', '#c0392b', '#27803a', '#9a6b00', '#1f6feb', '#8250df', '#1b7c83', '#6e7781'] }
+  };
+
+  /** Resolved profile value, and whether it came from Defaults. */
+  pval(id, key) {
+    const p = this.PROFILES.find(x => x.id === id);
+    const own = this.state.pvals[id] || {};
+    if (key in own) return { v: own[key], from: 'own' };
+    if (key in p.own) return { v: p.own[key], from: 'own' };
+    return { v: this.PDEF[key], from: id === 'defaults' ? 'own' : 'defaults' };
+  }
+
+  pset(id, key, v) {
+    this.setState(s => ({ pvals: { ...s.pvals, [id]: { ...(s.pvals[id] || {}), [key]: v } } }));
+  }
+
+  CATS = [
+    ['Text', 'typography', 'Font stack, size, and the cell geometry that follows from them.'],
+    ['Appearance', 'appearance', 'Which theme, and how glyph coverage is sampled before it reaches the frame.'],
+    ['Window', 'window', 'Shape, transparency, and who draws the titlebar.'],
+    ['Tabs', 'tabs', 'Where the strip lives and what comes back on the next launch.'],
+    ['Shell', 'shell', 'What runs, where it runs, and the environment it inherits.'],
+    ['Scrolling', 'scrolling', 'How much history is kept and what moves the view.'],
+    ['Cursor', 'cursor', 'Shape, blink, and motion between cells.'],
+    ['Motion', 'motion', 'Animation, and how much of it.'],
+    ['Unknown keys', '—', 'Keys your files set that this schema does not know.']
+  ];
+
+  val(key) { return this.state.vals[key] ?? this.F[key].d; }
+
+  set(key, v) {
+    this.setState(s => ({ vals: { ...s.vals, [key]: v } }));
+    if (key === 'tabs.position') this.setState({ screen: v === 'left' ? 'tabsV' : 'tabsH' });
+  }
 
   componentDidMount() {
     this._k = (e) => {
       const k = (e.key || '').toLowerCase();
       if ((e.metaKey || e.ctrlKey) && k === 'k') { e.preventDefault(); this.setState(s => ({ palette: !s.palette })); }
-      else if (k === 'escape') this.setState({ palette: false });
+      else if ((e.metaKey || e.ctrlKey) && k === ',') {
+        e.preventDefault();
+        this.setState({ tab: e.shiftKey ? 100 : 101, palette: false, newTabOpen: false });
+      }
+      else if (k === 'escape') this.setState({ palette: false, menu: null, newTabOpen: false });
     };
     window.addEventListener('keydown', this._k);
   }
@@ -626,29 +1947,399 @@ class Component extends DCLogic {
 
   go(screen) { return () => this.setState({ screen, palette: screen === 'palette' }); }
 
+  /** One widget's live bits, keyed by the field's dotted key with `_` for `.`. */
+  widgets() {
+    const out = {};
+    const fmt = (f, v) => (f.dp ? v.toFixed(f.dp) : String(Math.round(v))) + (f.unit || '');
+    const clamp = (f, v) => Math.min(f.max, Math.max(f.min, v));
+    for (const key of Object.keys(this.F)) {
+      const f = this.F[key];
+      const v = this.val(key);
+      const mod = key in this.state.vals && v !== f.d;
+      const g = {
+        dot: 'width:5px;height:5px;border-radius:50%;margin-top:6px;flex:none;cursor:pointer;background:' +
+          (mod ? '#6ea8ff' : 'transparent'),
+        onReset: () => this.setState(s => {
+          const next = { ...s.vals };
+          delete next[key];
+          return { vals: next };
+        })
+      };
+
+      if (f.k === 'bool') {
+        g.toggle = () => this.set(key, !v);
+        g.track = 'width:38px;height:22px;border-radius:11px;flex:none;cursor:pointer;padding:3px;display:flex;background:' +
+          (v ? '#6ea8ff' : '#2a3350') + ';justify-content:' + (v ? 'flex-end' : 'flex-start');
+        g.knob = 'width:16px;height:16px;border-radius:50%;background:' + (v ? '#0b0f1a' : '#8b93a7');
+      } else if (f.k === 'num') {
+        g.label = fmt(f, v);
+        g.dec = () => this.set(key, clamp(f, +(v - f.step).toFixed(4)));
+        g.inc = () => this.set(key, clamp(f, +(v + f.step).toFixed(4)));
+      } else if (f.k === 'slider') {
+        const pct = ((v - f.min) / (f.max - f.min)) * 100;
+        g.label = fmt(f, v);
+        g.fill = 'position:absolute;left:0;top:0;height:100%;border-radius:2px;background:#6ea8ff;width:' + pct + '%';
+        g.knobPos = 'position:absolute;top:-5px;width:14px;height:14px;border-radius:50%;background:#d7dcea;' +
+          'box-shadow:0 1px 5px rgba(0,0,0,.55);left:calc(' + pct + '% - 7px)';
+        const seek = (clientX, el) => {
+          const r = el.getBoundingClientRect();
+          const frac = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+          const raw = f.min + frac * (f.max - f.min);
+          this.set(key, +(Math.round(raw / f.step) * f.step).toFixed(4));
+        };
+        g.onDown = (e) => {
+          const el = e.currentTarget;
+          seek(e.clientX, el);
+          const move = (ev) => seek(ev.clientX, el);
+          const up = () => {
+            window.removeEventListener('mousemove', move);
+            window.removeEventListener('mouseup', up);
+          };
+          window.addEventListener('mousemove', move);
+          window.addEventListener('mouseup', up);
+        };
+      } else if (f.k === 'sel') {
+        const cur = f.o.find(o => o[0] === v);
+        g.value = v;
+        g.label = cur ? cur[1] : v;
+        // Flip the menu above the pill when there is no room below it.
+        g.onOpen = (e) => {
+          const r = e.currentTarget.getBoundingClientRect();
+          const up = window.innerHeight - r.bottom < 40 + f.o.length * 54;
+          this.setState(s => ({ menu: s.menu === key ? null : key, menuUp: up }));
+        };
+        g.opts = f.o.map(([value, label, description]) => {
+          const on = value === v;
+          return {
+            value, label, description: description || '',
+            onSelect: () => { this.set(key, value); this.setState({ menu: null }); },
+            style: 'padding:0 12px;height:26px;display:flex;align-items:center;border-radius:7px;font-size:12px;' +
+              'cursor:pointer;user-select:none;white-space:nowrap;background:' + (on ? '#16203a' : 'transparent') +
+              ';color:' + (on ? '#6ea8ff' : '#8b93a7'),
+            menuStyle: 'padding:8px 10px;border-radius:8px;cursor:pointer;display:flex;flex-direction:column;gap:3px;background:' +
+              (on ? '#16203a' : 'transparent'),
+            checkStyle: 'width:12px;font-size:10px;color:' + (on ? '#6ea8ff' : 'transparent')
+          };
+        });
+      }
+      out[key.replace('.', '_')] = g;
+    }
+    return out;
+  }
+
+  /** The selected profile's editor state. */
+  profileVals() {
+    const id = this.state.profile;
+    const p = this.PROFILES.find(x => x.id === id);
+    const isDef = id === 'defaults';
+    const get = k => this.pval(id, k);
+    const meta = (k) => {
+      const from = get(k).from;
+      const inherited = from === 'defaults';
+      return {
+        dot: 'width:5px;height:5px;border-radius:50%;margin-top:6px;flex:none;background:' +
+          (inherited || isDef ? 'transparent' : '#6ea8ff'),
+        chip: isDef ? '' : (inherited ? 'inherited from Defaults' : 'overrides Defaults'),
+        chipStyle: 'font-size:10px;padding:1px 6px;border-radius:5px;' +
+          (inherited
+            ? 'color:#4a516a;background:#0f1526;border:1px solid #1b2338'
+            : 'color:#6ea8ff;background:#16203a')
+      };
+    };
+    const seg = (k, opts) => {
+      const cur = get(k).v;
+      return opts.map(([value, label]) => {
+        const on = value === cur;
+        return {
+          label,
+          onSelect: () => this.pset(id, k, value),
+          style: 'padding:0 11px;height:26px;display:flex;align-items:center;border-radius:7px;font-size:12px;' +
+            'cursor:pointer;user-select:none;white-space:nowrap;background:' + (on ? '#16203a' : 'transparent') +
+            ';color:' + (on ? '#6ea8ff' : '#8b93a7')
+        };
+      });
+    };
+    const slider = (k, min, max, step, dp, width) => {
+      const v = get(k).v;
+      const pct = ((v - min) / (max - min)) * 100;
+      const seek = (clientX, el) => {
+        const r = el.getBoundingClientRect();
+        const frac = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+        this.pset(id, k, +(Math.round((min + frac * (max - min)) / step) * step).toFixed(4));
+      };
+      return {
+        label: v.toFixed(dp),
+        fill: 'position:absolute;left:0;top:0;height:100%;border-radius:2px;background:#6ea8ff;width:' + pct + '%',
+        knobPos: 'position:absolute;top:-5px;width:14px;height:14px;border-radius:50%;background:#d7dcea;' +
+          'box-shadow:0 1px 5px rgba(0,0,0,.55);left:calc(' + pct + '% - 7px)',
+        onDown: (e) => {
+          const el = e.currentTarget;
+          seek(e.clientX, el);
+          const move = ev => seek(ev.clientX, el);
+          const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); };
+          window.addEventListener('mousemove', move);
+          window.addEventListener('mouseup', up);
+        }
+      };
+    };
+
+    const theme = get('theme').v;
+    const t = this.THEMES[theme] || this.THEMES.obsidian;
+    const color = get('color').v;
+    const glyph = get('icon').v;
+    const size = get('size').v;
+    const opacity = get('opacity').v;
+    const blink = get('blink').v;
+    const ownCount = Object.keys({ ...p.own, ...(this.state.pvals[id] || {}) }).length;
+
+    const previewOut = id === 'zsh' ? 'Darwin 24.5.0' : (id === 'pwsh' ? 'Microsoft Windows 10.0.22631' : 'Linux 6.8.0-31-generic');
+    const previewPrompt = id === 'pwsh' ? 'PS C:\\src\\zesterm>' : (isDef ? '$' : '❯');
+
+    return {
+      glyph, name: p.name, command: p.command, dir: p.dir, host: p.host || 'chosen at launch',
+      hostPath: p.hostPath, hostLabel: p.host ? p.host : 'any host',
+      headGlyphStyle: 'width:34px;height:34px;flex:none;border-radius:9px;display:flex;align-items:center;justify-content:center;' +
+        'font-size:15px;color:' + color + ';background:' + color + '1f;border:1px solid ' + color + '55',
+      hostChipStyle: 'font-size:10.5px;padding:2px 8px;border-radius:6px;color:' + (p.host ? '#d7dcea' : '#4a516a') +
+        ';background:#16203a;display:flex;align-items:center;gap:6px',
+      hostDotStyle: 'width:6px;height:6px;border-radius:50%;flex:none;background:' + p.hostDot,
+      hostPathStyle: 'font-family:JetBrains Mono,monospace;font-size:10px;color:' +
+        (p.hostPath.indexOf('tunnel') > -1 ? '#e0b341' : '#5fd17f'),
+
+      previewStyle: 'margin-top:18px;border-radius:11px;overflow:hidden;border:1px solid #2a3350;background:#0f1526',
+      previewTabStyle: 'height:30px;display:flex;align-items:center;gap:8px;padding:0 12px;background:#121829;' +
+        'border-bottom:1px solid #2a3350;box-shadow:inset 0 2px 0 ' + color + ';color:#d7dcea',
+      previewTabGlyph: 'font-size:11px;color:' + color,
+      previewBodyStyle: 'padding:14px 16px;display:flex;flex-direction:column;gap:4px;font-family:JetBrains Mono,monospace;' +
+        'font-size:' + Math.max(11, size - 1) + 'px;line-height:1.6;background:' + t.bg + ';opacity:' + Math.max(0.55, opacity),
+      previewPromptStyle: 'color:' + t.accent,
+      previewPrompt,
+      previewCmdStyle: 'color:' + t.fg,
+      previewOutStyle: 'color:' + t.dim,
+      previewOut,
+      previewCaretStyle: 'display:inline-block;width:' + (get('cursor').v === 'bar' ? 2 : 8) + 'px;height:' +
+        (get('cursor').v === 'underline' ? 2 : 14) + 'px;vertical-align:-2px;background:' + t.accent +
+        (blink ? ';animation:zcaret 1.1s step-end infinite' : ''),
+
+      command_: { dot: 'width:5px;height:5px;border-radius:50%;margin-top:6px;flex:none;background:transparent' },
+      host_: { dot: 'width:5px;height:5px;border-radius:50%;margin-top:6px;flex:none;background:transparent' },
+      dir_: { dot: 'width:5px;height:5px;border-radius:50%;margin-top:6px;flex:none;background:transparent' },
+
+      anyHost: {
+        toggle: () => this.pset(id, 'askHost', !get('askHost').v),
+        track: 'width:34px;height:20px;border-radius:10px;flex:none;cursor:pointer;padding:3px;display:flex;background:' +
+          (get('askHost').v ? '#6ea8ff' : '#2a3350') + ';justify-content:' + (get('askHost').v ? 'flex-end' : 'flex-start'),
+        knob: 'width:14px;height:14px;border-radius:50%;background:' + (get('askHost').v ? '#0b0f1a' : '#8b93a7')
+      },
+
+      title: { ...meta('title'), opts: seg('title', [['shell', 'From shell'], ['profile', 'Profile name'], ['custom', 'Custom']]) },
+      theme: {
+        ...meta('theme'),
+        opts: Object.keys(this.THEMES).map(name => {
+          const on = name === theme;
+          const th = this.THEMES[name];
+          const sw = i => 'flex:1;background:' + th.strip[i];
+          return {
+            label: name, onSelect: () => this.pset(id, 'theme', name),
+            style: 'display:flex;flex-direction:column;gap:4px;align-items:center;padding:5px;border-radius:8px;cursor:pointer;' +
+              'border:1px solid ' + (on ? '#6ea8ff' : '#2a3350') + ';background:' + (on ? '#16203a' : '#121829'),
+            stripStyle: 'display:flex;width:60px;height:14px;border-radius:3px;overflow:hidden',
+            s0: sw(0), s1: sw(1), s2: sw(2), s3: sw(3), s4: sw(4), s5: sw(5), s6: sw(6), s7: sw(7),
+            labelStyle: 'font-size:9.5px;color:' + (on ? '#6ea8ff' : '#4a516a')
+          };
+        })
+      },
+      font: meta('font'),
+      fontName: get('font').v,
+      size: {
+        label: size.toFixed(0) + ' pt',
+        dec: () => this.pset(id, 'size', Math.max(4, size - 1)),
+        inc: () => this.pset(id, 'size', Math.min(144, size + 1))
+      },
+      opacity: { ...meta('opacity'), ...slider('opacity', 0, 1, 0.01, 2) },
+      backdrop: { opts: seg('backdrop', [['none', 'None'], ['mica', 'Mica'], ['acrylic', 'Acrylic'], ['vibrancy', 'Vibrancy']]) },
+      bg: meta('bg'),
+      bgFit: { opts: seg('bgFit', [['fill', 'Fill'], ['fit', 'Fit'], ['watermark', 'Watermark']]) },
+      bgDim: slider('bgDim', 0, 1, 0.05, 2),
+      colorFrom: {
+        opts: seg('colorFrom', [['profile', 'Profile colour'], ['host', 'Host colour']]),
+        // Swatches are moot when the host decides.
+        swatchRow: 'display:flex;gap:7px;opacity:' + (get('colorFrom').v === 'host' ? '.35' : '1') +
+          ';pointer-events:' + (get('colorFrom').v === 'host' ? 'none' : 'auto')
+      },
+      color: {
+        ...meta('color'),
+        opts: ['#6ea8ff', '#5fd17f', '#e0b341', '#e0606a', '#b07cff', '#5fc4e0'].map(c => ({
+          onSelect: () => this.pset(id, 'color', c),
+          style: 'width:22px;height:22px;border-radius:7px;cursor:pointer;background:' + c +
+            ';box-shadow:' + (c === color ? '0 0 0 2px #0b0f1a, 0 0 0 3px #d7dcea' : 'none')
+        }))
+      },
+      icon: {
+        opts: ['⬢', '▲', '⌘', '⌂', '⧉', '◆'].map(g => ({
+          label: g, onSelect: () => this.pset(id, 'icon', g),
+          style: 'width:26px;height:26px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:12px;' +
+            'cursor:pointer;border:1px solid ' + (g === glyph ? '#6ea8ff' : '#2a3350') +
+            ';color:' + (g === glyph ? '#6ea8ff' : '#8b93a7') + ';background:' + (g === glyph ? '#16203a' : '#121829')
+        }))
+      },
+      cursor: { ...meta('cursor'), opts: seg('cursor', [['block', 'Block'], ['underline', 'Underline'], ['bar', 'Bar']]) },
+      blink: {
+        ...meta('blink'),
+        toggle: () => this.pset(id, 'blink', !blink),
+        track: 'width:38px;height:22px;border-radius:11px;flex:none;cursor:pointer;padding:3px;display:flex;background:' +
+          (blink ? '#6ea8ff' : '#2a3350') + ';justify-content:' + (blink ? 'flex-end' : 'flex-start'),
+        knob: 'width:16px;height:16px;border-radius:50%;background:' + (blink ? '#0b0f1a' : '#8b93a7')
+      },
+
+      footDotStyle: 'width:5px;height:5px;border-radius:50%;background:' + (isDef ? '#4a516a' : color),
+      footNote: isDef
+        ? 'Every profile falls through to this one'
+        : ownCount + (ownCount === 1 ? ' setting overrides' : ' settings override') + ' Defaults',
+      footKey: isDef ? '[profiles.defaults]' : '[profiles.' + id + ']'
+    };
+  }
+
   renderVals() {
     const { screen, tab, palette, folded } = this.state;
     const isApp = screen === 'tabsH' || screen === 'tabsV' || screen === 'palette';
     const activeTab = screen === 'palette' ? tab : tab;
 
     const tabDefs = [
-      { title: 'zsh', host: 'studio', cwd: '~/dev/zesterm', dot: '#5fd17f', age: '6m' },
-      { title: 'zestd — logs', host: 'crate', cwd: '/var/log', dot: '#5fc4e0', age: '31d' },
-      { title: 'build ×2', host: 'studio + forge', cwd: 'split', dot: '#b07cff', age: '2m' }
+      { title: 'zsh', host: 'studio', cwd: '~/dev/zesterm', dot: '#5fd17f', glyph: '⌘', age: '6m', pid: 'zsh' },
+      { title: 'zestd — logs', host: 'crate', cwd: '/var/log', dot: '#5fc4e0', glyph: '⧉', age: '31d' },
+      { title: 'Ubuntu', host: 'forge', cwd: '~ · WSL', dot: '#e0b341', glyph: '⬢', age: '2m', pid: 'ubuntu' },
+      ...this.state.extraTabs
     ];
+
+    const plist = this.PROFILES.map(p => {
+      const on = p.id === this.state.profile;
+      const color = this.pval(p.id, 'color').v;
+      const glyph = this.pval(p.id, 'icon').v;
+      return {
+        name: p.name, glyph, badge: p.badge,
+        sub: p.host ? p.command.split(' ')[0] + ' · ' + p.host : 'falls through to every profile',
+        onSelect: () => this.setState({ profile: p.id }),
+        rowStyle: 'display:flex;align-items:center;gap:10px;padding:8px 9px;border-radius:9px;cursor:pointer;background:' +
+          (on ? '#16203a' : 'transparent') + (p.id === 'defaults' ? ';margin-bottom:6px' : ''),
+        glyphStyle: 'width:24px;height:24px;flex:none;border-radius:7px;display:flex;align-items:center;justify-content:center;' +
+          'font-size:12px;color:' + color + ';background:' + color + '1f',
+        nameStyle: 'font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:' +
+          (on ? '#d7dcea' : '#8b93a7'),
+        badgeStyle: 'font-family:JetBrains Mono,monospace;font-size:10px;flex:none;color:#4a516a'
+      };
+    });
+
+    const launchers = this.PROFILES.filter(p => p.id !== 'defaults').map((p, i) => {
+      const color = this.pval(p.id, 'color').v;
+      return {
+        name: p.name, glyph: this.pval(p.id, 'icon').v, key: p.badge,
+        tag: i === 0 ? 'default' : '',
+        tagStyle: 'font-size:10px;padding:1px 6px;border-radius:5px;color:#6ea8ff;background:' +
+          (i === 0 ? '#16203a' : 'transparent'),
+        sub: p.command, host: p.host,
+        onSelect: () => this.setState(st => ({
+          newTabOpen: false,
+          extraTabs: [...st.extraTabs, {
+            title: p.name, host: p.host, cwd: p.dir,
+            dot: this.pval(p.id, 'color').v, glyph: this.pval(p.id, 'icon').v, age: 'now', pid: p.id
+          }],
+          tab: 3 + st.extraTabs.length
+        })),
+        style: 'display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;cursor:pointer;background:' +
+          (i === 0 ? '#16203a' : 'transparent'),
+        glyphStyle: 'width:16px;text-align:center;font-size:12px;color:' + color,
+        hostStyle: 'font-size:10.5px;padding:1px 7px;border-radius:5px;color:#8b93a7;background:#0f1526;border:1px solid #1b2338'
+      };
+    });
+
+    const profilesOn = activeTab === 100;
+    const profilesTab = {
+      onSelect: () => this.setState({ tab: 100, palette: false, newTabOpen: false }),
+      tabStyle: 'display:flex;align-items:center;gap:8px;padding:0 12px;height:34px;flex:none;border-radius:9px 9px 0 0;' +
+        'cursor:pointer;margin-bottom:-1px;border:1px solid ' + (profilesOn ? '#2a3350' : 'transparent') +
+        ';border-bottom:none;background:' + (profilesOn ? '#0b0f1a' : 'transparent') +
+        ';box-shadow:' + (profilesOn ? 'inset 0 2px 0 #6ea8ff' : 'none'),
+      glyphStyle: 'font-size:12px;color:' + (profilesOn ? '#6ea8ff' : '#4a516a'),
+      titleStyle: 'font-size:12.5px;white-space:nowrap;color:' + (profilesOn ? '#d7dcea' : '#8b93a7')
+    };
+
+    const settingsOn = activeTab === 101;
+    const settingsTab = {
+      onSelect: () => this.setState({ tab: 101, palette: false }),
+      tabStyle: 'display:flex;align-items:center;gap:8px;padding:0 12px;height:34px;flex:none;border-radius:9px 9px 0 0;' +
+        'cursor:pointer;margin-bottom:-1px;border:1px solid ' + (settingsOn ? '#2a3350' : 'transparent') +
+        ';border-bottom:none;background:' + (settingsOn ? '#0b0f1a' : 'transparent') +
+        ';box-shadow:' + (settingsOn ? 'inset 0 2px 0 #6ea8ff' : 'none'),
+      glyphStyle: 'font-size:12px;color:' + (settingsOn ? '#6ea8ff' : '#4a516a'),
+      titleStyle: 'font-size:12.5px;white-space:nowrap;color:' + (settingsOn ? '#d7dcea' : '#8b93a7')
+    };
+
+    // What a tab is coloured by: its profile, the host it runs on, or nothing.
+    const HOSTDOT = { studio: '#5fd17f', crate: '#5fc4e0', forge: '#b07cff' };
+    const hostColor = (t) => HOSTDOT[(t.host || 'studio').split(' ')[0]] || '#6ea8ff';
+    const tabColor = (t) => (t.pid && this.pval(t.pid, 'colorFrom').v === 'host')
+      ? hostColor(t)
+      : (t.dot || '#6ea8ff');
 
     const htabs = tabDefs.map((t, i) => {
       const on = i === activeTab;
+      const c = tabColor(t);
       return {
         ...t,
+        tip: t.title + ' · ' + t.host + ' · ' + t.cwd,
         onSelect: () => this.setState({ tab: i }),
-        tabStyle: 'display:flex;align-items:center;gap:9px;padding:0 11px;height:34px;min-width:196px;max-width:240px;border-radius:9px 9px 0 0;cursor:pointer;margin-bottom:-1px;border:1px solid ' +
+        tabStyle: 'display:flex;align-items:center;gap:9px;padding:0 11px;height:34px;flex:0 1 158px;min-width:92px;max-width:216px;' +
+          'border-radius:9px 9px 0 0;cursor:pointer;margin-bottom:-1px;border:1px solid ' +
           (on ? '#2a3350' : 'transparent') + ';border-bottom:none;background:' + (on ? '#0b0f1a' : 'transparent') +
-          ';box-shadow:' + (on ? 'inset 0 2px 0 #6ea8ff' : 'none'),
-        dotStyle: 'width:6px;height:6px;border-radius:50%;flex:none;background:' + (on ? t.dot : '#4a516a'),
-        titleStyle: 'font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:' + (on ? '#d7dcea' : '#8b93a7')
+          ';box-shadow:' + (on ? 'inset 0 2px 0 ' + c : 'none'),
+        glyph: t.glyph,
+        glyphStyle: 'width:18px;height:18px;flex:none;border-radius:5px;display:flex;align-items:center;justify-content:center;' +
+          'font-size:11px;color:' + (on ? c : '#4a516a') + ';background:' + (on ? c + '1f' : 'transparent'),
+        titleStyle: 'flex:1;min-width:0;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:' +
+          (on ? '#d7dcea' : '#8b93a7')
       };
     });
+
+    // The sidebar is the tab strip in this layout, so it lists the same tabs,
+    // grouped by the host each one runs on.
+    const HOSTS = {
+      studio: { dot: '#5fd17f', meta: 'macOS · LAN 0.3ms' },
+      crate: { dot: '#5fc4e0', meta: 'ubuntu · LAN 0.4ms' },
+      forge: { dot: '#b07cff', meta: 'win11 · tunnel 41ms' }
+    };
+    const byHost = [];
+    tabDefs.forEach((t, i) => {
+      const host = (t.host || 'studio').split(' ')[0];
+      let g = byHost.find(x => x.host === host);
+      if (!g) {
+        g = {
+          host,
+          meta: (HOSTS[host] || {}).meta || '',
+          dotStyle: 'width:6px;height:6px;border-radius:50%;background:' + ((HOSTS[host] || {}).dot || '#4a516a'),
+          rows: []
+        };
+        byHost.push(g);
+      }
+      const on = i === activeTab;
+      const rc = tabColor(t);
+      g.rows.push({
+        title: t.title, cwd: t.cwd, age: t.age, glyph: t.glyph,
+        onSelect: () => this.setState({ tab: i, newTabOpen: false }),
+        rowStyle: 'display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:8px;cursor:pointer;background:' +
+          (on ? '#16203a' : 'transparent'),
+        glyphStyle: 'width:18px;height:18px;flex:none;border-radius:5px;display:flex;align-items:center;justify-content:center;' +
+          'font-size:11px;color:' + (on ? rc : '#4a516a') + ';background:' + (on ? rc + '1f' : 'transparent'),
+        titleStyle: 'font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:' +
+          (on ? '#d7dcea' : '#8b93a7')
+      });
+    });
+    const hostGroups = byHost;
+    const activeDef = tabDefs[activeTab] || tabDefs[0];
+    const active = {
+      title: activeDef.title, cwd: activeDef.cwd, host: (activeDef.host || 'studio').split(' ')[0],
+      dotStyle: 'width:5px;height:5px;border-radius:50%;background:' + (activeDef.dot || '#5fd17f')
+    };
 
     const vtabs = tabDefs.slice(0, 2).map((t, i) => {
       const on = i === activeTab;
@@ -656,22 +2347,77 @@ class Component extends DCLogic {
         ...t,
         onSelect: () => this.setState({ tab: i }),
         rowStyle: 'display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:8px;cursor:pointer;background:' + (on ? '#16203a' : 'transparent'),
-        dotStyle: 'width:5px;height:5px;border-radius:50%;flex:none;background:' + (on ? t.dot : '#4a516a'),
+        glyph: t.glyph,
+        glyphStyle: 'width:18px;height:18px;flex:none;border-radius:5px;display:flex;align-items:center;justify-content:center;' +
+          'font-size:11px;color:' + (on ? t.dot : '#4a516a') + ';background:' + (on ? t.dot + '1f' : 'transparent'),
         titleStyle: 'font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:' + (on ? '#d7dcea' : '#8b93a7')
       };
     });
 
-    const list = [
-      ['tabsH', 'Tabs'], ['tabsV', 'Vertical'], ['split', 'Split'],
-      ['palette', 'Palette'], ['fleet', 'Fleet'], ['themes', 'Themes'], ['mobile', 'Mobile']
-    ];
-    const screens = list.map(([id, label]) => {
-      const on = screen === id || (id === 'split' && screen !== 'palette' && isApp && tab === 2);
+    const w = this.widgets();
+    const cat = this.state.cat;
+    const catRow = this.CATS.find(c => c[0] === cat) || this.CATS[0];
+    const modified = Object.keys(this.state.vals).filter(k => this.state.vals[k] !== this.F[k].d).length;
+    const cats = this.CATS.map(([label, prefix]) => {
+      const on = label === cat;
+      const count = Object.keys(this.state.vals)
+        .filter(k => k.startsWith(prefix + '.') && this.state.vals[k] !== this.F[k].d).length;
       return {
         label,
-        onSelect: id === 'split'
-          ? () => this.setState({ screen: 'tabsH', tab: 2, palette: false })
-          : this.go(id),
+        count: count || '',
+        onSelect: () => this.setState({ cat: label, menu: null }),
+        style: 'display:flex;align-items:center;gap:8px;padding:0 10px;height:30px;border-radius:8px;font-size:12.5px;' +
+          'cursor:pointer;user-select:none;background:' + (on ? '#16203a' : 'transparent') +
+          ';color:' + (on ? '#6ea8ff' : '#8b93a7'),
+        countStyle: 'font-family:JetBrains Mono,monospace;font-size:10px;color:' + (on ? '#6ea8ff' : '#4a516a')
+      };
+    });
+    const freshTab = activeTab >= 3 && activeTab < 100 ? tabDefs[activeTab] : null;
+    const fp = freshTab && freshTab.pid ? this.PROFILES.find(x => x.id === freshTab.pid) : null;
+    const fsch = fp ? (this.THEMES[this.pval(fp.id, 'scheme').v] || this.THEMES[this.pval(fp.id, 'theme').v] || this.THEMES.obsidian) : this.THEMES.obsidian;
+    const fresh = {
+      note: fp ? 'New session · ' + fp.name + ' on ' + fp.host + ' · ' + fp.command : 'New session',
+      noteStyle: 'font-size:11px;color:' + fsch.dim + ';padding-bottom:10px',
+      prompt: fp && fp.id === 'pwsh' ? 'PS ' + fp.dir + '>' : (fp ? fp.dir + ' ❯' : '❯'),
+      promptStyle: 'color:' + fsch.accent,
+      caretStyle: 'display:inline-block;width:' + (fp && this.pval(fp.id, 'cursor').v === 'bar' ? 2 : 8) +
+        'px;height:16px;background:' + fsch.accent + ';animation:zcaret 1.1s step-end infinite',
+      bodyStyle: 'flex:1;padding:18px 22px;font-family:JetBrains Mono,monospace;font-size:' +
+        (fp ? Math.max(12, this.pval(fp.id, 'size').v) : 12.5) + 'px;line-height:1.62;background:' +
+        fsch.bg + ';color:' + fsch.fg
+    };
+
+    const shape = this.val('cursor.shape');
+    const cursorPreview = shape === 'block'
+      ? 'display:inline-block;width:8px;height:15px;background:#6ea8ff'
+      : shape === 'underline'
+        ? 'display:inline-block;width:9px;height:2px;background:#6ea8ff;margin-top:12px'
+        : 'display:inline-block;width:2px;height:15px;background:#6ea8ff';
+
+    const list = [
+      ['tabsH', 'Tabs'], ['tabsV', 'Vertical'], ['split', 'Split'],
+      ['profiles', 'Profiles'], ['settings', 'Settings'],
+      ['palette', 'Palette'], ['fleet', 'Fleet'], ['themes', 'Themes'], ['mobile', 'Mobile']
+    ];
+    const paneTab = { split: 2, profiles: 100, settings: 101 };
+    const screens = list.map(([id, label]) => {
+      // Exactly one pill is lit: a full-screen view wins, otherwise the open pane.
+      const full = screen === 'fleet' || screen === 'themes' || screen === 'mobile';
+      const on = id in paneTab
+        ? !full && tab === paneTab[id]
+        : (full || screen === 'palette' ? screen === id : screen === id && tab < 2);
+      return {
+        label,
+        onSelect: id in paneTab
+          // Restore an app layout too: a pane cannot show while the window is
+          // replaced by a full-screen view.
+          ? () => this.setState({
+            tab: paneTab[id], palette: false,
+            screen: screen === 'tabsV' ? 'tabsV' : 'tabsH'
+          })
+          : (id === 'tabsH' || id === 'tabsV'
+            ? () => this.setState({ screen: id, tab: 0, palette: false })
+            : this.go(id)),
         style: 'padding:0 13px;height:30px;display:flex;align-items:center;border-radius:8px;font-size:12px;cursor:pointer;user-select:none;background:' +
           (on ? '#16203a' : 'transparent') + ';color:' + (on ? '#6ea8ff' : '#8b93a7')
       };
@@ -685,8 +2431,65 @@ class Component extends DCLogic {
       isThemes: screen === 'themes',
       isMobile: screen === 'mobile',
       isBlocks: isApp && activeTab === 0,
+      isFresh: isApp && activeTab >= 3 && activeTab < 100,
+      fresh: fresh,
       isLog: isApp && activeTab === 1,
       isSplit: isApp && activeTab === 2,
+      isSettings: isApp && activeTab === 101,
+      isProfiles: isApp && activeTab === 100,
+      plist, launchers, profilesTab, pv: this.profileVals(),
+      newTabOpen: this.state.newTabOpen,
+      toggleNewTab: () => this.setState(s => ({ newTabOpen: !s.newTabOpen })),
+      // The + is the default profile; the caret is everything else.
+      newDefault: () => {
+        const d = this.PROFILES[1];
+        this.setState(st => ({
+          newTabOpen: false,
+          extraTabs: [...st.extraTabs, {
+            title: d.name, host: d.host, cwd: d.dir, dot: this.pval(d.id, 'color').v,
+            glyph: this.pval(d.id, 'icon').v, age: 'now', pid: d.id
+          }],
+          tab: 3 + st.extraTabs.length
+        }));
+      },
+      // One control, two halves: same fill, same ink, one divider between them.
+      // Box is centred on the chips; the + glyph's ink rides low in its em box, so nudge it up.
+      newDefaultStyle: 'width:32px;height:30px;display:flex;align-items:center;justify-content:center;' +
+        'padding-bottom:3px;box-sizing:border-box;' +
+        'border-radius:8px;font-size:22px;cursor:pointer;user-select:none;line-height:1;color:' +
+        (this.state.newTabOpen ? '#6ea8ff' : '#8b93a7') + ';background:' + (this.state.newTabOpen ? '#161d33' : 'transparent'),
+      menuProfilesStyle: 'display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;cursor:pointer;color:' +
+        (activeTab === 100 ? '#6ea8ff' : '#8b93a7') + ';background:' + (activeTab === 100 ? '#16203a' : 'transparent'),
+      menuSettingsStyle: 'display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;cursor:pointer;color:' +
+        (activeTab === 101 ? '#6ea8ff' : '#8b93a7') + ';background:' + (activeTab === 101 ? '#16203a' : 'transparent'),
+      // Picking a host is the fleet directory's job, so send them there.
+      pickHost: () => this.setState({ newTabOpen: false, screen: 'fleet' }),
+
+      w, cats, catLabel: cat, catKey: catRow[1], catLede: catRow[2],
+      catText: cat === 'Text',
+      catAppearance: cat === 'Appearance',
+      catWindow: cat === 'Window',
+      catTabs: cat === 'Tabs',
+      catShell: cat === 'Shell',
+      catScrolling: cat === 'Scrolling',
+      catCursor: cat === 'Cursor',
+      catMotion: cat === 'Motion',
+      catProfiles: cat === 'Profiles',
+      catUnknown: cat === 'Unknown keys',
+      backdropOpen: this.state.menu === 'window.backdrop',
+      backdropMenuStyle: 'position:absolute;right:0;width:288px;padding:6px;border-radius:11px;background:#121829;' +
+        'border:1px solid #2a3350;box-shadow:0 18px 44px rgba(0,0,0,.6);z-index:20;display:flex;flex-direction:column;gap:1px;' +
+        (this.state.menuUp ? 'bottom:36px' : 'top:36px'),
+      needsRestart: 'window.custom_chrome' in this.state.vals,
+      cursorPreview: cursorPreview,
+      modifiedNote: modified === 0
+        ? 'Everything is at its default'
+        : modified + (modified === 1 ? ' setting differs' : ' settings differ') + ' from the defaults — click a dot to reset',
+      openSettings: () => this.setState({ tab: 101 }),
+      settingsRowStyle: 'display:flex;align-items:center;gap:9px;padding:8px;border-radius:8px;cursor:pointer;color:' +
+        (activeTab === 101 ? '#6ea8ff' : '#8b93a7') + ';background:' + (activeTab === 101 ? '#16203a' : 'transparent'),
+      profilesRowStyle: 'display:flex;align-items:center;gap:9px;padding:8px;border-radius:8px;cursor:pointer;color:' +
+        (activeTab === 100 ? '#6ea8ff' : '#8b93a7') + ';background:' + (activeTab === 100 ? '#16203a' : 'transparent'),
       palette,
       folded,
       foldGlyph: folded ? '▾' : '▸',
@@ -696,8 +2499,8 @@ class Component extends DCLogic {
       goTabsV: this.go('tabsV'),
       goTabsH: this.go('tabsH'),
       goFleet: this.go('fleet'),
-      htabs, vtabs, screens,
-      showStatus: this.props.showStatus ?? true
+      goThemes: this.go('themes'),
+      htabs, vtabs, screens, settingsTab, hostGroups, active
     };
   }
 }
