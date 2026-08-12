@@ -3514,6 +3514,7 @@ impl App {
                     exit_label,
                     running_label,
                     folded: is_folded,
+                    foldable: block_actions::fold_range(b).is_some(),
                     folded_lines: b
                         .end_line
                         .map_or(0, |e| (e + 1).saturating_sub(out_line) as usize),

@@ -325,7 +325,13 @@ impl Session {
         // difference from. Asking about `acked` -- which lags by however long a
         // round trip takes -- would push a busy session past the keyframe
         // threshold and turn every frame into a full repaint.
-        let out = if sub.needs_keyframe {
+        // A delta can add and update blocks, never remove one. Eviction is
+        // silently absent on purpose -- a client keeping more history than the
+        // host should keep it -- but destruction is not eviction: `cls` erases
+        // the rows a block described, and a client left holding it paints a
+        // stale header over the row the user is typing on. Resync instead. The
+        // whole screen just changed, so a keyframe costs nothing extra.
+        let out = if sub.needs_keyframe || sub.encoder.blocks_need_keyframe(term.blocks()) {
             sub.needs_keyframe = false;
             Update::Keyframe(sub.encoder.keyframe(term.grid(), cursor, modes, &title, term.blocks()))
         } else {

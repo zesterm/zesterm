@@ -346,6 +346,15 @@ export interface Keyframe {
   readonly modes: number;
   /** Every block the host holds — a keyframe replaces, a delta upserts. */
   readonly blocks: readonly BlockPayload[];
+  /**
+   * The id from which `blocks` is authoritative.
+   *
+   * Rises past what scrollback eviction took, which a client keeping longer
+   * history is entitled to keep; falls to what a screen clear destroyed, which
+   * it must drop. `0` from a host that predates it, which replaces wholesale —
+   * what this client already did.
+   */
+  readonly blocks_from: number;
   /** The session's title at this instant; `''` from a host that predates it. */
   readonly title: string;
 }
@@ -525,6 +534,8 @@ export function parseHostMessage(v: unknown): HostMessage {
           o['blocks'] === undefined
             ? []
             : arr(o['blocks'], 'keyframe.blocks').map(parseBlockPayload),
+        blocks_from:
+          o['blocks_from'] === undefined ? 0 : num(o['blocks_from'], 'keyframe.blocks_from'),
         title: o['title'] === undefined ? '' : str(o['title'], 'keyframe.title'),
       };
     case 'update':

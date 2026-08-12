@@ -98,6 +98,13 @@ impl Applier {
 
         // Blocks after the rows, always: they name absolute line ids, and
         // `sync_lines` above is what makes this grid's numbering the host's.
+        //
+        // Trim first: a keyframe is a complete state from `blocks_from` up, so
+        // anything the client holds there that the host no longer has is gone
+        // rather than merely unchanged. Upserting alone could never express a
+        // removal, and a block destroyed by `cls` stayed on the client for
+        // ever, painting a stale header over the live prompt.
+        term.remote().drop_blocks_from(zest_core::BlockId(k.blocks_from));
         for b in &k.blocks {
             term.remote().upsert_block(b.to_block());
         }
@@ -377,6 +384,81 @@ mod tests {
                 "{why}\nclient:\n{}\nhost:\n{}",
                 self.client.screen_text(),
                 self.host.screen_text()
+            );
+        }
+    }
+
+    #[test]
+    fn a_block_the_host_destroyed_leaves_the_client_too() {
+        // The half that made this bug survive the host-side fix: the window is
+        // a client of its own daemon, so a block dropped on the host was still
+        // drawn in the window. `diff_blocks` cannot say "removed" and the
+        // applier only upserted, so even a keyframe left the stale block --
+        // and a stale block with an `output_line` outranks the live prompt in
+        // the header pass, which is the opaque band over the row being typed.
+        let mut p = Pair::new(20, 4);
+        p.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\nout\r\n\x1b]133;D;0\x07");
+        assert_eq!(p.client.blocks().blocks().len(), 1, "the block crossed");
+
+        // Advance the host alone, then ask -- the order the daemon uses, and
+        // it has to be that way round: `diff_blocks` overwrites the encoder's
+        // shadow, so a predicate consulted after encoding a delta has already
+        // lost the evidence.
+        p.host.advance(b"\x1b[2J\x1b[H");
+        assert!(p.host.blocks().blocks().is_empty(), "the host dropped what it erased");
+        assert!(
+            p.enc.blocks_need_keyframe(p.host.blocks()),
+            "the encoder must ask for a resync when a block is destroyed"
+        );
+
+        p.feed(b"");
+        assert_eq!(
+            p.client.blocks().blocks().len(),
+            1,
+            "a delta cannot express a removal -- this is why a keyframe is forced"
+        );
+
+        let k = p.enc.keyframe(p.host.grid(), cursor(), p.host.modes(), "", p.host.blocks());
+        p.seq += 1;
+        p.app.apply_keyframe(&mut p.client, &k, p.seq);
+        assert!(p.client.blocks().blocks().is_empty(), "the keyframe carried the removal");
+    }
+
+    #[test]
+    fn a_clear_removes_only_what_it_erased_from_the_client() {
+        // The floor is a boundary, not a reset: the command whose output is
+        // already in scrollback was not erased and must survive on both sides.
+        let mut p = Pair::new(20, 3);
+        p.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07old\x1b]133;C\x07\r\nout\r\n\x1b]133;D;0\x07");
+        for _ in 0..6 {
+            p.feed(b"filler\r\n");
+        }
+        p.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07new\x1b]133;C\x07\r\nout\r\n\x1b]133;D;0\x07");
+        assert_eq!(p.client.blocks().blocks().len(), 2, "both commands crossed");
+
+        p.host.advance(b"\x1b[2J\x1b[H");
+        let k = p.enc.keyframe(p.host.grid(), cursor(), p.host.modes(), "", p.host.blocks());
+        p.seq += 1;
+        p.app.apply_keyframe(&mut p.client, &k, p.seq);
+
+        let kept: Vec<&str> =
+            p.client.blocks().blocks().iter().map(|b| b.command.as_str()).collect();
+        assert_eq!(kept, ["old"], "only the erased block goes");
+    }
+
+    #[test]
+    fn eviction_alone_never_forces_a_keyframe() {
+        // The distinction the predicate has to make. Blocks falling off the
+        // oldest end are deliberately silent -- a client configured to keep
+        // more history than the host keeps it -- so a trim from the front must
+        // not cost a full repaint on a long-lived session.
+        let mut p = Pair::new(20, 3);
+        for i in 0..30 {
+            p.feed(format!("\x1b]133;A\x07$ \x1b]133;B\x07c{i}\x1b]133;C\x07\r\n").as_bytes());
+            p.feed(format!("out {i}\r\n\x1b]133;D;0\x07").as_bytes());
+            assert!(
+                !p.enc.blocks_need_keyframe(p.host.blocks()),
+                "step {i}: ordinary command traffic must not force a keyframe"
             );
         }
     }

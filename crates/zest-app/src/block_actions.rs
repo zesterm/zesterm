@@ -20,6 +20,21 @@
 
 use zest_core::{AbsPos, Block, LineId, Selection, SelectionMode, Terminal};
 
+/// The rows a fold would hide, or `None` when there is nothing to hide.
+///
+/// The single definition of "this block can be folded". The header pass draws
+/// its chevron from the same answer, so an affordance can never be offered
+/// that the fold then declines — which is what a command that printed nothing
+/// (`cd ..`) and every still-running command used to get.
+///
+/// Inclusive: the parser already adjusted `D` back onto the last output row, so
+/// a one-line output has `e == o` and still folds.
+#[must_use]
+pub fn fold_range(b: &Block) -> Option<(LineId, LineId)> {
+    let (o, e) = (b.output_line?, b.end_line?);
+    (e >= o).then_some((o, e + 1))
+}
+
 /// The fold view: for each visual row, the absolute storage index the
 /// renderer should draw there (`usize::MAX` = blank filler at the top when
 /// history ran out), or `None` when nothing folded is in play — the everyday
@@ -41,13 +56,7 @@ pub fn fold_row_map(
         .blocks()
         .iter()
         .filter(|b| folded.contains(&b.id.0))
-        .filter_map(|b| {
-            let o = b.output_line?;
-            let e = b.end_line?;
-            // Inclusive: the parser already adjusted `D` back onto the last
-            // output row, so a one-line output has `e == o` and still folds.
-            (e >= o).then_some((o, e + 1))
-        })
+        .filter_map(fold_range)
         .collect();
     if ranges.is_empty() {
         return None;
@@ -66,10 +75,15 @@ pub fn fold_row_map(
         }
         i -= 1;
     }
+    // Reverse first, then pad. Padding before the reverse put the blank filler
+    // at the *top*, so when a fold outran the history there was nothing to pull
+    // in with, the surviving rows sank by exactly the number of lines hidden --
+    // fold the only command in a fresh session and its header landed on the
+    // last rows of an empty screen. A terminal fills from the top.
+    picked.reverse();
     while picked.len() < rows {
         picked.push(usize::MAX);
     }
-    picked.reverse();
     Some(picked)
 }
 
@@ -203,6 +217,26 @@ mod tests {
 
         // And with nothing folded, no map at all: the fast path stays free.
         assert!(fold_row_map(&t, &std::collections::BTreeSet::new()).is_none());
+    }
+
+    #[test]
+    fn a_fold_that_outruns_history_leaves_its_blank_rows_at_the_bottom() {
+        // Filler was pushed before the reverse, so it landed at the *top* and
+        // the surviving rows sank by exactly the number of lines hidden: fold
+        // the only command in a fresh session and the header ends up on the
+        // last rows of an otherwise empty screen. A terminal fills from the
+        // top; blank space belongs below the prompt, not above the first block.
+        let t = session();
+        let finished = t.blocks().blocks()[0].clone();
+        let folded = std::collections::BTreeSet::from([finished.id.0]);
+        let map = fold_row_map(&t, &folded).expect("a fold produces a map");
+
+        assert_ne!(map[0], usize::MAX, "the first visual row must hold content");
+        let first_blank = map.iter().position(|&i| i == usize::MAX).unwrap_or(map.len());
+        assert!(
+            map[first_blank..].iter().all(|&i| i == usize::MAX),
+            "blank filler must be one trailing run, got {map:?}"
+        );
     }
 
     #[test]

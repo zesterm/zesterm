@@ -311,6 +311,7 @@ impl DaemonClient {
                     cursor,
                     modes,
                     blocks,
+                    blocks_from,
                     title,
                     ..
                 } => {
@@ -324,6 +325,7 @@ impl DaemonClient {
                             cursor,
                             modes: zest_core::Modes::from_bits_truncate(modes),
                             blocks,
+                            blocks_from,
                             title,
                         },
                     ));
