@@ -29,9 +29,10 @@ import { resolveTerminalPalette, type Theme } from '@zesterm/theme';
 import type { SessionEntry } from '@zesterm/control';
 
 import { wsDial } from '../ws-dial.ts';
+import { MONO_FAMILY } from '../chrome-model.ts';
 import { currentTheme, themeStore } from '../state/theme.ts';
+import type { LinkState } from '../state/tabs.ts';
 
-const FONT_FAMILY = 'ui-monospace, "SF Mono", Menlo, Consolas, monospace';
 const FONT_SIZE = 13;
 
 export const TerminalView = component<{
@@ -39,14 +40,16 @@ export const TerminalView = component<{
   dataPlaneUrl: string;
   signer: ClientSigner;
   theme: Theme;
-  onBack?: () => void;
+  /** The tab chip owns the visible title now; this is how it learns it. */
+  onTitle?: (title: string) => void;
+  /** Link health surfaces on the tab, not on a status bar the design removed. */
+  onLink?: (link: LinkState) => void;
 }>((ctx) => {
   const { entry, dataPlaneUrl, signer, theme } = ctx.props;
 
-  const status = signal<{ state: ConnectionState; exited: number | null | false; title: string }>({
+  const status = signal<{ state: ConnectionState; exited: number | null | false }>({
     state: { phase: 'connecting' },
     exited: false,
-    title: entry.title,
   });
   const blocks = signal<{ list: readonly BlockPayload[] }>({ list: [] });
 
@@ -108,7 +111,7 @@ export const TerminalView = component<{
     if (!ctx2d) return;
 
     const dpr = window.devicePixelRatio || 1;
-    const m = measureMetrics(ctx2d, FONT_FAMILY, FONT_SIZE, dpr);
+    const m = measureMetrics(ctx2d, MONO_FAMILY, FONT_SIZE, dpr);
     metrics = m;
     // currentTheme, not the prop: the prop is `store.theme` captured once at
     // boot, so a view mounted after a setTheme would paint the grid in the
@@ -147,12 +150,17 @@ export const TerminalView = component<{
           blocks.list = client ? [...client.grid.blocks] : [];
         },
         onTitle: (title) => {
-          status.title = title;
           document.title = title === '' ? 'zesterm' : `${title} — zesterm`;
+          ctx.props.onTitle?.(title);
         },
         onConnection: (state) => {
           status.state = state;
-          if (state.phase === 'connected') schedulePaint('all');
+          if (state.phase === 'connected') {
+            schedulePaint('all');
+            ctx.props.onLink?.('live');
+          } else if (state.phase === 'reconnecting') {
+            ctx.props.onLink?.('reconnecting');
+          }
         },
         onExited: (code) => {
           status.exited = code;
@@ -282,16 +290,6 @@ export const TerminalView = component<{
 
   return () => (
     <div class="terminal-view">
-      <header class="term-header">
-        <button class="back" onClick={() => ctx.props.onBack?.()}>
-          ← sessions
-        </button>
-        <span class="term-title">{status.title === '' ? 'shell' : status.title}</span>
-        {banner(status.state, status.exited) !== null ? (
-          <span class="term-banner">{banner(status.state, status.exited)}</span>
-        ) : null}
-      </header>
-
       <div
         class="term-wrap"
         ref={(el: HTMLElement) => {
@@ -304,6 +302,12 @@ export const TerminalView = component<{
           setTimeout(() => inputEl?.focus(), 0);
         }}
       >
+        {/* The header row this used to carry belongs to the tab chrome now;
+            connection state keeps a small overlay so a reconnect is never
+            silent inside a pane. */}
+        {banner(status.state, status.exited) !== null ? (
+          <div class="term-banner">{banner(status.state, status.exited)}</div>
+        ) : null}
         <canvas
           ref={(el: HTMLCanvasElement) => {
             canvas = el;

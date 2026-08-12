@@ -84,6 +84,12 @@ export function routerPlugin(ctx: AppContext) {
       { path: '/login', component: LoginRoute, beforeEnter: skipIfSignedIn(ctx) },
       { path: '/hosts', component: FleetRoute, beforeEnter: gate },
       { path: '/h/:hostId', component: FleetRoute, beforeEnter: gate },
+      // Mounts the shell with that session's tab active: the shell reads the
+      // params itself (useParams is reactive) and activates — or opens from
+      // the directory — the named tab. The reverse arrow is the shell's:
+      // activating a tab navigates here, so the URL is an EFFECT of
+      // activation and the route only ever feeds activation, never a
+      // navigation of its own — one direction each way, no loop.
       { path: '/h/:hostId/s/:sessionId', component: FleetRoute, beforeEnter: gate },
       // Unknown paths must not quietly render the session list: the Worker's
       // asset fallback serves index.html for *any* path, so a typo arrives
