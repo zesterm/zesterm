@@ -1357,6 +1357,20 @@ is now unblocked and building.
       per §4: reconnecting dims the body and appends the overlay, an open
       running block reads interrupted; 'stalled' is modelled but has no
       producer until delta-silence detection lands.
+- [x] **The fleet is a card grid, and the themes get a gallery** (#158) — the
+      design README's §7–§8 in DOM (docs/design/client-ui/README.md carries the
+      measurements). Host cards render from a pure `fleet-model` view-model
+      whose rule the tests pin: absent fields are omitted, never faked — the
+      registry carries enrolment facts only, so path/latency and the tunnel
+      pill stay #148, wake-over-LAN stays #146, a session count appears only
+      when something real supplies one, and the key row is the enrolled public
+      key itself (ADR-006), head+tail truncated. `/themes` renders the five
+      built-ins as live previews in each theme's OWN colours — the one place
+      inline colour is correct, because a preview painted in the page theme
+      previews nothing — over a swatch strip read from `resolveTerminalPalette`
+      in index order, never re-typed; clicking calls the theme store (#133) and
+      the active ring follows the theme actually applied. No import card
+      (#147); a nav affordance to reach `/themes` is still open.
 - [ ] Local echo prediction for high-latency links (mosh's other trick): predict
       printable-char echo when not in alt-screen, render dim, reconcile on delta
       arrival. The largest perceived-latency win available.
