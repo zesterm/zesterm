@@ -309,6 +309,32 @@ impl Gate {
         if let Some(wait) = self.limiter.blocked(key) {
             return Err(Refused::Cooling(wait));
         }
+        self.take_slot()
+    }
+
+    /// Take a slot for a connection with **no peer to rate-limit**, or say why
+    /// not.
+    ///
+    /// The relay's dial-back is the only caller and the only shape this fits:
+    /// the daemon opens the socket *outbound* because a room told it to, so
+    /// there is no accepted address at all, and the one address there is —
+    /// the relay's own edge — is the address every device in every fleet
+    /// arrives from. Keying the limiter on it is the hazard [`PeerKey`] already
+    /// describes in full: one hostile peer would take that key to
+    /// [`MAX_FAILURES`] and deny every other device for [`COOLDOWN`], over and
+    /// over, at no cost to itself.
+    ///
+    /// So the cap is applied and the limiter is not, and that is a **stated
+    /// gap rather than a solved problem**: a relayed peer gets unlimited
+    /// pairing-code guesses as far as this daemon is concerned, bounded only by
+    /// [`MAX_UNAUTHENTICATED`] concurrency and by whatever the relay itself
+    /// refuses. Closing it needs a key the *peer* owns — its attach ticket —
+    /// which the daemon does not see today, exactly as [`PeerKey::Relay`] says.
+    pub fn admit_relayed(&self) -> Result<Countdown, Refused> {
+        self.take_slot()
+    }
+
+    fn take_slot(&self) -> Result<Countdown, Refused> {
         // One bounded increment, not load-then-add. The separate check was
         // inherited from the per-listener version and was already racy there;
         // it matters more now that one budget of 32 is shared by every
@@ -434,7 +460,7 @@ pub(crate) struct Severable {
 impl Severable {
     /// Arm the poll and take ownership. Fails only if the socket cannot carry
     /// a timeout, in which case the caller has no cuttable connection.
-    fn new(sock: TcpStream) -> std::io::Result<Self> {
+    pub(crate) fn new(sock: TcpStream) -> std::io::Result<Self> {
         sock.set_read_timeout(Some(READ_POLL))?;
         Ok(Self {
             sock,
@@ -447,7 +473,7 @@ impl Severable {
     ///
     /// A separate socket handle because the one the reader owns is parked in
     /// `read` at exactly the moment this is used.
-    fn scissors(&self) -> std::io::Result<Scissors> {
+    pub(crate) fn scissors(&self) -> std::io::Result<Scissors> {
         Ok(Scissors {
             sock: self.sock.try_clone()?,
             severed: Arc::clone(&self.severed),
@@ -582,7 +608,7 @@ impl Cut for Scissors {
 /// The signal it needs is "the handshake completed", which only the
 /// `Connection` knows. `armed` is shared with the watching thread and cleared
 /// by [`Handshake::completed`] the moment the gate opens.
-struct Watchdog {
+pub(crate) struct Watchdog {
     /// Cleared when the handshake completes. Read by the watching thread.
     armed: Arc<AtomicBool>,
     /// Kept beyond the watching thread so a completed handshake can call
@@ -620,7 +646,7 @@ impl Watchdog {
         }
     }
 
-    fn start_with(cut: Arc<dyn Cut>, timeout: Duration) -> Self {
+    pub(crate) fn start_with(cut: Arc<dyn Cut>, timeout: Duration) -> Self {
         let mut this = Self::unwatched(timeout);
         this.cut = Some(Arc::clone(&cut));
         let armed = Arc::clone(&this.armed);
@@ -653,7 +679,7 @@ impl Watchdog {
     }
 
     /// A handle the connection disarms when its handshake completes.
-    fn handle(&self) -> WatchdogHandle {
+    pub(crate) fn handle(&self) -> WatchdogHandle {
         WatchdogHandle {
             armed: Arc::clone(&self.armed),
             deadline: Arc::clone(&self.deadline),
@@ -670,7 +696,7 @@ impl Watchdog {
     /// ten seconds turned every daemon log into a scroll of warnings about
     /// nothing. The warning now means the one thing worth warning about: a
     /// live connection was cut.
-    fn disarm(&self) {
+    pub(crate) fn disarm(&self) {
         self.armed.store(false, Ordering::Release);
     }
 

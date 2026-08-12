@@ -58,6 +58,7 @@ fn host() -> Host {
         listen_ws: true,
         ws_bind: "127.0.0.1".into(),
         ws_port: addr.port(),
+        relay: None,
         shell_integration: true,
         min_delta_interval: std::time::Duration::ZERO,
     };

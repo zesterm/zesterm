@@ -407,7 +407,12 @@ zest-daemon --socket-path                      # where this user's daemon listen
 zest-daemon --socket <path>                    # serve this machine's terminals
 zest-daemon --listen-lan                       # serve other machines too (off by default)
 zest-daemon --listen-ws                        # serve browsers over WebSocket (off by default, port 7718)
+zest-daemon --relay <url>                      # dial a relay so this machine is reachable from
+                                               #   anywhere, opening no port (off by default).
+                                               #   wss://host, or http://127.0.0.1:8787 for a relay
+                                               #   on this machine — plaintext is loopback-only
 zest-daemon --min-delta-interval <ms>          # coalescing floor; 0 (off) unless the transport asks
+                                               #   (--relay sets 30ms per pipe)
 zest-daemon --identity                         # this host's public key
 zest-daemon --trusted                          # which devices are paired
 zest-daemon --ephemeral                        # throwaway key, for the edit-run loop
@@ -531,6 +536,29 @@ Each of these cost real time and is documented where it bites:
   on every platform while the server's own reader is still parked. Assert on the
   side that has to wake up. (#99.)
 
+  **Both cases measured, because a rig hides the difference completely.** What
+  the *peer* does when you cut decides what you observe, and the two answers are
+  indistinguishable in a log (Windows 11 26220, #126):
+
+  | the peer, when your `shutdown` reaches it | reader with no poll | reader with the poll armed |
+  |---|---|---|
+  | stays up and says nothing | **parked for ever** | wakes at the next poll boundary |
+  | closes its half, sending a FIN back | wakes in 0.3ms | wakes in 0.3ms |
+
+  Only the top row is your cut working. The bottom one is the peer ending your
+  read — a remote close, which needs no help from anything local and would look
+  identical if `cut` did nothing at all. And the bottom row is the one you get by
+  default: Node, Python and every shell one-liner close on EOF, so a stand-in
+  peer quietly answers the wrong question and answers it green. #126 measured ten
+  clean cycles that way, at millisecond resolution, and concluded the poll was
+  redundant; deleting that one line then left a relay control link parked for
+  ever against a peer that stayed up, which is #99 again. `connected_pair()`
+  holds its `_client` open for exactly this reason — load-bearing, not
+  housekeeping. **So the poll is the mechanism and not a fallback**, and the
+  entry that says otherwise is the one somebody deletes as redundant. Cross the
+  two cases before believing either:
+  `cargo run -p zest-cloud --example shutdown_probe`.
+
   Two more edges, both measured on this box rather than reasoned about:
   - **A read timeout is per *handle* on Windows, not per socket.** A
     `try_clone`d handle inherits the value at the moment it is duplicated and is
@@ -545,6 +573,12 @@ Each of these cost real time and is documented where it bites:
     end-of-stream, or the log grows spurious errors for the watchdog doing its
     job and the test has to accept two answers. In `tls.rs` that failure was
     also *latched*, poisoning the writer along with it. (#101.)
+
+    Two orderings, one arm each, and **only one of them has ever been observed**:
+    #101 measured this one — a read issued *after* the cut — while every cut in
+    #126 landed on a reader already parked, which comes back as a clean end of
+    stream. A run that exercises one arm says nothing about the other, so the
+    `ConnectionAborted` arm is held by that single measurement and by reading.
 - **On macOS, `TIOCSWINSZ` on the pty master fails with `ENOTTY` until the slave
   has been opened once.** Setting the initial size right after `unlockpt` — the
   obvious place, and what Linux accepts — therefore fails with an error saying
@@ -772,6 +806,26 @@ Each of these cost real time and is documented where it bites:
   quietly fatal inside a polling loop, where the empty result is
   indistinguishable from "the job hasn't finished yet" and the loop waits out
   its timeout reporting nothing. Use `gh … --jq` / `-q`, which is gh's own.
+- **rustls refuses a `CA:TRUE` certificate as an end-entity, and the error names
+  the extension rather than the mistake.** Putting a TLS terminator in front of
+  something locally, the one-liner everybody reaches for — self-sign with
+  `basicConstraints=critical,CA:TRUE`, install it, serve it — fails the dial
+  with `invalid peer certificate: Other(OtherError(ExtensionValueInvalid))`,
+  which reads as a malformed extension *value* and actually means "this is a CA
+  and you served it as a server". `curl` and every browser accept the same
+  certificate, so the natural next suspect is the Rust client. rustls is right:
+  a chain wants a CA in the trust store and a **leaf** signed by it, `CA:FALSE`,
+  `serverAuth`, with the SAN. Sign the leaf with the CA already installed and no
+  second trust prompt is needed — which matters, because:
+- **Windows will not let a non-interactive shell add *or remove* a root
+  certificate.** `Import-Certificate -CertStoreLocation Cert:\CurrentUser\Root`
+  fails with `UI is not allowed in this operation.`, and the `Remove-Item` that
+  undoes it fails with `The operation is on user root store and UI is not
+  allowed.` The protected-root dialog cannot be suppressed in either direction,
+  so anything needing a locally-trusted CA needs a human at the keyboard twice —
+  once to trust it, once to clean up. It cannot be scripted into CI, and an
+  attempt that gets halfway leaves the certificate installed. (Both from #126,
+  standing a `wss://` relay up on loopback to exercise `TlsDuplex` on Winsock.)
 
 ## Related work on this machine
 

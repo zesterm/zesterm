@@ -166,57 +166,109 @@ without the override.
 Sign-in locally also needs the **second** OAuth app: a GitHub OAuth app accepts
 exactly one callback URL, so production cannot also serve `localhost`.
 
-## Seeing the relay work, without a daemon that can dial it
+## Seeing the relay work
 
-The daemon's outbound leg is the one piece of the relay path with no Rust yet,
-so two scripts stand in for the ends and everything between them is real: a real
-Durable Object under workerd, a real attach ticket, real `zest-proto` framing,
-and the ADR-008 sealed channel the relay cannot read.
+The daemon dials the relay itself now — `zest-daemon --relay <url>`,
+`crates/zest-daemon/src/relay.rs` — so `fake-host.mjs` is no longer the only
+way to park a control link. It stays, because a stand-in for one end is how you
+find out which end is wrong; but the run below is the real one.
 
-**Run the scripts from `cloud/packages/relay`, not from the repo root.** They
-import `@noble/ed25519`, which pnpm installs into that package — from anywhere
-else Node resolves nothing and the failure names the package rather than the
-cwd. This block said otherwise until someone ran it.
+```sh
+# 0. the relay's own secret — without it every control link is refused
+cp cloud/packages/relay/.dev.vars.example cloud/packages/relay/.dev.vars
+
+# 1. the relay Worker, under a real runtime
+pnpm -C cloud --filter @zesterm/relay-worker exec wrangler dev --port 8787
+
+# 2. the daemon, dialling out. `http://` is accepted for loopback only.
+./target/fast/zest-daemon --ephemeral --relay http://127.0.0.1:8787
+
+# 3. the browser's half: mints a ticket and attaches
+node cloud/packages/relay/tools/fake-browser.mjs \
+  --ticket-seed <64 lowercase hex> --host <the daemon's host id>
+```
+
+**Step 0 is not optional and its failure names nothing.** `RELAY_SIGNING_KEY` is
+the relay's own Ed25519 seed; with no `.dev.vars` the daemon dials, is
+challenged, and is refused `unconfigured` — the Worker behaving correctly
+(`room.ts` refuses rather than failing to start, deliberately), but a code that
+is neither `unknown-host` nor documented anywhere a person is looking. It is
+gitignored, so a machine that has run this before has one and never had to be
+told. `TICKET_PUBLIC_KEYS` matters only once a browser attaches; the control
+link needs the seed alone.
+
+On Windows, if a real `zesterm` is running, give the test daemon its own socket.
+Both want `\\.\pipe\zesterm-<user>` and the loser exits with
+`could not listen error=transport failed: Access is denied. (os error 5)`, which
+reads as a permissions problem rather than a name already taken:
+
+```powershell
+.\target\fast\zest-daemon.exe --ephemeral --socket \\.\pipe\zesterm-relaytest `
+  --relay http://127.0.0.1:8787
+```
+
+`--ephemeral` mints a fresh key every start, so the `hosts` row has to name
+whatever *this* run's id is. The daemon logs only the short form; the full 64
+hex is in the request the Worker saw, which `wrangler dev` will hand back:
+
+```sh
+curl -s -X POST http://localhost:8787/cdn-cgi/local/explorer/api/local/observability/query \
+  -H 'Content-Type: application/json' \
+  -d '{"sql":"SELECT json(attributes) FROM spans WHERE parent_id IS NULL ORDER BY rowid DESC LIMIT 1"}'
+```
+
+Until that row exists the relay answers `unknown-host` and the daemon redials on
+a growing delay, which is the correct behaviour and looks exactly like a bug if
+nobody says so. Insert the row and the next redial parks.
+
+### What the first `zest-proto` handshake over the relay proved
+
+Run on 2026-08-12, against `wrangler dev` on this Mac. Every layer real except
+the browser, which was a Rust client presenting a genuine minted ticket:
+
+```
+[daemon] the relay control link is parked            host=77eb1ca9
+[daemon] a relay pipe is up; serving it              remote=relay ws://127.0.0.1:8787 pipe ac55309d
+[daemon] pair "live-probe" (c811d122) from relay ws://127.0.0.1:8787 pipe ac55309d?
+[client] WELCOME from "Mac"  ·  ListSessions -> 0  ·  created session 77eb1ca9:1
+```
+
+So: a signature the Worker's `helloSignatureIsValid` accepted, a real D1
+`hosts` lookup, an attach ticket verified at the edge and spent in the object,
+an `open` down the parked link, a **second** socket dialled back for that pipe
+alone, and inside it the whole `zest-proto` handshake — including the ADR-008
+sealed channel, a pairing approval, and a PTY spawned on the host.
+
+Two things that run did *not* prove, and both are worth keeping in view. It was
+one machine and loopback, so it says nothing about TLS to the real edge, about
+two genuinely separate networks, or about the hibernation the cost model rests
+on. And the pairing prompt named the relay in the `remote` field, which is
+right — but a person approving a device still cannot tell *which* device, and
+`PeerKey::Relay` is still not a key anything is limited by.
+
+### The old way, with both ends stood in for
+
+Still the fastest way to isolate a failure to one end, and it needs no Rust at
+all:
+
+**From `cloud/packages/relay`, not the repo root** — the tools import
+`@noble/ed25519`, which pnpm installs into that package, and from anywhere else
+Node resolves nothing and names the package rather than the directory.
 
 ```sh
 cd cloud/packages/relay
-pnpm -C ../.. install                       # once: the tools need @noble/ed25519
-
-# The Worker needs both secrets, and `--public` prints the half it checks.
-node tools/fake-browser.mjs --ticket-seed <64 lowercase hex> --public   # -> TICKET_PUBLIC_KEYS
-cat > .dev.vars <<'EOF'
-TICKET_PUBLIC_KEYS="<the printed key>"
-RELAY_SIGNING_KEY="<any 64 hex>"
-EOF
-
-# The room checks `hosts` before it parks a control link, so the id must exist.
-pnpm exec wrangler d1 migrations apply zesterm --local
-pnpm exec wrangler d1 execute zesterm --local --command \
-  "INSERT INTO users (id,email,display_name,created_at,updated_at)
-     VALUES ('u1','a@b.c','dev',1,1);
-   INSERT INTO hosts (id,user_id,label,platform,enrolled_at)
-     VALUES ('$(node tools/fake-host.mjs --host-id)','u1','fake-host','macos',1);"
-
-# 1. the relay Worker, under a real runtime
-pnpm exec wrangler dev --port 8787 --ip 127.0.0.1
-
-# 2. a real daemon with a WebSocket port for the fake host to reach
 ../../../target/fast/zest-daemon --ephemeral --socket /tmp/zt-e2e.sock \
   --listen-ws --ws-bind 127.0.0.1 --ws-port 7718 --no-prompt
-
-# 3. the daemon's relay leg: parks a control link, dials back on `open`
 node tools/fake-host.mjs --relay http://127.0.0.1:8787 --daemon ws://127.0.0.1:7718
-
-# 4. the browser's half: mints a ticket, attaches, and pushes a framed message
 node tools/fake-browser.mjs --ticket-seed <64 lowercase hex> \
   --host "$(node tools/fake-host.mjs --host-id)" --send 01000000c0
 ```
 
-`--send 01000000c0` is a u32-LE length of 1 followed by MessagePack `nil`: a
-well-framed message the daemon parses, fails to decode as a `ClientMessage`, and
-answers. Sending `deadbeef` instead is also worth doing once — the daemon reads
-it as a 4,022,250,974-byte length prefix and refuses it against `MAX_FRAME`,
-which is the byte path proving itself in the error text.
+`--send 01000000c0` is a u32-LE length of 1 and MessagePack `nil`: a well-framed
+message the daemon parses, fails to decode, and answers. Sending `deadbeef`
+instead is worth doing once — the daemon reads it as a 4,022,250,974-byte length
+prefix and refuses it against `MAX_FRAME`, which is the byte path proving itself
+in an error message.
 
 `--ephemeral` on the daemon is not optional on macOS, and the reason is in
 `AGENTS.md`: the Keychain binds its grant to the *binary* that asked, dev builds
@@ -238,7 +290,6 @@ deployment's shape without ever starting one. That particular gap is now a gate:
 `pnpm -C cloud -r boot` starts both Workers under workerd on every PR. These
 stay tools regardless, because a pipe between two ends is not something a gate
 can stand up.
-Nothing in CI runs them.
 
 ## What the first full run proved, and what it did not
 
