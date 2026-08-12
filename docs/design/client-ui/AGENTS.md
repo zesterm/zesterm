@@ -41,7 +41,7 @@ profiles, settings, fleet, themes, mobile. Read this file first, then `README.md
 
 | File | Screen | Authoritative for |
 |---|---|---|
-| `01-tabs-horizontal.png` | §1 | Title bar, tab chips, `+`, `⌘K` pill, block pane, status bar |
+| `01-tabs-horizontal.png` | §1 | Title bar, tab chips, `+`, `⌘K` pill, block pane |
 | `02-tabs-launcher-menu.png` | §12 / §1 | The `+` launcher menu: profiles, other-host row, Profiles/Settings entries |
 | `03-tabs-vertical.png` | §2 | Full-width header, host-grouped sidebar, search row with its own `+` |
 | `04-split-panes.png` | §5 | Two panes, per-pane host identity, focused-pane treatment |
@@ -63,8 +63,8 @@ These are the things reviews have caught repeatedly. Each is cheap to verify.
    right-aligned except the `⌘K` pill.
 2. **Chips are 34px** tall and hang 1px below the strip floor; the `+` box is centred on the
    chips' centre line, not on the strip.
-3. **A tab chip shows its title only** — host and cwd live in the tooltip, status bar and
-   sidebar. Chips stop shrinking at 104px and the strip scrolls past that.
+3. **A tab chip shows its title only** — host and cwd live in the tooltip and the vertical
+   sidebar and header. Chips stop shrinking at 104px and the strip scrolls past that.
 4. **`+` opens the launcher menu**; there is no caret and no default-only half. The default
    profile is the menu's first row, run by `⏎`.
 5. **In vertical layout the `+` sits right of the search pill**, and its menu opens

@@ -136,10 +136,10 @@ everything shares one atlas (per `docs/CONTRACTS.md`).
 **Title bar** — background `#0d121f`, bottom border 1px `ui.line`.
 - Left: three 11px traffic-light circles, 7px gap, `danger` / `warn` / `success`, 14px right padding. On Windows/Linux this block is replaced by the platform's own buttons on the *right*; the tab strip keeps its left origin either way.
 - Centre: tab strip, 3px gap, bottom-aligned so the active tab's fill meets the pane.
-- **Tab chip:** 34px tall, min 196px / max 240px wide, radius `9px 9px 0 0`, padding `0 11px`, 9px gap, `margin-bottom:-1px` so it overlaps the border.
+- **Tab chip:** 34px tall, flex-basis 168px, min 104px / max 232px wide, radius `9px 9px 0 0`, padding `0 11px`, 9px gap, `margin-bottom:-1px` so it overlaps the border.
   - Active: fill `ui.bg`, 1px `ui.line` on top/left/right, no bottom border, plus a 2px `ui.accent` inset rule along the top edge.
   - Inactive: transparent fill and border; hover → `ui.selSoft`.
-  - Contents left→right: an 18px rounded glyph tile carrying the **profile's icon** in its **tab colour** on a 12%-alpha wash of it (inactive: `ui.faint`, no wash), the **title only** at 12.5px (`ui.fg` active / `ui.dim` inactive, `flex:1` + ellipsis), and a 16px close affordance (`ui.faint`, hover fill `ui.line`). **No second line** — host and cwd on a 34px chip made every tab look cramped and were unreadable at 9.5px; they live in the tab's `title` tooltip, the status bar, and the vertical sidebar, which has room for them. Chips are `flex:0 1 158px; min-width:92px; max-width:216px`.
+  - Contents left→right: an 18px rounded glyph tile carrying the **profile's icon** in its **tab colour** on a 12%-alpha wash of it (inactive: `ui.faint`, no wash), the **title only** at 12.5px (`ui.fg` active / `ui.dim` inactive, `flex:1` + ellipsis), and a 16px close affordance (`ui.faint`, hover fill `ui.line`). **No second line** — host and cwd on a 34px chip made every tab look cramped and were unreadable at 9.5px; they live in the tab's `title` tooltip and the vertical sidebar and header, which have room for them. Chips are `flex:0 1 168px; min-width:104px; max-width:232px`.
 - **New tab is a single `+`** — 32×30, borderless, 22px glyph, `ui.dim` ink, `ui.selSoft` fill
   with `ui.accent` ink while its menu is open. It **opens the launcher menu**; there is no
   separate caret and no default-only half. A split button was tried and dropped: two adjacent

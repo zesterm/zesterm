@@ -102,16 +102,14 @@
   //  - rendered credit links pointing at unsplash.com get the referral
   //    params appended when absent (credit-href values live in page
   //    content that can't be edited after the fact).
-  // Keep the utm_source value in sync with UTM_SOURCE in
-  // platform/web-agent/unsplash.ts — this file is a project-local
-  // artifact and cannot import it (equality is pinned by tests).
+  // The utm_source value is part of Unsplash's referral requirement for
+  // this artifact; keep it stable if the file is ever edited.
   const UNSPLASH_HOMEPAGE_HREF =
     'https://unsplash.com/?utm_source=claude_design&utm_medium=referral';
-  // Host rule mirrors the hotlink validator that admits Unsplash srcs into
-  // pages in the first place (cdn$ in unsplash.ts: apex or any subdomain)
-  // — Unsplash+ results serve from plus.unsplash.com, not just images.*,
-  // and an admitted-but-uncredited photo must error whatever unsplash
-  // host it rides on.
+  // Host rule: the unsplash.com apex or any subdomain counts as an
+  // Unsplash src — Unsplash+ results serve from plus.unsplash.com, not
+  // just images.*, and an admitted-but-uncredited photo must error
+  // whatever unsplash host it rides on.
   // Trailing-dot FQDNs (images.unsplash.com.) are the same host to the
   // browser but would miss the regex — strip one dot so the check fails
   // CLOSED (unrecognized-but-real Unsplash srcs must error, not render).
