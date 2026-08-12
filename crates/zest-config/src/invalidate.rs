@@ -56,7 +56,10 @@ impl Invalidation {
 /// the schema-coverage test consumes exactly this list.
 pub const KEYS: &[(&str, Invalidation)] = &[
     ("schema_version", Invalidation::None),
-    ("profiles", Invalidation::Restart),
+    // Re-read at the next resolve: the launcher menu and the profiles editor
+    // pick the change up live, and an already-running session keeps the
+    // settings it launched with by design.
+    ("profiles", Invalidation::Free),
     // Cell size comes from the font, so most of typography is geometry.
     ("typography.families", Invalidation::Geometry),
     ("typography.size_pt", Invalidation::Geometry),
@@ -294,5 +297,21 @@ mod tests {
     #[test]
     fn an_unknown_key_is_reported_as_needing_a_restart() {
         assert_eq!(class_of("something.nobody.wired"), Invalidation::Restart);
+    }
+
+    #[test]
+    fn a_profile_edit_is_free() {
+        // A profile is data the launcher and the profiles editor re-read on the
+        // next resolve; nothing in the running process caches it. Restart here
+        // would make every edit in the profiles tab claim a relaunch it does
+        // not need.
+        let a = Settings::default();
+        let mut b = a.clone();
+        b.profiles.insert("k8s-prod".into(), toml::Table::new());
+        assert_eq!(
+            diff(&a, &b),
+            Invalidation::Free,
+            "a profile edit must re-resolve live, not demand a restart"
+        );
     }
 }

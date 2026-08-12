@@ -20,6 +20,7 @@
 pub mod cascade;
 pub mod invalidate;
 pub mod migrate;
+pub mod profiles;
 pub mod schema;
 pub mod settings;
 pub mod ui;
@@ -35,6 +36,9 @@ pub mod watch;
 
 pub use cascade::{Layer, Resolved, Source};
 pub use invalidate::{diff, Invalidation};
+pub use profiles::{
+    ColorFrom, ProfileMeta, ProfileProvenance, ProfileResolved, TabTitle,
+};
 #[cfg(feature = "fs")]
 pub use watch::Watcher;
 // Re-exported because `write_value`'s signature already names
@@ -146,9 +150,30 @@ pub fn load(options: &Options) -> Load {
         None => None,
     };
 
-    // The profile layer comes from inside the user's file, so it can only exist
-    // once that file has been read.
+    // Any profile's typos are worth one warning each at load, whether or not
+    // that profile is selected today -- a typo found at launch time is a typo
+    // found the day it was written.
+    if let Some(table) = user_table.as_ref() {
+        if let Some(all) = table.get("profiles").and_then(toml::Value::as_table) {
+            for (name, profile) in all {
+                if let Some(profile) = profile.as_table() {
+                    for key in profiles::unknown_profile_keys(profile) {
+                        tracing::warn!(profile = %name, key = %key, "unknown key in profile; ignoring");
+                    }
+                }
+            }
+        }
+    }
+
+    // The profile layers come from inside the user's file, so they can only
+    // exist once that file has been read. `profiles.defaults` sits beneath the
+    // named profile: every profile falls through to it.
     if let (Some(name), Some(table)) = (options.profile.as_ref(), user_table.as_ref()) {
+        if name != profiles::RESERVED_PROFILE {
+            if let Some(defaults) = cascade::defaults_layer(table) {
+                layers.push(defaults);
+            }
+        }
         match cascade::profile_layer(table, name) {
             Some(layer) => layers.push(layer),
             None => tracing::warn!(profile = %name, "no such profile; ignoring"),
@@ -201,12 +226,34 @@ fn read_table(path: &Path) -> Result<toml::Table, Box<ConfigError>> {
 /// people hand-edit — and it would write out every default explicitly, turning a
 /// three-line config into two hundred.
 pub fn write_value(path: &Path, key: &str, value: toml_edit::Value) -> std::io::Result<()> {
+    let parts: Vec<&str> = key.split('.').collect();
+    write_at(path, &parts, value)
+}
+
+#[cfg(feature = "fs")]
+/// Write one settings value inside a profile's table.
+///
+/// The profile name is one path segment, never split: a profile literally
+/// named `prod.eu` must land at `[profiles."prod.eu"]`, not shatter into
+/// `[profiles.prod.eu]`. Only the settings key below it is dotted.
+pub fn write_profile_value(
+    path: &Path,
+    profile: &str,
+    key: &str,
+    value: toml_edit::Value,
+) -> std::io::Result<()> {
+    let mut parts = vec!["profiles", profile];
+    parts.extend(key.split('.'));
+    write_at(path, &parts, value)
+}
+
+#[cfg(feature = "fs")]
+fn write_at(path: &Path, parts: &[&str], value: toml_edit::Value) -> std::io::Result<()> {
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     let mut doc: toml_edit::DocumentMut = existing
         .parse()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e}")))?;
 
-    let parts: Vec<&str> = key.split('.').collect();
     let Some((last, groups)) = parts.split_last() else {
         return Ok(());
     };
@@ -215,7 +262,12 @@ pub fn write_value(path: &Path, key: &str, value: toml_edit::Value) -> std::io::
     for group in groups {
         node = &mut node[*group];
         if node.is_none() {
-            *node = toml_edit::Item::Table(toml_edit::Table::new());
+            // Implicit, so an intermediate table with only subtables ("[profiles]"
+            // above "[profiles.x.window]") does not print an empty header of
+            // its own. A table that gains a direct value prints regardless.
+            let mut table = toml_edit::Table::new();
+            table.set_implicit(true);
+            *node = toml_edit::Item::Table(table);
         }
     }
     node[*last] = toml_edit::Item::Value(value);
@@ -224,6 +276,97 @@ pub fn write_value(path: &Path, key: &str, value: toml_edit::Value) -> std::io::
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(path, doc.to_string())
+}
+
+#[cfg(feature = "fs")]
+/// Delete one key from the file, pruning tables the deletion left empty.
+///
+/// A missing key — or a missing file — is a no-op, not an error: "make this
+/// value not set" is already true, and reset-to-default must be idempotent.
+pub fn remove_value(path: &Path, key: &str) -> std::io::Result<()> {
+    let parts: Vec<&str> = key.split('.').collect();
+    remove_at(path, &parts)
+}
+
+#[cfg(feature = "fs")]
+/// Delete one settings key from a profile's table, pruning emptied tables.
+///
+/// Clearing an override is what makes a row fall back through Defaults, so
+/// like [`remove_value`] this treats "already absent" as success.
+pub fn remove_profile_value(path: &Path, profile: &str, key: &str) -> std::io::Result<()> {
+    let mut parts = vec!["profiles", profile];
+    parts.extend(key.split('.'));
+    remove_at(path, &parts)
+}
+
+#[cfg(feature = "fs")]
+/// Delete a whole profile. Missing profile or file is a no-op.
+pub fn remove_profile(path: &Path, name: &str) -> std::io::Result<()> {
+    remove_at(path, &["profiles", name])
+}
+
+#[cfg(feature = "fs")]
+/// Duplicate a profile under a new name, comments and all.
+///
+/// Unlike the removals, a missing source is an error: "Duplicate" acting on a
+/// profile that is not there means the caller's picture of the file is stale,
+/// and silently writing nothing would confirm it.
+pub fn copy_profile(path: &Path, from: &str, to: &str) -> std::io::Result<()> {
+    let existing = std::fs::read_to_string(path)?;
+    let mut doc: toml_edit::DocumentMut = existing
+        .parse()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e}")))?;
+
+    let source = doc
+        .get("profiles")
+        .and_then(|p| p.get(from))
+        .cloned()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("no profile `{from}` to copy"),
+            )
+        })?;
+    doc["profiles"][to] = source;
+    std::fs::write(path, doc.to_string())
+}
+
+#[cfg(feature = "fs")]
+fn remove_at(path: &Path, parts: &[&str]) -> std::io::Result<()> {
+    let Ok(existing) = std::fs::read_to_string(path) else {
+        return Ok(());
+    };
+    let mut doc: toml_edit::DocumentMut = existing
+        .parse()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e}")))?;
+
+    if remove_in(doc.as_table_mut(), parts) {
+        std::fs::write(path, doc.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "fs")]
+/// Remove `parts` under `table`, pruning parents the removal emptied.
+///
+/// Pruning matters because [`write_at`] creates parents on demand: without it,
+/// set-then-reset leaves a trail of empty `[profiles.x.window]` headers that
+/// read as settings the user once had.
+fn remove_in(table: &mut toml_edit::Table, parts: &[&str]) -> bool {
+    match parts {
+        [] => false,
+        [last] => table.remove(last).is_some(),
+        [head, rest @ ..] => {
+            let Some(child) = table.get_mut(head).and_then(toml_edit::Item::as_table_mut) else {
+                return false;
+            };
+            let removed = remove_in(child, rest);
+            if removed && child.is_empty() {
+                table.remove(head);
+            }
+            removed
+        }
+    }
 }
 
 #[cfg(all(test, feature = "fs"))]
@@ -283,6 +426,121 @@ mod tests {
         let text = std::fs::read_to_string(&path).expect("read");
         assert!(!text.contains("spring_damping"), "wrote out defaults: {text}");
         assert!(text.lines().count() < 5, "file grew: {text}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_dotted_profile_name_stays_one_key() {
+        // "prod.eu" is a legal profile name. Split naively it shatters into
+        // [profiles.prod.eu], a different profile, and reads back empty.
+        let path = temp("dotname");
+        std::fs::write(&path, "# fleet config\n").expect("write");
+
+        write_profile_value(
+            &path,
+            "prod.eu",
+            "window.opacity",
+            toml_edit::value(0.9).into_value().unwrap(),
+        )
+        .expect("edit");
+
+        let text = std::fs::read_to_string(&path).expect("read");
+        let table: toml::Table = text.parse().expect("still valid toml");
+        let opacity = table["profiles"]["prod.eu"]["window"]["opacity"].as_float();
+        assert_eq!(opacity, Some(0.9), "round-trip failed under the literal name: {text}");
+        assert!(
+            table["profiles"].as_table().is_some_and(|p| !p.contains_key("prod")),
+            "the name shattered into nested tables: {text}"
+        );
+        assert!(text.contains("# fleet config"), "lost a comment: {text}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn removing_a_value_keeps_comments_and_ordering() {
+        // The mirror of writing_a_value_keeps_comments_and_ordering: reset is
+        // an edit too, and it must not cost the user their annotations.
+        let path = temp("rm-comments");
+        std::fs::write(
+            &path,
+            "# my terminal\n[typography]\n# I like it big\nsize_pt = 14.0\nline_height = 1.5\n",
+        )
+        .expect("write");
+
+        remove_value(&path, "typography.size_pt").expect("remove");
+
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains("# my terminal"), "lost a comment: {text}");
+        assert!(!text.contains("size_pt"), "did not remove: {text}");
+        assert!(text.contains("line_height = 1.5"), "lost a sibling: {text}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn removing_a_missing_key_or_file_is_a_no_op() {
+        let path = temp("rm-missing");
+        // Missing file: nothing to do, and nothing to fail over.
+        remove_value(&path, "typography.size_pt").expect("missing file is fine");
+        assert!(!path.exists(), "a removal must not create the file");
+
+        std::fs::write(&path, "[cursor]\nblink = false\n").expect("write");
+        remove_value(&path, "typography.size_pt").expect("missing key is fine");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(text, "[cursor]\nblink = false\n", "a no-op must not rewrite the file");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn removing_the_last_value_prunes_the_emptied_tables() {
+        // write-then-reset must round-trip to nothing: leftover empty
+        // [profiles.x.window] headers read as settings the user once had.
+        let path = temp("rm-prune");
+        std::fs::write(&path, "").expect("write");
+
+        write_profile_value(&path, "x", "window.opacity", toml_edit::value(0.5).into_value().unwrap())
+            .expect("edit");
+        remove_profile_value(&path, "x", "window.opacity").expect("remove");
+
+        let text = std::fs::read_to_string(&path).expect("read");
+        let table: toml::Table = text.parse().expect("still valid toml");
+        assert!(
+            !table.contains_key("profiles"),
+            "emptied tables were not pruned: {text:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_profile_can_be_removed_and_copied() {
+        let path = temp("profile-ops");
+        std::fs::write(
+            &path,
+            "[profiles.ubuntu]\n# the penguin\ncommand = \"wsl.exe\"\n[profiles.mac]\ncommand = \"zsh\"\n",
+        )
+        .expect("write");
+
+        copy_profile(&path, "ubuntu", "ubuntu-2").expect("copy");
+        remove_profile(&path, "mac").expect("remove");
+        remove_profile(&path, "never-existed").expect("removing a missing profile is a no-op");
+
+        let text = std::fs::read_to_string(&path).expect("read");
+        let table: toml::Table = text.parse().expect("still valid toml");
+        let profiles = table["profiles"].as_table().expect("table");
+        assert!(
+            profiles.contains_key("ubuntu") && profiles.contains_key("ubuntu-2"),
+            "the copy must add a sibling without touching its source: {text}"
+        );
+        assert!(!profiles.contains_key("mac"), "remove_profile left it behind: {text}");
+        assert_eq!(
+            profiles["ubuntu-2"]["command"].as_str(),
+            Some("wsl.exe"),
+            "the copy is not a copy: {text}"
+        );
+
+        assert!(
+            copy_profile(&path, "ghost", "ghost-2").is_err(),
+            "copying a profile that is not there means the caller is stale; say so"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

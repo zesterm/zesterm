@@ -193,7 +193,14 @@ fn value_cell(field: &UiField, value: Option<&serde_json::Value>) -> SettingsVal
         Widget::Toggle => SettingsValueCell::Toggle {
             on: value.and_then(serde_json::Value::as_bool).unwrap_or(false),
         },
-        Widget::Select | Widget::ThemePicker => SettingsValueCell::Select { value: text_of(value) },
+        // The profile pickers (#130) are string-valued choices from a roster
+        // the client brings, exactly like ThemePicker; AccentPicker is the
+        // integer-valued exception and lands with the plain-text widgets.
+        Widget::Select
+        | Widget::ThemePicker
+        | Widget::HostPicker
+        | Widget::SchemePicker
+        | Widget::IconPicker => SettingsValueCell::Select { value: text_of(value) },
         Widget::Slider => {
             let v = value.and_then(serde_json::Value::as_f64).unwrap_or(0.0);
             let frac = field
@@ -205,7 +212,7 @@ fn value_cell(field: &UiField, value: Option<&serde_json::Value>) -> SettingsVal
             #[allow(clippy::cast_possible_truncation)] // display fraction, not data
             SettingsValueCell::Slider { frac: frac as f32, text: format_number(v) }
         }
-        Widget::Number | Widget::Text | Widget::Path => {
+        Widget::Number | Widget::Text | Widget::Path | Widget::AccentPicker => {
             SettingsValueCell::Text { text: text_of(value) }
         }
         // The primary face is the choice; the rest of the stack is fallback and
@@ -423,9 +430,16 @@ pub fn to_toml(
 ) -> Option<zest_config::toml_edit::Value> {
     match field.widget {
         Widget::Toggle => Some(zest_config::toml_edit::Value::from(value.as_bool()?)),
-        Widget::Select | Widget::ThemePicker | Widget::Text | Widget::Path => {
-            Some(zest_config::toml_edit::Value::from(value.as_str()?))
-        }
+        // The profile pickers (#130) write strings, except the accent, which
+        // is an index into the theme's accents.
+        Widget::Select
+        | Widget::ThemePicker
+        | Widget::Text
+        | Widget::Path
+        | Widget::HostPicker
+        | Widget::SchemePicker
+        | Widget::IconPicker => Some(zest_config::toml_edit::Value::from(value.as_str()?)),
+        Widget::AccentPicker => Some(zest_config::toml_edit::Value::from(value.as_i64()?)),
         Widget::Number | Widget::Slider if field.integer => {
             Some(zest_config::toml_edit::Value::from(value.as_i64()?))
         }

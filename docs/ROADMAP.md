@@ -484,6 +484,28 @@ theme screens. Colours, sizes and spacing come from there, not from this file.
       a blank panel as if broken. Drive-by: `watch_config` now watches
       `zesterm.toml` in portable mode instead of a `config.toml` nobody
       writes.
+- [x] **The typed profiles layer** (design screen 12's config half,
+      [docs/design/client-ui/](design/client-ui/README.md) §12; #130).
+      `zest_config::profiles` — outside the `fs` feature, like `ui`, so the
+      web editor renders from the same resolution. `ProfileMeta` parses the
+      profile-only keys (`command`, `host`, `tab_title`, `color_scheme`,
+      `tab_color`, `icon`, `color_from`, …) leniently — a wrong type warns
+      and falls back, never fails — and `profile_layer` now *strips* them, so
+      launcher/chrome inputs stop spraying `unknown_keys` on every
+      profile-tab launch. `profiles.defaults` is a reserved parent layer:
+      `load()` inserts it beneath the named profile (user <
+      profiles.defaults < profiles.<name> < workspace), it is hidden from
+      `list_profiles`, and `resolve_profile` reports per-key
+      overrides/inherited/unset — the editor's chips — through the cascade's
+      own merge, so `shell.env` replaces wholesale here too.
+      `PROFILE_SETTINGS_KEYS` scopes the editor's rows (the cascade still
+      takes any key — the k8s-prod red window stands), `profiles::fields()`
+      hands the editor renderable rows (four new `Widget`s: host-, scheme-,
+      accent-, icon-picker), and the fs side gains
+      `write_profile_value`/`remove_value`/`remove_profile_value`/
+      `remove_profile`/`copy_profile` — a dotted profile name stays one key,
+      removals prune emptied tables, comments survive. A profile edit is now
+      `Invalidation::Free`: the launcher re-resolves live.
 - [x] **Screen 1 of the design handoff: the title bar, tab chips and status
       bar** ([docs/design/client-ui/](design/client-ui/README.md)). The chrome
       speaks the design's type scale now — `Fonts::set_ui_px` threads a per-run

@@ -33,6 +33,16 @@ pub enum Widget {
     FontList,
     TagList,
     KeyValue,
+    /// Pick a machine from the fleet. The roster is live daemon state, so it
+    /// arrives from the client, never from the schema.
+    HostPicker,
+    /// Pick a colour scheme — the ANSI half of a theme, not its chrome tokens.
+    /// The roster comes from the client, like [`Widget::ThemePicker`].
+    SchemePicker,
+    /// Pick one accent colour from the active theme's accents.
+    AccentPicker,
+    /// Pick a glyph for the tab's icon tile.
+    IconPicker,
 }
 
 /// One option of a [`Widget::Select`] field.
@@ -167,6 +177,10 @@ fn field_of(
         "font-list" => Widget::FontList,
         "tag-list" => Widget::TagList,
         "key-value" => Widget::KeyValue,
+        "host-picker" => Widget::HostPicker,
+        "scheme-picker" => Widget::SchemePicker,
+        "accent-picker" => Widget::AccentPicker,
+        "icon-picker" => Widget::IconPicker,
         // A field without a hint still renders: fall back from its type
         // rather than vanishing, because an invisible setting is the worst
         // outcome a metadata gap can have.

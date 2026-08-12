@@ -2742,8 +2742,15 @@ impl App {
                 }
             }
             // The remaining list widgets have no inline editor; their rows say
-            // where the edit happens instead.
-            Widget::TagList | Widget::KeyValue => {}
+            // where the edit happens instead. The profile pickers belong to
+            // the profiles editor (#130), which this overlay does not render —
+            // when it does, they open rosters the way ThemePicker does.
+            Widget::TagList
+            | Widget::KeyValue
+            | Widget::HostPicker
+            | Widget::SchemePicker
+            | Widget::AccentPicker
+            | Widget::IconPicker => {}
         }
         self.mark_chrome_dirty();
     }
