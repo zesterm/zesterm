@@ -459,11 +459,30 @@ fn pipe_id_is_well_formed(id: &str) -> bool {
     id.len() == PIPE_ID_CHARS && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// Truncate to `limit` **UTF-16 code units**, on a character boundary.
+///
+/// UTF-16, not `char`s, because the far end counts in UTF-16: the Worker
+/// refuses `label.length > MAX_LABEL_CHARS` and JavaScript's `.length` is code
+/// units. Anything outside the BMP is one scalar value here and two units
+/// there, so a label of 65 emoji passes a 128-`char` truncation untouched and
+/// is refused as `malformed` by `parseHello`.
+///
+/// The daemon then reads that error, never parks, and climbs the redial ladder
+/// to its ceiling — unreachable for ever, silently, which is the exact outcome
+/// this function exists to prevent.
+///
+/// It is the mirror of a trap this repo already paid for from the other side
+/// (AGENTS.md: "a JavaScript client must iterate code points, never
+/// `text.length`"). Same confusion, opposite direction.
 fn truncate_chars(s: &str, limit: usize) -> &str {
-    match s.char_indices().nth(limit) {
-        Some((i, _)) => &s[..i],
-        None => s,
+    let mut units = 0usize;
+    for (i, c) in s.char_indices() {
+        units += c.len_utf16();
+        if units > limit {
+            return &s[..i];
+        }
     }
+    s
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -1019,10 +1038,28 @@ mod tests {
         // reads this with `JSON.parse` — which never sees a lone surrogate,
         // because `serde_json` would have refused to serialize it. The failure
         // would be a panic in `truncate_chars`, not a bad message.
+        //
+        // **In UTF-16 code units, because that is what the far end counts.**
+        // This assertion used to demand `chars().count() == MAX_LABEL_CHARS`,
+        // which every emoji passes and the Worker then refuses: `.length` is
+        // code units, so 65 emoji are 130 of them against a 128 bound. The
+        // daemon reads `malformed`, never parks, and climbs the ladder to its
+        // ceiling — permanently unreachable, from a label. The old assertion
+        // did not catch that; it *specified* it.
         let emoji = "🙂".repeat(MAX_LABEL_CHARS + 10);
         let kept = truncate_chars(&emoji, MAX_LABEL_CHARS);
-        assert_eq!(kept.chars().count(), MAX_LABEL_CHARS);
+        assert_eq!(
+            kept.chars().map(char::len_utf16).sum::<usize>(),
+            MAX_LABEL_CHARS,
+            "the bound the relay applies is UTF-16 code units, so this is the count that has \
+             to fit -- a label measured in scalar values is refused as malformed and the link \
+             never parks again"
+        );
         assert!(kept.is_char_boundary(kept.len()));
+
+        // And a label that is already short enough survives whole, so the fix
+        // is not "truncate everything".
+        assert_eq!(truncate_chars("andy-mac", MAX_LABEL_CHARS), "andy-mac");
     }
 
     #[test]
