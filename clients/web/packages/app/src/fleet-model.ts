@@ -10,6 +10,10 @@
  * rendering `0` for "unknown" would be the comfortable lie.
  */
 
+// Type-only, so this model keeps its no-runtime-dependency property: importing
+// `directory-source.ts` for a value would pull `@sigx/actors` into every test
+// that renders a card.
+import type { DirectoryStatus } from './directory-source.ts';
 import type { Host } from './registry.ts';
 
 /**
@@ -55,12 +59,30 @@ export interface CardRow {
   readonly mono: boolean;
 }
 
+/**
+ * The dot and the words beside it.
+ *
+ * `asleep` is deliberately not `degraded`, and that is the whole point of this
+ * type existing rather than a boolean. Over the relay most of a fleet is asleep
+ * most of the time — a lid is shut, a desktop is off — and a screen that paints
+ * the ordinary case as a fault is one people stop reading, taking the real
+ * faults with it. `unknown` is separate again: it is what a card says when
+ * nothing has asked, which is not the same as having asked and heard nothing.
+ */
+export interface CardPresence {
+  readonly text: string;
+  readonly kind: 'unknown' | 'pending' | 'ok' | 'asleep' | 'degraded';
+  /** Whether the card leads anywhere. Only a machine that answered does. */
+  readonly reachable: boolean;
+}
+
 export interface HostCard {
   readonly id: string;
   readonly name: string;
   /** The card gets the accent border and the `this machine` note. */
   readonly local: boolean;
   readonly rows: readonly CardRow[];
+  readonly presence: CardPresence;
 }
 
 export interface HostCardContext {
@@ -73,7 +95,42 @@ export interface HostCardContext {
   readonly localHostId: string | null;
   /** A session count, only when something real supplies one. */
   readonly sessions?: number;
+  /**
+   * What the live directory says about this machine, where anything is asking.
+   *
+   * Absent means nothing is — the local path, or a deployment with no relay —
+   * and the card says `unknown` rather than inventing an answer. When present
+   * it also supplies the session count, so the two can never disagree.
+   */
+  // `| undefined` explicitly: `exactOptionalPropertyTypes` is on, and the
+  // caller passes the absent case as a value rather than omitting the key.
+  readonly status?: DirectoryStatus | undefined;
   readonly now: number;
+}
+
+/** What the dot and its label say, given what the directory knows. */
+export function presenceOf(status: DirectoryStatus | undefined): CardPresence {
+  if (status === undefined) return { text: '', kind: 'unknown', reachable: false };
+  switch (status.kind) {
+    case 'pending':
+      return { text: 'connecting…', kind: 'pending', reachable: false };
+    case 'pairing':
+      // The code is the message: it has to be compared against what the machine
+      // itself is showing, and a prompt without it is a wait with no way out.
+      return { text: `approve ${status.code} on that machine`, kind: 'degraded', reachable: false };
+    case 'offline':
+      return { text: 'asleep', kind: 'asleep', reachable: false };
+    case 'error':
+      return { text: status.message, kind: 'degraded', reachable: false };
+    case 'ready': {
+      const n = status.view.sessions.length;
+      return {
+        text: n === 1 ? 'online · 1 session' : `online · ${n} sessions`,
+        kind: 'ok',
+        reachable: true,
+      };
+    }
+  }
 }
 
 /** A registry record → what its card renders. Absent fields are omitted. */
@@ -81,8 +138,12 @@ export function hostCard(host: Host, ctx: HostCardContext): HostCard {
   const rows: CardRow[] = [];
   if (host.platform !== '') rows.push({ label: 'os', value: host.platform, mono: false });
   rows.push({ label: 'key', value: fingerprintDisplay(host.id), mono: true });
-  if (ctx.sessions !== undefined) {
-    rows.push({ label: 'sessions', value: String(ctx.sessions), mono: false });
+  // A live count outranks a supplied one — they describe the same thing, and
+  // the live one is the one that just came off a socket.
+  const live = ctx.status?.kind === 'ready' ? ctx.status.view.sessions.length : undefined;
+  const sessions = live ?? ctx.sessions;
+  if (sessions !== undefined) {
+    rows.push({ label: 'sessions', value: String(sessions), mono: false });
   }
   rows.push({ label: 'last seen', value: ago(host.lastSeenAt, ctx.now), mono: false });
   return {
@@ -90,5 +151,6 @@ export function hostCard(host: Host, ctx: HostCardContext): HostCard {
     name: host.label,
     local: ctx.localHostId !== null && host.id === ctx.localHostId,
     rows,
+    presence: presenceOf(ctx.status),
   };
 }

@@ -663,14 +663,60 @@ body {
   gap: 8px;
 }
 
-/* Faint, not green: presence is unknown until the relay exists, and a live
-   dot the directory cannot back would be the comfortable lie. */
+/* The dot says exactly what the socket said.
+   `unknown` keeps the faint dot it always had — a deployment with no relay has
+   not learned that a machine is absent, it has not asked, and those are
+   different claims. `asleep` is dim rather than red on purpose: over the relay
+   most of a fleet is asleep most of the time, and a grid of red dots is how a
+   screen stops being read. */
 .card-dot {
   width: 8px;
   height: 8px;
   flex: none;
   border-radius: 50%;
   background: var(--zt-faint);
+}
+
+.card-dot.ok {
+  background: var(--zt-success);
+}
+
+.card-dot.pending {
+  background: var(--zt-warn);
+}
+
+.card-dot.asleep {
+  background: var(--zt-dim);
+}
+
+.card-dot.degraded {
+  background: var(--zt-danger);
+}
+
+.card-foot {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.presence {
+  font-size: 11px;
+  color: var(--zt-dim);
+}
+
+.presence.ok {
+  color: var(--zt-success);
+}
+
+.presence.degraded {
+  color: var(--zt-danger);
+}
+
+/* A machine that answered is the only one that leads anywhere; the border says
+   so before the button is read. */
+.host-card.reachable {
+  border-color: var(--zt-accent-soft);
 }
 
 .card-name {
