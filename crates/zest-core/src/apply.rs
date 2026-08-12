@@ -231,6 +231,19 @@ impl RemoteWriter<'_> {
         self.state.touch();
     }
 
+    /// Drop blocks from `first` up, before a keyframe restates them.
+    ///
+    /// A keyframe is a complete state, but applying one only ever *added*: a
+    /// block the host destroyed rather than evicted — `cls` erasing the rows it
+    /// described — survived on the client for ever and painted a stale header
+    /// over the live prompt. Trimming from the host's oldest id rather than
+    /// clearing keeps the older history a client may deliberately hold beyond
+    /// what the host retains.
+    pub fn drop_blocks_from(&mut self, first: crate::BlockId) {
+        self.state.blocks.retain_below(first);
+        self.state.touch();
+    }
+
     // --- bookkeeping -----------------------------------------------------
 
     /// Adopt the host's sequence number. **Assigned, never incremented.**

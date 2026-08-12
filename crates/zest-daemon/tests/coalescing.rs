@@ -207,7 +207,7 @@ fn a_floor_bounds_the_message_rate_and_still_lands_on_the_right_grid() {
             // The subscriber fell far enough behind that a delta chain would
             // cost more than the state it describes — normal under a floor,
             // and still one message.
-            HostMessage::Keyframe { seq, cols, rows, rows_data, attrs, cursor, modes, blocks, title, .. } => {
+            HostMessage::Keyframe { seq, cols, rows, rows_data, attrs, cursor, modes, blocks, blocks_from, title, .. } => {
                 updates += 1;
                 first.get_or_insert_with(Instant::now);
                 last = Instant::now();
@@ -222,6 +222,7 @@ fn a_floor_bounds_the_message_rate_and_still_lands_on_the_right_grid() {
                         cursor,
                         modes: zest_core::Modes::from_bits_truncate(modes),
                         blocks,
+                        blocks_from,
                         title,
                     },
                     seq.0,

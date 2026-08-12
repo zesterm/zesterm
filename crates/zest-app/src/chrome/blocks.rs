@@ -37,6 +37,12 @@ pub struct BlockView {
     /// "running 4.2s"; empty unless running.
     pub running_label: String,
     pub folded: bool,
+    /// Whether there is anything to fold.
+    ///
+    /// Must be the same predicate `block_actions::fold_row_map` folds on, or
+    /// the header offers a chevron the fold cannot honour — which is what
+    /// `cd ..` and every still-running command used to get.
+    pub foldable: bool,
     /// Output lines hidden by the fold, for the "N lines" tag.
     pub folded_lines: usize,
     /// The host went away mid-run: rail faint, metadata says "interrupted".
@@ -126,23 +132,30 @@ pub fn layout_blocks(
         ));
 
         // Fold chevron. Its hit region is wider than its glyph — a 6px
-        // triangle is not a target.
-        let chev = if v.folded { "\u{25b8}" } else { "\u{25be}" };
+        // triangle is not a target. Drawn only when there is output to hide:
+        // an affordance that answers a click by doing nothing is worse than
+        // none. The command text's x-offset is unaffected either way, so
+        // labels stay aligned down the column.
+        // Outside the branch: the command text starts past the chevron's slot
+        // whether or not one is drawn, so labels stay aligned down the column.
         let chev_x = band[0] + HPAD * s;
-        out.hit.push(
-            [band[0], band[1], HPAD * s + 16.0 * s, band[3]],
-            HitRegion::BlockFold(v.id),
-        );
-        out.texts.push(TextRun {
-            text: chev.into(),
-            pos: [chev_x, baseline_in(band[1], band[3], CMD_PX * s)],
-            max_width: 16.0 * s,
-            color: colors.text_faint,
-            clip,
-            px: CMD_PX * s,
-            bold: false,
-            tracking: 0.0,
-        });
+        if v.foldable {
+            let chev = if v.folded { "\u{25b8}" } else { "\u{25be}" };
+            out.hit.push(
+                [band[0], band[1], HPAD * s + 16.0 * s, band[3]],
+                HitRegion::BlockFold(v.id),
+            );
+            out.texts.push(TextRun {
+                text: chev.into(),
+                pos: [chev_x, baseline_in(band[1], band[3], CMD_PX * s)],
+                max_width: 16.0 * s,
+                color: colors.text_faint,
+                clip,
+                px: CMD_PX * s,
+                bold: false,
+                tracking: 0.0,
+            });
+        }
 
         // Right-to-left: chips on hover, then outcome, duration, cwd.
         let mut right = band[0] + band[2] - HPAD * s;
@@ -308,6 +321,7 @@ mod tests {
             exit_label: "exit 0".into(),
             running_label: String::new(),
             folded: false,
+            foldable: true,
             folded_lines: 0,
             interrupted: false,
         }
@@ -325,6 +339,26 @@ mod tests {
             b.hit.hit(INSET + 4.0, band_y),
             Some(HitRegion::BlockFold(7)),
             "the chevron zone outranks the band it sits in"
+        );
+    }
+
+    #[test]
+    fn a_block_with_nothing_to_fold_offers_no_chevron() {
+        // `cd ..` printed nothing and a running command has not finished, so
+        // `fold_row_map` declines both. The header used to draw a chevron and
+        // claim the click anyway, and tapping it did nothing at all.
+        let area = [0.0, 100.0, 800.0, 400.0];
+        let v = BlockView { foldable: false, ..view(7, (2, 3)) };
+        let b = layout_blocks(&[v], area, 20.0, 1.0, &colors(), None, 0.0, &mut measure);
+        let band_y = 100.0 + 2.0 * 20.0 + 10.0;
+        assert_eq!(
+            b.hit.hit(INSET + 4.0, band_y),
+            Some(HitRegion::BlockHeader(7)),
+            "the chevron zone must fall through to the band when nothing folds"
+        );
+        assert!(
+            !b.texts.iter().any(|t| t.text == "\u{25be}" || t.text == "\u{25b8}"),
+            "no chevron glyph is drawn for a block that cannot fold"
         );
     }
 

@@ -32,8 +32,8 @@ paragraph of justification attached.
 | `SecureChannel`, `Sealer`, `Opener`, `EphemeralDh`, `DhPublic` | `zest-mesh/src/secure.rs` | **frozen** at v3 — the browser has a second implementation, pinned to `fixtures/handshake.json` | WS-F, WS-G, WS-H |
 | `ClientHandshake`, `Challenge`, `Transcript`, `auth_transcript` | `zest-mesh/src/pairing.rs` | **frozen** at v3 — the transcript layout is signed bytes; a golden pins it | WS-F, WS-G, WS-H |
 | `DaemonClient` | `zest-daemon/src/client.rs` | draft — moved down from `zest-app` at v3, see below | WS-A, WS-F |
-| `Block`, `BlockIndex`, `BlockState` | `zest-core/src/blocks.rs` | **frozen** — gained `upsert`/`reanchor`, then `started_ms`/`ended_ms` + a caller clock, see below | WS-E, WS-F, WS-G |
-| `BlockPayload`, `BlockState` (wire) | `zest-proto/src/delta.rs` | **frozen** — arrived beside `Delta`; gained additive `started_ms`/`ended_ms`, see below | WS-E, WS-F, WS-G |
+| `Block`, `BlockIndex`, `BlockState` | `zest-core/src/blocks.rs` | **frozen** — gained `upsert`/`reanchor`, then `started_ms`/`ended_ms` + a caller clock, then `erase_screen`/`authoritative_from`, see below | WS-E, WS-F, WS-G |
+| `BlockPayload`, `BlockState` (wire) | `zest-proto/src/delta.rs` | **frozen** — arrived beside `Delta`; gained additive `started_ms`/`ended_ms`, then `Keyframe.blocks_from`, see below | WS-E, WS-F, WS-G |
 | `ChangeSource`, `Update`, `update_for` | `zest-core/src/subscribe.rs` | **frozen** — `release_before` removed, see below | WS-F |
 | `SessionSource`, `Origin` | `zest-app/src/source.rs` | **frozen** | WS-A, WS-B, WS-F |
 | `Peer`, `Endpoint`, `Reachability`, `Discovery` | `zest-mesh/` | **frozen** | WS-F, WS-H |
@@ -165,6 +165,30 @@ are no markers to replay — and `reanchor`, which maps blocks through the
 **Eviction deliberately has no wire message.** A client evicts on its own
 scrollback bound through the same code the host uses, so a client configured to
 keep more history than the host keeps more, rather than being told to forget.
+
+**Destruction is not eviction, and needed one** (#124). `ESC[2J` erases the rows
+a block describes, so the host drops it — but line ids survive an erase and the
+shell reuses the very ids the old blocks still claim, and a stale block *has* an
+`output_line` where a fresh prompt does not, so the header pass drew the old
+command over the row the user was typing on. Opaque, and it ate the click too.
+
+That fix is invisible without the wire: the window is a client of its own
+daemon, `diff_blocks` cannot say "removed", and `Applier::apply_keyframe`
+upserted rather than replaced, so even a keyframe left the stale block. So
+`Keyframe` gained `blocks_from: u32`, `#[serde(default)]` — the id from which
+the carried list is complete. The applier drops what it holds from there up
+before inserting; below it is the client's own longer history, which the
+paragraph above says it keeps.
+
+The value is `BlockIndex::authoritative_from`, which **rises** past what
+eviction took and **falls** to what a clear destroyed. One number rather than
+two because an empty list otherwise cannot distinguish "the host has evicted
+everything, keep yours" from "the host destroyed everything, drop yours" — and
+`cls` on a fresh session is exactly the second. `Encoder::blocks_need_keyframe`
+tells the daemon to resync when a removal is not a prefix trim; a keyframe is
+the right price, since the whole screen just changed. Default 0 means an older
+host replaces wholesale, which is what the browser's `GridView` already did.
+Landed with `zest-proto`, the daemon, the app and `clients/web` in one commit.
 
 **Additive once more, for the block headers (design screen 3): timestamps.**
 `Block` and `BlockPayload` gained `started_ms`/`ended_ms` — wall-clock

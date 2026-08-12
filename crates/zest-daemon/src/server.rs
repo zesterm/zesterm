@@ -565,6 +565,7 @@ impl Connection {
                     attrs: k.attrs,
                     cursor: k.cursor,
                     modes: k.modes.bits(),
+                    blocks_from: k.blocks_from,
                     blocks: k.blocks,
                     title: k.title,
                 }),
@@ -883,6 +884,7 @@ impl Connection {
                     attrs: keyframe.attrs,
                     cursor: keyframe.cursor,
                     modes: keyframe.modes.bits(),
+                    blocks_from: keyframe.blocks_from,
                     blocks: keyframe.blocks,
                     title: keyframe.title,
                 }]
@@ -918,6 +920,7 @@ impl Connection {
                         attrs: k.attrs,
                         cursor: k.cursor,
                         modes: k.modes.bits(),
+                        blocks_from: k.blocks_from,
                         blocks: k.blocks,
                         title: k.title,
                     }],

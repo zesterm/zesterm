@@ -37,6 +37,11 @@ export interface KeyframeState {
   readonly modes: number;
   /** Absent from callers that predate blocks; `[]` and absent mean the same. */
   readonly blocks?: readonly BlockPayload[];
+  /**
+   * The id from which `blocks` is authoritative. Absent means `0`, which
+   * replaces wholesale.
+   */
+  readonly blocks_from?: number;
 }
 
 export class GridView {
@@ -90,10 +95,13 @@ export class GridView {
     this.cursor = k.cursor;
     this.modes = k.modes;
     this.altScreen = (k.modes & Modes.ALT_SCREEN) !== 0;
-    // Replaced, not merged, unlike the attrs: a keyframe carries every block
-    // the host holds, and a block this client holds that the keyframe does not
-    // mention is one the host has forgotten.
-    this.blocks = [...(k.blocks ?? [])];
+    // Replaced from `blocks_from` up, not merged, unlike the attrs: a keyframe
+    // carries every block the host holds from there, so one this client holds
+    // above it that the keyframe does not mention is one the host destroyed —
+    // `cls` erasing the rows it described. Below it are blocks the host merely
+    // evicted, which a client keeping longer history than the host keeps.
+    const from = k.blocks_from ?? 0;
+    this.blocks = [...this.blocks.filter((b) => b.id < from), ...(k.blocks ?? [])];
     // `title` and `scrollback` are deliberately not cleared: neither is part of
     // the state a keyframe describes.
   }
