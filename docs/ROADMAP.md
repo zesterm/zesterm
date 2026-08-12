@@ -1374,7 +1374,6 @@ is now unblocked and building.
       per §4: reconnecting dims the body and appends the overlay, an open
       running block reads interrupted; 'stalled' is modelled but has no
       producer until delta-silence detection lands.
-
 - [ ] Local echo prediction for high-latency links (mosh's other trick): predict
       printable-char echo when not in alt-screen, render dim, reconcile on delta
       arrival. The largest perceived-latency win available.
