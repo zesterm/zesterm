@@ -45,7 +45,11 @@ export const VerticalHeader = component<{
       <span class="grow" />
       {/* The visual affordance the spec draws. It dispatches the palette
           action, which is a no-op until the palette work item lands. */}
-      <button class="kbd-pill" onClick={() => ctx.props.onPalette()}>
+      <button
+        class="kbd-pill"
+        onMouseDown={(e: MouseEvent) => e.preventDefault() /* chrome never steals the terminal's focus (see TabStrip) */}
+        onClick={() => ctx.props.onPalette()}
+      >
         ⌘K
       </button>
     </header>
@@ -72,7 +76,11 @@ export const SidebarTabs = component<{
   return (
     <aside class="sidebar">
       <div class="search-row">
-        <button class="search-pill" onClick={() => ctx.props.onPalette()}>
+        <button
+          class="search-pill"
+          onMouseDown={(e: MouseEvent) => e.preventDefault() /* chrome never steals the terminal's focus (see TabStrip) */}
+          onClick={() => ctx.props.onPalette()}
+        >
           <span class="search-key">⌘K</span>
           <span class="search-hint">Search sessions, blocks, hosts</span>
         </button>
@@ -82,6 +90,7 @@ export const SidebarTabs = component<{
           <button
             class={`tab-new in-sidebar${ctx.props.launcherOpen ? ' open' : ''}`}
             title="new session"
+            onMouseDown={(e: MouseEvent) => e.preventDefault()}
             onClick={() => ctx.props.onLauncherToggle()}
           >
             +
@@ -113,6 +122,12 @@ export const SidebarTabs = component<{
                 key={t.id}
                 class={`side-row${t.id === ctx.props.activeId ? ' selected' : ''}`}
                 title={chipTooltip(t, ctx.props.hostLabels[t.hostId])}
+                onMouseDown={(e: MouseEvent) => {
+                  // A click on the ALREADY-selected row must not blur the
+                  // terminal textarea — no remount would refocus it, and
+                  // typing silently stops reaching the shell (see TabStrip).
+                  e.preventDefault();
+                }}
                 onClick={() => ctx.props.onActivate(t.id)}
               >
                 <span class={`link-dot ${t.link}`} />
@@ -130,8 +145,19 @@ export const SidebarTabs = component<{
       </div>
 
       <footer class="sidebar-footer">
-        <button class="hosts-link" onClick={() => ctx.props.onHosts()}>
-          ● {groups.length} host{groups.length === 1 ? '' : 's'}
+        {/* Dot and label are separate spans so the 48px icon rail can keep
+            the dot and drop the sentence — text wraps out of the rail. The
+            tooltip carries the count there, like every other rail name. */}
+        <button
+          class="hosts-link"
+          title={`${groups.length} host${groups.length === 1 ? '' : 's'}`}
+          onMouseDown={(e: MouseEvent) => e.preventDefault()}
+          onClick={() => ctx.props.onHosts()}
+        >
+          <span class="hosts-dot">●</span>
+          <span class="hosts-label">
+            {groups.length} host{groups.length === 1 ? '' : 's'}
+          </span>
         </button>
       </footer>
     </aside>

@@ -24,6 +24,7 @@ import type { DeviceKey } from './device-key.ts';
 import { Login } from './components/Login.tsx';
 import { Fleet } from './components/Fleet.tsx';
 import { NotFound } from './components/NotFound.tsx';
+import { SHELL_CHILD_PATHS, SHELL_PATH } from './route-table.ts';
 
 export interface AppContext {
   readonly bootstrap: Bootstrap;
@@ -82,15 +83,24 @@ export function routerPlugin(ctx: AppContext) {
     routes: [
       { path: '/', redirect: '/hosts' },
       { path: '/login', component: LoginRoute, beforeEnter: skipIfSignedIn(ctx) },
-      { path: '/hosts', component: FleetRoute, beforeEnter: gate },
-      { path: '/h/:hostId', component: FleetRoute, beforeEnter: gate },
-      // Mounts the shell with that session's tab active: the shell reads the
-      // params itself (useParams is reactive) and activates — or opens from
-      // the directory — the named tab. The reverse arrow is the shell's:
-      // activating a tab navigates here, so the URL is an EFFECT of
+      // ONE record for every URL the shell lives at, with the session paths
+      // as absolute children (see route-table.ts): RouterView keys the routed
+      // component by matched[0].path, so sibling records would remount the
+      // Shell — and discard every open tab — on each crossing between /hosts
+      // and a session URL. The children carry no component of their own; the
+      // shell reads the params itself (useParams is reactive) and activates —
+      // or opens from the directory — the named tab. The reverse arrow is the
+      // shell's: activating a tab navigates here, so the URL is an EFFECT of
       // activation and the route only ever feeds activation, never a
-      // navigation of its own — one direction each way, no loop.
-      { path: '/h/:hostId/s/:sessionId', component: FleetRoute, beforeEnter: gate },
+      // navigation of its own — one direction each way, no loop. `gate` runs
+      // for the children too: the guard walks every matched record, and the
+      // parent is always matched.
+      {
+        path: SHELL_PATH,
+        component: FleetRoute,
+        beforeEnter: gate,
+        children: SHELL_CHILD_PATHS.map((path) => ({ path })),
+      },
       // Unknown paths must not quietly render the session list: the Worker's
       // asset fallback serves index.html for *any* path, so a typo arrives
       // here looking exactly like a real route.

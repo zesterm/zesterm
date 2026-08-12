@@ -7,6 +7,7 @@ import {
   chipTitle,
   chipTooltip,
   isIconRail,
+  launcherKeyOf,
   launcherRows,
   shouldScrollIntoView,
   shortHostId,
@@ -122,6 +123,34 @@ test('scroll-into-view fires only when the chip leaves the viewport', () => {
   );
   assert.equal(shouldScrollIntoView({ left: 350, right: 480 }, vp), true, 'overflowing right');
   assert.equal(shouldScrollIntoView({ left: 40, right: 160 }, vp), true, 'overflowing left');
+});
+
+test('the launcher menu acts on every chord it advertises', () => {
+  assert.equal(launcherKeyOf('Escape', false, false), 'dismiss');
+  assert.equal(launcherKeyOf('Escape', true, true), 'dismiss', 'esc dismisses from anywhere');
+  assert.equal(
+    launcherKeyOf('Enter', true, false),
+    'focus-rows',
+    "the 'Run on another host…' row advertises ⇧⏎ — a chord that instead feeds a newline to the shell behind the menu reads as a broken feature",
+  );
+  assert.equal(
+    launcherKeyOf('Enter', false, false),
+    'run-default',
+    '⏎ runs the default while focus still sits in the terminal textarea',
+  );
+});
+
+test('⏎ yields to a row that already holds focus', () => {
+  assert.equal(
+    launcherKeyOf('Enter', false, true),
+    'none',
+    'a focused row activates itself — claiming ⏎ would run the default over the row the user chose',
+  );
+  assert.equal(
+    launcherKeyOf('a', false, false),
+    'none',
+    'ordinary typing is not the menu’s to claim',
+  );
 });
 
 test('the icon-rail predicate agrees with the @media (max-width: 900px) rule', () => {

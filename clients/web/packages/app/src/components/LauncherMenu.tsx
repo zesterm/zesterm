@@ -14,7 +14,7 @@
 
 import { component, onMounted, onUnmounted } from 'sigx';
 
-import type { LauncherRow } from '../chrome-model.ts';
+import { launcherKeyOf, type LauncherRow } from '../chrome-model.ts';
 
 export const LauncherMenu = component<{
   rows: readonly LauncherRow[];
@@ -34,23 +34,36 @@ export const LauncherMenu = component<{
   const defaultRow = (): LauncherRow | undefined =>
     ctx.props.rows.find((r) => r.isDefault) ?? ctx.props.rows[0];
 
-  // ⏎ and Esc are claimed at document capture while the menu is open — focus
-  // usually still sits in the terminal's textarea, and an Enter that both ran
-  // the default AND fed a newline to the shell would be the worst of both.
+  // Every advertised chord — ⏎, ⇧⏎, Esc — is claimed at document capture
+  // while the menu is open: focus usually still sits in the terminal's
+  // textarea, and an Enter that both acted on the menu AND fed a newline to
+  // the shell would be the worst of both. The policy itself lives in
+  // `launcherKeyOf`, where it is node-tested.
   const onDocKeyDown = (e: KeyboardEvent): void => {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
-      ctx.props.onDismiss();
-      return;
-    }
-    if (e.key === 'Enter' && !e.shiftKey) {
-      const row = defaultRow();
-      if (row !== undefined) {
+    const focusInMenu = rootEl !== null && e.target instanceof Node && rootEl.contains(e.target);
+    switch (launcherKeyOf(e.key, e.shiftKey, focusInMenu)) {
+      case 'dismiss':
         e.preventDefault();
         e.stopPropagation();
-        ctx.props.onRun(row.hostId);
+        ctx.props.onDismiss();
+        return;
+      case 'focus-rows':
+        // The "Run on another host…" row's own action, by its ⇧⏎ chord.
+        e.preventDefault();
+        e.stopPropagation();
+        firstHostRow?.focus();
+        return;
+      case 'run-default': {
+        const row = defaultRow();
+        if (row !== undefined) {
+          e.preventDefault();
+          e.stopPropagation();
+          ctx.props.onRun(row.hostId);
+        }
+        return;
       }
+      case 'none':
+        return;
     }
   };
 

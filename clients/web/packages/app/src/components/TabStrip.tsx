@@ -64,6 +64,14 @@ export const TabStrip = component<{
             class={`tab-chip${t.id === ctx.props.activeId ? ' active' : ''}`}
             title={chipTooltip(t, ctx.props.hostLabels[t.hostId])}
             style={`--tab-color:${t.color ?? 'var(--zt-accent)'}`}
+            onMouseDown={(e: MouseEvent) => {
+              // Chrome never steals the terminal's focus. Clicking the
+              // ALREADY-active chip changes no key, so no remount refocuses
+              // the textarea — the blur to <body> would silently eat all
+              // typing. Cancelling mousedown's default stops the focus move;
+              // click still fires. (Covers the close button via bubbling.)
+              e.preventDefault();
+            }}
             onClick={() => ctx.props.onActivate(t.id)}
             ref={(el: HTMLElement) => chipEls.set(t.id, el)}
           >
@@ -88,6 +96,7 @@ export const TabStrip = component<{
         <button
           class={`tab-new${ctx.props.launcherOpen ? ' open' : ''}`}
           title="new session"
+          onMouseDown={(e: MouseEvent) => e.preventDefault() /* same focus rule as the chips */}
           onClick={() => ctx.props.onLauncherToggle()}
         >
           +
@@ -102,7 +111,11 @@ export const TabStrip = component<{
         ) : null}
       </div>
       <div class="strip-spacer" />
-      <button class="kbd-pill" onClick={() => ctx.props.onPalette()}>
+      <button
+        class="kbd-pill"
+        onMouseDown={(e: MouseEvent) => e.preventDefault() /* same focus rule as the chips */}
+        onClick={() => ctx.props.onPalette()}
+      >
         ⌘K
       </button>
     </header>

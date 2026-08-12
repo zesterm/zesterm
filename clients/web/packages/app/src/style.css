@@ -645,7 +645,10 @@ body {
   background: var(--zt-panel);
   border: 1px solid var(--zt-line);
   border-radius: 12px;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.62);
+  /* the mock's rgba(0,0,0,.62): tone from the shadow token, strength as
+     alpha here — per tokens.ts, strength is a rendering concern, never a
+     colour of the stylesheet's own */
+  box-shadow: 0 20px 50px color-mix(in srgb, var(--zt-shadow) 62%, transparent);
 }
 
 .launcher.strip {
@@ -960,6 +963,9 @@ body {
 }
 
 .hosts-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   padding: 4px 6px;
   border: none;
   border-radius: 6px;
@@ -986,13 +992,15 @@ body {
   .search-pill,
   .host-label,
   .host-sub,
-  .side-text {
+  .side-text,
+  .hosts-label {
     display: none;
   }
 
   .search-row,
   .host-head,
-  .side-row {
+  .side-row,
+  .sidebar-footer {
     justify-content: center;
   }
 }

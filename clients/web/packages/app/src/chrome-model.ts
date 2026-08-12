@@ -103,6 +103,25 @@ export function launcherRows(
   }));
 }
 
+/** What a document-level keydown means to the open launcher menu. */
+export type LauncherKey = 'dismiss' | 'run-default' | 'focus-rows' | 'none';
+
+/**
+ * The open menu's key policy, pure so every chord the menu ADVERTISES is
+ * pinned to an action: `esc` dismisses, `⏎` runs the default, `⇧⏎` moves
+ * focus into the host rows — the "Run on another host…" row's own action
+ * (design §1: both act; a dead chord feeds a newline to the shell behind the
+ * menu instead). `⏎` yields when focus already sits inside the menu, because
+ * the focused row activates itself and claiming the key would run the
+ * default over the row the user chose.
+ */
+export function launcherKeyOf(key: string, shift: boolean, focusInMenu: boolean): LauncherKey {
+  if (key === 'Escape') return 'dismiss';
+  if (key !== 'Enter') return 'none';
+  if (shift) return 'focus-rows';
+  return focusInMenu ? 'none' : 'run-default';
+}
+
 /** A horizontal extent — a chip's or its scroll viewport's, in any shared coordinates. */
 export interface Extent {
   readonly left: number;
