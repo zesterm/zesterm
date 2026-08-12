@@ -1374,6 +1374,28 @@ is now unblocked and building.
       per §4: reconnecting dims the body and appends the overlay, an open
       running block reads interrupted; 'stalled' is modelled but has no
       producer until delta-silence detection lands.
+- [x] **The command palette** (#157) — the design README's §6 in DOM, over the
+      #132 store. What it offers is built purely from what the browser holds:
+      blocks from the attached tabs' `GridView.blocks` (the "N hosts searched"
+      count states exactly that set), sessions from the open tabs plus the
+      directory deduped on the full (host, session) pair, hosts from the
+      launcher's list, and only actions that work — layout toggle and theme
+      switches; no settings/profiles rows advertised before they exist.
+      Ranking (`palette/rank.ts`) pins the group order Blocks → Sessions →
+      Hosts → Actions whatever the match quality says — the palette is
+      primarily command history — with subsequence + recency scoring within a
+      group and recents on the empty query; provenance ages render only when
+      the host stamped a timestamp. ⏎ resolves per row kind in a pure
+      `runTargetOf`: a block re-runs through the terminal's own ⌘⇧R prompt
+      gate and only on the active tab (a background tab activates and does
+      nothing destructive), a session activates or opens, a host takes the
+      launcher's create path, an action dispatches. While open the palette
+      owns the keyboard (chords are claimed but only the toggle acts, and Tab
+      is trapped — the hidden input is the dialog's only tab stop, so focus
+      cannot walk out to the pty behind the scrim), and dismissal restores
+      focus to whatever held it — the terminal textarea.
+      The footer omits ⇧⏎ run-on-host: no host-chooser hook exists yet, and a
+      dead advertised chord reads as broken.
 - [x] **The fleet is a card grid, and the themes get a gallery** (#158) — the
       design README's §7–§8 in DOM (docs/design/client-ui/README.md carries the
       measurements). Host cards render from a pure `fleet-model` view-model
