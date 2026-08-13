@@ -806,7 +806,18 @@ fn a_link_that_parked_and_then_died_redials_at_the_shortest_delay() {
     //
     // A polite `Say::Close` does not reproduce it — that path was green
     // throughout. The link has to die the way links die.
-    const FIRST: Duration = Duration::from_millis(100);
+    //
+    // 400ms, not 100ms, and the number is the fix for the second flake this
+    // test has had (#177). The noise on one gap is *additive and uneven*, not
+    // constant: `jittered()` adds 0–25% per draw, the fake relay only drains
+    // `Say::Abort` at its 25ms read-poll boundary, each ended link's watchdog
+    // lingers for up to one 250ms sleep slice, and a macOS CI runner was
+    // measured adding ~80ms *more* to each successive gap (gaps of
+    // 138/221/291ms on a TypeScript-only PR — accumulation, not the ladder,
+    // whose step is ×2). Against a 100ms base that noise was worth 120% of a
+    // step and the 2× ratio below tripped 14ms over; against 400ms it is under
+    // a third of one. The base is the margin.
+    const FIRST: Duration = Duration::from_millis(400);
     let d = daemon("relay-host");
     let relay = FakeRelay::start(d.config.host);
     // A wide ceiling, so a ladder that climbs is unmistakable on the clock
@@ -822,6 +833,13 @@ fn a_link_that_parked_and_then_died_redials_at_the_shortest_delay() {
     // ladder shows up as growth however slow the machine is, and this repo has
     // already paid three times for tests that assert wall-clock on a loaded
     // runner.
+    //
+    // And it is the *last* gap on purpose, not the middle one (#177 considered
+    // that): with ±25% jitter on every delay, a climbing ladder's second gap
+    // undercuts twice its first (2F·(1+j2) < 2F·(1+j1)) on a coin flip, so a
+    // middle-gap assertion detects the actual bug about half the time. The
+    // third step is 4F and cannot dip under 2·(F·1.25) at all — detection is
+    // the clock's, not the dice's.
     relay.next_parked().send(Say::Abort).expect("the first link is up");
     let mut gaps = Vec::new();
     for _ in 0..3 {
@@ -831,12 +849,17 @@ fn a_link_that_parked_and_then_died_redials_at_the_shortest_delay() {
         link.send(Say::Abort).ok();
     }
 
+    // Printed unconditionally so `--nocapture` shows the drift on a healthy
+    // run; under plain `cargo test` the harness holds this back until a
+    // failure, where it lands beside the assertion below.
+    eprintln!("redial gaps after a parked link died: {gaps:?}");
+
     let first = gaps[0];
     let last = gaps[2];
     assert!(
         first >= FIRST,
-        "a redial after {first:?} is no delay at all: a relay that is down is down for every \
-         daemon in the fleet, and they would all retry at once"
+        "a redial after {first:?} (gaps {gaps:?}) is no delay at all: a relay that is down is \
+         down for every daemon in the fleet, and they would all retry at once"
     );
     assert!(
         last < first * 2,
