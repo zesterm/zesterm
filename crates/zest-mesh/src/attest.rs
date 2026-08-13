@@ -121,6 +121,29 @@ pub fn sign_attestation(identity: &ClientIdentity, a: &Attestation) -> Result<Si
 /// cannot be replayed as a newer shape.
 pub const ATTESTATION_VERSION: u16 = 1;
 
+/// The longest window an attestation may claim, milliseconds: 365 days.
+///
+/// Pinned to `ATTESTATION_TTL_MS` in `cloud/packages/shared/src/attestation.ts`
+/// — the two are separate projects and nothing compiles both, so this is the
+/// `ENROLL_PATH` discipline again: a Rust minting `exp - iat` wider than the
+/// TypeScript accepts produces vouchers the control plane refuses with a
+/// `bad_request` that names a field and not the drift.
+pub const ATTESTATION_TTL_MS: u64 = 365 * 24 * 60 * 60 * 1000;
+
+/// An attestation in its wire form:
+/// `base64url(message) "." base64url(signature)`, both parts unpadded.
+///
+/// The message is re-derived from the fields, which is safe *here* and only
+/// here: [`attestation_message`] is deterministic, so the bytes signed and the
+/// bytes encoded cannot differ when both come from the same fields — unlike
+/// the verify side, which must use the bytes that arrived. Round-tripped
+/// against [`decode_attestation`] and the golden fixture by the tests below,
+/// because the far end is TypeScript and the framing is the contract.
+pub fn encode_attestation(a: &Attestation, sig: &Signature) -> Result<String, AttestError> {
+    let message = attestation_message(a)?;
+    Ok(format!("{}.{}", base64url_encode(&message), base64url_encode(&sig.to_bytes())))
+}
+
 /// How long a blob may be before it is refused unread.
 ///
 /// Mirrors `MAX_ATTESTATION_CHARS` in `cloud/packages/shared/src/attestation.ts`,
@@ -190,6 +213,28 @@ pub fn decode_attestation(text: &str) -> Option<DecodedAttestation> {
     let signature = Signature::from_slice(&base64url_decode(signature)?).ok()?;
     let fields = parse_message(&message)?;
     Some(DecodedAttestation { fields, message, signature })
+}
+
+/// Unpadded base64url — the one spelling [`base64url_decode`] accepts, so an
+/// encoded blob is its own canonical form by construction.
+fn base64url_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        let chars = [(n >> 18) & 63, (n >> 12) & 63, (n >> 6) & 63, n & 63];
+        for (i, ch) in chars.iter().enumerate() {
+            // One output char per 6 input bits actually present; the unused
+            // low bits of a final partial sextet are zero by the shifts
+            // above, which is exactly the canonical form the decoder demands.
+            if i <= chunk.len() {
+                out.push(ALPHABET[*ch as usize] as char);
+            }
+        }
+    }
+    out
 }
 
 /// Strict base64url: the URL-safe alphabet, unpadded, nothing else.
@@ -611,6 +656,44 @@ mod tests {
     }
 
     #[test]
+    fn an_encoded_attestation_round_trips_and_verifies() {
+        // The app's whole mint path in one loop: fields → sign → encode →
+        // decode → verify, with the decoded fields byte-equal to what was
+        // signed. This is what makes `encode_attestation` safe to re-derive
+        // the message from its fields — determinism, proven rather than
+        // assumed.
+        let me = approver();
+        let a = attestation(me.client_id());
+        let sig = sign_attestation(&me, &a).expect("fits");
+        let blob = encode_attestation(&a, &sig).expect("fits");
+
+        let decoded = decode_attestation(&blob).expect("our own encoding must decode");
+        assert_eq!(decoded.fields, a, "every field survives the wire form");
+        assert_eq!(
+            decoded.message(),
+            attestation_message(&a).expect("fits"),
+            "the encoded message is the signed message — re-derivation is sound only \
+             while this holds"
+        );
+        assert!(
+            decoded.verify(a.iat + 1_000),
+            "a blob the app minted must verify at the far end's decoder"
+        );
+        assert!(
+            !blob.contains('='),
+            "unpadded, or the strict decoder (and the TypeScript one) refuses our own blob"
+        );
+    }
+
+    #[test]
+    fn the_ttl_matches_the_control_planes() {
+        // 365 days, as `cloud/packages/shared/src/attestation.ts` writes it.
+        // Pinned as arithmetic on both sides; a drift here mints vouchers the
+        // Worker refuses with `bad_request: exp`.
+        assert_eq!(ATTESTATION_TTL_MS, 31_536_000_000, "365 * 24 * 60 * 60 * 1000");
+    }
+
+    #[test]
     fn a_malformed_blob_is_refused_not_guessed_at() {
         let me = approver();
         let a = attestation(me.client_id());
@@ -698,23 +781,9 @@ mod tests {
         );
     }
 
-    /// Unpadded base64url, test-side only: production encodes in TypeScript.
-    fn base64url(bytes: &[u8]) -> String {
-        const ALPHABET: &[u8; 64] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-        let mut out = String::new();
-        for chunk in bytes.chunks(3) {
-            let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
-            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-            let chars = [(n >> 18) & 63, (n >> 12) & 63, (n >> 6) & 63, n & 63];
-            for (i, ch) in chars.iter().enumerate() {
-                if i <= chunk.len() {
-                    out.push(ALPHABET[*ch as usize] as char);
-                }
-            }
-        }
-        out
-    }
+    /// The production encoder — no longer TypeScript-only, since the app
+    /// mints blobs too (`encode_attestation`).
+    use super::base64url_encode as base64url;
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()

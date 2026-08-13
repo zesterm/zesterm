@@ -58,16 +58,35 @@ pub struct AccountEntry {
     pub label: String,
 }
 
-/// What one account fetch answers: the hosts, and where the relay lives.
+/// One device the account lists, as the fleet consumes it — the devices
+/// section's row data, same minimal-shape discipline as [`AccountEntry`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountDevice {
+    pub id: zest_proto::ClientId,
+    pub label: String,
+    /// `browser|phone|desktop`, as the control plane spells it; rendered,
+    /// never matched on.
+    pub kind: String,
+    /// The one status that makes a device trusted. Everything else is
+    /// pending, which is the state the Approve affordance exists for.
+    pub approved: bool,
+}
+
+/// What one account fetch answers: the hosts, where the relay lives, and
+/// the devices.
 ///
 /// The origin rides beside the hosts rather than on each row because it is
 /// one fact about the deployment, not a per-host one — and `None` is a
 /// deployment without a relay, where enrolled-but-unseen hosts are listed
-/// and honestly unreachable.
+/// and honestly unreachable. The devices ride the same fetch (issue #190's
+/// approver leg) rather than a second watcher, because the cadence,
+/// the sign-out clearing and the poke-driven refresh are one set of
+/// decisions and two watchers would make them twice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountListing {
     pub relay_origin: Option<String>,
     pub hosts: Vec<AccountEntry>,
+    pub devices: Vec<AccountDevice>,
 }
 
 /// Why an account fetch produced no listing.
@@ -80,8 +99,11 @@ pub enum AccountError {
     Transient(String),
 }
 
-/// Forces an account refresh out of turn — on sign-in, and when the fleet
-/// screen is shown. Dropping it ends the watcher thread.
+/// Forces an account refresh out of turn — on sign-in, when the fleet
+/// screen is shown, and after an approval changed what the listing says.
+/// Clones share the doorbell (the approve worker holds one); the watcher
+/// ends when the *last* is dropped.
+#[derive(Clone)]
 pub struct AccountPoke(crossbeam_channel::Sender<()>);
 
 impl AccountPoke {
@@ -389,6 +411,20 @@ impl FleetModel {
         self.inner.state.lock().account.as_ref().and_then(|l| l.relay_origin.clone())
     }
 
+    /// The account's devices, from the last successful fetch; empty both
+    /// before the first and after a sign-out — the same decay to nothing as
+    /// the enrolled hosts.
+    #[must_use]
+    pub fn devices(&self) -> Vec<AccountDevice> {
+        self.inner
+            .state
+            .lock()
+            .account
+            .as_ref()
+            .map(|l| l.devices.clone())
+            .unwrap_or_default()
+    }
+
     /// Keep the account's host listing fresh, off the main thread.
     ///
     /// `fetch` is the whole transport (the `watch(dial)` shape): fleet.rs
@@ -606,8 +642,11 @@ mod tests {
             let calls = Arc::clone(&calls);
             let stored = Arc::clone(&stored);
             std::thread::spawn(move || {
-                let listing =
-                    || AccountListing { relay_origin: Some("wss://relay.example".into()), hosts: Vec::new() };
+                let listing = || AccountListing {
+                    relay_origin: Some("wss://relay.example".into()),
+                    hosts: Vec::new(),
+                    devices: Vec::new(),
+                };
                 let fetch = move || {
                     let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
                     let _ = seen_tx.send(n);

@@ -322,6 +322,140 @@ pub fn mint_ticket(
         .ok_or_else(|| CloudError::BadAnswer(format!("no ticket in {:?}", clip(&got.body))))
 }
 
+/// One device the account lists — the fleet screen's devices section.
+///
+/// `kind` and `status` stay strings on purpose: their variants are the
+/// control plane's to grow (`browser|phone|desktop`, `pending|approved`
+/// today), and an enum here would turn a new kind into a parse failure that
+/// takes the whole listing with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountDevice {
+    pub id: ClientId,
+    pub label: String,
+    pub kind: String,
+    pub status: String,
+    /// The key can be read by script on its origin — a browser on the
+    /// fallback path. Rendered, never decided on.
+    #[allow(dead_code, reason = "the devices section's seed-backed marker is later polish")]
+    pub extractable: bool,
+}
+
+impl AccountDevice {
+    /// The one status the control plane treats as trusted.
+    #[must_use]
+    pub fn approved(&self) -> bool {
+        self.status == "approved"
+    }
+}
+
+/// The account's device list, or why it could not be read.
+pub fn fetch_devices(
+    api: &dyn AccountApi,
+    token: &str,
+) -> Result<Vec<AccountDevice>, CloudError> {
+    let got = api
+        .get("/api/devices", token)
+        .map_err(|e| CloudError::Transport(e.to_string()))?;
+    if got.status == 401 {
+        return Err(CloudError::SignedOut);
+    }
+    if !(200..300).contains(&got.status) {
+        return Err(CloudError::BadAnswer(format!("{}: {}", got.status, clip(&got.body))));
+    }
+
+    // Permissive like the hosts parse: unknown fields are the control
+    // plane's future, and only what the section renders is required.
+    #[derive(serde::Deserialize)]
+    struct Row {
+        id: ClientId,
+        label: String,
+        kind: String,
+        status: String,
+        #[serde(default)]
+        extractable: bool,
+    }
+    #[derive(serde::Deserialize)]
+    struct Answer {
+        #[serde(default)]
+        devices: Vec<Row>,
+    }
+    let answer: Answer = serde_json::from_str(&got.body)
+        .map_err(|e| CloudError::BadAnswer(format!("{e}; body was {:?}", clip(&got.body))))?;
+    Ok(answer
+        .devices
+        .into_iter()
+        .map(|d| AccountDevice {
+            id: d.id,
+            label: d.label,
+            kind: d.kind,
+            status: d.status,
+            extractable: d.extractable,
+        })
+        .collect())
+}
+
+/// Whose account this token speaks for — the `userId` an attestation must
+/// name inside its signed bytes.
+///
+/// Asked per approval rather than persisted: the app stores only the token
+/// (PR #210 deliberately kept nothing else), and `/api/me` answers a bearer
+/// with `principal.userId` for exactly this caller.
+pub fn fetch_me(api: &dyn AccountApi, token: &str) -> Result<String, CloudError> {
+    let got =
+        api.get("/api/me", token).map_err(|e| CloudError::Transport(e.to_string()))?;
+    if got.status == 401 {
+        return Err(CloudError::SignedOut);
+    }
+    if !(200..300).contains(&got.status) {
+        return Err(CloudError::BadAnswer(format!("{}: {}", got.status, clip(&got.body))));
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Principal {
+        #[serde(rename = "userId")]
+        user_id: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Answer {
+        principal: Option<Principal>,
+    }
+    let answer: Answer = serde_json::from_str(&got.body)
+        .map_err(|e| CloudError::BadAnswer(format!("{e}; body was {:?}", clip(&got.body))))?;
+    answer
+        .principal
+        .and_then(|p| p.user_id)
+        .filter(|u| !u.is_empty())
+        // `/api/me` answers `{user: null}` with a 200 for an unknown
+        // credential; that is "signed out" in a 200's clothing, not a
+        // malformed answer.
+        .ok_or(CloudError::SignedOut)
+}
+
+/// Submit a signed attestation for `device` — Approve on a pending row,
+/// Vouch on an approved one; the route is the same statement either way.
+pub fn approve_device(
+    api: &dyn AccountApi,
+    token: &str,
+    device: ClientId,
+    blob: &str,
+) -> Result<(), CloudError> {
+    let body = serde_json::json!({ "attestation": blob }).to_string();
+    let path = format!("/api/devices/{}/approve", hex(&device.0));
+    let got = api
+        .post(&path, token, &body)
+        .map_err(|e| CloudError::Transport(e.to_string()))?;
+    if got.status == 401 {
+        return Err(CloudError::SignedOut);
+    }
+    if !(200..300).contains(&got.status) {
+        // The refusal's own word (`bad_signature`, `forbidden`, a named
+        // field) is the only actionable part; the status alone reads as an
+        // outage.
+        return Err(CloudError::BadAnswer(message_from(&got.body)));
+    }
+    Ok(())
+}
+
 /// The relay's attach subprotocol, and the path an attach dials.
 ///
 /// Pinned as literals because the other ends are TypeScript
@@ -456,11 +590,19 @@ mod tests {
         status: u16,
         body: String,
         calls: RefCell<Vec<(String, String)>>,
+        /// What each POST carried — the approve tests assert the blob
+        /// reaches the wire verbatim.
+        posted: RefCell<Vec<String>>,
     }
 
     impl FakeAccountApi {
         fn answering(status: u16, body: &str) -> Self {
-            Self { status, body: body.to_string(), calls: RefCell::new(Vec::new()) }
+            Self {
+                status,
+                body: body.to_string(),
+                calls: RefCell::new(Vec::new()),
+                posted: RefCell::new(Vec::new()),
+            }
         }
     }
 
@@ -473,9 +615,10 @@ mod tests {
             &self,
             path: &str,
             bearer: &str,
-            _body: &str,
+            body: &str,
         ) -> std::io::Result<zest_cloud::http::Response> {
             self.calls.borrow_mut().push((path.to_string(), bearer.to_string()));
+            self.posted.borrow_mut().push(body.to_string());
             Ok(zest_cloud::http::Response { status: self.status, body: self.body.clone() })
         }
     }
@@ -771,6 +914,93 @@ mod tests {
             );
         }
         assert_eq!(mints.get(), 2, "two dials are two mints, never a cached ticket");
+    }
+
+    #[test]
+    fn a_device_listing_parses_tolerantly_and_names_its_statuses() {
+        // Unknown fields and a missing `extractable` are the control plane's
+        // future; a listing that breaks on them freezes the schema from the
+        // wrong end — the hosts parse's rule, applied to devices.
+        let api = FakeAccountApi::answering(
+            200,
+            &format!(
+                r#"{{"devices":[
+                    {{"id":"{}","label":"work-browser","kind":"browser","status":"pending","extractable":true,"enrolledAt":1,"future":1}},
+                    {{"id":"{}","label":"studio-app","kind":"desktop","status":"approved"}}
+                ],"unknownTop":true}}"#,
+                hex(&[0x31; 32]),
+                hex(&[0x32; 32]),
+            ),
+        );
+        let got = fetch_devices(&api, "zt1_x").expect("a listing with extras still parses");
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].label, "work-browser");
+        assert!(!got[0].approved(), "pending is the state the Approve button exists for");
+        assert!(got[0].extractable, "seed-backed keys are named as such");
+        assert!(got[1].approved());
+        assert!(!got[1].extractable, "absent means no claim, defaulted false");
+        assert_eq!(
+            api.calls.borrow()[0],
+            ("/api/devices".to_string(), "zt1_x".to_string()),
+            "the route and the bearer are the request"
+        );
+    }
+
+    #[test]
+    fn every_account_read_maps_a_401_to_signed_out() {
+        // One refusal, one meaning, on all three reads the approver flow
+        // makes: a revoked token asks for sign-in, never for a retry.
+        let api = FakeAccountApi::answering(401, r#"{"error":"unauthorized"}"#);
+        assert!(matches!(fetch_devices(&api, "zt1_x"), Err(CloudError::SignedOut)));
+        assert!(matches!(fetch_me(&api, "zt1_x"), Err(CloudError::SignedOut)));
+        assert!(matches!(
+            approve_device(&api, "zt1_x", ClientId::from_bytes([7; 32]), "m.s"),
+            Err(CloudError::SignedOut)
+        ));
+    }
+
+    #[test]
+    fn me_answers_the_user_id_and_a_null_user_is_signed_out() {
+        // The bearer shape: `user` present-but-null, the principal named.
+        let api = FakeAccountApi::answering(
+            200,
+            r#"{"user":null,"principal":{"kind":"device","id":"abc","userId":"user_1234"}}"#,
+        );
+        assert_eq!(fetch_me(&api, "zt1_x").expect("a principal"), "user_1234");
+
+        // A 200 with `user: null` and no principal is how /api/me spells
+        // "this credential is nobody" — signed out in a 200's clothing.
+        let api = FakeAccountApi::answering(200, r#"{"user":null}"#);
+        assert!(matches!(fetch_me(&api, "zt1_x"), Err(CloudError::SignedOut)));
+    }
+
+    #[test]
+    fn an_approval_posts_the_blob_to_the_devices_own_path() {
+        let device = ClientId::from_bytes([0x44; 32]);
+        let api = FakeAccountApi::answering(200, r#"{"device":{"status":"approved"}}"#);
+        approve_device(&api, "zt1_x", device, "bWVzc2FnZQ.c2ln").expect("a 200 is an approval");
+        assert_eq!(
+            api.calls.borrow()[0].0,
+            format!("/api/devices/{}/approve", hex(&device.0)),
+            "the id in the path is the statement's subject — the handler cross-checks it \
+             against the signed bytes"
+        );
+        assert_eq!(
+            api.posted.borrow()[0],
+            r#"{"attestation":"bWVzc2FnZQ.c2ln"}"#,
+            "the blob travels verbatim; the control plane stores and re-serves these bytes"
+        );
+    }
+
+    #[test]
+    fn a_refused_approval_surfaces_the_control_planes_word() {
+        let api = FakeAccountApi::answering(400, r#"{"error":"bad_signature"}"#);
+        let err = approve_device(&api, "zt1_x", ClientId::from_bytes([7; 32]), "m.s")
+            .expect_err("a 400 is not an approval");
+        assert!(
+            err.to_string().contains("bad_signature"),
+            "the refusal's own word is the only actionable part; got {err}"
+        );
     }
 
     #[test]

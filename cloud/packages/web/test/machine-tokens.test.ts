@@ -120,18 +120,35 @@ test('a device token lists hosts, with the relay origin beside them', async () =
   db.close();
 });
 
-test('a host token may not list hosts, and neither token lists devices', async () => {
+test('a device token lists devices — the app is an approver', async () => {
+  // The widening #190 deferred and then made: the desktop app's fleet screen
+  // renders pending rows and vouches from them, with the only credential it
+  // has. Sound because the resolve join admits only approved devices.
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  const device = await enrolled(db, cookie, 'device', 8);
+
+  const res = await routeApi(bearer('/api/devices', device.token), env(db), fetch, NOW);
+  assert.equal(res?.status, 200, 'an approved device reads the approval surface');
+  const body = (await res!.json()) as { devices: { id: string; status: string }[] };
+  assert.deepEqual(
+    body.devices.map((d) => d.id),
+    [device.id],
+    'the same rows its owner sees',
+  );
+  db.close();
+});
+
+test('a host token may not list hosts or devices', async () => {
   const db = testDb();
   const cookie = await signedIn(db, 'user-a');
   const host = await enrolled(db, cookie, 'host', 7);
-  const device = await enrolled(db, cookie, 'device', 8);
 
-  for (const [path, token, why] of [
-    ['/api/hosts', host.token, 'a machine serving shells does not enumerate its owner’s fleet'],
-    ['/api/devices', host.token, 'nor the account’s devices'],
-    ['/api/devices', device.token, 'the devices list is the approval surface: people only, for now'],
+  for (const [path, why] of [
+    ['/api/hosts', 'a machine serving shells does not enumerate its owner’s fleet'],
+    ['/api/devices', 'and certainly not the approval surface'],
   ] as const) {
-    const res = await routeApi(bearer(path, token), env(db), fetch, NOW);
+    const res = await routeApi(bearer(path, host.token), env(db), fetch, NOW);
     assert.equal(res?.status, 401, why);
   }
   db.close();

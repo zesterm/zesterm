@@ -11,7 +11,8 @@ use zest_render_wgpu::{LinearRgba, RectInstance};
 use super::hit::HitRegion;
 use super::layout::{ChromeLayout, TextRun};
 use super::model::{
-    FleetAccountAction, FleetAccountModel, FleetCard, ScreenModel, SettingsValueCell, ThemeCard,
+    FleetAccountAction, FleetAccountModel, FleetCard, FleetDeviceAction, FleetDevicesModel,
+    ScreenModel, SettingsValueCell, ThemeCard,
 };
 use super::theme::ChromeColors;
 
@@ -138,8 +139,8 @@ pub fn screen_overlay(
     out: &mut ChromeLayout,
 ) -> Option<[f32; 4]> {
     match screen {
-        ScreenModel::Fleet { account, cards } => {
-            fleet(account, cards, area, colors, s, measure, out);
+        ScreenModel::Fleet { account, cards, devices } => {
+            fleet(account, cards, devices.as_ref(), area, colors, s, measure, out);
             None
         }
         ScreenModel::Themes { cards } => {
@@ -271,9 +272,131 @@ fn account_header(
     top + h + 12.0 * s
 }
 
+// Devices section, logical px.
+const DEVICE_ROW_H: f32 = 30.0;
+
+/// The devices section (issue #190: the app as approver): hosted account
+/// data under the host cards — a title, one row per key, a button carrying
+/// whichever verb the row's state earns, and the last failure in warn ink.
+fn devices_section(
+    model: &FleetDevicesModel,
+    area: [f32; 4],
+    top: f32,
+    colors: &ChromeColors,
+    s: f32,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+    out: &mut ChromeLayout,
+) {
+    let x0 = area[0] + PAD_X * s;
+    let title_px = 13.0 * s;
+    let mut y = top + title_px;
+    let tw = measure("Devices", title_px, true, 0.0);
+    out.texts.push(TextRun {
+        text: "Devices".into(),
+        pos: [x0, y],
+        max_width: tw + 2.0,
+        color: colors.text_active,
+        clip: area,
+        px: title_px,
+        bold: true,
+        tracking: 0.0,
+    });
+    out.texts.push(TextRun {
+        text: "browsers and apps holding a key to this account".into(),
+        pos: [x0 + tw + 12.0 * s, y],
+        max_width: (area[0] + area[2] - x0 - tw - 12.0 * s - PAD_X * s).max(0.0),
+        color: colors.text_faint,
+        clip: area,
+        px: 10.5 * s,
+        bold: false,
+        tracking: 0.0,
+    });
+    y += 8.0 * s;
+
+    if let Some(error) = &model.error {
+        let px = 11.0 * s;
+        y += px + 4.0 * s;
+        out.texts.push(TextRun {
+            text: error.clone(),
+            pos: [x0, y],
+            max_width: (area[2] - 2.0 * PAD_X * s).max(0.0),
+            color: colors.warn,
+            clip: area,
+            px,
+            bold: false,
+            tracking: 0.0,
+        });
+        y += 4.0 * s;
+    }
+
+    for (i, row) in model.rows.iter().enumerate() {
+        let h = DEVICE_ROW_H * s;
+        let px = 12.0 * s;
+        let base = baseline_in(y, h, px);
+        let lw = measure(&row.label, px, false, 0.0);
+        out.texts.push(TextRun {
+            text: row.label.clone(),
+            pos: [x0, base],
+            max_width: lw + 2.0,
+            color: colors.text_active,
+            clip: area,
+            px,
+            bold: false,
+            tracking: 0.0,
+        });
+        out.texts.push(TextRun {
+            text: row.detail.clone(),
+            pos: [x0 + lw + 12.0 * s, base],
+            max_width: (area[2] * 0.5).max(0.0),
+            color: colors.text_faint,
+            clip: area,
+            px: 11.0 * s,
+            bold: false,
+            tracking: 0.0,
+        });
+
+        // The account header's button treatment, verb from the row's state.
+        let label = match row.action {
+            FleetDeviceAction::None => None,
+            FleetDeviceAction::Approve => Some("Approve"),
+            FleetDeviceAction::Vouch => Some("Vouch"),
+        };
+        if let Some(label) = label {
+            let bpx = 11.0 * s;
+            let bw = measure(label, bpx, false, 0.0);
+            let rect = [
+                area[0] + area[2] - PAD_X * s - bw - 20.0 * s,
+                y + (h - ACCOUNT_BTN_H * s) / 2.0,
+                bw + 20.0 * s,
+                ACCOUNT_BTN_H * s,
+            ];
+            out.rects.push(RectInstance {
+                radii: [7.0 * s; 4],
+                border: colors.line,
+                border_width: HAIRLINE * s,
+                ..RectInstance::filled(rect, colors.panel_bg, area)
+            });
+            out.hit.push(rect, HitRegion::FleetApproveDevice(i));
+            out.texts.push(TextRun {
+                text: label.to_string(),
+                pos: [rect[0] + 10.0 * s, baseline_in(rect[1], rect[3], bpx)],
+                max_width: bw + 2.0,
+                color: colors.text_inactive,
+                clip: area,
+                px: bpx,
+                bold: false,
+                tracking: 0.0,
+            });
+        }
+        y += h;
+    }
+}
+
+#[allow(clippy::too_many_arguments, reason = "one screen's worth of model, not a seam")]
 fn fleet(
     account: &FleetAccountModel,
     cards: &[FleetCard],
+    devices: Option<&FleetDevicesModel>,
     area: [f32; 4],
     colors: &ChromeColors,
     s: f32,
@@ -297,12 +420,19 @@ fn fleet(
     let avail = area[2] - 2.0 * PAD_X * s;
     let (ncols, card_w) = grid_columns(avail, FLEET_CARD_MIN * s, FLEET_GAP * s);
 
+    // Card height is uniform: enough for a header and four rows. Uneven
+    // heights would need a measure pass nothing else wants yet — and the
+    // devices section below needs to know where the grid ends.
+    let card_h = (46.0 + 4.0 * 18.0 + 14.0) * s;
+    let card_rows = cards.len().div_ceil(ncols.max(1));
+    let cards_end = top + card_rows as f32 * (card_h + FLEET_GAP * s);
+    if let Some(devices) = devices {
+        devices_section(devices, area, cards_end + 10.0 * s, colors, s, measure, out);
+    }
+
     for (i, card) in cards.iter().enumerate() {
         let col = i % ncols;
         let row = i / ncols;
-        // Row height is uniform: enough for a header and four rows. Uneven
-        // heights would need a measure pass nothing else wants yet.
-        let card_h = (46.0 + 4.0 * 18.0 + 14.0) * s;
         let cx = x0 + col as f32 * (card_w + FLEET_GAP * s);
         let cy = top + row as f32 * (card_h + FLEET_GAP * s);
         let rect = [cx, cy, card_w, card_h];
