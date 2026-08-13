@@ -239,6 +239,14 @@ impl Terminal {
         self.state.resize(cols, rows);
     }
 
+    /// Tell the terminal its pty restates the viewport after a resize.
+    ///
+    /// Asked of the transport (`PtyTransport::restates_on_resize`) and passed
+    /// on at spawn. See [`crate::grid::Grid::set_pty_restates_viewport`].
+    pub fn set_pty_restates_viewport(&mut self, yes: bool) {
+        self.state.grid.set_pty_restates_viewport(yes);
+    }
+
     /// The visible screen as text. The workhorse of the test suite.
     #[must_use]
     pub fn screen_text(&self) -> String {

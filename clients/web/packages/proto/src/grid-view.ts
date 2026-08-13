@@ -99,6 +99,23 @@ export class GridView {
     const renumbered = this.cols !== 0 && k.cols !== this.cols;
     if (renumbered) this.scrollback = [];
     this.cols = k.cols;
+    // A *height* change scrolls rows out of the viewport and into the host's
+    // history, and at an unchanged width their ids still mean what they meant.
+    // Replacing `rows` wholesale therefore throws away rows this client holds
+    // and the host still has — and the blocks anchored there go on naming them,
+    // so they render as blocks with no rows: the pane looks like every block
+    // vanished when only the client's copy of the text did. Carry them over
+    // instead; there is nothing to fetch and nothing to renumber. (#200)
+    if (!renumbered) {
+      const firstNew = k.rows_data.find((r) => r.line !== NO_LINE)?.line;
+      const lastHeld = this.scrollback.at(-1)?.line;
+      if (firstNew !== undefined) {
+        const displaced = this.rows.filter(
+          (r) => r.line !== NO_LINE && r.line < firstNew && (lastHeld === undefined || r.line > lastHeld),
+        );
+        if (displaced.length > 0) this.scrollback = [...this.scrollback, ...displaced];
+      }
+    }
     this.rows = [...k.rows_data];
     // Merged, not replaced. A keyframe re-sends every attribute it uses, but the
     // ids stay meaningful to a client that has been attached throughout, so

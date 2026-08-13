@@ -331,6 +331,17 @@ pub trait PtyTransport: Send {
     fn writer(&self) -> Box<dyn Write + Send>;
     fn resize(&self, size: PtySize) -> Result<(), PtyError>;
 
+    /// Whether a resize is answered by restating the whole viewport.
+    ///
+    /// ConPTY is; a unix pty sends nothing back at all. The owner needs this
+    /// because a restating pty has the *last word* on the viewport's contents,
+    /// which changes what the grid may safely put there — see
+    /// `Grid::set_pty_restates_viewport`. `false` is the safe default: it means
+    /// "assume nothing is coming", which is what a pty that says nothing wants.
+    fn restates_on_resize(&self) -> bool {
+        false
+    }
+
     /// End the child, and make the reader reach EOF.
     ///
     /// Exists because on neither platform does dropping the transport suffice

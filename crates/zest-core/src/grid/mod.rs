@@ -123,6 +123,13 @@ pub struct Grid {
     scrollback_len: usize,
     /// Viewport offset from the bottom, in lines. 0 means "at the bottom".
     display_offset: usize,
+    /// Whether the pty restates the whole viewport after a resize.
+    ///
+    /// ConPTY does; a unix pty sends nothing back. It changes one decision —
+    /// see the grow branch of [`Grid::resize`] — and it is a plain bool rather
+    /// than a `cfg` because this crate must build for wasm and knows nothing
+    /// about platforms. The host asks its transport and passes the answer on.
+    pty_restates_viewport: bool,
     pub cursor: Cursor,
     pub region: ScrollRegion,
 }
@@ -154,9 +161,19 @@ impl Grid {
             capture_evicted: false,
             scrollback_len: 0,
             display_offset: 0,
+            pty_restates_viewport: false,
             cursor: Cursor::default(),
             region: ScrollRegion::full(rows),
         }
+    }
+
+    /// Tell the grid its pty restates the viewport after a resize.
+    ///
+    /// See the field, and the grow branch of [`Self::resize`]. Off by default,
+    /// which is the unix answer and the answer for a grid that has no pty at
+    /// all — a client applying deltas, or a test.
+    pub fn set_pty_restates_viewport(&mut self, yes: bool) {
+        self.pty_restates_viewport = yes;
     }
 
     #[must_use]
@@ -508,6 +525,28 @@ impl Grid {
                     // The cursor moved up with the content.
                     self.cursor.row = self.cursor.row.saturating_sub(over_the_top);
                 }
+            } else if self.pty_restates_viewport {
+                // Nothing comes back out of scrollback, because the pty is
+                // about to restate this viewport and would blank whatever we
+                // put in it.
+                //
+                // ConPTY's buffer is only as tall as the viewport, so shrinking
+                // to a few rows discards everything else it held; growing back,
+                // it repaints the rows it still has and *blanks the rest*. Pull
+                // history down to meet that and the repaint erases it -- and it
+                // is no longer in scrollback either, because this moved the
+                // boundary past it. That is not history misplaced, it is
+                // history destroyed, and it is what "I dragged the window's
+                // height to nothing and back and every block is empty" was:
+                // the blocks were intact the whole time and every row they
+                // named had been blanked. (#200)
+                //
+                // Leaving the boundary alone gives the repaint fresh rows to
+                // blank and keeps the history above it, which is also exactly
+                // what ConPTY and Windows Terminal do with their own buffers.
+                // The reversible-drag property below is a *unix* property; it
+                // was never reachable here, because the repaint always had the
+                // last word.
             } else {
                 // Growing pulls rows back down out of scrollback before it
                 // adds blank ones, so dragging a window smaller and back is one
@@ -1151,6 +1190,42 @@ mod tests {
             );
         }
         assert_eq!(g.cursor.row, 9, "the cursor did not come back with the content");
+    }
+
+    #[test]
+    fn a_restating_pty_keeps_its_history_in_scrollback_across_a_grow() {
+        // The same gesture as the test above, against a pty that repaints. The
+        // pull-back is *wrong* here and the opposite of harmless: ConPTY's
+        // buffer is only as tall as the viewport, so shrinking to four rows
+        // discards the rest, and growing back it repaints what it still has and
+        // blanks everything else. Rows pulled down to meet that are erased --
+        // and they are no longer in scrollback either, because the pull moved
+        // the boundary past them. History destroyed, not misplaced. (#200)
+        let mut g = Grid::new(30, 10, 500);
+        g.set_pty_restates_viewport(true);
+        for row in 0..10 {
+            write_text(&mut g, row, &format!("line {row}"));
+        }
+        g.cursor.row = 9;
+
+        g.resize(30, 4, &Cell::default());
+        let after_shrink = g.scrollback_len();
+        assert_eq!(after_shrink, 6, "six rows went over the top and became history");
+
+        g.resize(30, 10, &Cell::default());
+        assert_eq!(
+            g.scrollback_len(),
+            6,
+            "history stayed above the viewport, where the repaint cannot reach it"
+        );
+
+        // And it is still real text, reachable as history, rather than six rows
+        // the repaint is about to blank.
+        let history = g.lines_by_id(0, 6);
+        assert_eq!(history.len(), 6, "six rows of history are readable");
+        for (row, line) in history.iter().enumerate() {
+            assert_eq!(line.text().trim_end(), format!("line {row}"));
+        }
     }
 
     #[test]

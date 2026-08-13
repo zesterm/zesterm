@@ -1110,6 +1110,82 @@ fn erasing_a_wrapped_row_to_its_end_stops_it_being_wrapped() {
     );
 }
 
+/// A repaint from a pty whose buffer is only as tall as the viewport.
+///
+/// ConPTY's is. Shrink to a few rows and everything that no longer fits is
+/// gone from it for good; grow back and it restates the little it kept and
+/// **blanks the rest** — every one of those blank lines terminated with
+/// `ESC[K`, which is most of what a real capture consists of.
+fn conpty_repaint_after_a_squeeze(cols: usize, rows: usize, kept: &[&str]) -> Vec<u8> {
+    let mut out = format!("\x1b[?25l\x1b[8;{rows};{cols}t\x1b[H");
+    for r in 0..rows {
+        if r > 0 {
+            out.push_str("\r\n");
+        }
+        out.push_str(kept.get(r).copied().unwrap_or(""));
+        out.push_str("\x1b[K");
+    }
+    out.push_str(&format!("\x1b[{};1H\x1b[?25h", kept.len().max(1)));
+    out.into_bytes()
+}
+
+#[test]
+fn dragging_the_height_to_nothing_and_back_does_not_blank_every_block() {
+    // The reported gesture, and the one the width-change story never covered:
+    // drag the window's height down to nothing and back, and every block comes
+    // back empty. The width never changes, so `Grid::resize` returns an empty
+    // `Reindex`, no re-anchoring happens and none is needed — the blocks are
+    // intact throughout. What was gone was the *text*.
+    //
+    // Growing used to pull rows back out of scrollback so a drag was one
+    // reversible gesture. Against ConPTY that is not merely undone, it is
+    // destructive: its buffer is viewport-tall, so the squeeze discarded what
+    // no longer fitted, and the repaint on the way back blanks every row it no
+    // longer has. Rows pulled down to meet it are erased, and the pull has
+    // already moved them out of scrollback. History destroyed, not misplaced.
+    // (#200)
+    // Output that FILLS the viewport, which is the whole point: a real `ls` is
+    // twenty-odd rows in a twenty-four-row pane, so the block lives on the
+    // screen rather than safely up in history. A two-line block would sit in
+    // scrollback throughout and survive by luck.
+    let mut t = Terminal::new(40, 12, 500);
+    t.set_pty_restates_viewport(true);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\n");
+    for i in 0..9 {
+        t.advance(format!("entry {i}\r\n").as_bytes());
+    }
+    t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    assert_eq!(t.blocks().blocks().len(), 2, "one command and a live prompt");
+    let out = t.blocks().blocks()[0].output_line.expect("the command produced output");
+
+    // Down to a single row. ConPTY keeps that row and discards the rest.
+    t.resize(40, 1);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 1, &["$ "]));
+
+    // And back up. It restates the one line it still has, and blanks eleven.
+    t.resize(40, 12);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 12, &["$ "]));
+
+    assert_eq!(t.blocks().blocks().len(), 2, "the blocks were never the problem");
+    for (n, line) in (out..out + 9).enumerate() {
+        // Either place is right: the fix keeps this above the viewport, where
+        // the repaint cannot reach it, so `row_of_line` -- which only searches
+        // the screen -- correctly no longer finds it.
+        let found = t
+            .grid()
+            .row_of_line(line)
+            .map(|row| t.grid().row(row).text())
+            .or_else(|| t.grid().lines_by_id(line, 1).first().map(|r| r.text()))
+            .unwrap_or_default();
+        assert_eq!(
+            found.trim_end(),
+            format!("entry {n}"),
+            "line {line} of the listing came back blank -- which renders as the block \
+             being gone, however intact the index is"
+        );
+    }
+}
+
 #[test]
 fn a_drag_with_conpty_repaints_leaves_every_block_naming_its_own_output() {
     // `narrowing_and_widening_back_keeps_every_block` covers the reflow half of

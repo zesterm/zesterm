@@ -68,6 +68,27 @@ impl GridView {
 
     /// Replace everything with a complete state.
     pub fn apply_keyframe(&mut self, k: &Keyframe) {
+        // A *height* change scrolls rows out of the viewport and into the
+        // host's history, and at an unchanged width their ids still mean what
+        // they meant. Replacing `rows` wholesale would throw away rows this
+        // client holds and the host still has, and the blocks anchored there
+        // would go on naming them — rendering as blocks with no rows at all,
+        // which reads as every block having vanished. (#200)
+        //
+        // Gated on the width for the reason `grid-view.ts` gives at length: a
+        // reflow renumbers every id, so displaced rows cannot be filed under a
+        // numbering the keyframe has just replaced. The *stale-scrollback* half
+        // of that rule is still missing here and is tracked as #139; this adds
+        // only the case where there is nothing to renumber.
+        if self.cols == k.cols {
+            if let Some(first) = k.rows_data.iter().map(|r| r.line).find(|&l| l != i64::MIN) {
+                let last_held = self.scrollback.last().map(|r| r.line);
+                let displaced = self.rows.iter().filter(|r| {
+                    r.line != i64::MIN && r.line < first && last_held.is_none_or(|l| r.line > l)
+                });
+                self.scrollback.extend(displaced.cloned());
+            }
+        }
         self.cols = k.cols;
         self.rows = k.rows_data.clone();
         for a in &k.attrs {
@@ -236,6 +257,48 @@ mod tests {
             runs: vec![Run { attr: AttrId(0), cells: text.len() as u16, text: text.into(), marks: Vec::new() }],
             wrapped: false,
         }
+    }
+
+    fn keyframe(cols: u16, lines: &[(i64, &str)]) -> Keyframe {
+        Keyframe {
+            cols,
+            rows: lines.len() as u16,
+            rows_data: lines.iter().map(|&(l, t)| row(l, t)).collect(),
+            attrs: Vec::new(),
+            cursor: cursor(),
+            modes: Modes::empty(),
+            blocks: Vec::new(),
+            blocks_from: 0,
+            title: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_height_change_keyframe_keeps_the_rows_that_left_the_viewport() {
+        // Dragging a window's height down and back is where "every block is
+        // gone" comes from. The width never changes, so nothing is renumbered
+        // and nothing needs re-anchoring -- but the rows that were on screen
+        // are history now, and replacing `rows` wholesale threw away this
+        // client's only copy. The blocks anchored there went on naming them and
+        // rendered with no rows at all. (#200)
+        let mut view = GridView::new();
+        view.apply_keyframe(&keyframe(20, &[(0, "line 0"), (1, "line 1"), (2, "line 2")]));
+        view.apply_keyframe(&keyframe(20, &[(3, "line 3"), (4, "line 4"), (5, "line 5")]));
+
+        let held: Vec<i64> = view.scrollback.iter().map(|r| r.line).collect();
+        assert_eq!(held, vec![0, 1, 2], "the displaced rows were dropped, not kept");
+    }
+
+    #[test]
+    fn a_width_change_keyframe_still_drops_what_it_cannot_renumber() {
+        // The counterpart, and why the carry-over is gated on the width: a
+        // reflow renumbers every id, so displaced rows cannot be filed under a
+        // numbering the keyframe has just replaced.
+        let mut view = GridView::new();
+        view.apply_keyframe(&keyframe(20, &[(0, "line 0"), (1, "line 1")]));
+        view.apply_keyframe(&keyframe(10, &[(2, "line 2"), (3, "line 3")]));
+
+        assert!(view.scrollback.is_empty(), "old-numbering rows must not survive a reflow");
     }
 
     /// Replay a session and assert the decoder never diverges.

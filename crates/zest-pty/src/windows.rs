@@ -422,6 +422,15 @@ impl PtyTransport for ConPty {
         Ok(())
     }
 
+    /// Yes, and it is why `restates_on_resize` exists.
+    ///
+    /// ConPTY's buffer is only as tall as the viewport, so a resize both
+    /// discards what no longer fits and repaints what does — the repaint has
+    /// the last word on every visible row. (#200)
+    fn restates_on_resize(&self) -> bool {
+        true
+    }
+
     fn hangup(&self) {
         // This *is* the shutdown protocol of gotcha 2b, run deliberately rather
         // than as a side effect of drop timing, and both of its preconditions
