@@ -622,6 +622,61 @@ fn a_bare_d_marker_is_unknown_rather_than_success() {
 }
 
 #[test]
+fn an_abandoned_prompt_is_reused_rather_than_left_open() {
+    // An empty Enter, a ^C, or any prompt redraw is an `A` with no `C` and no
+    // `D` after it: zsh emits `C` from preexec and `D` only when something
+    // actually ran. Pushing a block per prompt therefore left a trail of
+    // `Prompt` blocks with no `end_line` -- and since `contains` treats an
+    // open block as covering every line below it, the FIRST one swallowed the
+    // rest of the session. The live prompt then rendered inside that block's
+    // output instead of on the prompt line, and a client typing into a shell
+    // that was answering perfectly well saw nothing appear. (#193)
+    //
+    // pwsh brackets even an empty line with C/D, so every block closes there.
+    // That is the whole reason this only ever appeared on macOS.
+    let mut t = Terminal::new(20, 4, 100);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+    t.advance(b"\r\n\x1b]133;A\x07$ \x1b]133;B\x07");
+    t.advance(b"\r\n\x1b]133;A\x07$ \x1b]133;B\x07");
+
+    assert_eq!(
+        t.blocks().blocks().len(),
+        1,
+        "three prompts and no command is one prompt showing, not three blocks: {:?}",
+        t.blocks().blocks()
+    );
+
+    // And it is the prompt showing *now*, not the first one: a block anchored
+    // to an abandoned row goes on claiming that row and everything after it.
+    let live = t.grid().active_line_id_at(t.cursor().row).expect("a live row");
+    let b = t.blocks().last().expect("the prompt block");
+    assert_eq!(b.prompt_line, live, "the surviving block is anchored to the live prompt");
+    assert_eq!(b.state, zest_core::BlockState::Prompt);
+    assert!(b.output_line.is_none(), "nothing has run in it");
+}
+
+#[test]
+fn reusing_an_abandoned_prompt_never_swallows_a_command_that_ran() {
+    // The reuse above is only sound while it is confined to a prompt that
+    // produced nothing. A block that actually ran is history, and the next
+    // prompt is a new block however the previous one ended -- including the
+    // `Running` block of a command still going when the shell somehow
+    // reprompts, which must not be silently rewritten as the live prompt.
+    let mut t = Terminal::new(20, 6, 100);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\nout\r\n\x1b]133;D;0\x07");
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+    assert_eq!(t.blocks().blocks().len(), 2, "a command that ran keeps its own block");
+
+    let first = &t.blocks().blocks()[0];
+    assert_eq!(first.command, "ls");
+    assert_eq!(first.state, zest_core::BlockState::Finished { exit_code: Some(0) });
+
+    // A second abandoned prompt still collapses into the trailing one.
+    t.advance(b"\r\n\x1b]133;A\x07$ \x1b]133;B\x07");
+    assert_eq!(t.blocks().blocks().len(), 2, "the abandoned prompt is reused, not appended");
+}
+
+#[test]
 fn block_timestamps_come_from_the_embedder_and_only_from_it() {
     // The parser has no clock (`no_std`): a terminal never told the time
     // produces blocks with no stamps, and one told the time stamps C and D

@@ -77,10 +77,18 @@ export function sliceBlocks(view: {
   let bi = 0;
   for (const row of walk(view)) {
     // Advance past blocks that ended before this row. An open block never
-    // ends, so nothing advances past it — it claims everything below.
+    // ends, so it claims everything below — but only the *last* block may,
+    // and that is a bound rather than an assumption: an earlier open block
+    // (an abandoned zsh prompt, from a host predating #193) otherwise
+    // swallowed the whole session, leaving every later block rendering as a
+    // bare header and the live prompt drawn inside a card halfway up the pane.
+    // Where the next block starts is where this one must stop.
     while (bi < blocks.length) {
       const b = blocks[bi] as BlockPayload;
-      if (b.end_line !== null && row.line > b.end_line) bi += 1;
+      const next = blocks[bi + 1];
+      const ended = b.end_line !== null && row.line > b.end_line;
+      const superseded = b.end_line === null && next !== undefined && row.line >= next.prompt_line;
+      if (ended || superseded) bi += 1;
       else break;
     }
 

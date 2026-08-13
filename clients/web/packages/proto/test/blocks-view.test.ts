@@ -369,3 +369,73 @@ test('an astral-plane row produces no phantom spacer text', () => {
     'the emoji spans keep their WIDE flag so a renderer can still size them',
   );
 });
+
+test('a stale open block stops at the next block instead of claiming the session', () => {
+  // "An open block never ends, so nothing advances past it" is right for the
+  // command still running at the bottom, and only for that one. A host that
+  // leaves an *earlier* block open — an abandoned zsh prompt, before #193 —
+  // made the first one swallow every row below it: later blocks rendered as
+  // bare headers with no rows, and the live prompt was drawn inside a card in
+  // the middle of the pane while the prompt line at the bottom sat empty.
+  //
+  // Fixed in `zest-core`, and defended here too: only the last block may run
+  // to the bottom, whatever a host of any age sends.
+  const view = new GridView();
+  view.applyKeyframe({
+    cols: 20,
+    rows_data: [0n, 1n, 2n, 3n].map((l) => synthRow(l, `row ${l}`)),
+    attrs: [],
+    cursor: CURSOR,
+    modes: 0,
+    blocks: [
+      {
+        id: 0,
+        prompt_line: 0n,
+        output_line: null,
+        end_line: null,
+        state: { state: 'prompt' },
+        command: '',
+        cwd: '/',
+      },
+      synthBlock(1, 2n, 3n, null),
+    ],
+    blocks_from: 0,
+  });
+
+  const { slices } = sliceBlocks(view);
+  assert.equal(slices.length, 2);
+  assert.deepEqual(
+    [...(slices[0]?.promptRows ?? []), ...(slices[0]?.outputRows ?? [])].map((r) => r.line),
+    [0n, 1n],
+    'the stale block is bounded by where the next one starts',
+  );
+  assert.deepEqual(
+    [...(slices[1]?.promptRows ?? []), ...(slices[1]?.outputRows ?? [])].map((r) => r.line),
+    [2n, 3n],
+    'the live block keeps its own rows — including the row the user is typing on',
+  );
+});
+
+test('the last block still runs to the bottom', () => {
+  // The bound above must not cost a running command its live output: rows
+  // arriving below the newest block belong to it, which is what makes a long
+  // build readable while it happens rather than only when it finishes.
+  const view = new GridView();
+  view.applyKeyframe({
+    cols: 20,
+    rows_data: [0n, 1n, 2n].map((l) => synthRow(l, `row ${l}`)),
+    attrs: [],
+    cursor: CURSOR,
+    modes: 0,
+    blocks: [synthBlock(0, 0n, 1n, null)],
+    blocks_from: 0,
+  });
+
+  const { slices, tail } = sliceBlocks(view);
+  assert.deepEqual(
+    (slices[0]?.outputRows ?? []).map((r) => r.line),
+    [1n, 2n],
+    'an open final block takes every row below its output line',
+  );
+  assert.equal(tail.length, 0, 'nothing escapes past the open block');
+});

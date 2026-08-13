@@ -251,6 +251,19 @@ export function paneModel(
       continue;
     }
 
+    // A prompt block that is NOT the trailing one is a prompt that was
+    // abandoned — an empty Enter, a ^C, a resize, all of which make zsh
+    // re-emit `133;A`. It is not a command, and a header for it invents one:
+    // `headerOf` splits on `finished ? exit : running`, so it would draw a '·'
+    // with a warn rail and a running counter for something that never ran.
+    // Its rows are the prompt's own text and are drawn as exactly that. Hosts
+    // stopped producing these in #193; one already running still can.
+    if (b.state.state === 'prompt') {
+      const rows = toPaneRows([...slice.promptRows, ...slice.outputRows], view.attrs);
+      if (rows.length > 0) items.push({ kind: 'rows', key: `prompt-${b.id}`, rows });
+      continue;
+    }
+
     const header = headerOf(slice, folds, link, nowMs);
     items.push(header);
     if (!header.folded) {

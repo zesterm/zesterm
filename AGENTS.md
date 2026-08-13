@@ -724,6 +724,23 @@ Each of these cost real time and is documented where it bites:
   two counts agree — so the entire recorded corpus was blind to it until a
   synthetic `astral` fixture was added. The corpus now refuses to generate
   without something past U+FFFF in it.
+- **A prompt redraw re-emits `OSC 133;A`, and a block with no end claims every
+  line below it.** Those two are individually reasonable and together they eat
+  the session. zsh emits `C` from preexec and `D` only when something ran, so
+  an empty Enter, a `^C` or a **resize** is an `A` on its own — and a resize is
+  the bad one, because `ResizeObserver` fires throughout a drag, so one drag is
+  dozens of prompts. Each left a `Prompt` block with no `end_line`, and
+  `Block::contains` reads an absent end as "everything below", so the *first*
+  abandoned prompt owned the rest of the session: later blocks rendered as bare
+  headers with no rows, the live prompt was drawn inside a card halfway up the
+  pane, and the prompt line at the bottom was empty. It reads as **"the
+  terminal is dead, I can't type"** — and typing works perfectly, the echo is
+  just being rendered somewhere nobody looks. pwsh brackets even an empty line
+  with `C`/`D`, so every block closes and Windows never shows any of it; the
+  whole class is invisible unless you test on macOS. `begin_prompt` now reuses
+  a trailing block that ran nothing, and `sliceBlocks` bounds an open block at
+  the next block's `prompt_line` rather than assuming only the last one can be
+  open. (#193.)
 - **Aggregate pixel metrics hide text rendering bugs**, and did so three times
   in one issue. Mid-tone fraction, ink coverage and saturated-pixel share each
   looked flat across a change that was obvious on screen — one of them because
