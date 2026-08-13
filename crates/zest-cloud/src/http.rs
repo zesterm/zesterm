@@ -157,15 +157,59 @@ pub struct Response {
     pub body: String,
 }
 
+/// The two requests this client makes. A closed set rather than a `&str`, so
+/// there is no method argument for a caller to interpolate anything into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Method {
+    Get,
+    Post,
+}
+
+impl Method {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+        }
+    }
+}
+
 /// POST `body` to `https://host[:port]path` as JSON.
 pub fn post_json(host: &str, port: u16, path: &str, body: &str, roots: Roots) -> io::Result<Response> {
+    post_json_with(host, port, path, body, &[], roots)
+}
+
+/// [`post_json`], with extra headers — `("authorization", "Bearer zt1_…")` is
+/// the caller this exists for.
+pub fn post_json_with(
+    host: &str,
+    port: u16,
+    path: &str,
+    body: &str,
+    headers: &[(&str, &str)],
+    roots: Roots,
+) -> io::Result<Response> {
     let duplex = TlsDuplex::connect(host, port, roots)?;
     duplex.set_read_timeout(Some(DEADLINE))?;
     let (reader, writer) = duplex.split();
-    exchange(reader, writer, &authority(host, port), path, body)
+    exchange_with(reader, writer, &authority(host, port), Method::Post, path, headers, Some(body))
 }
 
-/// The same exchange over anything readable and writable.
+/// GET `https://host[:port]path`, with extra headers.
+pub fn get(
+    host: &str,
+    port: u16,
+    path: &str,
+    headers: &[(&str, &str)],
+    roots: Roots,
+) -> io::Result<Response> {
+    let duplex = TlsDuplex::connect(host, port, roots)?;
+    duplex.set_read_timeout(Some(DEADLINE))?;
+    let (reader, writer) = duplex.split();
+    exchange_with(reader, writer, &authority(host, port), Method::Get, path, headers, None)
+}
+
+/// The POST exchange over anything readable and writable.
 ///
 /// Split out from [`post_json`] because everything that is worth testing here
 /// is the bytes, and none of it is TLS: the tests drive this over a `Vec` and a
@@ -173,26 +217,71 @@ pub fn post_json(host: &str, port: u16, path: &str, body: &str, roots: Roots) ->
 /// milliseconds with no socket, no certificate and no network.
 pub fn exchange(
     reader: impl Read,
-    mut writer: impl Write,
+    writer: impl Write,
     authority: &str,
     path: &str,
     body: &str,
 ) -> io::Result<Response> {
+    exchange_with(reader, writer, authority, Method::Post, path, &[], Some(body))
+}
+
+/// [`exchange`], generalized over method and headers. `Some(body)` is a JSON
+/// POST with the two body headers; `None` is a GET with neither — a GET
+/// carrying a `content-length` is the shape some origins answer with 400 and
+/// others silently truncate at.
+fn exchange_with(
+    reader: impl Read,
+    mut writer: impl Write,
+    authority: &str,
+    method: Method,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Option<&str>,
+) -> io::Result<Response> {
     // One `write_all`, not five: each one is a TLS record with its own AEAD tag
     // and its own syscall, and a request split across records is also a request
     // whose shape is visible to anyone counting packets.
-    let request = format!(
-        "POST {path} HTTP/1.1\r\n\
-         host: {authority}\r\n\
-         content-type: application/json\r\n\
-         content-length: {}\r\n\
-         connection: close\r\n\
-         \r\n{body}",
-        body.len(),
-    );
+    let mut request = format!("{} {path} HTTP/1.1\r\nhost: {authority}\r\n", method.as_str());
+    for (name, value) in headers {
+        // A bearer token reaches the wire verbatim inside a header value, so a
+        // value with a CR or LF in it is a smuggled request line, not a
+        // malformed header. Refused by name, exactly as `ws::client` refuses
+        // the same shapes — this is the whole reason the check exists.
+        if name.is_empty() || !name.bytes().all(is_header_name_byte) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{name:?} is not an HTTP header name"),
+            ));
+        }
+        if value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("the value of {name} contains a line break, which is a smuggled header"),
+            ));
+        }
+        request.push_str(name);
+        request.push_str(": ");
+        request.push_str(value);
+        request.push_str("\r\n");
+    }
+    if let Some(body) = body {
+        request.push_str(&format!(
+            "content-type: application/json\r\ncontent-length: {}\r\n",
+            body.len()
+        ));
+    }
+    request.push_str("connection: close\r\n\r\n");
+    if let Some(body) = body {
+        request.push_str(body);
+    }
     writer.write_all(request.as_bytes())?;
     writer.flush()?;
     read_response(reader)
+}
+
+/// RFC 9110's `token` characters — what may name a header.
+fn is_header_name_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
 }
 
 fn read_response(reader: impl Read) -> io::Result<Response> {
@@ -340,6 +429,87 @@ mod tests {
             "a missing host routes to whatever the edge serves by default and a wrong \
              content-length hangs the origin waiting for a body that already arrived"
         );
+    }
+
+    #[test]
+    fn a_get_carries_its_headers_and_no_body_headers_at_all() {
+        let mut sent = Vec::new();
+        exchange_with(
+            &ok_response()[..],
+            &mut sent,
+            "zesterm.example",
+            Method::Get,
+            "/api/hosts",
+            &[("authorization", "Bearer zt1_abc")],
+            None,
+        )
+        .expect("a well-formed response");
+        assert_eq!(
+            String::from_utf8(sent).expect("the request is ASCII"),
+            "GET /api/hosts HTTP/1.1\r\n\
+             host: zesterm.example\r\n\
+             authorization: Bearer zt1_abc\r\n\
+             connection: close\r\n\
+             \r\n",
+            "a GET with a content-length is a shape some origins 400 and others silently \
+             truncate at, and the bearer header is the whole credential — both have to be \
+             exactly these bytes"
+        );
+    }
+
+    #[test]
+    fn a_bearer_post_keeps_the_body_headers_beside_the_credential() {
+        let mut sent = Vec::new();
+        exchange_with(
+            &ok_response()[..],
+            &mut sent,
+            "zesterm.example",
+            Method::Post,
+            "/api/relay/ticket",
+            &[("authorization", "Bearer zt1_abc")],
+            Some("{\"hostId\":\"h\"}"),
+        )
+        .expect("a well-formed response");
+        assert_eq!(
+            String::from_utf8(sent).expect("the request is ASCII"),
+            "POST /api/relay/ticket HTTP/1.1\r\n\
+             host: zesterm.example\r\n\
+             authorization: Bearer zt1_abc\r\n\
+             content-type: application/json\r\n\
+             content-length: 14\r\n\
+             connection: close\r\n\
+             \r\n{\"hostId\":\"h\"}",
+            "the Worker's CSRF rule requires the JSON content-type even on bearer routes, \
+             so dropping it when headers are present would 403 every authenticated call"
+        );
+    }
+
+    #[test]
+    fn a_header_that_could_smuggle_a_request_is_refused_by_name() {
+        // The value cases are the live ones: a bearer token reaches the wire
+        // verbatim, so a token with a line break in it — from a corrupted
+        // credential store, or from anywhere — must be a refusal here and not
+        // a second request line on the socket.
+        for (name, value, why) in [
+            ("authorization", "Bearer a\r\nx-smuggled: yes", "CRLF in a value is a smuggled header"),
+            ("authorization", "Bearer a\ninjected", "a bare LF is enough for some parsers"),
+            ("authorization", "Bearer a\0b", "a NUL truncates in some intermediaries"),
+            ("bad header", "v", "a space in a name ends the name on the wire"),
+            ("x:y", "v", "a colon in a name is a name and a value"),
+            ("", "v", "an empty name is a malformed line"),
+        ] {
+            let e = exchange_with(
+                &ok_response()[..],
+                &mut Vec::new(),
+                "h",
+                Method::Get,
+                "/p",
+                &[(name, value)],
+                None,
+            )
+            .expect_err(why);
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{why}: {e}");
+        }
     }
 
     #[test]
