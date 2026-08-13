@@ -91,7 +91,9 @@ export function routerPlugin(ctx: AppContext) {
       // component by matched[0].path, so sibling records would remount the
       // Shell — and discard every open tab — on each crossing between /hosts
       // and a session URL. The children carry no component of their own; the
-      // shell reads the params itself (useParams is reactive) and activates —
+      // shell reads the params itself — off `useRoute()` at each use, never a
+      // `useParams()` record captured at setup, which is frozen (#196) — and
+      // activates —
       // or opens from the directory — the named tab. The reverse arrow is the
       // shell's: activating a tab navigates here, so the URL is an EFFECT of
       // activation and the route only ever feeds activation, never a
