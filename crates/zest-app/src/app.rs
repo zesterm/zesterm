@@ -2040,11 +2040,17 @@ impl App {
                 self.probe_account();
             }
             // The durable listing refreshes when someone actually looks at
-            // it; the first show also starts the watcher (same keychain
-            // discipline — its fetch reads the stored token).
+            // it; the first show instead *starts* the watcher (same keychain
+            // discipline — its fetch reads the stored token). Poking on the
+            // same show that started it would queue a second fetch behind the
+            // loop's immediate first one — two keychain reads and, signed
+            // out, two back-to-back 401s for one glance at the screen.
+            let already_watching = self.account_poke.is_some();
             self.start_account_watch();
-            if let Some(poke) = self.account_poke.as_ref() {
-                poke.poke();
+            if already_watching {
+                if let Some(poke) = self.account_poke.as_ref() {
+                    poke.poke();
+                }
             }
         }
         // A code entry does not survive leaving the screen that shows it —
