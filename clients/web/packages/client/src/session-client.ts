@@ -134,6 +134,17 @@ export class SessionClient {
    * stale updates asks once instead of once per update. */
   #awaitingKeyframe = false;
 
+  /**
+   * Which line numbering the grid is on — bumped by every width change.
+   *
+   * A reflow renumbers every id, so an answer to a request made before one is
+   * about a scheme that no longer exists. Counting the changes is enough to
+   * say so; the ids themselves cannot, since the new numbering reuses them.
+   */
+  #numbering = 0;
+  /** The numbering an outstanding scrollback request belongs to, if any. */
+  #scrollbackAsk: number | null = null;
+
   #pendingAck: bigint | null = null;
   #lastAckAt = 0;
   #ackTimer: TimerHandle | null = null;
@@ -404,6 +415,13 @@ export class SessionClient {
       return;
     }
     if (isScrollback(msg)) {
+      // An answer numbered under a scheme that no longer exists is exactly the
+      // stale state `applyKeyframe` discards, arriving a moment late — and
+      // prepending it would put rows at ids the live blocks now use. A drag is
+      // where this bites: `ResizeObserver` fires throughout one, so several
+      // asks can be outstanding while the width keeps moving.
+      if (this.#scrollbackAsk !== this.#numbering) return;
+      this.#scrollbackAsk = null;
       // Prepend history: the host answers `request_scrollback` oldest-first.
       for (const a of msg.attrs) this.grid.attrs.set(a.id, a);
       this.grid.scrollback.unshift(...msg.rows_data);
@@ -442,6 +460,9 @@ export class SessionClient {
    * a gap under the screen — which reads as the same bug it is fixing.
    */
   #refetchDiscardedScrollback(hadCols: number, hadScrollback: number): void {
+    // Every width change is a new numbering, whether or not anything is
+    // refetched under it — an answer is only good for the one it was asked in.
+    if (hadCols !== 0 && this.grid.cols !== hadCols) this.#numbering += 1;
     // `hadCols === 0` is the first keyframe of a connection, which discarded
     // nothing; an unchanged width keeps every row.
     if (hadCols === 0 || hadScrollback === 0 || this.grid.cols === hadCols) return;
@@ -461,6 +482,7 @@ export class SessionClient {
     // ones nearest the screen, which are the ones being asked for.
     const count = Math.min(Math.ceil(hadScrollback * growth), SCROLLBACK_PAGE);
     const from = first - BigInt(count);
+    this.#scrollbackAsk = this.#numbering;
     this.requestScrollback(from < 0n ? 0n : from, count);
   }
 

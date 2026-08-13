@@ -515,3 +515,43 @@ test('narrowing asks for more rows than it held, because the same text needs mor
   assert.equal(asked[0]?.['count'], 40, 'ten rows at 20 columns need about forty at 5');
   assert.equal(asked[0]?.['from_line'], 160, 'and they sit immediately above the viewport');
 });
+
+test('a scrollback answer that arrives after another resize is dropped', async () => {
+  // The refetch and the reflow race, and a drag is where they meet:
+  // `ResizeObserver` fires throughout one, so an answer can land after a later
+  // keyframe has renumbered everything. Those rows are exactly the stale state
+  // `applyKeyframe` exists to discard, arriving a moment late — prepended,
+  // they would sit at ids the live blocks now use. (#209)
+  const daemon = new FakeDaemon();
+  const clock = new FakeClock();
+  const c = client(daemon, clock);
+  await daemon.completeHandshake();
+  const link = daemon.current;
+
+  link.deliver(keyframe(1, ['live row']));
+  for (let i = 0; i < 4; i++) link.deliver(sbPush(i + 1, i + 2, 100 + i, `history ${i}`));
+
+  link.deliver(keyframeAt(9, 40, 70, ['rewrapped']));
+  assert.equal(link.ofType('request_scrollback').length, 1, 'the ask goes out');
+
+  // The drag continues before the host has answered.
+  link.deliver(keyframeAt(10, 30, 60, ['rewrapped again']));
+
+  // ...and only now does the first answer arrive, numbered for a width two
+  // changes ago.
+  link.deliver({
+    t: 'scrollback',
+    session: { host: ADDR.host, session: 1 },
+    from_line: 66,
+    rows_data: [
+      { line: 66, runs: [{ attr: 0, cells: 5, text: 'stale' }], wrapped: false },
+    ],
+    attrs: [],
+  });
+
+  assert.equal(
+    c.grid.scrollback.length,
+    0,
+    'an answer for a numbering that no longer exists is not history, it is noise',
+  );
+});
