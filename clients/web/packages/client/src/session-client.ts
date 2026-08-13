@@ -46,6 +46,15 @@ export const ACK_INTERVAL_MS = 16;
 export const REDIAL_MIN_MS = 200;
 export const REDIAL_MAX_MS = 5000;
 
+/**
+ * The host's own `SCROLLBACK_PAGE` (`zest-daemon`'s `server.rs`), mirrored.
+ *
+ * Asking for more is not an error — the host silently clamps — so a client
+ * that does not know the bound gets a shorter answer than it asked for and no
+ * indication of it.
+ */
+export const SCROLLBACK_PAGE = 500;
+
 export type ConnectionState =
   | { readonly phase: 'connecting' }
   | { readonly phase: 'awaiting-approval'; readonly code: string }
@@ -124,6 +133,17 @@ export class SessionClient {
   /** Set after a bad base until the healing keyframe lands, so a burst of
    * stale updates asks once instead of once per update. */
   #awaitingKeyframe = false;
+
+  /**
+   * Which line numbering the grid is on — bumped by every width change.
+   *
+   * A reflow renumbers every id, so an answer to a request made before one is
+   * about a scheme that no longer exists. Counting the changes is enough to
+   * say so; the ids themselves cannot, since the new numbering reuses them.
+   */
+  #numbering = 0;
+  /** The numbering an outstanding scrollback request belongs to, if any. */
+  #scrollbackAsk: number | null = null;
 
   #pendingAck: bigint | null = null;
   #lastAckAt = 0;
@@ -354,7 +374,13 @@ export class SessionClient {
     }
 
     if (isKeyframe(msg)) {
+      // Read before applying: a width change makes `applyKeyframe` discard the
+      // scrollback this client kept, and afterwards there is no way to tell
+      // that from a client that never had any.
+      const hadCols = this.grid.cols;
+      const hadScrollback = this.grid.scrollback.length;
       this.grid.applyKeyframe(msg);
+      this.#refetchDiscardedScrollback(hadCols, hadScrollback);
       this.#appliedSeq = msg.seq;
       this.#awaitingKeyframe = false;
       this.#queueAck(msg.seq);
@@ -389,6 +415,13 @@ export class SessionClient {
       return;
     }
     if (isScrollback(msg)) {
+      // An answer numbered under a scheme that no longer exists is exactly the
+      // stale state `applyKeyframe` discards, arriving a moment late — and
+      // prepending it would put rows at ids the live blocks now use. A drag is
+      // where this bites: `ResizeObserver` fires throughout one, so several
+      // asks can be outstanding while the width keeps moving.
+      if (this.#scrollbackAsk !== this.#numbering) return;
+      this.#scrollbackAsk = null;
       // Prepend history: the host answers `request_scrollback` oldest-first.
       for (const a of msg.attrs) this.grid.attrs.set(a.id, a);
       this.grid.scrollback.unshift(...msg.rows_data);
@@ -405,6 +438,57 @@ export class SessionClient {
     }
     // Anything else — session listings, pairing pushes — is not this
     // client's business; it watches one session.
+  }
+
+  /**
+   * Ask for the history a reflow forced this client to throw away.
+   *
+   * A width change renumbers every line id, so `GridView.applyKeyframe`
+   * discards the rows kept under the old numbering — they cannot be
+   * re-anchored, and joining them to reanchored blocks renders worse than a
+   * short history reads. That half was right and it was the whole of it: the
+   * rows were never fetched again, so for the rest of the attachment every
+   * block above the viewport rendered empty or starting halfway through. On
+   * Windows ConPTY repaints on every resize, so it fired whenever a window was
+   * dragged. (#209)
+   *
+   * `request_scrollback` answers under the *current* numbering, which is
+   * exactly what is missing, so no new wire shape is needed.
+   *
+   * The rows immediately **above the viewport**, not the oldest ones: the host
+   * pages this request, and a page taken from the start of history would leave
+   * a gap under the screen — which reads as the same bug it is fixing.
+   */
+  #refetchDiscardedScrollback(hadCols: number, hadScrollback: number): void {
+    // Every width change is a new numbering, whether or not anything is
+    // refetched under it — an answer is only good for the one it was asked in.
+    if (hadCols !== 0 && this.grid.cols !== hadCols) this.#numbering += 1;
+    // `hadCols === 0` is the first keyframe of a connection, which discarded
+    // nothing; an unchanged width keeps every row.
+    if (hadCols === 0 || hadScrollback === 0 || this.grid.cols === hadCols) return;
+    // The first row with a real id, not simply the first row: a scroll
+    // manufactures blanks at `NO_LINE` (`-2^63`), which have no position in
+    // the session. Anchoring on one computes a wildly negative `from`, clamps
+    // to zero, and fetches the *oldest* page in the history — leaving exactly
+    // the gap under the viewport this whole method exists to avoid.
+    const first = this.grid.rows.find((r) => r.line >= 0n)?.line;
+    if (first === undefined) return;
+    // The same history needs MORE rows at a narrower width, so asking for the
+    // count we held would fetch a fraction of it — measured: 29 rows kept at
+    // 80 columns came back as 5 of the 47 the oldest block then spanned. The
+    // widths are both known, so scale by their ratio.
+    //
+    // Never scaled *down* on a widening: asking for too many is free (the host
+    // sends what it has, and extra rows are simply more history) while asking
+    // for too few is the bug. Rounding up is the same asymmetry.
+    const growth = Math.max(1, hadCols / this.grid.cols);
+    // Bounded to what the host will answer in one frame. Asking for more does
+    // not fail — it is silently clamped, and the rows that go missing are the
+    // ones nearest the screen, which are the ones being asked for.
+    const count = Math.min(Math.ceil(hadScrollback * growth), SCROLLBACK_PAGE);
+    const from = first - BigInt(count);
+    this.#scrollbackAsk = this.#numbering;
+    this.requestScrollback(from < 0n ? 0n : from, count);
   }
 
   #afterWelcome(): void {

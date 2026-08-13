@@ -380,3 +380,211 @@ test('a device that cannot sign says so, and does not blame the host', async () 
   await flush();
   assert.equal(daemon.links.length, 1, 'a key that cannot sign will not sign on the next try');
 });
+
+/** A keyframe at a chosen width, with rows starting at a chosen absolute line. */
+function keyframeAt(
+  seq: number,
+  cols: number,
+  firstLine: number,
+  rows: string[],
+): Record<string, unknown> {
+  return {
+    t: 'keyframe',
+    session: { host: ADDR.host, session: 1 },
+    seq,
+    cols,
+    rows: rows.length,
+    rows_data: rows.map((text, i) => ({
+      line: firstLine + i,
+      runs: [{ attr: 0, cells: text.length, text }],
+      wrapped: false,
+    })),
+    attrs: [{ id: 0, fg: 'Default', bg: 'Default', flags: 0 }],
+    cursor: { row: 0, col: 0, visible: true, shape: 0 },
+    modes: 0,
+  };
+}
+
+/** A delta that pushes one row into the client's own scrollback. */
+function sbPush(base: number, seq: number, line: number, text: string): Record<string, unknown> {
+  return {
+    t: 'update',
+    session: { host: ADDR.host, session: 1 },
+    base,
+    seq,
+    delta: {
+      attrs: [],
+      ops: [
+        {
+          op: 'sb_push',
+          payload: { line, runs: [{ attr: 0, cells: text.length, text }], wrapped: false },
+        },
+      ],
+    },
+  };
+}
+
+test('a width change asks for the scrollback it had to discard', async () => {
+  // A reflow renumbers every line id, so the rows this client kept cannot be
+  // re-anchored and are dropped (`GridView.applyKeyframe`). Dropping them is
+  // right; leaving it there is not, because nothing ever fetched them again —
+  // so every block above the viewport rendered empty or half-missing for the
+  // rest of the attachment, and on Windows ConPTY repaints on every resize.
+  //
+  // The wire already answers this: `request_scrollback` returns rows under the
+  // CURRENT numbering, which is exactly what the client now lacks. (#209)
+  const daemon = new FakeDaemon();
+  const clock = new FakeClock();
+  const c = client(daemon, clock);
+  await daemon.completeHandshake();
+  const link = daemon.current;
+
+  link.deliver(keyframe(1, ['live row']));
+  for (let i = 0; i < 4; i++) link.deliver(sbPush(i + 1, i + 2, 100 + i, `history ${i}`));
+  assert.equal(c.grid.scrollback.length, 4, 'four rows of history before the resize');
+
+  // The resize: a keyframe at a new width, whose rows start well above zero
+  // because the host holds history of its own below them.
+  link.deliver(keyframeAt(9, 40, 70, ['live row, rewrapped']));
+  assert.equal(c.grid.scrollback.length, 0, 'the stale rows go, as they must');
+
+  const asked = link.ofType('request_scrollback');
+  assert.equal(asked.length, 1, 'and the client asks for them back under the new numbering');
+  assert.equal(
+    asked[0]?.['from_line'],
+    66,
+    'the rows immediately above the viewport — asking from 0 would fetch the oldest ' +
+      'history and leave a gap under the screen',
+  );
+  assert.equal(asked[0]?.['count'], 4, 'as much as it had, no more');
+});
+
+test('an unchanged width asks for nothing', async () => {
+  // A reconnect or a height-only resize keeps every row, so a refetch would be
+  // a round trip for rows the client is already holding.
+  const daemon = new FakeDaemon();
+  const clock = new FakeClock();
+  const c = client(daemon, clock);
+  await daemon.completeHandshake();
+  const link = daemon.current;
+
+  link.deliver(keyframe(1, ['live row']));
+  link.deliver(sbPush(1, 2, 100, 'history'));
+  link.deliver(keyframe(3, ['live row again']));
+
+  assert.equal(c.grid.scrollback.length, 1, 'the history survives an unchanged width');
+  assert.equal(link.ofType('request_scrollback').length, 0, 'so nothing is asked for');
+});
+
+test('a width change with no history to lose asks for nothing', async () => {
+  const daemon = new FakeDaemon();
+  const clock = new FakeClock();
+  client(daemon, clock);
+  await daemon.completeHandshake();
+  const link = daemon.current;
+
+  link.deliver(keyframe(1, ['live row']));
+  link.deliver(keyframeAt(2, 40, 0, ['rewrapped']));
+
+  assert.equal(
+    link.ofType('request_scrollback').length,
+    0,
+    'nothing was discarded, so there is nothing to fetch',
+  );
+});
+
+test('narrowing asks for more rows than it held, because the same text needs more', async () => {
+  // Rewrapping at half the width roughly doubles the rows the same history
+  // occupies, so a refetch of exactly what was held comes back a fraction of
+  // it: 29 rows kept at 80 columns returned 5 of the 47 the oldest block
+  // spanned at 40. Both widths are known, so the ask is scaled by their ratio
+  // — and rounded up, because asking for too many is free while asking for too
+  // few is the bug being fixed. (#209)
+  const daemon = new FakeDaemon();
+  const clock = new FakeClock();
+  client(daemon, clock);
+  await daemon.completeHandshake();
+  const link = daemon.current;
+
+  link.deliver(keyframe(1, ['live row'])); // 20 columns
+  for (let i = 0; i < 10; i++) link.deliver(sbPush(i + 1, i + 2, 100 + i, `history ${i}`));
+
+  link.deliver(keyframeAt(20, 5, 200, ['rewrapped'])); // a quarter of the width
+
+  const asked = link.ofType('request_scrollback');
+  assert.equal(asked[0]?.['count'], 40, 'ten rows at 20 columns need about forty at 5');
+  assert.equal(asked[0]?.['from_line'], 160, 'and they sit immediately above the viewport');
+});
+
+test('a scrollback answer that arrives after another resize is dropped', async () => {
+  // The refetch and the reflow race, and a drag is where they meet:
+  // `ResizeObserver` fires throughout one, so an answer can land after a later
+  // keyframe has renumbered everything. Those rows are exactly the stale state
+  // `applyKeyframe` exists to discard, arriving a moment late — prepended,
+  // they would sit at ids the live blocks now use. (#209)
+  const daemon = new FakeDaemon();
+  const clock = new FakeClock();
+  const c = client(daemon, clock);
+  await daemon.completeHandshake();
+  const link = daemon.current;
+
+  link.deliver(keyframe(1, ['live row']));
+  for (let i = 0; i < 4; i++) link.deliver(sbPush(i + 1, i + 2, 100 + i, `history ${i}`));
+
+  link.deliver(keyframeAt(9, 40, 70, ['rewrapped']));
+  assert.equal(link.ofType('request_scrollback').length, 1, 'the ask goes out');
+
+  // The drag continues before the host has answered.
+  link.deliver(keyframeAt(10, 30, 60, ['rewrapped again']));
+
+  // ...and only now does the first answer arrive, numbered for a width two
+  // changes ago.
+  link.deliver({
+    t: 'scrollback',
+    session: { host: ADDR.host, session: 1 },
+    from_line: 66,
+    rows_data: [
+      { line: 66, runs: [{ attr: 0, cells: 5, text: 'stale' }], wrapped: false },
+    ],
+    attrs: [],
+  });
+
+  assert.equal(
+    c.grid.scrollback.length,
+    0,
+    'an answer for a numbering that no longer exists is not history, it is noise',
+  );
+});
+
+test('a blank placeholder row does not anchor the refetch', async () => {
+  // A scroll manufactures rows at `NO_LINE` (-2^63) — grid blanks with no
+  // position in the session. Anchoring the ask on one computes a wildly
+  // negative `from`, which clamps to zero and fetches the OLDEST page of
+  // history, leaving the gap under the viewport this refetch exists to close.
+  const daemon = new FakeDaemon();
+  const clock = new FakeClock();
+  client(daemon, clock);
+  await daemon.completeHandshake();
+  const link = daemon.current;
+
+  link.deliver(keyframe(1, ['live row']));
+  for (let i = 0; i < 4; i++) link.deliver(sbPush(i + 1, i + 2, 100 + i, `history ${i}`));
+
+  // A keyframe whose first row is a manufactured blank, with the real rows
+  // below it.
+  const k = keyframeAt(9, 40, 70, ['first real row', 'second']);
+  (k['rows_data'] as Array<Record<string, unknown>>).unshift({
+    line: -(2n ** 63n),
+    runs: [],
+    wrapped: false,
+  });
+  link.deliver(k);
+
+  const asked = link.ofType('request_scrollback');
+  assert.equal(asked.length, 1);
+  assert.equal(
+    asked[0]?.['from_line'],
+    66,
+    'anchored on line 70, the first row with a real id — not on the blank above it',
+  );
+});
