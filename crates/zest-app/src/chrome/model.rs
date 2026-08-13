@@ -202,6 +202,33 @@ pub struct PickerModel {
     pub caret_on: bool,
 }
 
+/// Which affordance the fleet view's account header offers (issue #190).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FleetAccountAction {
+    /// Nothing clickable — state unknown, or an enrolment in flight.
+    None,
+    /// "Sign in with a code" — opens the code entry.
+    SignIn,
+    /// "Sign out" — forgets this app's token.
+    SignOut,
+}
+
+/// The fleet view's account header, as data: one line of fact, at most one
+/// affordance, and the code entry while one is open. Shaped here so
+/// `screens.rs` stays declarative-drawing only — the app decides what the
+/// account state means, the layout only draws what arrives.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FleetAccountModel {
+    /// The header sentence ("signed in as andy", "not signed in").
+    pub line: String,
+    pub action: FleetAccountAction,
+    /// The enrolment code being typed, drawn with the §11 editing cell
+    /// machinery; `None` when no entry is open.
+    pub entry: Option<SettingsValueCell>,
+    /// The last failure's message, drawn in warn ink beside the retry.
+    pub error: Option<String>,
+}
+
 /// One host card of the fleet view (design screen 7).
 #[derive(Debug, Clone, PartialEq)]
 pub struct FleetCard {
@@ -248,7 +275,7 @@ pub struct PaneModel {
 /// A full-pane screen replacing the grid (fleet directory, theme gallery).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScreenModel {
-    Fleet { cards: Vec<FleetCard> },
+    Fleet { account: FleetAccountModel, cards: Vec<FleetCard> },
     Themes { cards: Vec<ThemeCard> },
     /// The Profiles tab's pane: the §12 editor. Boxed because this variant
     /// is an order of magnitude bigger than its siblings and `ScreenModel`
