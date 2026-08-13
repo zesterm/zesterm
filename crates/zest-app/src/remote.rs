@@ -170,6 +170,10 @@ pub struct RemoteSession {
     /// reader uses its own copy) while every keystroke went to an address the
     /// daemon no longer had.
     addr: Arc<parking_lot::Mutex<SessionAddr>>,
+    /// Shared with the supervisor, which reattaches at whatever size the
+    /// window has reached by the time the link comes back -- not the size it
+    /// was born with.
+    size: Arc<parking_lot::Mutex<(u16, u16)>>,
     origin: Origin,
     /// Joined on drop, so the `Detach` is actually written before the process
     /// ends rather than racing it.
@@ -317,6 +321,11 @@ impl RemoteSession {
             None => (None, None),
         };
         let addr_cell = Arc::new(parking_lot::Mutex::new(addr));
+        // The size the window currently renders at, read fresh by every
+        // redial. Reattaching with the cols/rows captured here would re-impose
+        // a stale size -- and under arbitration (#215) a stale vote reshapes
+        // the shared session for every other client too.
+        let size_cell = Arc::new(parking_lot::Mutex::new((cols, rows)));
 
         let terminal = Arc::new(FairMutex::new(Terminal::new(
             usize::from(cols),
@@ -395,6 +404,7 @@ impl RemoteSession {
             let cwd = cwd.to_string();
             let on_pending = on_pending.clone();
             let addr_cell = Arc::clone(&addr_cell);
+            let size_cell = Arc::clone(&size_cell);
             std::thread::Builder::new()
                 .name("zest-remote-reader".into())
                 .spawn(move || {
@@ -599,6 +609,11 @@ impl RemoteSession {
                         else {
                             continue;
                         };
+                        // The size the window has *now*, not the one captured
+                        // at start(): the attach is a vote in the session's
+                        // arbitration, and a stale one reshapes the session
+                        // for everyone.
+                        let (cols, rows) = *size_cell.lock();
                         // The session we lost first. Its shell is still running
                         // and our subscriber was released when the connection
                         // dropped, so it is sitting there unattached.
@@ -675,6 +690,7 @@ impl RemoteSession {
             needs_redraw,
             tx,
             addr: addr_cell,
+            size: size_cell,
             origin: Origin::Daemon { host: host_label, local },
             writer: Some(writer_thread),
         })
@@ -772,6 +788,7 @@ impl SessionSource for RemoteSession {
     }
 
     fn resize(&self, cols: u16, rows: u16) {
+        *self.size.lock() = (cols, rows);
         let session = *self.addr.lock();
         let _ = self.tx.send(Outbound::Msg(ClientMessage::Resize { session, cols, rows }));
 
@@ -1561,6 +1578,45 @@ mod tests {
             sessions_before,
             "a reconnect created a second session instead of picking up the one \
              whose shell is still running"
+        );
+    }
+
+    /// The redial used to reattach with the cols/rows captured at `start()`,
+    /// so every reconnect re-imposed a size the window had since moved past --
+    /// and under size arbitration (#215) that stale vote shrinks or grows the
+    /// shared session for every other client too.
+    #[test]
+    fn a_reconnect_reattaches_at_the_current_size_not_the_first_one() {
+        let h = Harness::start("resize-recut");
+        let link = Link::new(&h.path, "resize-recut");
+        let back = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&back);
+        let s = h.attach_through(&link, "/bin/sh", move |w| {
+            if w == Wakeup::Reattached {
+                seen.fetch_add(1, Ordering::Release);
+            }
+        });
+        let session = h.registry.get(s.addr().session).expect("the session exists");
+
+        // The window moved on from the 40x6 it attached at.
+        s.resize(20, 3);
+        assert!(
+            wait_for(|| session.size() == (20, 3)),
+            "the resize never reached the daemon; size is {:?}",
+            session.size()
+        );
+
+        link.cut();
+        assert!(
+            wait_up_to(Duration::from_secs(30), || back.load(Ordering::Acquire) > 0),
+            "never reattached; the window is dead to the user"
+        );
+
+        assert_eq!(
+            session.size(),
+            (20, 3),
+            "the reconnect re-imposed the size captured at start(), not the \
+             one the window actually has"
         );
     }
 

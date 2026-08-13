@@ -55,6 +55,44 @@ impl Insets {
     }
 }
 
+/// Where a `cols` × `rows` grid sits inside `area`: centered when it is
+/// smaller than the pane, exactly `area` otherwise.
+///
+/// Under size arbitration (#215) a session is the *smallest* attached
+/// client's size, so this window's grid can be narrower or shorter than the
+/// pane it is drawn in. Centering happens per axis and only on a strict
+/// shortfall in whole cells; a grid that fills the pane's cell capacity gets
+/// the pane's exact rectangle, sub-cell remainder and all, so a local session
+/// renders byte-identically to what it did before arbitration existed.
+///
+/// A grid *larger* than the pane (the moment between a foreign grow and this
+/// window's next resize) keeps the pane's rectangle and lets the renderer
+/// clip, which is what it did before too.
+///
+/// Everything that converts between pixels and cells must use the same
+/// rectangle — the renderer's viewport, pointer hit testing, IME placement
+/// and the block headers — or a click lands one letterbox-offset away from
+/// the glyph it visibly touched.
+#[must_use]
+pub fn letterbox(area: [f32; 4], cols: usize, rows: usize, m: CellMetrics) -> [f32; 4] {
+    let cw = m.cell_w.max(1) as f32;
+    let ch = m.cell_h.max(1) as f32;
+    let fit_cols = ((area[2] / cw) as usize).max(1);
+    let fit_rows = ((area[3] / ch) as usize).max(1);
+    let [mut x, mut y, mut w, mut h] = area;
+    if cols < fit_cols {
+        w = cols as f32 * cw;
+        // Floored to a whole pixel: a half-pixel origin samples every glyph
+        // between texels and reads as a blurry font, not as an offset.
+        x = area[0] + ((area[2] - w) / 2.0).floor();
+    }
+    if rows < fit_rows {
+        h = rows as f32 * ch;
+        y = area[1] + ((area[3] - h) / 2.0).floor();
+    }
+    [x, y, w, h]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,6 +136,37 @@ mod tests {
         let i = Insets { top: 38.0, left: 8.0, right: 8.0, bottom: 8.0 };
         assert_eq!(i.grid_rect(1000, 400), [8.0, 38.0, 984.0, 354.0]);
         assert_eq!(i.grid_dims(m, 1000, 400), (98, 17));
+    }
+
+    #[test]
+    fn a_smaller_grid_is_centered_in_the_pane() {
+        // The arbitration case (#215): another, smaller client owns the size,
+        // and this window letterboxes -- per axis, in whole pixels.
+        let m = metrics(10, 20);
+        let area = [8.0, 38.0, 1000.0, 400.0]; // fits 100 x 20
+        assert_eq!(
+            letterbox(area, 60, 10, m),
+            [8.0 + 200.0, 38.0 + 100.0, 600.0, 200.0],
+            "a smaller grid must sit centered, not pinned top-left"
+        );
+        assert_eq!(
+            letterbox(area, 60, 20, m),
+            [208.0, 38.0, 600.0, 400.0],
+            "the shortfall is per axis: full-height grids center only horizontally"
+        );
+    }
+
+    #[test]
+    fn a_grid_that_fills_the_pane_keeps_the_exact_pane_rect() {
+        // The local-session case must be byte-identical to life before
+        // arbitration: same origin, same width, sub-cell remainder and all --
+        // this is what keeps every existing pixel assertion (#44) true.
+        let m = metrics(10, 20);
+        let area = [8.0, 38.0, 1005.0, 407.0]; // fits 100 x 20, with remainder
+        assert_eq!(letterbox(area, 100, 20, m), area);
+        // Transiently larger (a foreign grow this window has not resized to
+        // yet): still the pane's rect, and the renderer clips as it always did.
+        assert_eq!(letterbox(area, 140, 50, m), area);
     }
 
     #[test]
