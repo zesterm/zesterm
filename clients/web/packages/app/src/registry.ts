@@ -134,3 +134,32 @@ export async function revoke(
   });
   if (!res.ok) throw new Error(`revoke answered ${res.status}`);
 }
+
+/**
+ * Mint an enrolment code (10-minute TTL) for a new machine or device.
+ *
+ * Same posture as `revoke`: a JSON `POST` with the cookie, because the
+ * Worker's CSRF rule refuses anything else 403. Parsed field by field for the
+ * same reason the registry is — this answer is about to be shown to a person
+ * who will type it somewhere, and a panel reading `undefined` teaches them to
+ * type `undefined`.
+ */
+export async function mintEnrollCode(
+  kind: 'host' | 'device',
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ code: string; expiresAt: number }> {
+  const res = await fetchImpl('/api/enroll/code', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ kind }),
+  });
+  if (!res.ok) throw new Error(`enroll code answered ${res.status}`);
+  const body = (await res.json()) as Record<string, unknown> | null;
+  const code = str(body?.['code']);
+  const expiresAt = millis(body?.['expiresAt']);
+  if (code === null || expiresAt === null) {
+    throw new Error('enroll code answered the wrong shape');
+  }
+  return { code, expiresAt };
+}

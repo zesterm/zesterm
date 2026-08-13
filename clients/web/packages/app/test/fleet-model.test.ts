@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ago, fingerprintDisplay, hostCard, presenceOf } from '../src/fleet-model.ts';
+import { ago, codeCountdown, fingerprintDisplay, hostCard, presenceOf } from '../src/fleet-model.ts';
 import type { DirectoryStatus } from '../src/directory-source.ts';
 import type { Host } from '../src/registry.ts';
 
@@ -86,6 +86,33 @@ test('only the identified local machine is marked local', () => {
     false,
     'unidentifiable (the hosted path today) marks nothing rather than guessing',
   );
+});
+
+test('codeCountdown walks the whole ten minutes and is pure over the given clock', () => {
+  const minted = 5_000_000;
+  const expiresAt = minted + 600_000; // the server's TTL
+  assert.equal(codeCountdown(expiresAt, minted), '10:00', 'a just-minted code shows the full TTL');
+  assert.equal(codeCountdown(expiresAt, minted + 13_000), '9:47', 'mid-life counts down');
+  assert.equal(
+    codeCountdown(expiresAt, minted + 599_000),
+    '0:01',
+    'seconds are zero-padded so the display never jitters between widths',
+  );
+});
+
+test('codeCountdown says expired at the boundary and stays there', () => {
+  // At `expiresAt` the server stops honouring the code, so the display must
+  // not still be counting — and time past it is not a negative countdown.
+  assert.equal(codeCountdown(1_000, 1_000), 'expired');
+  assert.equal(codeCountdown(1_000, 1_001), 'expired');
+  assert.equal(codeCountdown(1_000, 999_999), 'expired');
+});
+
+test('codeCountdown never shows 0:00 beside a code that still works', () => {
+  // Rounds up, not down: `0:00` claims expiry, and a code with 400ms left is
+  // still one the server accepts.
+  assert.equal(codeCountdown(1_000, 600), '0:01');
+  assert.equal(codeCountdown(61_000, 500), '1:01');
 });
 
 test('ago is rough on purpose and pure over the given clock', () => {

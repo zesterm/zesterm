@@ -30,8 +30,9 @@ import type { DeviceKey } from '../device-key.ts';
 import { ago, hostCard } from '../fleet-model.ts';
 import { liveDirectory, relayLinks } from '../live-directory.ts';
 import { relayAccess } from '../relay-access.ts';
-import { fetchRegistry, revoke, type Device, type Host } from '../registry.ts';
+import { fetchRegistry, mintEnrollCode, revoke, type Device, type Host } from '../registry.ts';
 import { AccountMenu } from './AccountMenu.tsx';
+import { EnrollCode } from './EnrollCode.tsx';
 import { SessionList, type OpenTarget } from './SessionList.tsx';
 import { TerminalView } from './TerminalView.tsx';
 import { Shell } from './Shell.tsx';
@@ -60,11 +61,19 @@ export const Fleet = component<{
     open: { readonly id: string; readonly label: string } | null;
     /** Which session is attached, if any. */
     session: OpenTarget | null;
+    /** The one open enrolment panel, if any — minting for either kind replaces it. */
+    mint: { readonly kind: 'host' | 'device'; readonly code: string; readonly expiresAt: number } | null;
+    /** Which kind a mint is in flight for, so the buttons can say so. */
+    minting: 'host' | 'device' | null;
+    mintError: { readonly kind: 'host' | 'device'; readonly message: string } | null;
   }>({
     load: { phase: 'loading' },
     busy: null,
     open: null,
     session: null,
+    mint: null,
+    minting: null,
+    mintError: null,
   });
 
   /**
@@ -116,6 +125,24 @@ export const Fleet = component<{
       .catch((e: unknown) => {
         state.busy = null;
         state.load = { phase: 'failed', error: e instanceof Error ? e.message : String(e) };
+      });
+  };
+
+  const mint = (kind: 'host' | 'device'): void => {
+    if (state.minting !== null) return;
+    state.minting = kind;
+    state.mintError = null;
+    mintEnrollCode(kind)
+      .then((minted) => {
+        state.minting = null;
+        state.mint = { kind, code: minted.code, expiresAt: minted.expiresAt };
+      })
+      .catch((e: unknown) => {
+        // A failed mint is the button's problem, not the screen's — putting
+        // `load` into `failed` here would tear down two healthy lists over a
+        // request the user can simply retry.
+        state.minting = null;
+        state.mintError = { kind, message: e instanceof Error ? e.message : String(e) };
       });
   };
 
@@ -190,6 +217,10 @@ export const Fleet = component<{
         </div>
       );
     }
+    // Local consts rather than `state.mint?.…` in the JSX: narrowing does not
+    // survive into the nested closures, and each render reads one snapshot.
+    const minted = state.mint;
+    const mintErr = state.mintError;
     return (
     <div class="shell">
       <header class="topbar">
@@ -222,6 +253,32 @@ export const Fleet = component<{
         {state.load.phase === 'ready' ? (
           <>
             <section>
+              <div class="section-head">
+                <h2>Machines</h2>
+                <span class="grow" />
+                <button
+                  class="button subtle"
+                  disabled={state.minting !== null}
+                  onClick={() => mint('host')}
+                >
+                  {state.minting === 'host' ? 'minting…' : 'Add a machine'}
+                </button>
+              </div>
+              {mintErr !== null && mintErr.kind === 'host' ? (
+                <p class="error" role="alert">
+                  Could not mint a code: {mintErr.message}
+                </p>
+              ) : null}
+              {minted !== null && minted.kind === 'host' ? (
+                <EnrollCode
+                  kind="host"
+                  code={minted.code}
+                  expiresAt={minted.expiresAt}
+                  busy={state.minting !== null}
+                  onRemint={() => mint('host')}
+                  onClose={() => (state.mint = null)}
+                />
+              ) : null}
               {state.load.hosts.length === 0 ? (
                 <p class="muted">
                   No machines yet. Run <code>zest-daemon --enroll &lt;code&gt;</code> on one to add
@@ -298,11 +355,36 @@ export const Fleet = component<{
             </section>
 
             <section>
-              <h2>Browsers and phones</h2>
+              <div class="section-head">
+                <h2>Browsers and phones</h2>
+                <span class="grow" />
+                <button
+                  class="button subtle"
+                  disabled={state.minting !== null}
+                  onClick={() => mint('device')}
+                >
+                  {state.minting === 'device' ? 'minting…' : 'Add a device'}
+                </button>
+              </div>
               <p class="fineprint">
                 These hold keys that can attach to your machines. They never appear as machines
                 themselves, because they serve no sessions.
               </p>
+              {mintErr !== null && mintErr.kind === 'device' ? (
+                <p class="error" role="alert">
+                  Could not mint a code: {mintErr.message}
+                </p>
+              ) : null}
+              {minted !== null && minted.kind === 'device' ? (
+                <EnrollCode
+                  kind="device"
+                  code={minted.code}
+                  expiresAt={minted.expiresAt}
+                  busy={state.minting !== null}
+                  onRemint={() => mint('device')}
+                  onClose={() => (state.mint = null)}
+                />
+              ) : null}
               {state.load.devices.length === 0 ? (
                 <p class="muted">Nothing enrolled yet.</p>
               ) : (

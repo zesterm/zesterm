@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { fetchRegistry, parseDevice, parseHost, revoke } from '../src/registry.ts';
+import { fetchRegistry, mintEnrollCode, parseDevice, parseHost, revoke } from '../src/registry.ts';
 
 const HOST = { id: 'a'.repeat(64), label: 'andy-mac', platform: 'macos', enrolledAt: 1, lastSeenAt: 2 };
 const DEVICE = {
@@ -111,4 +111,77 @@ test('a refused revoke is reported rather than swallowed', async () => {
   const refusing: typeof fetch = (() =>
     Promise.resolve(new Response(null, { status: 403 }))) as unknown as typeof fetch;
   await assert.rejects(revoke('hosts', HOST.id, refusing), /403/);
+});
+
+test('minting is a JSON POST carrying the kind, because anything else is refused 403', async () => {
+  // Same CSRF posture as revoke: Origin plus a JSON content-type, with the
+  // session cookie — a link or a form cannot mint a code, by design.
+  let seen: {
+    url?: string;
+    method?: string | undefined;
+    ct?: string | undefined;
+    credentials?: string | undefined;
+    body?: unknown;
+  } = {};
+  const capturing: typeof fetch = ((url: string, init?: RequestInit) => {
+    seen = {
+      url,
+      method: init?.method,
+      ct: (init?.headers as Record<string, string> | undefined)?.['content-type'],
+      credentials: init?.credentials,
+      body: init?.body,
+    };
+    return Promise.resolve(
+      new Response(JSON.stringify({ code: 'ZK7M2Q9T', expiresAt: 1_000 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+  }) as unknown as typeof fetch;
+
+  const got = await mintEnrollCode('host', capturing);
+  assert.equal(seen.url, '/api/enroll/code');
+  assert.equal(seen.method, 'POST');
+  assert.equal(seen.ct, 'application/json');
+  assert.equal(seen.credentials, 'same-origin', 'the session cookie has to be sent');
+  assert.deepEqual(
+    JSON.parse(seen.body as string),
+    { kind: 'host' },
+    'the kind travels in the body — host and device codes enrol different tables',
+  );
+  assert.deepEqual(got, { code: 'ZK7M2Q9T', expiresAt: 1_000 });
+});
+
+test('a wrong-shaped mint answer is an error, not a panel showing undefined', async () => {
+  // The code is about to be typed into another machine verbatim; a panel
+  // rendering `undefined` teaches someone to type `undefined`.
+  const bodies: unknown[] = [
+    {},
+    { code: 'ZK7M2Q9T' },
+    { expiresAt: 1_000 },
+    { code: '', expiresAt: 1_000 },
+    { code: 'ZK7M2Q9T', expiresAt: 'soon' },
+    null,
+    'nonsense',
+  ];
+  for (const body of bodies) {
+    const serving: typeof fetch = (() =>
+      Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )) as unknown as typeof fetch;
+    await assert.rejects(
+      mintEnrollCode('device', serving),
+      /wrong shape/,
+      `shape ${JSON.stringify(body)} must be refused`,
+    );
+  }
+});
+
+test('a refused mint is reported rather than swallowed', async () => {
+  const refusing: typeof fetch = (() =>
+    Promise.resolve(new Response(null, { status: 403 }))) as unknown as typeof fetch;
+  await assert.rejects(mintEnrollCode('host', refusing), /403/);
 });

@@ -51,6 +51,22 @@ export function ago(at: number | null, now: number): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+/**
+ * How long an enrolment code has left, as the panel shows it (`9:47`), or
+ * `expired` once it is gone. Pure over the given clock for the same reason
+ * `ago` is; the component ticks and re-reads.
+ *
+ * `ceil`, not `floor`: a countdown rounds up so `0:00` is never shown beside
+ * a code that still works — the display reaches `expired` at the same moment
+ * the server stops honouring the code, not a second before it.
+ */
+export function codeCountdown(expiresAt: number, now: number): string {
+  const left = expiresAt - now;
+  if (left <= 0) return 'expired';
+  const secs = Math.ceil(left / 1000);
+  return `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+}
+
 /** One label/value line of a card body. */
 export interface CardRow {
   readonly label: string;
