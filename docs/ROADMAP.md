@@ -1771,6 +1771,16 @@ on each host. → ADR-005, ADR-006.
 - [ ] Device enrollment: non-extractable Ed25519 key, desktop approval modal
       with a matching code.
 
+      **The asking side's wait is now visible in the desktop app** (#190).
+      `AuthPending` used to die in a log line — the window showed a spinner
+      while the one number a person needed existed nowhere they could see.
+      `DaemonClient::connect_with` now hands the code to an
+      `AttachOptions::on_pending` callback (redials included, since a host
+      that forgot the device pends again), and the window shows *"waiting for
+      approval on \<host\> — code 481502"* as a chrome notice while the far
+      daemon holds the connect. The approval **modal** — the answering side —
+      is still open, as is the browser parity it shares with the bullet above.
+
       **The browser's half of the key has landed.** A `ClientSigner` seam in
       `@zesterm/auth` — `seedSigner` over a seed this process holds, or
       `webCryptoSigner` over a non-extractable `CryptoKey` in IndexedDB, and
