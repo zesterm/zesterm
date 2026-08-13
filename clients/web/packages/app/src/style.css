@@ -764,6 +764,63 @@ body {
   max-width: 640px;
 }
 
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* --- enrolment code panel -------------------------------------------------
+
+   The code is grouped by letter-spacing ONLY — never by inserted separator
+   characters. The enrolment signature covers the code bytes verbatim, and a
+   display reading ZK7M-2Q9T teaches people to type the dash. */
+
+.enroll-panel {
+  margin: 10px 0 16px;
+  max-width: 640px;
+  padding: 14px 16px;
+  background: var(--zt-panel);
+  border: 1px solid var(--zt-accent-soft);
+  border-radius: 12px;
+}
+
+.enroll-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.enroll-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--zt-fg);
+}
+
+.enroll-line {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.enroll-cmd {
+  font-family: var(--zt-mono, ui-monospace, monospace);
+  font-size: 12.5px;
+  color: var(--zt-dim);
+}
+
+.enroll-code {
+  font-family: var(--zt-mono, ui-monospace, monospace);
+  font-size: 15px;
+  letter-spacing: 0.3em;
+  color: var(--zt-fg);
+}
+
+.enroll-expiry {
+  margin: 10px 0 0;
+}
+
 /* --- theme cards (design §8) ---------------------------------------------
 
    Three bands: the live preview (colours arrive INLINE from the theme object

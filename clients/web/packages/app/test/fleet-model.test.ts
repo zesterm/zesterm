@@ -1,7 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ago, fingerprintDisplay, hostCard, presenceOf } from '../src/fleet-model.ts';
+import {
+  ago,
+  codeCountdown,
+  copyOutcome,
+  fingerprintDisplay,
+  hostCard,
+  mintPanelOnStart,
+  presenceOf,
+} from '../src/fleet-model.ts';
 import type { DirectoryStatus } from '../src/directory-source.ts';
 import type { Host } from '../src/registry.ts';
 
@@ -86,6 +94,33 @@ test('only the identified local machine is marked local', () => {
     false,
     'unidentifiable (the hosted path today) marks nothing rather than guessing',
   );
+});
+
+test('codeCountdown walks the whole ten minutes and is pure over the given clock', () => {
+  const minted = 5_000_000;
+  const expiresAt = minted + 600_000; // the server's TTL
+  assert.equal(codeCountdown(expiresAt, minted), '10:00', 'a just-minted code shows the full TTL');
+  assert.equal(codeCountdown(expiresAt, minted + 13_000), '9:47', 'mid-life counts down');
+  assert.equal(
+    codeCountdown(expiresAt, minted + 599_000),
+    '0:01',
+    'seconds are zero-padded so the display never jitters between widths',
+  );
+});
+
+test('codeCountdown says expired at the boundary and stays there', () => {
+  // At `expiresAt` the server stops honouring the code, so the display must
+  // not still be counting — and time past it is not a negative countdown.
+  assert.equal(codeCountdown(1_000, 1_000), 'expired');
+  assert.equal(codeCountdown(1_000, 1_001), 'expired');
+  assert.equal(codeCountdown(1_000, 999_999), 'expired');
+});
+
+test('codeCountdown never shows 0:00 beside a code that still works', () => {
+  // Rounds up, not down: `0:00` claims expiry, and a code with 400ms left is
+  // still one the server accepts.
+  assert.equal(codeCountdown(1_000, 600), '0:01');
+  assert.equal(codeCountdown(61_000, 500), '1:01');
 });
 
 test('ago is rough on purpose and pure over the given clock', () => {
@@ -182,4 +217,60 @@ test('a deployment with no relay says nothing, rather than accusing every machin
     !card.rows.some((r) => r.label === 'sessions'),
     'no relay means no session count either — 0 would claim knowledge',
   );
+});
+
+test('starting a mint for the other kind clears the panel at once', () => {
+  // The stale panel is the bug, found in review: a host code left on screen
+  // while a device mint is in flight is a code someone copies into the wrong
+  // sign-in, under a panel claiming a mint it did not start.
+  const host = { kind: 'host' as const, code: 'ZK7M2Q9T', expiresAt: 1_000 };
+  assert.equal(mintPanelOnStart(host, 'device'), null);
+});
+
+test('a remint for the same kind keeps its panel up', () => {
+  // The visible code is still the server's while the new one is minted, and a
+  // panel that blinks away mid-remint reads as the mint having failed.
+  const host = { kind: 'host' as const, code: 'ZK7M2Q9T', expiresAt: 1_000 };
+  assert.equal(mintPanelOnStart(host, 'host'), host);
+  assert.equal(mintPanelOnStart(null, 'host'), null, 'no panel stays no panel');
+});
+
+test('every way a clipboard write fails is one resolved copy failed', async () => {
+  // On plain http `navigator.clipboard` is undefined — not a clipboard that
+  // rejects — so the unguarded call throws SYNCHRONOUSLY and a `.catch` on
+  // its result never runs. The absent API, a sync throw and an ordinary
+  // rejection must all land in the same place, or the click handler errors
+  // instead of the button saying the copy didn't take.
+  assert.equal(await copyOutcome(undefined, 'x'), 'copy failed', 'insecure origin: no API at all');
+  assert.equal(
+    await copyOutcome(
+      {
+        writeText: () => {
+          throw new Error('sync');
+        },
+      },
+      'x',
+    ),
+    'copy failed',
+    'a synchronous throw resolves rather than escaping the handler',
+  );
+  assert.equal(
+    await copyOutcome({ writeText: () => Promise.reject(new Error('denied')) }, 'x'),
+    'copy failed',
+    'denied permission rejects, and is folded too',
+  );
+});
+
+test('a copy that took says copied, with exactly the minted text', async () => {
+  // Verbatim matters: the enrolment signature covers the code bytes, so what
+  // lands on the clipboard must be what the server minted, separators and all.
+  let wrote = '';
+  const clipboard = {
+    writeText: (t: string) => {
+      wrote = t;
+      return Promise.resolve();
+    },
+  };
+  assert.equal(await copyOutcome(clipboard, 'zest-daemon --enroll ZK7M2Q9T'), 'copied');
+  assert.equal(wrote, 'zest-daemon --enroll ZK7M2Q9T');
 });
