@@ -73,8 +73,11 @@ test('the boundary between account and label cannot be moved', () => {
 
 test('a malformed client id is refused before anything signs', () => {
   // `hexToBytes` on junk would hand noble a wrong-sized array to throw on
-  // later; refusing here names the actual mistake.
-  for (const bad of ['', 'ea4a', `${GOLDEN_KEY}ff`]) {
+  // later; refusing here names the actual mistake. Uppercase is in the list
+  // because the Worker's `fromHex` is lowercase-only and refuses the id on
+  // shape — a signature built over an uppercase spelling would be rejected
+  // every time with nothing naming the case as the cause.
+  for (const bad of ['', 'ea4a', `${GOLDEN_KEY}ff`, GOLDEN_KEY.toUpperCase()]) {
     assert.throws(() => registerRequest(GOLDEN_ACCOUNT, bad, GOLDEN_LABEL), RangeError, bad);
   }
 });

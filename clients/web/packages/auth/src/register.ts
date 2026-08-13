@@ -47,10 +47,14 @@ function lengthPrefixed(text: string): Uint8Array[] {
 
 /** The request a browser signs: `(account, key, label)` under the register domain. */
 export function registerRequest(account: string, clientId: string, label: string): Uint8Array {
-  const key = hexToBytes(clientId);
-  if (key.length !== 32) {
-    throw new RangeError(`a client id is 32 bytes of hex, this one is ${key.length}`);
+  // Lowercase-only, matching the rest of this package and — the half that
+  // bites — the Worker's `fromHex`, which refuses `deviceId` on shape before
+  // it ever verifies. An uppercase id here would build a signature the server
+  // rejects every time, with nothing naming the case as the cause.
+  if (!/^[0-9a-f]{64}$/.test(clientId)) {
+    throw new RangeError(`a client id is 64 lowercase hex characters, got ${clientId.length}`);
   }
+  const key = hexToBytes(clientId);
   const parts = [TEXT.encode(REGISTER_DOMAIN), ...lengthPrefixed(account), key, ...lengthPrefixed(label)];
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
   let at = 0;
