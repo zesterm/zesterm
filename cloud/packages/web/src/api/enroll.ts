@@ -250,8 +250,11 @@ export async function claimEnrollCode(request: Request, env: Env, now: number): 
 
   // For the machine to print — "enrolled with <account>" — never to decide
   // anything. The row is this account's by construction (the code named it).
+  // `display_name` can legitimately be the empty string, and "enrolled with"
+  // followed by nothing reads as a bug on the machine's console — the stable
+  // user id is the fallback that is always printable.
   const owner = await findUser(env.DB, codeRow.user_id);
-  const account = owner?.display_name ?? null;
+  const account = owner === null ? null : owner.display_name || owner.id;
 
   // `{ host }` or `{ device }`, the same shape the listings use, rather than a
   // spread beside a `kind` field. A `PublicDevice` has a `kind` of its own —

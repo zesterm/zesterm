@@ -17,7 +17,7 @@ import { claimEnrollCode, mintEnrollCode } from './api/enroll.ts';
 import { listRegistry, revokeRegistryEntry } from './api/registry.ts';
 import { mintRelayTicket } from './api/relay.ts';
 import { finishLogin, logout, startLogin } from './auth/routes.ts';
-import { requestPrincipal } from './api/principal.ts';
+import { carriesBearer, requestPrincipal } from './api/principal.ts';
 import { resolveSession } from './db/sessions.ts';
 import type { Env } from './env.ts';
 import { csrfOk, csrfOkWithoutOrigin, json } from './http.ts';
@@ -68,9 +68,11 @@ export async function routeApi(
   if (!path.startsWith('/api/') && !path.startsWith('/auth/')) return null;
 
   // Checked once, before any handler, so a route cannot be added that forgets.
-  const bearer = request.headers.get('authorization') !== null;
+  // `carriesBearer`, not "any Authorization header": a `Basic` header from
+  // some proxy must not widen the exemption to a request the resolver would
+  // never answer by token anyway.
   const csrf =
-    ORIGINLESS.has(path) || (bearer && BEARER.has(path))
+    ORIGINLESS.has(path) || (carriesBearer(request) && BEARER.has(path))
       ? csrfOkWithoutOrigin(request)
       : csrfOk(request, env.APP_ORIGIN);
   if (!csrf) return json({ error: 'forbidden' }, 403);

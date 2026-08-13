@@ -326,6 +326,32 @@ test('an expired token is refused, and use slides the expiry', async () => {
   db.close();
 });
 
+test('a non-Bearer Authorization header widens nothing', async () => {
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  const host = await enrolled(db, cookie, 'host', 7);
+
+  // `Basic` from some proxy, on a BEARER path, as a POST with no Origin: the
+  // exemption is keyed on the Bearer shape, so the full CSRF rule applies and
+  // this dies at the origin check — before any resolver runs at all.
+  const res = await routeApi(
+    new Request(`${ORIGIN}/api/relay/ticket`, {
+      method: 'POST',
+      headers: { authorization: 'Basic dXNlcjpwdw==', 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ hostId: host.id }),
+    }),
+    env(db),
+    fetch,
+    NOW,
+  );
+  assert.equal(
+    res?.status,
+    403,
+    'an Authorization header that is not Bearer must not drop the Origin half of the rule',
+  );
+  db.close();
+});
+
 test('a bearer request on a non-bearer route keeps the full CSRF rule', async () => {
   const db = testDb();
   const cookie = await signedIn(db, 'user-a');

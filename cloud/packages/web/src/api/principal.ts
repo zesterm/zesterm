@@ -25,6 +25,20 @@ export type Principal =
   | { readonly kind: 'host'; readonly id: string; readonly userId: string }
   | { readonly kind: 'device'; readonly id: string; readonly userId: string };
 
+/**
+ * Whether a request offers the one Authorization shape this Worker speaks.
+ *
+ * The router keys its Origin exemption on this — not on the mere presence of
+ * an `Authorization` header — so a `Basic` or `Negotiate` header from some
+ * proxy cannot widen the exemption to a request `requestPrincipal` would never
+ * resolve by token. The two functions deliberately share this predicate's
+ * spelling of "bearer" so they cannot drift apart.
+ */
+export function carriesBearer(request: Request): boolean {
+  const header = request.headers.get('authorization');
+  return header !== null && header.slice(0, 7).toLowerCase() === 'bearer ';
+}
+
 export async function requestPrincipal(
   request: Request,
   env: Env,
