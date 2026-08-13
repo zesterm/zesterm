@@ -555,3 +555,36 @@ test('a scrollback answer that arrives after another resize is dropped', async (
     'an answer for a numbering that no longer exists is not history, it is noise',
   );
 });
+
+test('a blank placeholder row does not anchor the refetch', async () => {
+  // A scroll manufactures rows at `NO_LINE` (-2^63) — grid blanks with no
+  // position in the session. Anchoring the ask on one computes a wildly
+  // negative `from`, which clamps to zero and fetches the OLDEST page of
+  // history, leaving the gap under the viewport this refetch exists to close.
+  const daemon = new FakeDaemon();
+  const clock = new FakeClock();
+  client(daemon, clock);
+  await daemon.completeHandshake();
+  const link = daemon.current;
+
+  link.deliver(keyframe(1, ['live row']));
+  for (let i = 0; i < 4; i++) link.deliver(sbPush(i + 1, i + 2, 100 + i, `history ${i}`));
+
+  // A keyframe whose first row is a manufactured blank, with the real rows
+  // below it.
+  const k = keyframeAt(9, 40, 70, ['first real row', 'second']);
+  (k['rows_data'] as Array<Record<string, unknown>>).unshift({
+    line: -(2n ** 63n),
+    runs: [],
+    wrapped: false,
+  });
+  link.deliver(k);
+
+  const asked = link.ofType('request_scrollback');
+  assert.equal(asked.length, 1);
+  assert.equal(
+    asked[0]?.['from_line'],
+    66,
+    'anchored on line 70, the first row with a real id — not on the blank above it',
+  );
+});

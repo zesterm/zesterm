@@ -466,7 +466,12 @@ export class SessionClient {
     // `hadCols === 0` is the first keyframe of a connection, which discarded
     // nothing; an unchanged width keeps every row.
     if (hadCols === 0 || hadScrollback === 0 || this.grid.cols === hadCols) return;
-    const first = this.grid.rows[0]?.line;
+    // The first row with a real id, not simply the first row: a scroll
+    // manufactures blanks at `NO_LINE` (`-2^63`), which have no position in
+    // the session. Anchoring on one computes a wildly negative `from`, clamps
+    // to zero, and fetches the *oldest* page in the history — leaving exactly
+    // the gap under the viewport this whole method exists to avoid.
+    const first = this.grid.rows.find((r) => r.line >= 0n)?.line;
     if (first === undefined) return;
     // The same history needs MORE rows at a narrower width, so asking for the
     // count we held would fetch a fraction of it — measured: 29 rows kept at
