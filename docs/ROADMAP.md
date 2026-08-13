@@ -1975,13 +1975,13 @@ three facts about Cloudflare that changed after #59 was written.
       to clear. Per-client *reflow* stayed off the table on purpose: one pty,
       one layout — the program inside draws for exactly one size, so
       per-client can only ever mean viewports over one shared grid.
-- [ ] **Resizing corrupts the block index; two of its causes are fixed** (#200).
-      Dragging a window leaves a directory listing split across two block cards,
+- [x] **Resizing stops emptying the block index** (#200).
+      Dragging a window left a directory listing split across two block cards,
       the live prompt drawn inside a finished block halfway up the pane, and the
       caret alone on a blank line — "the terminal is dead" again, and host-side,
-      since a fresh attach returns the same wrong index. Two causes are fixed,
-      neither of them the reflow or the re-anchor, both of which round-trip
-      exactly:
+      since a fresh attach returned the same wrong index. Three causes, none of
+      them the reflow or the re-anchor, both of which round-trip exactly. Two of
+      them first:
       **the pty was resized before the grid**, so ConPTY's answer — a repaint of
       the whole viewport, laid out for the new size — could be parsed against
       the old shape by the reader thread; and **an erase reaching the last
@@ -2013,18 +2013,21 @@ three facts about Cloudflare that changed after #59 was written.
       viewport rows into its own scrollback instead of dropping the only copy
       it had.
 
-      **What remains, measured rather than guessed.** One settled resize still
-      leaves the viewport's content fourteen rows above where the anchors expect
-      it: ConPTY restates from `ESC[H` and leaves the cursor where the shell
-      really is, and its pseudoconsole buffer is only as tall as the viewport,
-      so narrowing pushes content out of the region it can ever restate. **Our
-      grid holds more of the session than ConPTY does** — which rules out both
-      candidates the issue proposed, since "the restater owns the viewport"
-      would discard real history for a lossy copy and "detect divergence and
-      drop the blocks" evicts text we still hold. Also re-measured: ConPTY
+      **What remains, measured rather than guessed, and split out as #224.** One
+      settled *width* resize still leaves the viewport's content fourteen rows
+      above where the anchors expect it: ConPTY restates from `ESC[H` and leaves
+      the cursor where the shell really is, and its pseudoconsole buffer is only
+      as tall as the viewport, so narrowing pushes content out of the region it
+      can ever restate. **Our grid holds more of the session than ConPTY does**
+      — which rules out both candidates #200 proposed, since "the restater owns
+      the viewport" would discard real history for a lossy copy and "detect
+      divergence and drop the blocks" evicts text we still hold. Also
+      re-measured: ConPTY
       restates *logical lines*, not physical rows, relying on our autowrap for
       the layout, so the two reflows cannot disagree about wrapping at all. The
-      divergence is purely vertical. Wants an ADR argued against those numbers.
+      divergence is purely vertical, and it is the same asymmetry the height
+      half fixed — so #224 wants an ADR argued against those numbers rather
+      than against #200's older assumptions.
 - [ ] **The relay Worker and its Durable Object.** A control link the daemon
       parks, an attach ticket the browser carries on `Sec-WebSocket-Protocol`
       (not the query string — a secret in a URL lands in referrers, edge logs
