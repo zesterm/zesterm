@@ -256,7 +256,10 @@ fn exchange_with(
         if value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("the value of {name} contains a line break, which is a smuggled header"),
+                format!(
+                    "the value of {name} contains a CR, LF or NUL, which is a smuggled or \
+                     truncated header"
+                ),
             ));
         }
         request.push_str(name);
