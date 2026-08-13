@@ -39,6 +39,48 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const REWATCH_MIN: Duration = Duration::from_millis(500);
 const REWATCH_MAX: Duration = Duration::from_secs(10);
 
+/// How often the account listing is re-read while signed in. A minute,
+/// jittered ±25% so several windows do not poll the control plane in step;
+/// failures back off to five minutes — a listing that cannot be fetched is
+/// stale, not urgent.
+const ACCOUNT_POLL: Duration = Duration::from_secs(60);
+const ACCOUNT_BACKOFF: Duration = Duration::from_secs(300);
+
+/// One machine the account lists, as the fleet consumes it.
+///
+/// Deliberately not `crate::cloud::AccountHosts`: this module aggregates
+/// sources and owns no transport, so it names only the two facts it merges
+/// on and lets `app.rs` convert — the same discipline that keeps the roster
+/// socket-free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountEntry {
+    pub host: HostId,
+    pub label: String,
+}
+
+/// Why an account fetch produced no listing.
+pub enum AccountError {
+    /// There is no token, or the control plane refused it. Polling stops
+    /// until a poke says the account state moved — a signed-out watcher
+    /// re-fetching every minute would be a drumbeat of 401s about nothing.
+    SignedOut,
+    /// Unreachable, or an unusable answer. Worth retrying, slowly.
+    Transient(String),
+}
+
+/// Forces an account refresh out of turn — on sign-in, and when the fleet
+/// screen is shown. Dropping it ends the watcher thread.
+pub struct AccountPoke(crossbeam_channel::Sender<()>);
+
+impl AccountPoke {
+    pub fn poke(&self) {
+        // `try_send` on a bounded(1) channel: a poke already queued is the
+        // same poke, and blocking the event loop on a full channel would be
+        // paying for coalescing twice.
+        let _ = self.0.try_send(());
+    }
+}
+
 /// What is known about one host's session list.
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code, reason = "remote-host fetches (picker-open dials) construct the other states")]
@@ -53,6 +95,7 @@ pub enum SessionsState {
 }
 
 /// One row of the fleet, ready for the picker.
+#[derive(Clone)]
 pub struct FleetHost {
     pub host: HostId,
     pub label: String,
@@ -69,6 +112,10 @@ pub struct FleetHost {
     /// honest number is the difference between UI and decoration.
     pub rtt_ms: Option<f32>,
     pub sessions: SessionsState,
+    /// The account lists this machine. The durable fact (ROADMAP WS-G:
+    /// enrolment is the spine, discovery decorates) — an enrolled host stays
+    /// in the listing when mDNS has never heard of it.
+    pub enrolled: bool,
 }
 
 #[derive(Default)]
@@ -84,6 +131,10 @@ struct State {
     /// turns "LAN direct" into "LAN direct 0.4 ms".
     rtt: HashMap<HostId, f32>,
     discovery: Option<MdnsDiscovery>,
+    /// What the account lists, from the last successful fetch. `None` both
+    /// before the first fetch and after a sign-out — in either case there is
+    /// no account speaking, and the listing decays to discovery alone.
+    account: Option<Vec<AccountEntry>>,
 }
 
 struct Inner {
@@ -282,6 +333,7 @@ impl FleetModel {
                 reachability: Some(zest_mesh::Reachability::Loopback),
                 rtt_ms: state.rtt.get(host).copied(),
                 sessions: state.sessions.get(host).cloned().unwrap_or_default(),
+                enrolled: false,
             });
         }
 
@@ -306,10 +358,297 @@ impl FleetModel {
                         .get(&record.peer.host)
                         .cloned()
                         .unwrap_or_default(),
+                    enrolled: false,
                 });
             }
         }
 
+        merge_account(&mut out, state.account.as_deref());
         out
+    }
+
+    /// Keep the account's host listing fresh, off the main thread.
+    ///
+    /// `fetch` is the whole transport (the `watch(dial)` shape): fleet.rs
+    /// never learns what a token or an HTTP client is, and the tests below
+    /// drive a real poll loop with a closure and no network. Results land
+    /// through the same lock + latch as every other source.
+    pub fn watch_account(
+        &self,
+        fetch: impl Fn() -> Result<Vec<AccountEntry>, AccountError> + Send + 'static,
+    ) -> AccountPoke {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let inner = Arc::clone(&self.inner);
+        let spawned = std::thread::Builder::new().name("zest-fleet-account".into()).spawn(
+            move || {
+                account_loop(
+                    &fetch,
+                    &|entries| {
+                        inner.state.lock().account = entries;
+                        inner.mark_changed();
+                    },
+                    &rx,
+                    ACCOUNT_POLL,
+                    ACCOUNT_BACKOFF,
+                );
+            },
+        );
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "no account watcher; enrolled hosts will not be listed");
+        }
+        AccountPoke(tx)
+    }
+}
+
+/// Lay the account's listing over what discovery built (ROADMAP WS-G:
+/// enrolment is the spine, discovery decorates). A host both know is one row
+/// keeping its observed label, address and presence — the live facts — with
+/// `enrolled` flipped; a host only the account knows is appended with the
+/// account's label and no address, reached (once the dialler lands) only
+/// through the tunnel, and `Unseen` because nothing local has observed it.
+///
+/// Free of `State` so the tests can drive it with hand-built rows.
+fn merge_account(out: &mut Vec<FleetHost>, account: Option<&[AccountEntry]>) {
+    let Some(entries) = account else { return };
+    for entry in entries {
+        if let Some(seen) = out.iter_mut().find(|h| h.host == entry.host) {
+            seen.enrolled = true;
+        } else {
+            out.push(FleetHost {
+                host: entry.host,
+                label: entry.label.clone(),
+                presence: Presence::Unseen,
+                local: false,
+                address: None,
+                reachability: Some(zest_mesh::Reachability::Cloud),
+                rtt_ms: None,
+                sessions: SessionsState::default(),
+                enrolled: true,
+            });
+        }
+    }
+}
+
+/// The account poll loop, free of the thread and the event loop so the tests
+/// can drive it with injected closures and no winit proxy.
+///
+/// One channel is both the timer and the doorbell: `recv_timeout` is the
+/// poll interval, and a poke arriving early is simply the wait ending early.
+/// Signed out, the wait has no timeout at all — the *structure* is what
+/// guarantees a parked watcher cannot poll, rather than a flag somebody has
+/// to remember to check.
+fn account_loop(
+    fetch: &dyn Fn() -> Result<Vec<AccountEntry>, AccountError>,
+    store: &dyn Fn(Option<Vec<AccountEntry>>),
+    poke: &crossbeam_channel::Receiver<()>,
+    poll: Duration,
+    backoff: Duration,
+) {
+    loop {
+        let wait = match fetch() {
+            Ok(entries) => {
+                store(Some(entries));
+                jittered(poll)
+            }
+            Err(AccountError::SignedOut) => {
+                // The listing is the account's word; signed out, there is no
+                // account speaking, and keeping the old rows would show
+                // machines this window can no longer reach as if it could.
+                store(None);
+                match poke.recv() {
+                    Ok(()) => continue,
+                    // The poke was dropped: the app is going away.
+                    Err(_) => return,
+                }
+            }
+            Err(AccountError::Transient(e)) => {
+                tracing::debug!(error = %e, "account listing unavailable");
+                backoff
+            }
+        };
+        match poke.recv_timeout(wait) {
+            Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
+/// `base` ±25%, salted by the clock's nanoseconds. The point is only that
+/// several windows' polls decorrelate; the quality of the randomness is
+/// irrelevant, which is why this is arithmetic and not a `rand` dependency.
+fn jittered(base: Duration) -> Duration {
+    let salt = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    jittered_from(base, salt)
+}
+
+/// The salt→interval map, split out so the bounds are testable without a
+/// clock: salt buckets to [0.75, 1.25) of `base`.
+fn jittered_from(base: Duration, salt: u32) -> Duration {
+    base.mul_f64(0.75 + f64::from(salt % 1000) / 2000.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    fn discovered(host: HostId, label: &str) -> FleetHost {
+        FleetHost {
+            host,
+            label: label.into(),
+            presence: Presence::Online,
+            local: false,
+            address: Some("192.168.1.9:7717".into()),
+            reachability: Some(zest_mesh::Reachability::Lan),
+            rtt_ms: Some(0.4),
+            sessions: SessionsState::default(),
+            enrolled: false,
+        }
+    }
+
+    #[test]
+    fn a_host_both_sources_know_is_one_row_carrying_both_facts() {
+        let id = HostId::from_bytes([1; 32]);
+        let mut out = vec![discovered(id, "studio")];
+        merge_account(
+            &mut out,
+            Some(&[AccountEntry { host: id, label: "studio (enrolled label)".into() }]),
+        );
+
+        assert_eq!(out.len(), 1, "merge is by id; two rows for one machine would offer the \
+             same shell twice and let the copies disagree");
+        assert!(out[0].enrolled, "the account's word survives the merge");
+        assert_eq!(
+            out[0].address.as_deref(),
+            Some("192.168.1.9:7717"),
+            "discovery's decoration survives too — the LAN route is the better one and \
+             must not be erased by the account knowing the machine"
+        );
+        assert_eq!(
+            out[0].label, "studio",
+            "the advertised label wins: the daemon speaks for its current name, the \
+             account row remembers whatever it was enrolled as"
+        );
+    }
+
+    #[test]
+    fn an_account_only_host_is_listed_durable_with_nothing_it_does_not_have() {
+        let id = HostId::from_bytes([2; 32]);
+        let mut out = Vec::new();
+        merge_account(&mut out, Some(&[AccountEntry { host: id, label: "attic-pc".into() }]));
+
+        assert_eq!(out.len(), 1, "an enrolled host is in the listing whether or not the \
+             LAN has ever seen it — that durability is the account's whole contribution");
+        let row = &out[0];
+        assert!(row.enrolled);
+        assert_eq!(row.label, "attic-pc", "the account's label is the only one there is");
+        assert_eq!(row.address, None, "no address may be invented for it");
+        assert_eq!(
+            row.reachability,
+            Some(zest_mesh::Reachability::Cloud),
+            "the only conceivable path is the tunnel, and the card says so"
+        );
+        assert_eq!(
+            row.presence,
+            Presence::Unseen,
+            "nothing local has observed it, and Unseen is exactly that claim"
+        );
+        assert!(!row.local);
+    }
+
+    #[test]
+    fn no_account_listing_leaves_discovery_alone() {
+        let id = HostId::from_bytes([3; 32]);
+        let mut out = vec![discovered(id, "studio")];
+        merge_account(&mut out, None);
+        assert_eq!(out.len(), 1);
+        assert!(
+            !out[0].enrolled,
+            "signed out (or never fetched), no row may claim the account's word"
+        );
+    }
+
+    #[test]
+    fn signed_out_parks_the_poll_until_a_poke() {
+        // Call counts and ordering only — this repo's flake history says
+        // never to assert the jittered interval against a wall clock. The
+        // 1ms poll makes the loop's own cadence irrelevant to the test.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let stored = Arc::new(parking_lot::Mutex::new(Vec::<bool>::new()));
+        let (seen_tx, seen_rx) = crossbeam_channel::unbounded();
+        let (poke_tx, poke_rx) = crossbeam_channel::bounded(1);
+
+        let handle = {
+            let calls = Arc::clone(&calls);
+            let stored = Arc::clone(&stored);
+            std::thread::spawn(move || {
+                let fetch = move || {
+                    let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                    let _ = seen_tx.send(n);
+                    match n {
+                        1 => Ok(Vec::new()),
+                        2 => Err(AccountError::SignedOut),
+                        _ => Ok(Vec::new()),
+                    }
+                };
+                let store = move |v: Option<Vec<AccountEntry>>| stored.lock().push(v.is_some());
+                account_loop(
+                    &fetch,
+                    &store,
+                    &poke_rx,
+                    Duration::from_millis(1),
+                    Duration::from_millis(1),
+                );
+            })
+        };
+
+        let deadline = Duration::from_secs(10);
+        assert_eq!(seen_rx.recv_timeout(deadline), Ok(1), "the first fetch is immediate");
+        assert_eq!(seen_rx.recv_timeout(deadline), Ok(2), "the poll continues while signed in");
+        // Structurally parked (a recv with no timeout), so with a 1ms poll a
+        // broken loop would land dozens of fetches in this window.
+        assert!(
+            seen_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "a signed-out watcher must not keep polling — every poll would be a 401"
+        );
+
+        let poke = AccountPoke(poke_tx);
+        poke.poke();
+        assert_eq!(
+            seen_rx.recv_timeout(deadline),
+            Ok(3),
+            "a poke is how sign-in resumes the listing"
+        );
+        assert_eq!(
+            &stored.lock()[..2],
+            &[true, false],
+            "sign-out must clear the stored listing, not merely stop refreshing it — \
+             stale rows would show machines this window can no longer reach"
+        );
+
+        // Dropping the poke is how the app ends the watcher.
+        drop(poke);
+        handle.join().expect("the loop exits when the poke is dropped");
+    }
+
+    #[test]
+    fn the_jittered_interval_stays_within_a_quarter_of_the_base() {
+        let base = Duration::from_secs(60);
+        let (lo, hi) = (base.mul_f64(0.75), base.mul_f64(1.25));
+        for salt in 0..2000 {
+            let d = jittered_from(base, salt);
+            assert!(
+                d >= lo && d < hi,
+                "salt {salt}: {d:?} outside [{lo:?}, {hi:?}) — drift below turns the poll \
+                 into a hammer, drift above makes the listing stale"
+            );
+        }
+        assert_ne!(
+            jittered_from(base, 0),
+            jittered_from(base, 999),
+            "if every salt lands on one value there is no jitter and every window polls in step"
+        );
     }
 }

@@ -238,6 +238,11 @@ pub struct FleetCard {
     pub online: bool,
     /// A warn pill ("via tunnel"), when the path warrants one.
     pub pill: Option<String>,
+    /// Clicking opens a fresh shell on this machine. False when no route
+    /// exists yet (an enrolled host the relay dialler cannot reach until
+    /// that PR lands) — the card then takes no hit region, because an
+    /// affordance that must fail is worse than none.
+    pub open: bool,
     /// Label/value rows: path, key, sessions — only what is actually known.
     /// The value colour is by role: 0 plain, 1 success, 2 warn.
     pub rows: Vec<(String, String, u8)>,
