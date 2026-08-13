@@ -38,6 +38,39 @@ test('the nested shape still hands the leaf params to useParams', () => {
   );
 });
 
+test('the params record is replaced on navigation, so it can never be captured', async () => {
+  // The whole of #196 in four lines. `useParams()` is `useRoute().params`, and
+  // the router swaps that record out on every navigation — so `const params =
+  // useParams()` at setup pins the record the component was born with, and
+  // reads from it are frozen for ever *and* register no dependency on the
+  // route. `Shell.tsx` did exactly that: the URL said a session, the pane went
+  // on rendering the session list, and only a full reload showed the terminal.
+  //
+  // Pinned here rather than at the seam because nothing in this workspace
+  // renders a component: this is the router behaviour the Shell must respect,
+  // and if a future version ever mutated the record in place instead, whoever
+  // sees this fail should go and simplify Shell.tsx.
+  const nav = createRouter({
+    history: createMemoryHistory(),
+    routes: [{ path: SHELL_PATH, children: SHELL_CHILD_PATHS.map((path) => ({ path })) }],
+  });
+
+  await nav.push('/h/abc/s/3');
+  const captured = nav.currentRoute.params;
+  await nav.push('/h/def/s/9');
+
+  assert.deepEqual(
+    captured,
+    { hostId: 'abc', sessionId: '3' },
+    'a captured record still names the route it was taken from',
+  );
+  assert.deepEqual(
+    nav.currentRoute.params,
+    { hostId: 'def', sessionId: '9' },
+    'and only the route itself knows where we are — read through it, at each use',
+  );
+});
+
 test('the child paths are absolute', () => {
   for (const path of SHELL_CHILD_PATHS) {
     assert.ok(

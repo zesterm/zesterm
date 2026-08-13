@@ -18,7 +18,7 @@
  */
 
 import { component, onMounted, onUnmounted, signal, watch } from 'sigx';
-import { useNavigate, useParams } from '@sigx/router';
+import { useNavigate, useRoute } from '@sigx/router';
 import type { Theme } from '@zesterm/theme';
 import { modsOf, shellChord, type ShellAction } from '@zesterm/input';
 
@@ -73,7 +73,15 @@ import { TerminalView, type TerminalHooks } from './TerminalView.tsx';
 
 export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
   const { device, theme } = ctx.props;
-  const params = useParams();
+  // `useRoute()`, not `useParams()`, and the params are read off it at every
+  // use rather than captured here. `useParams()` IS `useRoute().params`, and
+  // the router replaces that record wholesale on each navigation — so a
+  // reference taken at setup is frozen for the life of the component and
+  // registers no dependency on the route. The pane then kept rendering the
+  // session list while the URL said a session, and only a full reload showed
+  // the terminal. `routes.tsx` records the same trap for `useQuery()`; this is
+  // it one hook over. (#196)
+  const route = useRoute();
   const navigate = useNavigate();
   // The shell's own directory read, beside the one SessionList makes: the
   // launcher needs the host and the route watcher needs to resolve a session
@@ -310,8 +318,8 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
    * every directory turn.
    */
   const syncRoute = (): void => {
-    const h = params['hostId'];
-    const s = params['sessionId'];
+    const h = route.params['hostId'];
+    const s = route.params['sessionId'];
     if (h === undefined || s === undefined || h === '' || s === '') return;
     const id = tabIdOf(h, s);
     if (store.tabs.activeId === id) return;
@@ -328,7 +336,7 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
   };
 
   const routeWatch = watch(
-    () => [params['hostId'], params['sessionId'], directory()] as const,
+    () => [route.params['hostId'], route.params['sessionId'], directory()] as const,
     syncRoute,
     { immediate: true },
   );
@@ -385,8 +393,11 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
     const active = tabs.tabs.find((t) => t.id === tabs.activeId) ?? null;
     const rows = launcherRows(hostChoices(), defaultHostId());
     const labels = hostLabelsOf();
-    const routeH = params['hostId'];
-    const routeS = params['sessionId'];
+    // Read inside the render, so the pane tracks the URL: activation and
+    // navigation are two separate updates and the render triggered by the
+    // first one must not settle on the route as it was before the second.
+    const routeH = route.params['hostId'];
+    const routeS = route.params['sessionId'];
 
     // The pane shows the active tab's terminal when the route names it, and
     // the session directory otherwise (`/hosts` — where the sidebar footer
