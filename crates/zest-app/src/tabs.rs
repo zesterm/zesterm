@@ -674,6 +674,30 @@ impl TabStrip {
         self.settings_active = false;
     }
 
+    /// Adopt a worker-built session tab, refusing a duplicate: if a live tab
+    /// already holds this session, that tab is activated (when `focus`) and
+    /// the newcomer is handed back for the caller to drop — dropping
+    /// detaches, the shell stays on its host. Two tabs on one session made
+    /// every click on the second resolve to the first (`activate_addr` is
+    /// first-match by address), which shipped as "clicking tab 3 selects
+    /// tab 1" (#188) — and a duplicate that reaches the strip is persisted,
+    /// so it survives every restart. A dead tab does not block re-attach:
+    /// the session outlived the tab that reported it gone.
+    pub fn adopt(&mut self, tab: Tab, focus: bool) -> Option<Tab> {
+        if let Some(i) = self.tabs.iter().position(|t| t.addr == tab.addr && !t.dead) {
+            if focus {
+                self.activate(i);
+            }
+            return Some(tab);
+        }
+        if focus {
+            self.push(tab);
+        } else {
+            self.push_background(tab);
+        }
+        None
+    }
+
     /// Add a tab without taking the keyboard — restored tabs arrive in the
     /// background, and a launch that steals focus once per remembered tab
     /// would be unusable.
@@ -770,6 +794,57 @@ mod tests {
     // TabStrip's only nontrivial logic is keeping `active` pointing at the
     // same tab across removals — exactly the off-by-one that shows up as
     // "closing a background tab switched my focus".
+
+    #[test]
+    fn adopting_an_already_open_session_activates_instead_of_duplicating() {
+        // #188, from a user's own tabs.json: session 1 attached twice made
+        // two tabs share one address, and activate_addr's first-match then
+        // sent every click on the second to the first — "clicking tab 3
+        // selects tab 1". Adoption refuses the duplicate and hands it back
+        // (dropping detaches; the shell stays), activating the original.
+        let mut strip = TabStrip::default();
+        for n in 1..=2 {
+            strip.push(fake(n));
+        }
+        strip.activate(1);
+        let dup = fake(1); // the same session, arriving again
+        let rejected = strip.adopt(dup, true);
+        assert!(rejected.is_some(), "the duplicate comes back for the caller to detach-drop");
+        assert_eq!(strip.len(), 2, "the strip holds each session once");
+        assert_eq!(
+            strip.active().expect("active").addr,
+            placeholder_addr(1),
+            "and asking for the session again activates the tab it already has"
+        );
+        rejected.expect("checked above").kill();
+
+        // Background adoption (a restore) also collapses: the second copy
+        // of a restored duplicate never reaches the strip, so a bad file
+        // heals itself on the next launch.
+        let restored_dup = fake(2);
+        let rejected = strip.adopt(restored_dup, false);
+        assert!(rejected.is_some(), "a restored duplicate is refused the same way");
+        assert_eq!(strip.len(), 2);
+        assert_eq!(
+            strip.active().expect("active").addr,
+            placeholder_addr(1),
+            "a background adoption never steals the keyboard, duplicate or not"
+        );
+        rejected.expect("checked above").kill();
+
+        // A dead tab does not block re-attach: the session outlived the tab
+        // that reported it gone, and refusing here would strand it.
+        strip.find_mut(placeholder_addr(2)).expect("tab 2 exists").dead = true;
+        let fresh = fake(2);
+        assert!(
+            strip.adopt(fresh, false).is_none(),
+            "the live session gets a fresh tab beside the dead one"
+        );
+        assert_eq!(strip.len(), 3);
+        for addr in [placeholder_addr(1), placeholder_addr(2), placeholder_addr(2)] {
+            strip.close(addr).expect("tab exists").kill();
+        }
+    }
 
     #[test]
     fn closing_a_background_tab_keeps_the_active_one() {
