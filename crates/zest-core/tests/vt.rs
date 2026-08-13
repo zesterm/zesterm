@@ -1056,11 +1056,14 @@ fn conpty_repaint(t: &Terminal) -> Vec<u8> {
             r += 1;
         }
         out.push_str(&text);
-        // Not when the line ends exactly on a row boundary: the cursor is then
-        // at the right margin with a deferred wrap, where `EL` erases the last
-        // cell -- correct per the spec, and an emitter that wanted the text it
-        // just wrote would be destroying it.
-        if !text.chars().count().is_multiple_of(cols) {
+        // Not when a *non-empty* line ends exactly on a row boundary: the
+        // cursor is then at the right margin with a deferred wrap, where `EL`
+        // erases the last cell -- correct per the spec, and an emitter that
+        // wanted the text it just wrote would be destroying it. An empty line
+        // is not that case and does get its `ESC[K`, which is most of what the
+        // capture consists of.
+        let len = text.chars().count();
+        if len == 0 || !len.is_multiple_of(cols) {
             out.push_str("\x1b[K");
         }
         if r < rows {
