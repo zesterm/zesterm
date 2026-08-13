@@ -323,6 +323,11 @@ fn fleet(
             ));
             dashed_border(&mut out.rects, rect, s, colors.line, area);
         }
+        // Only routable cards answer to the pointer (the ThemeCard shape):
+        // a card with no way to open a shell must not offer to.
+        if card.open {
+            out.hit.push(rect, HitRegion::FleetCard(i));
+        }
 
         // Header: dot, name, note or pill.
         let hx = cx + CARD_PAD * s;

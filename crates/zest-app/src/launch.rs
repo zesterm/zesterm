@@ -123,6 +123,7 @@ mod tests {
             reachability: None,
             rtt_ms: None,
             sessions: crate::fleet::SessionsState::Unknown,
+            enrolled: false,
         }
     }
 

@@ -91,6 +91,9 @@ pub enum HitRegion {
     Pane(bool),
     /// One theme card of the gallery; clicking applies that theme.
     ThemeCard(usize),
+    /// One host card of the fleet view; clicking opens a fresh shell on
+    /// that machine. Pushed only for cards with a live route.
+    FleetCard(usize),
     /// The fleet header's "Sign in with a code"; clicking opens the entry.
     FleetSignIn,
     /// The fleet header's "Sign out"; clicking forgets this app's token.

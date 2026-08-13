@@ -708,6 +708,15 @@ pub struct App {
     /// edit-buffer discipline (only `buffer` and `error` are live here;
     /// there is no field index and nothing to append to).
     enroll_entry: Option<crate::settings_ui::EditBuffer>,
+    /// Forces an account-listing refresh (the fleet's watcher). `None` until
+    /// the Fleet screen first starts it — the fetch reads the stored token,
+    /// and the keychain stays off the startup path.
+    account_poke: Option<crate::fleet::AccountPoke>,
+    /// The fleet snapshot the current chrome model was built from,
+    /// index-parallel with the fleet screen's cards, so a card click
+    /// resolves against exactly what is on screen — a click racing a fleet
+    /// change must not open a different machine.
+    fleet_view: Vec<crate::fleet::FleetHost>,
     fonts: Option<Fonts>,
     palette: zest_core::PaletteSnapshot,
 
@@ -905,6 +914,8 @@ impl App {
             account: AccountState::Unknown,
             account_update: Arc::new(parking_lot::Mutex::new(None)),
             enroll_entry: None,
+            account_poke: None,
+            fleet_view: Vec::new(),
             fonts: None,
             palette,
             chrome_colors,
@@ -1830,6 +1841,12 @@ impl App {
                             }
                             None => {}
                         }
+                        // Spine vs decoration made visible (WS-G): the row
+                        // says the account holds this machine, whether or
+                        // not discovery has ever decorated it.
+                        if h.enrolled {
+                            rows.push(("account".into(), "enrolled".into(), 1));
+                        }
                         rows.push(("key".into(), h.host.short(), 0));
                         if let SessionsState::Fresh(sessions) = &h.sessions {
                             let n = sessions.len();
@@ -1846,6 +1863,10 @@ impl App {
                                 Some(zest_mesh::Reachability::Cloud)
                             )
                             .then(|| "via tunnel".to_string()),
+                            // Honest affordance: no route, no click. The
+                            // relay dialler (next PR) is what will give an
+                            // account-only card one.
+                            open: self.best_route(h).is_some(),
                             rows,
                         }
                     })
@@ -2014,8 +2035,23 @@ impl App {
         // knowing — and the first acceptable moment to touch the keychain
         // for it (never at startup). On a worker, because an OS credential
         // store is allowed to block on a prompt.
-        if screen == AppScreen::Fleet && self.account == AccountState::Unknown {
-            self.probe_account();
+        if screen == AppScreen::Fleet {
+            if self.account == AccountState::Unknown {
+                self.probe_account();
+            }
+            // The durable listing refreshes when someone actually looks at
+            // it; the first show instead *starts* the watcher (same keychain
+            // discipline — its fetch reads the stored token). Poking on the
+            // same show that started it would queue a second fetch behind the
+            // loop's immediate first one — two keychain reads and, signed
+            // out, two back-to-back 401s for one glance at the screen.
+            let already_watching = self.account_poke.is_some();
+            self.start_account_watch();
+            if already_watching {
+                if let Some(poke) = self.account_poke.as_ref() {
+                    poke.poke();
+                }
+            }
         }
         // A code entry does not survive leaving the screen that shows it —
         // keys must never keep routing to an input nobody can see.
@@ -2023,6 +2059,49 @@ impl App {
             self.enroll_entry = None;
         }
         self.mark_chrome_dirty();
+    }
+
+    /// Start the fleet's account watcher, once. The fetch closure is the
+    /// whole transport: stored token → bearer GET /api/hosts → the minimal
+    /// entries fleet.rs merges on. A 401 also flips the header through the
+    /// account cell — the listing and the "signed in" line must not
+    /// disagree about whether the token still works.
+    fn start_account_watch(&mut self) {
+        if self.account_poke.is_some() {
+            return;
+        }
+        // `--screen fleet` dispatches before the fleet model exists; the
+        // resumed path calls back in once it does.
+        let Some(fleet) = self.fleet.as_ref() else { return };
+        let update = Arc::clone(&self.account_update);
+        let proxy = self.proxy.clone();
+        let poke = fleet.watch_account(move || {
+            use crate::fleet::{AccountEntry, AccountError};
+            let token = crate::cloud::stored_app_token(&zest_mesh::keystore::OsKeyStore)
+                .map_err(|e| AccountError::Transient(e.to_string()))?
+                .ok_or(AccountError::SignedOut)?;
+            let api = crate::cloud::HttpsAccountApi::new(
+                zest_daemon::enroll::DEFAULT_CONTROL_PLANE,
+                zest_cloud::tls::Roots::Platform,
+            )
+            .map_err(|e| AccountError::Transient(e.to_string()))?;
+            match crate::cloud::fetch_hosts(&api, &token) {
+                Ok(listing) => Ok(listing
+                    .hosts
+                    .into_iter()
+                    .map(|h| AccountEntry { host: h.host, label: h.label })
+                    .collect()),
+                Err(crate::cloud::CloudError::SignedOut) => {
+                    // The token was revoked out from under us. The watcher
+                    // parks either way; this is what keeps the header from
+                    // going on claiming "signed in" about a dead token.
+                    post_account(&update, &proxy, AccountState::SignedOut);
+                    Err(AccountError::SignedOut)
+                }
+                Err(e) => Err(AccountError::Transient(e.to_string())),
+            }
+        });
+        self.account_poke = Some(poke);
     }
 
     /// Read the stored app token off the event loop and post what it means.
@@ -3016,6 +3095,10 @@ impl App {
         // Built before the font borrow below: these read tabs, fleet and the
         // filesystem, never the fonts.
         let fleet_hosts = self.fleet.as_ref().map(|f| f.snapshot()).unwrap_or_default();
+        // Retained beside the model it feeds: the fleet screen's hit map
+        // carries card indices, and they must resolve against the snapshot
+        // the cards were built from, not a fresher one.
+        self.fleet_view = fleet_hosts.clone();
         let screen_model = profiles_model
             .map(crate::chrome::model::ScreenModel::Profiles)
             .or_else(|| self.build_screen_model(&fleet_hosts));
@@ -3464,6 +3547,23 @@ impl App {
                 if let Some(id) = id {
                     self.apply_theme_choice(id);
                 }
+            }
+            (HitRegion::FleetCard(i), MouseButton::Left) => {
+                // The card's promise is the picker row's: a fresh shell on
+                // that machine. Routed against the retained snapshot the
+                // card indices were built from, and through the exact
+                // PickerAction::Create path — back to the grid, remote
+                // creates pinned to the id the roster named.
+                let target = self.fleet_view.get(i).map(|h| (h.host, self.best_route(h)));
+                if let Some((host, Some(route))) = target {
+                    let expect = (!route.is_local()).then_some(host);
+                    self.screen = AppScreen::Terminal;
+                    self.spawn_tab_worker_pinned(route, None, expect, true);
+                    self.mark_chrome_dirty();
+                }
+                // No route: the card drew without a hit region, so this arm
+                // is only reachable by a click racing a snapshot change —
+                // ignoring it is the honest answer.
             }
             (HitRegion::FleetSignIn, MouseButton::Left) => {
                 // A fresh, empty entry: the keyboard owns it from here
@@ -5086,6 +5186,24 @@ impl App {
             }
         }
         self.mark_chrome_dirty();
+    }
+
+    /// The best way to open a session on this host right now, or `None`.
+    ///
+    /// The picker's routing rule (its rows dial the advertised endpoint,
+    /// the window's own route for the local machine), plus the presence
+    /// gate: an address off a record that is `Away` or `Unreachable` is a
+    /// dial that mostly times out. `None` is honest — the relay dialler is
+    /// the next PR, so an enrolled host with no local route cannot be
+    /// opened yet and its card must not pretend.
+    fn best_route(&self, host: &crate::fleet::FleetHost) -> Option<HostRoute> {
+        if host.local {
+            return self.route.clone();
+        }
+        if host.presence == zest_mesh::discovery::Presence::Online {
+            return host.address.clone().map(HostRoute::Tcp);
+        }
+        None
     }
 
     /// The stored identity for hosts that are not this machine, loaded on
@@ -6859,6 +6977,11 @@ impl ApplicationHandler<Wakeup> for App {
             fleet.watch(move || route.dialer());
         }
         self.fleet = Some(fleet);
+        // `--screen fleet` showed the screen before the fleet model existed,
+        // so its start_account_watch found nothing to start; catch up now.
+        if self.screen == AppScreen::Fleet {
+            self.start_account_watch();
+        }
     }
 
     /// A wakeup from the parser thread.
@@ -6973,7 +7096,24 @@ impl ApplicationHandler<Wakeup> for App {
                 // `self` for the whole `if let` otherwise.
                 let settled = self.account_update.lock().take();
                 if let Some(state) = settled {
+                    // Poke only on a *transition*: the watcher itself posts
+                    // SignedOut on a 401, and poking on that re-adoption
+                    // would fetch, 401, post, adopt, poke — a loop at
+                    // network round-trip cadence.
+                    let moved = state != self.account;
                     self.account = state;
+                    if moved
+                        && matches!(
+                            self.account,
+                            AccountState::SignedIn { .. } | AccountState::SignedOut
+                        )
+                    {
+                        // Sign-in resumes a parked watcher; sign-out makes
+                        // it clear the listing now rather than a minute on.
+                        if let Some(poke) = self.account_poke.as_ref() {
+                            poke.poke();
+                        }
+                    }
                     self.mark_chrome_dirty();
                     if let Some(w) = self.window.as_ref() {
                         w.request_redraw();

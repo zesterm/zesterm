@@ -149,7 +149,6 @@ pub fn forget_app_token(secrets: &dyn SecretStore) -> Result<bool, EnrollError> 
 /// was revoked (or never was one), and the app should offer sign-in again —
 /// not retry, which is what a transport failure suggests.
 #[derive(Debug, Clone, thiserror::Error)]
-#[allow(dead_code, reason = "the account-backed picker consumes these; tests hold them until then")]
 pub enum CloudError {
     #[error("the account no longer accepts this device's token")]
     SignedOut,
@@ -164,7 +163,6 @@ pub enum CloudError {
 /// A trait for the reason `ControlPlane` is one: the parsing and the 401
 /// classification below are the parts that go wrong silently, and none of
 /// them needs a socket to be got right.
-#[allow(dead_code, reason = "the account-backed picker consumes these; tests hold them until then")]
 pub trait AccountApi {
     fn get(&self, path: &str, bearer: &str) -> std::io::Result<zest_cloud::http::Response>;
     fn post(
@@ -176,13 +174,11 @@ pub trait AccountApi {
 }
 
 /// The real one: bearer-headed HTTPS through the crate that owns TLS.
-#[allow(dead_code, reason = "the account-backed picker consumes these; tests hold them until then")]
 pub struct HttpsAccountApi {
     base: Endpoint,
     roots: Roots,
 }
 
-#[allow(dead_code, reason = "the account-backed picker consumes these; tests hold them until then")]
 impl HttpsAccountApi {
     /// Verifying the control plane against `roots`; refuses a base URL that
     /// cannot be requested (`Endpoint`'s rules — https only).
@@ -231,7 +227,7 @@ impl AccountApi for HttpsAccountApi {
 
 /// One machine the account lists.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code, reason = "the account-backed picker consumes these; tests hold them until then")]
+#[allow(dead_code, reason = "the relay dialler (next PR) consumes these; tests hold them until then")]
 pub struct AccountHost {
     pub host: HostId,
     pub label: String,
@@ -242,7 +238,7 @@ pub struct AccountHost {
 
 /// What `GET /api/hosts` answers: the fleet as the account knows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code, reason = "the account-backed picker consumes these; tests hold them until then")]
+#[allow(dead_code, reason = "the relay dialler (next PR) consumes these; tests hold them until then")]
 pub struct AccountHosts {
     /// The account's display name, when the answer carries one.
     pub account: Option<String>,
@@ -253,7 +249,6 @@ pub struct AccountHosts {
 }
 
 /// The account's host list, or why it could not be read.
-#[allow(dead_code, reason = "the account-backed picker consumes these; tests hold them until then")]
 pub fn fetch_hosts(api: &dyn AccountApi, token: &str) -> Result<AccountHosts, CloudError> {
     let got = api
         .get("/api/hosts", token)
@@ -299,7 +294,7 @@ pub fn fetch_hosts(api: &dyn AccountApi, token: &str) -> Result<AccountHosts, Cl
 }
 
 /// An attach ticket for `host`, or why the relay would not admit us.
-#[allow(dead_code, reason = "the account-backed picker consumes these; tests hold them until then")]
+#[allow(dead_code, reason = "the relay dialler (next PR) consumes these; tests hold them until then")]
 pub fn mint_ticket(
     api: &dyn AccountApi,
     token: &str,
