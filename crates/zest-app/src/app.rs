@@ -583,9 +583,16 @@ fn approve_on_account(
     .map_err(|e| ApproveFailure::Message(e.to_string()))?;
     let account = crate::cloud::fetch_me(&api, &token).map_err(failure)?;
 
+    // A clock before the epoch would mint `iat = 0` — an attestation born
+    // expired, refused server-side with an error naming the signature window
+    // rather than the actual problem. Refuse here, where the cause can be
+    // named.
     let iat = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64);
+        .map_err(|_| {
+            ApproveFailure::Message("this machine's clock is set before 1970 — fix it first".into())
+        })?
+        .as_millis() as u64;
     let attestation = Attestation {
         v: ATTESTATION_VERSION,
         account,
