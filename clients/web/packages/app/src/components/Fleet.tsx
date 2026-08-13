@@ -27,10 +27,19 @@ import type { Theme } from '@zesterm/theme';
 
 import type { Bootstrap, User } from '../bootstrap.ts';
 import type { DeviceKey } from '../device-key.ts';
-import { browserLabel, deviceRow, hostCard, mintPanelOnStart, ownDeviceAction } from '../fleet-model.ts';
+import {
+  browserLabel,
+  deviceRow,
+  deviceVouchAction,
+  hostCard,
+  mintPanelOnStart,
+  ownDeviceAction,
+  ownDeviceApproved,
+} from '../fleet-model.ts';
 import { liveDirectory, relayLinks } from '../live-directory.ts';
 import { relayAccess } from '../relay-access.ts';
 import {
+  approveDevice,
   fetchRegistry,
   mintEnrollCode,
   registerDevice,
@@ -169,6 +178,30 @@ export const Fleet = component<{
       });
   };
 
+  /**
+   * Vouch for a device as this browser: sign an attestation over its id and
+   * label and hand it to the approve route. Approving a pending row is what
+   * the button is for; on an approved row the same act is a renewal — the
+   * Worker replaces this approver's earlier statement.
+   *
+   * No confirm, unlike `drop`: approval is reversible (revoke it), and the
+   * person just read the row they are approving.
+   */
+  const approve = (d: Device): void => {
+    const account = bootstrap.user?.id;
+    if (account === undefined || state.busy !== null) return;
+    state.busy = d.id;
+    approveDevice({ signer: device.signer, account, device: d, now: Date.now() })
+      .then(() => {
+        state.busy = null;
+        load();
+      })
+      .catch((e: unknown) => {
+        state.busy = null;
+        state.load = { phase: 'failed', error: e instanceof Error ? e.message : String(e) };
+      });
+  };
+
   const mint = (kind: 'host' | 'device'): void => {
     if (state.minting !== null) return;
     // A cross-kind mint clears the visible panel NOW, not when the new code
@@ -264,6 +297,12 @@ export const Fleet = component<{
     // Local consts rather than `state.mint?.…` in the JSX: narrowing does not
     // survive into the nested closures, and each render reads one snapshot.
     const minted = state.mint;
+    // Whether this browser may sign vouchers, computed once per render from
+    // the same snapshot the rows render from — so the buttons and the banner
+    // can never disagree about it.
+    const canVouch =
+      state.load.phase === 'ready' &&
+      ownDeviceApproved(state.load.devices, device.signer.clientId, device.ephemeral === true);
     const mintErr = state.mintError;
     return (
     <div class="shell">
@@ -452,6 +491,7 @@ export const Fleet = component<{
                 <ul class="rows">
                   {state.load.devices.map((d) => {
                     const row = deviceRow(d, Date.now());
+                    const action = deviceVouchAction(d, device.signer.clientId, canVouch);
                     return (
                       <li key={row.id} class="row">
                         <span class="row-name">{row.name}</span>
@@ -471,12 +511,26 @@ export const Fleet = component<{
                             <span class="warn"> · key readable by scripts on this origin</span>
                           ) : null}
                         </span>
+                        {action !== null ? (
+                          // `approve` turns a waiting device into a working
+                          // one; `vouch` renews or adds this browser's own
+                          // attestation for an already-approved device — see
+                          // `deviceVouchAction` for why every approved row
+                          // gets the offer.
+                          <button
+                            class="button"
+                            disabled={state.busy !== null}
+                            onClick={() => approve(d)}
+                          >
+                            {action}
+                          </button>
+                        ) : null}
                         <button
                           class="button subtle"
                           disabled={state.busy === row.id}
                           onClick={() => drop('devices', row.id, row.name)}
                         >
-                          revoke
+                          {row.removeLabel}
                         </button>
                       </li>
                     );

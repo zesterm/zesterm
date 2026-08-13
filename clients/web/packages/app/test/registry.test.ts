@@ -1,9 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { generateIdentity, registerRequest, seedSigner, verifyClientSignature } from '@zesterm/auth';
+import {
+  ATTESTATION_TTL_MS,
+  attestDevice,
+  generateIdentity,
+  registerRequest,
+  seedSigner,
+  verifyClientSignature,
+} from '@zesterm/auth';
 
 import {
+  approveDevice,
   fetchRegistry,
   mintEnrollCode,
   parseDevice,
@@ -291,5 +299,79 @@ test('a refused registration is reported rather than swallowed', async () => {
     registerDevice({ signer, account: 'user-a', label: 'x', extractable: true }, refusing),
     /429/,
     'the caller decides whether silence is right — the fleet auto-register swallows, a future button must not',
+  );
+});
+
+test('approveDevice signs an attestation as this browser and POSTs the CSRF posture', async () => {
+  const signer = seedSigner(generateIdentity('07'.repeat(32)));
+  const target = { id: 'b'.repeat(64), label: 'new browser' };
+  const NOW = 1_700_000_000_000;
+  let seen: {
+    url?: string;
+    method?: string | undefined;
+    ct?: string | undefined;
+    credentials?: string | undefined;
+    body?: unknown;
+  } = {};
+  const capturing: typeof fetch = ((url: string, init?: RequestInit) => {
+    seen = {
+      url,
+      method: init?.method,
+      ct: (init?.headers as Record<string, string> | undefined)?.['content-type'],
+      credentials: init?.credentials,
+      body: JSON.parse(init?.body as string),
+    };
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          device: {
+            id: target.id,
+            label: target.label,
+            kind: 'browser',
+            extractable: true,
+            status: 'approved',
+            enrolledAt: 5,
+            lastSeenAt: null,
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+  }) as unknown as typeof fetch;
+
+  const got = await approveDevice(
+    { signer, account: 'user-a', device: target, now: NOW },
+    capturing,
+  );
+
+  assert.equal(seen.url, `/api/devices/${target.id}/approve`);
+  assert.equal(seen.method, 'POST');
+  assert.equal(seen.ct, 'application/json', 'the Worker CSRF rule refuses anything else 403');
+  assert.equal(seen.credentials, 'same-origin', 'the session cookie has to be sent');
+
+  // Ed25519 is deterministic, so the strongest check is byte equality: the
+  // posted blob must be exactly what the auth helper builds for these fields
+  // — same window, same label, signed by this browser as `by`.
+  const expected = await attestDevice(signer, {
+    account: 'user-a',
+    device: target.id,
+    label: target.label,
+    iat: NOW,
+    exp: NOW + ATTESTATION_TTL_MS,
+  });
+  assert.deepEqual(seen.body, { attestation: expected });
+  assert.equal(got.status, 'approved', 'the parsed row is what the caller refetches around');
+});
+
+test('a refused approval is reported rather than swallowed', async () => {
+  const signer = seedSigner(generateIdentity('07'.repeat(32)));
+  const refusing: typeof fetch = (() =>
+    Promise.resolve(new Response(null, { status: 403 }))) as unknown as typeof fetch;
+  await assert.rejects(
+    approveDevice(
+      { signer, account: 'user-a', device: { id: 'b'.repeat(64), label: 'x' }, now: 1 },
+      refusing,
+    ),
+    /403/,
   );
 });

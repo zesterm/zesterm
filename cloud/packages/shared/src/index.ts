@@ -37,6 +37,19 @@ export {
 } from './ticket.ts';
 
 export {
+  ATTESTATION_KEY_LEN,
+  ATTESTATION_SIGNATURE_LEN,
+  ATTESTATION_TTL_MS,
+  ATTESTATION_VERSION,
+  MAX_ATTESTATION_CHARS,
+  attestationMessage,
+  decodeAttestation,
+  encodeAttestation,
+  type AttestationFields,
+  type DecodedAttestation,
+} from './attestation.ts';
+
+export {
   SESSION_TOKEN_BYTES,
   newSessionToken,
   sessionIdOf,

@@ -7,10 +7,12 @@ import {
   codeCountdown,
   copyOutcome,
   deviceRow,
+  deviceVouchAction,
   fingerprintDisplay,
   hostCard,
   mintPanelOnStart,
   ownDeviceAction,
+  ownDeviceApproved,
   presenceOf,
 } from '../src/fleet-model.ts';
 import type { DirectoryStatus } from '../src/directory-source.ts';
@@ -367,4 +369,79 @@ test('deviceRow keeps the pending marker and the key warning out of the meta str
   assert.equal(approved.pending, false);
   assert.equal(approved.keyReadable, false);
   assert.equal(approved.meta, 'browser · last seen never');
+});
+
+test('only an approved, non-ephemeral own key may vouch', () => {
+  const own = 'c'.repeat(64);
+  const device = (id: string, status: 'pending' | 'approved'): Device => ({
+    id,
+    label: 'x',
+    kind: 'browser',
+    extractable: true,
+    status,
+    enrolledAt: 1,
+    lastSeenAt: null,
+  });
+
+  assert.equal(ownDeviceApproved([device(own, 'approved')], own, false), true);
+  assert.equal(
+    ownDeviceApproved([device(own, 'pending')], own, false),
+    false,
+    'a pending key offering to vouch would offer a guaranteed server refusal',
+  );
+  assert.equal(ownDeviceApproved([], own, false), false, 'an unlisted key cannot vouch');
+  assert.equal(
+    ownDeviceApproved([device(own, 'approved')], own, true),
+    false,
+    'an ephemeral key must not vouch: whatever it signs names a key gone next load',
+  );
+});
+
+test('deviceVouchAction offers approve on pending rows, vouch on approved ones, never on self', () => {
+  const own = 'c'.repeat(64);
+  const other = 'd'.repeat(64);
+  const device = (id: string, status: 'pending' | 'approved'): Device => ({
+    id,
+    label: 'x',
+    kind: 'browser',
+    extractable: true,
+    status,
+    enrolledAt: 1,
+    lastSeenAt: null,
+  });
+
+  assert.equal(deviceVouchAction(device(other, 'pending'), own, true), 'approve');
+  assert.equal(
+    deviceVouchAction(device(other, 'approved'), own, true),
+    'vouch',
+    'attestation, not status, is what spares pairing prompts — and the browser cannot ' +
+      'see which approved devices already carry one, so every approved row gets the offer',
+  );
+  assert.equal(
+    deviceVouchAction(device(own, 'pending'), own, true),
+    null,
+    'self-vouching is refused by the Worker, so the button would be a guaranteed error',
+  );
+  assert.equal(deviceVouchAction(device(own, 'approved'), own, true), null);
+  assert.equal(
+    deviceVouchAction(device(other, 'pending'), own, false),
+    null,
+    'a browser that may not sign gets no signing buttons at all',
+  );
+});
+
+test('the remove button says deny on a pending row and revoke on an approved one', () => {
+  // Both run the same revoke underneath; the word is for the person — a
+  // pending request is *denied*, granted trust is *revoked*.
+  const base: Device = {
+    id: 'f'.repeat(64),
+    label: 'x',
+    kind: 'browser',
+    extractable: false,
+    status: 'pending',
+    enrolledAt: 1,
+    lastSeenAt: null,
+  };
+  assert.equal(deviceRow(base, 2).removeLabel, 'deny');
+  assert.equal(deviceRow({ ...base, status: 'approved' }, 2).removeLabel, 'revoke');
 });

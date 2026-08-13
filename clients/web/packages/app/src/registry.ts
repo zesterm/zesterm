@@ -14,7 +14,7 @@
  * reading `undefined`.
  */
 
-import { signRegistration, type ClientSigner } from '@zesterm/auth';
+import { ATTESTATION_TTL_MS, attestDevice, signRegistration, type ClientSigner } from '@zesterm/auth';
 
 export interface Host {
   readonly id: string;
@@ -217,4 +217,44 @@ export async function registerDevice(
   const device = parseDevice(((await res.json()) as { device?: unknown }).device);
   if (device === null) throw new Error('device register answered the wrong shape');
   return device;
+}
+
+/**
+ * Vouch for a device: sign an attestation as this browser and hand it to the
+ * approve route. Approves a `pending` row; on an already-approved one it is
+ * an idempotent renewal (the Worker replaces this approver's earlier
+ * statement rather than accumulating).
+ *
+ * Same CSRF posture as every other cookie write here. The window starts at
+ * `now` and runs the auth package's `ATTESTATION_TTL_MS` — the caller
+ * supplies the clock so the function stays testable against a fixed one.
+ */
+export async function approveDevice(
+  args: {
+    readonly signer: ClientSigner;
+    readonly account: string;
+    /** The device being vouched for — its id and its current label, both signed. */
+    readonly device: Pick<Device, 'id' | 'label'>;
+    readonly now: number;
+  },
+  fetchImpl: typeof fetch = fetch,
+): Promise<Device> {
+  const { signer, account, device, now } = args;
+  const blob = await attestDevice(signer, {
+    account,
+    device: device.id,
+    label: device.label,
+    iat: now,
+    exp: now + ATTESTATION_TTL_MS,
+  });
+  const res = await fetchImpl(`/api/devices/${encodeURIComponent(device.id)}/approve`, {
+    method: 'POST',
+    headers: { accept: 'application/json', 'content-type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ attestation: blob }),
+  });
+  if (!res.ok) throw new Error(`device approve answered ${res.status}`);
+  const approved = parseDevice(((await res.json()) as { device?: unknown }).device);
+  if (approved === null) throw new Error('device approve answered the wrong shape');
+  return approved;
 }

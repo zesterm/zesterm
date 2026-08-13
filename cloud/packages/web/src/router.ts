@@ -13,6 +13,7 @@
 
 import { readCookie, SESSION_COOKIE } from '@zesterm/cloud-shared';
 
+import { approveDevice, listAccountAttestations } from './api/attest.ts';
 import { registerDevice } from './api/devices.ts';
 import { claimEnrollCode, mintEnrollCode } from './api/enroll.ts';
 import { listRegistry, revokeRegistryEntry } from './api/registry.ts';
@@ -52,7 +53,17 @@ const ORIGINLESS = new Set(['/api/enroll/claim']);
  * The same path reached *without* the header is an ordinary cookie route and
  * keeps the full rule — membership here loosens nothing for browsers.
  */
-const BEARER = new Set(['/api/me', '/api/hosts', '/api/relay/ticket']);
+const BEARER = new Set(['/api/me', '/api/hosts', '/api/relay/ticket', '/api/attestations']);
+
+/**
+ * The one *parameterised* bearer route, which a `Set` of exact paths cannot
+ * hold: the desktop app approves a device with its token, and the device id
+ * is in the path. The handler keeps the exemption sound the way every BEARER
+ * route does — `requestPrincipal` never falls back to the cookie — and adds
+ * its own rule on top: a bearer principal may only submit vouchers it signed
+ * itself.
+ */
+const APPROVE = /^\/api\/devices\/([^/]+)\/approve$/;
 
 /** `/api/hosts/:id/revoke`, `/api/devices/:id/revoke`. */
 const REVOKE = /^\/api\/(hosts|devices)\/([^/]+)\/revoke$/;
@@ -73,7 +84,7 @@ export async function routeApi(
   // some proxy must not widen the exemption to a request the resolver would
   // never answer by token anyway.
   const csrf =
-    ORIGINLESS.has(path) || (carriesBearer(request) && BEARER.has(path))
+    ORIGINLESS.has(path) || (carriesBearer(request) && (BEARER.has(path) || APPROVE.test(path)))
       ? csrfOkWithoutOrigin(request)
       : csrfOk(request, env.APP_ORIGIN);
   if (!csrf) return json({ error: 'forbidden' }, 403);
@@ -142,6 +153,17 @@ export async function routeApi(
   if (path === '/api/hosts' || path === '/api/devices') {
     if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
     return listRegistry(request, env, path === '/api/hosts' ? 'host' : 'device', now);
+  }
+
+  if (path === '/api/attestations') {
+    if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+    return listAccountAttestations(request, env, now);
+  }
+
+  const approve = APPROVE.exec(path);
+  if (approve !== null) {
+    if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+    return approveDevice(request, env, approve[1] ?? '', now);
   }
 
   const revoke = REVOKE.exec(path);

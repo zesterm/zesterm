@@ -9,6 +9,7 @@
 
 import { fromHex } from '@zesterm/cloud-shared';
 
+import { revokeAttestationsFor } from '../db/attestations.ts';
 import { listDevices, listHosts, revokeDevice, revokeHost } from '../db/registry.ts';
 import type { EnrollKind } from '../db/types.ts';
 import type { Env } from '../env.ts';
@@ -84,6 +85,16 @@ export async function revokeRegistryEntry(
     kind === 'host'
       ? await revokeHost(env.DB, id, user.id, now)
       : await revokeDevice(env.DB, id, user.id, now);
+
+  if (kind === 'device' && revokedAt !== null) {
+    // Revoking a device takes its attestations with it — the ones vouching
+    // FOR it and the ones it made as an approver. Here rather than inside
+    // `revokeDevice`, because the attestation table's liveness is not a JOIN
+    // against `devices` (a voucher names two devices, and joining on both
+    // would make each read pay for the rule); the flag is written once, at
+    // the only place a device revocation happens.
+    await revokeAttestationsFor(env.DB, id, user.id, now);
+  }
 
   return revokedAt === null ? json({ error: 'not_found' }, 404) : json({ id, revokedAt });
 }
