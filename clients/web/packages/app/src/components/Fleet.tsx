@@ -27,7 +27,7 @@ import type { Theme } from '@zesterm/theme';
 
 import type { Bootstrap, User } from '../bootstrap.ts';
 import type { DeviceKey } from '../device-key.ts';
-import { ago, hostCard } from '../fleet-model.ts';
+import { ago, hostCard, mintPanelOnStart } from '../fleet-model.ts';
 import { liveDirectory, relayLinks } from '../live-directory.ts';
 import { relayAccess } from '../relay-access.ts';
 import { fetchRegistry, mintEnrollCode, revoke, type Device, type Host } from '../registry.ts';
@@ -130,6 +130,9 @@ export const Fleet = component<{
 
   const mint = (kind: 'host' | 'device'): void => {
     if (state.minting !== null) return;
+    // A cross-kind mint clears the visible panel NOW, not when the new code
+    // lands — see `mintPanelOnStart` for why the stale panel is the bug.
+    state.mint = mintPanelOnStart(state.mint, kind);
     state.minting = kind;
     state.mintError = null;
     mintEnrollCode(kind)
@@ -274,7 +277,9 @@ export const Fleet = component<{
                   kind="host"
                   code={minted.code}
                   expiresAt={minted.expiresAt}
-                  busy={state.minting !== null}
+                  // Per-kind, not `!== null`: this panel must never claim a
+                  // mint the other section started.
+                  busy={state.minting === 'host'}
                   onRemint={() => mint('host')}
                   onClose={() => (state.mint = null)}
                 />
@@ -380,7 +385,7 @@ export const Fleet = component<{
                   kind="device"
                   code={minted.code}
                   expiresAt={minted.expiresAt}
-                  busy={state.minting !== null}
+                  busy={state.minting === 'device'}
                   onRemint={() => mint('device')}
                   onClose={() => (state.mint = null)}
                 />

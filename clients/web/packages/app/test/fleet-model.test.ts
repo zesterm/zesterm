@@ -1,7 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ago, codeCountdown, fingerprintDisplay, hostCard, presenceOf } from '../src/fleet-model.ts';
+import {
+  ago,
+  codeCountdown,
+  copyOutcome,
+  fingerprintDisplay,
+  hostCard,
+  mintPanelOnStart,
+  presenceOf,
+} from '../src/fleet-model.ts';
 import type { DirectoryStatus } from '../src/directory-source.ts';
 import type { Host } from '../src/registry.ts';
 
@@ -209,4 +217,60 @@ test('a deployment with no relay says nothing, rather than accusing every machin
     !card.rows.some((r) => r.label === 'sessions'),
     'no relay means no session count either — 0 would claim knowledge',
   );
+});
+
+test('starting a mint for the other kind clears the panel at once', () => {
+  // The stale panel is the bug, found in review: a host code left on screen
+  // while a device mint is in flight is a code someone copies into the wrong
+  // sign-in, under a panel claiming a mint it did not start.
+  const host = { kind: 'host' as const, code: 'ZK7M2Q9T', expiresAt: 1_000 };
+  assert.equal(mintPanelOnStart(host, 'device'), null);
+});
+
+test('a remint for the same kind keeps its panel up', () => {
+  // The visible code is still the server's while the new one is minted, and a
+  // panel that blinks away mid-remint reads as the mint having failed.
+  const host = { kind: 'host' as const, code: 'ZK7M2Q9T', expiresAt: 1_000 };
+  assert.equal(mintPanelOnStart(host, 'host'), host);
+  assert.equal(mintPanelOnStart(null, 'host'), null, 'no panel stays no panel');
+});
+
+test('every way a clipboard write fails is one resolved copy failed', async () => {
+  // On plain http `navigator.clipboard` is undefined — not a clipboard that
+  // rejects — so the unguarded call throws SYNCHRONOUSLY and a `.catch` on
+  // its result never runs. The absent API, a sync throw and an ordinary
+  // rejection must all land in the same place, or the click handler errors
+  // instead of the button saying the copy didn't take.
+  assert.equal(await copyOutcome(undefined, 'x'), 'copy failed', 'insecure origin: no API at all');
+  assert.equal(
+    await copyOutcome(
+      {
+        writeText: () => {
+          throw new Error('sync');
+        },
+      },
+      'x',
+    ),
+    'copy failed',
+    'a synchronous throw resolves rather than escaping the handler',
+  );
+  assert.equal(
+    await copyOutcome({ writeText: () => Promise.reject(new Error('denied')) }, 'x'),
+    'copy failed',
+    'denied permission rejects, and is folded too',
+  );
+});
+
+test('a copy that took says copied, with exactly the minted text', async () => {
+  // Verbatim matters: the enrolment signature covers the code bytes, so what
+  // lands on the clipboard must be what the server minted, separators and all.
+  let wrote = '';
+  const clipboard = {
+    writeText: (t: string) => {
+      wrote = t;
+      return Promise.resolve();
+    },
+  };
+  assert.equal(await copyOutcome(clipboard, 'zest-daemon --enroll ZK7M2Q9T'), 'copied');
+  assert.equal(wrote, 'zest-daemon --enroll ZK7M2Q9T');
 });

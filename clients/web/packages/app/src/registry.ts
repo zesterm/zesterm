@@ -150,7 +150,9 @@ export async function mintEnrollCode(
 ): Promise<{ code: string; expiresAt: number }> {
   const res = await fetchImpl('/api/enroll/code', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    // `accept` as well as the CSRF content-type: this call reads a JSON body
+    // back, so it states what it can take, exactly as `getJson` does.
+    headers: { accept: 'application/json', 'content-type': 'application/json' },
     credentials: 'same-origin',
     body: JSON.stringify({ kind }),
   });

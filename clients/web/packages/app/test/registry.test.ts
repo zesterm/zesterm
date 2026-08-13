@@ -120,6 +120,7 @@ test('minting is a JSON POST carrying the kind, because anything else is refused
     url?: string;
     method?: string | undefined;
     ct?: string | undefined;
+    accept?: string | undefined;
     credentials?: string | undefined;
     body?: unknown;
   } = {};
@@ -128,6 +129,7 @@ test('minting is a JSON POST carrying the kind, because anything else is refused
       url,
       method: init?.method,
       ct: (init?.headers as Record<string, string> | undefined)?.['content-type'],
+      accept: (init?.headers as Record<string, string> | undefined)?.['accept'],
       credentials: init?.credentials,
       body: init?.body,
     };
@@ -143,6 +145,7 @@ test('minting is a JSON POST carrying the kind, because anything else is refused
   assert.equal(seen.url, '/api/enroll/code');
   assert.equal(seen.method, 'POST');
   assert.equal(seen.ct, 'application/json');
+  assert.equal(seen.accept, 'application/json', 'a JSON answer is read back, so the request says it takes one');
   assert.equal(seen.credentials, 'same-origin', 'the session cookie has to be sent');
   assert.deepEqual(
     JSON.parse(seen.body as string),

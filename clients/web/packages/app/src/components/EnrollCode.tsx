@@ -16,7 +16,7 @@
 
 import { component, onUnmounted, signal } from 'sigx';
 
-import { codeCountdown } from '../fleet-model.ts';
+import { codeCountdown, copyOutcome } from '../fleet-model.ts';
 
 export const EnrollCode = component<{
   kind: 'host' | 'device';
@@ -27,7 +27,10 @@ export const EnrollCode = component<{
   onRemint: () => void;
   onClose: () => void;
 }>((ctx) => {
-  const state = signal({ now: Date.now(), copied: false });
+  const state = signal<{ now: number; flash: 'copied' | 'copy failed' | null }>({
+    now: Date.now(),
+    flash: null,
+  });
 
   const ticker = setInterval(() => {
     state.now = Date.now();
@@ -39,15 +42,19 @@ export const EnrollCode = component<{
   });
 
   const copy = (text: string): void => {
-    // writeText rejects in insecure contexts and on denied permission; an
-    // unhandled rejection in the console for a copy that simply didn't take
-    // helps nobody, and there is no toast surface yet to say more.
-    navigator.clipboard.writeText(text).catch(() => {});
-    state.copied = true;
-    if (copyFlash !== null) clearTimeout(copyFlash);
-    copyFlash = setTimeout(() => {
-      state.copied = false;
-    }, 1500);
+    // `copyOutcome` never rejects: on plain http `navigator.clipboard` is
+    // undefined and the unguarded call throws SYNCHRONOUSLY, so a `.catch`
+    // on its result never runs and the handler errors. Every failure shape
+    // lands here as `copy failed` — the code stays selectable on screen, and
+    // the button flash is the only surface there is to say the copy didn't
+    // take. `copied` is said when the write resolved, not when the click did.
+    void copyOutcome(navigator.clipboard, text).then((outcome) => {
+      state.flash = outcome;
+      if (copyFlash !== null) clearTimeout(copyFlash);
+      copyFlash = setTimeout(() => {
+        state.flash = null;
+      }, 1500);
+    });
   };
 
   return () => {
@@ -84,7 +91,7 @@ export const EnrollCode = component<{
                     zest-daemon --enroll <span class="enroll-code">{code}</span>
                   </code>
                   <button class="button subtle" onClick={() => copy(command)}>
-                    {state.copied ? 'copied' : 'copy'}
+                    {state.flash ?? 'copy'}
                   </button>
                 </div>
               </>
@@ -94,7 +101,7 @@ export const EnrollCode = component<{
                 <div class="enroll-line">
                   <span class="enroll-code">{code}</span>
                   <button class="button subtle" onClick={() => copy(code)}>
-                    {state.copied ? 'copied' : 'copy'}
+                    {state.flash ?? 'copy'}
                   </button>
                 </div>
               </>

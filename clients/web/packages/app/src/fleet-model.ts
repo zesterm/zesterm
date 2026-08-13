@@ -67,6 +67,46 @@ export function codeCountdown(expiresAt: number, now: number): string {
   return `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
 }
 
+/**
+ * What the one enrolment panel shows the moment a mint for `kind` starts.
+ *
+ * Single occupancy is decided at START, not when the new code lands: leaving
+ * a host code on screen while a device mint is in flight leaves a code
+ * someone copies into the wrong sign-in, under a panel claiming a mint it
+ * did not start. A remint for the SAME kind keeps its panel — the visible
+ * code is still the server's, and a panel that blinks away mid-remint reads
+ * as the mint having failed.
+ */
+export function mintPanelOnStart<P extends { readonly kind: 'host' | 'device' }>(
+  panel: P | null,
+  kind: 'host' | 'device',
+): P | null {
+  return panel !== null && panel.kind === kind ? panel : null;
+}
+
+/**
+ * One resolved answer for a clipboard write, however it goes wrong.
+ *
+ * On an insecure origin `navigator.clipboard` is `undefined` — not a
+ * clipboard that rejects — so the unguarded call THROWS synchronously and a
+ * `.catch` chained on its result never runs; the click handler errors instead
+ * of the copy failing politely. Folded here so the absent API, a synchronous
+ * throw and an ordinary rejection (denied permission) all resolve to
+ * `copy failed`, and `copied` is said only once the write actually took.
+ */
+export async function copyOutcome(
+  clipboard: { writeText(text: string): Promise<void> } | undefined,
+  text: string,
+): Promise<'copied' | 'copy failed'> {
+  try {
+    if (clipboard === undefined) return 'copy failed';
+    await clipboard.writeText(text);
+    return 'copied';
+  } catch {
+    return 'copy failed';
+  }
+}
+
 /** One label/value line of a card body. */
 export interface CardRow {
   readonly label: string;
