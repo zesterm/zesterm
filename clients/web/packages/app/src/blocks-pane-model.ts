@@ -246,7 +246,7 @@ export function paneModel(
     if (isTrailingPrompt) {
       items.push({
         kind: 'prompt',
-        rows: toPaneRows([...slice.promptRows, ...slice.outputRows], view.attrs),
+        rows: toPaneRows(upToCaret([...slice.promptRows, ...slice.outputRows], view), view.attrs),
       });
       continue;
     }
@@ -290,6 +290,35 @@ export function paneModel(
   }
 
   return items;
+}
+
+/**
+ * The prompt's rows, stopping at the row the caret is on.
+ *
+ * A terminal is a fixed number of rows and a shell has usually printed a
+ * handful, so the trailing prompt slice runs on into the viewport's blank
+ * tail — 34 empty rows after one prompt line, measured. Those rows are
+ * viewport rather than content: the canvas grid pays nothing for them, and a
+ * DOM pane makes the reader scroll past them. Worse, the view appends the
+ * caret to the LAST row it is handed, so it was drawn dozens of lines below
+ * the prompt it belongs to. (#202)
+ *
+ * The caret's row, not the last non-blank one: a caret can legitimately sit on
+ * a blank continuation row of a multi-line prompt, and trimming to the text
+ * would swallow it.
+ *
+ * Everything is kept when the caret is not on one of this slice's own rows — a
+ * cursor on the alternate screen, or rows the client never cached. Membership
+ * is checked rather than inferred from the id being in range: a slice holding
+ * lines 10 and 12 while the caret sits on 11 would otherwise drop line 12 on
+ * the strength of a caret that is not in the slice at all. Rendering the whole
+ * prompt is the harmless answer; dropping a row of it is not.
+ */
+function upToCaret(rows: readonly RowPayload[], view: PaneView): readonly RowPayload[] {
+  const caretLine = view.rows[view.cursor.row]?.line;
+  if (caretLine === undefined) return rows;
+  if (!rows.some((r) => r.line === caretLine)) return rows;
+  return rows.filter((r) => r.line <= caretLine);
 }
 
 function headerOf(
