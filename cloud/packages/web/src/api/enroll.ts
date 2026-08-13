@@ -34,7 +34,8 @@ import { looksLikeEnrollCode } from '../enroll/codes.ts';
 import { KEY_LEN, SIGNATURE_LEN, verifyEnrollment } from '../enroll/preimage.ts';
 import { currentUser } from './session.ts';
 
-const DEVICE_KINDS: readonly DeviceKind[] = ['browser', 'phone', 'desktop'];
+/** Exported for `devices.ts`: registration renders into the same screen. */
+export const DEVICE_KINDS: readonly DeviceKind[] = ['browser', 'phone', 'desktop'];
 
 /**
  * A label is shown to a person and never parsed, so the only bounds that matter
@@ -50,7 +51,7 @@ const PLATFORM_MAX = 64;
 /** C0, DEL and C1 — everything that could move a cursor in a log or a terminal. */
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
 
-function labelOk(label: string): boolean {
+export function labelOk(label: string): boolean {
   const points = [...label];
   if (points.length === 0 || points.length > LABEL_MAX) return false;
   return !CONTROL.test(label);

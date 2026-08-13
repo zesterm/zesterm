@@ -10,7 +10,9 @@ use zest_render_wgpu::{LinearRgba, RectInstance};
 
 use super::hit::HitRegion;
 use super::layout::{ChromeLayout, TextRun};
-use super::model::{FleetCard, ScreenModel, ThemeCard};
+use super::model::{
+    FleetAccountAction, FleetAccountModel, FleetCard, ScreenModel, SettingsValueCell, ThemeCard,
+};
 use super::theme::ChromeColors;
 
 // Page frame, logical px (design screens 7–8).
@@ -136,8 +138,8 @@ pub fn screen_overlay(
     out: &mut ChromeLayout,
 ) -> Option<[f32; 4]> {
     match screen {
-        ScreenModel::Fleet { cards } => {
-            fleet(cards, area, colors, s, measure, out);
+        ScreenModel::Fleet { account, cards } => {
+            fleet(account, cards, area, colors, s, measure, out);
             None
         }
         ScreenModel::Themes { cards } => {
@@ -152,7 +154,125 @@ pub fn screen_overlay(
     }
 }
 
+// Account header (issue #190), logical px.
+const ACCOUNT_H: f32 = 32.0;
+const ACCOUNT_BTN_H: f32 = 26.0;
+const CODE_INPUT_W: f32 = 150.0;
+
+/// The account header between the page frame and the cards: one line of
+/// fact, at most one affordance, the code entry while one is open. Returns
+/// the y where the cards start.
+fn account_header(
+    model: &FleetAccountModel,
+    area: [f32; 4],
+    top: f32,
+    colors: &ChromeColors,
+    s: f32,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+    out: &mut ChromeLayout,
+) -> f32 {
+    // Nothing to say (the Unknown state): the cards keep the whole page
+    // rather than leaving a blank band that reads as a broken header.
+    if model.line.is_empty() && model.entry.is_none() && model.error.is_none() {
+        return top;
+    }
+    let h = ACCOUNT_H * s;
+    let x0 = area[0] + PAD_X * s;
+    let px = 12.0 * s;
+    let base = baseline_in(top, h, px);
+    let lw = measure(&model.line, px, false, 0.0);
+    out.texts.push(TextRun {
+        text: model.line.clone(),
+        pos: [x0, base],
+        max_width: lw + 2.0,
+        color: colors.text_active,
+        clip: area,
+        px,
+        bold: false,
+        tracking: 0.0,
+    });
+    let mut x = x0 + lw + 14.0 * s;
+
+    if let Some(SettingsValueCell::Editing { buffer, error }) = &model.entry {
+        // §11's editing input, sized for an 8-character code; the caret is a
+        // character, exactly as the settings tab draws it.
+        let boxr = [x, top + (h - ACCOUNT_BTN_H * s) / 2.0, CODE_INPUT_W * s, ACCOUNT_BTN_H * s];
+        out.rects.push(RectInstance {
+            radii: [8.0 * s; 4],
+            border: if *error { colors.pill_warn_text } else { colors.accent },
+            border_width: HAIRLINE * s,
+            ..RectInstance::filled(boxr, colors.panel_bg, area)
+        });
+        let text = format!("{buffer}\u{258f}");
+        let vw = measure(&text, px, false, 0.0);
+        out.texts.push(TextRun {
+            text,
+            pos: [boxr[0] + 10.0 * s, baseline_in(boxr[1], boxr[3], px)],
+            max_width: vw.max(2.0),
+            color: if *error { colors.pill_warn_text } else { colors.text_active },
+            clip: boxr,
+            px,
+            bold: false,
+            tracking: 0.0,
+        });
+        let hint = "Enter to sign in · Esc to cancel";
+        out.texts.push(TextRun {
+            text: hint.into(),
+            pos: [boxr[0] + boxr[2] + 12.0 * s, base],
+            max_width: (area[0] + area[2] - boxr[0] - boxr[2] - 12.0 * s - PAD_X * s).max(0.0),
+            color: colors.text_faint,
+            clip: area,
+            px: 10.5 * s,
+            bold: false,
+            tracking: 0.0,
+        });
+    } else {
+        let button = match model.action {
+            FleetAccountAction::None => None,
+            FleetAccountAction::SignIn => Some(("Sign in with a code", HitRegion::FleetSignIn)),
+            FleetAccountAction::SignOut => Some(("Sign out", HitRegion::FleetSignOut)),
+        };
+        if let Some((label, region)) = button {
+            let bpx = 11.0 * s;
+            let tw = measure(label, bpx, false, 0.0);
+            let rect = [x, top + (h - ACCOUNT_BTN_H * s) / 2.0, tw + 20.0 * s, ACCOUNT_BTN_H * s];
+            out.rects.push(RectInstance {
+                radii: [7.0 * s; 4],
+                border: colors.line,
+                border_width: HAIRLINE * s,
+                ..RectInstance::filled(rect, colors.panel_bg, area)
+            });
+            out.hit.push(rect, region);
+            out.texts.push(TextRun {
+                text: label.to_string(),
+                pos: [rect[0] + 10.0 * s, baseline_in(rect[1], rect[3], bpx)],
+                max_width: tw + 2.0,
+                color: colors.text_inactive,
+                clip: area,
+                px: bpx,
+                bold: false,
+                tracking: 0.0,
+            });
+            x = rect[0] + rect[2] + 14.0 * s;
+        }
+        if let Some(error) = &model.error {
+            out.texts.push(TextRun {
+                text: error.clone(),
+                pos: [x, base],
+                max_width: (area[0] + area[2] - x - PAD_X * s).max(0.0),
+                color: colors.warn,
+                clip: area,
+                px: 11.0 * s,
+                bold: false,
+                tracking: 0.0,
+            });
+        }
+    }
+    top + h + 12.0 * s
+}
+
 fn fleet(
+    account: &FleetAccountModel,
     cards: &[FleetCard],
     area: [f32; 4],
     colors: &ChromeColors,
@@ -171,6 +291,7 @@ fn fleet(
          Sessions never leave the machine they run on.",
         measure,
     );
+    let top = account_header(account, area, top, colors, s, measure, out);
 
     let x0 = area[0] + PAD_X * s;
     let avail = area[2] - 2.0 * PAD_X * s;

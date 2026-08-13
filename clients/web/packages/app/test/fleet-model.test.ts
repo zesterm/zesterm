@@ -3,15 +3,18 @@ import assert from 'node:assert/strict';
 
 import {
   ago,
+  browserLabel,
   codeCountdown,
   copyOutcome,
+  deviceRow,
   fingerprintDisplay,
   hostCard,
   mintPanelOnStart,
+  ownDeviceAction,
   presenceOf,
 } from '../src/fleet-model.ts';
 import type { DirectoryStatus } from '../src/directory-source.ts';
-import type { Host } from '../src/registry.ts';
+import type { Device, Host } from '../src/registry.ts';
 
 test('fingerprintDisplay keeps head and tail of a long key', () => {
   const key = 'a'.repeat(30) + 'zzzz';
@@ -273,4 +276,95 @@ test('a copy that took says copied, with exactly the minted text', async () => {
   };
   assert.equal(await copyOutcome(clipboard, 'zest-daemon --enroll ZK7M2Q9T'), 'copied');
   assert.equal(wrote, 'zest-daemon --enroll ZK7M2Q9T');
+});
+
+test('ownDeviceAction: an unlisted key registers, a pending own row banners, approved is quiet', () => {
+  const own = 'c'.repeat(64);
+  const device = (id: string, status: 'pending' | 'approved'): Device => ({
+    id,
+    label: 'x',
+    kind: 'browser',
+    extractable: true,
+    status,
+    enrolledAt: 1,
+    lastSeenAt: null,
+  });
+
+  assert.equal(ownDeviceAction([], own, false), 'register', 'the account has never seen this key');
+  assert.equal(
+    ownDeviceAction([device('d'.repeat(64), 'approved')], own, false),
+    'register',
+    'somebody else’s row is not this browser’s',
+  );
+  assert.equal(
+    ownDeviceAction([device(own, 'pending')], own, false),
+    'awaiting-approval',
+    'the owner learns their browser is waiting only if the screen says so',
+  );
+  assert.equal(
+    ownDeviceAction([device(own, 'approved')], own, false),
+    'nothing',
+    'an approved browser has nothing to register and nothing to announce',
+  );
+});
+
+test('an ephemeral key is never auto-registered', () => {
+  // An ephemeral identity is minted when the key store cannot be read and is
+  // deliberately not persisted — registering it would enrol a pending row per
+  // visit, none of them this browser by the time anyone approves it.
+  assert.equal(ownDeviceAction([], 'e'.repeat(64), true), 'nothing');
+});
+
+test('browserLabel names the product, in compatibility-archaeology order', () => {
+  // Everything claims Chrome/ and almost everything claims Safari/, so the
+  // more specific token must win first or every browser is called Chrome.
+  const cases: Array<[string, string]> = [
+    ['Mozilla/5.0 (X11; Linux) Gecko/20100101 Firefox/128.0', 'Firefox'],
+    ['Mozilla/5.0 AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36 Edg/126.0.2', 'Edge'],
+    ['Mozilla/5.0 AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36 OPR/112.0', 'Opera'],
+    ['Mozilla/5.0 AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36', 'Chrome'],
+    ['Mozilla/5.0 AppleWebKit/605.1.15 Version/17.5 Safari/605.1.15', 'Safari'],
+    ['curl/8.6.0', 'browser'],
+    ['', 'browser'],
+  ];
+  for (const [ua, want] of cases) {
+    assert.equal(browserLabel(ua), want, ua || '(empty)');
+  }
+});
+
+test('deviceRow keeps the pending marker and the key warning out of the meta string', () => {
+  // The component styles the two flags; folded into `meta` they would render
+  // in one colour and stop reading as either.
+  const row = deviceRow(
+    {
+      id: 'f'.repeat(64),
+      label: 'Firefox',
+      kind: 'browser',
+      extractable: true,
+      status: 'pending',
+      enrolledAt: 1,
+      lastSeenAt: 1_000,
+    },
+    61_000 + 1_000,
+  );
+  assert.equal(row.name, 'Firefox');
+  assert.equal(row.meta, 'browser · last seen 1m ago');
+  assert.equal(row.pending, true, 'a pending row must be distinguishable in the list');
+  assert.equal(row.keyReadable, true, 'the seed warning survives the row shaping');
+
+  const approved = deviceRow(
+    {
+      id: 'f'.repeat(64),
+      label: 'Firefox',
+      kind: 'browser',
+      extractable: false,
+      status: 'approved',
+      enrolledAt: 1,
+      lastSeenAt: null,
+    },
+    2,
+  );
+  assert.equal(approved.pending, false);
+  assert.equal(approved.keyReadable, false);
+  assert.equal(approved.meta, 'browser · last seen never');
 });

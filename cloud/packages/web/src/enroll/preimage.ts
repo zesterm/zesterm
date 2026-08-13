@@ -40,7 +40,13 @@ export const KEY_LEN = 32;
 /** An Ed25519 signature. Always 64 bytes; a short one is an error, never a pad. */
 export const SIGNATURE_LEN = 64;
 
-function pushLenPrefixed(parts: Uint8Array[], text: string): void {
+/**
+ * Exported for `register-preimage.ts`, which builds its request from the same
+ * two ingredients — a domain string and length-prefixed fields — and must not
+ * re-implement the prefix: two copies of a length encoding is how the two
+ * formats drift a byte apart.
+ */
+export function pushLenPrefixed(parts: Uint8Array[], text: string): void {
   const bytes = utf8(text);
   if (bytes.length > 0xffff) {
     // The Rust clamps to `u16::MAX` and truncates. Deliberately not ported:

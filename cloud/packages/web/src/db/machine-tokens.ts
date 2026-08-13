@@ -90,6 +90,11 @@ const RESOLVE_HOST = `
      AND t.revoked_at IS NULL AND t.expires_at > ?
      AND h.revoked_at IS NULL AND u.disabled_at IS NULL`;
 
+// `d.status = 'approved'` sits beside the liveness conditions for the reason
+// they are all here: approval is a fact about the principal, and putting it in
+// this JOIN means demoting a device disables its token with no second write —
+// and a `pending` registration (#184) never had a working credential to begin
+// with, however its holder comes by a token string.
 const RESOLVE_DEVICE = `
   SELECT t.user_id, t.principal_id, t.last_seen_at
     FROM machine_tokens t
@@ -97,7 +102,7 @@ const RESOLVE_DEVICE = `
     JOIN users u ON u.id = t.user_id
    WHERE t.id = ? AND t.principal_kind = 'device'
      AND t.revoked_at IS NULL AND t.expires_at > ?
-     AND d.revoked_at IS NULL AND u.disabled_at IS NULL`;
+     AND d.revoked_at IS NULL AND d.status = 'approved' AND u.disabled_at IS NULL`;
 
 /**
  * The principal behind a bearer token, or `null`.

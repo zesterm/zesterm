@@ -5520,6 +5520,7 @@ dependencies = [
  "wgpu",
  "windows-sys 0.60.2",
  "winit",
+ "zest-cloud",
  "zest-config",
  "zest-core",
  "zest-daemon",

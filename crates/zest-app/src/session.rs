@@ -63,6 +63,12 @@ pub enum Wakeup {
     /// moved, a session list refreshed. Coalesced by `FleetModel`'s latch,
     /// so a chatty network posts one of these per burst, not per packet.
     FleetChanged,
+    /// The account state moved — a stored token was found, an enrolment
+    /// settled, a sign-out completed. The new state travels in a shared cell
+    /// (last write wins, which is also the coalescing) because every one of
+    /// those happens on a worker thread the keychain and the network must
+    /// never block the event loop from.
+    AccountChanged,
     /// A worker finished opening a tab; the pending queue has it.
     ///
     /// Attaching from the picker dials over the network, and a dead host
@@ -78,6 +84,16 @@ pub enum Wakeup {
     /// carrying the tab's address. The bare variant survives for the paths
     /// that still mean the whole window.
     TabExited(zest_proto::SessionAddr),
+    /// The pairing prompt changed: a remote host started (or stopped)
+    /// waiting for a person to approve this device.
+    ///
+    /// Carries nothing — the host, the matching code and its expiry travel
+    /// in the app's shared pairing cell, written by whichever attach worker
+    /// or reconnect supervisor is doing the waiting; this event only says
+    /// "look again". Its own variant because the prompt is *chrome*:
+    /// `Redraw` repaints without invalidating the cached chrome layout, so
+    /// the code would never appear.
+    PairingChanged,
     /// A pinned session's host answered and said the session no longer
     /// exists.
     ///

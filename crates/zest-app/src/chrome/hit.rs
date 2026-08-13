@@ -91,6 +91,10 @@ pub enum HitRegion {
     Pane(bool),
     /// One theme card of the gallery; clicking applies that theme.
     ThemeCard(usize),
+    /// The fleet header's "Sign in with a code"; clicking opens the entry.
+    FleetSignIn,
+    /// The fleet header's "Sign out"; clicking forgets this app's token.
+    FleetSignOut,
     /// One row of the open picker, by index into its row list.
     PickerRow(usize),
     /// The picker's panel between rows (query line, group labels, footer) —

@@ -80,6 +80,11 @@ pub struct Halves {
     pub frames: FrameReader,
 }
 
+/// A listener for the approval wait: the six-digit matching code, and for
+/// how many seconds the host will still honour it. See
+/// [`DaemonClient::connect_with`].
+pub type OnPending<'a> = &'a dyn Fn(&str, u32);
+
 /// An authenticated connection to one daemon.
 pub struct DaemonClient {
     read: Box<dyn Read + Send>,
@@ -112,6 +117,26 @@ impl DaemonClient {
         label: &str,
         expect_host: Option<zest_proto::HostId>,
         watch_sessions: bool,
+    ) -> Result<Self, DaemonError> {
+        Self::connect_with(read, write, identity, label, expect_host, watch_sessions, None)
+    }
+
+    /// [`Self::connect`], with a listener for the approval wait.
+    ///
+    /// `on_pending` is called — on this same thread, mid-connect — each time
+    /// the host answers `AuthPending`: a person over there is being asked to
+    /// approve this device, and the six-digit code is what they compare.
+    /// Without it the code exists only in a log line while the caller shows a
+    /// spinner (#190). The connect keeps blocking afterwards; the host's
+    /// eventual `Welcome` or `AuthFailed` resolves it.
+    pub fn connect_with(
+        read: Box<dyn Read + Send>,
+        write: Box<dyn Write + Send>,
+        identity: &Arc<ClientIdentity>,
+        label: &str,
+        expect_host: Option<zest_proto::HostId>,
+        watch_sessions: bool,
+        on_pending: Option<OnPending<'_>>,
     ) -> Result<Self, DaemonError> {
         let mut client = Self {
             read,
@@ -200,6 +225,9 @@ impl DaemonClient {
                         expires_in_secs,
                         "waiting for this device to be approved on the host"
                     );
+                    if let Some(notify) = on_pending {
+                        notify(&code, expires_in_secs);
+                    }
                 }
                 HostMessage::AuthFailed { reason, message } => {
                     return Err(DaemonError::Refused(format!("{reason:?}: {message}")));
@@ -416,5 +444,122 @@ impl DaemonClient {
             }
             self.frames.feed(&buf[..n]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpStream;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    /// An attach that is waiting for a person must hand the caller the code.
+    ///
+    /// The daemon answers `AuthPending` while an unknown device waits for
+    /// approval, and until #190 the only client-side trace was a log line —
+    /// the app showed a spinner while the six-digit matching code existed
+    /// nowhere a person could see it. This drives the real LAN listener (the
+    /// one transport that consults the trust store) with an *empty* store, so
+    /// the handshake genuinely pends; a trusted client would skip approval and
+    /// prove nothing, which is exactly how the watchdog bug survived its own
+    /// test (see "Traps already paid for").
+    #[test]
+    fn a_pending_approval_reports_its_code_and_still_welcomes() {
+        let registry = Arc::new(crate::Registry::new());
+        let auth = Arc::new(crate::auth::Authenticator::new(
+            Arc::new(zest_mesh::identity::HostIdentity::generate().expect("host key")),
+            Arc::new(zest_mesh::trust::MemoryTrustStore::new()),
+            zest_mesh::pairing::PairingQueue::new(),
+            "lan-harness",
+        ));
+        let listener = crate::lan::LanListener::bind("127.0.0.1", 0).expect("bind the LAN listener");
+        let addr = listener.local_addr();
+        let config = crate::DaemonConfig {
+            host: zest_proto::HostId::from_bytes([7; 32]),
+            label: "lan-harness".into(),
+            local_socket: String::new(),
+            listen_lan: true,
+            lan_bind: "127.0.0.1".into(),
+            lan_port: 0,
+            listen_ws: false,
+            ws_bind: "127.0.0.1".into(),
+            ws_port: 0,
+            relay: None,
+            shell_integration: true,
+            min_delta_interval: Duration::ZERO,
+        };
+        {
+            let registry = Arc::clone(&registry);
+            let auth = Arc::clone(&auth);
+            std::thread::spawn(move || {
+                let _ = listener.serve_forever(
+                    config,
+                    registry,
+                    auth,
+                    Arc::new(crate::lan::Gate::new()),
+                );
+            });
+        }
+
+        let identity = Arc::new(ClientIdentity::generate().expect("client key"));
+
+        // The approver: a person on the host, played by a thread. It must not
+        // answer before the request is queued — `decide` on an empty queue
+        // resolves nothing and returns — so it waits for the client to have
+        // *heard* `AuthPending`, which the daemon only sends after queueing.
+        let seen: Arc<Mutex<Option<(String, u32)>>> = Arc::default();
+        {
+            let seen = Arc::clone(&seen);
+            let auth = Arc::clone(&auth);
+            let client_id = identity.client_id();
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while Instant::now() < deadline {
+                    if seen.lock().expect("seen lock").is_some() {
+                        auth.decide(client_id, zest_mesh::pairing::Decision::Approve);
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            });
+        }
+
+        let stream = TcpStream::connect(addr).expect("dial the listener");
+        let write = stream.try_clone().expect("clone the stream");
+        let sink = Arc::clone(&seen);
+        let on_pending = move |code: &str, secs: u32| {
+            *sink.lock().expect("seen lock") = Some((code.to_string(), secs));
+        };
+        let client = DaemonClient::connect_with(
+            Box::new(stream),
+            Box::new(write),
+            &identity,
+            "test",
+            None,
+            false,
+            Some(&on_pending),
+        )
+        .expect("an approved device must end up welcomed");
+
+        let pending = seen.lock().expect("seen lock").clone();
+        let (code, secs) = pending.expect(
+            "on_pending never ran: the approval wait happened (the connect blocked \
+             until the approver answered) and the caller was never told",
+        );
+        assert_eq!(
+            code.len(),
+            zest_mesh::pairing::PAIRING_CODE_DIGITS as usize,
+            "the callback must carry the matching code itself, not a placeholder"
+        );
+        assert!(
+            code.chars().all(|c| c.is_ascii_digit()),
+            "the code is what a person compares digit by digit: {code:?}"
+        );
+        assert!(secs > 0, "an expiry of zero would tell the user the code is already dead");
+        assert!(
+            !client.host_label().is_empty(),
+            "the callback informs the wait, it must not replace the Welcome"
+        );
     }
 }

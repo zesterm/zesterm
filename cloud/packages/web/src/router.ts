@@ -13,6 +13,7 @@
 
 import { readCookie, SESSION_COOKIE } from '@zesterm/cloud-shared';
 
+import { registerDevice } from './api/devices.ts';
 import { claimEnrollCode, mintEnrollCode } from './api/enroll.ts';
 import { listRegistry, revokeRegistryEntry } from './api/registry.ts';
 import { mintRelayTicket } from './api/relay.ts';
@@ -128,6 +129,14 @@ export async function routeApi(
   if (path === '/api/relay/ticket') {
     if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
     return mintRelayTicket(request, env, now);
+  }
+
+  // Deliberately in neither ORIGINLESS nor BEARER: it reads the session
+  // cookie, so it keeps the full CSRF rule, and a machine credential must not
+  // be able to register further keys.
+  if (path === '/api/devices/register') {
+    if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+    return registerDevice(request, env, now);
   }
 
   if (path === '/api/hosts' || path === '/api/devices') {
