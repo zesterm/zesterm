@@ -205,13 +205,13 @@ fn main() {
     }
 }
 
-/// Render control bytes visibly so escape sequences can be read.
 /// `<cols>x<rows>`, the shape a person types.
 fn parse_size(s: &str) -> Option<PtySize> {
     let (cols, rows) = s.split_once(['x', 'X'])?;
     Some(PtySize::new(cols.trim().parse().ok()?, rows.trim().parse().ok()?))
 }
 
+/// Render control bytes visibly so escape sequences can be read.
 fn escape(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for &b in bytes {
