@@ -449,7 +449,10 @@ pub(crate) fn value_cell(
             SettingsValueCell::Stepper { text }
         }
         Widget::Text | Widget::Path | Widget::AccentPicker => {
-            SettingsValueCell::Text { text: text_of(value) }
+            // The settings tab shows resolved values, never captions, so
+            // nothing here is a placeholder; the profiles editor sets the
+            // flag where a fallback stands in for unset.
+            SettingsValueCell::Text { text: text_of(value), placeholder: false }
         }
         Widget::FontList => {
             let faces: Vec<String> = value
