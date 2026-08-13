@@ -1425,6 +1425,18 @@ is now unblocked and building.
       Still open: the devices screen, and a real `--enroll` run against the
       deployed Worker — each half is tested against the shared preimage and
       the pinned response shape, not yet against the other over a network.
+- [x] **Attestations reach the daemons** (#184) — an approved device vouches
+      for a pending one (#213's routes), and every *enrolled* daemon polls
+      `GET /api/attestations` (five minutes ±25%, hurried when an unknown
+      client knocks — the miss pokes, it never fetches inside a handshake),
+      verifies each blob over its arrived bytes, and admits a device whose
+      approver is in its own trust file: recorded once, labelled
+      `… (attested)`. That marker is load-bearing — an attested-in record
+      holds shells but may never vouch, which is where non-transitivity lives.
+      Revocation is Model B in full: a revoked id is removed from local trust
+      outright, hand-paired or not; pairing at the machine restores it, and
+      `--forget` still works with the account unreachable. Still open: an
+      end-to-end run against the deployed Worker, and the desktop approve UI.
 - [x] **The fleet screen reads the account** — `GET /api/hosts` and
       `/api/devices`, with revoke on both.
       The plan called for a separate `/settings/devices`; that was wrong and
