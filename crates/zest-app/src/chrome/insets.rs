@@ -82,13 +82,15 @@ pub fn letterbox(area: [f32; 4], cols: usize, rows: usize, m: CellMetrics) -> [f
     let [mut x, mut y, mut w, mut h] = area;
     if cols < fit_cols {
         w = cols as f32 * cw;
-        // Floored to a whole pixel: a half-pixel origin samples every glyph
-        // between texels and reads as a blurry font, not as an offset.
-        x = area[0] + ((area[2] - w) / 2.0).floor();
+        // The whole coordinate is floored, not just the centering term: the
+        // pane's own origin can be fractional (padding times a fractional
+        // scale), and a half-pixel origin samples every glyph between texels
+        // -- it reads as a blurry font, not as an offset.
+        x = (area[0] + (area[2] - w) / 2.0).floor();
     }
     if rows < fit_rows {
         h = rows as f32 * ch;
-        y = area[1] + ((area[3] - h) / 2.0).floor();
+        y = (area[1] + (area[3] - h) / 2.0).floor();
     }
     [x, y, w, h]
 }
@@ -153,6 +155,16 @@ mod tests {
             letterbox(area, 60, 20, m),
             [208.0, 38.0, 600.0, 400.0],
             "the shortfall is per axis: full-height grids center only horizontally"
+        );
+
+        // A pane origin of padding x a fractional scale: the letterboxed
+        // origin must still land on a whole pixel, which means flooring the
+        // full coordinate rather than the centering term alone.
+        let fractional = [7.5, 38.5, 1000.0, 400.0];
+        assert_eq!(
+            letterbox(fractional, 60, 10, m),
+            [207.0, 138.0, 600.0, 200.0],
+            "a fractional pane origin must not leak a half-pixel into the letterbox"
         );
     }
 
