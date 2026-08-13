@@ -6434,7 +6434,9 @@ impl ApplicationHandler<Wakeup> for App {
                     // tabs.json that persisted a duplicate: the restore's
                     // second copy dies here on every launch.
                     if let Some(dup) = self.tabs.adopt(tab, focus) {
-                        tracing::info!(addr = %dup.addr, "session already open; activating its tab");
+                        // Accurate about focus: a background restore's
+                        // duplicate is refused without touching the keyboard.
+                        tracing::info!(addr = %dup.addr, focus, "session already open; refusing the duplicate");
                         drop(dup);
                     }
                 }

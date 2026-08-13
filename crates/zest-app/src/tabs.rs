@@ -674,17 +674,29 @@ impl TabStrip {
         self.settings_active = false;
     }
 
-    /// Adopt a worker-built session tab, refusing a duplicate: if a live tab
-    /// already holds this session, that tab is activated (when `focus`) and
-    /// the newcomer is handed back for the caller to drop — dropping
-    /// detaches, the shell stays on its host. Two tabs on one session made
-    /// every click on the second resolve to the first (`activate_addr` is
-    /// first-match by address), which shipped as "clicking tab 3 selects
-    /// tab 1" (#188) — and a duplicate that reaches the strip is persisted,
-    /// so it survives every restart. A dead tab does not block re-attach:
-    /// the session outlived the tab that reported it gone.
+    /// Adopt a worker-built session tab, keeping the address unique: if a
+    /// live tab already holds this session, that tab is activated (when
+    /// `focus`) and the newcomer is handed back for the caller to drop —
+    /// dropping detaches, the shell stays on its host. Two tabs on one
+    /// session made every click on the second resolve to the first
+    /// (`activate_addr` is first-match by address), which shipped as
+    /// "clicking tab 3 selects tab 1" (#188) — and a duplicate that reaches
+    /// the strip is persisted, so it survives every restart. A dead tab does
+    /// not block re-attach — the session outlived the tab that reported it
+    /// gone — but it must not stay either: sitting the fresh tab beside it
+    /// would put the dead twin first in every lookup, which is #188 again,
+    /// so the new attachment revives the dead tab's own slot.
     pub fn adopt(&mut self, tab: Tab, focus: bool) -> Option<Tab> {
-        if let Some(i) = self.tabs.iter().position(|t| t.addr == tab.addr && !t.dead) {
+        if let Some(i) = self.tabs.iter().position(|t| t.addr == tab.addr) {
+            if self.tabs[i].dead {
+                // Dropping the husk is safe — its session is already gone —
+                // and its slot carries straight over to the revived tab.
+                self.tabs[i] = tab;
+                if focus {
+                    self.activate(i);
+                }
+                return None;
+            }
             if focus {
                 self.activate(i);
             }
@@ -832,16 +844,23 @@ mod tests {
         );
         rejected.expect("checked above").kill();
 
-        // A dead tab does not block re-attach: the session outlived the tab
-        // that reported it gone, and refusing here would strand it.
+        // A dead tab does not block re-attach — the session outlived the
+        // tab that reported it gone — but it must not stay either: a fresh
+        // twin BESIDE it would put the dead tab first in every first-match
+        // lookup, which is #188 all over again. The new attachment revives
+        // the dead tab's own slot.
         strip.find_mut(placeholder_addr(2)).expect("tab 2 exists").dead = true;
         let fresh = fake(2);
         assert!(
             strip.adopt(fresh, false).is_none(),
-            "the live session gets a fresh tab beside the dead one"
+            "the live session revives the dead tab's slot, nothing is refused"
         );
-        assert_eq!(strip.len(), 3);
-        for addr in [placeholder_addr(1), placeholder_addr(2), placeholder_addr(2)] {
+        assert_eq!(strip.len(), 2, "revival replaces; the address stays unique");
+        assert!(
+            !strip.find_mut(placeholder_addr(2)).expect("tab 2 exists").dead,
+            "and the tab in that slot is the live one"
+        );
+        for addr in [placeholder_addr(1), placeholder_addr(2)] {
             strip.close(addr).expect("tab exists").kill();
         }
     }
