@@ -79,6 +79,10 @@ fn glyph_tile(
     }
 }
 
+/// Draws the editor's base layer and returns the open dropdown's anchor —
+/// the same #182 contract as the settings screen: a floating panel emitted
+/// in the base pass has every base text under it painted over its fill, so
+/// the caller draws the menu past the overlay markers.
 pub fn profiles_screen(
     model: &ProfilesScreenModel,
     area: [f32; 4],
@@ -87,7 +91,7 @@ pub fn profiles_screen(
     s: f32,
     measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
     out: &mut ChromeLayout,
-) {
+) -> Option<[f32; 4]> {
     // Opaque ground over the whole grid area — a screen, not a scrim — and
     // one swallow region so nothing falls through to what is beneath (the
     // grid, or an open Settings tab's content).
@@ -372,9 +376,8 @@ pub fn profiles_screen(
         }
     }
 
-    if let (Some(menu), Some(anchor)) = (&model.menu, menu_anchor) {
-        ss::dropdown_menu(menu, anchor, area, colors, s, measure, out);
-    }
+    // Handed back rather than drawn: the menu belongs to the overlay layer.
+    menu_anchor.filter(|_| model.menu.is_some())
 }
 
 /// The profile rail (§12): header, Defaults pinned first, a row per profile,
@@ -935,9 +938,53 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_base_pass_floats_nothing_and_hands_the_menu_back() {
+        // #182's profiles half: the editor's dropdown had the same
+        // base-pass draw-ordering hole as the settings tab's. The base pass
+        // now returns the anchor instead of drawing — no SettingsMenuRow
+        // can exist until the caller draws the menu in the overlay layer.
+        let mut m = model(false);
+        // Menus only ever open from Select pills (window.backdrop is the
+        // §12 case); the fixture has none, so give it one.
+        m.rows.push(setting_row(
+            "window.backdrop",
+            SettingsValueCell::Select { value: "mica".into() },
+            false,
+        ));
+        m.chips.push(None);
+        let select_row = m.rows.len() - 1;
+        m.menu = Some(super::super::model::SettingsMenuModel {
+            row: select_row,
+            options: vec![super::super::model::SettingsMenuOption {
+                label: "Mica".into(),
+                value: "mica".into(),
+                doc: String::new(),
+            }],
+            current: Some(0),
+            selected: 0,
+        });
+        let mut out = ChromeLayout::default();
+        let anchor =
+            profiles_screen(&m, [0.0, 46.0, 1100.0, 720.0], &colors(), None, 1.0, &mut measure, &mut out);
+        assert!(anchor.is_some(), "an open menu must hand its anchor to the caller");
+        let leaked = (0..1100).step_by(4).any(|x| {
+            (46..766).step_by(4).any(|y| {
+                matches!(out.hit.hit(x as f32, y as f32), Some(HitRegion::SettingsMenuRow(_)))
+            })
+        });
+        assert!(!leaked, "the base pass must not draw the menu — base texts would paint over it");
+    }
+
     fn lay(model: &ProfilesScreenModel, w: f32, h: f32) -> ChromeLayout {
         let mut out = ChromeLayout::default();
-        profiles_screen(model, [0.0, 46.0, w, h], &colors(), None, 1.0, &mut measure, &mut out);
+        let area = [0.0, 46.0, w, h];
+        let anchor = profiles_screen(model, area, &colors(), None, 1.0, &mut measure, &mut out);
+        // The caller contract since #182: the base pass hands the anchor
+        // back and the menu draws in the overlay layer, like layout() does.
+        if let (Some(menu), Some(anchor)) = (&model.menu, anchor) {
+            ss::dropdown_menu(menu, anchor, area, &colors(), 1.0, &mut measure, &mut out);
+        }
         out
     }
 

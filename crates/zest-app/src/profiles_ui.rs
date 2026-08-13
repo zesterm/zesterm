@@ -337,6 +337,13 @@ fn cell_for(
                 .unwrap_or("\u{2014}")
                 .to_string(),
         },
+        // An unset command's caption ("the host's default shell") is a
+        // placeholder, not a value: the input draws it faint, and the edit
+        // seed already refuses to commit it (edit_seed_value).
+        _ if field.key == "command" => SettingsValueCell::Text {
+            text: value.as_str().unwrap_or_default().to_string(),
+            placeholder: resolved.meta.command.is_none(),
+        },
         _ => settings_ui::value_cell(field, Some(value), &[]),
     }
 }
@@ -723,8 +730,9 @@ mod tests {
         };
         assert_eq!(
             cell("command"),
-            SettingsValueCell::Text { text: "pwsh -NoLogo".into() },
-            "an unset command shows the resolved shell, like the launch will use"
+            SettingsValueCell::Text { text: "pwsh -NoLogo".into(), placeholder: true },
+            "an unset command shows the resolved shell AS A PLACEHOLDER — faint, \
+             because it is what will run, not what is written (#183)"
         );
         assert!(
             matches!(cell("host"), SettingsValueCell::HostPill { name, online: true } if name == "studio"),

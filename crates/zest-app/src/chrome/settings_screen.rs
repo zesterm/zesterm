@@ -53,6 +53,8 @@ const STEP_BTN: f32 = 30.0;
 const SEG_H: f32 = 28.0;
 const SELECT_W: f32 = 180.0;
 const SELECT_H: f32 = 32.0;
+/// §11's text/path input: "32px mono input, ui.panel, 1px ui.line".
+const INPUT_H: f32 = 32.0;
 const LIST_ROW_H: f32 = 30.0;
 const LIST_GAP: f32 = 4.0;
 const CHIP_H: f32 = 26.0;
@@ -141,9 +143,10 @@ pub(super) fn control_height(cell: &SettingsValueCell) -> f32 {
         SettingsValueCell::Select { .. } | SettingsValueCell::HostPill { .. } => SELECT_H,
         SettingsValueCell::Slider { .. } => 14.0,
         SettingsValueCell::Stepper { .. } => STEP_H,
-        SettingsValueCell::Text { .. }
-        | SettingsValueCell::ReadOnly { .. }
-        | SettingsValueCell::Editing { .. } => 18.0,
+        // Text and its in-flight edit are the §11 input box; ReadOnly stays
+        // bare text — a border would promise an edit that does not exist.
+        SettingsValueCell::Text { .. } | SettingsValueCell::Editing { .. } => INPUT_H,
+        SettingsValueCell::ReadOnly { .. } => 18.0,
         // Gaps sit BETWEEN rows and before the add row, not after it —
         // (n+1) rows carry only n gaps, and charging one more here left a
         // blank stripe under every list.
@@ -193,6 +196,12 @@ pub(super) fn row_extent(
     }
 }
 
+/// Draws the tab's base layer and returns the open dropdown's anchor, if
+/// any. The menu itself is NOT drawn here: the chrome draws all rects then
+/// all texts, so a floating panel emitted in the base pass has every base
+/// text under its footprint painted over its opaque fill (#182 — the
+/// segmented control showed through the backdrop menu). The caller draws it
+/// past the overlay markers, where the picker and launcher live.
 pub fn settings_screen(
     model: &SettingsScreenModel,
     area: [f32; 4],
@@ -200,7 +209,7 @@ pub fn settings_screen(
     m: &ChromeMetrics,
     measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
     out: &mut ChromeLayout,
-) {
+) -> Option<[f32; 4]> {
     let s = m.scale;
 
     // Opaque ground over the whole grid area — a screen, not a scrim — and
@@ -575,9 +584,8 @@ pub fn settings_screen(
         }
     }
 
-    if let (Some(menu), Some(anchor)) = (&model.menu, menu_anchor) {
-        dropdown_menu(menu, anchor, area, colors, s, measure, out);
-    }
+    // Handed back rather than drawn: the menu belongs to the overlay layer.
+    menu_anchor.filter(|_| model.menu.is_some())
 }
 
 /// Draw one value cell right-aligned against `right` at `top`; returns the
@@ -784,14 +792,39 @@ pub(super) fn draw_control(
                 tracking: 0.0,
             });
         }
-        SettingsValueCell::Text { text } | SettingsValueCell::ReadOnly { text } => {
-            let faint = matches!(value, SettingsValueCell::ReadOnly { .. });
+        SettingsValueCell::ReadOnly { text } => {
             let vw = measure(text, mono, false, 0.0).min(CONTROL_W * s);
             out.texts.push(TextRun {
                 text: text.clone(),
                 pos: [right - vw, baseline_in(top, 18.0 * s, mono)],
                 max_width: CONTROL_W * s,
-                color: if faint { colors.text_faint } else { colors.text_active },
+                color: colors.text_faint,
+                clip,
+                px: mono,
+                bold: false,
+                tracking: 0.0,
+            });
+        }
+        SettingsValueCell::Text { text, placeholder } => {
+            // §11's input box: without it, the value reads as a label and
+            // nothing says editing exists (#183). Clicking begins the edit
+            // through the same dispatch Enter takes.
+            let boxr = [right - CONTROL_W * s, top, CONTROL_W * s, INPUT_H * s];
+            out.rects.push(RectInstance {
+                radii: [8.0 * s; 4],
+                border: colors.line,
+                border_width: HAIRLINE * s,
+                ..RectInstance::filled(boxr, colors.panel_bg, clip)
+            });
+            if let Some(hit) = intersect(boxr, clip) {
+                out.hit.push(hit, HitRegion::SettingsSelect(row));
+            }
+            let ink = if *placeholder { colors.text_faint } else { colors.text_active };
+            out.texts.push(TextRun {
+                text: text.clone(),
+                pos: [boxr[0] + 10.0 * s, baseline_in(top, INPUT_H * s, mono)],
+                max_width: (CONTROL_W - 20.0) * s,
+                color: ink,
                 clip,
                 px: mono,
                 bold: false,
@@ -799,17 +832,32 @@ pub(super) fn draw_control(
             });
         }
         SettingsValueCell::Editing { buffer, error } => {
-            // The caret is a character, not a rect: it inherits the text
-            // clip and colour for free, and this is not a text editor.
+            // The same box, wearing the focus ring; the caret is a
+            // character, not a rect — it inherits the text clip and colour
+            // for free, and this is not a text editor.
+            let boxr = [right - CONTROL_W * s, top, CONTROL_W * s, INPUT_H * s];
+            out.rects.push(RectInstance {
+                radii: [8.0 * s; 4],
+                border: if *error { colors.pill_warn_text } else { colors.accent },
+                border_width: HAIRLINE * s,
+                ..RectInstance::filled(boxr, colors.panel_bg, clip)
+            });
             let text = format!("{buffer}\u{258f}");
-            let vw = measure(&text, mono, false, 0.0).min(CONTROL_W * s);
             let color = if *error { colors.pill_warn_text } else { colors.text_active };
+            // Left-aligned until the buffer outgrows the box, then the tail
+            // stays visible — the caret is what the eye follows.
+            let vw = measure(&text, mono, false, 0.0);
+            let avail = (CONTROL_W - 20.0) * s;
+            let x = if vw <= avail { boxr[0] + 10.0 * s } else { boxr[0] + 10.0 * s + avail - vw };
             out.texts.push(TextRun {
                 text,
-                pos: [right - vw, baseline_in(top, 18.0 * s, mono)],
-                max_width: CONTROL_W * s,
+                pos: [x, baseline_in(top, INPUT_H * s, mono)],
+                // The full shaped width: the box's clip is what bounds an
+                // overgrown buffer, so the tail (and the caret) never
+                // ellipsise away mid-edit.
+                max_width: vw,
                 color,
-                clip,
+                clip: intersect(boxr, clip).unwrap_or(clip),
                 px: mono,
                 bold: false,
                 tracking: 0.0,
@@ -1578,7 +1626,14 @@ mod tests {
 
     fn lay(model: &SettingsScreenModel, w: f32, h: f32) -> ChromeLayout {
         let mut out = ChromeLayout::default();
-        settings_screen(model, [0.0, 46.0, w, h], &colors(), &metrics(w, h + 46.0), &mut measure, &mut out);
+        let area = [0.0, 46.0, w, h];
+        let m = metrics(w, h + 46.0);
+        let anchor = settings_screen(model, area, &colors(), &m, &mut measure, &mut out);
+        // The caller contract since #182: the base pass hands the anchor
+        // back and the menu draws in the overlay layer, like layout() does.
+        if let (Some(menu), Some(anchor)) = (&model.menu, anchor) {
+            dropdown_menu(menu, anchor, area, &colors(), m.scale, &mut measure, &mut out);
+        }
         out
     }
 

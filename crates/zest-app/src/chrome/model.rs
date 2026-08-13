@@ -473,8 +473,11 @@ pub enum SettingsValueCell {
     Slider { frac: f32, text: String },
     /// The − / value / ＋ stepper; `text` carries the unit ("14 pt").
     Stepper { text: String },
-    /// A scalar drawn as plain text (strings, paths).
-    Text { text: String },
+    /// A string value drawn as a §11 input box — panel fill, hairline
+    /// border, click begins the edit. `placeholder` marks a caption standing
+    /// in for an unset value ("the host's default shell"): drawn faint, so
+    /// what-will-run and what-is-written stay visually distinct.
+    Text { text: String, placeholder: bool },
     /// A value the tab displays but does not edit here.
     ReadOnly { text: String },
     /// Stacked font rows; order is the setting, drag is the edit.

@@ -239,10 +239,13 @@ pub fn layout(
     if let Some(panes) = &model.panes {
         panes_overlay(panes, model.grid_area, colors, m, measure, &mut out);
     }
+    let mut settings_menu_anchor = None;
     if let Some(settings) = &model.settings {
         // The Settings tab's content — window content like a screen, not an
-        // overlay: it replaces the grid area while that tab is active.
-        super::settings_screen::settings_screen(
+        // overlay: it replaces the grid area while that tab is active. Its
+        // open dropdown is the exception — an anchor comes back and the
+        // menu draws in the overlay layer below (#182).
+        settings_menu_anchor = super::settings_screen::settings_screen(
             settings,
             model.grid_area,
             colors,
@@ -251,11 +254,14 @@ pub fn layout(
             &mut out,
         );
     }
+    let mut screen_menu_anchor = None;
     if let Some(screen) = &model.screen {
         // Over the grid (and over the settings tab's content — Esc returns),
         // under the modals: a screen is window content, not an overlay, so
-        // the picker can still open above it.
-        super::screens::screen_overlay(
+        // the picker can still open above it. The profiles editor's open
+        // dropdown comes back as an anchor and draws below, like the
+        // settings tab's (#182).
+        screen_menu_anchor = super::screens::screen_overlay(
             screen,
             model.grid_area,
             colors,
@@ -269,6 +275,36 @@ pub fn layout(
     // text drawn before an overlay's panel covers it.
     out.overlay_rects_at = out.rects.len();
     out.overlay_texts_at = out.texts.len();
+    // The dropdowns first: they float over their screen's content, and the
+    // modals (picker, palette) still open above them.
+    if let (Some(settings), Some(anchor)) = (&model.settings, settings_menu_anchor) {
+        if let Some(menu) = &settings.menu {
+            super::settings_screen::dropdown_menu(
+                menu,
+                anchor,
+                model.grid_area,
+                colors,
+                m.scale,
+                measure,
+                &mut out,
+            );
+        }
+    }
+    if let (Some(super::model::ScreenModel::Profiles(p)), Some(anchor)) =
+        (&model.screen, screen_menu_anchor)
+    {
+        if let Some(menu) = &p.menu {
+            super::settings_screen::dropdown_menu(
+                menu,
+                anchor,
+                model.grid_area,
+                colors,
+                m.scale,
+                measure,
+                &mut out,
+            );
+        }
+    }
     if let Some(picker) = &model.picker {
         // Appended last on purpose: last drawn is topmost, and last pushed
         // wins the hit lookup — the same fact, stated once.
@@ -2978,6 +3014,101 @@ mod tests {
                 .any(|y| l.hit.hit(x as f32, y as f32) == Some(HitRegion::PaletteRow(selected)))
         });
         assert!(found, "the selected command must be visible and hittable after ensure_visible");
+    }
+
+    #[test]
+    fn the_open_menu_draws_in_the_overlay_layer() {
+        // #182: the chrome draws all rects then all texts, so a menu emitted
+        // in the base pass has every base text under its footprint painted
+        // OVER its opaque panel — the segmented control's labels showed
+        // through the backdrop dropdown. Floating panels live past the
+        // overlay markers, like the picker and the launcher.
+        use crate::chrome::model::{
+            SettingsMenuModel, SettingsMenuOption, SettingsRowModel, SettingsValueCell,
+        };
+        let mk = |menu_open: bool| {
+            let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
+            let mut mo = model(tabs, TabsPosition::Top);
+            mo.grid_area = [0.0, 46.0, 1200.0, 754.0];
+            let rows = vec![SettingsRowModel::Setting {
+                label: "Backdrop".into(),
+                key: "window.backdrop".into(),
+                description: "the documented dropdown".into(),
+                value: SettingsValueCell::Select { value: "acrylic".into() },
+                provenance: None,
+                restart: false,
+                inert: false,
+                modified: false,
+            }];
+            let mut screen = settings_screen_model(rows, 0, false);
+            if menu_open {
+                screen.menu = Some(SettingsMenuModel {
+                    row: 0,
+                    options: vec![SettingsMenuOption {
+                        label: "Acrylic".into(),
+                        value: "acrylic".into(),
+                        doc: "Acrylic blur.".into(),
+                    }],
+                    current: Some(0),
+                    selected: 0,
+                });
+            }
+            mo.settings = Some(screen);
+            mo
+        };
+        let m = metrics(1200.0, 800.0, 1.0);
+        let closed = layout(&mk(false), &colors(), &m, &mut measure);
+        assert_eq!(
+            closed.rects.len(),
+            closed.overlay_rects_at,
+            "with no floating panel open, nothing draws in the overlay layer"
+        );
+        let open = layout(&mk(true), &colors(), &m, &mut measure);
+        assert!(
+            open.rects.len() > open.overlay_rects_at,
+            "the open menu's panel must land after the overlay marker, above every base text"
+        );
+        assert!(
+            open.texts.len() > open.overlay_texts_at,
+            "and its labels with it, or the panel covers its own options"
+        );
+    }
+
+    #[test]
+    fn a_text_row_is_an_input_you_can_click() {
+        // #183: §11's text widget is a visible 32px input — panel fill,
+        // hairline border, click begins the edit. A bare right-aligned value
+        // gave the user nothing to aim at and no sign editing exists.
+        use crate::chrome::model::{SettingsRowModel, SettingsValueCell};
+        let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut mo = model(tabs, TabsPosition::Top);
+        mo.grid_area = [0.0, 46.0, 1200.0, 754.0];
+        let rows = vec![SettingsRowModel::Setting {
+            label: "Shell".into(),
+            key: "shell.command".into(),
+            description: "what runs".into(),
+            value: SettingsValueCell::Text { text: "pwsh -NoLogo".into(), placeholder: false },
+            provenance: None,
+            restart: false,
+            inert: false,
+            modified: false,
+        }];
+        mo.settings = Some(settings_screen_model(rows, 0, false));
+        let l = layout(&mo, &colors(), &m, &mut measure);
+        let boxr = (0..1200).step_by(2).find_map(|x| {
+            (46..800)
+                .step_by(2)
+                .find_map(|y| {
+                    (l.hit.hit(x as f32, y as f32) == Some(HitRegion::SettingsSelect(0)))
+                        .then_some(())
+                })
+                .map(|()| x)
+        });
+        assert!(
+            boxr.is_some(),
+            "the text value must be a hittable input box that begins the edit on click"
+        );
     }
 
     fn settings_rows(n: usize) -> Vec<crate::chrome::model::SettingsRowModel> {
