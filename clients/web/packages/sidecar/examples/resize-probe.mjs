@@ -16,7 +16,12 @@
  * The question it answers: after a resize, do the blocks the host sends still
  * name rows that exist and hold their own output? A block with `rows=0`, or one
  * whose `nonBlank` count has halved, is #200 -- the anchors and the content
- * having diverged. Needs a daemon running for this user.
+ * having diverged.
+ *
+ * Talks to this user's daemon by default. `ZESTERM_SOCKET` points it somewhere
+ * else, which is how a fix is measured: start the daemon you built on a socket
+ * of its own and compare, rather than killing the one holding the shells you
+ * are working in.
  */
 
 import { generateIdentity, seedSigner } from '@zesterm/auth';
@@ -24,7 +29,9 @@ import { ConnectionClient, SessionClient } from '@zesterm/client';
 import { sliceBlocks, expandRow, rowText } from '@zesterm/proto';
 import { socketDial, defaultSocketPath } from '../src/net-link.ts';
 
-const dial = socketDial(defaultSocketPath());
+const socket = process.env.ZESTERM_SOCKET ?? defaultSocketPath();
+console.log(`socket ${socket}`);
+const dial = socketDial(socket);
 const signer = seedSigner(generateIdentity());
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 

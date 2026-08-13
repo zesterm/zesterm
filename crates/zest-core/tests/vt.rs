@@ -1021,32 +1021,53 @@ fn narrowing_and_widening_back_keeps_every_block() {
 /// The bytes ConPTY sends in answer to `ResizePseudoConsole`, restating the
 /// viewport it was just handed.
 ///
-/// Measured against a real pwsh with `pty_dump --resize` (#205): hide the
-/// cursor, declare the new size with XTWINOPS, home, then rewrite every row in
-/// place, each terminated with `ESC[K`. **There is no `ESC[2J` anywhere** —
-/// the screen is restated in place, which is why `BlockIndex::erase_screen` is
-/// never reached by a resize and why a block's anchor can survive while the
-/// text underneath it does not. (#200)
+/// Measured against a real pwsh with `pty_dump --resize` (#205, re-measured for
+/// #200): hide the cursor, declare the new size with XTWINOPS, home, then
+/// restate the viewport, each line terminated with `ESC[K`. **There is no
+/// `ESC[2J` anywhere** — the screen is rewritten in place, which is why
+/// `BlockIndex::erase_screen` is never reached by a resize and why a block's
+/// anchor can survive while the text underneath it does not.
+///
+/// **It restates *logical lines*, not physical rows.** Resized to 40 columns, a
+/// 100-character line comes back as 100 characters and one `ESC[K` — ConPTY
+/// does not re-break it, it relies on our autowrap to lay it out:
+///
+/// ```text
+/// ESC[?25l ESC[8;30;40t ESC[H xxxx…(100)… ESC[K \r\n TAIL ESC[K \r\n ESC[K \r\n …
+/// ```
+///
+/// A helper emitting row-by-row with `\r\n` between would therefore be testing
+/// something ConPTY never does, and would break every wrap it restated.
 fn conpty_repaint(t: &Terminal) -> Vec<u8> {
     let (cols, rows) = (t.grid().cols(), t.grid().rows());
     let (row, col) = (t.cursor().row + 1, t.cursor().col + 1);
     let mut out = format!("\x1b[?25l\x1b[8;{rows};{cols}t\x1b[H");
-    for r in 0..rows {
-        if r > 0 {
-            out.push_str("\r\n");
+
+    let mut r = 0;
+    while r < rows {
+        // Collect one logical line, the way the shell printed it.
+        let mut text = String::new();
+        while r < rows && t.grid().row(r).wrapped {
+            text.push_str(&t.grid().row(r).text());
+            r += 1;
         }
-        let text = t.grid().row(r).text().trim_end().to_string();
+        if r < rows {
+            text.push_str(t.grid().row(r).text().trim_end());
+            r += 1;
+        }
         out.push_str(&text);
-        // Not after a row the text fills exactly. The cursor is then at the
-        // right margin with a deferred wrap, where `EL` erases the last cell --
-        // correct per the spec and what xterm does, so an emitter that wanted
-        // the row it just wrote would be destroying it. Anything ConPTY really
-        // does here is a question for `pty_dump --resize`, not for a helper
-        // that would silently make every test about the wrong thing.
-        if text.chars().count() < cols {
+        // Not when the line ends exactly on a row boundary: the cursor is then
+        // at the right margin with a deferred wrap, where `EL` erases the last
+        // cell -- correct per the spec, and an emitter that wanted the text it
+        // just wrote would be destroying it.
+        if !text.chars().count().is_multiple_of(cols) {
             out.push_str("\x1b[K");
         }
+        if r < rows {
+            out.push_str("\r\n");
+        }
     }
+
     out.push_str(&format!("\x1b[{row};{col}H\x1b[?25h"));
     out.into_bytes()
 }
