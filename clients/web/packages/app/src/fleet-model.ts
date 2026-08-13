@@ -14,7 +14,7 @@
 // `directory-source.ts` for a value would pull `@sigx/actors` into every test
 // that renders a card.
 import type { DirectoryStatus } from './directory-source.ts';
-import type { Host } from './registry.ts';
+import type { Device, Host } from './registry.ts';
 
 /**
  * A key fingerprint, truncated head+tail for a card row (`8f2a…c41d`).
@@ -105,6 +105,82 @@ export async function copyOutcome(
   } catch {
     return 'copy failed';
   }
+}
+
+/**
+ * What the fleet screen should do about this browser's own key, decided after
+ * each registry load.
+ *
+ * - `register` — the key is not in the account's list, and it is a key worth
+ *   listing: auto-register it silently.
+ * - `awaiting-approval` — the account knows the key and has not approved it;
+ *   the screen shows the banner, because a pending browser that looks
+ *   approved is one whose owner never learns it is waiting.
+ * - `nothing` — approved, or **ephemeral**. An ephemeral identity was minted
+ *   because the key store could not be read and is deliberately not
+ *   persisted, so registering it would enrol a key that is gone on the next
+ *   load — a pending row per visit, forever, none of them this browser by
+ *   the time anyone approves it.
+ */
+export type OwnDeviceAction = 'register' | 'awaiting-approval' | 'nothing';
+
+export function ownDeviceAction(
+  devices: readonly Device[],
+  ownId: string,
+  ephemeral: boolean,
+): OwnDeviceAction {
+  if (ephemeral) return 'nothing';
+  const own = devices.find((d) => d.id === ownId);
+  if (own === undefined) return 'register';
+  return own.status === 'pending' ? 'awaiting-approval' : 'nothing';
+}
+
+/**
+ * What a browser calls itself when it self-registers.
+ *
+ * A product name rather than the raw UA string: the label lands on the
+ * devices screen of every other browser on the account, where "Firefox" tells
+ * the owner which row is which and the 120-character UA tells them nothing.
+ * The order is the UA's own compatibility archaeology — everything claims
+ * `Chrome/` and almost everything claims `Safari/`, so the more specific
+ * tokens must win first. `browser` is the honest fallback, and the Worker
+ * accepts it as an ordinary label.
+ */
+export function browserLabel(userAgent: string): string {
+  if (userAgent.includes('Firefox/')) return 'Firefox';
+  if (userAgent.includes('Edg/')) return 'Edge';
+  if (userAgent.includes('OPR/')) return 'Opera';
+  if (userAgent.includes('Chrome/')) return 'Chrome';
+  if (userAgent.includes('Safari/')) return 'Safari';
+  return 'browser';
+}
+
+/** One device line of the "Browsers and phones" list. */
+export interface DeviceRowView {
+  readonly id: string;
+  readonly name: string;
+  /** `browser · last seen 5m ago` — the facts every row has. */
+  readonly meta: string;
+  /** Renders the pending marker: registered, not yet approved. */
+  readonly pending: boolean;
+  /** The spoken warning that this key is readable by scripts on the origin. */
+  readonly keyReadable: boolean;
+}
+
+/**
+ * A registry device → what its row renders. Pure over the given clock for
+ * the reason `ago` is; the flags are separate from `meta` because the
+ * component styles them — a marker and a warning folded into one string
+ * would render in one colour and stop reading as either.
+ */
+export function deviceRow(device: Device, now: number): DeviceRowView {
+  return {
+    id: device.id,
+    name: device.label,
+    meta: `${device.kind} · last seen ${ago(device.lastSeenAt, now)}`,
+    pending: device.status === 'pending',
+    keyReadable: device.extractable,
+  };
 }
 
 /** One label/value line of a card body. */

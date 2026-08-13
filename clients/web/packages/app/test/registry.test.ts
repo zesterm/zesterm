@@ -1,7 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { fetchRegistry, mintEnrollCode, parseDevice, parseHost, revoke } from '../src/registry.ts';
+import { generateIdentity, registerRequest, seedSigner, verifyClientSignature } from '@zesterm/auth';
+
+import {
+  fetchRegistry,
+  mintEnrollCode,
+  parseDevice,
+  parseHost,
+  registerDevice,
+  revoke,
+} from '../src/registry.ts';
 
 const HOST = { id: 'a'.repeat(64), label: 'andy-mac', platform: 'macos', enrolledAt: 1, lastSeenAt: 2 };
 const DEVICE = {
@@ -187,4 +196,100 @@ test('a refused mint is reported rather than swallowed', async () => {
   const refusing: typeof fetch = (() =>
     Promise.resolve(new Response(null, { status: 403 }))) as unknown as typeof fetch;
   await assert.rejects(mintEnrollCode('host', refusing), /403/);
+});
+
+test('a device row absent a status is read as approved', () => {
+  // Backward tolerance for a Worker deployed before the column existed —
+  // whose rows are all grandfathered approved by the migration anyway. The
+  // cautious direction is inverted from `extractable` on purpose: a false
+  // "pending" banner tells someone their working browser is locked out.
+  assert.equal(parseDevice(DEVICE)?.status, 'approved');
+  assert.equal(parseDevice({ ...DEVICE, status: 'pending' })?.status, 'pending');
+  assert.equal(parseDevice({ ...DEVICE, status: 'approved' })?.status, 'approved');
+});
+
+test('registerDevice signs its own key and POSTs the standard CSRF posture', async () => {
+  const signer = seedSigner(generateIdentity('07'.repeat(32)));
+  let seen: {
+    url?: string;
+    method?: string | undefined;
+    ct?: string | undefined;
+    credentials?: string | undefined;
+    body?: unknown;
+  } = {};
+  const capturing: typeof fetch = ((url: string, init?: RequestInit) => {
+    seen = {
+      url,
+      method: init?.method,
+      ct: (init?.headers as Record<string, string> | undefined)?.['content-type'],
+      credentials: init?.credentials,
+      body: JSON.parse(init?.body as string),
+    };
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          device: {
+            id: signer.clientId,
+            label: 'Firefox',
+            kind: 'browser',
+            extractable: true,
+            status: 'pending',
+            enrolledAt: 5,
+            lastSeenAt: null,
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+  }) as unknown as typeof fetch;
+
+  const got = await registerDevice(
+    { signer, account: 'user-a', label: 'Firefox', extractable: true },
+    capturing,
+  );
+
+  assert.equal(seen.url, '/api/devices/register');
+  assert.equal(seen.method, 'POST');
+  assert.equal(seen.ct, 'application/json', 'the Worker CSRF rule refuses anything else 403');
+  assert.equal(seen.credentials, 'same-origin', 'the session cookie has to be sent');
+  const body = seen.body as { deviceId: string; label: string; kind: string; extractable: boolean; sig: string };
+  assert.equal(body.deviceId, signer.clientId, 'the key registered is the key that signed');
+  assert.equal(body.kind, 'browser');
+  assert.equal(body.extractable, true);
+  assert.ok(
+    verifyClientSignature(
+      signer.clientId,
+      'enrollment',
+      registerRequest('user-a', signer.clientId, 'Firefox'),
+      body.sig,
+    ),
+    'the sig must be exactly what the Worker will verify: the register request under the client enrollment domain',
+  );
+  assert.equal(got.status, 'pending', 'the parsed row is what the caller renders');
+});
+
+test('a wrong-shaped register answer is an error, not a device made of undefined', async () => {
+  const signer = seedSigner(generateIdentity('07'.repeat(32)));
+  const serving: typeof fetch = (() =>
+    Promise.resolve(
+      new Response(JSON.stringify({ device: { id: signer.clientId } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    )) as unknown as typeof fetch;
+  await assert.rejects(
+    registerDevice({ signer, account: 'user-a', label: 'x', extractable: true }, serving),
+    /wrong shape/,
+  );
+});
+
+test('a refused registration is reported rather than swallowed', async () => {
+  const signer = seedSigner(generateIdentity('07'.repeat(32)));
+  const refusing: typeof fetch = (() =>
+    Promise.resolve(new Response(null, { status: 429 }))) as unknown as typeof fetch;
+  await assert.rejects(
+    registerDevice({ signer, account: 'user-a', label: 'x', extractable: true }, refusing),
+    /429/,
+    'the caller decides whether silence is right — the fleet auto-register swallows, a future button must not',
+  );
 });

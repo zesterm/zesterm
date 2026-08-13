@@ -190,6 +190,73 @@ export async function enrolDevice(
   return row === null ? null : publicDevice(row);
 }
 
+/**
+ * Register a browser's own key, or re-label one this account already holds.
+ *
+ * The same upsert shape as `enrolDevice`, with the same two `DO UPDATE`
+ * guards, and one deliberate omission: the conflict branch never touches
+ * `status`. Re-registering is how a browser refreshes its label on every
+ * visit, and a refresh that could flip `pending` back on — or, worse,
+ * `approved` — would make the column mean "whatever the last request said"
+ * rather than "what the account decided".
+ *
+ * `status` on the *insert* is a `CASE` over the account's own live rows,
+ * inside the statement, for the reason at the top of this file: D1 gives no
+ * transaction across two `prepare` calls, so "first device is born approved"
+ * decided by a separate read would let two concurrent first registrations
+ * both observe an empty account. One statement, one observation. The bootstrap
+ * rule itself is argued where the policy lives, in `api/devices.ts`.
+ */
+export async function registerDevice(
+  db: Db,
+  args: {
+    id: string;
+    userId: string;
+    label: string;
+    kind: DeviceKind;
+    extractable: boolean;
+    now: number;
+  },
+): Promise<PublicDevice | null> {
+  const row = await db
+    .prepare(
+      `INSERT INTO devices (id, user_id, label, kind, extractable, status, enrolled_at)
+       VALUES (?1, ?2, ?3, ?4, ?5,
+               CASE WHEN EXISTS (
+                 SELECT 1 FROM devices
+                  WHERE user_id = ?2 AND revoked_at IS NULL AND status = 'approved'
+               ) THEN 'pending' ELSE 'approved' END,
+               ?6)
+       ON CONFLICT(id) DO UPDATE SET label = excluded.label
+        WHERE devices.user_id = excluded.user_id AND devices.revoked_at IS NULL
+       RETURNING *`,
+    )
+    .bind(args.id, args.userId, args.label, args.kind, args.extractable ? 1 : 0, args.now)
+    .first<DeviceRow>();
+  return row === null ? null : publicDevice(row);
+}
+
+/**
+ * How many live devices this account has, by status, in one read — the
+ * pending bound and the bootstrap rule both ask, and two queries would be two
+ * chances to observe different moments.
+ */
+export async function countDevices(
+  db: Db,
+  userId: string,
+): Promise<{ pending: number; approved: number }> {
+  const row = await db
+    .prepare(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'pending')  AS pending,
+         COUNT(*) FILTER (WHERE status = 'approved') AS approved
+       FROM devices WHERE user_id = ? AND revoked_at IS NULL`,
+    )
+    .bind(userId)
+    .first<{ pending: number; approved: number }>();
+  return row ?? { pending: 0, approved: 0 };
+}
+
 export async function listHosts(db: Db, userId: string): Promise<PublicHost[]> {
   const { results } = await db
     .prepare(
