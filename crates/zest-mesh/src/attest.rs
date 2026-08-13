@@ -222,6 +222,13 @@ fn base64url_decode(text: &str) -> Option<Vec<u8>> {
             out.push((acc >> bits) as u8);
         }
     }
+    // The unused low bits of a final partial sextet must be zero, or the
+    // encoding is not canonical: "-a" and "-Q" would both decode to 0xf9,
+    // giving one blob two spellings — exactly the two-identities problem the
+    // padding refusal above exists to prevent.
+    if bits > 0 && acc & ((1 << bits) - 1) != 0 {
+        return None;
+    }
     Some(out)
 }
 
@@ -666,6 +673,28 @@ mod tests {
             decode_attestation(&format!("{}.{}", base64url(&bad_utf8), base64url(&sig.to_bytes()))).is_none(),
             "invalid UTF-8 is a refusal, not U+FFFD: it re-encodes to different \
              bytes than were signed"
+        );
+    }
+
+    #[test]
+    fn non_canonical_base64url_is_refused() {
+        // A final partial sextet carries unused low bits, and they must be
+        // zero: "-a" (trailing 1010) and "-Q" (trailing 0000) would otherwise
+        // both decode to 0xf9, giving one blob two spellings -- two identities
+        // wherever blobs are compared or deduplicated, which is the same
+        // problem the padding refusal exists to prevent.
+        assert_eq!(base64url_decode("-Q"), Some(vec![0xf9]), "the canonical spelling decodes");
+        assert_eq!(base64url_decode("-a"), None, "non-zero trailing bits are refused");
+        assert_eq!(
+            base64url_decode("abc"),
+            Some(vec![0x69, 0xb7]),
+            "a canonical three-char tail decodes to two bytes"
+        );
+        assert_eq!(
+            base64url_decode("abd"),
+            None,
+            "the same tail with its two spare bits set is another spelling of \
+             the same bytes, and is refused"
         );
     }
 

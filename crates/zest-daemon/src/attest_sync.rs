@@ -90,18 +90,30 @@ fn now_ms() -> u64 {
 
 /// The account's verified vouchers, shared between the sync thread and every
 /// connection's trust lookup.
+/// What one fetch produced, replaced wholesale by the next.
 #[derive(Default)]
-pub struct AttestationSet {
+struct FetchedSet {
     /// Signature-checked at ingestion; the window is re-checked at grant time,
     /// because a fetch is minutes old by then.
-    verified: RwLock<Vec<(Attestation, Signature)>>,
+    verified: Vec<(Attestation, Signature)>,
     /// Device ids the account has revoked. Consulted on every grant, and acted
     /// on at fetch time (Model B removes the records outright).
-    revoked: RwLock<BTreeSet<[u8; 32]>>,
+    revoked: BTreeSet<[u8; 32]>,
+}
+
+#[derive(Default)]
+pub struct AttestationSet {
+    /// One lock over both halves of a fetch, deliberately: they are written
+    /// together and read together, and two locks here once carried a
+    /// lock-order inversion — `granting` took revoked-then-verified while
+    /// `replace` took verified-then-revoked, a deadlock between a handshake
+    /// lookup and the sync thread that no test would meet.
+    fetched: RwLock<FetchedSet>,
     /// Ids this daemon admitted *because of an attestation*, so a later
     /// `insert` for the same client keeps the marker even when the record
     /// comes from the pairing queue's approval path, which builds its label
-    /// from the client's own transcript.
+    /// from the client's own transcript. Its own lock is safe: no path holds
+    /// it and `fetched` at once.
     granted: RwLock<BTreeSet<[u8; 32]>>,
 }
 
@@ -119,13 +131,12 @@ impl AttestationSet {
         trusted_by: &dyn Fn(ClientId) -> bool,
         now_ms: u64,
     ) -> Option<Attestation> {
-        let revoked = self.revoked.read().expect("revoked lock");
-        if revoked.contains(&client.0) {
+        let fetched = self.fetched.read().expect("fetched lock");
+        if fetched.revoked.contains(&client.0) {
             return None;
         }
-        self.verified
-            .read()
-            .expect("verified lock")
+        fetched
+            .verified
             .iter()
             .find(|(a, _)| {
                 a.device == client
@@ -133,7 +144,7 @@ impl AttestationSet {
                     && now_ms < a.exp
                     // A revoked approver's vouch dies with it, even before the
                     // fetch that removes its record has run.
-                    && !revoked.contains(&a.by.0)
+                    && !fetched.revoked.contains(&a.by.0)
                     && trusted_by(a.by)
             })
             .map(|(a, _)| a.clone())
@@ -141,8 +152,7 @@ impl AttestationSet {
 
     /// Replace both halves with a fresh fetch's result.
     fn replace(&self, verified: Vec<(Attestation, Signature)>, revoked: BTreeSet<[u8; 32]>) {
-        *self.verified.write().expect("verified lock") = verified;
-        *self.revoked.write().expect("revoked lock") = revoked;
+        *self.fetched.write().expect("fetched lock") = FetchedSet { verified, revoked };
     }
 
     /// Remember that `client` was admitted by attestation, so its record keeps
@@ -153,6 +163,17 @@ impl AttestationSet {
 
     fn was_granted(&self, client: ClientId) -> bool {
         self.granted.read().expect("granted lock").contains(&client.0)
+    }
+
+    /// The attested bookkeeping ends when the trust it described ends.
+    ///
+    /// Called when a record is revoked or removed: whatever trusts this id
+    /// next — a person pairing at the machine, a fresh grant — decides the
+    /// provenance fresh. Without this, the documented restore path ("pair at
+    /// the machine") would hand the new, hand-made record the marker and with
+    /// it a permanent, invisible loss of the power to vouch.
+    fn forget_granted(&self, client: ClientId) {
+        self.granted.write().expect("granted lock").remove(&client.0);
     }
 }
 
@@ -255,6 +276,10 @@ impl TrustStore for AttestedTrustStore {
     }
 
     fn remove(&self, client: ClientId) -> Result<bool, MeshError> {
+        // `--forget` is an ending too: the next record for this id — a person
+        // re-pairing, a fresh grant — starts with clean provenance rather than
+        // inheriting a marker from trust that no longer exists.
+        self.set.forget_granted(client);
         self.inner.remove(client)
     }
 
@@ -475,6 +500,12 @@ fn apply(
     // still works with the account unreachable.
     for id in &revoked {
         let client = ClientId::from_bytes(*id);
+        // The attested bookkeeping goes with the trust it described, whether
+        // or not a record exists locally: the restore path is a person pairing
+        // at the machine, and that fresh, hand-made record must not inherit
+        // the marker — it would be born unable to vouch, permanently, with
+        // nothing anywhere saying why.
+        set.forget_granted(client);
         let Ok(Some(record)) = trust.get(client) else { continue };
         match trust.remove(client) {
             Ok(true) => tracing::info!(
@@ -826,6 +857,84 @@ mod tests {
             inner.get(device).expect("get").expect("present").label,
             "andy-phone (attested)",
             "the marker survives the approval path's re-insert"
+        );
+    }
+
+    #[test]
+    fn a_revoked_device_re_paired_by_hand_regains_the_power_to_vouch() {
+        // Model B's restore path is a person pairing at the machine. That
+        // fresh record is hand-made trust: it must not inherit the attested
+        // marker, which would leave the device permanently unable to vouch
+        // with nothing anywhere saying why.
+        let approver = identity(0x11);
+        let device = identity(0x22).client_id();
+        let inner: Arc<dyn TrustStore> = Arc::new(MemoryTrustStore::new());
+        paired(inner.as_ref(), approver.client_id(), "desk-mac");
+        let (store, set, _rx) = wrapped(Arc::clone(&inner));
+        set.replace(vec![attested(&approver, device, "andy-phone")], BTreeSet::new());
+
+        // Admitted by attestation: record, marker and bookkeeping in place.
+        assert!(store.get(device).expect("get").is_some());
+        assert!(set.was_granted(device));
+
+        // The account revokes it.
+        let queue = PairingQueue::new();
+        assert!(apply(&set, inner.as_ref(), &queue, &feed(&[], &[device]), now_ms()));
+        assert!(inner.get(device).expect("get").is_none(), "the record is removed");
+
+        // A person pairs it again at the machine.
+        store
+            .insert(TrustRecord {
+                client: device,
+                label: "andy-phone".into(),
+                paired_at: SystemTime::UNIX_EPOCH,
+                last_seen: None,
+            })
+            .expect("insert");
+        let record = inner.get(device).expect("get").expect("re-paired");
+        assert_eq!(record.label, "andy-phone", "hand-made trust carries no marker");
+        assert!(
+            may_vouch(inner.as_ref(), device),
+            "and with the marker gone, full standing: the re-paired device may vouch"
+        );
+    }
+
+    #[test]
+    fn forgetting_a_device_clears_its_attested_bookkeeping_too() {
+        // The same hazard as revocation, through the other exit: --forget goes
+        // through the wrapper's `remove`, and a marker that outlived it would
+        // brand the next hand-made record for the same key.
+        let device = identity(0x22).client_id();
+        let inner: Arc<dyn TrustStore> = Arc::new(MemoryTrustStore::new());
+        let (store, set, _rx) = wrapped(Arc::clone(&inner));
+        set.note_granted(device);
+        store
+            .insert(TrustRecord {
+                client: device,
+                label: "andy-phone".into(),
+                paired_at: SystemTime::UNIX_EPOCH,
+                last_seen: None,
+            })
+            .expect("insert");
+        assert_eq!(
+            inner.get(device).expect("get").expect("present").label,
+            "andy-phone (attested)",
+            "while granted, an insert is marked"
+        );
+
+        assert!(store.remove(device).expect("remove"), "forgotten");
+        store
+            .insert(TrustRecord {
+                client: device,
+                label: "andy-phone".into(),
+                paired_at: SystemTime::UNIX_EPOCH,
+                last_seen: None,
+            })
+            .expect("insert");
+        assert_eq!(
+            inner.get(device).expect("get").expect("present").label,
+            "andy-phone",
+            "after --forget, a fresh pairing starts with clean provenance"
         );
     }
 
