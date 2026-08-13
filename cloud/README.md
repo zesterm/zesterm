@@ -323,9 +323,84 @@ ever starting one.
 
 ## Deploying
 
-Nothing here deploys yet: there is no Cloudflare account wired up and
-`APP_ORIGIN` is a placeholder. When there is, the order matters — see "Two
-Workers, and the deploy order that matters" above.
+Both Workers are deployed:
+
+| | |
+|---|---|
+| app | `https://zesterm.sigx.workers.dev` |
+| relay | `https://zesterm-relay.sigx.workers.dev` |
+
+Order matters — see "Two Workers, and the deploy order that matters" above. The
+app Worker serves `clients/web/packages/app/dist`, so build it first or you
+deploy the previous bundle:
+
+Every command here is written to run from the **repo root**:
+
+```sh
+pnpm -C clients/web --filter @zesterm/app build
+pnpm -C cloud/packages/web   exec wrangler deploy
+pnpm -C cloud/packages/relay exec wrangler deploy
+```
+
+### The ticket keypair spans BOTH Workers, under different names
+
+One keypair, split across two Workers and two differently-named secrets. It is
+the only piece of configuration in this project shared that way, and the only
+place where setting one half and not the other produces no error anywhere.
+
+| Worker | secret | holds | does |
+|---|---|---|---|
+| app | `TICKET_SIGNING_KEY` | the 32-byte seed | **mints** attach tickets |
+| relay | `TICKET_PUBLIC_KEYS` | the public half, comma-separated | **verifies** them |
+
+The names differ on purpose — one is a private seed and the other is a *list*,
+so that a key can be rotated by appending before the minting side moves, rather
+than by deploying two Workers atomically. The cost of that asymmetry is that
+`wrangler secret put TICKET_SIGNING_KEY` aimed at the relay is accepted,
+stored, and never read: a secret nobody consults looks exactly like a secret
+that is working.
+
+Missing on the app Worker, `POST /api/relay/ticket` answers **503
+`relay_unavailable`** — correctly, and invisibly. The browser has no error
+channel for a failed dial (`ByteLinkHandlers` has none by design), so the fleet
+screen shows every machine as **asleep**: exactly what a fleet of shut laptops
+looks like. Nothing is logged on either Worker, the daemon is parked and idle
+because no attach ever reaches it, and the relay's own `wrangler tail` is
+silent because no socket is ever opened. Every layer looks healthy and the
+screen is wrong.
+
+It cost an evening. What found it was the browser's own network panel — 27
+identical 503s — after `tools/fake-browser.mjs` had already proved the relay
+and the daemon fine, which is the thing to reach for first:
+
+```sh
+# Both halves, and note they are NOT the same secret name. From the repo root:
+pnpm -C cloud/packages/web   exec wrangler secret put TICKET_SIGNING_KEY
+pnpm -C cloud/packages/relay exec wrangler secret put TICKET_PUBLIC_KEYS
+
+# What is actually set, which is the check worth making:
+pnpm -C cloud/packages/web   exec wrangler secret list
+pnpm -C cloud/packages/relay exec wrangler secret list
+
+node cloud/packages/relay/tools/fake-browser.mjs \
+  --ticket-seed <64 hex> --host <64 hex> \
+  --relay https://zesterm-relay.sigx.workers.dev
+```
+
+A 101 with no close code means the relay, the room and the daemon's dial-back
+all work, and anything still broken is in the browser's leg.
+
+### Rows in D1 are not proof of enrolment
+
+A `hosts` row can be inserted by hand, and during bring-up several were. A
+daemon whose row was inserted rather than enrolled has **no token** —
+`zest-daemon --account` prints `token none` — and will never refresh anything.
+Check that before concluding the enrolment path works.
+
+The same applies to `user_id`. A seeded row (`u1`) and the row GitHub OAuth
+creates for the same person are different accounts, and `/api/hosts` filters by
+the signed-in one, so a machine attached to the wrong account is simply absent
+from the fleet with no error.
 
 ## Gates
 

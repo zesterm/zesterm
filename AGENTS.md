@@ -778,6 +778,26 @@ Each of these cost real time and is documented where it bites:
   at all, so any process in the user's session can read the key. The signing
   discipline above is macOS-only work; the Windows exposure is the session,
   not the build.
+- **Signing without `--identifier` re-arms the trap it is meant to disarm.**
+  `scripts/zesterm-dev` signs as `dev.zesterm.<binary>`; a hand-run `codesign`
+  without that flag designates `identifier "<binary>"` instead. The Keychain
+  matches on the *designated requirement*, so the two are different principals
+  and a grant earned by one is worthless to the other — the daemon starts
+  prompting again the first time you build through the script, having appeared
+  fixed until then. Measured for one identity: two binaries differing in size
+  by 5 MB, signed with the same `--identifier`, produce different cdhashes and
+  a byte-identical requirement. That independence from content is the whole
+  mechanism, and the `--identifier` is what pins it.
+- **`--trust <hex>` is a one-shot command, and `--ephemeral` discards the
+  result.** It records the pairing and *exits*, like `--trusted` and
+  `--forget`, so it cannot be combined with serving — a daemon started that way
+  is gone before a browser can attach. And under `--ephemeral` the trust store
+  is in memory, so a `--trust-file` is accepted and then ignored (the daemon
+  says so, in a `WARN` that is easy to read past). A daemon that must stay in
+  the foreground and pair with something new can only answer its own prompt,
+  and it refuses to prompt unless stdin is a **terminal** — a pipe or a FIFO
+  gets `no stdin to prompt on; pairing requests will time out`, and the browser
+  sees a handshake that never completes rather than a refusal.
 - **On macOS the daemon blocks on a Keychain prompt after every rebuild**, and
   the app gives up waiting after 2s and silently falls back to an in-process
   pty. The window works perfectly and is not daemon-backed, so anything being
