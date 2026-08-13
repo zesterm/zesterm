@@ -921,12 +921,71 @@ pub mod client {
     /// Halves rather than a stream because the TLS stream underneath this can
     /// be neither cloned nor split; whoever owns it says how.
     pub fn connect_to<R, W>(
+        reader: R,
+        writer: W,
+        host_header: &str,
+        path: &str,
+        extra_headers: &[(&str, &str)],
+        want_protocol: Option<&str>,
+    ) -> io::Result<(WsReader<R, W>, WsWriter<W>)>
+    where
+        R: Read + Send + 'static,
+        W: Write + Send + 'static,
+    {
+        // One offer, and the same one expected back: the single-protocol
+        // dial is the two-offer dial with a one-element list.
+        let offer;
+        let offers: &[&str] = match want_protocol {
+            Some(p) => {
+                offer = [p];
+                &offer
+            }
+            None => &[],
+        };
+        connect_with_offers(reader, writer, host_header, path, extra_headers, offers, want_protocol)
+    }
+
+    /// [`connect_to`], offering several subprotocols and requiring one back.
+    ///
+    /// The relay attach is what this exists for: a ticket travels as a
+    /// *second* offer (`zesterm.relay.v1, ticket.<t>` — the relay splits on
+    /// commas and echoes the protocol; `cloud/packages/relay/src/ticket.ts`
+    /// is the other end), because a subprotocol token may not contain the
+    /// separators a ticket might, and `Sec-WebSocket-Protocol` is the only
+    /// header a browser can set — so it is the framing both clients share.
+    /// Deliberately NOT an extra header: repeated headers happen to be
+    /// joined with commas by some servers, which reads the same on the far
+    /// end and is a framing nobody chose.
+    ///
+    /// `want` is the one the server must echo. A response naming any other
+    /// offer — the ticket entry included — fails the connection: a server
+    /// that answered with the ticket has agreed to a framing that does not
+    /// exist, and would echo a secret back onto the wire besides.
+    pub fn connect_to_offering<R, W>(
+        reader: R,
+        writer: W,
+        host_header: &str,
+        path: &str,
+        extra_headers: &[(&str, &str)],
+        offers: &[&str],
+        want: &str,
+    ) -> io::Result<(WsReader<R, W>, WsWriter<W>)>
+    where
+        R: Read + Send + 'static,
+        W: Write + Send + 'static,
+    {
+        connect_with_offers(reader, writer, host_header, path, extra_headers, offers, Some(want))
+    }
+
+    /// The shared body of the two connect shapes above.
+    fn connect_with_offers<R, W>(
         mut reader: R,
         mut writer: W,
         host_header: &str,
         path: &str,
         extra_headers: &[(&str, &str)],
-        want_protocol: Option<&str>,
+        offers: &[&str],
+        want: Option<&str>,
     ) -> io::Result<(WsReader<R, W>, WsWriter<W>)>
     where
         R: Read + Send + 'static,
@@ -938,7 +997,8 @@ pub mod client {
             host_header,
             path,
             extra_headers,
-            want_protocol,
+            offers,
+            want,
         )?;
         Ok(split_halves(reader, writer, Role::Client, leftover))
     }
@@ -957,12 +1017,21 @@ pub mod client {
         R: Read + Send + 'static,
         W: Write + Send + 'static,
     {
+        let offer;
+        let offers: &[&str] = match want_protocol {
+            Some(p) => {
+                offer = [p];
+                &offer
+            }
+            None => &[],
+        };
         let leftover = upgrade(
             &mut reader,
             &mut writer,
             host_header,
             path,
             extra_headers,
+            offers,
             want_protocol,
         )?;
         Ok(split_message_halves(reader, writer, Role::Client, leftover))
@@ -997,8 +1066,15 @@ pub mod client {
         host_header: &str,
         path: &str,
         extra_headers: &[(&str, &str)],
-        want_protocol: Option<&str>,
+        offers: &[&str],
+        want: Option<&str>,
     ) -> io::Result<Vec<u8>> {
+        // A want the request never offered is a caller error, and the server
+        // could only ever fail it (§4.1 forbids naming an unoffered one) —
+        // refused here, where the mistake is nameable.
+        if want.is_some_and(|w| !offers.contains(&w)) {
+            return Err(protocol_error("the wanted subprotocol was not among the offers"));
+        }
         if !is_field_value(host_header) || !is_field_value(path) {
             return Err(protocol_error("the request line would be split"));
         }
@@ -1027,11 +1103,16 @@ pub mod client {
              Sec-WebSocket-Key: {key}\r\n\
              Sec-WebSocket-Version: 13\r\n"
         );
-        if let Some(protocol) = want_protocol {
-            if !is_token(protocol) {
-                return Err(protocol_error("a subprotocol that is not a token"));
+        if !offers.is_empty() {
+            // Each offer is checked alone: the joined list is only as clean
+            // as its dirtiest entry, and an unpadded base64url ticket IS a
+            // token — anything that is not never belonged on this line.
+            for protocol in offers {
+                if !is_token(protocol) {
+                    return Err(protocol_error("a subprotocol that is not a token"));
+                }
             }
-            request.push_str(&format!("Sec-WebSocket-Protocol: {protocol}\r\n"));
+            request.push_str(&format!("Sec-WebSocket-Protocol: {}\r\n", offers.join(", ")));
         }
         for (name, value) in extra_headers {
             if !is_token(name) || !is_field_value(value) {
@@ -1075,9 +1156,12 @@ pub mod client {
         // §4.1: a server may name at most one of the subprotocols the client
         // offered, and naming anything else — including naming one when none
         // were offered — must fail the connection. Letting it pass would mean
-        // agreeing to a framing this side has no implementation of.
-        if protocol.as_deref() != want_protocol {
-            return Err(protocol_error(match (&protocol, want_protocol) {
+        // agreeing to a framing this side has no implementation of. `want`
+        // rather than "any offer", because the ticket entry is an offer too,
+        // and a server echoing it has both agreed to nothing and repeated a
+        // secret onto the wire.
+        if protocol.as_deref() != want {
+            return Err(protocol_error(match (&protocol, want) {
                 (Some(_), None) => "the server named a subprotocol that was not offered",
                 (None, Some(_)) => "the server did not accept the subprotocol",
                 _ => "the server named a different subprotocol",
@@ -1684,6 +1768,109 @@ mod tests {
         // And one that names none has not accepted what was asked for.
         let (reader, writer, _) = scripted(accepted);
         assert!(client::connect_to(reader, writer, "h", "/", &[], Some("zesterm.relay.v1")).is_err());
+    }
+
+    #[test]
+    fn two_offers_travel_on_one_line_and_the_protocol_comes_back() {
+        // The relay attach's exact shape: protocol first, ticket second, one
+        // header, comma-joined — `ticketFromSubprotocols` on the far end
+        // splits on commas, so the wire bytes here are the contract.
+        fn echoes(key: &str) -> String {
+            format!(
+                "HTTP/1.1 101 Switching Protocols\r\n\
+                 Sec-WebSocket-Accept: {}\r\n\
+                 Sec-WebSocket-Protocol: zesterm.relay.v1\r\n\r\n",
+                accept_key(key)
+            )
+        }
+        let (reader, writer, sent) = scripted(echoes);
+        let _halves = client::connect_to_offering(
+            reader,
+            writer,
+            "relay.example",
+            "/v1/attach?host=ab12",
+            &[],
+            &["zesterm.relay.v1", "ticket.eyJhbGciOi_base64url-ticket"],
+            "zesterm.relay.v1",
+        )
+        .expect("the relay accepted the protocol offer");
+        let request = String::from_utf8(sent.lock().expect("lock").clone()).expect("utf-8");
+        assert!(
+            request.contains(
+                "\r\nSec-WebSocket-Protocol: zesterm.relay.v1, ticket.eyJhbGciOi_base64url-ticket\r\n"
+            ),
+            "one header, comma-joined, protocol first — not two headers a server may or \
+             may not join the same way; got {request:?}"
+        );
+    }
+
+    #[test]
+    fn a_server_echoing_the_ticket_entry_is_refused() {
+        // The ticket is an offer only as a smuggling vessel. A server naming
+        // it back has agreed to a framing that does not exist — and repeated
+        // a secret onto the wire, which is reason enough on its own.
+        fn echoes_ticket(key: &str) -> String {
+            format!(
+                "HTTP/1.1 101 Switching Protocols\r\n\
+                 Sec-WebSocket-Accept: {}\r\n\
+                 Sec-WebSocket-Protocol: ticket.abc\r\n\r\n",
+                accept_key(key)
+            )
+        }
+        let (reader, writer, _) = scripted(echoes_ticket);
+        assert!(
+            client::connect_to_offering(
+                reader,
+                writer,
+                "h",
+                "/v1/attach?host=ab",
+                &[],
+                &["zesterm.relay.v1", "ticket.abc"],
+                "zesterm.relay.v1",
+            )
+            .is_err(),
+            "an echoed ticket must fail the connection, not become the agreed protocol"
+        );
+    }
+
+    #[test]
+    fn every_offer_is_token_checked_before_the_wire() {
+        // The joined list is only as clean as its dirtiest entry: a ticket
+        // carrying a comma or a space would silently become two offers or a
+        // mangled line. (An unpadded base64url ticket IS a token — `.`, `-`
+        // and `_` are all RFC 9110 token bytes — so the real one passes.)
+        for bad in ["with space", "with,comma", ""] {
+            let (reader, writer, sent) = scripted(accepted);
+            assert!(
+                client::connect_to_offering(
+                    reader,
+                    writer,
+                    "h",
+                    "/",
+                    &[],
+                    &["zesterm.relay.v1", bad],
+                    "zesterm.relay.v1",
+                )
+                .is_err(),
+                "offer {bad:?} must be refused"
+            );
+            assert!(
+                sent.lock().expect("lock").is_empty(),
+                "offer {bad:?} reached the wire before it was checked"
+            );
+        }
+    }
+
+    #[test]
+    fn wanting_a_protocol_that_was_not_offered_is_a_caller_error() {
+        // §4.1 forbids the server naming an unoffered protocol, so this
+        // request could only ever fail — better refused where the mistake
+        // has a name, before anything is sent.
+        let (reader, writer, sent) = scripted(accepted);
+        assert!(
+            client::connect_to_offering(reader, writer, "h", "/", &[], &["a.b"], "c.d").is_err()
+        );
+        assert!(sent.lock().expect("lock").is_empty());
     }
 
     #[test]

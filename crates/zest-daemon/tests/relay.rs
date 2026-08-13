@@ -76,6 +76,9 @@ enum Seen {
     Ping,
     /// A pipe was dialled back, with this request target.
     PipeDial(String),
+    /// An attach arrived, with the ticket its subprotocol offers carried —
+    /// extracted exactly as `ticket.ts`'s `ticketFromSubprotocols` does.
+    Attach { ticket: Option<String> },
 }
 
 /// What a test tells the parked control link to do.
@@ -112,6 +115,9 @@ struct FakeRelay {
     parked: Receiver<Sender<Say>>,
     /// Pipe legs the fake relay accepted, as byte streams.
     pipes: Receiver<WebSocket<TcpStream>>,
+    /// Attach legs the fake relay accepted — the browser's (and now the
+    /// app's) side of a pipe, waiting for a test to pump them together.
+    attaches: Receiver<WebSocket<TcpStream>>,
 }
 
 impl FakeRelay {
@@ -122,6 +128,7 @@ impl FakeRelay {
         let (seen_tx, seen) = mpsc::channel();
         let (parked_tx, parked) = mpsc::channel();
         let (pipes_tx, pipes) = mpsc::channel();
+        let (attaches_tx, attaches) = mpsc::channel();
         let policy = Arc::new(Mutex::new(PipePolicy::Accept));
 
         let policy_for_thread = Arc::clone(&policy);
@@ -131,14 +138,15 @@ impl FakeRelay {
                 let seen_tx = seen_tx.clone();
                 let parked_tx = parked_tx.clone();
                 let pipes_tx = pipes_tx.clone();
+                let attaches_tx = attaches_tx.clone();
                 let policy = Arc::clone(&policy_for_thread);
                 std::thread::spawn(move || {
-                    serve_one(stream, host, &seen_tx, &parked_tx, &pipes_tx, &policy);
+                    serve_one(stream, host, &seen_tx, &parked_tx, &pipes_tx, &attaches_tx, &policy);
                 });
             }
         });
 
-        Self { addr, seen, policy, parked, pipes }
+        Self { addr, seen, policy, parked, pipes, attaches }
     }
 
     /// `ws://` rather than `wss://`: `RelayOrigin::parse` admits plaintext for
@@ -200,6 +208,7 @@ fn serve_one(
     seen: &Sender<Seen>,
     parked: &Sender<Sender<Say>>,
     pipes: &Sender<WebSocket<TcpStream>>,
+    attaches: &Sender<WebSocket<TcpStream>>,
     policy: &Arc<Mutex<PipePolicy>>,
 ) {
     // The request target, captured out of the upgrade — `tungstenite::accept`
@@ -207,13 +216,47 @@ fn serve_one(
     // control link from a pipe.
     let target = Arc::new(Mutex::new(String::new()));
     let seen_target = Arc::clone(&target);
-    let accepted = tungstenite::accept_hdr(stream, |request: &Request, response: Response| {
-        *seen_target.lock().expect("target") =
-            request.uri().path_and_query().map_or_else(String::new, ToString::to_string);
+    let offers = Arc::new(Mutex::new(String::new()));
+    let seen_offers = Arc::clone(&offers);
+    let accepted = tungstenite::accept_hdr(stream, |request: &Request, mut response: Response| {
+        let path = request.uri().path_and_query().map_or_else(String::new, ToString::to_string);
+        // The attach half of `index.ts`: the offers arrive on one header,
+        // and the response names the protocol — never the ticket entry.
+        // Echoed by an independent RFC 6455 server, which is the point: a
+        // client whose two-offer line tungstenite mis-parsed would fail
+        // right here.
+        if path.starts_with("/v1/attach") {
+            if let Some(header) = request.headers().get("Sec-WebSocket-Protocol") {
+                let header = header.to_str().unwrap_or_default().to_string();
+                if header.split(',').any(|o| o.trim() == "zesterm.relay.v1") {
+                    response.headers_mut().insert(
+                        "Sec-WebSocket-Protocol",
+                        "zesterm.relay.v1".parse().expect("a header value"),
+                    );
+                }
+                *seen_offers.lock().expect("offers") = header;
+            }
+        }
+        *seen_target.lock().expect("target") = path;
         Ok(response)
     });
     let Ok(mut ws) = accepted else { return };
     let target = target.lock().expect("target").clone();
+
+    if target.starts_with("/v1/attach") {
+        // Ticket extraction exactly as `ticketFromSubprotocols` does it:
+        // split on commas, trim, take whichever entry wears the prefix.
+        let ticket = offers
+            .lock()
+            .expect("offers")
+            .split(',')
+            .map(str::trim)
+            .find_map(|o| o.strip_prefix("ticket."))
+            .map(ToString::to_string);
+        let _ = seen.send(Seen::Attach { ticket });
+        let _ = attaches.send(ws);
+        return;
+    }
 
     if target.starts_with("/v1/pipe") {
         let _ = seen.send(Seen::PipeDial(target));
@@ -640,6 +683,117 @@ fn an_attach_becomes_a_second_socket_carrying_a_real_session() {
         session.list().expect("a request/response exchange over the pipe").is_empty(),
         "a fresh daemon has no sessions, and answering at all is what proves the pipe carries \
          both directions"
+    );
+}
+
+/// The room's byte-pump, done by a thread: whatever one leg says, the other
+/// hears, kinds preserved. One thread polling both sockets rather than two
+/// threads, because a tungstenite `WebSocket` cannot be split.
+fn pump(mut a: WebSocket<TcpStream>, mut b: WebSocket<TcpStream>) {
+    fn shuttle(from: &mut WebSocket<TcpStream>, to: &mut WebSocket<TcpStream>) -> Result<bool, ()> {
+        match from.read() {
+            Ok(Message::Binary(x)) => to.send(Message::Binary(x)).map(|()| true).map_err(|_| ()),
+            Ok(Message::Text(x)) => to.send(Message::Text(x)).map(|()| true).map_err(|_| ()),
+            Ok(Message::Close(_)) => {
+                let _ = to.close(None);
+                Err(())
+            }
+            Ok(_) => Ok(false),
+            Err(tungstenite::Error::Io(e))
+                if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) =>
+            {
+                Ok(false)
+            }
+            Err(_) => Err(()),
+        }
+    }
+    std::thread::spawn(move || {
+        let _ = a.get_ref().set_read_timeout(Some(Duration::from_millis(5)));
+        let _ = b.get_ref().set_read_timeout(Some(Duration::from_millis(5)));
+        loop {
+            let ab = match shuttle(&mut a, &mut b) {
+                Ok(moved) => moved,
+                Err(()) => return,
+            };
+            let ba = match shuttle(&mut b, &mut a) {
+                Ok(moved) => moved,
+                Err(()) => return,
+            };
+            if !ab && !ba {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    });
+}
+
+#[test]
+fn a_two_offer_attach_carries_a_real_session_through_the_relay() {
+    // #190's last leg, end to end: the exact upgrade `zest-app`'s
+    // `HostRoute::Relay` sends (`connect_to_offering`, protocol first and
+    // `ticket.<t>` second on one header), accepted and echoed by an
+    // *independent* RFC 6455 server, the ticket read out of the offers the
+    // way `ticketFromSubprotocols` reads it, a pipe opened down the parked
+    // control link, and the ordinary encrypted `zest-proto` handshake run
+    // through the pump — the host authorizing, exactly as on the LAN. What
+    // the fake does not do is verify the ticket's signature; that is
+    // `cloud/packages/relay/test/`'s, against the same message shapes.
+    let d = daemon("relay-host");
+    let relay = FakeRelay::start(d.config.host);
+    d.start_relay(&relay.url(), plaintext_dialler());
+    let control = relay.next_parked();
+
+    let stream = TcpStream::connect(relay.addr).expect("dial the fake relay");
+    let write_half = stream.try_clone().expect("clone the socket");
+    let (r, w) = zest_daemon::ws::client::connect_to_offering(
+        stream,
+        write_half,
+        &relay.addr.to_string(),
+        &format!("/v1/attach?host={}", hex(&d.config.host.0)),
+        &[],
+        &["zesterm.relay.v1", "ticket.e2e-attach-ticket"],
+        "zesterm.relay.v1",
+    )
+    .expect("tungstenite must accept the two-offer line and echo the protocol");
+
+    let Seen::Attach { ticket } = relay.wait_for(|s| matches!(s, Seen::Attach { .. })) else {
+        unreachable!()
+    };
+    assert_eq!(
+        ticket.as_deref(),
+        Some("e2e-attach-ticket"),
+        "the ticket must survive the comma-joined header exactly as the relay's \
+         `ticketFromSubprotocols` will read it"
+    );
+
+    // The room's job, done by the test: open a pipe for the attach and pump
+    // the two legs together.
+    let attach_ws = relay.attaches.recv_timeout(PATIENCE).expect("the attach socket");
+    control
+        .send(Say::Open("feedfacefeedfacefeedfacefeedface".into()))
+        .expect("the control link is parked");
+    let pipe_ws = relay.pipes.recv_timeout(PATIENCE).expect("the daemon dialled back");
+    pump(attach_ws, pipe_ws);
+
+    let client = Arc::new(ClientIdentity::generate().expect("client key"));
+    d.trust_client(&client);
+    let mut session = DaemonClient::connect(
+        Box::new(r),
+        Box::new(w),
+        &client,
+        "relay-e2e",
+        Some(d.config.host),
+        false,
+    )
+    .expect("the sealed zest-proto handshake must complete through attach, pump and pipe");
+
+    assert_eq!(
+        session.host_label(),
+        "relay-host",
+        "the Welcome is the daemon's own, through two WebSocket hops and the ADR-008 channel"
+    );
+    assert!(
+        session.list().expect("a request/response exchange through the relay").is_empty(),
+        "answering at all proves both directions cross the pump"
     );
 }
 
