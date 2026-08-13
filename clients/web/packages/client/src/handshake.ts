@@ -95,6 +95,9 @@ export class HandshakeDriver {
       nonce: this.#nonce,
       dh: this.#ephemeral.publicKey,
       watch_sessions: this.#options.watchSessions,
+      // Never from a browser: approvals are loopback authority, and the
+      // daemon would silently not subscribe us anyway.
+      watch_pairings: false,
     };
   }
 

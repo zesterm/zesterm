@@ -171,6 +171,7 @@ fn handshake(ws: &mut Ws, frames: &mut FrameReader, ch: &mut Chan, identity: &Ar
             nonce: zest_proto::Nonce32::from_bytes(*hs.nonce().as_bytes()),
             dh: zest_proto::Pub32::from_bytes(hs.dh().0),
             watch_sessions: false,
+            watch_pairings: false,
         },
     );
 
@@ -438,6 +439,7 @@ fn the_daemons_own_client_codec_interoperates() {
         nonce: zest_proto::Nonce32::from_bytes(*hs.nonce().as_bytes()),
         dh: zest_proto::Pub32::from_bytes(hs.dh().0),
         watch_sessions: false,
+        watch_pairings: false,
     })
     .expect("encode");
     std::io::Write::write_all(&mut writer, &hello).expect("write");

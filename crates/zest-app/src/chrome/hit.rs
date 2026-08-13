@@ -55,6 +55,14 @@ impl From<ResizeEdge> for winit::window::CursorIcon {
 /// What a point in the chrome means.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HitRegion {
+    /// The approval modal's panel and its full-window scrim — swallows every
+    /// click that is not a button, and deliberately does not dismiss: a
+    /// security prompt is answered or Esc'd, never mis-clicked away.
+    ApprovalPanel,
+    /// The approval modal's Approve button.
+    ApprovalApprove,
+    /// The approval modal's Deny button.
+    ApprovalDeny,
     /// A tab; clicking activates it.
     Tab(SessionAddr),
     /// A tab's close button.

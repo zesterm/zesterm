@@ -185,6 +185,7 @@ fn handshake(peer: &mut Peer, identity: &Arc<ClientIdentity>) -> (ClientMessage,
         nonce: zest_proto::Nonce32::from_bytes(*hs.nonce().as_bytes()),
         dh: zest_proto::Pub32::from_bytes(hs.dh().0),
         watch_sessions: false,
+        watch_pairings: false,
     });
 
     let challenge =
@@ -319,6 +320,7 @@ fn a_captured_proof_cannot_be_replayed_onto_a_second_connection() {
         nonce: zest_proto::Nonce32::from_bytes(*hs.nonce().as_bytes()),
         dh: zest_proto::Pub32::from_bytes(hs.dh().0),
         watch_sessions: false,
+        watch_pairings: false,
     });
     let challenge = second
         .wait_for(|m| matches!(m, HostMessage::Challenge { .. }))
@@ -365,6 +367,7 @@ fn a_captured_proof_cannot_be_replayed_onto_a_second_connection() {
         nonce: zest_proto::Nonce32::from_bytes([0x5c; 32]),
         dh: zest_proto::Pub32::from_bytes([0x11; 32]),
         watch_sessions: false,
+        watch_pairings: false,
     });
     assert!(
         third.wait_for(|m| matches!(m, HostMessage::Challenge { .. })).is_some(),
@@ -556,6 +559,7 @@ fn a_client_that_dialled_another_host_notices() {
         nonce: zest_proto::Nonce32::from_bytes(*hs.nonce().as_bytes()),
         dh: zest_proto::Pub32::from_bytes(client_dh.0),
         watch_sessions: false,
+        watch_pairings: false,
     });
     let challenge =
         stream.wait_for(|m| matches!(m, HostMessage::Challenge { .. })).expect("no challenge");

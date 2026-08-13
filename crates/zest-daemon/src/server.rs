@@ -344,6 +344,23 @@ pub struct Connection {
     watch_token: Option<u64>,
     /// The registry generation this connection last told its client about.
     seen_generation: u64,
+    /// This client asked (`Hello.watch_pairings`) to hear about devices
+    /// waiting for approval. Honoured only where `may_approve_devices` says
+    /// yes — the loopback socket — so a LAN connection that asks is silently
+    /// never subscribed, exactly like its `PairingDecision` would be refused.
+    watch_pairings: bool,
+    /// Registration in `PairingQueue::watch`, for `Drop` to release.
+    pairing_watch_token: Option<u64>,
+    /// The queue generation this connection last pushed from. Left at 0 on
+    /// subscribe *on purpose*: unlike sessions, the client cannot list the
+    /// queue on demand, so anything already pending must be replayed by the
+    /// first poll rather than assumed seen.
+    seen_pairing_generation: u64,
+    /// Which clients this connection has announced and not yet tombstoned —
+    /// the diff state that turns "the queue changed" into "show this" /
+    /// "stop showing that". Keyed by client because the queue resolves by
+    /// client: a device that retried is one prompt, not two.
+    announced_pairings: std::collections::HashSet<ClientId>,
     /// This connection's encryption, from the `Challenge` onwards. See [`Seal`].
     seal: Option<Seal>,
 }
@@ -365,6 +382,9 @@ impl Drop for Connection {
     fn drop(&mut self) {
         if let Some(token) = self.watch_token.take() {
             self.registry.unwatch(token);
+        }
+        if let Some(token) = self.pairing_watch_token.take() {
+            self.auth.authenticator().queue().unwatch(token);
         }
         let had_subscriptions = !self.attached.is_empty();
         for (&id, &handle) in &self.attached {
@@ -411,6 +431,10 @@ impl Connection {
             watch_sessions: false,
             watch_token: None,
             seen_generation: 0,
+            watch_pairings: false,
+            pairing_watch_token: None,
+            seen_pairing_generation: 0,
+            announced_pairings: std::collections::HashSet::new(),
             seal: None,
         }
     }
@@ -525,6 +549,51 @@ impl Connection {
                 out.push(HostMessage::Sessions {
                     sessions: self.registry.list(self.config.host),
                     created: None,
+                });
+            }
+        }
+        // The approval pushes, same coalescing shape: however many queue
+        // changes piled up, one diff against what this connection already
+        // announced says "show this" (a request, with its remaining
+        // validity) and "stop showing that" (a tombstone, `resolved: true`,
+        // carrying only the client — there is nothing left to compare).
+        if self.watch_pairings
+            && self.auth.may_approve_devices()
+            && matches!(self.gate, Gate::Served)
+        {
+            let queue = self.auth.authenticator().queue();
+            let generation = queue.generation();
+            if generation != self.seen_pairing_generation {
+                self.seen_pairing_generation = generation;
+                let pending = queue.pending();
+                let now = std::time::Instant::now();
+                for r in &pending {
+                    if self.announced_pairings.insert(r.client) {
+                        let left = zest_mesh::pairing::APPROVAL_TIMEOUT
+                            .saturating_sub(now.saturating_duration_since(r.requested_at));
+                        out.push(HostMessage::PairingRequested {
+                            client: r.client,
+                            label: r.label.clone(),
+                            code: r.code.clone(),
+                            remote: r.remote.clone(),
+                            expires_in_secs: u32::try_from(left.as_secs()).unwrap_or(u32::MAX),
+                            resolved: false,
+                        });
+                    }
+                }
+                self.announced_pairings.retain(|c| {
+                    if pending.iter().any(|r| r.client == *c) {
+                        return true;
+                    }
+                    out.push(HostMessage::PairingRequested {
+                        client: *c,
+                        label: String::new(),
+                        code: String::new(),
+                        remote: String::new(),
+                        expires_in_secs: 0,
+                        resolved: true,
+                    });
+                    false
                 });
             }
         }
@@ -657,8 +726,17 @@ impl Connection {
         }
 
         match msg {
-            ClientMessage::Hello { version, client, label, nonce, dh, watch_sessions } => {
+            ClientMessage::Hello {
+                version,
+                client,
+                label,
+                nonce,
+                dh,
+                watch_sessions,
+                watch_pairings,
+            } => {
                 self.watch_sessions = watch_sessions;
+                self.watch_pairings = watch_pairings;
                 let Some(h) = self.handshake_mut() else {
                     return vec![HostMessage::Error {
                         session: None,
@@ -1026,6 +1104,22 @@ impl Connection {
             self.seen_generation = self.registry.generation();
             if let Some(waker) = self.waker.clone() {
                 self.watch_token = Some(self.registry.watch(waker));
+            }
+        }
+        // The approval-modal subscription, gated by the transport: only a
+        // connection that could answer (`may_approve_devices`) is told what
+        // is waiting, so the codes never leave the machine. Unlike sessions,
+        // `seen_pairing_generation` is not snapped to current here — a
+        // request already waiting when the app connects must be replayed by
+        // the first poll, or a modal only ever shows for requests that
+        // arrive while the app happens to be running.
+        if self.watch_pairings
+            && self.auth.may_approve_devices()
+            && self.pairing_watch_token.is_none()
+        {
+            if let Some(waker) = self.waker.clone() {
+                self.pairing_watch_token =
+                    Some(self.auth.authenticator().queue().watch(waker));
             }
         }
         vec![HostMessage::Welcome {
@@ -1452,6 +1546,18 @@ mod tests {
     fn authenticate_with(c: &mut Connection, watch_sessions: bool) -> Peer {
         let client =
             std::sync::Arc::new(zest_mesh::identity::ClientIdentity::generate().expect("client key"));
+        authenticate_identity(c, &client, watch_sessions, false)
+    }
+
+    /// The full handshake for a caller that needs to pick the identity (to
+    /// pre-trust it) or to watch the approval queue.
+    fn authenticate_identity(
+        c: &mut Connection,
+        client: &std::sync::Arc<zest_mesh::identity::ClientIdentity>,
+        watch_sessions: bool,
+        watch_pairings: bool,
+    ) -> Peer {
+        let client = std::sync::Arc::clone(client);
         // The shared client handshake, not a hand-rolled one: a test peer that
         // derived its key differently would fail every frame *after* the
         // handshake, which reads as a broken daemon rather than a broken test.
@@ -1470,6 +1576,7 @@ mod tests {
                 nonce: zest_proto::Nonce32::from_bytes(*hs.nonce().as_bytes()),
                 dh: zest_proto::Pub32::from_bytes(hs.dh().0),
                 watch_sessions,
+                watch_pairings,
             },
         );
         let [HostMessage::Challenge { nonce, host, label, version, dh, signature }] = &out[..]
@@ -1534,6 +1641,148 @@ mod tests {
             ),
             registry,
         )
+    }
+
+    /// A pairing request submitted to this queue, with the decision captured.
+    fn pending_request(
+        auth: &Arc<crate::auth::Authenticator>,
+        device: ClientId,
+    ) -> (
+        zest_mesh::pairing::PendingHandle,
+        Arc<std::sync::Mutex<Option<zest_mesh::pairing::Decision>>>,
+    ) {
+        let decided: Arc<std::sync::Mutex<Option<zest_mesh::pairing::Decision>>> =
+            Arc::default();
+        let sink = Arc::clone(&decided);
+        let handle = auth.ask(
+            zest_mesh::pairing::PairingRequest {
+                client: device,
+                label: "andy-phone".into(),
+                code: "481502".into(),
+                remote: "192.168.1.42:60123".into(),
+                requested_at: Instant::now(),
+            },
+            Box::new(move |d| {
+                *sink.lock().expect("decision lock") = Some(d);
+            }),
+        );
+        (handle, decided)
+    }
+
+    #[test]
+    fn a_loopback_watcher_hears_the_approval_queue_and_its_decision_answers() {
+        // ROADMAP M4's modal, at the daemon seam: the app subscribes with
+        // `Hello.watch_pairings` over loopback, hears what is waiting —
+        // including a request that arrived *before* it connected, or the
+        // modal only ever covers lucky timing — answers it with the
+        // `PairingDecision` loopback already honours, and hears the
+        // tombstone that closes the prompt.
+        let auth = test_authenticator();
+        let registry = Arc::new(Registry::new());
+        let device = ClientId::from_bytes([0xd0; 32]);
+
+        // Waiting before the watcher exists: the replay case.
+        let (_handle, decided) = pending_request(&auth, device);
+
+        let mut watcher = Connection::new(
+            config(),
+            Arc::clone(&registry),
+            crate::auth::Auth::Transport(Arc::clone(&auth)),
+            "test",
+        );
+        let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let woken = Arc::clone(&woken);
+            watcher.set_waker(Box::new(move || {
+                woken.store(true, std::sync::atomic::Ordering::Release);
+            }));
+        }
+        let identity = std::sync::Arc::new(
+            zest_mesh::identity::ClientIdentity::generate().expect("client key"),
+        );
+        let mut peer = authenticate_identity(&mut watcher, &identity, false, true);
+
+        let pushed = watcher.poll();
+        let [HostMessage::PairingRequested {
+            client,
+            label,
+            code,
+            remote,
+            expires_in_secs,
+            resolved,
+        }] = &pushed[..]
+        else {
+            panic!("a request already waiting must be replayed on subscribe, got {pushed:?}");
+        };
+        assert_eq!(*client, device);
+        assert_eq!(code, "481502", "the code is the person's comparison input");
+        assert_eq!(label, "andy-phone");
+        assert_eq!(remote, "192.168.1.42:60123");
+        assert!(!resolved, "a live request is not a tombstone");
+        assert!(
+            *expires_in_secs > 0,
+            "a zero expiry would tell the modal the code is already dead"
+        );
+
+        // The decision goes back over the same loopback connection.
+        let out = peer.send(
+            &mut watcher,
+            &ClientMessage::PairingDecision { client: device, approve: true },
+        );
+        assert!(out.is_empty(), "a loopback decision is honoured silently, got {out:?}");
+        assert_eq!(
+            *decided.lock().expect("decision lock"),
+            Some(zest_mesh::pairing::Decision::Approve),
+            "the modal's Approve must reach the device's waiting handshake"
+        );
+
+        // Resolving woke the watcher, and the coalesced diff says "gone" —
+        // which is what closes a modal someone answered elsewhere too.
+        assert!(
+            woken.load(std::sync::atomic::Ordering::Acquire),
+            "answering must wake the watching connection"
+        );
+        let pushed = watcher.poll();
+        let [HostMessage::PairingRequested { client, resolved: true, code, .. }] = &pushed[..]
+        else {
+            panic!("the request leaving the queue must push a tombstone, got {pushed:?}");
+        };
+        assert_eq!(*client, device);
+        assert!(code.is_empty(), "a tombstone carries no code — there is nothing to compare");
+    }
+
+    #[test]
+    fn a_lan_connection_never_hears_the_approval_queue() {
+        // The gate: `watch_pairings` is honoured where `may_approve_devices`
+        // is — loopback — and silently ignored elsewhere. A LAN peer that
+        // asked would otherwise be shown other people's matching codes,
+        // which is exactly the information a hostile network wants.
+        let auth = test_authenticator();
+        let registry = Arc::new(Registry::new());
+
+        // Trusted first, because an untrusted Proof connection pends instead
+        // of welcoming — and a *trusted* device asking to watch is precisely
+        // the sharp case: it is allowed in, just not allowed to see this.
+        let identity = std::sync::Arc::new(
+            zest_mesh::identity::ClientIdentity::generate().expect("client key"),
+        );
+        auth.trust_now(identity.client_id(), "trusted-lan").expect("trust");
+        let mut lan = Connection::new(
+            config(),
+            Arc::clone(&registry),
+            crate::auth::Auth::Proof(Arc::clone(&auth)),
+            "192.168.1.9:50000",
+        );
+        let _peer = authenticate_identity(&mut lan, &identity, false, true);
+
+        let (_handle, _decided) = pending_request(&auth, ClientId::from_bytes([0xd1; 32]));
+        let pushed = lan.poll();
+        assert!(
+            !pushed
+                .iter()
+                .any(|m| matches!(m, HostMessage::PairingRequested { .. })),
+            "a LAN connection asked to watch and must still hear nothing: {pushed:?}"
+        );
     }
 
     #[test]
@@ -1683,6 +1932,7 @@ mod tests {
                 nonce: zest_proto::Nonce32::from_bytes(*hs.nonce().as_bytes()),
                 dh: zest_proto::Pub32::from_bytes(hs.dh().0),
                 watch_sessions: false,
+                watch_pairings: false,
             },
         );
         let [HostMessage::Challenge { nonce, host, label, version, dh, signature }] = &out[..]
@@ -1715,6 +1965,7 @@ mod tests {
             nonce: zest_proto::Nonce32::from_bytes([6; 32]),
             dh: zest_proto::Pub32::from_bytes([8; 32]),
             watch_sessions: false,
+            watch_pairings: false,
         }
     }
 
@@ -1907,6 +2158,7 @@ mod tests {
                 nonce: zest_proto::Nonce32::from_bytes([7; 32]),
                 dh: zest_proto::Pub32::from_bytes([8; 32]),
                 watch_sessions: false,
+                watch_pairings: false,
             },
         );
         assert!(

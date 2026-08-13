@@ -29,7 +29,13 @@ export type HostMessage = { "t": "welcome", version: number, host: HostId, label
  * implementations can disagree about — and the set of refusals that
  * happen *before* a Challenge is exactly "the host never sent one".
  */
-dh: Pub32, signature: Sig64, } | { "t": "auth_pending", code: string, expires_in_secs: number, } | { "t": "auth_failed", reason: AuthFailure, message: string, } | { "t": "pairing_requested", client: ClientId, label: string, code: string, remote: string, } | { "t": "sessions", sessions: Array<SessionInfo>, 
+dh: Pub32, signature: Sig64, } | { "t": "auth_pending", code: string, expires_in_secs: number, } | { "t": "auth_failed", reason: AuthFailure, message: string, } | { "t": "pairing_requested", client: ClientId, label: string, code: string, remote: string, 
+/**
+ * How long the code is still worth comparing, mirroring
+ * [`HostMessage::AuthPending`]. `0` from a daemon that predates the
+ * field — treat as unknown, not as already-expired.
+ */
+expires_in_secs: number, resolved: boolean, } | { "t": "sessions", sessions: Array<SessionInfo>, 
 /**
  * The session this reply's `CreateSession` produced, when it did.
  *

@@ -130,6 +130,24 @@ pub struct FleetHost {
     pub enrolled: bool,
 }
 
+/// One push from the daemon's approval queue, forwarded to the app.
+///
+/// Decoded here so the app's modal state never sees a wire type: `Requested`
+/// raises the modal, `Resolved` closes it (someone answered — at the stdin
+/// prompt, in another window — or the device gave up or timed out).
+pub enum PairingEvent {
+    Requested {
+        client: zest_proto::ClientId,
+        label: String,
+        remote: String,
+        code: String,
+        expires_in_secs: u32,
+    },
+    Resolved {
+        client: zest_proto::ClientId,
+    },
+}
+
 #[derive(Default)]
 struct State {
     /// The window's own daemon, learned from its signed Welcome — a default
@@ -155,6 +173,10 @@ struct Inner {
     /// main thread reads the snapshot.
     dirty: AtomicBool,
     state: parking_lot::Mutex<State>,
+    /// How to reach the daemon the watcher watches, kept for
+    /// [`FleetModel::decide_pairing`] — the decision dials fresh rather than
+    /// writing into a watcher parked in `read`.
+    decide_dial: parking_lot::Mutex<Option<Arc<dyn Fn() -> Dialer + Send + Sync>>>,
 }
 
 impl Inner {
@@ -180,6 +202,7 @@ impl FleetModel {
             proxy,
             dirty: AtomicBool::new(false),
             state: parking_lot::Mutex::new(State { local, ..State::default() }),
+            decide_dial: parking_lot::Mutex::new(None),
         });
 
         // The browser: observations land in the roster on the mesh thread;
@@ -269,12 +292,19 @@ impl FleetModel {
     ///
     /// Reconnects with backoff forever: this is a background view, and "the
     /// daemon restarted" should heal without anyone noticing.
-    pub fn watch(&self, dial: impl Fn() -> Dialer + Send + 'static) {
+    pub fn watch(
+        &self,
+        dial: impl Fn() -> Dialer + Send + Sync + 'static,
+        on_pairing: impl Fn(PairingEvent) + Send + Sync + 'static,
+    ) {
+        let dial = Arc::new(dial);
+        *self.inner.decide_dial.lock() = Some(Arc::clone(&dial) as _);
+        let on_pairing = Arc::new(on_pairing);
         let inner = Arc::clone(&self.inner);
         let spawned = std::thread::Builder::new().name("zest-fleet-watch".into()).spawn(move || {
             let mut wait = REWATCH_MIN;
             loop {
-                match Self::watch_once(&inner, &dial()) {
+                match Self::watch_once(&inner, &dial(), on_pairing.as_ref()) {
                     Ok(()) => wait = REWATCH_MIN,
                     Err(e) => {
                         tracing::debug!(error = %e, "fleet watch connection ended");
@@ -289,7 +319,57 @@ impl FleetModel {
         }
     }
 
-    fn watch_once(inner: &Arc<Inner>, dial: &Dialer) -> Result<(), crate::remote::RemoteError> {
+    /// Answer a pairing prompt: allow (or refuse) `client` onto this machine.
+    ///
+    /// Dials a **fresh** loopback connection for the decision rather than
+    /// writing into the watcher, whose thread is parked in `read`. That is
+    /// the smallest honest sender: the daemon gates `PairingDecision` on the
+    /// *transport* (`may_approve_devices`), not on the connection that heard
+    /// the request, so a fresh connection over the same dial carries exactly
+    /// the watcher's authority — and a loopback handshake is tens of
+    /// microseconds against a decision a person took seconds to make.
+    /// Off the event loop, like every dial.
+    pub fn decide_pairing(&self, client: zest_proto::ClientId, approve: bool) {
+        let Some(dial) = self.inner.decide_dial.lock().clone() else {
+            tracing::warn!("no route to the daemon; the pairing decision has nowhere to go");
+            return;
+        };
+        let spawned = std::thread::Builder::new().name("zest-pairing-decide".into()).spawn(
+            move || {
+                let result = (|| -> Result<(), crate::remote::RemoteError> {
+                    let identity = ClientIdentity::generate()
+                        .map(Arc::new)
+                        .map_err(|e| crate::remote::RemoteError::Io(e.to_string()))?;
+                    let (read, write) = (dial())()?;
+                    let mut c = DaemonClient::connect(
+                        read,
+                        write,
+                        &identity,
+                        "zesterm-approve",
+                        None,
+                        false,
+                    )?;
+                    c.decide_pairing(client, approve)?;
+                    Ok(())
+                })();
+                if let Err(e) = result {
+                    // The request stays pending on the daemon, so the person
+                    // can still answer at its stdin; the modal has closed
+                    // optimistically, which the tombstone push reconciles.
+                    tracing::warn!(error = %e, approve, "could not deliver the pairing decision");
+                }
+            },
+        );
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "no thread for the pairing decision");
+        }
+    }
+
+    fn watch_once(
+        inner: &Arc<Inner>,
+        dial: &Dialer,
+        on_pairing: &(impl Fn(PairingEvent) + Send + Sync),
+    ) -> Result<(), crate::remote::RemoteError> {
         // An ephemeral identity per connection: the watcher only ever talks
         // to the window's own daemon, where the socket is the authorization
         // (the same reasoning as the attach path).
@@ -297,8 +377,18 @@ impl FleetModel {
             .map(Arc::new)
             .map_err(|e| crate::remote::RemoteError::Io(e.to_string()))?;
         let (read, write) = dial()?;
-        let mut client =
-            DaemonClient::connect(read, write, &identity, "zesterm-fleet", None, true)?;
+        let mut client = DaemonClient::connect_watching(
+            read,
+            write,
+            &identity,
+            "zesterm-fleet",
+            None,
+            // Pairings too: this is the app's one standing loopback
+            // connection, and the approval modal is its second tenant. On a
+            // remote daemon the flag is silently not honoured, which is the
+            // right degradation — that machine's approvals are not ours.
+            zest_daemon::client::Watch { sessions: true, pairings: true },
+        )?;
         let host = client.host();
 
         let sessions = client.list()?;
@@ -311,12 +401,34 @@ impl FleetModel {
         // Block on pushes until the connection dies; every push is the whole
         // current truth for this host.
         loop {
-            let msg = client.next_message()?;
-            if let zest_proto::HostMessage::Sessions { sessions, .. } = msg {
-                let mut state = inner.state.lock();
-                state.sessions.insert(host, SessionsState::Fresh(sessions));
-                drop(state);
-                inner.mark_changed();
+            match client.next_message()? {
+                zest_proto::HostMessage::Sessions { sessions, .. } => {
+                    let mut state = inner.state.lock();
+                    state.sessions.insert(host, SessionsState::Fresh(sessions));
+                    drop(state);
+                    inner.mark_changed();
+                }
+                zest_proto::HostMessage::PairingRequested {
+                    client: device,
+                    label,
+                    code,
+                    remote,
+                    expires_in_secs,
+                    resolved,
+                } => {
+                    on_pairing(if resolved {
+                        PairingEvent::Resolved { client: device }
+                    } else {
+                        PairingEvent::Requested {
+                            client: device,
+                            label,
+                            remote,
+                            code,
+                            expires_in_secs,
+                        }
+                    });
+                }
+                _ => {}
             }
         }
     }

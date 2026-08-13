@@ -606,10 +606,88 @@ fn arm_pairing_prompt(
         + std::time::Duration::from_secs(u64::from(expires_in_secs));
     *cell.lock() = Some(PairingPrompt { host, code: code.clone(), expires_at });
     post();
+    spawn_pairing_clock(
+        cell,
+        move |p: &PairingPrompt| p.code == code && p.expires_at == expires_at,
+        expires_at,
+        post,
+    );
+}
 
+/// A device waiting for THIS machine's approval — the inbound half of
+/// pairing, as [`PairingCell`] is the outbound wait. Separate cells on
+/// purpose: a window attaching somewhere while its daemon is asked to
+/// approve something else must show both honestly. Written by the fleet
+/// watcher's thread; `Wakeup::PairingChanged` announces every change here
+/// too — the event means "pairing state moved, look again", whichever side.
+type ApprovalCell = Arc<parking_lot::Mutex<Option<ApprovalRequest>>>;
+
+/// One inbound request: who is asking, as the daemon pushed it.
+struct ApprovalRequest {
+    client: zest_proto::ClientId,
+    label: String,
+    remote: String,
+    code: String,
+    expires_at: std::time::Instant,
+    /// Esc was pressed: keep the state — the daemon's tombstone still clears
+    /// it — but stop drawing the modal. Per request, so the next device to
+    /// ask shows again.
+    dismissed: bool,
+}
+
+/// Store an inbound request and arm its clock; the fleet watcher's
+/// `PairingEvent::Requested` handler.
+fn arm_approval_request(
+    cell: &ApprovalCell,
+    client: zest_proto::ClientId,
+    label: String,
+    remote: String,
+    code: String,
+    expires_in_secs: u32,
+    post: Arc<dyn Fn() + Send + Sync>,
+) {
+    // 0 is "expiry unknown" (a daemon predating the field). Assume the
+    // pairing window rather than showing a modal that can never close —
+    // its request will have left that daemon's queue by then anyway.
+    let secs = if expires_in_secs == 0 {
+        zest_mesh::pairing::APPROVAL_TIMEOUT.as_secs()
+    } else {
+        u64::from(expires_in_secs)
+    };
+    let expires_at = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    *cell.lock() =
+        Some(ApprovalRequest { client, label, remote, code, expires_at, dismissed: false });
+    post();
+    spawn_pairing_clock(
+        cell,
+        move |r: &ApprovalRequest| r.client == client && r.expires_at == expires_at,
+        expires_at,
+        post,
+    );
+}
+
+/// The clock both pairing cells share (#208's staleness lesson, held once).
+///
+/// It exists because the chrome snapshots a prompt into a *cached* layout:
+/// `refresh_chrome` returns early while `chrome_layout` is `Some`, so
+/// without one more wake a countdown never moves and an **expired code
+/// stays painted for ever** unless some unrelated event happens to
+/// invalidate the chrome. The thread posts at each boundary where a
+/// displayed "Xm" changes, and at expiry it clears the cell itself —
+/// nothing else will — and wakes once more.
+///
+/// A replaced or cleared prompt must not inherit the old clock: every tick
+/// re-checks `mine` — the caller's statement that the cell still holds the
+/// prompt this clock was armed for — and exits silently otherwise, so at
+/// most one clock is ever speaking for a cell.
+fn spawn_pairing_clock<T: Send + 'static>(
+    cell: &Arc<parking_lot::Mutex<Option<T>>>,
+    mine: impl Fn(&T) -> bool + Send + 'static,
+    expires_at: std::time::Instant,
+    post: Arc<dyn Fn() + Send + Sync>,
+) {
     let cell = Arc::clone(cell);
     let clock = std::thread::Builder::new().name("zest-pairing-clock".into()).spawn(move || {
-        let mine = |p: &PairingPrompt| p.code == code && p.expires_at == expires_at;
         let mut first = true;
         loop {
             let left = {
@@ -638,7 +716,7 @@ fn arm_pairing_prompt(
                 return;
             }
             // To the next whole-minute boundary of the displayed countdown
-            // (`div_ceil(60)` in `pairing_notice`), or to expiry if sooner.
+            // (`div_ceil(60)` in both renderings), or to expiry if sooner.
             let secs = (left.as_secs().saturating_sub(1) % 60) + 1;
             std::thread::sleep(std::time::Duration::from_secs(secs).min(left));
         }
@@ -745,6 +823,9 @@ pub struct App {
     /// matching code the chrome must show while the attach worker blocks
     /// (#190). Written from worker threads, drawn as the chrome's notice.
     pairing: PairingCell,
+    /// A device is waiting for THIS machine's approval — the modal's state,
+    /// written by the fleet watcher (`Hello.watch_pairings` pushes).
+    approval: ApprovalCell,
     /// The persisted identity used for hosts that are not this machine,
     /// loaded lazily on first need so the keychain stays off the startup
     /// path (and off it entirely for people who never leave loopback).
@@ -963,6 +1044,7 @@ impl App {
             pending_tabs: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_launches: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pairing: Arc::new(parking_lot::Mutex::new(None)),
+            approval: Arc::new(parking_lot::Mutex::new(None)),
             remote_identity: None,
             account: AccountState::Unknown,
             account_update: Arc::new(parking_lot::Mutex::new(None)),
@@ -3168,6 +3250,7 @@ impl App {
 
         // Before the font borrow below, like everything else the model reads.
         let notice = self.pairing_notice();
+        let approval = self.approval_model();
 
         let Some(window) = self.window.as_ref() else { return };
         let Some(fonts) = self.fonts.as_mut() else { return };
@@ -3446,6 +3529,7 @@ impl App {
             settings: settings_model,
             launcher: launcher_model,
             notice,
+            approval,
         };
 
         let colors = self.chrome_colors;
@@ -3528,6 +3612,12 @@ impl App {
             self.mark_chrome_dirty();
         }
         match (region, button) {
+            (HitRegion::ApprovalApprove, MouseButton::Left) => self.decide_approval(true),
+            (HitRegion::ApprovalDeny, MouseButton::Left) => self.decide_approval(false),
+            // The panel (and its full-window scrim) swallows everything
+            // else: a security prompt neither dismisses on a stray click
+            // nor lets one fall through to the grid beneath it.
+            (HitRegion::ApprovalPanel, _) => {}
             (HitRegion::Tab(addr), MouseButton::Left) => {
                 // The Profiles chip is an app tab, not a session: clicking
                 // it shows its pane. Through the open path (idempotent) so
@@ -5355,6 +5445,44 @@ impl App {
 
     /// The chrome's notice line, while an approval is pending and its code
     /// still worth comparing.
+    /// The approval modal's content, while a device is asking and the code
+    /// is still worth comparing. `None` once dismissed (Esc), expired, or
+    /// resolved — the modal closes by this returning `None`, which is what
+    /// makes every close path one rule.
+    fn approval_model(&self) -> Option<crate::chrome::model::ApprovalModel> {
+        let cell = self.approval.lock();
+        let r = cell.as_ref()?;
+        if r.dismissed {
+            return None;
+        }
+        let left = r.expires_at.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        Some(crate::chrome::model::ApprovalModel {
+            label: r.label.clone(),
+            remote: r.remote.clone(),
+            code: r.code.clone(),
+            expires: format!("code expires in {}m", left.as_secs().div_ceil(60)),
+        })
+    }
+
+    /// Answer the modal. The cell empties immediately — the person decided,
+    /// and a modal that lingers while a socket round-trips invites a second
+    /// click — and the daemon's tombstone push reconciles the optimistic
+    /// close if the delivery fails (the request then still shows at the
+    /// daemon's own prompt).
+    fn decide_approval(&mut self, approve: bool) {
+        let taken = self.approval.lock().take();
+        let Some(request) = taken else { return };
+        if let Some(fleet) = self.fleet.as_ref() {
+            fleet.decide_pairing(request.client, approve);
+        } else {
+            tracing::warn!("no fleet model; the pairing decision has nowhere to go");
+        }
+        self.mark_chrome_dirty();
+    }
+
     fn pairing_notice(&self) -> Option<String> {
         let cell = self.pairing.lock();
         let prompt = cell.as_ref()?;
@@ -7059,8 +7187,47 @@ impl ApplicationHandler<Wakeup> for App {
         let fleet = crate::fleet::FleetModel::start(self.proxy.clone(), local);
         if let Some(route) = self.route.clone() {
             // One watching connection to the window's daemon keeps its
-            // session list fresh through pushes.
-            fleet.watch(move || route.dialer());
+            // session list fresh through pushes — and carries the approval
+            // queue, whose pushes raise the modal.
+            let approval = Arc::clone(&self.approval);
+            let proxy = self.proxy.clone();
+            fleet.watch(
+                move || route.dialer(),
+                move |event| {
+                    let proxy = proxy.clone();
+                    let post: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                        let _ = proxy.send_event(Wakeup::PairingChanged);
+                    });
+                    match event {
+                        crate::fleet::PairingEvent::Requested {
+                            client,
+                            label,
+                            remote,
+                            code,
+                            expires_in_secs,
+                        } => arm_approval_request(
+                            &approval,
+                            client,
+                            label,
+                            remote,
+                            code,
+                            expires_in_secs,
+                            post,
+                        ),
+                        // Someone answered — at the daemon's stdin, in
+                        // another window — or the device gave up. Either
+                        // way there is nothing left to decide.
+                        crate::fleet::PairingEvent::Resolved { client } => {
+                            let mut cell = approval.lock();
+                            if cell.as_ref().is_some_and(|r| r.client == client) {
+                                *cell = None;
+                                drop(cell);
+                                post();
+                            }
+                        }
+                    }
+                },
+            );
         }
         self.fleet = Some(fleet);
         // `--screen fleet` showed the screen before the fleet model existed,
@@ -7337,6 +7504,24 @@ impl ApplicationHandler<Wakeup> for App {
                 // a command -- is bad enough to check twice.
                 if self.ime.composing() {
                     return;
+                }
+
+                // The approval modal owns exactly one key: Esc dismisses
+                // it, deciding nothing — the daemon times out the request as
+                // it always has. Every other key falls through, because the
+                // modal pops up on its own schedule and must not eat the
+                // keystrokes of whoever was mid-command underneath it.
+                {
+                    use winit::keyboard::{Key, NamedKey};
+                    if matches!(&event.logical_key, Key::Named(NamedKey::Escape))
+                        && self.approval_model().is_some()
+                    {
+                        if let Some(r) = self.approval.lock().as_mut() {
+                            r.dismissed = true;
+                        }
+                        self.mark_chrome_dirty();
+                        return;
+                    }
                 }
 
                 // The open launcher owns the keyboard, like every overlay.
@@ -9480,7 +9665,7 @@ mod tuning_tests {
 
 #[cfg(test)]
 mod pairing_tests {
-    use super::{arm_pairing_prompt, PairingCell};
+    use super::{arm_approval_request, arm_pairing_prompt, ApprovalCell, PairingCell};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -9552,6 +9737,69 @@ mod pairing_tests {
             cell.lock().as_ref().is_some_and(|p| p.code == "222222"),
             "the old clock took the new prompt with it; the person is now \
              comparing a code the window no longer shows"
+        );
+    }
+
+    #[test]
+    fn an_expired_approval_request_clears_itself_and_wakes_the_ui() {
+        // The inbound cell rides the same clock as #208's outbound one, and
+        // must: the modal is chrome, the chrome is cached, and a request
+        // whose device long since gave up would otherwise sit on screen
+        // asking a question that can no longer be answered.
+        let cell: ApprovalCell = Arc::new(parking_lot::Mutex::new(None));
+        let woken = Arc::new(AtomicUsize::new(0));
+        let posts = Arc::clone(&woken);
+        arm_approval_request(
+            &cell,
+            zest_proto::ClientId::from_bytes([0xd0; 32]),
+            "andy-phone".into(),
+            "192.168.1.42:60123".into(),
+            "481502".into(),
+            1,
+            Arc::new(move || {
+                posts.fetch_add(1, Ordering::Release);
+            }),
+        );
+        assert!(
+            cell.lock().as_ref().is_some_and(|r| r.code == "481502" && !r.dismissed),
+            "arming must store the request, undismissed, for the modal to read"
+        );
+        assert!(
+            wait_until(Duration::from_secs(10), || cell.lock().is_none()),
+            "the expired request never removed itself — the modal would ask \
+             for ever about a device that already gave up"
+        );
+        assert!(
+            woken.load(Ordering::Acquire) >= 2,
+            "the removal must wake the UI too, or the cached chrome keeps \
+             the modal painted"
+        );
+    }
+
+    #[test]
+    fn an_unknown_expiry_assumes_the_pairing_window_rather_than_never_closing() {
+        // `expires_in_secs: 0` is an older daemon saying "field unknown".
+        // The modal must still get a deadline — the daemon's own approval
+        // window — because a modal with no deadline never self-clears.
+        let cell: ApprovalCell = Arc::new(parking_lot::Mutex::new(None));
+        arm_approval_request(
+            &cell,
+            zest_proto::ClientId::from_bytes([0xd1; 32]),
+            "old-daemon-device".into(),
+            "10.0.0.7:50123".into(),
+            "111111".into(),
+            0,
+            Arc::new(|| {}),
+        );
+        let deadline = cell.lock().as_ref().map(|r| r.expires_at).expect("stored");
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            left > Duration::from_secs(30),
+            "an unknown expiry must not read as already-expired (got {left:?})"
+        );
+        assert!(
+            left <= zest_mesh::pairing::APPROVAL_TIMEOUT,
+            "…and must not outlive the daemon's own window (got {left:?})"
         );
     }
 }

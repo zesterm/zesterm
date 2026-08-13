@@ -415,6 +415,18 @@ export interface PairingRequested {
   readonly label: string;
   readonly code: string;
   readonly remote: string;
+  /**
+   * Seconds the code stays comparable, mirroring `auth_pending`. `0` from a
+   * daemon that predates the field — unknown, not already-expired.
+   */
+  readonly expires_in_secs: number;
+  /**
+   * `true` is the tombstone: the request left the queue (answered, expired,
+   * or the device hung up), so close whatever prompt showed it. A marker
+   * rather than a second message so an older peer never meets an unknown
+   * tag; a tombstone carries only `client`.
+   */
+  readonly resolved: boolean;
 }
 
 export interface SessionInfo {
@@ -582,6 +594,13 @@ export function parseHostMessage(v: unknown): HostMessage {
         label: str(o['label'], 'pairing_requested.label'),
         code: str(o['code'], 'pairing_requested.code'),
         remote: str(o['remote'], 'pairing_requested.remote'),
+        // `#[serde(default)]` on the host: absent from an older daemon.
+        expires_in_secs:
+          o['expires_in_secs'] === undefined
+            ? 0
+            : num(o['expires_in_secs'], 'pairing_requested.expires_in_secs'),
+        resolved:
+          o['resolved'] === undefined ? false : bool(o['resolved'], 'pairing_requested.resolved'),
       };
     case 'sessions':
       return {

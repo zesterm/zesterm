@@ -148,6 +148,7 @@ mod tests {
             nonce: crate::Nonce32::from_bytes([9; 32]),
             dh: crate::Pub32::from_bytes([7; 32]),
             watch_sessions: false,
+            watch_pairings: false,
         }
     }
 

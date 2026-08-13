@@ -759,6 +759,27 @@ pub struct ChromeModel {
     /// the other machine (#190). Drawn pinned to the top of the grid area,
     /// under the modal overlays; `None` draws nothing.
     pub notice: Option<String>,
+    /// The pairing approval modal (ROADMAP M4): a device is waiting for a
+    /// person at THIS machine to let it in. Drawn over everything, including
+    /// the other modals — its text is a security decision, and chrome that
+    /// could cover it would be chrome that could spoof it by omission.
+    pub approval: Option<ApprovalModel>,
+}
+
+/// What the approval modal says. Composed by the app (which holds the
+/// request and its clock); layout only draws it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ApprovalModel {
+    /// The asking device's self-declared name ("andy-phone") — signed into
+    /// the transcript, so it is at least the device's own claim.
+    pub label: String,
+    /// Where it is connecting from ("192.168.1.42:60123").
+    pub remote: String,
+    /// The six-digit matching code; the person compares it with the one on
+    /// the asking device's screen.
+    pub code: String,
+    /// Pre-formatted validity line ("code expires in 2m").
+    pub expires: String,
 }
 
 /// The knobs `layout` reads, resolved to physical pixels by the caller.

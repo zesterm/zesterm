@@ -329,6 +329,13 @@ pub fn layout(
         // carries no ranking.
         launcher_overlay(launcher, model.hover, colors, m, measure, &mut out);
     }
+    if let Some(approval) = &model.approval {
+        // Above every other overlay, deliberately: unlike them it opens on
+        // the *network's* schedule, not the user's, so it cannot rely on the
+        // app's one-overlay-at-a-time rule — and its text is a security
+        // decision nothing may cover.
+        approval_overlay(approval, model.hover, colors, m, measure, &mut out);
+    }
     // Dead last, after the modals, and that ordering is the feature: lookups
     // walk the map backwards, so the window's own edge outranks a palette
     // scrim. A window you cannot resize while an overlay is open would be a
@@ -567,6 +574,141 @@ const NOTICE_TOP: f32 = 8.0;
 /// here would steal the terminal's own top rows from selection. It rides the
 /// grid area rather than the strip because a six-digit code has to be
 /// readable, and a 34px chip cannot carry a sentence.
+// The pairing approval modal (ROADMAP M4), logical px.
+const APPROVAL_W: f32 = 460.0;
+const APPROVAL_H: f32 = 190.0;
+const APPROVAL_PAD: f32 = 20.0;
+const APPROVAL_RADIUS: f32 = 12.0;
+const APPROVAL_BTN_W: f32 = 96.0;
+const APPROVAL_BTN_H: f32 = 30.0;
+const APPROVAL_BTN_GAP: f32 = 10.0;
+/// The code's type size — the one thing on the panel a person actually
+/// compares, so it dwarfs everything else on it.
+const APPROVAL_CODE_PX: f32 = 28.0;
+
+/// The pairing approval modal: a device is asking, a person answers.
+///
+/// Drawn after every other overlay (see the call site) with a dimming scrim
+/// that swallows and does not dismiss — the buttons and Esc are the only
+/// exits, because "clicked it away by accident" must not be a state a
+/// security prompt can reach.
+fn approval_overlay(
+    approval: &super::model::ApprovalModel,
+    hover: Option<HitRegion>,
+    colors: &ChromeColors,
+    m: &ChromeMetrics,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+    out: &mut ChromeLayout,
+) {
+    let s = m.scale;
+    let no_clip = [0.0, 0.0, m.width, m.height];
+
+    out.rects.push(RectInstance::filled(no_clip, colors.scrim, no_clip));
+    out.hit.push(no_clip, HitRegion::ApprovalPanel);
+
+    let w = (APPROVAL_W * s).min((m.width - 2.0 * EDGE_PAD * s).max(0.0));
+    let h = APPROVAL_H * s;
+    let x = (m.width - w) / 2.0;
+    // The picker's band, roughly: high enough to read as a prompt, not a
+    // sheet growing out of the grid.
+    let y = ((m.height - h) * 0.32).max(0.0);
+    let panel = [x, y, w, h];
+    out.rects.push(RectInstance {
+        radii: [APPROVAL_RADIUS * s; 4],
+        border: colors.line,
+        border_width: HAIRLINE * s,
+        shadow_blur: 20.0 * s,
+        shadow_alpha: colors.shadow_alpha,
+        ..RectInstance::filled(panel, colors.panel_bg, no_clip)
+    });
+    out.hit.push(panel, HitRegion::ApprovalPanel);
+
+    let pad = APPROVAL_PAD * s;
+    // The question, with the device's own claim of a name and where it is
+    // dialling from — the person's entire decision input, which is why the
+    // label rides inside the signed transcript.
+    let title = format!("Allow {} ({}) to attach?", approval.label, approval.remote);
+    let title_px = UI_BODY * s;
+    out.texts.push(TextRun {
+        text: title,
+        pos: [x + pad, y + pad + title_px * 0.8],
+        max_width: w - 2.0 * pad,
+        color: colors.text_active,
+        clip: panel,
+        px: title_px,
+        bold: true,
+        tracking: 0.0,
+    });
+
+    // The code, huge and centered: the person compares it digit by digit
+    // with the asking device's screen.
+    let code_px = APPROVAL_CODE_PX * s;
+    let code_w = measure(&approval.code, code_px, true, 0.0);
+    out.texts.push(TextRun {
+        text: approval.code.clone(),
+        pos: [x + (w - code_w) / 2.0, y + 62.0 * s + code_px * 0.72],
+        max_width: w - 2.0 * pad,
+        color: colors.accent,
+        clip: panel,
+        px: code_px,
+        bold: true,
+        tracking: 2.0 * s,
+    });
+    let sub = format!("compare this code on the asking device \u{b7} {}", approval.expires);
+    let sub_px = UI_STATUS * s;
+    let sub_w = measure(&sub, sub_px, false, 0.0);
+    out.texts.push(TextRun {
+        text: sub,
+        pos: [x + (w - sub_w).max(0.0) / 2.0, y + 104.0 * s + sub_px * 0.72],
+        max_width: w - 2.0 * pad,
+        color: colors.text_faint,
+        clip: panel,
+        px: sub_px,
+        bold: false,
+        tracking: 0.0,
+    });
+
+    // Deny, then Approve at the far right — the affirmative in the corner
+    // position every dialog on every platform has taught the hand.
+    let btn_h = APPROVAL_BTN_H * s;
+    let btn_w = APPROVAL_BTN_W * s;
+    let by = y + h - pad - btn_h;
+    for (i, (label, region, ink)) in [
+        ("Deny", HitRegion::ApprovalDeny, colors.danger),
+        ("Approve", HitRegion::ApprovalApprove, colors.accent),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let bx = x + w - pad - btn_w - (1 - i) as f32 * (btn_w + APPROVAL_BTN_GAP * s);
+        let rect = [bx, by, btn_w, btn_h];
+        let hovered = hover == Some(region);
+        out.rects.push(RectInstance {
+            radii: [7.0 * s; 4],
+            border: ink,
+            border_width: HAIRLINE * s,
+            ..RectInstance::filled(
+                rect,
+                if hovered { colors.tab_hover_bg } else { colors.panel_bg },
+                panel,
+            )
+        });
+        let label_px = UI_BODY * s;
+        let lw = measure(label, label_px, false, 0.0);
+        out.texts.push(TextRun {
+            text: label.into(),
+            pos: [bx + (btn_w - lw) / 2.0, baseline_in(by, btn_h, label_px)],
+            max_width: btn_w,
+            color: ink,
+            clip: panel,
+            px: label_px,
+            bold: false,
+            tracking: 0.0,
+        });
+        out.hit.push(rect, region);
+    }
+}
+
 fn notice_bar(
     text: &str,
     area: [f32; 4],
@@ -2475,6 +2617,7 @@ mod tests {
             settings: None,
             launcher: None,
             notice: None,
+            approval: None,
         }
     }
 
@@ -3604,6 +3747,72 @@ mod tests {
                 "{link:?} must ink a rect in the strip with its state colour"
             );
         }
+    }
+
+    #[test]
+    fn the_approval_modal_owns_the_window_and_its_buttons_answer() {
+        // ROADMAP M4's modal: a device is asking to attach and a person at
+        // this machine decides. Three properties carry the security of it —
+        // the code is drawn (it is the person's entire comparison input),
+        // the two buttons answer exactly where they are drawn, and a click
+        // anywhere else lands on the modal's own panel/scrim rather than
+        // falling through to a grid that would treat it as a selection.
+        use super::super::model::ApprovalModel;
+        let mut mo = model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+        mo.approval = Some(ApprovalModel {
+            label: "andy-phone".into(),
+            remote: "192.168.1.42:60123".into(),
+            code: "481502".into(),
+            expires: "code expires in 2m".into(),
+        });
+        let m = metrics(1200.0, 800.0, 1.0);
+        let l = layout(&mo, &colors(), &m, &mut measure);
+
+        assert!(
+            l.texts.iter().any(|t| t.text == "481502"),
+            "the matching code must be drawn — it is what the person compares"
+        );
+        assert!(
+            l.texts.iter().any(|t| t.text.contains("andy-phone")
+                && t.text.contains("192.168.1.42")),
+            "the prompt names who is asking and from where — the decision input"
+        );
+
+        let find = |region: HitRegion| -> Option<(f32, f32)> {
+            for y in 0..800 {
+                for x in (0..1200).step_by(4) {
+                    if l.hit.hit(x as f32, y as f32) == Some(region) {
+                        return Some((x as f32, y as f32));
+                    }
+                }
+            }
+            None
+        };
+        let approve = find(HitRegion::ApprovalApprove).expect("Approve answers somewhere");
+        let deny = find(HitRegion::ApprovalDeny).expect("Deny answers somewhere");
+        assert!(
+            deny.0 < approve.0,
+            "Approve sits rightmost — the affirmative corner every dialog trains"
+        );
+
+        // Modal means modal: away from the buttons, the panel/scrim answers,
+        // so nothing reaches the grid or the strip beneath (the resize edges
+        // at the window's rim are the deliberate exception).
+        for (x, y) in [(600.0, 400.0), (30.0, 700.0), (1100.0, 100.0)] {
+            assert_eq!(
+                l.hit.hit(x, y),
+                Some(HitRegion::ApprovalPanel),
+                "({x},{y}) must land on the modal, not fall through it"
+            );
+        }
+
+        // And absent, nothing of it remains.
+        mo.approval = None;
+        let quiet = layout(&mo, &colors(), &m, &mut measure);
+        assert!(
+            quiet.texts.iter().all(|t| t.text != "481502"),
+            "a resolved request leaves no trace of its code"
+        );
     }
 
     #[test]

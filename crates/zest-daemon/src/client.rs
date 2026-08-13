@@ -85,6 +85,21 @@ pub struct Halves {
 /// [`DaemonClient::connect_with`].
 pub type OnPending<'a> = &'a dyn Fn(&str, u32);
 
+/// What this connection's `Hello` subscribes to.
+///
+/// A struct rather than two more `bool` parameters, so the flag a caller
+/// does not want never appears at its call site — and so the next
+/// subscription is a field here instead of a signature change everywhere.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Watch {
+    /// `Hello.watch_sessions`: push the session list when it changes.
+    pub sessions: bool,
+    /// `Hello.watch_pairings`: push devices waiting for approval. Honoured
+    /// on loopback only — a daemon that will not take this connection's
+    /// `PairingDecision` silently never subscribes it either.
+    pub pairings: bool,
+}
+
 /// An authenticated connection to one daemon.
 pub struct DaemonClient {
     read: Box<dyn Read + Send>,
@@ -118,7 +133,32 @@ impl DaemonClient {
         expect_host: Option<zest_proto::HostId>,
         watch_sessions: bool,
     ) -> Result<Self, DaemonError> {
-        Self::connect_with(read, write, identity, label, expect_host, watch_sessions, None)
+        Self::connect_impl(
+            read,
+            write,
+            identity,
+            label,
+            expect_host,
+            Watch { sessions: watch_sessions, pairings: false },
+            None,
+        )
+    }
+
+    /// [`Self::connect`], subscribing per `watch`.
+    ///
+    /// The fleet watcher's constructor: one loopback connection that hears
+    /// both the session list and the approval queue. Separate from `connect`
+    /// so its two flags do not spread a growing parameter list through every
+    /// caller that wants neither.
+    pub fn connect_watching(
+        read: Box<dyn Read + Send>,
+        write: Box<dyn Write + Send>,
+        identity: &Arc<ClientIdentity>,
+        label: &str,
+        expect_host: Option<zest_proto::HostId>,
+        watch: Watch,
+    ) -> Result<Self, DaemonError> {
+        Self::connect_impl(read, write, identity, label, expect_host, watch, None)
     }
 
     /// [`Self::connect`], with a listener for the approval wait.
@@ -136,6 +176,26 @@ impl DaemonClient {
         label: &str,
         expect_host: Option<zest_proto::HostId>,
         watch_sessions: bool,
+        on_pending: Option<OnPending<'_>>,
+    ) -> Result<Self, DaemonError> {
+        Self::connect_impl(
+            read,
+            write,
+            identity,
+            label,
+            expect_host,
+            Watch { sessions: watch_sessions, pairings: false },
+            on_pending,
+        )
+    }
+
+    fn connect_impl(
+        read: Box<dyn Read + Send>,
+        write: Box<dyn Write + Send>,
+        identity: &Arc<ClientIdentity>,
+        label: &str,
+        expect_host: Option<zest_proto::HostId>,
+        watch: Watch,
         on_pending: Option<OnPending<'_>>,
     ) -> Result<Self, DaemonError> {
         let mut client = Self {
@@ -156,7 +216,8 @@ impl DaemonClient {
             label: label.to_string(),
             nonce: zest_proto::Nonce32::from_bytes(*hs.nonce().as_bytes()),
             dh: zest_proto::Pub32::from_bytes(hs.dh().0),
-            watch_sessions,
+            watch_sessions: watch.sessions,
+            watch_pairings: watch.pairings,
         })?;
 
         // Challenge -> Auth -> Welcome. Two round trips on connect, which on a
@@ -363,6 +424,20 @@ impl DaemonClient {
                 other => discarded("Keyframe", &other),
             }
         }
+    }
+
+    /// Answer a pending pairing request: allow (or refuse) `client` to attach.
+    ///
+    /// Fire-and-forget on the wire, like `close`: the daemon sends no reply
+    /// on success. It is honoured on a loopback connection only — elsewhere
+    /// the daemon answers with an `Error` and decides nothing, which the
+    /// watcher's read loop will surface as a log line rather than a shell.
+    pub fn decide_pairing(
+        &mut self,
+        client: zest_proto::ClientId,
+        approve: bool,
+    ) -> Result<(), DaemonError> {
+        self.send(&ClientMessage::PairingDecision { client, approve })
     }
 
     /// End a session: the daemon hangs its child up and removes it.

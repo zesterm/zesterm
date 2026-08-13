@@ -1790,8 +1790,22 @@ on each host. → ADR-005, ADR-006.
       `AttachOptions::on_pending` callback (redials included, since a host
       that forgot the device pends again), and the window shows *"waiting for
       approval on \<host\> — code 481502"* as a chrome notice while the far
-      daemon holds the connect. The approval **modal** — the answering side —
-      is still open, as is the browser parity it shares with the bullet above.
+      daemon holds the connect.
+
+      **The answering side is now a desktop modal** (#190, second half). The
+      fleet watcher's loopback connection subscribes with
+      `Hello.watch_pairings`; the daemon's `PairingQueue` gained watchers
+      (the `Registry` generation shape) and pushes `PairingRequested` —
+      including requests already waiting when the app connects, and a
+      `resolved` tombstone when one leaves the queue, so a modal answered at
+      the stdin prompt closes everywhere else. The modal shows
+      "Allow <label> (<remote>) to attach?" with the code large enough to
+      compare, Approve/Deny buttons (the decision travels as the
+      `PairingDecision` loopback already honours, over a fresh loopback
+      connection), Esc to dismiss without deciding, and #208's clock so an
+      expired request closes itself. Subscription and pushes are gated by
+      `may_approve_devices`, so the codes never leave the machine — a test
+      pins that a LAN connection asking to watch hears nothing.
 
       **The browser's half of the key has landed.** A `ClientSigner` seam in
       `@zesterm/auth` — `seedSigner` over a seed this process holds, or
