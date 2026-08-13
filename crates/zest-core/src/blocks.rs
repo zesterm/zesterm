@@ -164,7 +164,31 @@ impl BlockIndex {
     }
 
     /// Begin a block at a prompt (OSC 133;A).
+    ///
+    /// A trailing block that is still at its prompt is **moved** to the new
+    /// one rather than left behind. Only one prompt is ever showing, and a
+    /// prompt that ran nothing is not history — an empty Enter, a `^C` and any
+    /// redraw all re-emit `A` with no `C` and no `D` to close what came
+    /// before, because zsh emits `C` from preexec and `D` only when something
+    /// ran. Appending instead left a `Prompt` block per keystroke-that-wasn't,
+    /// each with no `end_line`; [`Block::contains`] reads an absent end as
+    /// "everything below", so the first one claimed the rest of the session
+    /// and the live prompt was rendered inside it. (#193)
+    ///
+    /// Confined to a block that produced nothing: anything with an
+    /// `output_line` is a command that ran and stays exactly where it is.
     pub fn begin_prompt(&mut self, line: LineId, cwd: String) -> BlockId {
+        if let Some(b) = self.blocks.last_mut() {
+            if matches!(b.state, BlockState::Prompt) && b.output_line.is_none() {
+                b.prompt_line = line;
+                b.cwd = cwd;
+                // The old prompt's text was read back off the grid into
+                // `command` by nothing yet — but a re-anchored block must not
+                // carry a half-typed line that was abandoned with it.
+                b.command = String::new();
+                return b.id;
+            }
+        }
         let id = BlockId(self.next_id);
         self.next_id += 1;
         self.blocks.push(Block {

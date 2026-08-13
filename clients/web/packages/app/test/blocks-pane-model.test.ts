@@ -548,3 +548,50 @@ test('paneModel over blocks-zsh while reconnecting: the open block reads interru
   );
   assert.equal(items[items.length - 1]?.kind, 'overlay', 'and the pane carries the overlay');
 });
+
+test('an abandoned prompt renders as rows, never as a card that claims to be running', () => {
+  // A prompt that ran nothing is not a command, and `headerOf` splits on
+  // `finished ? exit : running` — so one rendered as a header got a '·' for
+  // the command it never had, a warn rail and a running counter. On a zsh
+  // session idle for an hour that read as six commands in flight. (#193)
+  //
+  // `zest-core` no longer produces these, and a client still meets them from
+  // any host that has not been restarted. The honest rendering is the prompt's
+  // own text: nothing the host sent may vanish, and nothing may be invented.
+  const view = {
+    scrollback: [],
+    rows: [
+      synthRow(0n, '❯ '),
+      synthRow(1n, '❯ echo hi'),
+      synthRow(2n, 'hi'),
+      synthRow(3n, '❯ '),
+    ],
+    blocks: [
+      synthBlock(0, 0n, null, null, { state: 'prompt' }, ''),
+      synthBlock(1, 1n, 2n, 2n, { state: 'finished', exit_code: 0 }, 'echo hi'),
+      synthBlock(2, 3n, null, null, { state: 'prompt' }, ''),
+    ],
+    cursor: CURSOR,
+    attrs: new Map(),
+  };
+
+  const items = paneModel(view, new Set(), 'live', NOW);
+  assert.deepEqual(
+    headers(items).map((h) => h.blockId),
+    [1],
+    'only the command that actually ran gets a card',
+  );
+
+  const rendered = items
+    .flatMap((i) => (i.kind === 'rows' || i.kind === 'prompt' || i.kind === 'output' ? i.rows : []))
+    .map((r) => r.line);
+  assert.ok(rendered.includes(0n), "the abandoned prompt's row is still drawn, as text");
+
+  const trailing = items[items.length - 1];
+  assert.equal(trailing?.kind, 'prompt', 'the live prompt is still the prompt line');
+  assert.deepEqual(
+    trailing?.kind === 'prompt' ? trailing.rows.map((r) => r.line) : null,
+    [3n],
+    'and it holds the row the caret is on',
+  );
+});
