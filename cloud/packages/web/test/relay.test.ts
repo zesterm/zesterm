@@ -188,11 +188,11 @@ test('the ticket names the host, the account and the session, and dies in thirty
       aud: 'relay',
       host: MAC,
       user: 'user-a',
-      dev: await sessionIdOf(cookie.slice(SESSION_COOKIE.length + 1)),
+      dev: `session:${await sessionIdOf(cookie.slice(SESSION_COOKIE.length + 1))}`,
       iat: NOW,
       exp: NOW + ATTACH_TICKET_TTL_MS,
     },
-    '`dev` is sha256(cookie) — the sessions row id, which is not a credential — because nothing in the schema links a session to a device',
+    '`dev` is the prefixed sha256(cookie) — the sessions row id, which is not a credential — because nothing in the schema links a session to a device; the prefix keeps it distinguishable from a real device id, which is also 64 hex',
   );
 
   assert.ok(

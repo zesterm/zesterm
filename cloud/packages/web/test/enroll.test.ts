@@ -12,7 +12,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { SESSION_COOKIE } from '@zesterm/cloud-shared';
+import { looksLikeMachineToken, SESSION_COOKIE } from '@zesterm/cloud-shared';
 
 import { ENROLL_CODE_ALPHABET, ENROLL_CODE_LENGTH, ENROLL_CODE_TTL_MS } from '../src/enroll/codes.ts';
 import { createSession } from '../src/db/sessions.ts';
@@ -141,15 +141,25 @@ test('a machine that holds the key is enrolled into the code owner’s account',
   );
 
   assert.equal(res?.status, 200);
-  assert.deepEqual(await res!.json(), {
-    host: {
-      id: key.id,
-      label: 'andy-mac',
-      platform: 'macos',
-      enrolledAt: NOW,
-      lastSeenAt: null,
-    },
+  const answer = (await res!.json()) as { host: unknown; token: string; account: string };
+  assert.deepEqual(answer.host, {
+    id: key.id,
+    label: 'andy-mac',
+    platform: 'macos',
+    enrolledAt: NOW,
+    lastSeenAt: null,
   });
+  // The shape `zest-daemon`'s `enroll()` hard-requires: a non-empty `token` it
+  // can store, and an `account` to print. The token itself is random, so what
+  // is pinned is that it exists and is never stored in the clear.
+  assert.ok(looksLikeMachineToken(answer.token), 'the claim must hand the machine a credential');
+  assert.equal(answer.account, 'user-a', 'the daemon prints "enrolled with <account>"');
+  const stored = rowOf<{ n: number }>(
+    db,
+    `SELECT COUNT(*) AS n FROM machine_tokens WHERE id = ?`,
+    answer.token,
+  );
+  assert.deepEqual(stored, { n: 0 }, 'only the hash of a token may ever reach storage');
 
   const row = rowOf(db, `SELECT user_id, label FROM hosts WHERE id = ?`, key.id);
   assert.deepEqual(row, { user_id: 'user-a', label: 'andy-mac' });

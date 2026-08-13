@@ -41,6 +41,9 @@ export {
   newSessionToken,
   sessionIdOf,
   looksLikeSessionToken,
+  MACHINE_TOKEN_BYTES,
+  newMachineToken,
+  looksLikeMachineToken,
 } from './tokens.ts';
 
 export {

@@ -6,7 +6,9 @@ import {
   fromBase64Url,
   fromHex,
   hex,
+  looksLikeMachineToken,
   looksLikeSessionToken,
+  newMachineToken,
   newSessionToken,
   OAUTH_COOKIE,
   oauthStateCookie,
@@ -72,6 +74,22 @@ test('a malformed token is rejected before any database round trip', () => {
   assert.ok(!looksLikeSessionToken('short'));
   assert.ok(!looksLikeSessionToken(toBase64Url(new Uint8Array(16))), 'wrong length');
   assert.ok(!looksLikeSessionToken('!'.repeat(64)), 'not base64url');
+});
+
+test('machine tokens carry the greppable prefix, and neither shape passes for the other', () => {
+  const machine = newMachineToken();
+  assert.ok(machine.startsWith('zt1_'), 'the prefix is what secret scanners key on');
+  assert.ok(looksLikeMachineToken(machine));
+  assert.ok(!looksLikeMachineToken(machine.slice(4)), 'the prefix is part of the shape');
+  assert.ok(!looksLikeMachineToken(`zt1_${toBase64Url(new Uint8Array(16))}`), 'wrong length');
+  assert.ok(
+    !looksLikeSessionToken(machine),
+    'a machine token in a cookie jar must fail shape, not resolve',
+  );
+  assert.ok(
+    !looksLikeMachineToken(newSessionToken()),
+    'and a stolen cookie value is not a bearer credential',
+  );
 });
 
 test('a signed payload round-trips, and a tampered one does not', async () => {
