@@ -124,6 +124,8 @@ fn page_frame(
     y + 26.0 * s
 }
 
+/// Returns the profiles editor's open-dropdown anchor, when that screen has
+/// one — the #182 contract; the card screens float nothing.
 pub fn screen_overlay(
     screen: &ScreenModel,
     area: [f32; 4],
@@ -132,10 +134,16 @@ pub fn screen_overlay(
     s: f32,
     measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
     out: &mut ChromeLayout,
-) {
+) -> Option<[f32; 4]> {
     match screen {
-        ScreenModel::Fleet { cards } => fleet(cards, area, colors, s, measure, out),
-        ScreenModel::Themes { cards } => themes(cards, area, colors, s, measure, out),
+        ScreenModel::Fleet { cards } => {
+            fleet(cards, area, colors, s, measure, out);
+            None
+        }
+        ScreenModel::Themes { cards } => {
+            themes(cards, area, colors, s, measure, out);
+            None
+        }
         // Hover matters only here (the Delete button's danger tint); the
         // card screens keep the design's instant, hoverless surfaces.
         ScreenModel::Profiles(model) => super::profiles_screen::profiles_screen(

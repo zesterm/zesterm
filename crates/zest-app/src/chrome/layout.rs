@@ -254,11 +254,14 @@ pub fn layout(
             &mut out,
         );
     }
+    let mut screen_menu_anchor = None;
     if let Some(screen) = &model.screen {
         // Over the grid (and over the settings tab's content — Esc returns),
         // under the modals: a screen is window content, not an overlay, so
-        // the picker can still open above it.
-        super::screens::screen_overlay(
+        // the picker can still open above it. The profiles editor's open
+        // dropdown comes back as an anchor and draws below, like the
+        // settings tab's (#182).
+        screen_menu_anchor = super::screens::screen_overlay(
             screen,
             model.grid_area,
             colors,
@@ -272,10 +275,25 @@ pub fn layout(
     // text drawn before an overlay's panel covers it.
     out.overlay_rects_at = out.rects.len();
     out.overlay_texts_at = out.texts.len();
-    // The settings dropdown first: it floats over the tab's content, and
-    // the modals (picker, palette) still open above it.
+    // The dropdowns first: they float over their screen's content, and the
+    // modals (picker, palette) still open above them.
     if let (Some(settings), Some(anchor)) = (&model.settings, settings_menu_anchor) {
         if let Some(menu) = &settings.menu {
+            super::settings_screen::dropdown_menu(
+                menu,
+                anchor,
+                model.grid_area,
+                colors,
+                m.scale,
+                measure,
+                &mut out,
+            );
+        }
+    }
+    if let (Some(super::model::ScreenModel::Profiles(p)), Some(anchor)) =
+        (&model.screen, screen_menu_anchor)
+    {
+        if let Some(menu) = &p.menu {
             super::settings_screen::dropdown_menu(
                 menu,
                 anchor,
