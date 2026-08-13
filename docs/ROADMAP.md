@@ -126,6 +126,13 @@ Two rules that are not obvious and are load-bearing:
   mapped — it names a column as well as a line, and rewrapping moves both —
   while command blocks are re-anchored, because losing the block for a build
   because the window was widened while it ran is the case blocks exist for.
+- **The grid is resized before the pty**, because on Windows a pty resize is
+  answered by a full-viewport repaint and the reader parses it under the same
+  lock. Told first, the pty sends back a screen laid out for the new size and it
+  lands on a grid still at the old one — after which a perfectly correct reflow
+  and a perfectly correct re-anchor still leave every block naming somebody
+  else's text. The lock is released before the call rather than held across it;
+  holding it is the `ClosePseudoConsole` deadlock again. (#200)
 
 ### The gap to M3
 
@@ -1968,6 +1975,24 @@ three facts about Cloudflare that changed after #59 was written.
       to clear. Per-client *reflow* stayed off the table on purpose: one pty,
       one layout — the program inside draws for exactly one size, so
       per-client can only ever mean viewports over one shared grid.
+- [x] **Resizing stops corrupting the block index** (#200). Dragging a window
+      left a directory listing split across two block cards, the live prompt
+      drawn inside a finished block halfway up the pane, and the caret alone on
+      a blank line — "the terminal is dead" again, and host-side, since a fresh
+      attach returned the same wrong index. Two causes, neither of them the
+      reflow or the re-anchor, both of which round-trip exactly:
+      **the pty was resized before the grid**, so ConPTY's answer — a repaint of
+      the whole viewport, laid out for the new size — could be parsed against
+      the old shape by the reader thread; and **an erase reaching the last
+      column left `Row::wrapped` set**, which the repaint hits on every row it
+      shortens, so the *next* width change rejoined two rows that were never one
+      logical line. Both are pinned by tests rather than by comments: a probe
+      transport in each host asserting the order (with `try_lock`, so the
+      deadlocking alternative is a named failure instead of a hang), and a
+      `conpty_repaint` helper in `zest-core` that emits the literal bytes #205
+      measured. The other half of the original report — a width change costing
+      the client its scrollback and nothing asking for it back — landed
+      separately as #209. No wire change in either.
 - [ ] **The relay Worker and its Durable Object.** A control link the daemon
       parks, an attach ticket the browser carries on `Sec-WebSocket-Protocol`
       (not the query string — a secret in a URL lands in referrers, edge logs

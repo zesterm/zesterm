@@ -10,7 +10,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test \"test/**/*.test.ts\"",
-    "start": "node src/main.ts"
+    "start": "node src/main.ts",
+    "probe:resize": "node examples/resize-probe.mjs"
   },
   "dependencies": {
     "@sigx/actors": "^0.7.0",

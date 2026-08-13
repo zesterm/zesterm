@@ -716,6 +716,25 @@ impl Grid {
                 *c = blank;
             }
         }
+        // An erase reaching the last column destroys the cell that carried
+        // `CellFlags::WRAPLINE`, so the row's own flag has to go with it --
+        // `set_wrapped` writes the two together and everything downstream
+        // believes one or the other. `reflow` believes the flag, and a row
+        // that still claims to continue into the next gets *rejoined* with it
+        // at the next width change: two logical lines become one, the rows
+        // below are dragged up, and every block anchored there names somebody
+        // else's text.
+        //
+        // The path that made this matter rather than theoretical: a ConPTY
+        // resize repaint terminates every row with `ESC[K` and overwrites in
+        // place, never scrolling -- so `Row::reset`, the only other thing that
+        // clears the flag, never runs. (#200)
+        //
+        // A partial erase correctly leaves it: the last cell survived, and so
+        // did the wrap it records.
+        if to >= cols.saturating_sub(1) {
+            r.wrapped = false;
+        }
     }
 
     pub fn erase_rows(&mut self, from: usize, to: usize, template: &Cell) {

@@ -277,11 +277,19 @@ impl Session {
         let _ = self.pty_tx.send(bytes);
     }
 
+    /// Resize the grid and the pty together, **grid first** -- see
+    /// `zest_daemon::session::Session::resize`, which carries the reasoning and
+    /// the test. ConPTY answers a resize by repainting the whole viewport and
+    /// this session's reader thread parses that under the same lock, so telling
+    /// the pty first lets a repaint for the new size land on the old grid.
+    /// Do not hold the lock across the pty call; that deadlocks. (#200)
     pub fn resize(&self, cols: u16, rows: u16) {
+        // A statement, so the guard is dropped at the semicolon rather than
+        // surviving into the pty call below.
+        self.terminal.lock().resize(cols as usize, rows as usize);
         if let Err(e) = self.pty.resize(PtySize::new(cols, rows)) {
             tracing::warn!(error = %e, "pty resize failed");
         }
-        self.terminal.lock().resize(cols as usize, rows as usize);
         self.mark_dirty();
     }
 
@@ -328,6 +336,73 @@ mod tests {
             format!("/bin/echo {text}")
         };
         CommandSpec { command_line, cwd: None, env: Vec::new() }
+    }
+
+    /// A transport that records what the grid looked like when it was resized.
+    ///
+    /// The daemon has the same probe for the same reason, and its test carries
+    /// the argument -- this one exists because the local pane is a second
+    /// production path that can regress on its own.
+    struct SizeProbePty {
+        terminal: Arc<FairMutex<Terminal>>,
+        seen: std::sync::Mutex<Option<Option<(usize, usize)>>>,
+    }
+
+    impl PtyTransport for SizeProbePty {
+        fn take_reader(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+            None
+        }
+        fn writer(&self) -> Box<dyn std::io::Write + Send> {
+            Box::new(std::io::sink())
+        }
+        fn hangup(&self) {}
+
+        fn resize(&self, _size: PtySize) -> Result<(), zest_pty::PtyError> {
+            // `try_lock`, never `lock`: holding the terminal lock across the pty
+            // call deadlocks, and a hanging test says nothing.
+            let seen =
+                self.terminal.try_lock_unfair().map(|t| (t.grid().cols(), t.grid().rows()));
+            *self.seen.lock().expect("probe") = Some(seen);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_grid_is_resized_before_the_pty_is_told() {
+        // ConPTY answers a resize by restating the whole viewport at the size it
+        // was just given, and this session's reader parses that under the
+        // terminal lock -- so telling the pty first lets a repaint for the new
+        // size land on a grid still at the old one. See
+        // `zest_daemon::session::Session::resize`. (#200)
+        let terminal = Arc::new(FairMutex::new(Terminal::new(80, 24, 100)));
+        let probe = Arc::new(SizeProbePty {
+            terminal: Arc::clone(&terminal),
+            seen: std::sync::Mutex::new(None),
+        });
+        let (pty_tx, _pty_rx) = crossbeam_channel::unbounded();
+        let session = Session {
+            terminal: Arc::clone(&terminal),
+            needs_redraw: Arc::new(AtomicBool::new(false)),
+            pty_tx,
+            pty: Arc::clone(&probe) as Arc<dyn PtyTransport + Send + Sync>,
+            exited: Arc::new(AtomicBool::new(false)),
+        };
+
+        session.resize(40, 12);
+
+        let seen = *probe.seen.lock().expect("probe");
+        match seen {
+            Some(Some(size)) => assert_eq!(
+                size,
+                (40, 12),
+                "the pty was told to resize while the grid was still {size:?}"
+            ),
+            Some(None) => panic!(
+                "the terminal lock was held across the pty resize -- the reader cannot \
+                 drain ConPTY's repaint until it is released"
+            ),
+            None => panic!("the pty was never resized"),
+        }
     }
 
     #[test]

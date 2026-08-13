@@ -427,6 +427,11 @@ cargo run -p zest-daemon --example attach      # drive a daemon session, no GUI
 cargo run -p zest-mesh   --example mesh_probe  # advertise and browse the fleet
 cargo run -p zest-daemon --example pair -- --addr <host:port>   # pair with a host
 
+pnpm -C clients/web/packages/sidecar probe:resize
+                                               # drive one session over the loopback pipe and dump
+                                               #   each block's line range against the rows it holds,
+                                               #   before and after a drag
+
 pnpm -C cloud -r dry-run                       # validate the Worker configs, no credentials needed
 pnpm -C cloud -r boot                          # start each Worker under workerd and make one request
 pnpm -C cloud --filter @zesterm/web-worker dev # the hosted client under workerd, port 8787
@@ -443,6 +448,11 @@ says whether the daemon or the renderer is at fault, with no window, GPU or font
 involved. `mesh_probe` is the two-machine check no unit test can perform — it
 reports **self-visible** separately from **peers**, so "my multicast is not
 leaving this box" and "nothing else is advertising" are distinguishable.
+`probe:resize` is the same idea one layer above `pty_dump --resize`: that one
+answers "what does ConPTY emit", this one "what does the host's block index look
+like afterwards", and between them a resize bug can be placed without guessing
+from a rendered pane. A block coming back `rows=0`, or with its `nonBlank` count
+halved, is the anchors and the content having diverged (#200).
 
 `--screenshot` is the one to reach for when the question is *how it looks*.
 It renders one real frame — real insets, real chrome, real theme, real scale
@@ -509,6 +519,44 @@ Each of these cost real time and is documented where it bites:
 - **`ClosePseudoConsole` deadlocks** unless the reader is still draining, which
   dictates the whole shutdown protocol. The reader also cannot observe child
   exit at all.
+- **ConPTY answers a resize by restating the entire viewport, so the grid must
+  be resized *before* the pty — and the terminal lock must not be held across
+  the call.** `ResizePseudoConsole` emits `ESC[?25l  ESC[8;<rows>;<cols>t
+  ESC[H` and then rewrites every row in place, terminated with `ESC[K` (no
+  `ESC[2J` anywhere — see the next entry). Those bytes are laid out for the new
+  size and land on the reader thread, which parses them under the terminal
+  lock. Tell the pty first and a repaint for the *new* size is parsed into a
+  grid still at the *old* one, which nothing afterwards can undo: the rows were
+  overwritten in place while their line ids never moved, so the reflow is
+  correct, the block re-anchor is correct, and every block still ends up naming
+  somebody else's text. The obvious stronger fix — hold the lock across both —
+  is the deadlock above wearing a different hat, because the reader cannot
+  drain what ConPTY is writing while it waits for that lock. Release, then
+  call: the repaint cannot exist before the call that causes it. Both hosts
+  have a probe transport asserting the order rather than a comment asking for
+  it (`zest-daemon`/`zest-app` `session.rs`, `the_grid_is_resized_before_the_pty_is_told`). (#200)
+- **A row overwritten in place keeps a stale `wrapped`, and the next reflow
+  believes it.** `wrapped` is one fact in two places — `Row::wrapped` and
+  `CellFlags::WRAPLINE` on the last cell, written together by
+  `Grid::set_wrapped` — and it was only ever cleared by `Row::reset`, which a
+  scroll runs and an overwrite does not. An erase reaching the last column
+  therefore destroyed the cell flag and left the bool, and the ConPTY repaint
+  above hits that on every row it shortens. Nothing looks wrong until the
+  *next* width change, when `reflow` rejoins two rows that were never one
+  logical line: a directory listing collapses to half its rows, everything
+  below is dragged up, and the blocks anchored there are suddenly describing
+  the wrong output — which reads as a resize corrupting the block index rather
+  than as an erase bug, and was chased as one. `erase_in_row` now clears both;
+  a *partial* erase correctly keeps them, since the last cell survived. (#200)
+
+  **Only the erase path is fixed, and the fixtures say so.** Regenerating
+  `vim-macos.json` flipped 48 rows to `wrapped: false`, 35 of them completely
+  blank — a blank row cannot continue into the next, so those were unarguable.
+  The 250 that remain are all vim's `~` markers: rows rewritten with *shorter
+  text and no erase at all*, which nothing currently clears. Harmless for
+  reflow, because the alternate screen is never reflowed, and visible in
+  `RowPayload.wrapped` and in copy-joining. The real repair is to stop keeping
+  the fact twice — the cell flag alone, the way alacritty does it. → #219.
 - **Windows serializes I/O per handle on a *synchronous* named pipe**, so a
   reader thread sitting in `ReadFile` — which is exactly what a server does
   while a client is quiet — holds off a writer thread on that same handle. The

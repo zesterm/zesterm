@@ -1018,6 +1018,120 @@ fn narrowing_and_widening_back_keeps_every_block() {
     }
 }
 
+/// The bytes ConPTY sends in answer to `ResizePseudoConsole`, restating the
+/// viewport it was just handed.
+///
+/// Measured against a real pwsh with `pty_dump --resize` (#205): hide the
+/// cursor, declare the new size with XTWINOPS, home, then rewrite every row in
+/// place, each terminated with `ESC[K`. **There is no `ESC[2J` anywhere** —
+/// the screen is restated in place, which is why `BlockIndex::erase_screen` is
+/// never reached by a resize and why a block's anchor can survive while the
+/// text underneath it does not. (#200)
+fn conpty_repaint(t: &Terminal) -> Vec<u8> {
+    let (cols, rows) = (t.grid().cols(), t.grid().rows());
+    let (row, col) = (t.cursor().row + 1, t.cursor().col + 1);
+    let mut out = format!("\x1b[?25l\x1b[8;{rows};{cols}t\x1b[H");
+    for r in 0..rows {
+        if r > 0 {
+            out.push_str("\r\n");
+        }
+        let text = t.grid().row(r).text().trim_end().to_string();
+        out.push_str(&text);
+        // Not after a row the text fills exactly. The cursor is then at the
+        // right margin with a deferred wrap, where `EL` erases the last cell --
+        // correct per the spec and what xterm does, so an emitter that wanted
+        // the row it just wrote would be destroying it. Anything ConPTY really
+        // does here is a question for `pty_dump --resize`, not for a helper
+        // that would silently make every test about the wrong thing.
+        if text.chars().count() < cols {
+            out.push_str("\x1b[K");
+        }
+    }
+    out.push_str(&format!("\x1b[{row};{col}H\x1b[?25h"));
+    out.into_bytes()
+}
+
+#[test]
+fn erasing_a_wrapped_row_to_its_end_stops_it_being_wrapped() {
+    // `wrapped` is one fact kept in two places -- the row's own flag and
+    // `CellFlags::WRAPLINE` on its last cell, written together by
+    // `Grid::set_wrapped`. An erase blanks the cells, which clears the second,
+    // and left the first alone: the row went on claiming it continued into the
+    // next one while the cell that said so had been erased.
+    //
+    // Not a corner. Every row of a ConPTY resize repaint is terminated with
+    // `ESC[K` (#205), and the repaint overwrites rows *in place* -- it never
+    // scrolls, so `Row::reset`, the only other thing that clears the flag,
+    // never runs. Nothing looks wrong until the *next* width change, when
+    // reflow rejoins two rows that were never one logical line: a listing
+    // collapses to half its rows and the text below is dragged up under
+    // anchors the reanchor had mapped perfectly correctly. (#200)
+    let mut t = Terminal::new(5, 3, 100);
+    t.advance(b"abcdefgh");
+    assert!(t.grid().row(0).wrapped, "the fixture did not wrap");
+
+    t.advance(b"\x1b[1;1H\x1b[K");
+    assert!(
+        !t.grid().row(0).wrapped,
+        "the row was erased to its end and still claims to continue into the next"
+    );
+
+    // The consequence, which is what makes this worth a test rather than tidiness.
+    t.resize(20, 3);
+    assert_eq!(
+        screen(&t),
+        "\nfgh",
+        "reflow rejoined an erased row with the one below it, dragging `fgh` up onto \
+         a line it never belonged to"
+    );
+}
+
+#[test]
+fn a_drag_with_conpty_repaints_leaves_every_block_naming_its_own_output() {
+    // `narrowing_and_widening_back_keeps_every_block` covers the reflow half of
+    // a drag and passes. What it cannot see is that on Windows every resize is
+    // *also* a full-viewport repaint, so the real gesture is resize-then-bytes,
+    // twice -- our reflow and then ConPTY's restatement on top of it.
+    //
+    // The repaint here restates the screen we already have, which is ConPTY
+    // agreeing with us and is therefore the *best* case: anything that breaks
+    // under it breaks under every worse one, and breaks for every client.
+    let mut t = Terminal::new(24, 8, 500);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07one\x1b]133;C\x07\r\nfirst output\r\n\x1b]133;D;0\x07");
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07two\x1b]133;C\x07\r\nsecond output\r\n\x1b]133;D;0\x07");
+    t.advance(b"\x1b]133;A\x07$ ");
+    assert_eq!(t.blocks().blocks().len(), 3, "two commands and a live prompt");
+
+    // Ordered the way the host must order it: the grid first, so the repaint is
+    // parsed at the width it was laid out for (see `Session::resize`).
+    for (cols, rows) in [(12, 8), (24, 8)] {
+        t.resize(cols, rows);
+        let repaint = conpty_repaint(&t);
+        t.advance(&repaint);
+    }
+
+    for (i, text) in [(0usize, "first output"), (1, "second output")] {
+        let b = &t.blocks().blocks()[i];
+        let out = b.output_line.expect("the command produced output");
+        let row = t.grid().row_of_line(out).expect("its output line still exists");
+        assert_eq!(
+            t.grid().row(row).text().trim_end(),
+            text,
+            "block {:?} names line {out}, which now reads {:?} -- the repaint moved the \
+             screen out from under an anchor reflow had mapped correctly",
+            b.command,
+            t.grid().row(row).text()
+        );
+    }
+
+    let live = t.blocks().last().expect("the live prompt");
+    assert!(live.output_line.is_none(), "the live prompt has run nothing: {live:?}");
+    assert!(
+        t.blocks().blocks()[..2].iter().all(|b| !b.contains(live.prompt_line)),
+        "the live prompt was swallowed into a finished block above it: {live:?}"
+    );
+}
+
 #[test]
 fn the_block_path_is_independent_of_chunk_boundaries() {
     // A pty hands over arbitrary chunks, so an OSC handler that accumulated
