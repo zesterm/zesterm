@@ -5113,8 +5113,14 @@ impl App {
                         *cell.lock() = session.addr();
                         session.terminal().lock().set_palette(seed);
                         let local = route.is_local();
-                        self.tabs
-                            .push(Tab::daemon(session, local, (cols, rows)).with_identity(identity));
+                        // A create should never collide, but the daemon owns
+                        // session ids — adopt guards every path the same way
+                        // (#188); a refused duplicate detaches on drop.
+                        let tab = Tab::daemon(session, local, (cols, rows)).with_identity(identity);
+                        if let Some(dup) = self.tabs.adopt(tab, true) {
+                            tracing::info!(addr = %dup.addr, "session already open; activating its tab");
+                            drop(dup);
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "could not open a new tab");
@@ -6422,10 +6428,16 @@ impl ApplicationHandler<Wakeup> for App {
                 drop(fresh);
                 let pushed = !tabs.is_empty();
                 for (tab, focus) in tabs {
-                    if focus {
-                        self.tabs.push(tab);
-                    } else {
-                        self.tabs.push_background(tab);
+                    // Refused duplicates (#188) detach on drop — the shell
+                    // stays on its host; the strip already activated the
+                    // tab that holds it. This is also what heals a
+                    // tabs.json that persisted a duplicate: the restore's
+                    // second copy dies here on every launch.
+                    if let Some(dup) = self.tabs.adopt(tab, focus) {
+                        // Accurate about focus: a background restore's
+                        // duplicate is refused without touching the keyboard.
+                        tracing::info!(addr = %dup.addr, focus, "session already open; refusing the duplicate");
+                        drop(dup);
                     }
                 }
                 // Profile launches settling (issue #175): the connecting tab
