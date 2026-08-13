@@ -20,6 +20,7 @@ import { resolveTerminalPalette, type Theme } from '@zesterm/theme';
 
 import { currentTheme, themeStore } from '../state/theme.ts';
 import { GRID_FONT_SIZE, MONO_FAMILY } from '../chrome-model.ts';
+import { canvasSizeFor } from '../grid-canvas.ts';
 
 export interface GridPaneHooks {
   schedulePaint(dirty: DirtyRows): void;
@@ -53,26 +54,34 @@ export const GridPane = component<{
     frameQueued = true;
     requestAnimationFrame(() => {
       frameQueued = false;
-      const dirtyNow = pendingDirty;
+      let dirtyNow = pendingDirty;
       pendingDirty = new Set();
+      // A reshaped bitmap starts blank, so partial dirt would paint stripes
+      // over emptiness.
+      if (sizeToGrid()) dirtyNow = 'all';
       if (painter) painter.paint(client.grid, dirtyNow);
     });
   };
 
   // Canvas bitmap only — the pty resize lives in TerminalView (one authority
-  // for both modes). Same family/size/formula, so the bitmap and the pty
-  // agree on cols/rows without this ever telling the client anything.
-  const sizeToWrapper = (): void => {
+  // for both modes), and this never tells the client anything. The bitmap
+  // follows the GRID rather than the wrapper: under size arbitration (#215)
+  // another attached client can hold the session smaller than this pane, and
+  // a wrapper-sized canvas kept the stale pixels below a foreign shrink
+  // forever — a canvas is only cleared by a bitmap-dims write, and a wrapper
+  // that never moved never wrote them.
+  const sizeToGrid = (): boolean => {
     const m = metrics;
     const el = wrapper;
     const c = canvas;
-    if (!m || !el || !c) return;
-    const cols = Math.max(2, Math.floor((el.clientWidth * m.dpr) / m.cellW));
-    const rows = Math.max(1, Math.floor((el.clientHeight * m.dpr) / m.cellH));
-    c.width = cols * m.cellW;
-    c.height = rows * m.cellH;
-    c.style.width = `${c.width / m.dpr}px`;
-    c.style.height = `${c.height / m.dpr}px`;
+    if (!m || !el || !c) return false;
+    const { width, height } = canvasSizeFor(client.grid, el, m);
+    if (c.width === width && c.height === height) return false;
+    c.width = width;
+    c.height = height;
+    c.style.width = `${width / m.dpr}px`;
+    c.style.height = `${height / m.dpr}px`;
+    return true;
   };
 
   onMounted(() => {
@@ -108,11 +117,14 @@ export const GridPane = component<{
         schedulePaint('all');
       }) ?? null;
 
-    sizeToWrapper();
+    sizeToGrid();
     ctx.props.register({ schedulePaint });
 
+    // The wrapper only matters before the first keyframe (the fallback in
+    // canvasSizeFor); after that a pane resize reaches this canvas as a
+    // keyframe with a new shape, via TerminalView's resize and the daemon's
+    // arbitration. The rAF re-runs sizeToGrid either way.
     observer = new ResizeObserver(() => {
-      sizeToWrapper();
       schedulePaint('all');
     });
     observer.observe(el);

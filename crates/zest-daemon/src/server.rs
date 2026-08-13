@@ -865,13 +865,18 @@ impl Connection {
                 if let Some(stale) = self.attached.remove(&session.session.0) {
                     s.detach(stale);
                 }
-                s.resize(cols, rows);
+                // The ask is a vote, not a command: the session sizes itself to
+                // the smallest attached client (#215), and the reply keyframe
+                // carries whatever was granted.
                 let waker = self.waker.clone();
-                let (handle, seq, keyframe) = s.attach_with(Box::new(move || {
-                    if let Some(w) = &waker {
-                        w();
-                    }
-                }));
+                let (handle, seq, keyframe) = s.attach_with(
+                    Box::new(move || {
+                        if let Some(w) = &waker {
+                            w();
+                        }
+                    }),
+                    Some((cols, rows)),
+                );
                 self.attached.insert(session.session.0, handle);
                 // Another watcher's listing shows this session as attached now.
                 self.registry.touch();
@@ -955,8 +960,18 @@ impl Connection {
             }
 
             ClientMessage::Resize { session, cols, rows } => {
-                if let Some(s) = self.registry.get(session.session) {
-                    s.resize(cols, rows);
+                // Names this connection's *attachment*, not the session: only
+                // an attached client has a pane worth arbitrating over, so a
+                // Resize from a connection that never attached is ignored.
+                // Both shipped clients attach before they ever resize.
+                if let (Some(s), Some(&handle)) =
+                    (self.registry.get(session.session), self.attached.get(&session.session.0))
+                {
+                    if s.set_client_size(handle, cols, rows) {
+                        // `SessionInfo` carries cols/rows, so the listing rows
+                        // a watcher holds just went stale.
+                        self.registry.touch();
+                    }
                 }
                 Vec::new()
             }
@@ -1859,6 +1874,13 @@ mod tests {
         });
         let addr = SessionAddr::new(config().host, SessionId(1));
         peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+        // Wait for the echo's output so the session's sequence is really
+        // nonzero. Attaching used to guarantee that by resizing the terminal
+        // even to its existing size; arbitration made the equal-size attach a
+        // true no-op (#215), so a fresh session is honestly at sequence 0 --
+        // and a keyframe saying 0 then *matches* the daemon's baseline, which
+        // is the agreement this test exists to protect.
+        assert!(wait_for(|| !c.poll().is_empty()), "the echo never produced output");
 
         let out = peer.send(&mut c, &ClientMessage::RequestKeyframe { session: addr });
         let [HostMessage::Keyframe { seq, .. }] = &out[..] else {
@@ -2003,6 +2025,216 @@ mod tests {
             wait_for(|| !c.poll().is_empty()),
             "the child produced output but nothing reached the client"
         );
+    }
+
+    /// The original #215 bug: merely attaching counted as a resize.
+    ///
+    /// One session on two devices at once is the product, and a phone peeking
+    /// at a desktop session must not reshape the desktop's pty. The session's
+    /// size is the smallest attached client, so a *larger* second attach
+    /// changes nothing — and its keyframe reports the granted size, not the
+    /// ask.
+    #[test]
+    fn a_second_attach_does_not_resize_the_first_clients_pty() {
+        let (mut a, registry) = conn();
+        let mut peer_a = authenticate(&mut a);
+        peer_a.send(
+            &mut a,
+            &ClientMessage::CreateSession {
+                command: sleep_cmd(),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+            },
+        );
+        let addr = registry.list(config().host)[0].addr;
+        peer_a.send(&mut a, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+
+        let mut b = Connection::new(
+            config(),
+            Arc::clone(&registry),
+            crate::auth::Auth::Transport(test_authenticator()),
+            "test2",
+        );
+        let mut peer_b = authenticate(&mut b);
+        let out = peer_b.send(&mut b, &ClientMessage::Attach { session: addr, cols: 100, rows: 40 });
+
+        let s = registry.get(addr.session).expect("the session is attached");
+        assert_eq!(
+            s.size(),
+            (80, 24),
+            "a larger second attach resized the pty out from under the first client"
+        );
+        assert!(
+            matches!(&out[..], [HostMessage::Keyframe { cols: 80, rows: 24, .. }]),
+            "the attach keyframe must carry the granted size, not the ask: {out:?}"
+        );
+        registry.close(addr.session);
+    }
+
+    /// The other half of the min: a smaller client does shrink the session --
+    /// every viewer must see a complete screen -- and its detach gives the
+    /// space back without anyone else doing anything.
+    #[test]
+    fn a_smaller_attach_wins_and_its_detach_restores_the_size() {
+        let (mut a, registry) = conn();
+        let mut peer_a = authenticate(&mut a);
+        peer_a.send(
+            &mut a,
+            &ClientMessage::CreateSession {
+                command: sleep_cmd(),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+            },
+        );
+        let addr = registry.list(config().host)[0].addr;
+        peer_a.send(&mut a, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+
+        let mut b = Connection::new(
+            config(),
+            Arc::clone(&registry),
+            crate::auth::Auth::Transport(test_authenticator()),
+            "test2",
+        );
+        let mut peer_b = authenticate(&mut b);
+        peer_b.send(&mut b, &ClientMessage::Attach { session: addr, cols: 60, rows: 20 });
+
+        let s = registry.get(addr.session).expect("the session is attached");
+        assert_eq!(s.size(), (60, 20), "the smallest attached client sets the session size");
+
+        peer_b.send(&mut b, &ClientMessage::Detach { session: addr });
+        assert_eq!(s.size(), (80, 24), "detaching the constraining client must give the space back");
+        registry.close(addr.session);
+    }
+
+    /// A client whose pane did not change has no reason to re-render: its
+    /// ResizeObserver never fires. The daemon must push it an authoritative
+    /// keyframe, because a *shrink* described only by deltas lands inside the
+    /// stale larger grid without ever tripping NeedsKeyframe (apply.rs).
+    #[test]
+    fn a_foreign_size_change_reaches_the_other_client_as_a_keyframe() {
+        let (mut a, registry) = conn();
+        let mut peer_a = authenticate(&mut a);
+        peer_a.send(
+            &mut a,
+            &ClientMessage::CreateSession {
+                command: sleep_cmd(),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+            },
+        );
+        let addr = registry.list(config().host)[0].addr;
+        peer_a.send(&mut a, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+        // Drain whatever the attach owed.
+        while !a.poll().is_empty() {}
+
+        let mut b = Connection::new(
+            config(),
+            Arc::clone(&registry),
+            crate::auth::Auth::Transport(test_authenticator()),
+            "test2",
+        );
+        let mut peer_b = authenticate(&mut b);
+        peer_b.send(&mut b, &ClientMessage::Attach { session: addr, cols: 60, rows: 20 });
+
+        let mut granted = None;
+        wait_for(|| {
+            for m in a.poll() {
+                if let HostMessage::Keyframe { cols, rows, .. } = m {
+                    granted = Some((cols, rows));
+                }
+            }
+            granted.is_some()
+        });
+        assert_eq!(
+            granted,
+            Some((60, 20)),
+            "the unchanged client was never told the session is a different shape"
+        );
+        registry.close(addr.session);
+    }
+
+    /// `Resize` now names an attachment, not the session: only an attached
+    /// client has a size worth arbitrating over. Both shipped clients attach
+    /// before they ever resize.
+    #[test]
+    fn a_resize_from_an_unattached_connection_is_ignored() {
+        let (mut a, registry) = conn();
+        let mut peer_a = authenticate(&mut a);
+        peer_a.send(
+            &mut a,
+            &ClientMessage::CreateSession {
+                command: sleep_cmd(),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+            },
+        );
+        let addr = registry.list(config().host)[0].addr;
+        peer_a.send(&mut a, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+
+        let mut b = Connection::new(
+            config(),
+            Arc::clone(&registry),
+            crate::auth::Auth::Transport(test_authenticator()),
+            "test2",
+        );
+        let mut peer_b = authenticate(&mut b);
+        peer_b.send(&mut b, &ClientMessage::Resize { session: addr, cols: 10, rows: 5 });
+
+        let s = registry.get(addr.session).expect("the session is attached");
+        assert_eq!(s.size(), (80, 24), "a connection that never attached resized the session");
+        registry.close(addr.session);
+    }
+
+    /// `SessionInfo` carries cols/rows, so a granted resize changes the
+    /// listing -- a watcher's fleet screen shows sizes that are now wrong
+    /// unless the resize bumps the generation like attach and detach do.
+    #[test]
+    fn a_granted_resize_pushes_a_listing_update_to_watchers() {
+        let (mut watcher, registry) = conn();
+        let _watcher_peer = authenticate_with(&mut watcher, true);
+
+        let mut c = Connection::new(
+            config(),
+            Arc::clone(&registry),
+            crate::auth::Auth::Transport(test_authenticator()),
+            "test2",
+        );
+        let mut peer = authenticate(&mut c);
+        peer.send(
+            &mut c,
+            &ClientMessage::CreateSession {
+                command: sleep_cmd(),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+            },
+        );
+        let addr = registry.list(config().host)[0].addr;
+        peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+        // Drain the pushes the create and attach owed.
+        while !watcher.poll().is_empty() {}
+
+        peer.send(&mut c, &ClientMessage::Resize { session: addr, cols: 60, rows: 20 });
+
+        let mut listed = None;
+        wait_for(|| {
+            for m in watcher.poll() {
+                if let HostMessage::Sessions { sessions, .. } = m {
+                    listed = sessions.first().map(|i| (i.cols, i.rows));
+                }
+            }
+            listed.is_some()
+        });
+        assert_eq!(
+            listed,
+            Some((60, 20)),
+            "a granted resize must reach watchers as a fresh listing"
+        );
+        registry.close(addr.session);
     }
 
     #[test]

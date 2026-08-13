@@ -424,6 +424,37 @@ function sbPush(base: number, seq: number, line: number, text: string): Record<s
   };
 }
 
+test('a foreign keyframe adopts the granted size without resending resize', async () => {
+  // Another attached client is smaller and the daemon arbitrated (#215): the
+  // keyframe is the grant, and it lands here without this pane having moved.
+  // Adopt the shape; never echo a resize back — this client's vote did not
+  // change, and answering a grant with a re-ask would turn one foreign
+  // resize into a fight between clients.
+  const daemon = new FakeDaemon();
+  const clock = new FakeClock();
+  const c = client(daemon, clock);
+  await daemon.completeHandshake();
+  const link = daemon.current;
+
+  link.deliver(keyframe(1, ['at twenty columns']));
+  link.deliver(keyframeAt(5, 12, 0, ['at twelve']));
+  assert.equal(c.grid.cols, 12, 'the keyframe size is authoritative');
+  assert.equal(link.ofType('resize').length, 0, 'a foreign change must not be echoed back');
+
+  // The cached size still holds what this client ASKED (20x2), not the
+  // grant. So when the pane later really becomes 12 wide, that is a changed
+  // vote the daemon must hear — had the keyframe overwritten the cache, this
+  // resize would be swallowed as a no-op, the daemon would keep counting a
+  // 20-column vote, and the session would grow past this pane the moment the
+  // smaller client detached.
+  c.resize(12, 2);
+  assert.equal(
+    link.ofType('resize').length,
+    1,
+    'a real pane change to the granted size still updates the vote',
+  );
+});
+
 test('a width change asks for the scrollback it had to discard', async () => {
   // A reflow renumbers every line id, so the rows this client kept cannot be
   // re-anchored and are dropped (`GridView.applyKeyframe`). Dropping them is

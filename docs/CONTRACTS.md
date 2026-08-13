@@ -381,6 +381,43 @@ move it.
 
 ---
 
+### `Attach`/`Resize` are requests; the keyframe is the grant
+
+A session has one pty and one grid, and several clients may be attached to it at once — which is
+the product, not an edge case. The sizes clients send are therefore **votes, not commands**: the
+daemon holds each subscriber's declared size and keeps the session at the **smallest attached
+client** (min cols, min rows), recomputed on attach, resize and detach, so every viewer sees a
+complete screen and larger viewers letterbox. An undeclared attach (none shipped today) never
+constrains, and the last detach changes nothing — the session outlives its clients and gets no
+parting resize. Equal recomputes touch nothing at all, because a pty resize is a ConPTY repaint on
+Windows (#200). → #215.
+
+**Nothing new is on the wire, and three client-side properties hold it up:**
+
+1. **`Keyframe.cols/rows` is the only carrier of shape, and it is authoritative.** When the
+   arbitrated size changes, every other subscriber gets a forced keyframe (`needs_keyframe` +
+   wake). It cannot be a delta: a *shrink* described by deltas lands entirely inside a stale
+   larger grid without ever tripping `Applied::NeedsKeyframe` — there is no `DeltaOp::Resize`, on
+   purpose (`zest-proto/src/apply.rs`).
+2. **A client's cached size means "what I asked", never "what I was granted".** The web client's
+   resize dedupe compares against its own ask; a foreign keyframe must not overwrite it, or a
+   later real pane change to the granted size would be swallowed and the daemon left counting a
+   stale vote. Symmetrically, a grant is never echoed back as a `Resize` — clients send one only
+   when their own pane changes, which is what makes a resize fight structurally impossible.
+3. **Reattach carries the current size, not the birth size.** Every attach is a fresh vote, so the
+   desktop's redial reads the size the window has now (`remote.rs`'s size cell), and the browser
+   reattaches at its current dims. A stale vote here reshapes the session for everyone.
+
+`Resize` names the sender's *attachment*: one from a connection that never attached is ignored. A
+granted resize bumps the registry generation, because `SessionInfo.cols/rows` sits in watchers'
+listings. Per-client *reflow* is structurally impossible — the program inside the pty lays out for
+exactly one size — so per-client anything can only ever mean viewports over one shared grid.
+
+Consumers: `zest-daemon` (`session.rs::reconcile_size`), `zest-app` (`chrome/insets.rs::letterbox`,
+`remote.rs`), `clients/web` (`GridPane`/`grid-canvas.ts`, `session-client.ts`).
+
+---
+
 ### The relay control link: JSON, and the one seam that is not `zest-proto`
 
 Four messages between `zest-daemon` and the relay Worker, and neither end shares a line of code with

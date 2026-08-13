@@ -1738,13 +1738,24 @@ impl App {
         let size = window.inner_size();
         let area = self.insets_at(scale).grid_rect(size.width, size.height);
         let tab = self.tabs.active()?;
-        if tab.split.is_some() {
+        let frame = if tab.split.is_some() {
             let (l, r) = crate::chrome::layout::pane_frames(area, scale);
-            let frame = if tab.focus_right { r } else { l };
-            Some(crate::chrome::layout::pane_body(frame, scale))
+            crate::chrome::layout::pane_body(if tab.focus_right { r } else { l }, scale)
         } else {
-            Some(area)
-        }
+            area
+        };
+        // The grid, not the pane, decides the final rectangle: under size
+        // arbitration (#215) the session is the smallest attached client's
+        // size, and a grid smaller than this pane sits centered in it. Reading
+        // the granted size from the terminal -- not from `tab.sized`, which
+        // records what this window *asked* -- is what keeps the letterbox
+        // aligned with the pixels the renderer actually draws.
+        let m = self.fonts.as_ref()?.cell_metrics();
+        let (cols, rows) = {
+            let term = tab.focused_source().terminal().lock();
+            (term.grid().cols(), term.grid().rows())
+        };
+        Some(crate::chrome::insets::letterbox(frame, cols, rows, m))
     }
 
     /// Resize both panes of a split tab to their body rectangles.
@@ -6320,6 +6331,21 @@ impl App {
                     let right_identity = active_tab.identity.as_ref();
                     let term_l = left_source.terminal().lock();
                     let term_r = right_source.terminal().lock();
+                    // Each pane letterboxes its own grid (#215); the focused
+                    // one must come out equal to `focused_view_rect`, which is
+                    // the rectangle the pointer and IME believe.
+                    let lb = crate::chrome::insets::letterbox(
+                        lb,
+                        term_l.grid().cols(),
+                        term_l.grid().rows(),
+                        metrics,
+                    );
+                    let rb = crate::chrome::insets::letterbox(
+                        rb,
+                        term_r.grid().cols(),
+                        term_r.grid().rows(),
+                        metrics,
+                    );
                     let preedit = self.ime.preedit().map(|p| {
                         zest_render_wgpu::Preedit { text: &p.text, cursor: p.cursor }
                     });
@@ -6366,6 +6392,14 @@ impl App {
                 None => {
                     let identity = self.tabs.active().and_then(|t| t.identity.as_ref());
                     let term = session.terminal().lock();
+                    // A grid held smaller than this pane by another attached
+                    // client sits centered in it (#215).
+                    let rect = crate::chrome::insets::letterbox(
+                        area,
+                        term.grid().cols(),
+                        term.grid().rows(),
+                        metrics,
+                    );
                     self.scene.build(
                         &gpu.device,
                         &gpu.queue,
@@ -6374,7 +6408,7 @@ impl App {
                         metrics,
                         backdrop,
                         &[Viewport {
-                            rect: area,
+                            rect,
                             grid: term.grid(),
                             palette: term.palette(),
                             scroll_px: 0.0,

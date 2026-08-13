@@ -71,6 +71,19 @@ struct Subscriber {
     /// is every client, most of the time -- sees nothing again. Polling on a
     /// timer would fix it and cost the 0%-idle guarantee.
     wake: Box<dyn Fn() + Send>,
+    /// The size this client asked to render at.
+    ///
+    /// A vote, not a grant: the session's size is the smallest attached
+    /// client, so every viewer sees a complete screen (#215). `None` never
+    /// constrains -- a subscriber that only watches has no pane to protect.
+    size: Option<(u16, u16)>,
+}
+
+/// The floor a declared size is held to.
+///
+/// Matches the web client's own floor, and `PtySize` must never see zero.
+fn clamp_size((cols, rows): (u16, u16)) -> (u16, u16) {
+    (cols.max(2), rows.max(1))
 }
 
 /// A running shell, and everyone watching it.
@@ -222,7 +235,7 @@ impl Session {
     /// no base for a delta, and one that is reattaching after an hour asleep is
     /// indistinguishable from a new one.
     pub fn attach(&self) -> (u64, u64, Keyframe) {
-        self.attach_with(Box::new(|| {}))
+        self.attach_with(Box::new(|| {}), None)
     }
 
     /// Attach, and be told when there is something to collect.
@@ -230,24 +243,106 @@ impl Session {
     /// Returns `(handle, seq, keyframe)`. The sequence is what the keyframe
     /// describes and what the client will acknowledge; without it on the wire a
     /// client has no baseline to compare the next update's `base` against.
-    pub fn attach_with(&self, wake: Box<dyn Fn() + Send>) -> (u64, u64, Keyframe) {
-        let mut encoder = Encoder::new();
-        let (keyframe, seq) = {
-            let term = self.terminal.lock().expect("terminal lock");
-            let k = encoder.keyframe(term.grid(), cursor_of(&term), term.modes(), &self.title(), term.blocks());
-            (k, ChangeSource::seq(&*term))
+    ///
+    /// `size` is what this client renders at -- a vote in the arbitration, not
+    /// a command (#215). The keyframe is built *after* the vote is counted, so
+    /// it carries the granted size whether or not that equals the ask.
+    pub fn attach_with(
+        &self,
+        wake: Box<dyn Fn() + Send>,
+        size: Option<(u16, u16)>,
+    ) -> (u64, u64, Keyframe) {
+        self.ever_attached.store(true, Ordering::Release);
+        let handle = {
+            let mut next = self.next_subscriber.lock().expect("counter lock");
+            let h = *next;
+            *next += 1;
+            h
         };
 
-        self.ever_attached.store(true, Ordering::Release);
-        let mut next = self.next_subscriber.lock().expect("counter lock");
-        let handle = *next;
-        *next += 1;
-        self.subscribers
-            .lock()
-            .expect("subscriber lock")
-            .insert(handle, Subscriber { encoder, sent: seq, acked: seq, needs_keyframe: false, wake });
+        let mut subs = self.subscribers.lock().expect("subscriber lock");
+        subs.insert(
+            handle,
+            Subscriber {
+                encoder: Encoder::new(),
+                sent: 0,
+                acked: 0,
+                needs_keyframe: false,
+                wake,
+                size: size.map(clamp_size),
+            },
+        );
+        self.reconcile_size(&mut subs, Some(handle));
+
+        let sub = subs.get_mut(&handle).expect("just inserted");
+        let term = self.terminal.lock().expect("terminal lock");
+        let seq = ChangeSource::seq(&*term);
+        let title = self.title.lock().map(|t| t.clone()).unwrap_or_default();
+        let keyframe =
+            sub.encoder.keyframe(term.grid(), cursor_of(&term), term.modes(), &title, term.blocks());
+        sub.sent = seq;
+        sub.acked = seq;
 
         (handle, seq, keyframe)
+    }
+
+    /// Record what `handle` now renders at, and re-arbitrate.
+    ///
+    /// Answers `ClientMessage::Resize`. Returns whether the session's
+    /// effective size changed. The caller is *not* exempt from the keyframe
+    /// push: the web client sends no `RequestKeyframe` after a resize and
+    /// relies on it when its own shrink is granted.
+    pub fn set_client_size(&self, handle: u64, cols: u16, rows: u16) -> bool {
+        let mut subs = self.subscribers.lock().expect("subscriber lock");
+        let Some(sub) = subs.get_mut(&handle) else { return false };
+        sub.size = Some(clamp_size((cols, rows)));
+        self.reconcile_size(&mut subs, None)
+    }
+
+    /// Recompute the arbitrated size and apply it.
+    ///
+    /// The session's size is the smallest attached client -- min cols and min
+    /// rows over every subscriber that declared one -- recomputed on attach,
+    /// resize and detach, so every viewer sees a complete screen (#215).
+    /// Larger viewers letterbox; that is the clients' side of the deal.
+    ///
+    /// On a change every subscriber except `exempt` is marked for a keyframe
+    /// and woken. A keyframe and not a delta, because a delta describing a
+    /// *smaller* grid lands entirely inside a stale larger one without ever
+    /// tripping `NeedsKeyframe` (see `zest_proto::apply`) -- only a full state
+    /// can tell a client whose own pane never changed that the session is a
+    /// different shape. `exempt` is the attach path's fresh subscriber, whose
+    /// keyframe its caller builds right after this.
+    ///
+    /// Equal-size recomputes touch nothing at all: a pty resize is a ConPTY
+    /// repaint on Windows (#200), so it must not happen on every attach.
+    fn reconcile_size(&self, subs: &mut HashMap<u64, Subscriber>, exempt: Option<u64>) -> bool {
+        let Some(want) =
+            subs.values().filter_map(|s| s.size).reduce(|a, b| (a.0.min(b.0), a.1.min(b.1)))
+        else {
+            // Nobody declared a size. The last detach lands here: the session
+            // outlives its clients and gets no parting resize.
+            return false;
+        };
+        if want == self.size() {
+            return false;
+        }
+        // The resize happens under the subscribers lock on purpose. Released
+        // between computing `want` and applying it, the min goes stale the
+        // moment another attach or resize interleaves, and two racing resizes
+        // can land on the pty out of order -- the grid then disagrees with
+        // the votes until the next change. The cost is one bounded syscall at
+        // human cadence blocking concurrent polls for its duration; the
+        // serialization is not incidental, it *is* the arbitration.
+        self.resize(want.0, want.1);
+        for (h, sub) in subs.iter_mut() {
+            if Some(*h) == exempt {
+                continue;
+            }
+            sub.needs_keyframe = true;
+            (sub.wake)();
+        }
+        true
     }
 
     /// Rebuild a complete state for a subscriber that cannot apply what it has.
@@ -278,7 +373,12 @@ impl Session {
     /// **Does not touch the child.** A session whose last client left keeps
     /// running; that is the entire point of the daemon owning it.
     pub fn detach(&self, handle: u64) {
-        self.subscribers.lock().expect("subscriber lock").remove(&handle);
+        let mut subs = self.subscribers.lock().expect("subscriber lock");
+        subs.remove(&handle);
+        // The remaining clients may have been held down by the one that left;
+        // give them their space back. The *last* detach changes nothing --
+        // see `reconcile_size`.
+        self.reconcile_size(&mut subs, None);
     }
 
     /// Whether anyone is watching.
@@ -865,5 +965,100 @@ mod tests {
         assert_eq!(s.size(), (80, 24));
         s.resize(100, 30);
         assert_eq!(s.size(), (100, 30), "the grid did not follow the resize");
+    }
+
+    /// A sized attach for the arbitration tests below.
+    fn attach_at(s: &Session, cols: u16, rows: u16) -> (u64, u64, Keyframe) {
+        s.attach_with(Box::new(|| {}), Some((cols, rows)))
+    }
+
+    #[test]
+    fn the_smallest_attached_client_sets_the_session_size() {
+        // Desk and phone on one session: every viewer must see a complete
+        // screen, so the smallest pane wins and a detach gives the space back.
+        let s = session("min");
+        let (_a, _, _) = attach_at(&s, 80, 24);
+        assert_eq!(s.size(), (80, 24));
+
+        let (b, _, kb) = attach_at(&s, 60, 20);
+        assert_eq!(s.size(), (60, 20), "the smaller client must win the arbitration");
+        assert_eq!((kb.cols, kb.rows), (60, 20), "the attach keyframe must say what was granted");
+
+        s.detach(b);
+        assert_eq!(s.size(), (80, 24), "detaching the constraining client must restore the size");
+    }
+
+    #[test]
+    fn attaching_larger_grants_the_existing_size() {
+        let s = session("grant");
+        let (_a, _, _) = attach_at(&s, 80, 24);
+        let (_b, _, kb) = attach_at(&s, 100, 40);
+        assert_eq!(s.size(), (80, 24), "a larger attach must not grow the shared pty");
+        assert_eq!(
+            (kb.cols, kb.rows),
+            (80, 24),
+            "the keyframe must carry the granted size, not the ask"
+        );
+    }
+
+    #[test]
+    fn a_foreign_size_change_sends_the_other_client_a_keyframe() {
+        // A client whose own pane never changed has no reason to re-render;
+        // the daemon must push it a full state, because a shrink described by
+        // deltas lands inside the stale larger grid without tripping
+        // NeedsKeyframe (zest_proto::apply).
+        let s = session("foreign");
+        let (a, _, _) = attach_at(&s, 80, 24);
+        let (b, _, _) = attach_at(&s, 80, 24);
+        wait_for(|| s.has_exited());
+        while s.poll(a).is_some() {}
+        while s.poll(b).is_some() {}
+
+        assert!(s.set_client_size(b, 60, 20), "the shrink moves the min and must be granted");
+        match s.poll(a) {
+            Some((_, _, Update::Keyframe(k))) => {
+                assert_eq!((k.cols, k.rows), (60, 20), "the keyframe must carry the new size");
+            }
+            other => panic!("the unchanged client was owed a keyframe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_ungranted_resize_touches_nothing() {
+        // Equal-size recomputes are a no-op all the way down: a pty resize is
+        // a ConPTY repaint on Windows (#200), so nothing may move unless the
+        // min does.
+        let s = session("noop");
+        let (a, _, _) = attach_at(&s, 80, 24);
+        let (b, _, _) = attach_at(&s, 60, 20);
+        wait_for(|| s.has_exited());
+        while s.poll(a).is_some() {}
+        while s.poll(b).is_some() {}
+
+        assert!(!s.set_client_size(a, 70, 22), "a resize that does not move the min changed it");
+        assert_eq!(s.size(), (60, 20));
+        assert!(s.poll(a).is_none(), "an ungranted resize must not repaint anyone");
+        assert!(s.poll(b).is_none(), "an ungranted resize must not repaint anyone");
+    }
+
+    #[test]
+    fn the_last_detach_keeps_the_size() {
+        // The session outlives its clients (ADR-007) and gets no parting
+        // resize -- a reattach from the same device finds the shape it left.
+        let s = session("keep");
+        let (a, _, _) = attach_at(&s, 60, 20);
+        assert_eq!(s.size(), (60, 20));
+        s.detach(a);
+        assert_eq!(s.size(), (60, 20), "the last detach must leave the grid alone");
+    }
+
+    #[test]
+    fn an_undeclared_attach_never_constrains_the_size() {
+        // `attach()` declares nothing -- a watch-only subscriber has no pane
+        // to protect and must not drag the session to some default.
+        let s = session("watch");
+        let (_w, _, _) = s.attach();
+        let (_a, _, _) = attach_at(&s, 60, 20);
+        assert_eq!(s.size(), (60, 20), "the undeclared subscriber must not out-vote the sized one");
     }
 }

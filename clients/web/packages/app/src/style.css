@@ -200,10 +200,16 @@ body {
 }
 
 /* The alt-screen canvas pane; the 8px was .term-wrap's until the blocks mode
-   arrived with its own §3 padding. */
+   arrived with its own §3 padding. Flex-centered: under size arbitration
+   (#215) the canvas is exactly grid-sized, and a grid held smaller than this
+   pane by another attached client sits letterboxed in the middle rather than
+   pinned top-left. */
 .grid-pane {
   height: 100%;
   padding: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .grid-pane canvas {
