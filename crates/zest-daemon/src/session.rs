@@ -524,16 +524,33 @@ impl Session {
         let _ = w.flush();
     }
 
-    /// Resize the pty and the grid together.
+    /// Resize the grid and the pty together, **grid first**.
     ///
     /// Both, always: a grid that disagrees with what the shell believes produces
     /// output wrapped for a screen that does not exist.
+    ///
+    /// The order is load-bearing on Windows. `ResizePseudoConsole` is answered
+    /// by restating the entire viewport -- `ESC[?25l`, the new size, `ESC[H`,
+    /// then every row rewritten in place and terminated with `ESC[K` (#205) --
+    /// and the reader thread parses that under this same lock. Told first, the
+    /// pty can have a repaint laid out for the *new* size parsed into a grid
+    /// still at the *old* one, and nothing afterwards recovers: the rows were
+    /// overwritten in place while their line ids never moved, so the reflow is
+    /// correct, the re-anchor is correct, and every block still ends up naming
+    /// text that is not its own. (#200)
+    ///
+    /// The lock is *released* before the pty call rather than held across it,
+    /// and that is enough: the repaint cannot exist before the call that causes
+    /// it, and the release/acquire pairs the two threads. Holding it is the
+    /// stronger-looking option and deadlocks -- the reader cannot drain what
+    /// ConPTY is writing while it waits for this lock, and a ConPTY that cannot
+    /// write is `ClosePseudoConsole` in another costume (`zest-pty`, gotcha 2b).
     pub fn resize(&self, cols: u16, rows: u16) {
-        if let Err(e) = self.pty.resize(PtySize::new(cols, rows)) {
-            tracing::warn!(session = self.id.0, error = %e, "pty resize failed");
-        }
         if let Ok(mut term) = self.terminal.lock() {
             term.resize(cols as usize, rows as usize);
+        }
+        if let Err(e) = self.pty.resize(PtySize::new(cols, rows)) {
+            tracing::warn!(session = self.id.0, error = %e, "pty resize failed");
         }
     }
 
@@ -660,6 +677,90 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         false
+    }
+
+    /// A transport that records what the grid looked like when it was resized.
+    ///
+    /// `PtyTransport` reports no size of its own and the thing under test is an
+    /// *order*, so the probe reads the size off the terminal the session shares
+    /// with it.
+    struct SizeProbePty {
+        terminal: Arc<Mutex<Terminal>>,
+        /// `None` until a resize arrives. `Some(None)` means the terminal lock
+        /// was held at that moment, which is a different failure -- see the
+        /// assertion.
+        seen: Mutex<Option<Option<(usize, usize)>>>,
+    }
+
+    impl PtyTransport for SizeProbePty {
+        fn take_reader(&mut self) -> Option<Box<dyn Read + Send>> {
+            None
+        }
+        fn writer(&self) -> Box<dyn Write + Send> {
+            Box::new(std::io::sink())
+        }
+        fn hangup(&self) {}
+
+        fn resize(&self, _size: PtySize) -> Result<(), zest_pty::PtyError> {
+            // `try_lock`, never `lock`. A "fix" that held the terminal lock
+            // across the pty call would deadlock right here, and a test that
+            // hangs says nothing -- this way that ordering is a named failure.
+            let seen =
+                self.terminal.try_lock().ok().map(|t| (t.grid().cols(), t.grid().rows()));
+            *self.seen.lock().expect("probe") = Some(seen);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_grid_is_resized_before_the_pty_is_told() {
+        // ConPTY answers `ResizePseudoConsole` by restating the whole viewport,
+        // laid out for the size it was just given (#205). Those bytes arrive on
+        // the reader thread, which parses them under the terminal lock -- so
+        // telling the pty first opens a window in which a repaint for the NEW
+        // size is parsed into a grid still at the OLD one.
+        //
+        // Nothing recovers from that afterwards, which is why the order is the
+        // fix rather than a tidiness: the repaint overwrites rows *in place*
+        // while their line ids stay where they were, so the reflow renumbers
+        // correctly, `BlockIndex::reanchor` maps correctly, and every block
+        // still ends up naming text that is no longer its own -- a listing
+        // split across two cards, the live prompt swallowed into a finished
+        // block, the trailing block covering no rows at all. (#200)
+        let terminal = Arc::new(Mutex::new(Terminal::new(80, 24, 100)));
+        let probe = Arc::new(SizeProbePty {
+            terminal: Arc::clone(&terminal),
+            seen: Mutex::new(None),
+        });
+        let s = Session {
+            id: SessionId(1),
+            terminal: Arc::clone(&terminal),
+            pty: Arc::clone(&probe) as Arc<dyn PtyTransport + Send + Sync>,
+            writer: Arc::new(Mutex::new(Box::new(std::io::sink()) as Box<dyn Write + Send>)),
+            subscribers: Arc::default(),
+            next_subscriber: Mutex::new(0),
+            exited: Arc::new(AtomicBool::new(false)),
+            ever_attached: Arc::new(AtomicBool::new(false)),
+            title: Arc::new(Mutex::new(String::new())),
+        };
+
+        s.resize(40, 12);
+
+        let seen = *probe.seen.lock().expect("probe");
+        match seen {
+            Some(Some(size)) => assert_eq!(
+                size,
+                (40, 12),
+                "the pty was told to resize while the grid was still {size:?}; the repaint \
+                 ConPTY sends back is laid out for 40x12 and would be parsed at that width"
+            ),
+            Some(None) => panic!(
+                "the terminal lock was held across the pty resize -- the reader thread \
+                 cannot drain ConPTY's repaint until it is released, which is the \
+                 `ClosePseudoConsole` deadlock in another costume"
+            ),
+            None => panic!("the pty was never resized"),
+        }
     }
 
     #[test]

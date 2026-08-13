@@ -415,7 +415,10 @@ impl PtyTransport for ConPty {
         if hr != 0 {
             return Err(PtyError::Resize(io::Error::from_raw_os_error(hr)));
         }
-        // Caller beware: ConPTY responds by re-emitting the whole screen.
+        // Caller beware: ConPTY responds by re-emitting the whole screen — so
+        // resize the grid *first* and do not hold its lock across this call.
+        // See `zest_daemon::session::Session::resize`, which carries both
+        // halves of the reasoning and the test that pins them. (#200)
         Ok(())
     }
 

@@ -1018,6 +1018,144 @@ fn narrowing_and_widening_back_keeps_every_block() {
     }
 }
 
+/// The bytes ConPTY sends in answer to `ResizePseudoConsole`, restating the
+/// viewport it was just handed.
+///
+/// Measured against a real pwsh with `pty_dump --resize` (#205, re-measured for
+/// #200): hide the cursor, declare the new size with XTWINOPS, home, then
+/// restate the viewport, each line terminated with `ESC[K`. **There is no
+/// `ESC[2J` anywhere** — the screen is rewritten in place, which is why
+/// `BlockIndex::erase_screen` is never reached by a resize and why a block's
+/// anchor can survive while the text underneath it does not.
+///
+/// **It restates *logical lines*, not physical rows.** Resized to 40 columns, a
+/// 100-character line comes back as 100 characters and one `ESC[K` — ConPTY
+/// does not re-break it, it relies on our autowrap to lay it out:
+///
+/// ```text
+/// ESC[?25l ESC[8;30;40t ESC[H xxxx…(100)… ESC[K \r\n TAIL ESC[K \r\n ESC[K \r\n …
+/// ```
+///
+/// A helper emitting row-by-row with `\r\n` between would therefore be testing
+/// something ConPTY never does, and would break every wrap it restated.
+fn conpty_repaint(t: &Terminal) -> Vec<u8> {
+    let (cols, rows) = (t.grid().cols(), t.grid().rows());
+    let (row, col) = (t.cursor().row + 1, t.cursor().col + 1);
+    let mut out = format!("\x1b[?25l\x1b[8;{rows};{cols}t\x1b[H");
+
+    let mut r = 0;
+    while r < rows {
+        // Collect one logical line, the way the shell printed it.
+        let mut text = String::new();
+        while r < rows && t.grid().row(r).wrapped {
+            text.push_str(&t.grid().row(r).text());
+            r += 1;
+        }
+        if r < rows {
+            text.push_str(t.grid().row(r).text().trim_end());
+            r += 1;
+        }
+        out.push_str(&text);
+        // Not when a *non-empty* line ends exactly on a row boundary: the
+        // cursor is then at the right margin with a deferred wrap, where `EL`
+        // erases the last cell -- correct per the spec, and an emitter that
+        // wanted the text it just wrote would be destroying it. An empty line
+        // is not that case and does get its `ESC[K`, which is most of what the
+        // capture consists of.
+        let len = text.chars().count();
+        if len == 0 || !len.is_multiple_of(cols) {
+            out.push_str("\x1b[K");
+        }
+        if r < rows {
+            out.push_str("\r\n");
+        }
+    }
+
+    out.push_str(&format!("\x1b[{row};{col}H\x1b[?25h"));
+    out.into_bytes()
+}
+
+#[test]
+fn erasing_a_wrapped_row_to_its_end_stops_it_being_wrapped() {
+    // `wrapped` is one fact kept in two places -- the row's own flag and
+    // `CellFlags::WRAPLINE` on its last cell, written together by
+    // `Grid::set_wrapped`. An erase blanks the cells, which clears the second,
+    // and left the first alone: the row went on claiming it continued into the
+    // next one while the cell that said so had been erased.
+    //
+    // Not a corner. Every row of a ConPTY resize repaint is terminated with
+    // `ESC[K` (#205), and the repaint overwrites rows *in place* -- it never
+    // scrolls, so `Row::reset`, the only other thing that clears the flag,
+    // never runs. Nothing looks wrong until the *next* width change, when
+    // reflow rejoins two rows that were never one logical line: a listing
+    // collapses to half its rows and the text below is dragged up under
+    // anchors the reanchor had mapped perfectly correctly. (#200)
+    let mut t = Terminal::new(5, 3, 100);
+    t.advance(b"abcdefgh");
+    assert!(t.grid().row(0).wrapped, "the fixture did not wrap");
+
+    t.advance(b"\x1b[1;1H\x1b[K");
+    assert!(
+        !t.grid().row(0).wrapped,
+        "the row was erased to its end and still claims to continue into the next"
+    );
+
+    // The consequence, which is what makes this worth a test rather than tidiness.
+    t.resize(20, 3);
+    assert_eq!(
+        screen(&t),
+        "\nfgh",
+        "reflow rejoined an erased row with the one below it, dragging `fgh` up onto \
+         a line it never belonged to"
+    );
+}
+
+#[test]
+fn a_drag_with_conpty_repaints_leaves_every_block_naming_its_own_output() {
+    // `narrowing_and_widening_back_keeps_every_block` covers the reflow half of
+    // a drag and passes. What it cannot see is that on Windows every resize is
+    // *also* a full-viewport repaint, so the real gesture is resize-then-bytes,
+    // twice -- our reflow and then ConPTY's restatement on top of it.
+    //
+    // The repaint here restates the screen we already have, which is ConPTY
+    // agreeing with us and is therefore the *best* case: anything that breaks
+    // under it breaks under every worse one, and breaks for every client.
+    let mut t = Terminal::new(24, 8, 500);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07one\x1b]133;C\x07\r\nfirst output\r\n\x1b]133;D;0\x07");
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07two\x1b]133;C\x07\r\nsecond output\r\n\x1b]133;D;0\x07");
+    t.advance(b"\x1b]133;A\x07$ ");
+    assert_eq!(t.blocks().blocks().len(), 3, "two commands and a live prompt");
+
+    // Ordered the way the host must order it: the grid first, so the repaint is
+    // parsed at the width it was laid out for (see `Session::resize`).
+    for (cols, rows) in [(12, 8), (24, 8)] {
+        t.resize(cols, rows);
+        let repaint = conpty_repaint(&t);
+        t.advance(&repaint);
+    }
+
+    for (i, text) in [(0usize, "first output"), (1, "second output")] {
+        let b = &t.blocks().blocks()[i];
+        let out = b.output_line.expect("the command produced output");
+        let row = t.grid().row_of_line(out).expect("its output line still exists");
+        assert_eq!(
+            t.grid().row(row).text().trim_end(),
+            text,
+            "block {:?} names line {out}, which now reads {:?} -- the repaint moved the \
+             screen out from under an anchor reflow had mapped correctly",
+            b.command,
+            t.grid().row(row).text()
+        );
+    }
+
+    let live = t.blocks().last().expect("the live prompt");
+    assert!(live.output_line.is_none(), "the live prompt has run nothing: {live:?}");
+    assert!(
+        t.blocks().blocks()[..2].iter().all(|b| !b.contains(live.prompt_line)),
+        "the live prompt was swallowed into a finished block above it: {live:?}"
+    );
+}
+
 #[test]
 fn the_block_path_is_independent_of_chunk_boundaries() {
     // A pty hands over arbitrary chunks, so an OSC handler that accumulated
