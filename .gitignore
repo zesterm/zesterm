@@ -20,3 +20,8 @@ Thumbs.db
 
 # Offscreen render output from the dump examples
 /*.png
+
+# wrangler's cache, which holds the Cloudflare account id. `cloud/.gitignore`
+# covers the one `cloud/` produces; this covers the one that appears wherever
+# wrangler is invoked from, which includes the repo root.
+.wrangler/
