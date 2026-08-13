@@ -55,7 +55,7 @@ export type Role = 'host' | 'client' | 'relay';
  * signature that is valid in a context nobody intended.
  * `zest_mesh::identity::Purpose`, spelled with its `as_domain` names.
  */
-export type Purpose = 'auth' | 'enrollment' | 'attach-ticket';
+export type Purpose = 'auth' | 'enrollment' | 'attach-ticket' | 'device-attestation';
 
 /** `zest_mesh::identity::preimage`, verbatim. */
 export function signingPreimage(role: Role, purpose: Purpose, message: Uint8Array): Uint8Array {

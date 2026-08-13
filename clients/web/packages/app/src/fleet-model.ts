@@ -155,6 +155,45 @@ export function browserLabel(userAgent: string): string {
   return 'browser';
 }
 
+/**
+ * Can this browser sign vouchers at all?
+ *
+ * Only a key the account has *approved* may vouch — the Worker refuses a
+ * pending approver — and an ephemeral key must not offer to, for the reason
+ * `ownDeviceAction` never registers one: whatever it signs names a key that
+ * is gone next load.
+ */
+export function ownDeviceApproved(
+  devices: readonly Device[],
+  ownId: string,
+  ephemeral: boolean,
+): boolean {
+  if (ephemeral) return false;
+  return devices.some((d) => d.id === ownId && d.status === 'approved');
+}
+
+/**
+ * The vouching button a device row offers, if any.
+ *
+ * - `approve` — the row is pending and this browser may vouch: the button
+ *   that turns a waiting device into a working one.
+ * - `vouch` — the row is approved and is not this browser. Offered on ANY
+ *   such row, deliberately: attestation, not status, is what spares
+ *   per-machine pairing prompts, and the browser cannot see which approved
+ *   devices already carry one (`/api/attestations` refuses device readers) —
+ *   so the simplest honest v1 is to always offer, and a re-vouch is an
+ *   idempotent renewal by the Worker's own design.
+ * - `null` — this browser cannot sign (unapproved or ephemeral), or the row
+ *   is this browser itself: the Worker refuses self-vouching, so offering
+ *   the button would offer a guaranteed error.
+ */
+export type DeviceVouchAction = 'approve' | 'vouch' | null;
+
+export function deviceVouchAction(device: Device, ownId: string, ownApproved: boolean): DeviceVouchAction {
+  if (!ownApproved || device.id === ownId) return null;
+  return device.status === 'pending' ? 'approve' : 'vouch';
+}
+
 /** One device line of the "Browsers and phones" list. */
 export interface DeviceRowView {
   readonly id: string;
@@ -165,6 +204,12 @@ export interface DeviceRowView {
   readonly pending: boolean;
   /** The spoken warning that this key is readable by scripts on the origin. */
   readonly keyReadable: boolean;
+  /**
+   * What the remove button says. A pending row is *denied* — the request
+   * never granted — while an approved one is *revoked*, trust withdrawn.
+   * Both run the same revoke underneath; the word is for the person.
+   */
+  readonly removeLabel: 'deny' | 'revoke';
 }
 
 /**
@@ -180,6 +225,7 @@ export function deviceRow(device: Device, now: number): DeviceRowView {
     meta: `${device.kind} · last seen ${ago(device.lastSeenAt, now)}`,
     pending: device.status === 'pending',
     keyReadable: device.extractable,
+    removeLabel: device.status === 'pending' ? 'deny' : 'revoke',
   };
 }
 

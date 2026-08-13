@@ -22,9 +22,10 @@ export type Role = 'host' | 'client';
 /**
  * What a signature is *for*. `attach-ticket` is reserved by the Rust today so
  * M4's tickets cannot collide with signatures minted now; carried here for the
- * same reason.
+ * same reason. `device-attestation` is `zest_mesh::attest`'s: one trusted
+ * device vouching for a new one, pinned by `fixtures/attest.json`.
  */
-export type Purpose = 'auth' | 'enrollment' | 'attach-ticket';
+export type Purpose = 'auth' | 'enrollment' | 'attach-ticket' | 'device-attestation';
 
 /**
  * The buffer is `ArrayBuffer`-backed rather than plain `Uint8Array` because

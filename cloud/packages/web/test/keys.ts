@@ -8,7 +8,13 @@
 
 import { getPublicKeyAsync, signAsync } from '@noble/ed25519';
 
-import { hex } from '@zesterm/cloud-shared';
+import {
+  attestationMessage,
+  encodeAttestation,
+  hex,
+  signingPreimage,
+  type AttestationFields,
+} from '@zesterm/cloud-shared';
 import { enrollmentPreimage, type Role } from '../src/enroll/preimage.ts';
 import { registerPreimage } from '../src/enroll/register-preimage.ts';
 
@@ -45,4 +51,20 @@ export async function signRegistration(args: {
   const { key, account, label } = args;
   const preimage = registerPreimage(account, await getPublicKeyAsync(key.seed), label);
   return hex(await signAsync(preimage, key.seed));
+}
+
+/**
+ * A complete attestation blob, signed by `key` as the approver.
+ *
+ * `by` defaults to the signing key's own id — the honest voucher — and can be
+ * overridden so tests can build the dishonest one: a statement naming one
+ * approver, signed by another, which the route must refuse.
+ */
+export async function attestationBlob(
+  key: TestKey,
+  fields: Omit<AttestationFields, 'v' | 'by'> & { by?: string },
+): Promise<string> {
+  const message = attestationMessage({ v: 1, ...fields, by: fields.by ?? key.id });
+  const sig = await signAsync(signingPreimage('client', 'device-attestation', message), key.seed);
+  return encodeAttestation(message, sig);
 }
