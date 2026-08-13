@@ -32,6 +32,8 @@ fn main() {
     let mut record_path = None;
     let mut raw = false;
     let mut idle_exit = None::<Duration>;
+    let mut resize_to = None::<PtySize>;
+    let mut resize_after = None::<Duration>;
 
     let mut i = 0;
     while i < args.len() {
@@ -54,6 +56,23 @@ fn main() {
             // usable for non-interactive capture without hanging.
             "--idle-exit-ms" => {
                 idle_exit = args.get(i + 1).and_then(|s| s.parse().ok()).map(Duration::from_millis);
+                i += 2;
+            }
+            // Resize the pty mid-capture, which is the only way to see what a
+            // shell emits in answer. ConPTY repaints on a resize and what that
+            // repaint contains decides whether the block index survives it --
+            // an ED would take every block on screen with it. Inferring that
+            // from a rendered pane is guesswork; this shows the bytes. (#200)
+            "--resize" => {
+                resize_to = args.get(i + 1).and_then(|s| parse_size(s));
+                if resize_to.is_none() {
+                    eprintln!("--resize wants <cols>x<rows>, e.g. 40x30");
+                    std::process::exit(2);
+                }
+                i += 2;
+            }
+            "--resize-after-ms" => {
+                resize_after = args.get(i + 1).and_then(|s| s.parse().ok()).map(Duration::from_millis);
                 i += 2;
             }
             other => {
@@ -139,6 +158,20 @@ fn main() {
         }
     });
 
+    // The resize, once the shell has had time to print a prompt and whatever
+    // `--cmd` produced. Marked in the stream so the repaint that follows is
+    // unambiguous -- everything after this line is the shell's answer to it.
+    if let Some(size) = resize_to {
+        std::thread::sleep(resize_after.unwrap_or(Duration::from_millis(1500)));
+        eprintln!("\n[pty_dump] --- resize to {}x{} ---", size.cols, size.rows);
+        match pty.resize(size) {
+            Ok(()) => {}
+            Err(e) => eprintln!("[pty_dump] resize failed: {e}"),
+        }
+        std::thread::sleep(Duration::from_millis(800));
+        eprintln!("\n[pty_dump] --- end of the resize repaint ---");
+    }
+
     // Wait for the child, then keep draining until the stream goes quiet --
     // ConPTY paints asynchronously, so process exit does not mean the output
     // has been produced yet.
@@ -170,6 +203,12 @@ fn main() {
             Err(e) => eprintln!("[pty_dump] could not write {path}: {e}"),
         }
     }
+}
+
+/// `<cols>x<rows>`, the shape a person types.
+fn parse_size(s: &str) -> Option<PtySize> {
+    let (cols, rows) = s.split_once(['x', 'X'])?;
+    Some(PtySize::new(cols.trim().parse().ok()?, rows.trim().parse().ok()?))
 }
 
 /// Render control bytes visibly so escape sequences can be read.

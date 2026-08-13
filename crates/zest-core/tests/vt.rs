@@ -937,6 +937,88 @@ fn widening_the_window_re_anchors_blocks_instead_of_losing_them() {
 }
 
 #[test]
+fn narrowing_hard_must_not_evict_the_whole_history() {
+    // The scrollback cap counts *rows*, and narrowing rewraps every logical
+    // line into more of them — so halving the width can double the row count
+    // and push the oldest content past the cap. That is eviction working as
+    // designed, and its effect on the index is not: `evict_before` raises
+    // `authoritative_from` to `next_id` once the last block goes, after which
+    // every keyframe declares the host authoritative past every block that
+    // ever existed and carries none. The loss is permanent and global — a
+    // brand-new client attaching later is told there is no history. (#200)
+    let mut t = Terminal::new(80, 10, 40);
+    for i in 0..12 {
+        let line = format!("\x1b]133;A\x07$ \x1b]133;B\x07cmd{i}\x1b]133;C\x07\r\n{}\r\n\x1b]133;D;0\x07",
+            "x".repeat(70));
+        t.advance(line.as_bytes());
+    }
+    let before = t.blocks().blocks().len();
+    assert!(before > 0, "commands ran, so there is history to lose");
+
+    t.resize(10, 10);
+    let after = t.blocks().blocks().len();
+
+    assert!(
+        after > 0,
+        "narrowing from 80 to 10 columns evicted every one of the {before} blocks — \
+         and once the last goes, authoritative_from rises past them all and no client, \
+         however fresh, is ever told they existed"
+    );
+}
+
+#[test]
+fn narrowing_and_widening_back_keeps_every_block() {
+    // A drag is not one resize. A window goes narrow and comes back, each step
+    // renumbering every line id, and the test above covers only the widening
+    // half. The round trip destroyed the entire index in a live session: three
+    // blocks before, none after — proved host-side by reloading the client so
+    // the daemon sent a fresh keyframe, while a second session on the same
+    // daemon still delivered its own blocks. (#200)
+    //
+    // Tall enough that nothing is evicted: this is about re-anchoring, and a
+    // block legitimately dropped for scrolling out of a short scrollback would
+    // make the test lie about which one it is testing.
+    let mut t = Terminal::new(40, 20, 500);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07one\x1b]133;C\x07\r\nfirst output\r\n\x1b]133;D;0\x07");
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07two\x1b]133;C\x07\r\nsecond output\r\n\x1b]133;D;0\x07");
+    assert_eq!(t.blocks().blocks().len(), 2, "two commands ran");
+
+    t.resize(12, 20);
+    assert_eq!(
+        t.blocks().blocks().len(),
+        2,
+        "narrowing rewraps every line; the blocks are still the same two commands: {:?}",
+        t.blocks().blocks()
+    );
+
+    t.resize(40, 20);
+    assert_eq!(
+        t.blocks().blocks().len(),
+        2,
+        "and coming back must not lose them either: {:?}",
+        t.blocks().blocks()
+    );
+
+    // Surviving is not enough — a block that names the wrong rows renders as
+    // somebody else's output, which is how a listing ends up split across two
+    // cards and the live prompt is swallowed into one.
+    for (b, command, text) in [
+        (&t.blocks().blocks()[0], "one", "first output"),
+        (&t.blocks().blocks()[1], "two", "second output"),
+    ] {
+        assert_eq!(b.command, command);
+        let out = b.output_line.expect("the command produced output");
+        let row = t.grid().row_of_line(out).expect("its output line still exists");
+        assert_eq!(
+            t.grid().row(row).text().trim_end(),
+            text,
+            "block {:?} must still name its own output after the round trip",
+            b.command
+        );
+    }
+}
+
+#[test]
 fn the_block_path_is_independent_of_chunk_boundaries() {
     // A pty hands over arbitrary chunks, so an OSC handler that accumulated
     // state outside the parser would produce a different index depending on
