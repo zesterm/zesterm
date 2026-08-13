@@ -327,6 +327,13 @@ impl Session {
         if want == self.size() {
             return false;
         }
+        // The resize happens under the subscribers lock on purpose. Released
+        // between computing `want` and applying it, the min goes stale the
+        // moment another attach or resize interleaves, and two racing resizes
+        // can land on the pty out of order -- the grid then disagrees with
+        // the votes until the next change. The cost is one bounded syscall at
+        // human cadence blocking concurrent polls for its duration; the
+        // serialization is not incidental, it *is* the arbitration.
         self.resize(want.0, want.1);
         for (h, sub) in subs.iter_mut() {
             if Some(*h) == exempt {
