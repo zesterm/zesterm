@@ -116,6 +116,171 @@ pub fn sign_attestation(identity: &ClientIdentity, a: &Attestation) -> Result<Si
     Ok(identity.sign(Purpose::DeviceAttestation, &attestation_message(a)?))
 }
 
+/// The layout version [`attestation_message`] writes and [`decode_attestation`]
+/// accepts. Anything else is refused unread — it is signed, so an old statement
+/// cannot be replayed as a newer shape.
+pub const ATTESTATION_VERSION: u16 = 1;
+
+/// How long a blob may be before it is refused unread.
+///
+/// Mirrors `MAX_ATTESTATION_CHARS` in `cloud/packages/shared/src/attestation.ts`,
+/// and for its reason: the blob is caller-supplied and reaches the decoder
+/// before any signature is checked, so the cheap bound comes first. Two
+/// kilobytes is nearly three times any honest blob.
+pub const MAX_ATTESTATION_CHARS: usize = 2048;
+
+/// An attestation as it travels: `base64url(message) "." base64url(signature)`,
+/// both parts unpadded.
+///
+/// **Verification is over the bytes that arrived, never a re-encoding.** The
+/// blob is stored and re-served verbatim by the control plane, and the message
+/// this holds is exactly what was parsed — re-deriving it from the fields
+/// would quietly bless any parse bug by verifying a message nobody sent.
+#[derive(Debug, Clone)]
+pub struct DecodedAttestation {
+    pub fields: Attestation,
+    /// The message exactly as it arrived — the bytes the signature covers.
+    message: Vec<u8>,
+    pub signature: Signature,
+}
+
+impl DecodedAttestation {
+    /// The arrived message bytes, for anyone re-serving or pinning them.
+    #[must_use]
+    pub fn message(&self) -> &[u8] {
+        &self.message
+    }
+
+    /// [`verify_attestation`], over the arrived bytes.
+    #[must_use]
+    pub fn verify(&self, now_ms: u64) -> bool {
+        // The same gate order as `verify_attestation`: the window first,
+        // because this runs on untrusted input and the Ed25519 verify is the
+        // expensive step.
+        if now_ms < self.fields.iat || now_ms >= self.fields.exp {
+            return false;
+        }
+        verify_client(self.fields.by, Purpose::DeviceAttestation, &self.message, &self.signature)
+            .is_ok()
+    }
+}
+
+/// Split, decode and narrow — and **verify nothing**, the split
+/// `cloud/packages/shared/src/attestation.ts` makes for the same reason: what
+/// to verify against and at which clock is the caller's decision. Every
+/// malformed shape collapses to one `None`.
+///
+/// The walk refuses short buffers, **trailing bytes**, and any version or
+/// domain that is not this one. Trailing bytes matter more than they look: a
+/// decoder that ignored them would accept two different blobs as one
+/// statement, and the extra bytes would still be inside what the signature is
+/// checked over — a mismatch that surfaces as "bad signature" and names
+/// nothing.
+#[must_use]
+pub fn decode_attestation(text: &str) -> Option<DecodedAttestation> {
+    if text.is_empty() || text.len() > MAX_ATTESTATION_CHARS {
+        return None;
+    }
+    let mut parts = text.split('.');
+    let (message, signature) = (parts.next()?, parts.next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    let message = base64url_decode(message)?;
+    let signature = Signature::from_slice(&base64url_decode(signature)?).ok()?;
+    let fields = parse_message(&message)?;
+    Some(DecodedAttestation { fields, message, signature })
+}
+
+/// Strict base64url: the URL-safe alphabet, unpadded, nothing else.
+///
+/// `=` is refused rather than skipped — the TypeScript side neither emits nor
+/// accepts it, and two spellings of one blob would be two identities for the
+/// same statement wherever a blob is compared or deduplicated.
+fn base64url_decode(text: &str) -> Option<Vec<u8>> {
+    // A length of 1 mod 4 encodes a partial byte no encoder produces.
+    if text.len() % 4 == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let mut acc: u32 = 0;
+    let mut bits = 0u32;
+    for &b in text.as_bytes() {
+        let v = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            _ => return None,
+        };
+        acc = (acc << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            #[allow(clippy::cast_possible_truncation)]
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// Field by field off the wire bytes. `None` on anything malformed.
+fn parse_message(message: &[u8]) -> Option<Attestation> {
+    let mut c = Cursor { data: message, at: 0 };
+    if c.take(ATTEST_DOMAIN.len())? != ATTEST_DOMAIN {
+        return None;
+    }
+    let v = c.u16()?;
+    if v != ATTESTATION_VERSION {
+        return None;
+    }
+    let account = c.string()?;
+    let device = ClientId::from_bytes(c.key()?);
+    let label = c.string()?;
+    let by = ClientId::from_bytes(c.key()?);
+    let iat = c.u64()?;
+    let exp = c.u64()?;
+    if c.at != message.len() {
+        return None;
+    }
+    Some(Attestation { v, account, device, label, by, iat, exp })
+}
+
+struct Cursor<'a> {
+    data: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let end = self.at.checked_add(n)?;
+        let out = self.data.get(self.at..end)?;
+        self.at = end;
+        Some(out)
+    }
+
+    fn u16(&mut self) -> Option<u16> {
+        Some(u16::from_be_bytes(self.take(2)?.try_into().ok()?))
+    }
+
+    fn u64(&mut self) -> Option<u64> {
+        Some(u64::from_be_bytes(self.take(8)?.try_into().ok()?))
+    }
+
+    fn key(&mut self) -> Option<[u8; 32]> {
+        self.take(32)?.try_into().ok()
+    }
+
+    fn string(&mut self) -> Option<String> {
+        let len = usize::from(self.u16()?);
+        // Invalid UTF-8 is a refusal, not U+FFFD: a string that re-encodes to
+        // different bytes than were signed is a field the encoder side could
+        // never have produced.
+        String::from_utf8(self.take(len)?.to_vec()).ok()
+    }
+}
+
 /// Did the holder of `a.by` vouch for exactly this statement, and is it live?
 ///
 /// Answers only "`a.by` signed *these* bytes and `now_ms` falls in
@@ -397,6 +562,129 @@ mod tests {
             "the fixture must carry a case that verifies false, or a TS \
              implementation that accepts everything passes it"
         );
+    }
+
+    #[test]
+    fn a_blob_decodes_to_the_bytes_that_were_encoded() {
+        // Round-trip through the wire form for every golden case, so the Rust
+        // decoder and the TypeScript encoder are pinned to one blob framing:
+        // base64url(message) "." base64url(signature), unpadded. The verdicts
+        // must survive the trip too, expired case included.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zest-proto/fixtures/attest.json");
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("attest.json"))
+                .expect("parses");
+
+        for case in json["cases"].as_array().expect("cases") {
+            let name = case["name"].as_str().expect("name");
+            let message = hex_bytes(case["message"].as_str().expect("message"));
+            let signature = hex_bytes(case["signature"].as_str().expect("signature"));
+            let blob = format!("{}.{}", base64url(&message), base64url(&signature));
+
+            let decoded = decode_attestation(&blob)
+                .unwrap_or_else(|| panic!("{name}: the golden blob must decode"));
+            assert_eq!(decoded.message(), &message[..], "{name}: the arrived bytes are kept");
+            assert_eq!(
+                hex(&decoded.fields.device.0),
+                case["attestation"]["device"].as_str().expect("device"),
+                "{name}: the parsed device key"
+            );
+            assert_eq!(
+                decoded.fields.label,
+                case["attestation"]["label"].as_str().expect("label"),
+                "{name}: the parsed label, UTF-8 bytes and not UTF-16 units"
+            );
+            assert_eq!(
+                decoded.verify(case["now_ms"].as_u64().expect("now_ms")),
+                case["expect_verify"].as_bool().expect("expect_verify"),
+                "{name}: the verdict must survive the wire form"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_blob_is_refused_not_guessed_at() {
+        let me = approver();
+        let a = attestation(me.client_id());
+        let message = attestation_message(&a).expect("fits");
+        let sig = sign_attestation(&me, &a).expect("fits");
+        let good = format!("{}.{}", base64url(&message), base64url(&sig.to_bytes()));
+        assert!(decode_attestation(&good).is_some(), "the well-formed blob decodes");
+
+        assert!(decode_attestation("").is_none(), "empty");
+        assert!(decode_attestation(&"a".repeat(MAX_ATTESTATION_CHARS + 1)).is_none(), "over the length bound");
+        assert!(decode_attestation(&good.replace('.', "")).is_none(), "no separator");
+        assert!(decode_attestation(&format!("{good}.")).is_none(), "a second separator");
+        assert!(
+            decode_attestation(&format!("{good}=")).is_none(),
+            "padding is refused: two spellings of one blob would be two identities \
+             for the same statement"
+        );
+        assert!(
+            decode_attestation(&format!("{}.{}", base64url(&message), base64url(&sig.to_bytes()[..63]))).is_none(),
+            "a 63-byte signature is an error, never a pad"
+        );
+
+        // Trailing bytes inside the message: still inside what the signature
+        // covers, so ignoring them would surface later as a nameless mismatch.
+        let mut trailing = message.clone();
+        trailing.push(0);
+        assert!(
+            decode_attestation(&format!("{}.{}", base64url(&trailing), base64url(&sig.to_bytes()))).is_none(),
+            "trailing bytes are refused at the parse, by name"
+        );
+
+        let mut truncated = message.clone();
+        truncated.truncate(message.len() - 1);
+        assert!(
+            decode_attestation(&format!("{}.{}", base64url(&truncated), base64url(&sig.to_bytes()))).is_none(),
+            "a short message is refused"
+        );
+
+        // A version this build does not speak, and a foreign domain.
+        let mut v2 = message.clone();
+        v2[ATTEST_DOMAIN.len() + 1] = 2;
+        assert!(
+            decode_attestation(&format!("{}.{}", base64url(&v2), base64url(&sig.to_bytes()))).is_none(),
+            "an unknown layout version is refused unread"
+        );
+        let mut wrong_domain = message.clone();
+        wrong_domain[0] ^= 1;
+        assert!(
+            decode_attestation(&format!("{}.{}", base64url(&wrong_domain), base64url(&sig.to_bytes()))).is_none(),
+            "a foreign domain is not this message"
+        );
+
+        // Invalid UTF-8 where the label's bytes go. The label in `a` is ASCII
+        // "andy-phone", so flipping its first byte to 0xff makes the string
+        // fail to decode rather than merely change.
+        let label_at = ATTEST_DOMAIN.len() + 2 + 2 + a.account.len() + 32 + 2;
+        let mut bad_utf8 = message.clone();
+        bad_utf8[label_at] = 0xff;
+        assert!(
+            decode_attestation(&format!("{}.{}", base64url(&bad_utf8), base64url(&sig.to_bytes()))).is_none(),
+            "invalid UTF-8 is a refusal, not U+FFFD: it re-encodes to different \
+             bytes than were signed"
+        );
+    }
+
+    /// Unpadded base64url, test-side only: production encodes in TypeScript.
+    fn base64url(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            let chars = [(n >> 18) & 63, (n >> 12) & 63, (n >> 6) & 63, n & 63];
+            for (i, ch) in chars.iter().enumerate() {
+                if i <= chunk.len() {
+                    out.push(ALPHABET[*ch as usize] as char);
+                }
+            }
+        }
+        out
     }
 
     fn hex(bytes: &[u8]) -> String {

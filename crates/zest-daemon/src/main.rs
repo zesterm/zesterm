@@ -239,6 +239,37 @@ fn main() {
         }
     };
 
+    // The account's attestations, for a machine that enrolled: prepared here,
+    // because the authenticator below must hold the wrapped store, but not
+    // *running* yet -- the one-shot handlers between here and the servers
+    // (--trust, --forget, --trusted) return before it would be right for a
+    // listing command to touch the network. Under --ephemeral the keystore is
+    // memory and `prepare` would answer None by itself; the explicit gate says
+    // the intent out loud.
+    let attest = if ephemeral {
+        None
+    } else {
+        zest_daemon::attest_sync::AttestSync::prepare(
+            store.as_ref(),
+            &opt("--control-plane")
+                .unwrap_or_else(|| enroll::DEFAULT_CONTROL_PLANE.to_string()),
+            Roots::Platform,
+        )
+    };
+    // Both names stay live: the wrapper is what serves handshakes, and the
+    // file store is what the sync loop reasons about (who may vouch, whose
+    // record a revocation removes). Handing the loop the wrapper would let a
+    // grant answer for its own authority.
+    let file_trust = Arc::clone(&trust);
+    let trust: Arc<dyn TrustStore> = match &attest {
+        Some(sync) => Arc::new(zest_daemon::attest_sync::AttestedTrustStore::new(
+            Arc::clone(&trust),
+            sync.set(),
+            sync.poke(),
+        )),
+        None => trust,
+    };
+
     let queue = PairingQueue::new();
     let auth = Arc::new(Authenticator::new(
         Arc::clone(&identity),
@@ -334,6 +365,12 @@ fn main() {
         trust = %trust.describe(),
         "starting"
     );
+
+    // Every one-shot has returned; this process is the daemon. Fetch on start,
+    // then poll, hurried by trust-store misses. → attest_sync.rs.
+    if let Some(sync) = attest {
+        sync.spawn(Arc::clone(&file_trust), Arc::clone(&queue));
+    }
 
     // Someone has to be able to say yes. Without an approver, an unknown client
     // waits two minutes and is denied -- correct, and useless if there is

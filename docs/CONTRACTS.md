@@ -38,7 +38,7 @@ paragraph of justification attached.
 | `SessionSource`, `Origin` | `zest-app/src/source.rs` | **frozen** | WS-A, WS-B, WS-F |
 | `Peer`, `Endpoint`, `Reachability`, `Discovery` | `zest-mesh/` | **frozen** | WS-F, WS-H |
 | `HostIdentity`, `ClientIdentity`, `Signature`, `Nonce`, `Purpose` | `zest-mesh/src/identity.rs` | draft — WS-H may change freely; gained `Purpose::DeviceAttestation` with #184 | WS-H only |
-| `Attestation`, `attestation_message`, `sign_attestation`, `verify_attestation` | `zest-mesh/src/attest.rs` | draft — the `zesterm-attest-v1` layout, signed under `Purpose::DeviceAttestation`; `fixtures/attest.json` pins it for the TS implementations that land later | WS-H only |
+| `Attestation`, `attestation_message`, `sign_attestation`, `verify_attestation`, `decode_attestation` | `zest-mesh/src/attest.rs` | **frozen** — the `zesterm-attest-v1` layout and its `base64url(message).base64url(sig)` blob framing, signed under `Purpose::DeviceAttestation`; the TS port (`cloud/packages/shared/src/attestation.ts`) and the daemon's sync (`zest-daemon/src/attest_sync.rs`) are both pinned to `fixtures/attest.json` | WS-F, WS-H |
 | `KeyStore`, `SecretStore`, `CredentialStore` | `zest-mesh/src/keystore.rs` | draft — WS-H may change freely | WS-H, WS-F |
 | `DaemonConfig`, `SessionHandle`, `SessionState` | `zest-daemon/src/lib.rs` | draft — WS-F may change freely; gained `min_delta_interval`, see below | WS-F only |
 | TypeScript bindings | `crates/zest-proto/bindings/` | **generated** — `cargo xtask check-bindings` | WS-G, WS-H |
