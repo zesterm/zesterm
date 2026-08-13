@@ -75,6 +75,14 @@ export type EnrollKind = 'host' | 'device';
 /** `devices.kind`. Closed, because the devices screen renders an icon per value. */
 export type DeviceKind = 'browser' | 'phone' | 'desktop';
 
+/**
+ * `devices.status`. `pending` is a registered key awaiting approval — listed
+ * and revocable, but its bearer token resolves to nothing and no attestation
+ * names it. There is no 'denied': denying is the existing revoke, which is
+ * what keeps a denied key from registering again (migration 0004).
+ */
+export type DeviceStatus = 'pending' | 'approved';
+
 export interface EnrollCodeRow {
   readonly code: string;
   readonly user_id: string;
@@ -101,6 +109,9 @@ export interface DeviceRow {
   readonly label: string;
   readonly kind: DeviceKind;
   readonly extractable: number;
+  readonly status: DeviceStatus;
+  readonly approved_at: number | null;
+  readonly approved_by: string | null;
   readonly enrolled_at: number;
   readonly last_seen_at: number | null;
   readonly revoked_at: number | null;
@@ -128,6 +139,12 @@ export interface PublicDevice {
    * showing a green tick that is not true.
    */
   readonly extractable: boolean;
+  /**
+   * `pending` until the account approves this key. The screen renders the
+   * difference, because a pending device that looks approved is a device
+   * whose owner never learns it is waiting.
+   */
+  readonly status: DeviceStatus;
   readonly enrolledAt: number;
   readonly lastSeenAt: number | null;
 }
@@ -151,6 +168,7 @@ export function publicDevice(row: DeviceRow): PublicDevice {
     label: row.label,
     kind: row.kind,
     extractable: row.extractable !== 0,
+    status: row.status,
     enrolledAt: row.enrolled_at,
     lastSeenAt: row.last_seen_at,
   };

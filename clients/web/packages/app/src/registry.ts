@@ -14,6 +14,8 @@
  * reading `undefined`.
  */
 
+import { signRegistration, type ClientSigner } from '@zesterm/auth';
+
 export interface Host {
   readonly id: string;
   readonly label: string;
@@ -23,6 +25,8 @@ export interface Host {
 }
 
 export type DeviceKind = 'browser' | 'phone' | 'desktop';
+
+export type DeviceStatus = 'pending' | 'approved';
 
 export interface Device {
   readonly id: string;
@@ -36,6 +40,12 @@ export interface Device {
    * comfortable lie about the one that matters.
    */
   readonly extractable: boolean;
+  /**
+   * `pending` is a registered key awaiting approval — listed and revocable,
+   * but not yet a credential anywhere. Shown, because a pending device that
+   * looks approved is one whose owner never learns it is waiting.
+   */
+  readonly status: DeviceStatus;
   readonly enrolledAt: number;
   readonly lastSeenAt: number | null;
 }
@@ -82,6 +92,12 @@ export function parseDevice(value: unknown): Device | null {
     // Absent reads as extractable, which is the cautious direction: the screen
     // then over-warns rather than quietly promising a key is safe.
     extractable: d['extractable'] !== false,
+    // Absent reads as approved — backward tolerance for a Worker deployed
+    // before the column existed, whose rows are all grandfathered approved by
+    // the migration anyway. The cautious direction is inverted from
+    // `extractable` on purpose: a false "pending" banner tells the owner
+    // their working browser is locked out, which is the scarier lie here.
+    status: d['status'] === 'pending' ? 'pending' : 'approved',
     enrolledAt,
     lastSeenAt: millis(d['lastSeenAt']),
   };
@@ -164,4 +180,41 @@ export async function mintEnrollCode(
     throw new Error('enroll code answered the wrong shape');
   }
   return { code, expiresAt };
+}
+
+/**
+ * Register this browser's own key with the account, as a `pending` device
+ * (an account's first device is born approved — the Worker's bootstrap rule).
+ *
+ * Same CSRF posture as `revoke` and `mintEnrollCode`. The body carries an
+ * Ed25519 signature over `(account, key, label)` — see `@zesterm/auth`'s
+ * `register.ts` — so the Worker learns the caller *holds* the key it names,
+ * and a captured request replays under no other account.
+ *
+ * `account` is the bootstrap answer's `user.id`, passed in rather than
+ * re-fetched: the caller already holds the bootstrap, and a second fetch here
+ * would be a second chance for the two to name different users.
+ */
+export async function registerDevice(
+  args: {
+    readonly signer: ClientSigner;
+    readonly account: string;
+    readonly label: string;
+    /** From the device key's kind: a seed is readable by scripts, WebCrypto is not. */
+    readonly extractable: boolean;
+  },
+  fetchImpl: typeof fetch = fetch,
+): Promise<Device> {
+  const { signer, account, label, extractable } = args;
+  const sig = await signRegistration(signer, account, label);
+  const res = await fetchImpl('/api/devices/register', {
+    method: 'POST',
+    headers: { accept: 'application/json', 'content-type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ deviceId: signer.clientId, label, kind: 'browser', extractable, sig }),
+  });
+  if (!res.ok) throw new Error(`device register answered ${res.status}`);
+  const device = parseDevice(((await res.json()) as { device?: unknown }).device);
+  if (device === null) throw new Error('device register answered the wrong shape');
+  return device;
 }

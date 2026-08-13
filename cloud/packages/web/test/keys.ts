@@ -10,6 +10,7 @@ import { getPublicKeyAsync, signAsync } from '@noble/ed25519';
 
 import { hex } from '@zesterm/cloud-shared';
 import { enrollmentPreimage, type Role } from '../src/enroll/preimage.ts';
+import { registerPreimage } from '../src/enroll/register-preimage.ts';
 
 export interface TestKey {
   readonly seed: Uint8Array;
@@ -32,5 +33,16 @@ export async function signEnrollment(args: {
 }): Promise<string> {
   const { key, code, label, role = 'host' } = args;
   const preimage = enrollmentPreimage(role, code, await getPublicKeyAsync(key.seed), label);
+  return hex(await signAsync(preimage, key.seed));
+}
+
+/** What a signed-in browser sends: the signature over `(account, key, label)`. */
+export async function signRegistration(args: {
+  key: TestKey;
+  account: string;
+  label: string;
+}): Promise<string> {
+  const { key, account, label } = args;
+  const preimage = registerPreimage(account, await getPublicKeyAsync(key.seed), label);
   return hex(await signAsync(preimage, key.seed));
 }

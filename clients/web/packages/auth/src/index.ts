@@ -24,6 +24,7 @@ export {
   ChallengeError,
   type ClientIdentity,
 } from './identity.ts';
+export { registerRequest, signRegistration } from './register.ts';
 export { type ClientSigner } from './signer.ts';
 // The WebCrypto implementation is `@zesterm/auth/webcrypto`, deliberately not
 // re-exported here: it needs the DOM's `CryptoKey` type, and the packages

@@ -260,6 +260,30 @@ test('revoking the principal kills its token with no second write', async () => 
   db.close();
 });
 
+test('a pending device’s token resolves to nothing', async () => {
+  // Approval is in the resolver's JOIN beside the liveness conditions, so a
+  // device that is not `approved` has no working credential — however its
+  // holder came by a token string, and with no second write anywhere when a
+  // row is demoted. Enrolment mints the token while the row is approved (a
+  // typed code is the account's explicit act); the flip below is the demotion.
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  const device = await enrolled(db, cookie, 'device', 8);
+
+  db.raw.prepare(`UPDATE devices SET status = 'pending' WHERE id = ?`).run(device.id);
+  const res = await routeApi(bearer('/api/hosts', device.token), env(db), fetch, NOW);
+  assert.equal(res?.status, 401, 'pending means awaiting approval, and a credential does not wait');
+
+  db.raw.prepare(`UPDATE devices SET status = 'approved' WHERE id = ?`).run(device.id);
+  const approved = await routeApi(bearer('/api/hosts', device.token), env(db), fetch, NOW);
+  assert.equal(
+    approved?.status,
+    200,
+    'the token itself was never revoked — approval alone is what gates it',
+  );
+  db.close();
+});
+
 test('re-enrolling rotates: at most one live token per principal', async () => {
   const db = testDb();
   const cookie = await signedIn(db, 'user-a');

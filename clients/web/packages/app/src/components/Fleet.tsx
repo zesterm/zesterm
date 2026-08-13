@@ -27,10 +27,17 @@ import type { Theme } from '@zesterm/theme';
 
 import type { Bootstrap, User } from '../bootstrap.ts';
 import type { DeviceKey } from '../device-key.ts';
-import { ago, hostCard, mintPanelOnStart } from '../fleet-model.ts';
+import { browserLabel, deviceRow, hostCard, mintPanelOnStart, ownDeviceAction } from '../fleet-model.ts';
 import { liveDirectory, relayLinks } from '../live-directory.ts';
 import { relayAccess } from '../relay-access.ts';
-import { fetchRegistry, mintEnrollCode, revoke, type Device, type Host } from '../registry.ts';
+import {
+  fetchRegistry,
+  mintEnrollCode,
+  registerDevice,
+  revoke,
+  type Device,
+  type Host,
+} from '../registry.ts';
 import { AccountMenu } from './AccountMenu.tsx';
 import { EnrollCode } from './EnrollCode.tsx';
 import { SessionList, type OpenTarget } from './SessionList.tsx';
@@ -97,6 +104,11 @@ export const Fleet = component<{
   const live = relay === null ? null : liveDirectory({ openLink: relayLinks(device.signer, relay) });
   onUnmounted(() => live?.close());
 
+  // Once per mount, not once per load: `load()` runs again after every revoke,
+  // and a registration the Worker keeps refusing must not be retried on each —
+  // that is a request loop wearing a refresh's clothes.
+  let registerTried = false;
+
   const load = (): void => {
     fetchRegistry()
       .then((r) => {
@@ -104,6 +116,35 @@ export const Fleet = component<{
         // Only the machines still in the account: a revoked host's connection
         // is closed by the same call that stops listing it.
         live?.setHosts(r.hosts.map((h) => ({ id: h.id, label: h.label })));
+
+        // This browser's own key, silently, when the account does not list it
+        // yet. Silent in both directions — no button and no error: the row
+        // (and the pending banner, when the bootstrap rule does not apply)
+        // appearing on the refetch is the whole surface, and a failure leaves
+        // a working screen that simply is not listed yet. Ephemeral keys are
+        // excluded in `ownDeviceAction`: they are gone next load, and a
+        // pending row per visit helps nobody.
+        const account = bootstrap.user?.id;
+        if (
+          account !== undefined &&
+          !registerTried &&
+          ownDeviceAction(r.devices, device.signer.clientId, device.ephemeral === true) === 'register'
+        ) {
+          registerTried = true;
+          registerDevice({
+            signer: device.signer,
+            account,
+            label: browserLabel(navigator.userAgent),
+            // Reported honestly from the key's own kind: a seed is readable
+            // by any script on the origin, a WebCrypto key is not.
+            extractable: device.kind === 'seed',
+          })
+            .then(() => load())
+            .catch(() => {
+              // Nothing to show: the screen is already rendering the account
+              // as it stands, and the next mount will try again.
+            });
+        }
       })
       .catch((e: unknown) => {
         state.load = { phase: 'failed', error: e instanceof Error ? e.message : String(e) };
@@ -390,31 +431,56 @@ export const Fleet = component<{
                   onClose={() => (state.mint = null)}
                 />
               ) : null}
+              {ownDeviceAction(
+                state.load.devices,
+                device.signer.clientId,
+                device.ephemeral === true,
+              ) === 'awaiting-approval' ? (
+                // The one fact worth a banner: this row is *this browser*, and
+                // pending means it cannot reach any machine yet. The list
+                // below marks the row too, but nothing there says which
+                // device the reader is sitting at.
+                <p class="fineprint" role="status">
+                  <span class="warn">This browser is awaiting approval</span> — it is listed below
+                  and can be revoked, but it cannot reach your machines until an approved device
+                  vouches for it.
+                </p>
+              ) : null}
               {state.load.devices.length === 0 ? (
                 <p class="muted">Nothing enrolled yet.</p>
               ) : (
                 <ul class="rows">
-                  {state.load.devices.map((d) => (
-                    <li key={d.id} class="row">
-                      <span class="row-name">{d.label}</span>
-                      <span class="row-meta">
-                        {d.kind} · last seen {ago(d.lastSeenAt, Date.now())}
-                        {d.extractable ? (
-                          // Said out loud rather than shown as a tick: this key
-                          // is readable by any script on the origin, which is
-                          // working but not secure.
-                          <span class="warn"> · key readable by scripts on this origin</span>
-                        ) : null}
-                      </span>
-                      <button
-                        class="button subtle"
-                        disabled={state.busy === d.id}
-                        onClick={() => drop('devices', d.id, d.label)}
-                      >
-                        revoke
-                      </button>
-                    </li>
-                  ))}
+                  {state.load.devices.map((d) => {
+                    const row = deviceRow(d, Date.now());
+                    return (
+                      <li key={row.id} class="row">
+                        <span class="row-name">{row.name}</span>
+                        <span class="row-meta">
+                          {row.meta}
+                          {row.pending ? (
+                            // Pending is a state, not a fault — but it is the
+                            // warn colour because an unexpected pending row is
+                            // a key somebody registered with this account's
+                            // session, and the owner should look at it.
+                            <span class="warn"> · pending approval</span>
+                          ) : null}
+                          {row.keyReadable ? (
+                            // Said out loud rather than shown as a tick: this key
+                            // is readable by any script on the origin, which is
+                            // working but not secure.
+                            <span class="warn"> · key readable by scripts on this origin</span>
+                          ) : null}
+                        </span>
+                        <button
+                          class="button subtle"
+                          disabled={state.busy === row.id}
+                          onClick={() => drop('devices', row.id, row.name)}
+                        >
+                          revoke
+                        </button>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </section>

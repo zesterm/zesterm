@@ -1,0 +1,31 @@
+-- Devices gain a lifecycle: `pending` until the account approves them.
+--
+-- Registration (#184) lets a signed-in browser put its own public key into
+-- `devices` with nothing but its session — no code typed, no second factor.
+-- That is deliberately a weaker act than code-enrolment, and `status` is where
+-- the difference is recorded: a registered row is `pending`, visible on the
+-- devices screen and revocable, but the resolver in `machine-tokens.ts`
+-- refuses its bearer token and no attestation will ever name it until it is
+-- approved.
+--
+-- DEFAULT 'approved' is doing two jobs at once, both intended. It grandfathers
+-- every existing row — each of those got here through code-enrolment, and
+-- demoting them all to pending would lock every enrolled phone and desktop out
+-- of the account the moment this migration lands. And it makes future
+-- code-enrolled devices *born* approved: the typed code was the account
+-- holder's explicit act, minutes earlier, on a screen only their session could
+-- reach — exactly the approval this column exists to record.
+--
+-- `approved_by` is the 64-hex device id of the attestor, once approval is an
+-- act one device performs for another. NULL means code-or-bootstrap: approval
+-- implied by the enrolment code, or by the bootstrap rule for an account's
+-- first device, where there is no incumbent device to name.
+--
+-- There is deliberately no 'denied' status. Denying a pending device is the
+-- existing revoke: `revoked_at` is set, the row stays, and the schema's own
+-- rule — a revoked key cannot re-enrol — is what keeps a denied key from
+-- simply registering again. A parallel denied state would be a second spelling
+-- of the same fact, and the two would eventually disagree.
+ALTER TABLE devices ADD COLUMN status TEXT NOT NULL DEFAULT 'approved' CHECK (status IN ('pending','approved'));
+ALTER TABLE devices ADD COLUMN approved_at INTEGER;
+ALTER TABLE devices ADD COLUMN approved_by TEXT;
