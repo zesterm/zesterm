@@ -125,11 +125,11 @@ impl Session {
         let mut reader = pty.take_reader().expect("a fresh pty always has a reader");
         let writer = pty.writer();
 
-        let terminal = Arc::new(Mutex::new(Terminal::new(
-            size.cols as usize,
-            size.rows as usize,
-            scrollback,
-        )));
+        let mut term = Terminal::new(size.cols as usize, size.rows as usize, scrollback);
+        // A restating pty has the last word on the viewport, which changes what
+        // the grid may put there when it grows. (#200)
+        term.set_pty_restates_viewport(pty.restates_on_resize());
+        let terminal = Arc::new(Mutex::new(term));
         let exited = Arc::new(AtomicBool::new(false));
         let title = Arc::new(Mutex::new(String::new()));
 

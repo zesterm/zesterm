@@ -1995,6 +1995,24 @@ three facts about Cloudflare that changed after #59 was written.
       the client its scrollback and nothing asking for it back — landed
       separately as #209. No wire change in any of it.
 
+      **The height drag, which is the one people actually hit.** Dragging the
+      window's height to nothing and back emptied every block on screen. No
+      width change, so no renumbering and no re-anchoring — the index was
+      perfectly intact and every row it named had been blanked, which is why it
+      reads as a block-index bug and is not one. Growing pulled rows back out
+      of scrollback to make a drag reversible; against a pty whose buffer is
+      only as tall as the viewport that is destructive, because the repaint
+      blanks what it no longer holds and the pull has already moved those rows
+      out of history. Growing now leaves the boundary alone when the transport
+      says it restates (`PtyTransport::restates_on_resize` →
+      `Grid::set_pty_restates_viewport`), which is also what ConPTY and Windows
+      Terminal do with their own buffers. The reversible-drag property is a
+      *unix* property and keeps working there; it was never reachable on
+      Windows, because the repaint always had the last word. The web client
+      gained the other half: a height-change keyframe carries the displaced
+      viewport rows into its own scrollback instead of dropping the only copy
+      it had.
+
       **What remains, measured rather than guessed.** One settled resize still
       leaves the viewport's content fourteen rows above where the anchors expect
       it: ConPTY restates from `ESC[H` and leaves the cursor where the shell

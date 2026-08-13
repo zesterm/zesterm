@@ -439,3 +439,66 @@ test('the last block still runs to the bottom', () => {
   );
   assert.equal(tail.length, 0, 'nothing escapes past the open block');
 });
+
+test('a height-change keyframe keeps the rows that scrolled out of the viewport', () => {
+  // Dragging the window's height down and back is the gesture that "every
+  // block is gone" comes from. The width never changes, so nothing is
+  // renumbered and nothing needs re-anchoring — but the rows that were on
+  // screen are now in the host's history, and replacing `rows` wholesale threw
+  // away this client's only copy. The blocks anchored there went on naming
+  // them, so they rendered as blocks with no rows at all. (#200)
+  const view = new GridView();
+  view.applyKeyframe({
+    cols: 20,
+    rows_data: [0n, 1n, 2n, 3n].map((l) => synthRow(l, `line ${l}`)),
+    attrs: [],
+    cursor: CURSOR,
+    modes: 0,
+    blocks: [synthBlock(0, 0n, 1n, 3n)],
+    blocks_from: 0,
+  });
+
+  // The window grew: the host's viewport has moved on and lines 0..3 are
+  // history now. Same width, so the ids still mean what they meant.
+  view.applyKeyframe({
+    cols: 20,
+    rows_data: [4n, 5n, 6n, 7n].map((l) => synthRow(l, `line ${l}`)),
+    attrs: [],
+    cursor: CURSOR,
+    modes: 0,
+    blocks: [synthBlock(0, 0n, 1n, 3n)],
+    blocks_from: 0,
+  });
+
+  const { slices } = sliceBlocks(view);
+  const rows = [...(slices[0]?.promptRows ?? []), ...(slices[0]?.outputRows ?? [])];
+  assert.equal(
+    rows.length,
+    4,
+    'the block came back with no rows: the client dropped the only copy it had of ' +
+      'lines the host still holds, which renders as the block having vanished',
+  );
+  assert.equal(rows[1]?.runs[0]?.text, 'line 1');
+});
+
+test('a width-change keyframe still discards the rows it cannot renumber', () => {
+  // The counterpart, and the reason the carry-over above is gated on the
+  // width: a reflow renumbers every id, so displaced rows cannot be filed
+  // under a numbering the keyframe has just replaced.
+  const view = new GridView();
+  view.applyKeyframe({
+    cols: 20,
+    rows_data: [0n, 1n, 2n, 3n].map((l) => synthRow(l, `line ${l}`)),
+    attrs: [],
+    cursor: CURSOR,
+    modes: 0,
+  });
+  view.applyKeyframe({
+    cols: 10,
+    rows_data: [4n, 5n].map((l) => synthRow(l, `line ${l}`)),
+    attrs: [],
+    cursor: CURSOR,
+    modes: 0,
+  });
+  assert.equal(view.scrollback.length, 0, 'old-numbering rows must not survive a reflow');
+});

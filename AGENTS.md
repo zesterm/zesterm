@@ -535,6 +535,20 @@ Each of these cost real time and is documented where it bites:
   call: the repaint cannot exist before the call that causes it. Both hosts
   have a probe transport asserting the order rather than a comment asking for
   it (`zest-daemon`/`zest-app` `session.rs`, `the_grid_is_resized_before_the_pty_is_told`). (#200)
+- **ConPTY's buffer is only as tall as the viewport, so growing must not pull
+  history back down into it.** `Grid::resize` used to, unconditionally, so that
+  dragging a window smaller and back was one reversible gesture — which is
+  right on unix, where the pty says nothing. On Windows the shrink discards
+  everything that no longer fits from ConPTY's buffer, and the repaint on the
+  way back restates the little it kept and **blanks the rest**. Rows pulled
+  down to meet that are erased, and the pull has already moved them out of
+  scrollback: history *destroyed*, not misplaced. Dragging the height to
+  nothing and back therefore emptied every block on screen while the block
+  index stayed perfectly intact — which reads as "all my blocks are gone" and
+  sends you looking at the block index, where nothing is wrong. The transport
+  answers `PtyTransport::restates_on_resize` and the grid takes it as
+  `set_pty_restates_viewport`; a plain bool, because `zest-core` must build for
+  wasm and knows nothing about platforms. (#200)
 - **A row overwritten in place keeps a stale `wrapped`, and the next reflow
   believes it.** `wrapped` is one fact in two places — `Row::wrapped` and
   `CellFlags::WRAPLINE` on the last cell, written together by
