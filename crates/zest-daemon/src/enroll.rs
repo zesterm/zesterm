@@ -230,6 +230,13 @@ pub fn signed_body(
         host_id: HostId,
         label: &'a str,
         sig: Sig64,
+        // Advisory, and deliberately *outside* the signature: the preimage
+        // stays `(code, key, label)` so no fixture moves. The Worker screens
+        // it for control characters and renders it, never decides on it. No
+        // `deviceKind` here — that field's values are device kinds
+        // (browser/phone/desktop) and the Worker 400s anything else, so a
+        // daemon naming itself would be refused, not described.
+        platform: &'a str,
     }
 
     Ok(serde_json::to_string(&Body {
@@ -237,6 +244,7 @@ pub fn signed_body(
         host_id: host,
         label,
         sig: Sig64(sig.to_bytes()),
+        platform: std::env::consts::OS,
     })
     // Infallible in practice: every field is a string or a fixed-width byte
     // array, and none of them can fail to serialize.
@@ -580,6 +588,18 @@ mod tests {
             Some(hex(&host.host_id().0).as_str()),
             "the id is 64 lowercase hex, the spelling `hosts.id` is declared with and \
              every other message on this wire uses"
+        );
+        assert_eq!(
+            parsed["platform"].as_str(),
+            Some(std::env::consts::OS),
+            "platform is advisory and unsigned — it decorates the devices screen — but it \
+             still has to be present, or every enrolled machine renders as platform unknown"
+        );
+        assert_eq!(
+            parsed.get("deviceKind"),
+            None,
+            "deviceKind's values are browser/phone/desktop and the Worker 400s anything \
+             else, so a daemon that names itself here is refusing its own enrolment"
         );
     }
 

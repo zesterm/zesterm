@@ -60,6 +60,17 @@ pub const CLIENT_KEY_NAME: &str = "client-key";
 /// [`SecretStore`] for why the token does not travel through [`KeyStore`].
 pub const CLOUD_TOKEN_NAME: &str = "cloud-token";
 
+/// The desktop app's own bearer token, when *it* has signed in.
+///
+/// Deliberately not [`CLOUD_TOKEN_NAME`], and the split is principal, not
+/// tidiness (#190): `cloud-token` names this machine's **host row** — a
+/// machine that serves shells and must never act as the person — while this
+/// names a **device of the user**, which may read the fleet, mint relay
+/// admission, and one day approve other devices. One store, two principals,
+/// two entries; sharing the name would hand the daemon the user's authority
+/// the first time either side wrote the other's slot.
+pub const APP_CLOUD_TOKEN_NAME: &str = "app-cloud-token";
+
 /// The service every zesterm credential is filed under.
 ///
 /// Matches `directories::ProjectDirs::from("dev", "zesterm", "zesterm")`, so a

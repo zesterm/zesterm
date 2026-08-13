@@ -420,7 +420,7 @@ zest-daemon --min-delta-interval <ms>          # coalescing floor; 0 (off) unles
 zest-daemon --identity                         # this host's public key
 zest-daemon --trusted                          # which devices are paired
 zest-daemon --ephemeral                        # throwaway key, for the edit-run loop
-zest-daemon --enroll <code>                    # join this machine to an account (no transport yet — see enroll.rs)
+zest-daemon --enroll <code>                    # join this machine to an account (posts to the control plane)
 zest-daemon --account                          # what this machine has stored; never the token itself
 zest-daemon --logout                           # forget this machine's copy of the token
 cargo run -p zest-daemon --example attach      # drive a daemon session, no GUI
