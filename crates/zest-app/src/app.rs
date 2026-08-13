@@ -392,6 +392,13 @@ enum AppScreen {
     Profiles,
 }
 
+/// How long an enrolment code is — the server's `ENROLL_CODE_LENGTH`
+/// (`cloud/packages/web/src/enroll/codes.ts`), pinned here because the two
+/// ends are separate projects and nothing compiles both. The entry clamps at
+/// this, so a held key or a stray paste cannot outgrow the box the fleet
+/// header sizes for it.
+const ENROLL_CODE_LENGTH: usize = 8;
+
 /// Whether this window's user is signed in to an account (issue #190).
 ///
 /// `Unknown` is the startup state and stays it until the Fleet screen is
@@ -1982,7 +1989,11 @@ impl App {
             post_account(&update, &proxy, AccountState::SignedOut);
         });
         if let Err(e) = spawned {
+            // The enroll worker's shape: a spawn that failed must say so on
+            // screen, or the header keeps claiming "signed in" about a
+            // sign-out that never started.
             tracing::warn!(error = %e, "could not start the sign-out worker");
+            self.account = AccountState::Failed("could not sign out — try again".into());
         }
         self.mark_chrome_dirty();
     }
@@ -7800,13 +7811,25 @@ impl ApplicationHandler<Wakeup> for App {
                                     && !key::belongs_to_desktop(self.modifiers)
                                 {
                                     if let Some(edit) = self.enroll_entry.as_mut() {
-                                        // The code alphabet is uppercase; a
-                                        // person reading one off a screen may
-                                        // well type it lowercase, and making
-                                        // them notice would be a refusal
-                                        // about nothing.
-                                        edit.buffer.push_str(&c.as_str().to_uppercase());
-                                        edit.error = false;
+                                        // The code alphabet is uppercase
+                                        // ASCII alphanumerics (the server's
+                                        // ENROLL_CODE_ALPHABET), so filter to
+                                        // that and uppercase per character —
+                                        // a person reading a code off a
+                                        // screen may well type it lowercase,
+                                        // and making them notice would be a
+                                        // refusal about nothing. Anything
+                                        // else typed is dropped rather than
+                                        // sent to be refused.
+                                        for ch in c.as_str().chars() {
+                                            if edit.buffer.len() >= ENROLL_CODE_LENGTH {
+                                                break;
+                                            }
+                                            if ch.is_ascii_alphanumeric() {
+                                                edit.buffer.push(ch.to_ascii_uppercase());
+                                                edit.error = false;
+                                            }
+                                        }
                                     }
                                 }
                             }
