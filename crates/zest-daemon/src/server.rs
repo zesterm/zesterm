@@ -576,7 +576,7 @@ impl Connection {
                             label: r.label.clone(),
                             code: r.code.clone(),
                             remote: r.remote.clone(),
-                            expires_in_secs: u32::try_from(left.as_secs()).unwrap_or(u32::MAX),
+                            expires_in_secs: pairing_expiry_secs(left),
                             resolved: false,
                         });
                     }
@@ -1518,6 +1518,18 @@ fn shell_integration_dir() -> std::path::PathBuf {
     )
 }
 
+/// A live request's remaining validity, for the wire.
+///
+/// Ceiled, and never 0: the wire reserves `0` for "expiry unknown" (a daemon
+/// predating the field) and for tombstones, and the client answers unknown by
+/// assuming the full pairing window — so a request with 400ms left that
+/// truncated to 0 would keep a dead code on screen for minutes. A request
+/// still in the queue is still answerable, which is what `max(1)` claims.
+fn pairing_expiry_secs(left: std::time::Duration) -> u32 {
+    let ceiled = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+    u32::try_from(ceiled.max(1)).unwrap_or(u32::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1749,6 +1761,27 @@ mod tests {
         };
         assert_eq!(*client, device);
         assert!(code.is_empty(), "a tombstone carries no code — there is nothing to compare");
+    }
+
+    #[test]
+    fn a_live_requests_expiry_is_never_the_unknown_marker() {
+        // `0` means "expiry unknown" on the wire (an old daemon, or a
+        // tombstone), and the client answers unknown by assuming the full
+        // pairing window. Truncation made a request with under a second
+        // left claim exactly that, so its dead code stayed on screen for
+        // minutes. Live requests therefore ceil and floor at 1.
+        assert_eq!(pairing_expiry_secs(Duration::ZERO), 1, "expired-but-queued is still answerable");
+        assert_eq!(pairing_expiry_secs(Duration::from_millis(400)), 1, "sub-second must not truncate to unknown");
+        assert_eq!(pairing_expiry_secs(Duration::from_secs(1)), 1);
+        assert_eq!(
+            pairing_expiry_secs(Duration::from_millis(1200)),
+            2,
+            "partial seconds round up — the code outlives the number, never the reverse"
+        );
+        assert_eq!(
+            pairing_expiry_secs(zest_mesh::pairing::APPROVAL_TIMEOUT),
+            u32::try_from(zest_mesh::pairing::APPROVAL_TIMEOUT.as_secs()).expect("fits"),
+        );
     }
 
     #[test]

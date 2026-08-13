@@ -606,21 +606,45 @@ fn arm_pairing_prompt(
         + std::time::Duration::from_secs(u64::from(expires_in_secs));
     *cell.lock() = Some(PairingPrompt { host, code: code.clone(), expires_at });
     post();
-    spawn_pairing_clock(
-        cell,
-        move |p: &PairingPrompt| p.code == code && p.expires_at == expires_at,
-        expires_at,
-        post,
-    );
+    let mine = move |p: &PairingPrompt| p.code == code && p.expires_at == expires_at;
+    let remaining = {
+        let cell = Arc::clone(cell);
+        let mine = mine.clone();
+        move || {
+            let lock = cell.lock();
+            lock.as_ref()
+                .filter(|p| mine(p))
+                .map(|_| expires_at.saturating_duration_since(std::time::Instant::now()))
+        }
+    };
+    let expire = {
+        let cell = Arc::clone(cell);
+        move || {
+            let mut lock = cell.lock();
+            if lock.as_ref().is_some_and(&mine) {
+                *lock = None;
+                true
+            } else {
+                false
+            }
+        }
+    };
+    spawn_pairing_clock(remaining, expire, post);
 }
 
-/// A device waiting for THIS machine's approval — the inbound half of
-/// pairing, as [`PairingCell`] is the outbound wait. Separate cells on
-/// purpose: a window attaching somewhere while its daemon is asked to
-/// approve something else must show both honestly. Written by the fleet
-/// watcher's thread; `Wakeup::PairingChanged` announces every change here
-/// too — the event means "pairing state moved, look again", whichever side.
-type ApprovalCell = Arc<parking_lot::Mutex<Option<ApprovalRequest>>>;
+/// Devices waiting for THIS machine's approval — the inbound half of
+/// pairing, as [`PairingCell`] is the outbound wait. Separate on purpose: a
+/// window attaching somewhere while its daemon is asked to approve
+/// something else must show both honestly. Written by the fleet watcher's
+/// thread; `Wakeup::PairingChanged` announces every change here too — the
+/// event means "pairing state moved, look again", whichever side.
+///
+/// A queue, not a slot: the daemon announces each device exactly once, so a
+/// second device arriving while the first is on screen must wait its turn
+/// rather than overwrite it — an overwritten request could never be
+/// answered from the modal at all. Arrival order; [`visible_approval`] says
+/// which entry the modal shows.
+type ApprovalCell = Arc<parking_lot::Mutex<Vec<ApprovalRequest>>>;
 
 /// One inbound request: who is asking, as the daemon pushed it.
 struct ApprovalRequest {
@@ -629,10 +653,19 @@ struct ApprovalRequest {
     remote: String,
     code: String,
     expires_at: std::time::Instant,
-    /// Esc was pressed: keep the state — the daemon's tombstone still clears
-    /// it — but stop drawing the modal. Per request, so the next device to
-    /// ask shows again.
+    /// Esc was pressed: keep the entry — the daemon's tombstone still clears
+    /// it — but stop drawing it. Per request, so the next in the queue (and
+    /// any later arrival) shows.
     dismissed: bool,
+}
+
+/// Which queued request the modal shows: the oldest that is neither
+/// dismissed nor expired. One at a time on purpose — two codes on screen is
+/// an invitation to compare the wrong one — and every way a request ends
+/// (answered, dismissed, expired, tombstoned) advances by making this
+/// predicate move on.
+fn visible_approval(queue: &[ApprovalRequest], now: std::time::Instant) -> Option<usize> {
+    queue.iter().position(|r| !r.dismissed && r.expires_at > now)
 }
 
 /// Store an inbound request and arm its clock; the fleet watcher's
@@ -655,15 +688,38 @@ fn arm_approval_request(
         u64::from(expires_in_secs)
     };
     let expires_at = std::time::Instant::now() + std::time::Duration::from_secs(secs);
-    *cell.lock() =
-        Some(ApprovalRequest { client, label, remote, code, expires_at, dismissed: false });
+    {
+        let mut queue = cell.lock();
+        // A device asking again replaces its older self (the daemon keys
+        // its queue by client for the same reason): one device, one prompt,
+        // and the fresh code is the one its screen is showing.
+        queue.retain(|r| r.client != client);
+        queue.push(ApprovalRequest { client, label, remote, code, expires_at, dismissed: false });
+    }
     post();
-    spawn_pairing_clock(
-        cell,
-        move |r: &ApprovalRequest| r.client == client && r.expires_at == expires_at,
-        expires_at,
-        post,
-    );
+    // Identity for the clock is (client, expires_at): a replacement carries
+    // a fresh monotonic expiry, so the replaced entry's clock finds nothing
+    // and dies without touching the newcomer.
+    let remaining = {
+        let cell = Arc::clone(cell);
+        move || {
+            let queue = cell.lock();
+            queue
+                .iter()
+                .find(|r| r.client == client && r.expires_at == expires_at)
+                .map(|_| expires_at.saturating_duration_since(std::time::Instant::now()))
+        }
+    };
+    let expire = {
+        let cell = Arc::clone(cell);
+        move || {
+            let mut queue = cell.lock();
+            let before = queue.len();
+            queue.retain(|r| !(r.client == client && r.expires_at == expires_at));
+            queue.len() != before
+        }
+    };
+    spawn_pairing_clock(remaining, expire, post);
 }
 
 /// The clock both pairing cells share (#208's staleness lesson, held once).
@@ -677,28 +733,23 @@ fn arm_approval_request(
 /// nothing else will — and wakes once more.
 ///
 /// A replaced or cleared prompt must not inherit the old clock: every tick
-/// re-checks `mine` — the caller's statement that the cell still holds the
-/// prompt this clock was armed for — and exits silently otherwise, so at
-/// most one clock is ever speaking for a cell.
-fn spawn_pairing_clock<T: Send + 'static>(
-    cell: &Arc<parking_lot::Mutex<Option<T>>>,
-    mine: impl Fn(&T) -> bool + Send + 'static,
-    expires_at: std::time::Instant,
+/// re-asks `remaining` — the caller's statement of whether its prompt still
+/// stands, and for how long — and exits silently on `None`, so at most one
+/// clock is ever speaking for any prompt. `expire` removes exactly the
+/// caller's prompt, answering whether it was still there to remove; only
+/// then is the removal worth a wake. Closures rather than a cell type so
+/// the single-slot prompt and the approval queue share one clock — the
+/// staleness rules live once.
+fn spawn_pairing_clock(
+    remaining: impl Fn() -> Option<std::time::Duration> + Send + 'static,
+    expire: impl FnOnce() -> bool + Send + 'static,
     post: Arc<dyn Fn() + Send + Sync>,
 ) {
-    let cell = Arc::clone(cell);
     let clock = std::thread::Builder::new().name("zest-pairing-clock".into()).spawn(move || {
         let mut first = true;
         loop {
-            let left = {
-                let lock = cell.lock();
-                // Replaced or cleared: a newer prompt armed its own clock.
-                let Some(p) = lock.as_ref() else { return };
-                if !mine(p) {
-                    return;
-                }
-                expires_at.saturating_duration_since(std::time::Instant::now())
-            };
+            // Replaced or cleared: a newer prompt armed its own clock.
+            let Some(left) = remaining() else { return };
             // Checked before waking: a clock that outlived its prompt must
             // not keep poking the event loop. The arming call already posted
             // for the first paint.
@@ -707,10 +758,7 @@ fn spawn_pairing_clock<T: Send + 'static>(
             }
             first = false;
             if left.is_zero() {
-                let mut lock = cell.lock();
-                if lock.as_ref().is_some_and(&mine) {
-                    *lock = None;
-                    drop(lock);
+                if expire() {
                     post();
                 }
                 return;
@@ -1044,7 +1092,7 @@ impl App {
             pending_tabs: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_launches: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pairing: Arc::new(parking_lot::Mutex::new(None)),
-            approval: Arc::new(parking_lot::Mutex::new(None)),
+            approval: Arc::new(parking_lot::Mutex::new(Vec::new())),
             remote_identity: None,
             account: AccountState::Unknown,
             account_update: Arc::new(parking_lot::Mutex::new(None)),
@@ -5445,20 +5493,16 @@ impl App {
 
     /// The chrome's notice line, while an approval is pending and its code
     /// still worth comparing.
-    /// The approval modal's content, while a device is asking and the code
-    /// is still worth comparing. `None` once dismissed (Esc), expired, or
-    /// resolved — the modal closes by this returning `None`, which is what
-    /// makes every close path one rule.
+    /// The approval modal's content: the queue's visible request, while its
+    /// code is still worth comparing. `None` when every entry is dismissed,
+    /// expired, or resolved — the modal closes (or advances) by
+    /// [`visible_approval`] moving on, which is what makes every close path
+    /// one rule.
     fn approval_model(&self) -> Option<crate::chrome::model::ApprovalModel> {
-        let cell = self.approval.lock();
-        let r = cell.as_ref()?;
-        if r.dismissed {
-            return None;
-        }
-        let left = r.expires_at.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() {
-            return None;
-        }
+        let queue = self.approval.lock();
+        let now = std::time::Instant::now();
+        let r = &queue[visible_approval(&queue, now)?];
+        let left = r.expires_at.saturating_duration_since(now);
         Some(crate::chrome::model::ApprovalModel {
             label: r.label.clone(),
             remote: r.remote.clone(),
@@ -5473,7 +5517,13 @@ impl App {
     /// close if the delivery fails (the request then still shows at the
     /// daemon's own prompt).
     fn decide_approval(&mut self, approve: bool) {
-        let taken = self.approval.lock().take();
+        let taken = {
+            let mut queue = self.approval.lock();
+            // The entry the modal is showing — the same predicate the
+            // drawing used, so a click can never answer for a request the
+            // person was not looking at.
+            visible_approval(&queue, std::time::Instant::now()).map(|i| queue.remove(i))
+        };
         let Some(request) = taken else { return };
         if let Some(fleet) = self.fleet.as_ref() {
             fleet.decide_pairing(request.client, approve);
@@ -7218,10 +7268,11 @@ impl ApplicationHandler<Wakeup> for App {
                         // another window — or the device gave up. Either
                         // way there is nothing left to decide.
                         crate::fleet::PairingEvent::Resolved { client } => {
-                            let mut cell = approval.lock();
-                            if cell.as_ref().is_some_and(|r| r.client == client) {
-                                *cell = None;
-                                drop(cell);
+                            let mut queue = approval.lock();
+                            let before = queue.len();
+                            queue.retain(|r| r.client != client);
+                            if queue.len() != before {
+                                drop(queue);
                                 post();
                             }
                         }
@@ -7513,14 +7564,23 @@ impl ApplicationHandler<Wakeup> for App {
                 // keystrokes of whoever was mid-command underneath it.
                 {
                     use winit::keyboard::{Key, NamedKey};
-                    if matches!(&event.logical_key, Key::Named(NamedKey::Escape))
-                        && self.approval_model().is_some()
-                    {
-                        if let Some(r) = self.approval.lock().as_mut() {
-                            r.dismissed = true;
+                    if matches!(&event.logical_key, Key::Named(NamedKey::Escape)) {
+                        let dismissed = {
+                            let mut queue = self.approval.lock();
+                            match visible_approval(&queue, std::time::Instant::now()) {
+                                Some(i) => {
+                                    // The next queued request (if any) shows
+                                    // in this one's place on the repaint.
+                                    queue[i].dismissed = true;
+                                    true
+                                }
+                                None => false,
+                            }
+                        };
+                        if dismissed {
+                            self.mark_chrome_dirty();
+                            return;
                         }
-                        self.mark_chrome_dirty();
-                        return;
                     }
                 }
 
@@ -9665,7 +9725,9 @@ mod tuning_tests {
 
 #[cfg(test)]
 mod pairing_tests {
-    use super::{arm_approval_request, arm_pairing_prompt, ApprovalCell, PairingCell};
+    use super::{
+        arm_approval_request, arm_pairing_prompt, visible_approval, ApprovalCell, PairingCell,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -9740,13 +9802,93 @@ mod pairing_tests {
         );
     }
 
+    /// Queue a request with a device id, a code, and minutes of validity.
+    fn approval(cell: &ApprovalCell, id: u8, code: &str, secs: u32) {
+        arm_approval_request(
+            cell,
+            zest_proto::ClientId::from_bytes([id; 32]),
+            format!("device-{id}"),
+            "192.168.1.42:60123".into(),
+            code.into(),
+            secs,
+            Arc::new(|| {}),
+        );
+    }
+
     #[test]
-    fn an_expired_approval_request_clears_itself_and_wakes_the_ui() {
-        // The inbound cell rides the same clock as #208's outbound one, and
-        // must: the modal is chrome, the chrome is cached, and a request
+    fn two_concurrent_requests_queue_and_both_can_be_answered() {
+        // The review finding on #222: a single `Option` slot meant the
+        // second device overwrote the first, and since the daemon announces
+        // each device exactly once, the overwritten request could never be
+        // answered from the modal at all. Both must survive; the modal
+        // shows the older, and answering it advances to the newer.
+        let cell: ApprovalCell = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        approval(&cell, 0xd0, "111111", 120);
+        approval(&cell, 0xd1, "222222", 120);
+
+        let queue = cell.lock();
+        assert_eq!(queue.len(), 2, "the second device must not overwrite the first");
+        let visible = visible_approval(&queue, Instant::now()).expect("one shows");
+        assert_eq!(queue[visible].code, "111111", "the modal shows arrivals in order");
+        drop(queue);
+
+        // Deciding removes exactly the visible entry (the decide path), and
+        // the queue advances to the other device.
+        let mut queue = cell.lock();
+        let i = visible_approval(&queue, Instant::now()).expect("still one");
+        let answered = queue.remove(i);
+        assert_eq!(answered.code, "111111");
+        let next = visible_approval(&queue, Instant::now()).expect("the second advances");
+        assert_eq!(
+            queue[next].code, "222222",
+            "the request that used to be overwritten is now answerable"
+        );
+    }
+
+    #[test]
+    fn a_tombstone_for_the_visible_request_advances_to_the_next() {
+        // Someone answered the visible device at the daemon's stdin: its
+        // tombstone removes it here (the listener's retain), and the next
+        // device's prompt shows instead of a dead one.
+        let cell: ApprovalCell = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        approval(&cell, 0xd0, "111111", 120);
+        approval(&cell, 0xd1, "222222", 120);
+
+        let mut queue = cell.lock();
+        let gone = zest_proto::ClientId::from_bytes([0xd0; 32]);
+        queue.retain(|r| r.client != gone);
+        let next = visible_approval(&queue, Instant::now()).expect("the next shows");
+        assert_eq!(queue[next].code, "222222");
+    }
+
+    #[test]
+    fn dismissing_the_visible_request_shows_the_next() {
+        // Esc is "not now", per request: the dismissed entry stays for its
+        // tombstone but stops drawing, and the queue moves on.
+        let cell: ApprovalCell = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        approval(&cell, 0xd0, "111111", 120);
+        approval(&cell, 0xd1, "222222", 120);
+
+        let mut queue = cell.lock();
+        let i = visible_approval(&queue, Instant::now()).expect("one shows");
+        queue[i].dismissed = true;
+        let next = visible_approval(&queue, Instant::now()).expect("the next shows");
+        assert_eq!(queue[next].code, "222222", "dismiss hides one prompt, not the queue");
+        queue[next].dismissed = true;
+        assert!(
+            visible_approval(&queue, Instant::now()).is_none(),
+            "everything dismissed means no modal, not the first one back"
+        );
+    }
+
+    #[test]
+    fn an_expired_approval_request_clears_itself_and_the_next_shows() {
+        // The inbound queue rides the same clock as #208's outbound cell,
+        // and must: the modal is chrome, the chrome is cached, and a request
         // whose device long since gave up would otherwise sit on screen
-        // asking a question that can no longer be answered.
-        let cell: ApprovalCell = Arc::new(parking_lot::Mutex::new(None));
+        // asking a question that can no longer be answered — now with a
+        // second device queued behind it, whose turn expiry must grant.
+        let cell: ApprovalCell = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let woken = Arc::new(AtomicUsize::new(0));
         let posts = Arc::clone(&woken);
         arm_approval_request(
@@ -9760,12 +9902,11 @@ mod pairing_tests {
                 posts.fetch_add(1, Ordering::Release);
             }),
         );
+        approval(&cell, 0xd1, "222222", 120);
         assert!(
-            cell.lock().as_ref().is_some_and(|r| r.code == "481502" && !r.dismissed),
-            "arming must store the request, undismissed, for the modal to read"
-        );
-        assert!(
-            wait_until(Duration::from_secs(10), || cell.lock().is_none()),
+            wait_until(Duration::from_secs(10), || {
+                cell.lock().iter().all(|r| r.code != "481502")
+            }),
             "the expired request never removed itself — the modal would ask \
              for ever about a device that already gave up"
         );
@@ -9774,6 +9915,32 @@ mod pairing_tests {
             "the removal must wake the UI too, or the cached chrome keeps \
              the modal painted"
         );
+        let queue = cell.lock();
+        let next = visible_approval(&queue, Instant::now())
+            .expect("expiry must hand the modal to the device still waiting");
+        assert_eq!(queue[next].code, "222222");
+    }
+
+    #[test]
+    fn a_rearmed_device_survives_its_old_requests_clock() {
+        // A device that asks again replaces its own entry with a fresh code
+        // and a fresh expiry. The replaced entry's clock, firing later, must
+        // find nothing — clearing the newcomer would delete the code the
+        // person is actively comparing (the same generation discipline as
+        // the outbound prompt's clock).
+        let cell: ApprovalCell = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        approval(&cell, 0xd0, "111111", 1);
+        approval(&cell, 0xd0, "222222", 120);
+        assert_eq!(cell.lock().len(), 1, "one device is one prompt, not two");
+
+        // Outlive the first entry's expiry with margin: its clock has fired
+        // and exited by now, or it was going to clobber the replacement.
+        std::thread::sleep(Duration::from_secs(2));
+        let queue = cell.lock();
+        assert!(
+            queue.iter().any(|r| r.code == "222222"),
+            "the old clock took the replacement with it"
+        );
     }
 
     #[test]
@@ -9781,17 +9948,9 @@ mod pairing_tests {
         // `expires_in_secs: 0` is an older daemon saying "field unknown".
         // The modal must still get a deadline — the daemon's own approval
         // window — because a modal with no deadline never self-clears.
-        let cell: ApprovalCell = Arc::new(parking_lot::Mutex::new(None));
-        arm_approval_request(
-            &cell,
-            zest_proto::ClientId::from_bytes([0xd1; 32]),
-            "old-daemon-device".into(),
-            "10.0.0.7:50123".into(),
-            "111111".into(),
-            0,
-            Arc::new(|| {}),
-        );
-        let deadline = cell.lock().as_ref().map(|r| r.expires_at).expect("stored");
+        let cell: ApprovalCell = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        approval(&cell, 0xd1, "111111", 0);
+        let deadline = cell.lock().first().map(|r| r.expires_at).expect("stored");
         let left = deadline.saturating_duration_since(Instant::now());
         assert!(
             left > Duration::from_secs(30),
