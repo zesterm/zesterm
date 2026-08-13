@@ -162,6 +162,15 @@ enum HostRoute {
     LocalSocket(String),
     /// Another machine's daemon at `host:port` (`--attach`).
     Tcp(String),
+    /// An enrolled machine, through the deployed relay (#190's last leg).
+    ///
+    /// Carries the origin and the host, never a ticket and never the
+    /// token: tickets are 30-second single-use so the dialler mints one per
+    /// dial, and the token is read from the credential store per dial too —
+    /// on the dial's own worker thread, never the event loop — which is
+    /// what makes a signed-out app stop at the next redial with
+    /// `SignedOut` instead of riding a credential captured at click time.
+    Relay { host: zest_proto::HostId, relay_origin: String },
 }
 
 impl HostRoute {
@@ -194,6 +203,50 @@ impl HostRoute {
                         Box::new(read) as Box<dyn std::io::Read + Send>,
                         Box::new(stream) as Box<dyn std::io::Write + Send>,
                     ))
+                })
+            }
+            HostRoute::Relay { host, relay_origin } => {
+                let host = *host;
+                let origin = relay_origin.clone();
+                Box::new(move || {
+                    use crate::remote::RemoteError;
+                    // Every dial — every redial — runs the whole ladder
+                    // fresh: token from the store, ticket from the control
+                    // plane, TLS to the relay. This closure runs on the tab
+                    // worker or the reconnect supervisor, so the keychain
+                    // and two network round trips stay off the event loop.
+                    let mint = || {
+                        let token =
+                            crate::cloud::stored_app_token(&zest_mesh::keystore::OsKeyStore)
+                                .map_err(|e| crate::cloud::CloudError::Transport(e.to_string()))?
+                                .ok_or(crate::cloud::CloudError::SignedOut)?;
+                        let api = crate::cloud::HttpsAccountApi::new(
+                            zest_daemon::enroll::DEFAULT_CONTROL_PLANE,
+                            zest_cloud::tls::Roots::Platform,
+                        )
+                        .map_err(|e| crate::cloud::CloudError::Transport(e.to_string()))?;
+                        crate::cloud::mint_ticket(&api, &token, host)
+                    };
+                    // The daemon's own relay diallers, reused whole: the TLS
+                    // one's read poll arrangement is the trap `zest_cloud::
+                    // tls::READ_POLL` documents, and the plaintext one is
+                    // loopback-only by `RelayOrigin::parse`'s rule — a
+                    // `wrangler dev` relay for the edit-run loop. The `cut`
+                    // is dropped: `RemoteSession`'s supervisor owns this
+                    // link's lifecycle through read errors, and has no
+                    // handshake watchdog of its own to arm it from.
+                    let parsed = zest_daemon::relay::RelayOrigin::parse(&origin)
+                        .map_err(|e| RemoteError::Io(e.to_string()))?;
+                    let connect = || {
+                        let dial = if parsed.tls {
+                            zest_daemon::relay::tls_dialler(zest_cloud::tls::Roots::Platform)
+                        } else {
+                            zest_daemon::relay::plaintext_dialler()
+                        };
+                        let wire = dial(&parsed.host, parsed.port)?;
+                        Ok(crate::cloud::RelayLeg { reader: wire.reader, writer: wire.writer })
+                    };
+                    crate::cloud::relay_dial(host, &parsed.host_header(), &mint, &connect)
                 })
             }
         }
@@ -1593,7 +1646,8 @@ impl App {
                 let wake = wake_for(&self.proxy, Arc::clone(&cell), Arc::clone(&self.activity));
                 let command = match route {
                     HostRoute::LocalSocket(_) => self.config.shell.clone().unwrap_or_default(),
-                    HostRoute::Tcp(_) => String::new(),
+                    // Remote either way: the far host runs its own default.
+                    HostRoute::Tcp(_) | HostRoute::Relay { .. } => String::new(),
                 };
                 let session = crate::remote::RemoteSession::create_and_attach(
                     route.dialer(),
@@ -2086,11 +2140,16 @@ impl App {
             )
             .map_err(|e| AccountError::Transient(e.to_string()))?;
             match crate::cloud::fetch_hosts(&api, &token) {
-                Ok(listing) => Ok(listing
-                    .hosts
-                    .into_iter()
-                    .map(|h| AccountEntry { host: h.host, label: h.label })
-                    .collect()),
+                Ok(listing) => Ok(crate::fleet::AccountListing {
+                    // The origin rides along: it is what turns an enrolled
+                    // row into a routable card (`best_route`'s relay arm).
+                    relay_origin: listing.relay_origin,
+                    hosts: listing
+                        .hosts
+                        .into_iter()
+                        .map(|h| AccountEntry { host: h.host, label: h.label })
+                        .collect(),
+                }),
                 Err(crate::cloud::CloudError::SignedOut) => {
                     // The token was revoked out from under us. The watcher
                     // parks either way; this is what keeps the header from
@@ -5160,24 +5219,32 @@ impl App {
                     let meta = crate::launcher::profile_meta(&self.settings, &name);
                     let target = match &route {
                         HostRoute::Tcp(addr) => {
-                            crate::launch::HostTarget::Remote { host, addr: addr.clone() }
+                            Some(crate::launch::HostTarget::Remote { host, addr: addr.clone() })
                         }
-                        HostRoute::LocalSocket(_) => crate::launch::HostTarget::Local,
+                        HostRoute::LocalSocket(_) => Some(crate::launch::HostTarget::Local),
+                        // The picker never builds relay routes today, and
+                        // `HostTarget` cannot name one — a profile launch
+                        // through the relay is the follow-up that extends
+                        // it. Falling through opens a plain shell there
+                        // rather than dropping the click.
+                        HostRoute::Relay { .. } => None,
                     };
-                    // The picked host's display name, for the provenance
-                    // line — the profile itself pinned none (that is what
-                    // ask_host means).
-                    let label = self
-                        .fleet
-                        .as_ref()
-                        .map(|f| f.snapshot())
-                        .unwrap_or_default()
-                        .iter()
-                        .find(|h| h.host == host)
-                        .map(|h| h.label.clone())
-                        .unwrap_or_default();
-                    self.launch_profile_at(&name, &meta, target, label);
-                    return;
+                    if let Some(target) = target {
+                        // The picked host's display name, for the provenance
+                        // line — the profile itself pinned none (that is what
+                        // ask_host means).
+                        let label = self
+                            .fleet
+                            .as_ref()
+                            .map(|f| f.snapshot())
+                            .unwrap_or_default()
+                            .iter()
+                            .find(|h| h.host == host)
+                            .map(|h| h.label.clone())
+                            .unwrap_or_default();
+                        self.launch_profile_at(&name, &meta, target, label);
+                        return;
+                    }
                 }
                 // Pin remote creates to the host the roster named: the
                 // address came from an advertisement, which is a claim.
@@ -5201,7 +5268,19 @@ impl App {
             return self.route.clone();
         }
         if host.presence == zest_mesh::discovery::Presence::Online {
-            return host.address.clone().map(HostRoute::Tcp);
+            if let Some(addr) = host.address.clone() {
+                return Some(HostRoute::Tcp(addr));
+            }
+        }
+        // The last resort, and the leg that makes an enrolled-but-unseen
+        // host reachable at all: through the relay the account names. Gated
+        // on the header's own signed-in state rather than on a keychain
+        // read — this runs per card per chrome rebuild, and the dialler
+        // reads the real token per dial anyway.
+        if host.enrolled && matches!(self.account, AccountState::SignedIn { .. }) {
+            if let Some(origin) = self.fleet.as_ref().and_then(|f| f.relay_origin()) {
+                return Some(HostRoute::Relay { host: host.host, relay_origin: origin });
+            }
         }
         None
     }
@@ -5344,7 +5423,9 @@ impl App {
             })
             .or_else(|| match &route {
                 HostRoute::Tcp(a) => Some(a.clone()),
-                HostRoute::LocalSocket(_) => None,
+                // The pairing notice falls back to "the host": a relay
+                // origin is where the pipe is, not who is at its far end.
+                HostRoute::LocalSocket(_) | HostRoute::Relay { .. } => None,
             });
         let on_pending = (!local).then(|| {
             self.pairing_notifier(pending_host.unwrap_or_else(|| "the host".into()))
@@ -5379,7 +5460,10 @@ impl App {
                     session.terminal().lock().set_palette(palette);
                     let hint = match &route {
                         HostRoute::Tcp(a) => Some(a.clone()),
-                        HostRoute::LocalSocket(_) => None,
+                        // No dial hint: restore-by-address has no address
+                        // for a relayed tab. Restoring one rebuilds its
+                        // route from the account, later work.
+                        HostRoute::LocalSocket(_) | HostRoute::Relay { .. } => None,
                     };
                     pending
                         .lock()
@@ -5434,7 +5518,9 @@ impl App {
     /// not run.
     fn shell_fallback(&self) -> String {
         match self.route {
-            Some(HostRoute::Tcp(_)) => "the host's default shell".to_string(),
+            Some(HostRoute::Tcp(_) | HostRoute::Relay { .. }) => {
+                "the host's default shell".to_string()
+            }
             _ => self
                 .config
                 .shell

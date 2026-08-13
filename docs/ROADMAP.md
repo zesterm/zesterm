@@ -1797,6 +1797,26 @@ on each host. → ADR-005, ADR-006.
       wire), and a `subtle` signature that settles after its connection
       dropped must not be replayed onto the next one.
 
+      **#190's desktop arc is complete**: sign-in, the account-read fleet,
+      pairing surfaced, and now the relay leg. The app signs in with a code
+      typed on the fleet screen (#210 — `ClientIdentity` signs as role
+      `client`, token under `app-cloud-token`, a different principal from
+      the daemon's `cloud-token`); the fleet screen reads `/api/hosts` and
+      lays the durable account listing under discovery's decoration (#214);
+      the matching code shows while a host pends (#208); and `HostRoute::
+      Relay` now attaches through the deployed relay — a fresh 30-second
+      ticket minted per dial, redials included, the browser's exact
+      one-header two-offer `Sec-WebSocket-Protocol` framing, and the
+      ordinary encrypted handshake through the pipe, so the host still
+      challenges and authorizes and the relay never sees plaintext. A
+      signed-out app stops its redial loop (`RemoteError::SignedOut`, the
+      supervisor's `Refused` discipline) rather than backing off against
+      guaranteed 401s. Not claimed: no attach has run against the deployed
+      relay — the leg is proven against injected mint/connect seams plus
+      wire-byte tests on both sides of the offer line, and the first live
+      attach is still the first live attach, exactly host enrolment's
+      caveat.
+
       **No silent rotation**: a device that already has
       `zesterm.device-seed.v1` keeps it. A new key means a new `ClientId`
       means every daemon in the fleet re-prompts a device the person already
@@ -1981,6 +2001,16 @@ three facts about Cloudflare that changed after #59 was written.
       proves the browser, the ticket, the object, the pipe, the `zest-proto`
       handshake and the sealed channel end to end. Only the daemon's own
       outbound leg needs TLS.
+
+      **The desktop app's attach leg landed** (#190):
+      `ws::client::connect_to_offering` sends the browser's exact framing —
+      one `Sec-WebSocket-Protocol` header, comma-joined, protocol first and
+      `ticket.<t>` second, each offer token-checked alone — and refuses a
+      server that echoes the ticket entry back. `zest-app`'s
+      `HostRoute::Relay` mints a fresh ticket per dial through
+      `cloud::mint_ticket` and reuses the daemon's own relay diallers for
+      the TLS leg, so there is one answer to the Winsock read-poll trap,
+      not two.
 - [x] **`zest-cloud`, and the workspace's first TLS stack.** The one crate that
       owns rustls and HTTP, with `cargo xtask check-deps` growing a boundary
       that keeps them out of every crate that crosses to wasm or to a client.

@@ -593,7 +593,22 @@ impl RemoteSession {
                         std::thread::sleep(wait);
                         wait = (wait * 2).min(REDIAL_MAX);
 
-                        let Ok((r, w)) = dial() else { continue };
+                        let (r, w) = match dial() {
+                            Ok(halves) => halves,
+                            // The relay dialler's Refused: the account no
+                            // longer mints tickets for this window, and no
+                            // amount of backoff changes that — only a person
+                            // signing in does. Stops exactly as a refused
+                            // attach stops, and the tab is marked gone
+                            // rather than left saying "reconnecting" about
+                            // a loop that no longer runs.
+                            Err(RemoteError::SignedOut) => {
+                                tracing::warn!(%addr, "signed out; stopping the redial loop");
+                                wake(Wakeup::SessionGone(addr));
+                                return;
+                            }
+                            Err(_) => continue,
+                        };
                         let Ok(mut conn) =
                             connect_daemon(r, w, &identity, &label, expect_host, on_pending.as_ref())
                         else {
@@ -820,6 +835,13 @@ pub enum RemoteError {
     Closed,
     #[error("transport failed: {0}")]
     Io(String),
+    /// A relay dial's ticket mint was refused for the token, or there is no
+    /// token to mint with. Its own variant for the reason `Refused` is one:
+    /// the supervisor stops on it, because no redial can succeed until a
+    /// person signs in again — backing off against guaranteed 401s would
+    /// spin forever and say nothing.
+    #[error("signed out — sign in on the fleet screen to reach this machine")]
+    SignedOut,
     #[error("could not start a thread: {0}")]
     Thread(String),
 }

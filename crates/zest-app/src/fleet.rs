@@ -58,6 +58,18 @@ pub struct AccountEntry {
     pub label: String,
 }
 
+/// What one account fetch answers: the hosts, and where the relay lives.
+///
+/// The origin rides beside the hosts rather than on each row because it is
+/// one fact about the deployment, not a per-host one — and `None` is a
+/// deployment without a relay, where enrolled-but-unseen hosts are listed
+/// and honestly unreachable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountListing {
+    pub relay_origin: Option<String>,
+    pub hosts: Vec<AccountEntry>,
+}
+
 /// Why an account fetch produced no listing.
 pub enum AccountError {
     /// There is no token, or the control plane refused it. Polling stops
@@ -134,7 +146,7 @@ struct State {
     /// What the account lists, from the last successful fetch. `None` both
     /// before the first fetch and after a sign-out — in either case there is
     /// no account speaking, and the listing decays to discovery alone.
-    account: Option<Vec<AccountEntry>>,
+    account: Option<AccountListing>,
 }
 
 struct Inner {
@@ -363,8 +375,18 @@ impl FleetModel {
             }
         }
 
-        merge_account(&mut out, state.account.as_deref());
+        merge_account(&mut out, state.account.as_ref().map(|l| l.hosts.as_slice()));
         out
+    }
+
+    /// Where the account says the relay lives, when a listing has one.
+    ///
+    /// Read separately from `snapshot()` because it is a deployment fact,
+    /// not a host row — `best_route` asks it once per route, not per card
+    /// field.
+    #[must_use]
+    pub fn relay_origin(&self) -> Option<String> {
+        self.inner.state.lock().account.as_ref().and_then(|l| l.relay_origin.clone())
     }
 
     /// Keep the account's host listing fresh, off the main thread.
@@ -375,7 +397,7 @@ impl FleetModel {
     /// through the same lock + latch as every other source.
     pub fn watch_account(
         &self,
-        fetch: impl Fn() -> Result<Vec<AccountEntry>, AccountError> + Send + 'static,
+        fetch: impl Fn() -> Result<AccountListing, AccountError> + Send + 'static,
     ) -> AccountPoke {
         let (tx, rx) = crossbeam_channel::bounded(1);
         let inner = Arc::clone(&self.inner);
@@ -438,8 +460,8 @@ fn merge_account(out: &mut Vec<FleetHost>, account: Option<&[AccountEntry]>) {
 /// guarantees a parked watcher cannot poll, rather than a flag somebody has
 /// to remember to check.
 fn account_loop(
-    fetch: &dyn Fn() -> Result<Vec<AccountEntry>, AccountError>,
-    store: &dyn Fn(Option<Vec<AccountEntry>>),
+    fetch: &dyn Fn() -> Result<AccountListing, AccountError>,
+    store: &dyn Fn(Option<AccountListing>),
     poke: &crossbeam_channel::Receiver<()>,
     poll: Duration,
     backoff: Duration,
@@ -584,16 +606,18 @@ mod tests {
             let calls = Arc::clone(&calls);
             let stored = Arc::clone(&stored);
             std::thread::spawn(move || {
+                let listing =
+                    || AccountListing { relay_origin: Some("wss://relay.example".into()), hosts: Vec::new() };
                 let fetch = move || {
                     let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
                     let _ = seen_tx.send(n);
                     match n {
-                        1 => Ok(Vec::new()),
+                        1 => Ok(listing()),
                         2 => Err(AccountError::SignedOut),
-                        _ => Ok(Vec::new()),
+                        _ => Ok(listing()),
                     }
                 };
-                let store = move |v: Option<Vec<AccountEntry>>| stored.lock().push(v.is_some());
+                let store = move |v: Option<AccountListing>| stored.lock().push(v.is_some());
                 account_loop(
                     &fetch,
                     &store,

@@ -227,20 +227,20 @@ impl AccountApi for HttpsAccountApi {
 
 /// One machine the account lists.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code, reason = "the relay dialler (next PR) consumes these; tests hold them until then")]
 pub struct AccountHost {
     pub host: HostId,
     pub label: String,
     /// When the relay last saw it, epoch milliseconds; `None` when it has
     /// never dialled in.
+    #[allow(dead_code, reason = "the fleet card's `last seen` row is the consumer, later in #190's arc")]
     pub last_seen_ms: Option<u64>,
 }
 
 /// What `GET /api/hosts` answers: the fleet as the account knows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code, reason = "the relay dialler (next PR) consumes these; tests hold them until then")]
 pub struct AccountHosts {
     /// The account's display name, when the answer carries one.
+    #[allow(dead_code, reason = "the fleet header shows it once the watcher threads it through")]
     pub account: Option<String>,
     /// Where the relay lives; `None` on a deployment without one, in which
     /// case the hosts are listed but unreachable through the account.
@@ -294,7 +294,6 @@ pub fn fetch_hosts(api: &dyn AccountApi, token: &str) -> Result<AccountHosts, Cl
 }
 
 /// An attach ticket for `host`, or why the relay would not admit us.
-#[allow(dead_code, reason = "the relay dialler (next PR) consumes these; tests hold them until then")]
 pub fn mint_ticket(
     api: &dyn AccountApi,
     token: &str,
@@ -321,6 +320,75 @@ pub fn mint_ticket(
         .ticket
         .filter(|t| !t.is_empty())
         .ok_or_else(|| CloudError::BadAnswer(format!("no ticket in {:?}", clip(&got.body))))
+}
+
+/// The relay's attach subprotocol, and the path an attach dials.
+///
+/// Pinned as literals because the other ends are TypeScript
+/// (`cloud/packages/relay/src/ticket.ts` and `routes.ts`) and nothing
+/// compiles both — the same argument as `ENROLL_PATH`'s.
+pub const RELAY_SUBPROTOCOL: &str = "zesterm.relay.v1";
+const RELAY_ATTACH_PATH: &str = "/v1/attach";
+
+/// One relay dial: a fresh ticket, a leg to the relay, the WS upgrade —
+/// halves the ordinary encrypted daemon handshake then runs through
+/// unchanged (the relay's pipe leg hands the same WS halves straight to the
+/// daemon's `serve_lan`, so the host still challenges and authorizes; the
+/// relay never sees plaintext).
+///
+/// `mint` and `connect` are injected for the reason `ControlPlane` is: the
+/// sequencing here — SignedOut stops *before* a socket is opened, a
+/// transient mint failure stays retryable, every dial mints anew because
+/// tickets are 30-second single-use — is what goes wrong silently, and none
+/// of it needs a network to be got right. The two-offer wire bytes are
+/// `ws::client`'s own tests' business.
+pub fn relay_dial(
+    host: HostId,
+    host_header: &str,
+    mint: &dyn Fn() -> Result<String, CloudError>,
+    connect: &dyn Fn() -> std::io::Result<RelayLeg>,
+) -> Result<DialHalves, crate::remote::RemoteError> {
+    use crate::remote::RemoteError;
+    // Mint before dialling: a refused mint must cost no socket, and a
+    // signed-out app must stop the supervisor rather than back off against
+    // guaranteed 401s.
+    let ticket = mint().map_err(|e| match e {
+        CloudError::SignedOut => RemoteError::SignedOut,
+        // Transient by classification: `Io` is the shape the redial loop
+        // backs off on, which is right for an unreachable control plane.
+        other => RemoteError::Io(other.to_string()),
+    })?;
+    let leg = connect().map_err(|e| RemoteError::Io(e.to_string()))?;
+
+    let path = format!("{RELAY_ATTACH_PATH}?host={}", hex(&host.0));
+    let offer = format!("ticket.{ticket}");
+    let (reader, writer) = zest_daemon::ws::client::connect_to_offering(
+        leg.reader,
+        leg.writer,
+        host_header,
+        &path,
+        &[],
+        // Protocol first, ticket second — the relay splits the one header
+        // on commas and takes whichever entry wears the ticket prefix.
+        &[RELAY_SUBPROTOCOL, &offer],
+        RELAY_SUBPROTOCOL,
+    )
+    .map_err(|e| RemoteError::Io(format!("relay upgrade: {e}")))?;
+    Ok((Box::new(reader), Box::new(writer)))
+}
+
+/// What a dial hands the supervisor — `remote::Dialer`'s own success shape.
+pub type DialHalves = (Box<dyn std::io::Read + Send>, Box<dyn std::io::Write + Send>);
+
+/// The raw byte legs a relay dial upgrades — what `connect` produces.
+pub struct RelayLeg {
+    pub reader: Box<dyn std::io::Read + Send>,
+    pub writer: Box<dyn std::io::Write + Send>,
+}
+
+/// Lowercase hex, the spelling every id on this wire uses.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The most useful sentence in a refusal body — the daemon's `message_from`,
@@ -592,6 +660,117 @@ mod tests {
             ("/api/hosts".to_string(), "zt1_x".to_string()),
             "the route and the bearer are the request"
         );
+    }
+
+    #[test]
+    fn relay_dial_signed_out_stops_before_any_socket() {
+        use std::cell::Cell;
+        // The order is the point: a signed-out app must stop the supervisor
+        // (RemoteError::SignedOut is its Refused), and it must do so having
+        // opened nothing — a socket per doomed redial would knock on the
+        // relay forever about a token that cannot mint.
+        let connected = Cell::new(false);
+        // A `let..else` rather than `expect_err`: the Ok halves are boxed
+        // readers with no Debug to print.
+        let Err(err) = relay_dial(
+            HostId::from_bytes([9; 32]),
+            "relay.example",
+            &|| Err(CloudError::SignedOut),
+            &|| {
+                connected.set(true);
+                Err(std::io::Error::other("must not be reached"))
+            },
+        ) else {
+            panic!("no ticket, no dial")
+        };
+        assert!(
+            matches!(err, crate::remote::RemoteError::SignedOut),
+            "SignedOut is the variant the supervisor stops on; got {err:?}"
+        );
+        assert!(!connected.get(), "a refused mint must cost no socket");
+    }
+
+    #[test]
+    fn relay_dial_transient_mint_failure_stays_retryable() {
+        let Err(err) = relay_dial(
+            HostId::from_bytes([9; 32]),
+            "relay.example",
+            &|| Err(CloudError::Transport("no route to host".into())),
+            &|| Err(std::io::Error::other("must not be reached")),
+        ) else {
+            panic!("nothing to upgrade")
+        };
+        assert!(
+            matches!(err, crate::remote::RemoteError::Io(_)),
+            "Io is the shape the redial loop backs off and retries on — mapping a wifi \
+             blip to SignedOut would permanently kill a session over a hiccup; got {err:?}"
+        );
+    }
+
+    /// A writer that shares its capture, and a reader that ends at once: the
+    /// upgrade's request reaches the capture and then fails on EOF — which
+    /// is what these tests want, since the wire bytes are the assertion and
+    /// no fake relay needs to answer for them.
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("lock").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    struct Eof;
+    impl std::io::Read for Eof {
+        fn read(&mut self, _out: &mut [u8]) -> std::io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn every_relay_dial_mints_a_fresh_ticket_and_the_request_carries_it() {
+        use std::cell::Cell;
+        // Tickets are 30-second single-use: a dialler that cached one would
+        // pass its first dial and fail every redial with a refusal that
+        // reads as an outage. Two dials, two mints, each ticket on its own
+        // request — counted, not timed.
+        let mints = Cell::new(0u32);
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mint = || {
+            mints.set(mints.get() + 1);
+            Ok(format!("T{}", mints.get()))
+        };
+        let sent_for_leg = std::sync::Arc::clone(&sent);
+        let connect = move || {
+            Ok(RelayLeg {
+                reader: Box::new(Eof) as Box<dyn std::io::Read + Send>,
+                writer: Box::new(Capture(std::sync::Arc::clone(&sent_for_leg))),
+            })
+        };
+
+        let host = HostId::from_bytes([0xab; 32]);
+        for expected in ["T1", "T2"] {
+            sent.lock().expect("lock").clear();
+            // The dial itself fails on the EOF leg; the request it wrote is
+            // the assertion.
+            let _ = relay_dial(host, "relay.example", &mint, &connect);
+            let request =
+                String::from_utf8(sent.lock().expect("lock").clone()).expect("utf-8");
+            assert!(
+                request.starts_with(&format!("GET /v1/attach?host={} HTTP/1.1\r\n", hex(&host.0))),
+                "the attach path names the host in hex — the relay routes rooms on it; \
+                 got {request:?}"
+            );
+            assert!(
+                request.contains(&format!(
+                    "\r\nSec-WebSocket-Protocol: zesterm.relay.v1, ticket.{expected}\r\n"
+                )),
+                "dial after dial, the ticket on the wire must be the one just minted; \
+                 got {request:?}"
+            );
+        }
+        assert_eq!(mints.get(), 2, "two dials are two mints, never a cached ticket");
     }
 
     #[test]
