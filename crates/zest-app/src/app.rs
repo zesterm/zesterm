@@ -472,6 +472,74 @@ fn clear_pairing(cell: &PairingCell, proxy: &EventLoopProxy<Wakeup>) {
     }
 }
 
+/// Store a prompt and arm its clock.
+///
+/// The clock exists because the chrome snapshots the prompt into a *cached*
+/// layout: `refresh_chrome` returns early while `chrome_layout` is `Some`,
+/// so without one more wake the countdown never moves and an **expired code
+/// stays painted for ever** unless some unrelated event happens to
+/// invalidate the chrome (found by review on #208). The thread posts at
+/// each boundary where the displayed "Xm left" changes, and at expiry it
+/// clears the cell itself — nothing else will — and wakes once more.
+///
+/// A replaced or cleared prompt must not inherit the old clock: every tick
+/// re-checks that the cell still holds *this* prompt (code + expiry is
+/// identity enough — two prompts can't share a monotonic `expires_at`) and
+/// exits silently otherwise, so at most one clock is ever speaking.
+fn arm_pairing_prompt(
+    cell: &PairingCell,
+    host: String,
+    code: String,
+    expires_in_secs: u32,
+    post: Arc<dyn Fn() + Send + Sync>,
+) {
+    let expires_at = std::time::Instant::now()
+        + std::time::Duration::from_secs(u64::from(expires_in_secs));
+    *cell.lock() = Some(PairingPrompt { host, code: code.clone(), expires_at });
+    post();
+
+    let cell = Arc::clone(cell);
+    let clock = std::thread::Builder::new().name("zest-pairing-clock".into()).spawn(move || {
+        let mine = |p: &PairingPrompt| p.code == code && p.expires_at == expires_at;
+        let mut first = true;
+        loop {
+            let left = {
+                let lock = cell.lock();
+                // Replaced or cleared: a newer prompt armed its own clock.
+                let Some(p) = lock.as_ref() else { return };
+                if !mine(p) {
+                    return;
+                }
+                expires_at.saturating_duration_since(std::time::Instant::now())
+            };
+            // Checked before waking: a clock that outlived its prompt must
+            // not keep poking the event loop. The arming call already posted
+            // for the first paint.
+            if !first {
+                post();
+            }
+            first = false;
+            if left.is_zero() {
+                let mut lock = cell.lock();
+                if lock.as_ref().is_some_and(&mine) {
+                    *lock = None;
+                    drop(lock);
+                    post();
+                }
+                return;
+            }
+            // To the next whole-minute boundary of the displayed countdown
+            // (`div_ceil(60)` in `pairing_notice`), or to expiry if sooner.
+            let secs = (left.as_secs().saturating_sub(1) % 60) + 1;
+            std::thread::sleep(std::time::Duration::from_secs(secs).min(left));
+        }
+    });
+    if let Err(e) = clock {
+        // The prompt still shows; it just cannot count down or self-clear.
+        tracing::warn!(error = %e, "no thread for the pairing clock");
+    }
+}
+
 /// The live GPU state, created once the window exists.
 struct Gpu {
     surface: wgpu::Surface<'static>,
@@ -4796,13 +4864,16 @@ impl App {
         let cell = Arc::clone(&self.pairing);
         let proxy = self.proxy.clone();
         Arc::new(move |code, expires_in_secs| {
-            *cell.lock() = Some(PairingPrompt {
-                host: host.clone(),
+            let proxy = proxy.clone();
+            arm_pairing_prompt(
+                &cell,
+                host.clone(),
                 code,
-                expires_at: std::time::Instant::now()
-                    + std::time::Duration::from_secs(u64::from(expires_in_secs)),
-            });
-            let _ = proxy.send_event(Wakeup::PairingChanged);
+                expires_in_secs,
+                Arc::new(move || {
+                    let _ = proxy.send_event(Wakeup::PairingChanged);
+                }),
+            );
         })
     }
 
@@ -8820,5 +8891,83 @@ mod tuning_tests {
         let t = resolve_text_tuning(&config(-5.0, 99.0));
         assert!((0.5..=2.5).contains(&t.gamma), "gamma clamped, got {}", t.gamma);
         assert!((0.0..=1.0).contains(&t.contrast), "contrast clamped, got {}", t.contrast);
+    }
+}
+
+#[cfg(test)]
+mod pairing_tests {
+    use super::{arm_pairing_prompt, PairingCell};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn wait_until(limit: Duration, f: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + limit;
+        while Instant::now() < deadline {
+            if f() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[test]
+    fn an_expired_prompt_clears_itself_and_wakes_the_ui() {
+        // The review finding on #208 this clock exists for: the chrome
+        // snapshots the prompt into a *cached* layout, so once painted
+        // nothing re-rendered the countdown or removed an expired code —
+        // it could sit on screen indefinitely unless an unrelated event
+        // happened to invalidate the chrome. Expiry must clear the cell and
+        // wake the UI with no outside help.
+        let cell: PairingCell = Arc::new(parking_lot::Mutex::new(None));
+        let woken = Arc::new(AtomicUsize::new(0));
+        let posts = Arc::clone(&woken);
+        arm_pairing_prompt(
+            &cell,
+            "forge".into(),
+            "481502".into(),
+            1,
+            Arc::new(move || {
+                posts.fetch_add(1, Ordering::Release);
+            }),
+        );
+        assert!(
+            cell.lock().as_ref().is_some_and(|p| p.code == "481502"),
+            "arming must store the prompt for the chrome to read"
+        );
+        assert!(woken.load(Ordering::Acquire) >= 1, "arming must wake the UI for the first paint");
+
+        assert!(
+            wait_until(Duration::from_secs(10), || cell.lock().is_none()),
+            "the expired prompt never removed itself — a dead code stays painted \
+             until some unrelated event rebuilds the chrome, which is the bug"
+        );
+        assert!(
+            woken.load(Ordering::Acquire) >= 2,
+            "clearing without a wake leaves the cached chrome still showing the \
+             code; the removal must post too"
+        );
+    }
+
+    #[test]
+    fn a_replaced_prompt_is_not_clobbered_by_the_old_clock() {
+        // A redial stores a fresh code while the old prompt's clock is still
+        // sleeping. When that clock fires it must recognise the cell no
+        // longer holds its prompt and go quietly — clearing here would
+        // delete the *live* code out from under the person reading it.
+        let cell: PairingCell = Arc::new(parking_lot::Mutex::new(None));
+        let noop: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+        arm_pairing_prompt(&cell, "forge".into(), "111111".into(), 1, Arc::clone(&noop));
+        arm_pairing_prompt(&cell, "forge".into(), "222222".into(), 120, noop);
+
+        // Outlive the first prompt's expiry with margin: its clock has fired
+        // and exited by now, or it was going to clobber us.
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(
+            cell.lock().as_ref().is_some_and(|p| p.code == "222222"),
+            "the old clock took the new prompt with it; the person is now \
+             comparing a code the window no longer shows"
+        );
     }
 }
