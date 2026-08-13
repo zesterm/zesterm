@@ -433,6 +433,72 @@ test('revoking a device revokes its attestations both ways, and lists it as revo
   db.close();
 });
 
+test('a voucher from a fast clock is stored but not served until its iat passes', async () => {
+  // The approve route tolerates an iat up to ATTESTATION_IAT_SKEW_MS ahead of
+  // the server, so for those minutes the table can hold a voucher that is not
+  // yet inside its own [iat, exp) window. Serving it early would make every
+  // daemon verify and refuse the same bytes — so the served set requires
+  // iat <= now, and the voucher appears the moment its window opens.
+  const db = testDb();
+  const { cookie, a, b } = await twoBrowsers(db);
+  const ahead = NOW + ATTESTATION_IAT_SKEW_MS;
+  const eager = await attestationBlob(a, {
+    account: 'user-a',
+    device: b.id,
+    label: 'second browser',
+    iat: ahead,
+    exp: ahead + ATTESTATION_TTL_MS,
+  });
+  const res = await routeApi(post(`/api/devices/${b.id}/approve`, { attestation: eager }, cookie), env(db), fetch, NOW);
+  assert.equal(res?.status, 200, 'within the skew allowance, a fast clock is honest and must be accepted');
+
+  const early = await routeApi(new Request(`${ORIGIN}/api/attestations`, { headers: { cookie } }), env(db), fetch, NOW);
+  assert.deepEqual(
+    ((await early!.json()) as { attestations: string[] }).attestations,
+    [],
+    'not yet valid means not yet served — iat is the window’s inclusive edge, and now is before it',
+  );
+
+  const onTime = await routeApi(new Request(`${ORIGIN}/api/attestations`, { headers: { cookie } }), env(db), fetch, ahead);
+  assert.deepEqual(
+    ((await onTime!.json()) as { attestations: string[] }).attestations,
+    [eager],
+    'at iat exactly the window is open — inclusive, as the fixture pins it',
+  );
+  db.close();
+});
+
+test('a voucher already dead at the server’s clock is refused, and writes nothing', async () => {
+  // iat a minute back (inside skew), exp at now: every other window bound
+  // passes, and the voucher is already outside [iat, exp). Accepting it would
+  // mark the device approved on the word of a statement this account will
+  // never serve and no daemon would accept.
+  const db = testDb();
+  const { cookie, a, b } = await twoBrowsers(db);
+  const dead = await attestationBlob(a, {
+    account: 'user-a',
+    device: b.id,
+    label: 'second browser',
+    iat: NOW - 60_000,
+    exp: NOW,
+  });
+  const res = await routeApi(post(`/api/devices/${b.id}/approve`, { attestation: dead }, cookie), env(db), fetch, NOW);
+  assert.equal(res?.status, 400);
+  assert.deepEqual(await res!.json(), { error: 'bad_request', detail: 'exp' });
+
+  assert.deepEqual(
+    rowOf(db, `SELECT status, approved_at, approved_by FROM devices WHERE id = ?`, b.id),
+    { status: 'pending', approved_at: null, approved_by: null },
+    'an approval with nothing behind it must not change the device',
+  );
+  assert.deepEqual(
+    rowOf(db, `SELECT COUNT(*) AS n FROM device_attestations`),
+    { n: 0 },
+    'and the dead voucher must not enter the distribution channel',
+  );
+  db.close();
+});
+
 test('an expired attestation is not served, with no write needed', async () => {
   const db = testDb();
   const { cookie, a, b } = await twoBrowsers(db);

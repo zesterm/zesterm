@@ -50,21 +50,25 @@ export async function putAttestation(
 /**
  * The account's live vouchers, verbatim, oldest first.
  *
- * Unexpired and unrevoked only: an expired attestation is dead by its own
- * signed `exp`, and serving it would just make every daemon verify and refuse
- * the same bytes. The whole list, no deltas — an account's fleet is a handful
- * of devices, so the honest cost of re-sending everything is bytes nobody
- * will miss, and a delta protocol is a second copy of "what changed" that can
- * disagree with the table.
+ * Live means inside the blob's own signed window, `[iat, exp)`, and
+ * unrevoked. Both edges matter here: `exp` because an expired attestation is
+ * dead by its own bytes, and `iat` because the approve route tolerates a
+ * clock five minutes ahead of the server's (`ATTESTATION_IAT_SKEW_MS`) — so
+ * for those minutes the table can hold a voucher that is stored but not yet
+ * valid, and serving it would just make every daemon verify and refuse the
+ * same bytes. It appears here the moment its `iat` passes. The whole list,
+ * no deltas — an account's fleet is a handful of devices, so the honest cost
+ * of re-sending everything is bytes nobody will miss, and a delta protocol
+ * is a second copy of "what changed" that can disagree with the table.
  */
 export async function listAttestations(db: Db, userId: string, now: number): Promise<string[]> {
   const { results } = await db
     .prepare(
       `SELECT blob FROM device_attestations
-        WHERE user_id = ? AND revoked_at IS NULL AND exp > ?
+        WHERE user_id = ? AND revoked_at IS NULL AND iat <= ? AND exp > ?
         ORDER BY iat, device_id`,
     )
-    .bind(userId, now)
+    .bind(userId, now, now)
     .all<{ blob: string }>();
   return results.map((r) => r.blob);
 }

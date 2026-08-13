@@ -158,6 +158,14 @@ export async function approveDevice(
   if (a.exp <= a.iat || a.exp - a.iat > ATTESTATION_TTL_MS) {
     return json({ error: 'bad_request', detail: 'exp' }, 400);
   }
+  if (a.exp <= now) {
+    // Reachable despite the skew check: an `iat` a few minutes back with a
+    // window of seconds is inside every bound above and already dead. Storing
+    // it would mark the device approved on the word of a voucher this account
+    // will never serve and no daemon would accept — an approval with nothing
+    // behind it.
+    return json({ error: 'bad_request', detail: 'exp' }, 400);
+  }
   if (Math.abs(a.iat - now) > ATTESTATION_IAT_SKEW_MS) {
     // Freshly minted or refused: this route exists to accept vouchers made
     // for it just now, and a wide-open `iat` would let a long-captured blob
