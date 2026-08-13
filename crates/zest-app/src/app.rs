@@ -392,6 +392,36 @@ enum AppScreen {
     Profiles,
 }
 
+/// How long an enrolment code is — the server's `ENROLL_CODE_LENGTH`
+/// (`cloud/packages/web/src/enroll/codes.ts`), pinned here because the two
+/// ends are separate projects and nothing compiles both. The entry clamps at
+/// this, so a held key or a stray paste cannot outgrow the box the fleet
+/// header sizes for it.
+const ENROLL_CODE_LENGTH: usize = 8;
+
+/// Whether this window's user is signed in to an account (issue #190).
+///
+/// `Unknown` is the startup state and stays it until the Fleet screen is
+/// first shown: reading the token means touching the keychain, and the
+/// keychain stays off the startup path (the `remote_identity` discipline,
+/// applied to the token).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountState {
+    /// Never asked the credential store.
+    Unknown,
+    SignedOut,
+    /// An enrolment worker is in flight; the header says so and offers
+    /// nothing clickable until it settles.
+    Enrolling,
+    /// A token is stored. The name is `None` when only the token is known —
+    /// the account's display name is not persisted, so a restart shows
+    /// "signed in" until an enrolment or a hosts fetch supplies it again.
+    SignedIn { account: Option<String> },
+    /// The last enrolment failed; the message is what the header shows
+    /// beside the retry affordance.
+    Failed(String),
+}
+
 #[derive(Clone)]
 enum PickerAction {
     /// A group label or an empty-state row; Enter does nothing.
@@ -442,6 +472,32 @@ fn wake_for(
 /// Last-output instants by session, shared with every tab's wake callback.
 type ActivityMap =
     Arc<parking_lot::Mutex<std::collections::HashMap<zest_proto::SessionAddr, std::time::Instant>>>;
+
+/// Park an account state for the event loop and wake it. The cell holds one
+/// state — last write wins — because only the newest answer is ever true.
+fn post_account(
+    update: &Arc<parking_lot::Mutex<Option<AccountState>>>,
+    proxy: &EventLoopProxy<Wakeup>,
+    state: AccountState,
+) {
+    *update.lock() = Some(state);
+    let _ = proxy.send_event(Wakeup::AccountChanged);
+}
+
+/// An enrolment failure as the fleet header should say it — short, and
+/// pointed at the person's next move rather than at the mechanism.
+fn enroll_failure(e: &zest_daemon::enroll::EnrollError) -> String {
+    use zest_daemon::enroll::EnrollError;
+    match e {
+        // The Worker deliberately answers a dead code and a bad signature
+        // identically (no liveness oracle), so the next move is the same
+        // whatever the refusal said: mint a fresh code.
+        EnrollError::Refused { .. } => "code not accepted — mint a fresh one".into(),
+        EnrollError::Transport(_) => "could not reach the control plane".into(),
+        // The store's and the parser's own words are the actionable part.
+        other => other.to_string(),
+    }
+}
 
 /// Settled profile launches, parked by workers for `Wakeup::TabsChanged` —
 /// the connecting tab's placeholder address, and the session (or the error
@@ -640,6 +696,18 @@ pub struct App {
     /// loaded lazily on first need so the keychain stays off the startup
     /// path (and off it entirely for people who never leave loopback).
     remote_identity: Option<Arc<zest_mesh::identity::ClientIdentity>>,
+    /// Whether this window is signed in to an account. `Unknown` until the
+    /// Fleet screen is first shown — reading the token touches the keychain.
+    account: AccountState,
+    /// The account workers' handoff cell: keychain reads, enrolments and
+    /// sign-outs settle here and post `Wakeup::AccountChanged`; the event
+    /// loop drains it. Last write wins, which is also the coalescing.
+    account_update: Arc<parking_lot::Mutex<Option<AccountState>>>,
+    /// An enrolment code being typed on the Fleet screen. While it exists,
+    /// characters belong to it and not to the terminal — the settings tab's
+    /// edit-buffer discipline (only `buffer` and `error` are live here;
+    /// there is no field index and nothing to append to).
+    enroll_entry: Option<crate::settings_ui::EditBuffer>,
     fonts: Option<Fonts>,
     palette: zest_core::PaletteSnapshot,
 
@@ -834,6 +902,9 @@ impl App {
             pending_launches: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pairing: Arc::new(parking_lot::Mutex::new(None)),
             remote_identity: None,
+            account: AccountState::Unknown,
+            account_update: Arc::new(parking_lot::Mutex::new(None)),
+            enroll_entry: None,
             fonts: None,
             palette,
             chrome_colors,
@@ -1668,11 +1739,63 @@ impl App {
         &self,
         fleet_hosts: &[crate::fleet::FleetHost],
     ) -> Option<crate::chrome::model::ScreenModel> {
-        use crate::chrome::model::{FleetCard, ScreenModel, ThemeCard};
+        use crate::chrome::model::{
+            FleetAccountAction, FleetAccountModel, FleetCard, ScreenModel, ThemeCard,
+        };
         use crate::fleet::SessionsState;
         match self.screen {
             AppScreen::Terminal => None,
             AppScreen::Fleet => {
+                // The account header: what the state means is decided here,
+                // so screens.rs stays declarative-drawing only. An open code
+                // entry replaces the affordance — Enter and Esc own it.
+                let account = if let Some(edit) = self.enroll_entry.as_ref() {
+                    FleetAccountModel {
+                        line: "Sign in with a code".into(),
+                        action: FleetAccountAction::None,
+                        entry: Some(crate::chrome::model::SettingsValueCell::Editing {
+                            buffer: edit.buffer.clone(),
+                            error: edit.error,
+                        }),
+                        error: None,
+                    }
+                } else {
+                    match &self.account {
+                        AccountState::Unknown => FleetAccountModel {
+                            line: String::new(),
+                            action: FleetAccountAction::None,
+                            entry: None,
+                            error: None,
+                        },
+                        AccountState::SignedOut => FleetAccountModel {
+                            line: "not signed in".into(),
+                            action: FleetAccountAction::SignIn,
+                            entry: None,
+                            error: None,
+                        },
+                        AccountState::Enrolling => FleetAccountModel {
+                            line: "enrolling…".into(),
+                            action: FleetAccountAction::None,
+                            entry: None,
+                            error: None,
+                        },
+                        AccountState::SignedIn { account } => FleetAccountModel {
+                            line: match account {
+                                Some(name) => format!("signed in as {name}"),
+                                None => "signed in".into(),
+                            },
+                            action: FleetAccountAction::SignOut,
+                            entry: None,
+                            error: None,
+                        },
+                        AccountState::Failed(message) => FleetAccountModel {
+                            line: "not signed in".into(),
+                            action: FleetAccountAction::SignIn,
+                            entry: None,
+                            error: Some(message.clone()),
+                        },
+                    }
+                };
                 let cards = fleet_hosts
                     .iter()
                     .map(|h| {
@@ -1727,7 +1850,7 @@ impl App {
                         }
                     })
                     .collect();
-                Some(ScreenModel::Fleet { cards })
+                Some(ScreenModel::Fleet { account, cards })
             }
             AppScreen::Themes => {
                 let active = if zest_theme::builtin::get(&self.config.theme).is_some() {
@@ -1874,6 +1997,7 @@ impl App {
     fn leave_screen(&mut self) {
         if self.screen != AppScreen::Terminal {
             self.screen = AppScreen::Terminal;
+            self.enroll_entry = None;
             self.mark_chrome_dirty();
         }
     }
@@ -1886,7 +2010,127 @@ impl App {
         self.picker = None;
         self.palette_ui = None;
         self.launcher = None;
+        // First look at the Fleet screen is when the account becomes worth
+        // knowing — and the first acceptable moment to touch the keychain
+        // for it (never at startup). On a worker, because an OS credential
+        // store is allowed to block on a prompt.
+        if screen == AppScreen::Fleet && self.account == AccountState::Unknown {
+            self.probe_account();
+        }
+        // A code entry does not survive leaving the screen that shows it —
+        // keys must never keep routing to an input nobody can see.
+        if screen != AppScreen::Fleet {
+            self.enroll_entry = None;
+        }
         self.mark_chrome_dirty();
+    }
+
+    /// Read the stored app token off the event loop and post what it means.
+    fn probe_account(&mut self) {
+        let update = Arc::clone(&self.account_update);
+        let proxy = self.proxy.clone();
+        let spawned = std::thread::Builder::new().name("zest-app-cloud".into()).spawn(move || {
+            let state = match crate::cloud::stored_app_token(&zest_mesh::keystore::OsKeyStore) {
+                // A stored token is "signed in"; the display name is not
+                // persisted, so it stays unnamed until an enrolment or a
+                // hosts fetch supplies one.
+                Ok(Some(_)) => AccountState::SignedIn { account: None },
+                Ok(None) => AccountState::SignedOut,
+                // An unreadable store reads as signed out rather than as an
+                // error state: the person's next move (sign in) is the same,
+                // and enrolling is where the store's failure gets named.
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not read the app's cloud token");
+                    AccountState::SignedOut
+                }
+            };
+            post_account(&update, &proxy, state);
+        });
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "no account probe; the fleet header stays unknown");
+        }
+    }
+
+    /// Enrol this app with `code`, off the event loop, and post the outcome.
+    fn spawn_enroll(&mut self, code: String) {
+        let identity = match self.durable_identity() {
+            Ok(i) => i,
+            Err(reason) => {
+                self.account = AccountState::Failed(reason);
+                self.mark_chrome_dirty();
+                return;
+            }
+        };
+        self.account = AccountState::Enrolling;
+        let label = self.local_machine_label();
+        let update = Arc::clone(&self.account_update);
+        let proxy = self.proxy.clone();
+        let spawned = std::thread::Builder::new().name("zest-app-enroll".into()).spawn(move || {
+            let state = match crate::cloud::enroll_desktop(
+                &identity,
+                &code,
+                &label,
+                zest_daemon::enroll::DEFAULT_CONTROL_PLANE,
+                &zest_daemon::enroll::HttpsControlPlane::new(zest_cloud::tls::Roots::Platform),
+                &zest_mesh::keystore::OsKeyStore,
+            ) {
+                Ok(enrolled) => AccountState::SignedIn { account: enrolled.account },
+                Err(e) => AccountState::Failed(enroll_failure(&e)),
+            };
+            post_account(&update, &proxy, state);
+        });
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "could not start the enrolment worker");
+            self.account = AccountState::Failed("could not start the enrolment worker".into());
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// Forget the app's token off the event loop and post the sign-out.
+    /// The header keeps saying "signed in" until the worker settles — the
+    /// delete is near-instant, and an "enrolling…" interim would be a lie.
+    fn spawn_sign_out(&mut self) {
+        let update = Arc::clone(&self.account_update);
+        let proxy = self.proxy.clone();
+        let spawned = std::thread::Builder::new().name("zest-app-cloud".into()).spawn(move || {
+            if let Err(e) = crate::cloud::forget_app_token(&zest_mesh::keystore::OsKeyStore) {
+                tracing::warn!(error = %e, "could not delete the app's cloud token");
+            }
+            // SignedOut either way: a delete that failed still means the app
+            // should stop presenting the token, and the warn above is where
+            // the store's trouble is named.
+            post_account(&update, &proxy, AccountState::SignedOut);
+        });
+        if let Err(e) = spawned {
+            // The enroll worker's shape: a spawn that failed must say so on
+            // screen, or the header keeps claiming "signed in" about a
+            // sign-out that never started.
+            tracing::warn!(error = %e, "could not start the sign-out worker");
+            self.account = AccountState::Failed("could not sign out — try again".into());
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// What to call this machine on the devices screen: the fleet's own name
+    /// for the local host (the daemon's label, from its signed Welcome) when
+    /// one exists, else the environment's — the daemon's `machine_label`
+    /// order, minus the uname arm this crate has no reason to grow.
+    fn local_machine_label(&self) -> String {
+        if let Some(label) = self
+            .fleet
+            .as_ref()
+            .and_then(|f| f.snapshot().into_iter().find(|h| h.local).map(|h| h.label))
+        {
+            return label;
+        }
+        for var in ["COMPUTERNAME", "HOSTNAME"] {
+            if let Ok(name) = std::env::var(var) {
+                if !name.is_empty() {
+                    return name;
+                }
+            }
+        }
+        "unnamed".to_string()
     }
 
     /// Open (or activate) the Profiles tab — the ⌘⇧, / Manage-profiles /
@@ -3220,6 +3464,21 @@ impl App {
                 if let Some(id) = id {
                     self.apply_theme_choice(id);
                 }
+            }
+            (HitRegion::FleetSignIn, MouseButton::Left) => {
+                // A fresh, empty entry: the keyboard owns it from here
+                // (Enter enrols, Esc drops it). field_idx/append are the
+                // settings tab's concerns and idle here.
+                self.enroll_entry = Some(crate::settings_ui::EditBuffer {
+                    field_idx: 0,
+                    buffer: String::new(),
+                    error: false,
+                    append: false,
+                });
+                self.mark_chrome_dirty();
+            }
+            (HitRegion::FleetSignOut, MouseButton::Left) => {
+                self.spawn_sign_out();
             }
             (HitRegion::BlockFold(id), MouseButton::Left) => {
                 if let Some(tab) = self.tabs.active() {
@@ -4850,6 +5109,26 @@ impl App {
             }
         }
         self.remote_identity.clone()
+    }
+
+    /// The stored identity, or a refusal — never a throwaway.
+    ///
+    /// [`App::remote_identity`]'s fallback is right for dialling (the far
+    /// host re-approves) and wrong for enrolling: a device row bound to a key
+    /// that evaporates on restart is a row nobody can ever use again, minted
+    /// with a one-shot code. So this always asks the store — the cache may be
+    /// holding that very fallback — and refreshes the cache only on success,
+    /// which also heals a cached throwaway once the store works again.
+    fn durable_identity(&mut self) -> Result<Arc<zest_mesh::identity::ClientIdentity>, String> {
+        match zest_mesh::identity::ClientIdentity::load_or_create(&zest_mesh::keystore::OsKeyStore)
+        {
+            Ok(i) => {
+                let identity = Arc::new(i);
+                self.remote_identity = Some(Arc::clone(&identity));
+                Ok(identity)
+            }
+            Err(e) => Err(format!("no credential store to keep the device key in ({e})")),
+        }
     }
 
     fn spawn_tab_worker(&mut self, route: HostRoute, attach: Option<zest_proto::SessionAddr>) {
@@ -6687,6 +6966,20 @@ impl ApplicationHandler<Wakeup> for App {
                     self.mark_chrome_dirty();
                 }
             }
+            // An account worker settled; adopt what it parked. The fleet
+            // header is part of the cached chrome, so this is a rebuild.
+            Wakeup::AccountChanged => {
+                // Taken before the assignment: the guard's temporary borrows
+                // `self` for the whole `if let` otherwise.
+                let settled = self.account_update.lock().take();
+                if let Some(state) = settled {
+                    self.account = state;
+                    self.mark_chrome_dirty();
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                }
+            }
             // One tab's child exited. Close that tab — killing is moot, the
             // child is already gone — and the last tab closing closes the
             // window, which is exactly the old single-session behavior.
@@ -7683,6 +7976,71 @@ impl ApplicationHandler<Wakeup> for App {
                 // user is not looking at it.
                 if self.screen != AppScreen::Terminal {
                     use winit::keyboard::{Key, NamedKey};
+
+                    // The fleet screen's code entry owns the keys while it is
+                    // open — the settings tab's edit-buffer discipline. Esc
+                    // drops the entry, not the screen; a second Esc leaves.
+                    if self.screen == AppScreen::Fleet && self.enroll_entry.is_some() {
+                        match &event.logical_key {
+                            Key::Named(NamedKey::Escape) => {
+                                self.enroll_entry = None;
+                            }
+                            Key::Named(NamedKey::Enter) => {
+                                let code = self
+                                    .enroll_entry
+                                    .as_ref()
+                                    .map(|e| e.buffer.trim().to_string())
+                                    .unwrap_or_default();
+                                if code.is_empty() {
+                                    // An empty Enter marks the box rather
+                                    // than spending a request on it.
+                                    if let Some(edit) = self.enroll_entry.as_mut() {
+                                        edit.error = true;
+                                    }
+                                } else {
+                                    self.enroll_entry = None;
+                                    self.spawn_enroll(code);
+                                }
+                            }
+                            Key::Named(NamedKey::Backspace) => {
+                                if let Some(edit) = self.enroll_entry.as_mut() {
+                                    edit.buffer.pop();
+                                    edit.error = false;
+                                }
+                            }
+                            Key::Character(c) => {
+                                if !self.modifiers.control_key()
+                                    && !key::belongs_to_desktop(self.modifiers)
+                                {
+                                    if let Some(edit) = self.enroll_entry.as_mut() {
+                                        // The code alphabet is uppercase
+                                        // ASCII alphanumerics (the server's
+                                        // ENROLL_CODE_ALPHABET), so filter to
+                                        // that and uppercase per character —
+                                        // a person reading a code off a
+                                        // screen may well type it lowercase,
+                                        // and making them notice would be a
+                                        // refusal about nothing. Anything
+                                        // else typed is dropped rather than
+                                        // sent to be refused.
+                                        for ch in c.as_str().chars() {
+                                            if edit.buffer.len() >= ENROLL_CODE_LENGTH {
+                                                break;
+                                            }
+                                            if ch.is_ascii_alphanumeric() {
+                                                edit.buffer.push(ch.to_ascii_uppercase());
+                                                edit.error = false;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        self.mark_chrome_dirty();
+                        return;
+                    }
+
                     if matches!(&event.logical_key, Key::Named(NamedKey::Escape)) {
                         self.show_screen(AppScreen::Terminal);
                         return;

@@ -63,6 +63,12 @@ pub enum Wakeup {
     /// moved, a session list refreshed. Coalesced by `FleetModel`'s latch,
     /// so a chatty network posts one of these per burst, not per packet.
     FleetChanged,
+    /// The account state moved — a stored token was found, an enrolment
+    /// settled, a sign-out completed. The new state travels in a shared cell
+    /// (last write wins, which is also the coalescing) because every one of
+    /// those happens on a worker thread the keychain and the network must
+    /// never block the event loop from.
+    AccountChanged,
     /// A worker finished opening a tab; the pending queue has it.
     ///
     /// Attaching from the picker dials over the network, and a dead host
