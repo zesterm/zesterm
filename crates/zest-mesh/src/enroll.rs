@@ -53,6 +53,24 @@ const ENROLL_DOMAIN: &[u8] = b"zesterm-enroll-v1";
 /// label="d"` would produce identical bytes — so a signature over one would be
 /// a valid signature over the other, and a label is attacker-chosen.
 pub fn enrollment_request(code: &str, host: HostId, label: &str) -> Result<Vec<u8>, EnrollError> {
+    enrollment_request_for(code, &host.0, label)
+}
+
+/// [`enrollment_request`] over a bare key, byte for byte.
+///
+/// The layout's 32-byte field is "the key being enrolled", and a device enrols
+/// a `ClientId` where a machine enrols a `HostId` — same bytes, different
+/// newtype, and the control plane cannot tell which it was handed. What keeps a
+/// device signature from enrolling a host anyway is the *role* inside the
+/// signing prefix, which the Worker takes from the code's own kind. This
+/// exists so the desktop app does not have to launder its `ClientId` through a
+/// `HostId` to build the message, which would put a lie in the type system to
+/// keep a byte layout.
+pub fn enrollment_request_for(
+    code: &str,
+    key: &[u8; 32],
+    label: &str,
+) -> Result<Vec<u8>, EnrollError> {
     let code_len = u16::try_from(code.len()).map_err(|_| EnrollError::CodeTooLong)?;
     let label_len = u16::try_from(label.len()).map_err(|_| EnrollError::LabelTooLong)?;
 
@@ -60,7 +78,7 @@ pub fn enrollment_request(code: &str, host: HostId, label: &str) -> Result<Vec<u
     out.extend_from_slice(ENROLL_DOMAIN);
     out.extend_from_slice(&code_len.to_be_bytes());
     out.extend_from_slice(code.as_bytes());
-    out.extend_from_slice(&host.0);
+    out.extend_from_slice(key);
     out.extend_from_slice(&label_len.to_be_bytes());
     out.extend_from_slice(label.as_bytes());
     Ok(out)
