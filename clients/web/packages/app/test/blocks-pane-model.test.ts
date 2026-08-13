@@ -595,3 +595,66 @@ test('an abandoned prompt renders as rows, never as a card that claims to be run
     'and it holds the row the caret is on',
   );
 });
+
+test('the prompt line stops at the caret, not at the bottom of the grid', () => {
+  // A terminal is a fixed number of rows and a shell has usually printed a
+  // handful, so the trailing prompt slice runs on into the viewport's blank
+  // tail. The view appends the caret to the LAST row it is given
+  // (`BlocksPane.tsx`), so on a 60-row window the caret was drawn dozens of
+  // empty lines below the prompt it belongs to — reported as "the cursor is at
+  // the bottom and the actual terminal input sits higher up". Measured live at
+  // 35 rows for one non-blank prompt. (#202)
+  //
+  // Those rows are viewport, not content. The canvas grid pays nothing for
+  // them; a DOM pane makes the user scroll past them.
+  const view = {
+    scrollback: [],
+    rows: [
+      synthRow(0n, '❯ '),
+      synthRow(1n, ''),
+      synthRow(2n, ''),
+      synthRow(3n, ''),
+      synthRow(4n, ''),
+    ],
+    blocks: [synthBlock(0, 0n, null, null, { state: 'prompt' }, '')],
+    // Where the caret actually is: on the prompt row, at the end of '❯ '.
+    cursor: { row: 0, col: 2, visible: true, shape: 0 },
+    attrs: new Map(),
+  };
+
+  const items = paneModel(view, new Set(), 'live', NOW);
+  const prompt = items[items.length - 1];
+  assert.equal(prompt?.kind, 'prompt');
+  assert.deepEqual(
+    prompt?.kind === 'prompt' ? prompt.rows.map((r) => r.line) : null,
+    [0n],
+    'the four blank rows below the caret are viewport, not prompt',
+  );
+});
+
+test('a prompt spanning several rows keeps every row up to the caret', () => {
+  // Trimming at the caret must not truncate a multi-line prompt: a two-line
+  // prompt with the caret on the second row keeps both, and only the blank
+  // tail below goes. Trimming to the last *non-blank* row instead would be
+  // wrong the moment a caret sits on a blank continuation row.
+  const view = {
+    scrollback: [],
+    rows: [
+      synthRow(0n, 'user@host ~/dev'),
+      synthRow(1n, '❯ '),
+      synthRow(2n, ''),
+      synthRow(3n, ''),
+    ],
+    blocks: [synthBlock(0, 0n, null, null, { state: 'prompt' }, '')],
+    cursor: { row: 1, col: 2, visible: true, shape: 0 },
+    attrs: new Map(),
+  };
+
+  const items = paneModel(view, new Set(), 'live', NOW);
+  const prompt = items[items.length - 1];
+  assert.deepEqual(
+    prompt?.kind === 'prompt' ? prompt.rows.map((r) => r.line) : null,
+    [0n, 1n],
+    'both prompt rows survive; only the tail below the caret is dropped',
+  );
+});
