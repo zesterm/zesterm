@@ -94,6 +94,11 @@ pub enum HitRegion {
     /// One host card of the fleet view; clicking opens a fresh shell on
     /// that machine. Pushed only for cards with a live route.
     FleetCard(usize),
+    /// A devices-section row's button, by row index. One region for both
+    /// verbs: whether the click approves or vouches is the row's state
+    /// (`FleetDeviceAction`), decided where the row was built — the same
+    /// snapshot the index resolves against.
+    FleetApproveDevice(usize),
     /// The fleet header's "Sign in with a code"; clicking opens the entry.
     FleetSignIn,
     /// The fleet header's "Sign out"; clicking forgets this app's token.

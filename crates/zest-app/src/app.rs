@@ -539,6 +539,110 @@ fn post_account(
 
 /// An enrolment failure as the fleet header should say it — short, and
 /// pointed at the person's next move rather than at the mechanism.
+/// Why an approval did not happen — `SignedOut` apart, because it also has
+/// to flip the account header, which a bare message cannot ask for.
+enum ApproveFailure {
+    SignedOut,
+    Message(String),
+}
+
+/// The approval ladder, on the worker's thread: token → `/api/me` (the
+/// `userId` the signed statement must name — deliberately fetched per
+/// approval, since #210 chose to persist nothing but the token) → build,
+/// sign and encode the attestation with this app's key → POST it.
+///
+/// The window is the full [`zest_mesh::attest::ATTESTATION_TTL_MS`]: the
+/// voucher outlives this screen by design — daemons re-verify it for a year
+/// — and the control plane clamps anything wider.
+fn approve_on_account(
+    identity: &zest_mesh::identity::ClientIdentity,
+    device: &crate::fleet::AccountDevice,
+) -> Result<(), ApproveFailure> {
+    use zest_mesh::attest::{
+        encode_attestation, sign_attestation, Attestation, ATTESTATION_TTL_MS,
+        ATTESTATION_VERSION,
+    };
+    let signed_out = |e: &crate::cloud::CloudError| {
+        matches!(e, crate::cloud::CloudError::SignedOut)
+    };
+    let failure = |e: crate::cloud::CloudError| {
+        if signed_out(&e) {
+            ApproveFailure::SignedOut
+        } else {
+            ApproveFailure::Message(e.to_string())
+        }
+    };
+
+    let token = crate::cloud::stored_app_token(&zest_mesh::keystore::OsKeyStore)
+        .map_err(|e| ApproveFailure::Message(e.to_string()))?
+        .ok_or(ApproveFailure::SignedOut)?;
+    let api = crate::cloud::HttpsAccountApi::new(
+        zest_daemon::enroll::DEFAULT_CONTROL_PLANE,
+        zest_cloud::tls::Roots::Platform,
+    )
+    .map_err(|e| ApproveFailure::Message(e.to_string()))?;
+    let account = crate::cloud::fetch_me(&api, &token).map_err(failure)?;
+
+    let iat = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    let attestation = Attestation {
+        v: ATTESTATION_VERSION,
+        account,
+        device: device.id,
+        label: device.label.clone(),
+        by: identity.client_id(),
+        iat,
+        exp: iat + ATTESTATION_TTL_MS,
+    };
+    let sig = sign_attestation(identity, &attestation)
+        .map_err(|e| ApproveFailure::Message(e.to_string()))?;
+    let blob = encode_attestation(&attestation, &sig)
+        .map_err(|e| ApproveFailure::Message(e.to_string()))?;
+    crate::cloud::approve_device(&api, &token, device.id, &blob).map_err(failure)
+}
+
+/// The devices section's rows, shaped from the account listing and what this
+/// window knows about its own key (issue #190: the app as approver).
+///
+/// Pure, and the verb table lives here alone: a pending row offers Approve,
+/// an approved row that is not this app's own key offers Vouch, and the own
+/// key offers nothing — a key cannot vouch for itself, and the server would
+/// refuse the statement anyway. `own` is the *cached* identity: `None` means
+/// the keychain has not been consulted yet, in which case the own row shows
+/// a Vouch this window will refuse at click time with the identity loaded —
+/// a late refusal with a name, never a keychain read per chrome rebuild.
+fn fleet_device_rows(
+    devices: &[crate::fleet::AccountDevice],
+    own: Option<zest_proto::ClientId>,
+) -> Vec<crate::chrome::model::FleetDeviceRow> {
+    use crate::chrome::model::{FleetDeviceAction, FleetDeviceRow};
+    devices
+        .iter()
+        .map(|d| {
+            let mine = own == Some(d.id);
+            let status = if mine {
+                "this app"
+            } else if d.approved {
+                "approved"
+            } else {
+                "pending"
+            };
+            FleetDeviceRow {
+                label: d.label.clone(),
+                detail: format!("{} · {status}", d.kind),
+                action: if mine {
+                    FleetDeviceAction::None
+                } else if d.approved {
+                    FleetDeviceAction::Vouch
+                } else {
+                    FleetDeviceAction::Approve
+                },
+            }
+        })
+        .collect()
+}
+
 fn enroll_failure(e: &zest_daemon::enroll::EnrollError) -> String {
     use zest_daemon::enroll::EnrollError;
     match e {
@@ -770,6 +874,18 @@ pub struct App {
     /// resolves against exactly what is on screen — a click racing a fleet
     /// change must not open a different machine.
     fleet_view: Vec<crate::fleet::FleetHost>,
+    /// The account devices the current chrome model was built from,
+    /// index-parallel with the devices section's rows — the `fleet_view`
+    /// discipline, applied to the approver flow (#190): a click racing a
+    /// listing refresh must not vouch for a different key.
+    devices_view: Vec<crate::fleet::AccountDevice>,
+    /// The devices section's last failure, drawn in warn ink under its
+    /// title. On App rather than the section model: the model is rebuilt
+    /// per chrome pass and would forget it.
+    devices_error: Option<String>,
+    /// The approve workers' handoff cell (`Some(None)` clears), drained by
+    /// the same `Wakeup::AccountChanged` the account cell uses.
+    devices_error_update: Arc<parking_lot::Mutex<Option<Option<String>>>>,
     fonts: Option<Fonts>,
     palette: zest_core::PaletteSnapshot,
 
@@ -969,6 +1085,9 @@ impl App {
             enroll_entry: None,
             account_poke: None,
             fleet_view: Vec::new(),
+            devices_view: Vec::new(),
+            devices_error: None,
+            devices_error_update: Arc::new(parking_lot::Mutex::new(None)),
             fonts: None,
             palette,
             chrome_colors,
@@ -1925,7 +2044,19 @@ impl App {
                         }
                     })
                     .collect();
-                Some(ScreenModel::Fleet { account, cards })
+                // Hosted account data: present exactly while signed in.
+                // Every row is the account's, so a signed-out screen has no
+                // section rather than an empty one pretending to be a fact.
+                let devices = matches!(self.account, AccountState::SignedIn { .. }).then(|| {
+                    crate::chrome::model::FleetDevicesModel {
+                        rows: fleet_device_rows(
+                            &self.devices_view,
+                            self.remote_identity.as_ref().map(|i| i.client_id()),
+                        ),
+                        error: self.devices_error.clone(),
+                    }
+                });
+                Some(ScreenModel::Fleet { account, cards, devices })
             }
             AppScreen::Themes => {
                 let active = if zest_theme::builtin::get(&self.config.theme).is_some() {
@@ -2139,8 +2270,15 @@ impl App {
                 zest_cloud::tls::Roots::Platform,
             )
             .map_err(|e| AccountError::Transient(e.to_string()))?;
-            match crate::cloud::fetch_hosts(&api, &token) {
-                Ok(listing) => Ok(crate::fleet::AccountListing {
+            // Hosts and devices in one fetch pass: both are the account's
+            // word, and one refreshing while the other failed would draw a
+            // fleet screen describing two different moments.
+            let answer = crate::cloud::fetch_hosts(&api, &token).and_then(|listing| {
+                let devices = crate::cloud::fetch_devices(&api, &token)?;
+                Ok((listing, devices))
+            });
+            match answer {
+                Ok((listing, devices)) => Ok(crate::fleet::AccountListing {
                     // The origin rides along: it is what turns an enrolled
                     // row into a routable card (`best_route`'s relay arm).
                     relay_origin: listing.relay_origin,
@@ -2148,6 +2286,15 @@ impl App {
                         .hosts
                         .into_iter()
                         .map(|h| AccountEntry { host: h.host, label: h.label })
+                        .collect(),
+                    devices: devices
+                        .into_iter()
+                        .map(|d| crate::fleet::AccountDevice {
+                            id: d.id,
+                            approved: d.approved(),
+                            label: d.label,
+                            kind: d.kind,
+                        })
                         .collect(),
                 }),
                 Err(crate::cloud::CloudError::SignedOut) => {
@@ -2245,6 +2392,74 @@ impl App {
             // sign-out that never started.
             tracing::warn!(error = %e, "could not start the sign-out worker");
             self.account = AccountState::Failed("could not sign out — try again".into());
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// Approve or vouch for the devices-section row at `index`, off the
+    /// event loop (#190: the app as approver).
+    ///
+    /// The row resolves against `devices_view` — the snapshot the section's
+    /// indices were built from — and the identity loads *here*, on the
+    /// click, which is the same keychain trade `spawn_enroll` makes. The
+    /// worker then runs the whole ladder: token, `/api/me` for the userId
+    /// the statement must name, sign, encode, POST — and pokes the account
+    /// watcher on success so the listing refreshes with the row's new state.
+    fn spawn_approve(&mut self, index: usize) {
+        let Some(device) = self.devices_view.get(index).cloned() else { return };
+        let identity = match self.durable_identity() {
+            Ok(i) => i,
+            Err(reason) => {
+                self.devices_error = Some(reason);
+                self.mark_chrome_dirty();
+                return;
+            }
+        };
+        if identity.client_id() == device.id {
+            // Reachable when the row was drawn before the keychain was ever
+            // consulted (`fleet_device_rows`'s own-key note): refused here
+            // with a name rather than shipped for the server's 400.
+            self.devices_error =
+                Some("this is this app's own key — another device must vouch for it".into());
+            self.mark_chrome_dirty();
+            return;
+        }
+        self.devices_error = None;
+        let update = Arc::clone(&self.devices_error_update);
+        let account_update = Arc::clone(&self.account_update);
+        let proxy = self.proxy.clone();
+        let poke = self.account_poke.clone();
+        let spawned = std::thread::Builder::new().name("zest-app-approve".into()).spawn(
+            move || {
+                let outcome = approve_on_account(&identity, &device);
+                match outcome {
+                    Ok(()) => {
+                        // The listing this approval changed is the watcher's
+                        // to re-read; the poke is what makes the row flip
+                        // now rather than a poll interval later.
+                        if let Some(poke) = poke.as_ref() {
+                            poke.poke();
+                        }
+                        *update.lock() = Some(None);
+                    }
+                    Err(ApproveFailure::SignedOut) => {
+                        // The header must stop claiming otherwise, exactly
+                        // as the account watcher does on its own 401s.
+                        post_account(&account_update, &proxy, AccountState::SignedOut);
+                        *update.lock() = Some(Some(
+                            "signed out — sign in with a code before approving".into(),
+                        ));
+                    }
+                    Err(ApproveFailure::Message(m)) => {
+                        *update.lock() = Some(Some(m));
+                    }
+                }
+                let _ = proxy.send_event(Wakeup::AccountChanged);
+            },
+        );
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "could not start the approval worker");
+            self.devices_error = Some("could not start the approval worker".into());
         }
         self.mark_chrome_dirty();
     }
@@ -3158,6 +3373,7 @@ impl App {
         // carries card indices, and they must resolve against the snapshot
         // the cards were built from, not a fresher one.
         self.fleet_view = fleet_hosts.clone();
+        self.devices_view = self.fleet.as_ref().map(|f| f.devices()).unwrap_or_default();
         let screen_model = profiles_model
             .map(crate::chrome::model::ScreenModel::Profiles)
             .or_else(|| self.build_screen_model(&fleet_hosts));
@@ -3623,6 +3839,12 @@ impl App {
                 // No route: the card drew without a hit region, so this arm
                 // is only reachable by a click racing a snapshot change —
                 // ignoring it is the honest answer.
+            }
+            (HitRegion::FleetApproveDevice(i), MouseButton::Left) => {
+                // Approve or vouch — which verb is the row's state, decided
+                // where the row was built (`fleet_device_rows`), against the
+                // same snapshot this index resolves into.
+                self.spawn_approve(i);
             }
             (HitRegion::FleetSignIn, MouseButton::Left) => {
                 // A fresh, empty entry: the keyboard owns it from here
@@ -7180,6 +7402,19 @@ impl ApplicationHandler<Wakeup> for App {
             Wakeup::AccountChanged => {
                 // Taken before the assignment: the guard's temporary borrows
                 // `self` for the whole `if let` otherwise.
+                // The approve workers' channel rides the same wakeup; drain
+                // it first so a failure and the state that caused it land
+                // in one chrome rebuild — and note it separately, because an
+                // approval outcome often arrives with the account cell empty
+                // and must still repaint the section.
+                let approve_settled = self.devices_error_update.lock().take();
+                if let Some(error) = approve_settled {
+                    self.devices_error = error;
+                    self.mark_chrome_dirty();
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                }
                 let settled = self.account_update.lock().take();
                 if let Some(state) = settled {
                     // Poke only on a *transition*: the watcher itself posts
@@ -9103,6 +9338,61 @@ fn to_core_palette(r: &zest_theme::ResolvedPalette) -> zest_core::PaletteSnapsho
     }
 }
 
+
+#[cfg(test)]
+mod fleet_device_row_tests {
+    use super::fleet_device_rows;
+    use crate::chrome::model::FleetDeviceAction;
+    use crate::fleet::AccountDevice;
+    use zest_proto::ClientId;
+
+    fn device(id: u8, label: &str, kind: &str, approved: bool) -> AccountDevice {
+        AccountDevice {
+            id: ClientId::from_bytes([id; 32]),
+            label: label.into(),
+            kind: kind.into(),
+            approved,
+        }
+    }
+
+    #[test]
+    fn the_verb_table_is_the_rows_state() {
+        // Pending approves, approved vouches, the own key offers nothing —
+        // the whole approver surface in one table, because a wrong verb here
+        // is a button that mints a statement the server must refuse.
+        let own = ClientId::from_bytes([3; 32]);
+        let rows = fleet_device_rows(
+            &[
+                device(1, "work-browser", "browser", false),
+                device(2, "andy-phone", "phone", true),
+                device(3, "studio-app", "desktop", true),
+            ],
+            Some(own),
+        );
+        assert_eq!(rows.len(), 3, "every device is a row; hiding one hides a pending key");
+        assert_eq!(rows[0].action, FleetDeviceAction::Approve, "pending → Approve");
+        assert_eq!(rows[0].detail, "browser · pending");
+        assert_eq!(rows[1].action, FleetDeviceAction::Vouch, "approved, not mine → Vouch");
+        assert_eq!(rows[1].detail, "phone · approved");
+        assert_eq!(
+            rows[2].action,
+            FleetDeviceAction::None,
+            "a key cannot vouch for itself, so the own row offers nothing"
+        );
+        assert_eq!(rows[2].detail, "desktop · this app", "and says why it is different");
+    }
+
+    #[test]
+    fn an_unknown_own_key_leaves_the_own_row_actionable() {
+        // Before the keychain is ever consulted the app cannot tell its own
+        // row apart; the click path re-checks with the identity loaded and
+        // refuses with a name. Hiding the button instead would require a
+        // keychain read per chrome rebuild — the trade the helper documents.
+        let rows = fleet_device_rows(&[device(3, "studio-app", "desktop", true)], None);
+        assert_eq!(rows[0].action, FleetDeviceAction::Vouch);
+        assert_eq!(rows[0].detail, "desktop · approved");
+    }
+}
 
 #[cfg(test)]
 mod palette_tests {

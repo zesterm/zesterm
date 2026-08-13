@@ -53,7 +53,13 @@ const ORIGINLESS = new Set(['/api/enroll/claim']);
  * The same path reached *without* the header is an ordinary cookie route and
  * keeps the full rule — membership here loosens nothing for browsers.
  */
-const BEARER = new Set(['/api/me', '/api/hosts', '/api/relay/ticket', '/api/attestations']);
+const BEARER = new Set([
+  '/api/me',
+  '/api/hosts',
+  '/api/devices',
+  '/api/relay/ticket',
+  '/api/attestations',
+]);
 
 /**
  * The one *parameterised* bearer route, which a `Set` of exact paths cannot

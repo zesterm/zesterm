@@ -229,6 +229,40 @@ pub struct FleetAccountModel {
     pub error: Option<String>,
 }
 
+/// What a devices-section row offers (issue #190: the app as approver).
+///
+/// Derived from row state by the app — pending rows approve, approved rows
+/// that are not this app's own key vouch — so the drawing stays declarative
+/// and one hit region serves both verbs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FleetDeviceAction {
+    /// Nothing clickable: this app's own key, or an action in flight.
+    None,
+    /// "Approve" — a pending key becomes trusted on this account's word.
+    Approve,
+    /// "Vouch" — an already-approved key gets this app's attestation too,
+    /// widening which daemons can admit it.
+    Vouch,
+}
+
+/// One row of the fleet view's devices section, ready to draw.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FleetDeviceRow {
+    pub label: String,
+    /// The mono fact line: "browser · pending", "desktop · this app".
+    pub detail: String,
+    pub action: FleetDeviceAction,
+}
+
+/// The fleet view's devices section — hosted account data, present only
+/// while the app is signed in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FleetDevicesModel {
+    pub rows: Vec<FleetDeviceRow>,
+    /// The last approval's failure, in the account header's error pattern.
+    pub error: Option<String>,
+}
+
 /// One host card of the fleet view (design screen 7).
 #[derive(Debug, Clone, PartialEq)]
 pub struct FleetCard {
@@ -280,7 +314,13 @@ pub struct PaneModel {
 /// A full-pane screen replacing the grid (fleet directory, theme gallery).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScreenModel {
-    Fleet { account: FleetAccountModel, cards: Vec<FleetCard> },
+    Fleet {
+        account: FleetAccountModel,
+        cards: Vec<FleetCard>,
+        /// `None` while signed out — the section simply is not there, since
+        /// every row of it is the account's data.
+        devices: Option<FleetDevicesModel>,
+    },
     Themes { cards: Vec<ThemeCard> },
     /// The Profiles tab's pane: the §12 editor. Boxed because this variant
     /// is an order of magnitude bigger than its siblings and `ScreenModel`

@@ -28,8 +28,13 @@ import { requestPrincipal } from './principal.ts';
  * absent credential gets: a machine serving shells has no business
  * enumerating its owner's other machines.
  *
- * `/api/devices` stays people-only for now; it is the approval surface, and
- * widening it is a decision for the attestation work, not a default.
+ * `/api/devices` answers people and **devices** too, since the desktop app
+ * became an approver (#190): its fleet screen renders the account's devices
+ * and vouches from pending rows, and it reads them with the only credential
+ * it has. The widening this comment used to defer is exactly this decision,
+ * and it is sound because the resolve join (`db/machine-tokens.ts`) admits
+ * only *approved* devices — a pending key's token cannot enumerate the
+ * account it is not yet trusted by. Hosts stay refused on both lists.
  */
 export async function listRegistry(
   request: Request,
@@ -49,8 +54,12 @@ export async function listRegistry(
     });
   }
 
-  if (principal.kind !== 'user') return json({ error: 'unauthorized' }, 401);
-  return json({ devices: await listDevices(env.DB, principal.user.id) });
+  // A host's token stays refused here as on `/api/hosts`, and for the same
+  // reason with more teeth: this list is the approval surface, and a machine
+  // serving shells has no business learning which keys are pending.
+  if (principal.kind === 'host') return json({ error: 'unauthorized' }, 401);
+  const userId = principal.kind === 'user' ? principal.user.id : principal.userId;
+  return json({ devices: await listDevices(env.DB, userId) });
 }
 
 /**
