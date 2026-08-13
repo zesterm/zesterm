@@ -307,15 +307,18 @@ export function paneModel(
  * a blank continuation row of a multi-line prompt, and trimming to the text
  * would swallow it.
  *
- * Everything is kept when the cursor names no row this slice holds — a cursor
- * on the alternate screen, or a slice whose rows the client never cached.
- * Rendering the whole prompt is the harmless answer; rendering none is not.
+ * Everything is kept when the caret is not on one of this slice's own rows — a
+ * cursor on the alternate screen, or rows the client never cached. Membership
+ * is checked rather than inferred from the id being in range: a slice holding
+ * lines 10 and 12 while the caret sits on 11 would otherwise drop line 12 on
+ * the strength of a caret that is not in the slice at all. Rendering the whole
+ * prompt is the harmless answer; dropping a row of it is not.
  */
 function upToCaret(rows: readonly RowPayload[], view: PaneView): readonly RowPayload[] {
   const caretLine = view.rows[view.cursor.row]?.line;
   if (caretLine === undefined) return rows;
-  const kept = rows.filter((r) => r.line <= caretLine);
-  return kept.length > 0 ? kept : rows;
+  if (!rows.some((r) => r.line === caretLine)) return rows;
+  return rows.filter((r) => r.line <= caretLine);
 }
 
 function headerOf(

@@ -658,3 +658,32 @@ test('a prompt spanning several rows keeps every row up to the caret', () => {
     'both prompt rows survive; only the tail below the caret is dropped',
   );
 });
+
+test('a caret that is not on one of the prompt rows trims nothing', () => {
+  // Membership, not range. This slice holds 10 and 12 while the caret sits on
+  // 11 — a row the client never cached — so the caret is not in the prompt at
+  // all and trimming on `line <= 11` would drop line 12 on its say-so. The
+  // rule is that a caret elsewhere means "leave the prompt alone", and an id
+  // that merely falls between two of our rows is exactly that case.
+  const view = {
+    scrollback: [],
+    rows: [synthRow(10n, '❯ one'), synthRow(11n, 'uncached'), synthRow(12n, '❯ two')],
+    blocks: [synthBlock(0, 10n, null, null, { state: 'prompt' }, '')],
+    cursor: { row: 1, col: 0, visible: true, shape: 0 },
+    attrs: new Map(),
+  };
+
+  // The slice the model sees holds 10 and 12 only — 11 is not the prompt's.
+  const trimmed = paneModel(
+    { ...view, rows: [synthRow(10n, '❯ one'), synthRow(12n, '❯ two')] },
+    new Set(),
+    'live',
+    NOW,
+  );
+  const prompt = trimmed[trimmed.length - 1];
+  assert.deepEqual(
+    prompt?.kind === 'prompt' ? prompt.rows.map((r) => r.line) : null,
+    [10n, 12n],
+    'the caret names no row here, so nothing is dropped',
+  );
+});
