@@ -29,6 +29,7 @@ use std::fmt;
 
 use zest_proto::HostId;
 
+pub mod attest;
 pub mod discovery;
 pub mod enroll;
 pub mod identity;
