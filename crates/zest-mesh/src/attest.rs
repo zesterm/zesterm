@@ -31,6 +31,8 @@ pub enum AttestError {
     AccountTooLong,
     #[error("device label is longer than 65535 bytes")]
     LabelTooLong,
+    #[error("the signing identity is not the approver the attestation names")]
+    SignerIsNotApprover,
 }
 
 /// The domain this message lives in.
@@ -101,10 +103,16 @@ pub fn attestation_message(a: &Attestation) -> Result<Vec<u8>, AttestError> {
 /// Sign an attestation as the approver.
 ///
 /// `identity` must be the identity behind [`Attestation::by`] — the approver's,
-/// never the new device's. Nothing here can enforce that (a key is a key), but
-/// [`verify_attestation`] checks against `by`, so a voucher signed by the wrong
-/// key is minted broken rather than accepted broken.
+/// never the new device's — and a mismatch is an error *here*, not merely a
+/// voucher that fails later.
 pub fn sign_attestation(identity: &ClientIdentity, a: &Attestation) -> Result<Signature, AttestError> {
+    // Refused at mint time rather than left for verification: a voucher signed
+    // by a key other than `by` is guaranteed to fail [`verify_attestation`],
+    // and that late `verify == false` names neither the mistake nor the side
+    // that made it.
+    if identity.client_id() != a.by {
+        return Err(AttestError::SignerIsNotApprover);
+    }
     Ok(identity.sign(Purpose::DeviceAttestation, &attestation_message(a)?))
 }
 
@@ -116,12 +124,16 @@ pub fn sign_attestation(identity: &ClientIdentity, a: &Attestation) -> Result<Si
 /// not mixed in here where a missing check would look like a passing one.
 #[must_use]
 pub fn verify_attestation(a: &Attestation, sig: &Signature, now_ms: u64) -> bool {
+    // The window first: this runs on untrusted input, and the Ed25519 verify
+    // is the expensive step, so a voucher that is dead on arrival is refused
+    // before any signature work is spent on it.
+    if now_ms < a.iat || now_ms >= a.exp {
+        return false;
+    }
     // A field too long to encode is refused rather than truncated-then-checked:
     // there is no signature that can be correct over bytes we decline to build.
     let Ok(message) = attestation_message(a) else { return false };
     verify_client(a.by, Purpose::DeviceAttestation, &message, sig).is_ok()
-        && a.iat <= now_ms
-        && now_ms < a.exp
 }
 
 #[cfg(test)]
@@ -185,19 +197,46 @@ mod tests {
              the future would let a stolen approver key mint vouchers that \
              outlive its revocation"
         );
+        assert!(
+            !verify_attestation(&a, &Signature::from_bytes([0; 64]), a.exp),
+            "outside the window the verdict is the window's alone -- the check \
+             short-circuits before any signature work, so a garbage signature \
+             gets the same refusal as a valid one"
+        );
     }
 
     #[test]
     fn a_signature_by_a_key_other_than_by_is_rejected() {
         // The approver named in the statement and the key that signed it must
         // be the same key. Otherwise anyone could mint a voucher naming a
-        // trusted device as its approver and sign it themselves.
+        // trusted device as its approver and sign it themselves. Signed by
+        // hand rather than through `sign_attestation`, which refuses to mint
+        // this mismatch -- an attacker is not obliged to use our signer.
         let impostor = ClientIdentity::from_secret_bytes(&[0x99; SECRET_LEN]);
         let a = attestation(approver().client_id());
-        let sig = sign_attestation(&impostor, &a).expect("fits");
+        let sig = impostor.sign(
+            Purpose::DeviceAttestation,
+            &attestation_message(&a).expect("fits"),
+        );
         assert!(
             !verify_attestation(&a, &sig, a.iat + 1_000),
             "verification must use `a.by`, never whichever key happened to sign"
+        );
+    }
+
+    #[test]
+    fn signing_as_a_key_other_than_by_is_refused_at_mint_time() {
+        // A voucher signed by a key other than `by` is guaranteed to fail
+        // verification later, and that late `verify == false` names neither
+        // the mistake nor the side that made it -- so the mismatch is an error
+        // here, where the caller holding the wrong identity can still be told
+        // which one.
+        let impostor = ClientIdentity::from_secret_bytes(&[0x99; SECRET_LEN]);
+        let a = attestation(approver().client_id());
+        assert_eq!(
+            sign_attestation(&impostor, &a),
+            Err(AttestError::SignerIsNotApprover),
+            "minting a voucher the verifier is certain to refuse helps nobody"
         );
     }
 

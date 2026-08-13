@@ -436,7 +436,7 @@ fn run_fixture_dump() -> ExitCode {
 /// Three, since #184. `handshake_dump` and `attest_dump` live in `zest-mesh`
 /// because `zest-proto` has no crypto dependency and must not gain one, but
 /// they write here because this is the directory the web tests already read.
-/// Adding a generator means adding it to this list, and forgetting to is
+/// Adding a generator means adding it to this list, and forgetting to do so is
 /// exactly the failure `check_generated` guards against by running all of them.
 const FIXTURE_GENERATORS: &[&[&str]] = &[
     &["run", "-p", "zest-proto", "--example", "fixture_dump"],
