@@ -137,6 +137,17 @@ pub enum ClientMessage {
         /// falls back to polling.
         #[serde(default)]
         watch_sessions: bool,
+        /// Ask to be told when a device is waiting to be approved.
+        ///
+        /// The desktop approval modal's subscription: [`HostMessage::PairingRequested`]
+        /// pushes follow, request and tombstone alike. **Honoured on loopback
+        /// only** — the same authority rule as `PairingDecision`, decided by
+        /// the transport, so a LAN connection that sets it is silently never
+        /// subscribed rather than refused. A field rather than a new message
+        /// for `watch_sessions`' reason exactly: `#[serde(default)]` degrades
+        /// to today's behavior on an older daemon, which simply never pushes.
+        #[serde(default)]
+        watch_pairings: bool,
     },
     /// The client's proof, answering [`HostMessage::Challenge`].
     ///
@@ -234,10 +245,34 @@ pub enum HostMessage {
     AuthFailed { reason: AuthFailure, message: String },
     /// A device is asking to be paired; show it and call for a decision.
     ///
-    /// Pushed to loopback connections only — the desktop app is a client of its
-    /// own daemon, so the approval modal is a front end over this rather than a
-    /// second mechanism. `remote` is for the prompt: "from 192.168.1.42".
-    PairingRequested { client: ClientId, label: String, code: String, remote: String },
+    /// Pushed to loopback connections that asked (`Hello.watch_pairings`) —
+    /// the desktop app is a client of its own daemon, so the approval modal is
+    /// a front end over this rather than a second mechanism. `remote` is for
+    /// the prompt: "from 192.168.1.42".
+    ///
+    /// One message plays both halves, because a modal must also *close*:
+    /// `resolved: false` means "show this" and `resolved: true` is the
+    /// tombstone — the request left the queue (approved, denied, expired, or
+    /// the device hung up), so stop showing it. A marker field rather than a
+    /// second variant on purpose: both fields are `#[serde(default)]`, which
+    /// the frozen-contract rule blesses as additive, while a new tag in a
+    /// tagged enum fails the *whole* message on an older peer (`DeltaOp`'s
+    /// lesson, docs/CONTRACTS.md). A tombstone carries only `client`; the
+    /// other fields are empty rather than repeated, so nobody is tempted to
+    /// read a code out of a message that means "there is nothing to compare".
+    PairingRequested {
+        client: ClientId,
+        label: String,
+        code: String,
+        remote: String,
+        /// How long the code is still worth comparing, mirroring
+        /// [`HostMessage::AuthPending`]. `0` from a daemon that predates the
+        /// field — treat as unknown, not as already-expired.
+        #[serde(default)]
+        expires_in_secs: u32,
+        #[serde(default)]
+        resolved: bool,
+    },
     Sessions {
         sessions: Vec<SessionInfo>,
         /// The session this reply's `CreateSession` produced, when it did.
@@ -370,6 +405,7 @@ mod tests {
             nonce: Nonce32::from_bytes([4; 32]),
             dh: Pub32::from_bytes([6; 32]),
             watch_sessions: false,
+            watch_pairings: false,
         };
         let json = serde_json::to_string(&msg).expect("serialize");
         let back: ClientMessage = serde_json::from_str(&json).expect("deserialize");
@@ -395,6 +431,75 @@ mod tests {
     }
 
     #[test]
+    fn a_hello_without_watch_pairings_still_decodes() {
+        // The entire reason the field is `#[serde(default)]`: every client
+        // shipped before the approval modal sends a Hello without it, and a
+        // Hello that fails to decode reads as a framing bug rather than as
+        // an old peer. Through the real msgpack framing, not serde_json --
+        // `to_vec_named` is what the daemon decodes.
+        #[derive(serde::Serialize)]
+        struct OldHello<'a> {
+            t: &'a str,
+            version: u16,
+            client: ClientId,
+            label: &'a str,
+            nonce: Nonce32,
+            dh: Pub32,
+            watch_sessions: bool,
+        }
+        let old = rmp_serde::to_vec_named(&OldHello {
+            t: "hello",
+            version: PROTOCOL_VERSION,
+            client: ClientId::from_bytes([9; 32]),
+            label: "old-client",
+            nonce: Nonce32::from_bytes([1; 32]),
+            dh: Pub32::from_bytes([2; 32]),
+            watch_sessions: true,
+        })
+        .expect("encode");
+        let parsed: ClientMessage = crate::frame::decode(&old).expect("an old Hello must decode");
+        let ClientMessage::Hello { watch_sessions, watch_pairings, .. } = parsed else {
+            panic!("expected Hello");
+        };
+        assert!(watch_sessions, "the fields the old client did send survive");
+        assert!(
+            !watch_pairings,
+            "absent must mean 'not subscribed', exactly today's behavior"
+        );
+    }
+
+    #[test]
+    fn a_pairing_requested_without_the_new_fields_still_decodes() {
+        // An app talking to an older daemon: `expires_in_secs` and `resolved`
+        // are `#[serde(default)]` so its pushes still parse -- 0 reads as
+        // "expiry unknown" (never as already-expired) and absent `resolved`
+        // is an ordinary request, both of which are what that daemon meant.
+        #[derive(serde::Serialize)]
+        struct OldPush<'a> {
+            t: &'a str,
+            client: ClientId,
+            label: &'a str,
+            code: &'a str,
+            remote: &'a str,
+        }
+        let old = rmp_serde::to_vec_named(&OldPush {
+            t: "pairing_requested",
+            client: ClientId::from_bytes([7; 32]),
+            label: "andy-phone",
+            code: "481502",
+            remote: "192.168.1.42:7717",
+        })
+        .expect("encode");
+        let parsed: HostMessage = crate::frame::decode(&old).expect("an old push must decode");
+        let HostMessage::PairingRequested { code, expires_in_secs, resolved, .. } = parsed else {
+            panic!("expected PairingRequested");
+        };
+        assert_eq!(code, "481502");
+        assert_eq!(expires_in_secs, 0, "absent expiry is unknown, not zero minutes");
+        assert!(!resolved, "an old daemon only ever pushes live requests");
+    }
+
+    #[test]
     fn an_absent_nonce_is_not_a_valid_one() {
         // The other half: having decoded, the all-zero default must not be
         // mistaken for freshness a client actually supplied.
@@ -405,6 +510,7 @@ mod tests {
             nonce: Nonce32::default(),
             dh: Pub32::default(),
             watch_sessions: false,
+            watch_pairings: false,
         };
         let ClientMessage::Hello { nonce, dh, .. } = msg else { panic!("expected Hello") };
         assert!(nonce.is_absent());

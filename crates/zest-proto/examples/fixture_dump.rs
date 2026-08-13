@@ -714,6 +714,7 @@ fn write_client_messages(path: &Path) {
                 nonce: Nonce32::from_bytes([0x5c; 32]),
                 dh: zest_proto::Pub32::from_bytes([0x2d; 32]),
                 watch_sessions: true,
+                watch_pairings: false,
             },
         ),
         ("auth", ClientMessage::Auth { signature: Sig64::from_bytes([0xef; 64]) }),

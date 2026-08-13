@@ -39,6 +39,14 @@ export type ClientMessage =
        */
       readonly dh: string;
       readonly watch_sessions: boolean;
+      /**
+       * Ask to hear about devices waiting for approval
+       * (`pairing_requested` pushes). Honoured on loopback connections
+       * only — a browser client is never one, so this is `false` everywhere
+       * today; it exists because the encoder is held byte-equal to the
+       * host's, which always writes the field.
+       */
+      readonly watch_pairings: boolean;
     }
   | {
       readonly t: 'auth';
@@ -121,6 +129,7 @@ export function encodeClientMessageBody(msg: ClientMessage): Uint8Array {
         nonce: msg.nonce,
         dh: msg.dh,
         watch_sessions: msg.watch_sessions,
+        watch_pairings: msg.watch_pairings,
       };
       break;
     case 'auth':

@@ -53,7 +53,19 @@ dh: Pub32,
  * exactly today's behavior — the client notices no pushes arrive and
  * falls back to polling.
  */
-watch_sessions: boolean, } | { "t": "auth", signature: Sig64, } | { "t": "pairing_decision", client: ClientId, approve: boolean, } | { "t": "request_keyframe", session: SessionAddr, } | { "t": "list_sessions" } | { "t": "create_session", 
+watch_sessions: boolean, 
+/**
+ * Ask to be told when a device is waiting to be approved.
+ *
+ * The desktop approval modal's subscription: [`HostMessage::PairingRequested`]
+ * pushes follow, request and tombstone alike. **Honoured on loopback
+ * only** — the same authority rule as `PairingDecision`, decided by
+ * the transport, so a LAN connection that sets it is silently never
+ * subscribed rather than refused. A field rather than a new message
+ * for `watch_sessions`' reason exactly: `#[serde(default)]` degrades
+ * to today's behavior on an older daemon, which simply never pushes.
+ */
+watch_pairings: boolean, } | { "t": "auth", signature: Sig64, } | { "t": "pairing_decision", client: ClientId, approve: boolean, } | { "t": "request_keyframe", session: SessionAddr, } | { "t": "list_sessions" } | { "t": "create_session", 
 /**
  * Empty means the host's default shell.
  */

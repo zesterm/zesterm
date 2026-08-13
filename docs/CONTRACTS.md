@@ -26,7 +26,7 @@ paragraph of justification attached.
 |---|---|---|---|
 | `PtyTransport` | `zest-pty/src/lib.rs` | **frozen** — `hangup` added, see below | WS-C, WS-D, WS-F |
 | `HostId`, `ClientId`, `SessionId`, `SessionAddr` | `zest-proto/src/ids.rs` | **frozen** | WS-F, WS-G, WS-H |
-| `ClientMessage`, `HostMessage`, `SessionInfo` | `zest-proto/src/lib.rs` | **frozen** at v3 — see below | WS-F, WS-G |
+| `ClientMessage`, `HostMessage`, `SessionInfo` | `zest-proto/src/lib.rs` | **frozen** at v3 — additive `Hello.watch_pairings` and `PairingRequested` expiry/tombstone fields for the approval modal, see below | WS-F, WS-G |
 | `Delta`, `DeltaOp`, `Run`, `RowPayload`, `AttrDef` | `zest-proto/src/delta.rs` | **frozen** at v3 — unchanged in content, but the frame carrying it is now ciphertext | WS-F, WS-G |
 | `Nonce32`, `Sig64`, `Pub32`, `AuthFailure` | `zest-proto/src/auth.rs` | **frozen** — `Nonce32`/`Sig64` arrived with v2, `Pub32` with v3 | WS-F, WS-G, WS-H |
 | `SecureChannel`, `Sealer`, `Opener`, `EphemeralDh`, `DhPublic` | `zest-mesh/src/secure.rs` | **frozen** at v3 — the browser has a second implementation, pinned to `fixtures/handshake.json` | WS-F, WS-G, WS-H |
@@ -134,6 +134,31 @@ subscriber.
    consumer is worse than either shape.
 4. Update the table in the same commit. A row that no longer describes the code is worse than no
    row, because it is believed.
+
+### Additive, and therefore not a bump: the approval-modal subscription
+
+`Hello` gained `watch_pairings` and `HostMessage::PairingRequested` gained
+`expires_in_secs` and `resolved` — all `#[serde(default)]`, so an old peer on
+either side decodes exactly as before. An old daemon simply never pushes
+(the modal never opens, which is what every desktop had until now); an old
+client never subscribes and never meets the fields. `PROTOCOL_VERSION`
+stays at 3.
+
+**A `resolved` marker rather than a `PairingResolved` variant**, for
+`DeltaOp`'s reason restated below: `HostMessage` is `#[serde(tag = "t")]`,
+and an unknown tag fails the *whole* message on an older peer, so a new
+variant is not additive. The tombstone (`resolved: true`) carries only
+`client` — the other fields are empty so nobody reads a code out of a
+message that means "there is nothing left to compare". The pushes go only
+to loopback connections that asked (`may_approve_devices` gates the
+subscription server-side), so the matching codes never leave the machine.
+
+Consumers landed in the same commit: the daemon (queue watchers + the
+per-connection diff push), the desktop app (the modal), the TS wire types
+(`wire.ts` parses the new fields with absent-tolerant defaults,
+`wire-client.ts` encodes `watch_pairings` — the encoder is held byte-equal
+to `rmp_serde`, which always writes the field), and the regenerated
+`client-messages.json` golden.
 
 ### Additive, and therefore not a bump: command blocks
 

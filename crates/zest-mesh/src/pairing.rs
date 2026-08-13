@@ -500,6 +500,15 @@ pub struct PairingQueue {
     pending: Mutex<Vec<(u64, Pending)>>,
     next_id: AtomicU64,
     on_request: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    /// Bumped whenever `pending` would read differently: submit, resolve,
+    /// expire, cancel. What lets a watching connection answer "did anything
+    /// change?" without diffing two listings — the same shape as
+    /// `Registry.generation`, because the daemon's push loop is the same.
+    generation: AtomicU64,
+    /// Wakers for connections that asked to watch the queue
+    /// (`Hello.watch_pairings`), keyed by a token so `Drop` can unregister.
+    watchers: Mutex<std::collections::HashMap<u64, std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    next_watcher: AtomicU64,
 }
 
 /// Cancels its request when dropped.
@@ -531,6 +540,41 @@ impl PairingQueue {
         *self.on_request.lock() = Some(Box::new(f));
     }
 
+    /// The queue changed; tell everyone who asked to hear it.
+    ///
+    /// Called *after* the change is visible in `pending`, so a woken watcher
+    /// that lists immediately sees the new truth. Wakers are cloned out and
+    /// run outside the lock for `submit`'s reason: a waker is arbitrary code.
+    fn touch(&self) {
+        self.generation.fetch_add(1, Ordering::Release);
+        let wakers: Vec<_> = self.watchers.lock().values().cloned().collect();
+        for waker in wakers {
+            waker();
+        }
+    }
+
+    /// Where the queue's contents currently stand; see `touch`.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// Register a waker to run whenever the queue changes.
+    ///
+    /// Beside `on_request` rather than replacing it: the stdin prompter wants
+    /// "a request arrived", a pushing connection wants "the listing you
+    /// announced may be stale" — which includes requests *leaving*, so a
+    /// modal can close when someone answers at the terminal.
+    pub fn watch(&self, waker: std::sync::Arc<dyn Fn() + Send + Sync>) -> u64 {
+        let token = self.next_watcher.fetch_add(1, Ordering::Relaxed);
+        self.watchers.lock().insert(token, waker);
+        token
+    }
+
+    pub fn unwatch(&self, token: u64) {
+        self.watchers.lock().remove(&token);
+    }
+
     /// Queue a request. `notify` is called exactly once, from whichever thread
     /// resolves it.
     pub fn submit(
@@ -542,6 +586,7 @@ impl PairingQueue {
         self.pending.lock().push((id, Pending { request, notify }));
         // Outside the lock: a UI callback is arbitrary code, and running it
         // while holding the queue lock is how a deadlock is built.
+        self.touch();
         if let Some(f) = self.on_request.lock().as_ref() {
             f();
         }
@@ -577,6 +622,9 @@ impl PairingQueue {
             out
         };
         let n = taken.len();
+        if n > 0 {
+            self.touch();
+        }
         for p in taken {
             (p.notify)(decision);
         }
@@ -600,6 +648,9 @@ impl PairingQueue {
             out
         };
         let n = expired.len();
+        if n > 0 {
+            self.touch();
+        }
         for p in expired {
             (p.notify)(Decision::Deny);
         }
@@ -615,6 +666,7 @@ impl PairingQueue {
                 .map(|i| pending.remove(i).1)
         };
         if let Some(p) = taken {
+            self.touch();
             (p.notify)(Decision::Deny);
         }
     }

@@ -28,6 +28,7 @@ const CANONICAL: Record<string, ClientMessage> = {
     nonce: '5c'.repeat(32),
     dh: '2d'.repeat(32),
     watch_sessions: true,
+    watch_pairings: false,
   },
   auth: { t: 'auth', signature: 'ef'.repeat(64) },
   pairing_decision: { t: 'pairing_decision', client: 'ab'.repeat(32), approve: false },

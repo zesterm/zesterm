@@ -74,6 +74,7 @@ fn main() {
         nonce: zest_proto::Nonce32::from_bytes(*hs.nonce().as_bytes()),
         dh: zest_proto::Pub32::from_bytes(hs.dh().0),
         watch_sessions: false,
+        watch_pairings: false,
     };
     write(&mut stream, None, &hello);
 
