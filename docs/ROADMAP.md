@@ -1915,6 +1915,27 @@ three facts about Cloudflare that changed after #59 was written.
       elapsed poll, so only a real cut ends a read — and stands the poll back
       down once the handshake completes, since the 0%-idle property should not
       pay for a watchdog that is no longer watching. → #99.
+- [x] **One session, several clients: the size is arbitrated, not stolen**
+      (#215). `Attach` and `Resize` were last-writer-wins — merely attaching
+      resized the pty, so a phone peeking at a desktop session reshaped the
+      desktop, which was never told: its own pane had not moved, so nothing
+      re-rendered. The session now sizes itself to the **smallest attached
+      client** — tmux's rule — with each subscriber's declared size held as a
+      vote and the min recomputed on attach, resize and detach. Equal
+      recomputes touch nothing, so attaching at the current size no longer
+      costs a ConPTY repaint (#200). **No wire change**: the keyframe was
+      already the only carrier of shape in both clients, so a changed grant
+      reaches every other subscriber as a forced keyframe — a *shrink*
+      described by deltas lands inside a stale larger grid without ever
+      tripping `NeedsKeyframe`, which is why it must be a full state. Both
+      clients letterbox a grid held smaller than their pane (centered, per
+      axis, pixel-identical when the grid fills the pane); the desktop's
+      redial reattaches at the size the window has *now* rather than the one
+      it was born with; the web canvas follows the grid rather than the
+      wrapper, because stale pixels below a foreign shrink had no other way
+      to clear. Per-client *reflow* stayed off the table on purpose: one pty,
+      one layout — the program inside draws for exactly one size, so
+      per-client can only ever mean viewports over one shared grid.
 - [ ] **The relay Worker and its Durable Object.** A control link the daemon
       parks, an attach ticket the browser carries on `Sec-WebSocket-Protocol`
       (not the query string — a secret in a URL lands in referrers, edge logs
