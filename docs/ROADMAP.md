@@ -1412,9 +1412,19 @@ is now unblocked and building.
       surfaces at bring-up as a mismatch that names neither side. Verification
       is `zip215: false`, matching dalek's `verify_strict`: noble's default
       accepts small-order keys, which verify almost anything.
-      Still open: the devices screen. The daemon's `--enroll` now posts for
-      real — but the two halves have still never spoken over a network; each is
-      tested against the shared preimage, not against the other.
+      **The claim now answers with a bearer token** (`zt1_…`, hash-only in a
+      new `machine_tokens` table, one live token per principal), which is the
+      shape `--enroll` always hard-required — the response mismatch that kept
+      the two halves apart is gone. `Authorization: Bearer` works on
+      `/api/me`, `/api/hosts` (which carries `relayOrigin` for callers with no
+      session) and `/api/relay/ticket`; a bearer request is resolved by the
+      token alone and never falls back to the cookie, which is what keeps the
+      router's origin exemption sound. Revoking a host or device kills its
+      token by construction — liveness is a JOIN against the principal row,
+      not a second write.
+      Still open: the devices screen, and a real `--enroll` run against the
+      deployed Worker — each half is tested against the shared preimage and
+      the pinned response shape, not yet against the other over a network.
 - [x] **The fleet screen reads the account** — `GET /api/hosts` and
       `/api/devices`, with revoke on both.
       The plan called for a separate `/settings/devices`; that was wrong and

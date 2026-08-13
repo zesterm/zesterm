@@ -17,6 +17,7 @@ import { claimEnrollCode, mintEnrollCode } from './api/enroll.ts';
 import { listRegistry, revokeRegistryEntry } from './api/registry.ts';
 import { mintRelayTicket } from './api/relay.ts';
 import { finishLogin, logout, startLogin } from './auth/routes.ts';
+import { carriesBearer, requestPrincipal } from './api/principal.ts';
 import { resolveSession } from './db/sessions.ts';
 import type { Env } from './env.ts';
 import { csrfOk, csrfOkWithoutOrigin, json } from './http.ts';
@@ -38,6 +39,20 @@ import { csrfOk, csrfOkWithoutOrigin, json } from './http.ts';
  */
 const ORIGINLESS = new Set(['/api/enroll/claim']);
 
+/**
+ * The routes that also answer machines — `Authorization: Bearer` from a daemon
+ * or the desktop app, which have no cookie, no browser and no origin.
+ *
+ * A request carrying that header on one of these paths drops the `Origin` half
+ * of the CSRF rule, and the exemption is sound for the same reason
+ * `ORIGINLESS`'s is: `requestPrincipal` resolves such a request by the token
+ * *alone* and never falls back to the cookie, so a request that skipped the
+ * origin check is a request whose ambient credentials were never consulted.
+ * The same path reached *without* the header is an ordinary cookie route and
+ * keeps the full rule — membership here loosens nothing for browsers.
+ */
+const BEARER = new Set(['/api/me', '/api/hosts', '/api/relay/ticket']);
+
 /** `/api/hosts/:id/revoke`, `/api/devices/:id/revoke`. */
 const REVOKE = /^\/api\/(hosts|devices)\/([^/]+)\/revoke$/;
 
@@ -53,9 +68,13 @@ export async function routeApi(
   if (!path.startsWith('/api/') && !path.startsWith('/auth/')) return null;
 
   // Checked once, before any handler, so a route cannot be added that forgets.
-  const csrf = ORIGINLESS.has(path)
-    ? csrfOkWithoutOrigin(request)
-    : csrfOk(request, env.APP_ORIGIN);
+  // `carriesBearer`, not "any Authorization header": a `Basic` header from
+  // some proxy must not widen the exemption to a request the resolver would
+  // never answer by token anyway.
+  const csrf =
+    ORIGINLESS.has(path) || (carriesBearer(request) && BEARER.has(path))
+      ? csrfOkWithoutOrigin(request)
+      : csrfOk(request, env.APP_ORIGIN);
   if (!csrf) return json({ error: 'forbidden' }, 403);
 
   if (path === '/auth/login') return startLogin(request, env, now);
@@ -65,24 +84,36 @@ export async function routeApi(
     return logout(request, env);
   }
 
-  if (path === '/api/bootstrap' || path === '/api/me') {
+  if (path === '/api/me') {
+    if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+    // One resolver for "who is this", cookie or bearer. A person keeps the
+    // shape the app already reads; a machine gets its principal named back —
+    // which is how the desktop app learns the `userId` its attestations must
+    // carry — and `user` stays present-but-null so nothing switches on a
+    // missing key.
+    const principal = await requestPrincipal(request, env, now);
+    if (principal === null) return json({ user: null });
+    return principal.kind === 'user'
+      ? json({ user: principal.user })
+      : json({
+          user: null,
+          principal: { kind: principal.kind, id: principal.id, userId: principal.userId },
+        });
+  }
+
+  if (path === '/api/bootstrap') {
     if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
     const user = await resolveSession(
       env.DB,
       readCookie(request.headers.get('cookie'), SESSION_COOKIE),
       now,
     );
-    // `/api/me` is the same answer without the envelope -- one source of truth
-    // for "who is this", so the two can never disagree about it.
-    //
     // `relayOrigin` is on the envelope rather than baked into the bundle for
     // the reason `mode` is: the app ships as one `vite build` serving both the
     // loopback sidecar and the edge, so anything it learns from a `VITE_*`
     // variable is something the shipped bundle was never tested with. `null`
     // is the ordinary answer for a deployment with no relay.
-    return path === '/api/me'
-      ? json({ user })
-      : json({ mode: 'cloud', user, relayOrigin: env.RELAY_ORIGIN ?? null });
+    return json({ mode: 'cloud', user, relayOrigin: env.RELAY_ORIGIN ?? null });
   }
 
   if (path === '/api/enroll/code') {

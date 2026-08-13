@@ -15,20 +15,41 @@ import type { Env } from '../env.ts';
 import { json } from '../http.ts';
 import { KEY_LEN } from '../enroll/preimage.ts';
 import { currentUser } from './session.ts';
+import { requestPrincipal } from './principal.ts';
 
-/** `GET /api/hosts` and `GET /api/devices`. Revoked rows are simply not there. */
+/**
+ * `GET /api/hosts` and `GET /api/devices`. Revoked rows are simply not there.
+ *
+ * `/api/hosts` answers people and **devices** — the desktop app reads its
+ * fleet with a bearer token — and carries `relayOrigin` beside the list,
+ * because a bearer caller has no session to fetch `/api/bootstrap` with and
+ * the hosts are unreachable without it. A *host's* token gets the 401 an
+ * absent credential gets: a machine serving shells has no business
+ * enumerating its owner's other machines.
+ *
+ * `/api/devices` stays people-only for now; it is the approval surface, and
+ * widening it is a decision for the attestation work, not a default.
+ */
 export async function listRegistry(
   request: Request,
   env: Env,
   kind: EnrollKind,
   now: number,
 ): Promise<Response> {
-  const user = await currentUser(request, env, now);
-  if (user === null) return json({ error: 'unauthorized' }, 401);
+  const principal = await requestPrincipal(request, env, now);
+  if (principal === null) return json({ error: 'unauthorized' }, 401);
 
-  return kind === 'host'
-    ? json({ hosts: await listHosts(env.DB, user.id) })
-    : json({ devices: await listDevices(env.DB, user.id) });
+  if (kind === 'host') {
+    if (principal.kind === 'host') return json({ error: 'unauthorized' }, 401);
+    const userId = principal.kind === 'user' ? principal.user.id : principal.userId;
+    return json({
+      hosts: await listHosts(env.DB, userId),
+      relayOrigin: env.RELAY_ORIGIN ?? null,
+    });
+  }
+
+  if (principal.kind !== 'user') return json({ error: 'unauthorized' }, 401);
+  return json({ devices: await listDevices(env.DB, principal.user.id) });
 }
 
 /**

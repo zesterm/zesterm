@@ -43,3 +43,30 @@ export function looksLikeSessionToken(token: string): boolean {
   const bytes = fromBase64Url(token);
   return bytes !== null && bytes.length === SESSION_TOKEN_BYTES;
 }
+
+// --- machine tokens ---------------------------------------------------------
+
+/**
+ * The bearer credential a machine keeps after enrolling — same anatomy as a
+ * session token (48 opaque bytes, only the hash is stored), because the
+ * reasoning at the top of this file does not care who the bearer is.
+ *
+ * The `zt1_` prefix is the one deliberate difference. A session token lives in
+ * a cookie jar; this one lives in an OS credential store and, inevitably, one
+ * day in a pasted log line or an environment dump. A recognisable prefix makes
+ * that leak greppable — secret scanners work on prefixes — and names the
+ * format so a v2 can rotate in beside it.
+ */
+export const MACHINE_TOKEN_BYTES = 48;
+const MACHINE_TOKEN_PREFIX = 'zt1_';
+
+export function newMachineToken(): string {
+  return MACHINE_TOKEN_PREFIX + toBase64Url(randomBytes(MACHINE_TOKEN_BYTES));
+}
+
+/** Shape check before any round trip, exactly as `looksLikeSessionToken`. */
+export function looksLikeMachineToken(token: string): boolean {
+  if (!token.startsWith(MACHINE_TOKEN_PREFIX)) return false;
+  const bytes = fromBase64Url(token.slice(MACHINE_TOKEN_PREFIX.length));
+  return bytes !== null && bytes.length === MACHINE_TOKEN_BYTES;
+}

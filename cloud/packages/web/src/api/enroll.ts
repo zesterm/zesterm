@@ -28,6 +28,8 @@ import {
 import type { DeviceKind, EnrollKind } from '../db/types.ts';
 import type { Env } from '../env.ts';
 import { json, jsonObject } from '../http.ts';
+import { createMachineToken } from '../db/machine-tokens.ts';
+import { findUser } from '../db/users.ts';
 import { looksLikeEnrollCode } from '../enroll/codes.ts';
 import { KEY_LEN, SIGNATURE_LEN, verifyEnrollment } from '../enroll/preimage.ts';
 import { currentUser } from './session.ts';
@@ -235,9 +237,30 @@ export async function claimEnrollCode(request: Request, env: Env, now: number): 
     return json({ error: 'already_enrolled' }, 409);
   }
 
+  // The credential the machine keeps. Minted *after* the enrol so a failure
+  // above leaves no orphaned token, and returned exactly once — the daemon
+  // stores it in the OS credential store and this response is the only place
+  // it ever exists in the clear.
+  const minted = await createMachineToken(env.DB, {
+    userId: codeRow.user_id,
+    kind,
+    principalId: id,
+    now,
+  });
+
+  // For the machine to print — "enrolled with <account>" — never to decide
+  // anything. The row is this account's by construction (the code named it).
+  // `display_name` can legitimately be the empty string, and "enrolled with"
+  // followed by nothing reads as a bug on the machine's console — the stable
+  // user id is the fallback that is always printable.
+  const owner = await findUser(env.DB, codeRow.user_id);
+  const account = owner === null ? null : owner.display_name || owner.id;
+
   // `{ host }` or `{ device }`, the same shape the listings use, rather than a
   // spread beside a `kind` field. A `PublicDevice` has a `kind` of its own —
   // `'phone'` — so the spread quietly overwrote the envelope's, and a caller
   // switching on it read the wrong answer for every device.
-  return kind === 'host' ? json({ host: enrolled }) : json({ device: enrolled });
+  return kind === 'host'
+    ? json({ host: enrolled, token: minted.token, account })
+    : json({ device: enrolled, token: minted.token, account });
 }
