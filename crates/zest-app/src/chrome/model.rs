@@ -721,6 +721,12 @@ pub struct ChromeModel {
     /// enforces, so layout never has to rank it against the others. While
     /// it is open the `+` wears selSoft fill and accent ink (design §1).
     pub launcher: Option<LauncherModel>,
+    /// A window-level line the user must be able to read *now* — today, the
+    /// pairing approval prompt ("waiting for approval on forge — code
+    /// 481502"), which exists while an attach worker blocks on a person at
+    /// the other machine (#190). Drawn pinned to the top of the grid area,
+    /// under the modal overlays; `None` draws nothing.
+    pub notice: Option<String>,
 }
 
 /// The knobs `layout` reads, resolved to physical pixels by the caller.

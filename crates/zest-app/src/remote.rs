@@ -69,8 +69,16 @@ pub type Dialer =
 const REDIAL_MIN: Duration = Duration::from_millis(200);
 const REDIAL_MAX: Duration = Duration::from_secs(5);
 
+/// How the UI hears that a host is waiting for a person to approve us.
+///
+/// The six-digit matching code and its remaining validity, exactly as the
+/// host's `AuthPending` said them. An `Arc`, not a borrow: the reconnect
+/// supervisor re-dials and re-handshakes on its own thread, and a redial
+/// against a host that no longer trusts this device pends all over again.
+pub type PendingCallback = Arc<dyn Fn(String, u32) + Send + Sync>;
+
 /// What to attach to, and how to describe this client while doing it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone)]
 pub struct AttachOptions<'a> {
     /// The key this client proves it holds.
     ///
@@ -115,6 +123,12 @@ pub struct AttachOptions<'a> {
     /// and without this "connect to my Mac" means "connect to whatever answered
     /// on that port". `None` on loopback, where the socket is the answer.
     pub expect_host: Option<zest_proto::HostId>,
+    /// Called while the host waits for a person to approve this device —
+    /// the six-digit matching code the window must show (#190). `None` on
+    /// loopback, which never consults the trust store and cannot pend.
+    /// Reused verbatim on every redial: a host that forgot this device
+    /// mid-session pends all over again.
+    pub on_pending: Option<PendingCallback>,
 }
 
 /// What the supervisor does when the host answers but the session is gone.
@@ -268,14 +282,16 @@ impl RemoteSession {
             adopt,
             local,
             expect_host,
+            ref on_pending,
         } = opts;
+        let on_pending = on_pending.clone();
         let (tx, rx): (Sender<Outbound>, Receiver<Outbound>) = crossbeam_channel::unbounded();
 
         // The handshake runs inline, before any thread starts, so a failure is
         // an error the caller can fall back from rather than a window that
         // opens and then reports it has nothing to show.
         let (read, write) = dial()?;
-        let mut conn = DaemonClient::connect(read, write, identity, label, expect_host, false)?;
+        let mut conn = connect_daemon(read, write, identity, label, expect_host, on_pending.as_ref())?;
         let addr = match target {
             Target::Open => conn.open_session(command, cwd, cols, rows, adopt)?,
             Target::Existing(a) => a,
@@ -377,6 +393,7 @@ impl RemoteSession {
             let label = label.to_string();
             let command = command.to_string();
             let cwd = cwd.to_string();
+            let on_pending = on_pending.clone();
             let addr_cell = Arc::clone(&addr_cell);
             std::thread::Builder::new()
                 .name("zest-remote-reader".into())
@@ -578,7 +595,7 @@ impl RemoteSession {
 
                         let Ok((r, w)) = dial() else { continue };
                         let Ok(mut conn) =
-                            DaemonClient::connect(r, w, &identity, &label, expect_host, false)
+                            connect_daemon(r, w, &identity, &label, expect_host, on_pending.as_ref())
                         else {
                             continue;
                         };
@@ -661,6 +678,39 @@ impl RemoteSession {
             origin: Origin::Daemon { host: host_label, local },
             writer: Some(writer_thread),
         })
+    }
+}
+
+/// One handshake, with the approval listener adapted to `DaemonClient`'s
+/// borrowed shape.
+///
+/// Shared by the first attach and every redial on purpose: two call sites
+/// deciding separately whether a pending approval reaches the UI is how the
+/// redial half would quietly stay a spinner.
+fn connect_daemon(
+    read: Box<dyn Read + Send>,
+    write: Box<dyn Write + Send>,
+    identity: &Arc<ClientIdentity>,
+    label: &str,
+    expect_host: Option<zest_proto::HostId>,
+    on_pending: Option<&PendingCallback>,
+) -> Result<DaemonClient, zest_daemon::DaemonError> {
+    match on_pending {
+        Some(notify) => {
+            let adapter = |code: &str, expires_in_secs: u32| {
+                notify(code.to_string(), expires_in_secs);
+            };
+            DaemonClient::connect_with(
+                read,
+                write,
+                identity,
+                label,
+                expect_host,
+                false,
+                Some(&adapter),
+            )
+        }
+        None => DaemonClient::connect(read, write, identity, label, expect_host, false),
     }
 }
 
@@ -1061,6 +1111,7 @@ mod tests {
                     adopt,
                     local: true,
                     expect_host: None,
+                    on_pending: None,
                 },
                 wake,
             )
@@ -1267,6 +1318,7 @@ mod tests {
                 adopt: false,
                 local: true,
                 expect_host: None,
+                on_pending: None,
             },
             move |w| {
                 if w == Wakeup::Reattached {
@@ -1579,6 +1631,7 @@ mod tests {
                 adopt: false,
                 local: true,
                 expect_host: None,
+                on_pending: None,
             },
             |_| {},
         )
@@ -1643,6 +1696,7 @@ mod tests {
                 adopt: false,
                 local: true,
                 expect_host: None,
+                on_pending: None,
             },
             move |w| {
                 if matches!(w, Wakeup::SessionGone(_)) {
@@ -1686,6 +1740,7 @@ mod tests {
             adopt: false,
             local: true,
             expect_host,
+            on_pending: None,
         }
     }
 
@@ -1727,5 +1782,127 @@ mod tests {
             "the pinned attach must create its session"
         );
         drop(s);
+    }
+
+    /// An attach that is waiting for a person surfaces the matching code.
+    ///
+    /// The daemon-side half of #190 lives in `zest_daemon::client`'s own
+    /// test; this one proves the app-side thread: the callback placed in
+    /// `AttachOptions` is the one the handshake actually calls. It has to run
+    /// against the LAN listener — the harness's loopback socket is
+    /// `Auth::Transport`, which never consults the trust store and so can
+    /// never pend.
+    #[test]
+    fn an_attach_awaiting_approval_surfaces_the_code() {
+        let h = Harness::start("pending");
+        let auth = Arc::new(zest_daemon::Authenticator::new(
+            Arc::clone(&h.host_identity),
+            // Empty on purpose: a trusted client skips approval, which is
+            // exactly how the watchdog bug outlived its own test (roadmap M3).
+            Arc::new(zest_mesh::trust::MemoryTrustStore::new()),
+            zest_mesh::pairing::PairingQueue::new(),
+            "harness-lan",
+        ));
+        let listener =
+            zest_daemon::LanListener::bind("127.0.0.1", 0).expect("bind the LAN listener");
+        let lan_addr = listener.local_addr();
+        {
+            let registry = Arc::clone(&h.registry);
+            let auth = Arc::clone(&auth);
+            let cfg = zest_daemon::DaemonConfig {
+                host: zest_proto::HostId::from_bytes([3; 32]),
+                label: "harness-lan".into(),
+                local_socket: String::new(),
+                listen_lan: true,
+                lan_bind: "127.0.0.1".into(),
+                lan_port: 0,
+                listen_ws: false,
+                ws_bind: "127.0.0.1".into(),
+                ws_port: 0,
+                relay: None,
+                shell_integration: true,
+                min_delta_interval: Duration::ZERO,
+            };
+            std::thread::spawn(move || {
+                let _ = listener.serve_forever(
+                    cfg,
+                    registry,
+                    auth,
+                    Arc::new(zest_daemon::Gate::new()),
+                );
+            });
+        }
+
+        let identity = Arc::new(ClientIdentity::generate().expect("client key"));
+        let seen: Arc<std::sync::Mutex<Option<(String, u32)>>> = Arc::default();
+
+        // The person on the host, played by a thread. It answers only after
+        // the client has heard `AuthPending` — the daemon queues the request
+        // before sending it, so approving any earlier would resolve nothing.
+        {
+            let seen = Arc::clone(&seen);
+            let auth = Arc::clone(&auth);
+            let client_id = identity.client_id();
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while Instant::now() < deadline {
+                    if seen.lock().expect("seen lock").is_some() {
+                        auth.decide(client_id, zest_mesh::pairing::Decision::Approve);
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            });
+        }
+
+        let dial: Dialer = Box::new(move || {
+            let stream = std::net::TcpStream::connect(lan_addr)
+                .map_err(|e| RemoteError::Io(e.to_string()))?;
+            let write = stream.try_clone().map_err(|e| RemoteError::Io(e.to_string()))?;
+            Ok((
+                Box::new(stream) as Box<dyn Read + Send>,
+                Box::new(write) as Box<dyn Write + Send>,
+            ))
+        });
+        let sink = Arc::clone(&seen);
+        let s = RemoteSession::attach(
+            dial,
+            &AttachOptions {
+                identity: &identity,
+                label: "test",
+                command: "/bin/sh",
+                cwd: "",
+                cols: 40,
+                rows: 6,
+                scrollback: 100,
+                adopt: false,
+                local: false,
+                expect_host: None,
+                on_pending: Some(Arc::new(move |code, expires_in_secs| {
+                    *sink.lock().expect("seen lock") = Some((code, expires_in_secs));
+                })),
+            },
+            |_| {},
+        )
+        .expect("the attach must complete once a person approves");
+
+        let pending = seen.lock().expect("seen lock").clone();
+        let (code, secs) = pending.expect(
+            "the attach blocked on approval and AttachOptions::on_pending never \
+             fired — the window would have shown a spinner with the code only \
+             in a log line, which is the #190 bug itself",
+        );
+        assert_eq!(code.len(), 6, "the callback carries the code a person compares");
+        assert!(secs > 0, "a zero expiry would tell the user the code is already dead");
+
+        // And the attach it informed is a real session, not a side effect:
+        // approval must resolve into the same working attach as a trusted one.
+        std::thread::sleep(Duration::from_millis(300));
+        s.write(b"echo approved-and-attached\n".to_vec());
+        assert!(
+            wait_for(|| s.terminal().lock().screen_text().contains("approved-and-attached")),
+            "approved, but the session never became usable; grid:\n{}",
+            s.terminal().lock().screen_text()
+        );
     }
 }

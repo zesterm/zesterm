@@ -271,6 +271,13 @@ pub fn layout(
             &mut out,
         );
     }
+    if let Some(notice) = &model.notice {
+        // After the screens, before the modals: an approval prompt must
+        // survive the fleet screen being open — the picker is where the
+        // attach that is now pending usually started — while the modals
+        // still rank above it, like everything else in the base layer.
+        notice_bar(notice, model.grid_area, colors, m, measure, &mut out);
+    }
     // Everything below is the overlay layer; everything above must have its
     // text drawn before an overlay's panel covers it.
     out.overlay_rects_at = out.rects.len();
@@ -546,6 +553,54 @@ fn panes_overlay(
             tracking: 0.0,
         });
     }
+}
+
+// The window-level notice bar (#190), logical px.
+const NOTICE_H: f32 = 30.0;
+const NOTICE_PAD: f32 = 14.0;
+const NOTICE_TOP: f32 = 8.0;
+
+/// A window-level notice, pinned centered to the top of the grid area — the
+/// pairing approval prompt is the tenant today.
+///
+/// Deliberately **not** a hit target: there is nothing to click, and a region
+/// here would steal the terminal's own top rows from selection. It rides the
+/// grid area rather than the strip because a six-digit code has to be
+/// readable, and a 34px chip cannot carry a sentence.
+fn notice_bar(
+    text: &str,
+    area: [f32; 4],
+    colors: &ChromeColors,
+    m: &ChromeMetrics,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+    out: &mut ChromeLayout,
+) {
+    let s = m.scale;
+    let px = UI_BODY * s;
+    let h = NOTICE_H * s;
+    let pad = NOTICE_PAD * s;
+    let w = (measure(text, px, false, 0.0) + 2.0 * pad).min((area[2] - 2.0 * EDGE_PAD * s).max(0.0));
+    let x = area[0] + (area[2] - w) / 2.0;
+    let y = area[1] + NOTICE_TOP * s;
+    // The panel fill, like the picker: a see-through bar over a busy grid is
+    // unreadable at exactly the moment someone is trying to compare digits.
+    // The warn border is the "a person is needed" ink the chips already use.
+    out.rects.push(RectInstance {
+        radii: [h / 2.0; 4],
+        border: colors.warn,
+        border_width: HAIRLINE * s,
+        ..RectInstance::filled([x, y, w, h], colors.panel_bg, area)
+    });
+    out.texts.push(TextRun {
+        text: text.to_string(),
+        pos: [x + pad, baseline_in(y, h, px)],
+        max_width: (w - 2.0 * pad).max(0.0),
+        color: colors.text_active,
+        clip: area,
+        px,
+        bold: false,
+        tracking: 0.0,
+    });
 }
 
 // ⌘K palette geometry (design screen 6), logical px.
@@ -2419,6 +2474,7 @@ mod tests {
             palette: None,
             settings: None,
             launcher: None,
+            notice: None,
         }
     }
 
@@ -3548,6 +3604,55 @@ mod tests {
                 "{link:?} must ink a rect in the strip with its state colour"
             );
         }
+    }
+
+    #[test]
+    fn a_pairing_notice_is_readable_over_the_grid_and_takes_no_clicks() {
+        // #190: while a remote attach waits for approval, the person must be
+        // able to read the six-digit matching code somewhere better than a
+        // log line. The bar must sit in the grid area (a 34px chip cannot
+        // carry a sentence), stay below the modal overlays, and answer no
+        // clicks — a hit region here would steal the terminal's top rows
+        // from selection.
+        let text = "waiting for approval on forge — code 481502 · 2m left";
+        let mut mo = model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+        mo.notice = Some(text.into());
+        let m = metrics(1200.0, 800.0, 1.0);
+        let l = layout(&mo, &colors(), &m, &mut measure);
+
+        let idx = l
+            .texts
+            .iter()
+            .position(|t| t.text == text)
+            .expect("the notice text must be drawn");
+        let run = &l.texts[idx];
+        let [gx, gy, gw, _] = mo.grid_area;
+        assert!(
+            run.pos[0] > gx && run.pos[0] < gx + gw && run.pos[1] > gy,
+            "the notice belongs in the grid area, where the eye already is: {:?}",
+            run.pos
+        );
+        assert!(
+            idx < l.overlay_texts_at,
+            "the notice is base chrome — a modal (picker, palette) must be able to cover it"
+        );
+        let c = colors();
+        assert!(
+            l.rects.iter().any(|r| r.border == c.warn && r.rect[1] > gy),
+            "the bar wears warn ink — the 'a person is needed' colour the chips use"
+        );
+        assert!(
+            l.hit.hit(600.0, run.pos[1]).is_none(),
+            "the bar must not answer clicks, or it steals the grid's own rows"
+        );
+
+        // And no notice draws nothing — the common case pays zero.
+        mo.notice = None;
+        let quiet = layout(&mo, &colors(), &m, &mut measure);
+        assert!(
+            quiet.texts.iter().all(|t| t.text != text),
+            "a cleared prompt must leave the chrome"
+        );
     }
 
     #[test]

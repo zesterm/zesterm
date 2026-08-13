@@ -450,6 +450,28 @@ type PendingLaunches = Arc<
     parking_lot::Mutex<Vec<(zest_proto::SessionAddr, Result<crate::remote::RemoteSession, String>)>>,
 >;
 
+/// The approval a remote host is waiting on, shared with the attach workers
+/// that learn of it (`Wakeup::PairingChanged` announces every change). One
+/// cell for the window rather than per tab: approvals are human-paced, and
+/// the prompt names its host.
+type PairingCell = Arc<parking_lot::Mutex<Option<PairingPrompt>>>;
+
+/// One pending approval: the host being dialled, the six-digit matching code
+/// a person compares on both machines, and when the host stops accepting it.
+struct PairingPrompt {
+    host: String,
+    code: String,
+    expires_at: std::time::Instant,
+}
+
+/// Drop the prompt once an attach settles — approved, refused, or given up.
+/// A free function because the worker threads that call it hold no `&App`.
+fn clear_pairing(cell: &PairingCell, proxy: &EventLoopProxy<Wakeup>) {
+    if cell.lock().take().is_some() {
+        let _ = proxy.send_event(Wakeup::PairingChanged);
+    }
+}
+
 /// The live GPU state, created once the window exists.
 struct Gpu {
     surface: wgpu::Surface<'static>,
@@ -542,6 +564,10 @@ pub struct App {
     /// connecting tab's placeholder address, waiting for the event loop to
     /// settle them live or failed (`Wakeup::TabsChanged`, issue #175).
     pending_launches: PendingLaunches,
+    /// A remote host is waiting for a person to approve this device — the
+    /// matching code the chrome must show while the attach worker blocks
+    /// (#190). Written from worker threads, drawn as the chrome's notice.
+    pairing: PairingCell,
     /// The persisted identity used for hosts that are not this machine,
     /// loaded lazily on first need so the keychain stays off the startup
     /// path (and off it entirely for people who never leave loopback).
@@ -738,6 +764,7 @@ impl App {
             slider_drag: None,
             pending_tabs: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_launches: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            pairing: Arc::new(parking_lot::Mutex::new(None)),
             remote_identity: None,
             fonts: None,
             palette,
@@ -972,6 +999,8 @@ impl App {
             // Loopback: the socket already answered "is this my machine",
             // and there is no advertisement to have been misled by.
             expect_host: None,
+            // ...and never consults the trust store, so nothing can pend.
+            on_pending: None,
         };
         let session = match restore {
             Some(addr) => {
@@ -1129,6 +1158,19 @@ impl App {
                 // advertisement; pinning a HostId here is future work along
                 // with the stored identity.
                 expect_host: None,
+                // This connect runs inline, before the event loop pumps its
+                // first frame, so there is no window to show the code in.
+                // `--attach` is launched from a terminal, and stderr is
+                // where its user is already looking — it is how the M3
+                // bring-up compared codes. Redials after the window is up
+                // land here too; harmless where no console exists.
+                on_pending: Some(Arc::new(|code, expires_in_secs| {
+                    eprintln!(
+                        "waiting for approval on the host — compare code {code} \
+                         (expires in {}m)",
+                        expires_in_secs.div_ceil(60)
+                    );
+                })),
             },
             wake,
         );
@@ -1416,6 +1458,9 @@ impl App {
                         adopt: false,
                         local: route.is_local(),
                         expect_host: None,
+                        // Inline on the event loop over the window's already
+                        // proven route: a pend here could not paint anyway.
+                        on_pending: None,
                     },
                     wake,
                 );
@@ -2667,6 +2712,9 @@ impl App {
             self.insets_at(scale).grid_rect(size.width, size.height)
         });
 
+        // Before the font borrow below, like everything else the model reads.
+        let notice = self.pairing_notice();
+
         let Some(window) = self.window.as_ref() else { return };
         let Some(fonts) = self.fonts.as_mut() else { return };
 
@@ -2943,6 +2991,7 @@ impl App {
             palette: value_picker_model.or(palette_model),
             settings: settings_model,
             launcher: launcher_model,
+            notice,
         };
 
         let colors = self.chrome_colors;
@@ -4740,6 +4789,42 @@ impl App {
         self.spawn_tab_worker_pinned(route, attach, expect, true);
     }
 
+    /// The `AttachOptions::on_pending` callback for an attach headed at
+    /// `host`: park the code in the shared cell and wake the event loop —
+    /// the worker thread doing the waiting cannot touch the chrome itself.
+    fn pairing_notifier(&self, host: String) -> crate::remote::PendingCallback {
+        let cell = Arc::clone(&self.pairing);
+        let proxy = self.proxy.clone();
+        Arc::new(move |code, expires_in_secs| {
+            *cell.lock() = Some(PairingPrompt {
+                host: host.clone(),
+                code,
+                expires_at: std::time::Instant::now()
+                    + std::time::Duration::from_secs(u64::from(expires_in_secs)),
+            });
+            let _ = proxy.send_event(Wakeup::PairingChanged);
+        })
+    }
+
+    /// The chrome's notice line, while an approval is pending and its code
+    /// still worth comparing.
+    fn pairing_notice(&self) -> Option<String> {
+        let cell = self.pairing.lock();
+        let prompt = cell.as_ref()?;
+        let left = prompt.expires_at.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            // The host has thrown the code away; showing it would invite
+            // comparing a number that can no longer match anything.
+            return None;
+        }
+        Some(format!(
+            "waiting for approval on {} — code {} · {}m left",
+            prompt.host,
+            prompt.code,
+            left.as_secs().div_ceil(60)
+        ))
+    }
+
     /// Open a session on `route` off the event loop and park the finished
     /// tab for `Wakeup::TabsChanged`.
     ///
@@ -4777,6 +4862,27 @@ impl App {
         let proxy = self.proxy.clone();
         let palette = self.palette.clone();
 
+        // A first contact holds the connect while a person over there
+        // approves; the matching code must reach this window's chrome, not a
+        // log line (#190). Named like the fleet names the host, falling back
+        // to the address being dialled — which still says *where* the
+        // approval is owed.
+        let pending_host = expect_host
+            .and_then(|h| {
+                self.fleet
+                    .as_ref()
+                    .map(|f| f.snapshot())
+                    .and_then(|hosts| hosts.iter().find(|e| e.host == h).map(|e| e.label.clone()))
+            })
+            .or_else(|| match &route {
+                HostRoute::Tcp(a) => Some(a.clone()),
+                HostRoute::LocalSocket(_) => None,
+            });
+        let on_pending = (!local).then(|| {
+            self.pairing_notifier(pending_host.unwrap_or_else(|| "the host".into()))
+        });
+        let pairing = Arc::clone(&self.pairing);
+
         let spawned = std::thread::Builder::new().name("zest-tab-open".into()).spawn(move || {
             let opts = crate::remote::AttachOptions {
                 identity: &identity,
@@ -4789,6 +4895,7 @@ impl App {
                 adopt: false,
                 local,
                 expect_host,
+                on_pending,
             };
             let result = match attach {
                 Some(addr) => {
@@ -4796,6 +4903,8 @@ impl App {
                 }
                 None => crate::remote::RemoteSession::create_and_attach(route.dialer(), &opts, wake),
             };
+            // Either way the wait is over — the code must not outlive it.
+            clear_pairing(&pairing, &proxy);
             match result {
                 Ok(session) => {
                     *cell.lock() = session.addr();
@@ -4977,6 +5086,11 @@ impl App {
         let activity = Arc::clone(&self.activity);
         let outcomes = Arc::clone(&self.pending_launches);
         let scrollback = self.config.scrollback;
+        // First contact with this host holds the dial while a person over
+        // there approves — the matching code goes up as the chrome's notice,
+        // beside this launch's connecting tab (#190).
+        let on_pending = Some(self.pairing_notifier(host_label.clone()));
+        let pairing = Arc::clone(&self.pairing);
         let spawned = std::thread::Builder::new().name("zest-profile-launch".into()).spawn(
             move || {
                 let mut failures = 0u32;
@@ -5001,6 +5115,7 @@ impl App {
                                     // which is a claim; pin the identity it
                                     // claimed, like the picker's creates do.
                                     expect_host: Some(*host),
+                                    on_pending: on_pending.clone(),
                                 },
                                 wake,
                             )
@@ -5043,6 +5158,9 @@ impl App {
                         }
                     }
                 };
+                // The dial settled, live or failed — the code must not
+                // outlive the wait it was informing.
+                clear_pairing(&pairing, &proxy);
                 outcomes.lock().push((placeholder, outcome));
                 let _ = proxy.send_event(Wakeup::TabsChanged);
             },
@@ -5105,6 +5223,9 @@ impl App {
                         adopt: false,
                         local: route.is_local(),
                         expect_host: None,
+                        // Inline on the event loop over the window's already
+                        // proven route: a pend here could not paint anyway.
+                        on_pending: None,
                     },
                     wake,
                 );
@@ -6511,11 +6632,18 @@ impl ApplicationHandler<Wakeup> for App {
                 self.close_tab(addr, true, el);
             }
             // A pinned tab's host answered and its session no longer exists.
+            // The prompt itself travels in the shared pairing cell; this
+            // event only asks for the chrome to be rebuilt around it.
+            Wakeup::PairingChanged => self.mark_chrome_dirty(),
             // The supervisor stopped rather than swapping in a fresh shell;
             // the tab stays put, marked ended, until the user closes it (a
             // recreate affordance arrives with the picker).
             Wakeup::SessionGone(addr) => {
                 tracing::warn!(%addr, "the session ended on its host");
+                // A redial can pend, be approved, and then find the session
+                // gone — the supervisor stops there, so nothing later would
+                // clear the prompt it latched.
+                self.pairing.lock().take();
                 if let Some(tab) = self.tabs.find_mut(addr) {
                     tab.dead = true;
                 } else if let Some(tab) = self.tabs.find_split_owner(addr) {
@@ -6530,6 +6658,9 @@ impl ApplicationHandler<Wakeup> for App {
             Wakeup::Reattached => {
                 tracing::info!("the daemon connection is back");
                 self.link_down = false;
+                // A redial that pended was answered — that is how the link
+                // came back — so the prompt is settled either way.
+                self.pairing.lock().take();
                 self.mark_chrome_dirty();
                 if let Some(s) = self.tabs.active_source() {
                     s.mark_dirty();

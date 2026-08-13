@@ -78,6 +78,16 @@ pub enum Wakeup {
     /// carrying the tab's address. The bare variant survives for the paths
     /// that still mean the whole window.
     TabExited(zest_proto::SessionAddr),
+    /// The pairing prompt changed: a remote host started (or stopped)
+    /// waiting for a person to approve this device.
+    ///
+    /// Carries nothing — the host, the matching code and its expiry travel
+    /// in the app's shared pairing cell, written by whichever attach worker
+    /// or reconnect supervisor is doing the waiting; this event only says
+    /// "look again". Its own variant because the prompt is *chrome*:
+    /// `Redraw` repaints without invalidating the cached chrome layout, so
+    /// the code would never appear.
+    PairingChanged,
     /// A pinned session's host answered and said the session no longer
     /// exists.
     ///
