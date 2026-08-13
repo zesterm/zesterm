@@ -686,25 +686,64 @@ fn an_attach_becomes_a_second_socket_carrying_a_real_session() {
     );
 }
 
-/// The room's byte-pump, done by a thread: whatever one leg says, the other
-/// hears, kinds preserved. One thread polling both sockets rather than two
+/// The room's pump, done by a thread, with the deployed room's semantics
+/// (`room.ts`): **data frames cross, control frames do not.** Text and
+/// binary are forwarded whole; a protocol ping is answered on its own leg —
+/// workerd does that in the runtime, so `webSocketMessage` only ever sees
+/// data and nothing pings *through* the relay — and a close ends the pipe
+/// by closing the survivor with the room's own `CLOSE_PIPE_PEER_GONE`
+/// (4410), never by forwarding the peer's reason code, which is exactly
+/// what `#endPipe` does. One thread polling both sockets rather than two
 /// threads, because a tungstenite `WebSocket` cannot be split.
 fn pump(mut a: WebSocket<TcpStream>, mut b: WebSocket<TcpStream>) {
+    fn peer_gone(survivor: &mut WebSocket<TcpStream>) {
+        let _ = survivor.close(Some(tungstenite::protocol::CloseFrame {
+            code: tungstenite::protocol::frame::coding::CloseCode::Library(4410),
+            reason: "the other end of this pipe is gone".into(),
+        }));
+        let _ = survivor.flush();
+    }
+    /// One data frame across, or the sender told its peer is gone — the
+    /// `catch` around `peer.send` in room.ts.
+    fn forward(
+        from: &mut WebSocket<TcpStream>,
+        to: &mut WebSocket<TcpStream>,
+        msg: Message,
+    ) -> Result<bool, ()> {
+        if to.send(msg).is_err() {
+            peer_gone(from);
+            return Err(());
+        }
+        Ok(true)
+    }
     fn shuttle(from: &mut WebSocket<TcpStream>, to: &mut WebSocket<TcpStream>) -> Result<bool, ()> {
         match from.read() {
-            Ok(Message::Binary(x)) => to.send(Message::Binary(x)).map(|()| true).map_err(|_| ()),
-            Ok(Message::Text(x)) => to.send(Message::Text(x)).map(|()| true).map_err(|_| ()),
+            Ok(msg @ (Message::Binary(_) | Message::Text(_))) => forward(from, to, msg),
+            // Answered locally, exactly as the runtime answers it: a ping is
+            // about *this* hop's liveness and forwarding it would make one
+            // leg's keepalive depend on the other leg answering.
+            Ok(Message::Ping(x)) => from.send(Message::Pong(x)).map(|()| true).map_err(|_| ()),
+            // The answer to a ping this side never sends; absorbed, as the
+            // runtime absorbs it.
+            Ok(Message::Pong(_)) => Ok(false),
             Ok(Message::Close(_)) => {
-                let _ = to.close(None);
+                peer_gone(to);
                 Err(())
             }
-            Ok(_) => Ok(false),
+            // `Message::Frame` is documented unreachable outside
+            // `read_frame`; nothing else remains.
+            Ok(Message::Frame(_)) => Ok(false),
             Err(tungstenite::Error::Io(e))
                 if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) =>
             {
                 Ok(false)
             }
-            Err(_) => Err(()),
+            // A leg that failed rather than closed is the same news to the
+            // survivor — `webSocketError` delegates to `webSocketClose`.
+            Err(_) => {
+                peer_gone(to);
+                Err(())
+            }
         }
     }
     std::thread::spawn(move || {
