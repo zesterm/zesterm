@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "notes": [
+    "Signing preimage: \"zesterm-sig-v1\\0client\\0device-attestation\\0\" ++ message              (NUL bytes literal). Plain Ed25519 over that -- no Ed25519ctx, no prehash.",
+    "Message: \"zesterm-attest-v1\" (17 bytes, no terminator) ++ u16be(v) ++              u16be(len(account)) ++ account ++ device (32 raw bytes) ++ u16be(len(label)) ++              label ++ by (32 raw bytes) ++ u64be(iat) ++ u64be(exp). Lengths count UTF-8              BYTES, never UTF-16 code units -- the astral case is what catches `.length`.",
+    "Validity window is [iat, exp) in epoch milliseconds: iat inclusive, exp              exclusive. The expired case is evaluated at now_ms == exp exactly, so an              implementation that accepts `now <= exp` fails it.",
+    "Verification is against `by` -- the approver -- and no other key. Whether `by`              is in the verifier's trust store is deliberately outside this layer:              non-transitivity (only locally-paired keys may vouch) is the daemon's check."
+  ],
+  "cases": [
+    {
+      "name": "plain",
+      "approver_seed": "1111111111111111111111111111111111111111111111111111111111111111",
+      "attestation": {
+        "v": 1,
+        "account": "acct_0123456789",
+        "device": "a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0",
+        "label": "andy-mac",
+        "by": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "iat": 1755000000000,
+        "exp": 1757592000000
+      },
+      "message": "7a65737465726d2d6174746573742d76310001000f616363745f30313233343536373839a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f00008616e64792d6d6163d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737000001989e26ce000000019938a59600",
+      "signature": "b0655aa870fab115bd311eaa2e70bf0a1dc8f516897ed862615827694c30ab8e7653a72065e1bce867e6ef2e078c44c1e2cb6f104f6af7c16f11f0b21362000f",
+      "now_ms": 1755000001000,
+      "expect_verify": true,
+      "note": "the ordinary voucher: ASCII everywhere, 30-day window, checked one second in"
+    },
+    {
+      "name": "astral-label",
+      "approver_seed": "1111111111111111111111111111111111111111111111111111111111111111",
+      "attestation": {
+        "v": 1,
+        "account": "acct_0123456789",
+        "device": "17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce",
+        "label": "phone 😀",
+        "by": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "iat": 1755000000000,
+        "exp": 1755086400000
+      },
+      "message": "7a65737465726d2d6174746573742d76310001000f616363745f3031323334353637383917cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce000a70686f6e6520f09f9880d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737000001989e26ce0000000198a34d2a00",
+      "signature": "42632c2d59e1b0da37ba2b39e616841e61a8721de261a798cd7608b82fac183ec7035e07d6ef6a08cd44c41477678f34a57d50dac2e3ce56c617aab65c854e00",
+      "now_ms": 1755000001000,
+      "expect_verify": true,
+      "note": "the label's length prefix is 10 (bytes), not 8 (UTF-16 units); a reader counting code units builds a different message and fails here by name"
+    },
+    {
+      "name": "expired",
+      "approver_seed": "1111111111111111111111111111111111111111111111111111111111111111",
+      "attestation": {
+        "v": 1,
+        "account": "acct_0123456789",
+        "device": "a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0",
+        "label": "andy-mac",
+        "by": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "iat": 1755000000000,
+        "exp": 1757592000000
+      },
+      "message": "7a65737465726d2d6174746573742d76310001000f616363745f30313233343536373839a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f00008616e64792d6d6163d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737000001989e26ce000000019938a59600",
+      "signature": "b0655aa870fab115bd311eaa2e70bf0a1dc8f516897ed862615827694c30ab8e7653a72065e1bce867e6ef2e078c44c1e2cb6f104f6af7c16f11f0b21362000f",
+      "now_ms": 1757592000000,
+      "expect_verify": false,
+      "note": "MUST verify false: a valid signature evaluated at now_ms == exp, which is outside the half-open window"
+    }
+  ]
+}

@@ -433,14 +433,15 @@ fn run_fixture_dump() -> ExitCode {
 
 /// Everything that writes into [`FIXTURES_DIR`].
 ///
-/// Two, since protocol 3. `handshake_dump` lives in `zest-mesh` because
-/// `zest-proto` has no crypto dependency and must not gain one, but it writes
-/// here because this is the directory the web tests already read. Adding a
-/// third generator means adding it to this list, and forgetting to is exactly
-/// the failure `check_generated` guards against by running all of them.
+/// Three, since #184. `handshake_dump` and `attest_dump` live in `zest-mesh`
+/// because `zest-proto` has no crypto dependency and must not gain one, but
+/// they write here because this is the directory the web tests already read.
+/// Adding a generator means adding it to this list, and forgetting to do so is
+/// exactly the failure `check_generated` guards against by running all of them.
 const FIXTURE_GENERATORS: &[&[&str]] = &[
     &["run", "-p", "zest-proto", "--example", "fixture_dump"],
     &["run", "-p", "zest-mesh", "--example", "handshake_dump"],
+    &["run", "-p", "zest-mesh", "--example", "attest_dump"],
 ];
 
 /// Fail if the committed TypeScript bindings do not match the Rust.

@@ -105,6 +105,8 @@ pub enum Purpose {
     /// A short-lived attach ticket. M4; the domain is reserved now so that
     /// signatures minted then cannot collide with signatures minted today.
     AttachTicket,
+    /// An already-trusted device vouching for a new one. → [`crate::attest`].
+    DeviceAttestation,
 }
 
 impl Purpose {
@@ -113,6 +115,7 @@ impl Purpose {
             Self::Auth => b"auth",
             Self::Enrollment => b"enrollment",
             Self::AttachTicket => b"attach-ticket",
+            Self::DeviceAttestation => b"device-attestation",
         }
     }
 }

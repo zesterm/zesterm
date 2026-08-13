@@ -100,9 +100,13 @@ name = "mesh_probe"
 required-features = ["lan"]
 
 [dev-dependencies]
-# For `handshake_dump` only. A dev-dependency rather than a real one because
-# `zest-mesh` itself never writes JSON -- the golden does.
+# For the golden generators (`handshake_dump`, `attest_dump`) and the test that
+# reads `attest.json` back. A dev-dependency rather than a real one because
+# `zest-mesh` itself never speaks JSON -- the goldens do.
 serde_json = { workspace = true }
 
 [[example]]
 name = "handshake_dump"
+
+[[example]]
+name = "attest_dump"
