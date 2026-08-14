@@ -1290,4 +1290,26 @@ mod tests {
             "glyph.wgsl FLAG_FIXED is out of sync with glyph_flags::FIXED; expected `{expected}`"
         );
     }
+
+    #[test]
+    fn shader_side_bits_match_the_instance_bits() {
+        // `border_omit` is a bitmask agreed between two files, and drift is
+        // invisible: the border skips a different edge, which reads as a design
+        // mistake in whoever's chrome happens to notice rather than as a
+        // constant that moved. Same reasoning as FLAG_FIXED above.
+        let src = include_str!("shaders/rect.wgsl");
+        for (name, value) in [
+            ("SIDE_TOP", border_sides::TOP),
+            ("SIDE_RIGHT", border_sides::RIGHT),
+            ("SIDE_BOTTOM", border_sides::BOTTOM),
+            ("SIDE_LEFT", border_sides::LEFT),
+        ] {
+            let expected = format!("const {name}: u32 = {value}u;");
+            assert!(
+                src.contains(&expected),
+                "rect.wgsl {name} is out of sync with border_sides::{}; expected `{expected}`",
+                name.trim_start_matches("SIDE_")
+            );
+        }
+    }
 }

@@ -59,6 +59,10 @@ pub fn srgb_to_linear(v: f32) -> f32 {
 /// shape, so the pipeline has to be able to say which sides a border skips —
 /// clipping a full-thickness ring cuts it square instead, which is visibly the
 /// wrong picture.
+///
+/// `shaders/rect.wgsl` declares the same four bits as `SIDE_*`; the pair is
+/// pinned by `shader_side_bits_match_the_instance_bits`, because a value that
+/// drifts here omits a different edge rather than failing.
 pub mod border_sides {
     pub const TOP: u32 = 1 << 0;
     pub const RIGHT: u32 = 1 << 1;

@@ -36,6 +36,10 @@ struct RectVsOut {
 const SHAPE_ROUNDED_BOX: u32 = 0u;
 const SHAPE_HULL_OF_TWO: u32 = 1u;
 
+// `border_omit`'s bits, and they are `instance.rs`'s `border_sides` written a
+// second time. Nothing about a wrong value here looks wrong: the border simply
+// skips a different edge, which reads as a design mistake rather than as drift
+// across two files. `shader_side_bits_match_the_instance_bits` pins the pair.
 const SIDE_TOP: u32 = 1u;
 const SIDE_RIGHT: u32 = 2u;
 const SIDE_BOTTOM: u32 = 4u;
