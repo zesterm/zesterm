@@ -387,10 +387,24 @@ fn main() {
             ephemeral,
             explicit,
             no_relay: flag("--no-relay"),
-            // Presence only. Reading the token here would be a keychain prompt
-            // on the startup path; `stored_token` is the same call `--account`
-            // makes and answers `Ok(None)` for a machine that never enrolled.
-            enrolled: matches!(enroll::stored_token(store.as_ref()), Ok(Some(_))),
+            // Three states, never two. An `Err` here is a locked keychain or a
+            // keyring that has not come up yet -- **not** a machine that never
+            // enrolled -- and folding the two together made relay dialling
+            // vanish from an enrolled machine with nothing said. It is said
+            // here, and `choose` still dials a cached origin, because what
+            // authorizes the link is the host key rather than this token.
+            token: match enroll::stored_token(store.as_ref()) {
+                Ok(Some(_)) => zest_daemon::relay_origin::Token::Held,
+                Ok(None) => zest_daemon::relay_origin::Token::Absent,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        store = %store.describe_secret_store(),
+                        "could not read the cloud token; falling back to the cached relay origin"
+                    );
+                    zest_daemon::relay_origin::Token::Unreadable
+                }
+            },
             cached: origin_cache.load(),
         })
     };

@@ -54,6 +54,31 @@ pub enum Off {
     /// No cloud token: this machine never enrolled, so there is no account to
     /// learn a relay from. The ordinary state of a purely local install.
     NotEnrolled,
+    /// The credential store could not be read *and* nothing is cached, so this
+    /// start has neither an answer nor a way to ask for one.
+    ///
+    /// Separate from [`Off::NotEnrolled`] because the two demand opposite
+    /// responses: that one is normal, this one is a locked keychain or a
+    /// keyring daemon that has not come up, and it is temporary. Collapsing it
+    /// into "not enrolled" is exactly how relay dialling would disappear from
+    /// an enrolled machine with nothing said.
+    TokenUnreadable,
+}
+
+/// What reading the cloud token told us.
+///
+/// Three states, not a `bool`: a store that could not be read is not a store
+/// with no token, and [`SecretStore`] returns `Result<Option<_>>` for that
+/// reason. → `keystore.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Token {
+    /// This machine is enrolled.
+    Held,
+    /// It never enrolled, or logged out.
+    #[default]
+    Absent,
+    /// The credential store said no — locked keychain, keyring not up yet.
+    Unreadable,
 }
 
 /// Everything the decision depends on, so the call site cannot smuggle in a
@@ -65,8 +90,8 @@ pub struct RelayInputs {
     pub explicit: Option<String>,
     /// `--no-relay`.
     pub no_relay: bool,
-    /// The machine holds a cloud token.
-    pub enrolled: bool,
+    /// What reading the cloud token told us.
+    pub token: Token,
     /// What the last successful fetch wrote to disk.
     pub cached: Option<String>,
 }
@@ -85,7 +110,15 @@ pub struct RelayInputs {
 ///    the one workflow that exercises this transport.
 /// 3. `--ephemeral` otherwise dials nothing.
 /// 4. No token, nothing to dial: an unenrolled machine has no account.
-/// 5. Enrolled: the cached origin if there is one — that is what makes a start
+/// 5. **Token unreadable, but an origin cached: dial it anyway.** The token
+///    authorizes the *fetch*; what authorizes the link is the host key, which
+///    a locked credential store has not taken away. A machine that booted
+///    before its keyring did is precisely the case the cache exists for, and
+///    refusing to dial there would make an enrolled machine silently
+///    unreachable for the reason hardest to see from the fleet screen. With
+///    nothing cached there is neither an answer nor a way to ask, so it is
+///    [`Off::TokenUnreadable`] — named, so a log line can say which.
+/// 6. Enrolled: the cached origin if there is one — that is what makes a start
 ///    with the control plane down still reachable — and otherwise ask.
 #[must_use]
 pub fn choose(inputs: &RelayInputs) -> RelayChoice {
@@ -98,10 +131,16 @@ pub fn choose(inputs: &RelayInputs) -> RelayChoice {
     if inputs.ephemeral {
         return RelayChoice::Off(Off::Ephemeral);
     }
-    if !inputs.enrolled {
-        return RelayChoice::Off(Off::NotEnrolled);
+    match inputs.token {
+        Token::Absent => RelayChoice::Off(Off::NotEnrolled),
+        Token::Unreadable => inputs
+            .cached
+            .clone()
+            .map_or(RelayChoice::Off(Off::TokenUnreadable), RelayChoice::Dial),
+        Token::Held => {
+            inputs.cached.clone().map_or(RelayChoice::AskAccount, RelayChoice::Dial)
+        }
     }
-    inputs.cached.clone().map_or(RelayChoice::AskAccount, RelayChoice::Dial)
 }
 
 /// The last relay origin the control plane named, on disk.
@@ -145,18 +184,29 @@ impl OriginCache {
         if trimmed.is_empty() {
             return None;
         }
-        // Validated on the way *in*, not merely on the way out: a hand-edited
-        // or truncated file must not become a dial attempt against a garbage
-        // authority once per start, forever.
-        Endpoint::parse(trimmed).ok().or_else(|| relay_ws_endpoint(trimmed).ok())?;
+        // Validated on the way *in*, and **by the dialler's own parser**: a
+        // hand-edited or truncated file must not become a dial attempt against
+        // a garbage authority once per start, forever. `Endpoint::parse` was
+        // the wrong authority and accepted more than the dialler does -- it
+        // takes a path, so `https://relay.example/v1/control` passed here and
+        // then failed in `Relay::new` on every start, which is a cache that
+        // validates and never works. One parser, and it is the one that dials.
+        crate::relay::RelayOrigin::parse(trimmed).ok()?;
         Some(trimmed.to_string())
     }
 
     /// Remember `origin`, atomically. Returns whether anything changed.
     ///
-    /// Temp file then rename, `trust.rs`'s discipline: a half-written file here
-    /// is a daemon that dials a truncated hostname on every start after a
-    /// crash, and the crash is exactly when nobody is watching the logs.
+    /// Temp file, **fsync**, rename — `trust.rs`'s `write_private` discipline,
+    /// reimplemented rather than reused because that helper is private to
+    /// `zest-mesh` and this file needs no `0600` (an origin is a URL an account
+    /// publishes, not a secret).
+    ///
+    /// The `sync_all` is the load-bearing line and not ceremony: a rename can
+    /// land before the bytes do, so without it a hard stop leaves the new name
+    /// pointing at an empty or half-written file — and this file matters most
+    /// exactly then, on the boot after the machine went down, when nobody is
+    /// reading the logs and the only symptom is a fleet row saying asleep.
     pub fn store(&self, origin: &str) -> std::io::Result<bool> {
         if self.load().as_deref() == Some(origin) {
             return Ok(false);
@@ -165,7 +215,7 @@ impl OriginCache {
             std::fs::create_dir_all(dir)?;
         }
         let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, format!("{origin}\n"))?;
+        write_durable(&tmp, format!("{origin}\n").as_bytes())?;
         std::fs::rename(&tmp, &self.path)?;
         Ok(true)
     }
@@ -184,19 +234,15 @@ impl OriginCache {
     }
 }
 
-/// A relay origin the daemon can actually dial.
+/// Write `bytes` to `path` and make them durable before returning.
 ///
-/// `Relay::new` takes the same spellings this checks, and the check happens
-/// twice on purpose: here so a garbage cache never becomes a dial, and there so
-/// a mistyped `--relay` is a message at startup rather than a thread failing
-/// for ever in a log nobody reads.
-fn relay_ws_endpoint(url: &str) -> Result<Endpoint, std::io::Error> {
-    // `wss://` is the deployed spelling and `Endpoint::parse` speaks https, so
-    // the swap is what lets one parser answer for both.
-    let https = url
-        .strip_prefix("wss://")
-        .map_or_else(|| url.to_string(), |rest| format!("https://{rest}"));
-    Endpoint::parse(&https)
+/// The half of `trust.rs`'s `write_private` that is about crash safety rather
+/// than permissions. See [`OriginCache::store`] for why the fsync is the point.
+fn write_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
 }
 
 /// One `GET /api/me`, for the relay origin the account publishes.
@@ -293,7 +339,7 @@ mod tests {
     use super::*;
 
     fn inputs() -> RelayInputs {
-        RelayInputs { enrolled: true, ..RelayInputs::default() }
+        RelayInputs { token: Token::Held, ..RelayInputs::default() }
     }
 
     #[test]
@@ -317,17 +363,48 @@ mod tests {
     fn an_unenrolled_machine_dials_nothing() {
         // The ordinary local install, and it must be untouched by this feature:
         // no account, no token, nothing to ask, no network call at startup.
-        let solo = RelayInputs { enrolled: false, ..RelayInputs::default() };
+        let solo = RelayInputs { token: Token::Absent, ..RelayInputs::default() };
         assert_eq!(choose(&solo), RelayChoice::Off(Off::NotEnrolled));
 
-        // Even with a stale cache: the token is what authorizes the link, and a
-        // machine that logged out must stop dialling.
+        // Even with a stale cache: `--logout` clears the cache precisely so
+        // this state means "stop dialling", and a machine that never enrolled
+        // has no account whose relay it could be parked at.
         let logged_out = RelayInputs {
-            enrolled: false,
+            token: Token::Absent,
             cached: Some("wss://relay.example".into()),
             ..RelayInputs::default()
         };
         assert_eq!(choose(&logged_out), RelayChoice::Off(Off::NotEnrolled));
+    }
+
+    #[test]
+    fn a_locked_credential_store_still_dials_what_it_cached() {
+        // The row that was missing, and the bug behind it: collapsing an
+        // unreadable store into "not enrolled" made relay dialling vanish from
+        // an enrolled machine with nothing said. What authorizes the *link* is
+        // the host key, not the token -- the token only authorizes the fetch --
+        // so a machine that booted before its keyring did stays reachable.
+        let locked = RelayInputs {
+            token: Token::Unreadable,
+            cached: Some("wss://relay.example".into()),
+            ..RelayInputs::default()
+        };
+        assert_eq!(
+            choose(&locked),
+            RelayChoice::Dial("wss://relay.example".into()),
+            "a locked keychain at boot is exactly when the cache earns its place"
+        );
+
+        // With nothing cached there is neither an answer nor a way to ask for
+        // one -- but it is its own reason, so the log can say which.
+        let blind = RelayInputs { token: Token::Unreadable, ..RelayInputs::default() };
+        assert_eq!(choose(&blind), RelayChoice::Off(Off::TokenUnreadable));
+        assert_ne!(
+            choose(&blind),
+            RelayChoice::Off(Off::NotEnrolled),
+            "a store that could not be read is not a store with no token, and the \
+             two demand opposite responses"
+        );
     }
 
     #[test]
@@ -416,7 +493,23 @@ mod tests {
         // start, for ever.
         let dir = tempdir("garbage");
         let path = dir.join("relay-origin");
-        for junk in ["", "   \n", "not a url", "ftp://relay.example", "wss://relay.example/#frag"] {
+        for junk in [
+            "",
+            "   \n",
+            "not a url",
+            "ftp://relay.example",
+            "wss://relay.example/#frag",
+            // The one a laxer validator let through: `Endpoint::parse` accepts
+            // a path, `RelayOrigin::parse` does not, so this used to pass here
+            // and then fail in `Relay::new` on every single start -- a cache
+            // that validates and never works.
+            "https://relay.example/v1/control",
+            "wss://relay.example/v1/control",
+            "wss://relay.example?host=x",
+            // Plaintext off loopback is refused by the dialler, so it must be
+            // refused here too rather than cached and rejected later.
+            "ws://relay.example",
+        ] {
             std::fs::write(&path, junk).expect("write");
             assert_eq!(
                 OriginCache::at(&path).load(),
@@ -425,11 +518,24 @@ mod tests {
             );
         }
 
-        // Both real spellings survive the round trip: `wss://` is what a
-        // deployment publishes, `https://` is what `Endpoint` parses natively.
-        for good in ["wss://relay.example", "https://relay.example"] {
+        // Every spelling the dialler accepts survives the round trip, because
+        // the validator here *is* the dialler's: the two deployed forms, and
+        // the loopback plaintext the runbook uses for `wrangler dev`.
+        for good in [
+            "wss://relay.example",
+            "https://relay.example",
+            "wss://relay.example:8443",
+            "wss://relay.example/",
+            "http://127.0.0.1:8787",
+        ] {
             std::fs::write(&path, format!("{good}\n")).expect("write");
-            assert_eq!(OriginCache::at(&path).load().as_deref(), Some(good));
+            assert_eq!(
+                OriginCache::at(&path).load().as_deref(),
+                Some(good),
+                "the cache must accept exactly what `Relay::new` will dial"
+            );
+            crate::relay::RelayOrigin::parse(good)
+                .expect("and the dialler must accept what the cache returned");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
