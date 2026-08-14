@@ -194,9 +194,10 @@ fn account_header(
     });
     let mut x = x0 + lw + 14.0 * s;
 
-    if let Some(SettingsValueCell::Editing { buffer, error }) = &model.entry {
-        // §11's editing input, sized for an 8-character code; the caret is a
-        // character, exactly as the settings tab draws it.
+    if let Some(SettingsValueCell::Editing { buffer, caret, selection, error }) = &model.entry {
+        // §11's editing input, sized for an 8-character code — drawn through
+        // the settings tab's own entry, so the caret and selection are the
+        // same ones everywhere.
         let boxr = [x, top + (h - ACCOUNT_BTN_H * s) / 2.0, CODE_INPUT_W * s, ACCOUNT_BTN_H * s];
         out.rects.push(RectInstance {
             radii: [8.0 * s; 4],
@@ -204,18 +205,21 @@ fn account_header(
             border_width: HAIRLINE * s,
             ..RectInstance::filled(boxr, colors.panel_bg, area)
         });
-        let text = format!("{buffer}\u{258f}");
-        let vw = measure(&text, px, false, 0.0);
-        out.texts.push(TextRun {
-            text,
-            pos: [boxr[0] + 10.0 * s, baseline_in(boxr[1], boxr[3], px)],
-            max_width: vw.max(2.0),
-            color: if *error { colors.pill_warn_text } else { colors.text_active },
-            clip: boxr,
-            px,
-            bold: false,
-            tracking: 0.0,
-        });
+        super::settings_screen::text_entry(
+            &super::settings_screen::TextEntry {
+                text: buffer,
+                caret: *caret,
+                selection: *selection,
+                color: if *error { colors.pill_warn_text } else { colors.text_active },
+                selection_bg: colors.accent_soft,
+                px,
+            },
+            boxr,
+            area,
+            s,
+            measure,
+            out,
+        );
         let hint = "Enter to sign in · Esc to cancel";
         out.texts.push(TextRun {
             text: hint.into(),

@@ -183,6 +183,17 @@ pub enum PickerRow {
     Nothing,
 }
 
+/// Where a text entry's caret sits, as `TextField` describes it.
+///
+/// Byte offsets into the entry's string — see `SettingsValueCell::Editing`
+/// for why bytes and not characters. `Default` is a caret at the start with
+/// nothing selected, which is what an untouched box wants.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Caret {
+    pub at: usize,
+    pub selection: Option<(usize, usize)>,
+}
+
 /// The ⌘K palette, when open.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PickerModel {
@@ -191,6 +202,8 @@ pub struct PickerModel {
     pub selected: usize,
     /// The live filter string, drawn in the search line.
     pub filter: String,
+    /// The filter box's caret and selection.
+    pub filter_caret: Caret,
     /// Scroll offset of the row list, physical pixels; layout clamps it.
     pub scroll: f32,
     /// Bring the selection into view this pass — keyboard only, so wheel
@@ -433,6 +446,8 @@ pub struct ProfilesScreenModel {
     /// Index into `rows` the keyboard is on.
     pub selected: usize,
     pub filter: String,
+    /// The filter box's caret and selection.
+    pub filter_caret: Caret,
     /// Scroll offset of the rows pane, physical pixels; layout clamps it.
     pub scroll: f32,
     /// Bring the selection into view this pass — keyboard only.
@@ -534,6 +549,8 @@ pub struct PaletteModel {
     /// Index into `rows` the keyboard is on.
     pub selected: usize,
     pub filter: String,
+    /// The filter box's caret and selection.
+    pub filter_caret: Caret,
     /// Scroll offset, physical pixels; layout clamps it.
     pub scroll: f32,
     /// Bring the selected row into view this pass — keyboard navigation
@@ -583,7 +600,17 @@ pub enum SettingsValueCell {
     /// colours after a failed parse. Whether the edit replaces the value or
     /// grows a list is `settings_ui::EditBuffer`'s business — this cell only
     /// knows how to draw the text.
-    Editing { buffer: String, error: bool },
+    ///
+    /// `caret` and `selection` are **byte** offsets into `buffer`, straight
+    /// off `TextField` — the renderer measures `buffer[..caret]` to place the
+    /// caret, so anything but a byte index would have to be converted here,
+    /// which is where the off-by-one would live.
+    Editing {
+        buffer: String,
+        caret: usize,
+        selection: Option<(usize, usize)>,
+        error: bool,
+    },
     /// The §12 host pill: status dot, host name, ▾. Clicking opens a typed
     /// edit of the host label today; the fleet-picker chooser the ▾ implies
     /// arrives with the cross-host launch item, which owns the picker's
@@ -692,6 +719,8 @@ pub struct SettingsScreenModel {
     /// Index into `rows` the keyboard is on.
     pub selected: usize,
     pub filter: String,
+    /// The filter box's caret and selection.
+    pub filter_caret: Caret,
     /// Scroll offset, physical pixels; layout clamps it.
     pub scroll: f32,
     /// Bring the selected row into view this pass. Keyboard only — the

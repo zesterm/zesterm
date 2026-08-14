@@ -101,6 +101,85 @@ pub(super) fn wrap_text(
     lines
 }
 
+/// Horizontal padding inside every text entry, and the caret's width.
+const ENTRY_PAD: f32 = 10.0;
+const CARET_W: f32 = 1.5;
+
+/// One text entry's contents and ink, as `TextField` describes it.
+pub(super) struct TextEntry<'a> {
+    pub text: &'a str,
+    /// Byte offsets, straight off `TextField` — see `SettingsValueCell::Editing`.
+    pub caret: usize,
+    pub selection: Option<(usize, usize)>,
+    pub color: LinearRgba,
+    pub selection_bg: LinearRgba,
+    /// Type size, already scaled.
+    pub px: f32,
+}
+
+/// Draw a text entry inside `boxr`: selection behind, text, caret on top.
+///
+/// Shared by the settings/profiles edit boxes and every filter field, which
+/// is the point — the four hand-rolled copies of this were what let one of
+/// them keep a caret the others did not have.
+///
+/// Scrolls to the **caret**, not to the tail. Anchoring on the tail is the
+/// obvious thing and it is wrong the moment someone arrows back into a long
+/// path: the text they are editing scrolls off the left while the end they
+/// are not looking at stays pinned.
+pub(super) fn text_entry(
+    entry: &TextEntry,
+    boxr: [f32; 4],
+    clip: [f32; 4],
+    s: f32,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+    out: &mut ChromeLayout,
+) {
+    let px = entry.px;
+    let pad = ENTRY_PAD * s;
+    let avail = boxr[2] - 2.0 * pad;
+    let at = |b: usize, measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32| {
+        measure(&entry.text[..b], px, false, 0.0)
+    };
+    let caret_x = at(entry.caret, measure);
+    let full = measure(entry.text, px, false, 0.0);
+    // Keep the caret inside the window, then keep the window inside the text
+    // — the second clamp is what stops a backspace at the end from leaving a
+    // blank gap where the tail used to be.
+    let mut off = (caret_x - avail).max(0.0).min(caret_x);
+    off = off.min((full - avail).max(0.0));
+    let x = boxr[0] + pad - off;
+    let inner = intersect(boxr, clip).unwrap_or(clip);
+
+    if let Some((lo, hi)) = entry.selection {
+        let (a, b) = (at(lo, measure), at(hi, measure));
+        out.rects.push(RectInstance::rounded(
+            [x + a, boxr[1] + 5.0 * s, b - a, boxr[3] - 10.0 * s],
+            2.0 * s,
+            entry.selection_bg,
+            inner,
+        ));
+    }
+    out.texts.push(TextRun {
+        text: entry.text.to_string(),
+        pos: [x, baseline_in(boxr[1], boxr[3], px)],
+        // The full shaped width: the box's clip is what bounds an overgrown
+        // buffer, so the tail never ellipsises away mid-edit.
+        max_width: full.max(1.0),
+        color: entry.color,
+        clip: inner,
+        px,
+        bold: false,
+        tracking: 0.0,
+    });
+    // After the text, so it is never painted over.
+    out.rects.push(RectInstance::filled(
+        [x + caret_x, boxr[1] + 5.0 * s, (CARET_W * s).max(1.0), boxr[3] - 10.0 * s],
+        entry.color,
+        inner,
+    ));
+}
+
 /// A dashed 1px border for the add affordances — same placeholder-grade
 /// recipe as the fleet's asleep cards (`screens::dashed_border` is private
 /// to its own concerns; four dashes of arithmetic beat a wider interface).
@@ -831,10 +910,8 @@ pub(super) fn draw_control(
                 tracking: 0.0,
             });
         }
-        SettingsValueCell::Editing { buffer, error } => {
-            // The same box, wearing the focus ring; the caret is a
-            // character, not a rect — it inherits the text clip and colour
-            // for free, and this is not a text editor.
+        SettingsValueCell::Editing { buffer, caret, selection, error } => {
+            // The same box, wearing the focus ring.
             let boxr = [right - CONTROL_W * s, top, CONTROL_W * s, INPUT_H * s];
             out.rects.push(RectInstance {
                 radii: [8.0 * s; 4],
@@ -842,26 +919,22 @@ pub(super) fn draw_control(
                 border_width: HAIRLINE * s,
                 ..RectInstance::filled(boxr, colors.panel_bg, clip)
             });
-            let text = format!("{buffer}\u{258f}");
             let color = if *error { colors.pill_warn_text } else { colors.text_active };
-            // Left-aligned until the buffer outgrows the box, then the tail
-            // stays visible — the caret is what the eye follows.
-            let vw = measure(&text, mono, false, 0.0);
-            let avail = (CONTROL_W - 20.0) * s;
-            let x = if vw <= avail { boxr[0] + 10.0 * s } else { boxr[0] + 10.0 * s + avail - vw };
-            out.texts.push(TextRun {
-                text,
-                pos: [x, baseline_in(top, INPUT_H * s, mono)],
-                // The full shaped width: the box's clip is what bounds an
-                // overgrown buffer, so the tail (and the caret) never
-                // ellipsise away mid-edit.
-                max_width: vw,
-                color,
-                clip: intersect(boxr, clip).unwrap_or(clip),
-                px: mono,
-                bold: false,
-                tracking: 0.0,
-            });
+            text_entry(
+                &TextEntry {
+                    text: buffer,
+                    caret: *caret,
+                    selection: *selection,
+                    color,
+                    selection_bg: colors.accent_soft,
+                    px: mono,
+                },
+                boxr,
+                clip,
+                s,
+                measure,
+                out,
+            );
         }
         SettingsValueCell::FontList { faces } => {
             let w = CONTROL_W * s;
@@ -1394,21 +1467,38 @@ fn rail(
         bold: false,
         tracking: 0.0,
     });
-    let (ftext, fcolor) = if model.filter.is_empty() {
-        ("Filter settings".to_string(), colors.text_faint)
+    // The caption only while nothing is typed; once there is text the box is
+    // a text entry with a caret, like every other one (#251).
+    let entry_x = pill[0] + slash_w + 8.0 * s;
+    let entry = [entry_x, pill[1], (pill[0] + pill[2] - entry_x).max(0.0), pill[3]];
+    if model.filter.is_empty() {
+        out.texts.push(TextRun {
+            text: "Filter settings".to_string(),
+            pos: [entry_x + ENTRY_PAD * s, baseline_in(pill[1], pill[3], 12.0 * s)],
+            max_width: (entry[2] - 2.0 * ENTRY_PAD * s).max(0.0),
+            color: colors.text_faint,
+            clip: area,
+            px: 12.0 * s,
+            bold: false,
+            tracking: 0.0,
+        });
     } else {
-        (model.filter.clone(), colors.text_active)
-    };
-    out.texts.push(TextRun {
-        text: ftext,
-        pos: [pill[0] + 10.0 * s + slash_w + 8.0 * s, baseline_in(pill[1], pill[3], 12.0 * s)],
-        max_width: (pill[2] - slash_w - 30.0 * s).max(0.0),
-        color: fcolor,
-        clip: area,
-        px: 12.0 * s,
-        bold: false,
-        tracking: 0.0,
-    });
+        text_entry(
+            &TextEntry {
+                text: &model.filter,
+                caret: model.filter_caret.at,
+                selection: model.filter_caret.selection,
+                color: colors.text_active,
+                selection_bg: colors.accent_soft,
+                px: 12.0 * s,
+            },
+            entry,
+            area,
+            s,
+            measure,
+            out,
+        );
+    }
 
     // The footer note — the schema-generated promise, wrapped.
     let note = "Every field is generated from the config schema — a new setting appears \
@@ -1616,6 +1706,7 @@ mod tests {
             empty: None,
             selected: 0,
             filter: String::new(),
+            filter_caret: Default::default(),
             scroll: 0.0,
             ensure_visible: false,
             modified_total: 3,
@@ -1821,5 +1912,79 @@ mod tests {
             items.contains(&(0, 0)) && items.contains(&(0, 1)),
             "font rows are drag targets — order is the setting"
         );
+    }
+
+    /// The caret's x for a buffer with `caret` bytes behind it, as drawn.
+    fn caret_x(buffer: &str, caret: usize, selection: Option<(usize, usize)>) -> f32 {
+        let m = model(vec![cell_row(
+            SettingsValueCell::Editing {
+                buffer: buffer.to_string(),
+                caret,
+                selection,
+                error: false,
+            },
+            false,
+        )]);
+        let out = lay(&m, 1200.0, 700.0);
+        // By its exact width: the hairline dividers are 1px and would
+        // otherwise answer as the caret at a fixed x, which is precisely the
+        // stuck-caret bug this test exists to catch.
+        let carets: Vec<f32> = out
+            .rects
+            .iter()
+            .filter(|r| (r.rect[2] - CARET_W).abs() < 0.01)
+            .map(|r| r.rect[0])
+            .collect();
+        assert_eq!(carets.len(), 1, "exactly one caret is drawn: {carets:?}");
+        carets[0]
+    }
+
+    #[test]
+    fn the_caret_is_a_rect_that_follows_the_caret_index() {
+        // Before #251 the caret was a literal `▏` appended to the text, so it
+        // could only ever sit at the end — which is exactly what made arrowing
+        // back into a long path pointless. Assert it moves.
+        let start = caret_x("/usr/local/bin", 0, None);
+        let middle = caret_x("/usr/local/bin", 5, None);
+        let end = caret_x("/usr/local/bin", 14, None);
+        assert!(start.is_finite(), "a caret rect is drawn at all");
+        assert!(start < middle, "caret at byte 5 is right of caret at byte 0");
+        assert!(middle < end, "and the end is right of the middle");
+    }
+
+    #[test]
+    fn a_selection_is_drawn_behind_the_text() {
+        // Painted before the run and only as wide as the selected bytes; a
+        // selection the width of the whole box would look like a focus fill.
+        let plain = model(vec![cell_row(
+            SettingsValueCell::Editing {
+                buffer: "obsidian".into(),
+                caret: 8,
+                selection: None,
+                error: false,
+            },
+            false,
+        )]);
+        let selected = model(vec![cell_row(
+            SettingsValueCell::Editing {
+                buffer: "obsidian".into(),
+                caret: 8,
+                selection: Some((0, 8)),
+                error: false,
+            },
+            false,
+        )]);
+        let before = lay(&plain, 1200.0, 700.0).rects.len();
+        let after = lay(&selected, 1200.0, 700.0).rects.len();
+        assert_eq!(after, before + 1, "the selection adds exactly one rect");
+
+        let wide = lay(&selected, 1200.0, 700.0);
+        let sel = wide
+            .rects
+            .iter()
+            .map(|r| r.rect[2])
+            .filter(|w| (*w - measure("obsidian", 12.0, false, 0.0)).abs() < 1.0)
+            .count();
+        assert_eq!(sel, 1, "and it is exactly as wide as the eight selected bytes");
     }
 }

@@ -27,6 +27,7 @@ use crate::platform;
 use crate::session::{Session, Wakeup};
 use crate::source::{Origin, SessionSource};
 use crate::tabs::{Tab, TabStrip};
+use crate::text_field::{command_for, TextCommand, TextField};
 
 
 /// How long the window may take to appear, in milliseconds.
@@ -258,7 +259,7 @@ impl HostRoute {
 /// index `n` means the same thing in both by construction.
 struct PickerState {
     selected: usize,
-    filter: String,
+    filter: TextField,
     scroll: f32,
     /// Bring the selection into view on the next layout — keyboard only.
     scroll_to_selected: bool,
@@ -277,7 +278,7 @@ struct PickerState {
 /// entries are headers and reference rows the selection skips.
 struct PaletteState {
     selected: usize,
-    filter: String,
+    filter: TextField,
     scroll: f32,
     /// Bring the selection into view on the next layout — keyboard
     /// navigation only, never the wheel.
@@ -293,7 +294,7 @@ struct SettingsUiState {
     /// The rail's selected category, by label — a label, not an index,
     /// because the filter hides empty categories and an index would slide.
     category: String,
-    filter: String,
+    filter: TextField,
     scroll: f32,
     /// Bring the selection into view on the next layout — set by keyboard
     /// navigation, never by the wheel, so free scrolling does not snap back.
@@ -324,16 +325,30 @@ impl SettingsUiState {
     /// keyboard — a commit written to the concealed session would type a
     /// composed word into a shell the user cannot see.
     fn commit_text(&mut self, text: &str) {
+        self.text_key(TextCommand::Insert(text.to_string()), None);
+    }
+
+    /// One text command, routed exactly where [`Self::commit_text`] routes a
+    /// composed word — and the seam the key path drives, so "⌘V into the
+    /// settings filter" is a test rather than a thing to try in a window.
+    fn text_key(&mut self, cmd: TextCommand, clipboard: Option<&str>) -> Option<String> {
         if self.menu.is_some() {
-            return;
+            return None;
         }
         if let Some(edit) = self.editing.as_mut() {
-            edit.buffer.push_str(text);
-            edit.error = false;
+            let out = edit.buffer.apply(cmd, clipboard);
+            if out.changed {
+                // New input clears a stale parse error, as typing does.
+                edit.error = false;
+            }
+            out.copied
         } else {
-            self.filter.push_str(text);
-            self.selected = 0;
-            self.scroll_to_selected = true;
+            let out = self.filter.apply(cmd, clipboard);
+            if out.changed {
+                self.selected = 0;
+                self.scroll_to_selected = true;
+            }
+            out.copied
         }
     }
 }
@@ -346,7 +361,7 @@ struct ProfilesUiState {
     profile: String,
     /// Index into the drawn rows the keyboard is on.
     selected: usize,
-    filter: String,
+    filter: TextField,
     scroll: f32,
     /// Bring the selection into view on the next layout — keyboard only.
     scroll_to_selected: bool,
@@ -366,16 +381,27 @@ impl ProfilesUiState {
     /// Composed (IME) text, routed exactly like the Settings tab's: menu
     /// swallows, an open buffer takes it, otherwise the filter.
     fn commit_text(&mut self, text: &str) {
+        self.text_key(TextCommand::Insert(text.to_string()), None);
+    }
+
+    /// The Settings tab's [`SettingsUiState::text_key`], for the same reason.
+    fn text_key(&mut self, cmd: TextCommand, clipboard: Option<&str>) -> Option<String> {
         if self.menu.is_some() {
-            return;
+            return None;
         }
         if let Some(edit) = self.editing.as_mut() {
-            edit.buffer.push_str(text);
-            edit.error = false;
+            let out = edit.buffer.apply(cmd, clipboard);
+            if out.changed {
+                edit.error = false;
+            }
+            out.copied
         } else {
-            self.filter.push_str(text);
-            self.selected = 0;
-            self.scroll_to_selected = true;
+            let out = self.filter.apply(cmd, clipboard);
+            if out.changed {
+                self.selected = 0;
+                self.scroll_to_selected = true;
+            }
+            out.copied
         }
     }
 }
@@ -409,7 +435,7 @@ struct ValuePickerState {
     /// used by the palette and the settings overlay alike.
     visible: Vec<String>,
     selected: usize,
-    filter: String,
+    filter: TextField,
     scroll: f32,
     scroll_to_selected: bool,
 }
@@ -424,7 +450,7 @@ impl ValuePickerState {
         if self.filter.is_empty() {
             return self.options.clone();
         }
-        let needle = self.filter.to_lowercase();
+        let needle = self.filter.text().to_lowercase();
         self.options
             .iter()
             .filter(|o| o.to_lowercase().contains(&needle))
@@ -473,14 +499,22 @@ const ENROLL_CODE_ALPHABET: &str = "23456789ABCDEFGHJKMNPQRSTVWXYZ";
 /// a stray word around the code still land the code itself, and what keeps a
 /// `0` or an `I` (which no real code contains) from occupying a slot the
 /// real character then cannot fill.
+/// A field's caret, as the chrome model wants it.
+fn caret_of(field: &TextField) -> crate::chrome::model::Caret {
+    crate::chrome::model::Caret { at: field.caret(), selection: field.selection() }
+}
+
 fn push_code_chars(edit: &mut crate::settings_ui::EditBuffer, text: &str) {
     for ch in text.chars() {
-        if edit.buffer.len() >= ENROLL_CODE_LENGTH {
+        // The code is ASCII, so bytes and characters agree here and the
+        // clamp can read the length directly.
+        if edit.buffer.text().len() >= ENROLL_CODE_LENGTH {
             break;
         }
         let up = ch.to_ascii_uppercase();
         if ENROLL_CODE_ALPHABET.contains(up) {
-            edit.buffer.push(up);
+            let mut utf8 = [0u8; 4];
+            edit.buffer.insert(up.encode_utf8(&mut utf8));
             edit.error = false;
         }
     }
@@ -1796,6 +1830,16 @@ impl App {
         }
     }
 
+    /// The clipboard text a [`TextCommand`] needs, or `None` for the commands
+    /// that need none. Read here rather than in `text_field`, which owns no
+    /// handle — and read only on an actual paste, because opening the OS
+    /// clipboard on every keystroke is a syscall per character.
+    fn paste_text(&mut self, cmd: &TextCommand) -> Option<String> {
+        matches!(cmd, TextCommand::Paste)
+            .then(|| self.clipboard.as_mut()?.get_text().ok())
+            .flatten()
+    }
+
     fn copy_selection(&mut self) {
         // Read through the session first, then hand the owned text on, so the
         // session borrow does not overlap the `&mut self` clipboard access.
@@ -2192,7 +2236,9 @@ impl App {
                         action: FleetAccountAction::None,
                         second: FleetAccountAction::None,
                         entry: Some(crate::chrome::model::SettingsValueCell::Editing {
-                            buffer: edit.buffer.clone(),
+                            buffer: edit.buffer.text().to_string(),
+                            caret: edit.buffer.caret(),
+                            selection: edit.buffer.selection(),
                             error: edit.error,
                         }),
                         error: None,
@@ -3018,7 +3064,7 @@ impl App {
             self.profiles_ui = Some(ProfilesUiState {
                 profile: zest_config::profiles::RESERVED_PROFILE.to_string(),
                 selected: 0,
-                filter: String::new(),
+                filter: TextField::default(),
                 scroll: 0.0,
                 scroll_to_selected: true,
                 actions: Vec::new(),
@@ -3196,7 +3242,7 @@ impl App {
                         // The value picker takes the keys from the tab
                         // (see the key path's ordering); a composed family
                         // name belongs to its filter.
-                        p.filter.push_str(&text);
+                        p.filter.insert(&text);
                         p.selected = 0;
                         p.scroll_to_selected = true;
                     } else if let Some(ui) = self.settings_ui.as_mut() {
@@ -3492,7 +3538,8 @@ impl App {
             crate::chrome::model::PickerModel {
                 rows,
                 selected: state.selected,
-                filter: state.filter.clone(),
+                filter: state.filter.text().to_string(),
+                filter_caret: caret_of(&state.filter),
                 scroll: state.scroll,
                 ensure_visible: state.scroll_to_selected,
                 hosts_searched,
@@ -3554,14 +3601,15 @@ impl App {
                     })
                     .collect(),
                 selected: state.selected,
-                filter: state.filter.clone(),
+                filter: state.filter.text().to_string(),
+                filter_caret: caret_of(&state.filter),
                 scroll: state.scroll,
                 ensure_visible: state.scroll_to_selected,
             }
         });
 
         let palette_model = self.palette_ui.as_mut().map(|state| {
-            let (rows, actions) = keymap::palette(&state.filter);
+            let (rows, actions) = keymap::palette(state.filter.text());
             state.actions = actions;
             // A filter edit can strand the selection on a header, a
             // reference row, or past the end; land it on the nearest
@@ -3570,7 +3618,8 @@ impl App {
             crate::chrome::model::PaletteModel {
                 rows,
                 selected: state.selected,
-                filter: state.filter.clone(),
+                filter: state.filter.text().to_string(),
+                filter_caret: caret_of(&state.filter),
                 scroll: state.scroll,
                 ensure_visible: state.scroll_to_selected,
             }
@@ -3627,14 +3676,14 @@ impl App {
                     let (mut rows, mut actions) = sui::build_unknown_rows(
                         &unknown_keys,
                         &provenance,
-                        &ui.filter,
+                        ui.filter.text(),
                         &zest_config::schema::keys(),
                     );
                     let empty = rows.is_empty().then(|| {
                         if unknown_keys.is_empty() {
                             "Every key in your files is a setting this build knows.".to_string()
                         } else {
-                            format!("nothing matches \u{201c}{}\u{201d}", ui.filter)
+                            format!("nothing matches \u{201c}{}\u{201d}", ui.filter.text())
                         }
                     });
                     if !rows.is_empty() {
@@ -3661,7 +3710,7 @@ impl App {
                         &values,
                         &provenance,
                         &ui.category,
-                        &ui.filter,
+                        ui.filter.text(),
                         ui.editing.as_ref(),
                         &restart_pending,
                         error.as_deref(),
@@ -3669,7 +3718,7 @@ impl App {
                     );
                     let empty = rows
                         .is_empty()
-                        .then(|| format!("nothing matches \u{201c}{}\u{201d}", ui.filter));
+                        .then(|| format!("nothing matches \u{201c}{}\u{201d}", ui.filter.text()));
                     (rows, actions, empty)
                 };
                 ui.actions = actions;
@@ -3734,7 +3783,8 @@ impl App {
                     rows,
                     empty,
                     selected: ui.selected,
-                    filter: ui.filter.clone(),
+                    filter: ui.filter.text().to_string(),
+                    filter_caret: caret_of(&ui.filter),
                     scroll: ui.scroll,
                     ensure_visible: ui.scroll_to_selected,
                     modified_total: total,
@@ -3805,7 +3855,7 @@ impl App {
                     &ui.fields,
                     &resolved,
                     &ctx,
-                    &ui.filter,
+                    ui.filter.text(),
                     ui.editing.as_ref(),
                     ui.error.as_deref(),
                 );
@@ -3858,7 +3908,7 @@ impl App {
                 let count = pui::override_count(&ui.fields, &resolved);
                 let empty = rows
                     .is_empty()
-                    .then(|| format!("nothing matches \u{201c}{}\u{201d}", ui.filter));
+                    .then(|| format!("nothing matches \u{201c}{}\u{201d}", ui.filter.text()));
 
                 Box::new(crate::chrome::model::ProfilesScreenModel {
                     rail: pui::build_rail(&settings, &fallback_command, &local_host),
@@ -3877,7 +3927,8 @@ impl App {
                     rows,
                     chips,
                     selected: ui.selected,
-                    filter: ui.filter.clone(),
+                    filter: ui.filter.text().to_string(),
+                    filter_caret: caret_of(&ui.filter),
                     scroll: ui.scroll,
                     ensure_visible: ui.scroll_to_selected,
                     empty,
@@ -4389,7 +4440,7 @@ impl App {
                 // settings tab's concerns and idle here.
                 self.enroll_entry = Some(crate::settings_ui::EditBuffer {
                     field_idx: 0,
-                    buffer: String::new(),
+                    buffer: TextField::default(),
                     error: false,
                     append: false,
                 });
@@ -4700,7 +4751,7 @@ impl App {
                 self.launcher = None;
                 Some(PickerState {
                     selected: 0,
-                    filter: String::new(),
+                    filter: TextField::default(),
                     scroll: 0.0,
                     scroll_to_selected: false,
                     actions: Vec::new(),
@@ -4720,7 +4771,7 @@ impl App {
                 self.launcher = None;
                 Some(PaletteState {
                     selected: 0,
-                    filter: String::new(),
+                    filter: TextField::default(),
                     scroll: 0.0,
                     scroll_to_selected: true,
                     actions: Vec::new(),
@@ -4761,7 +4812,7 @@ impl App {
             self.settings_ui = Some(SettingsUiState {
                 selected: 0,
                 category: crate::settings_ui::GROUP_ORDER[0].to_string(),
-                filter: String::new(),
+                filter: TextField::default(),
                 scroll: 0.0,
                 scroll_to_selected: true,
                 actions: Vec::new(),
@@ -4832,7 +4883,7 @@ impl App {
             visible: options.clone(),
             options,
             selected,
-            filter: String::new(),
+            filter: TextField::default(),
             scroll: 0.0,
             scroll_to_selected: true,
         });
@@ -4978,7 +5029,7 @@ impl App {
                 if let (Some(ui), Some(buffer)) = (self.settings_ui.as_mut(), seed) {
                     ui.editing = Some(crate::settings_ui::EditBuffer {
                         field_idx: idx,
-                        buffer,
+                        buffer: TextField::new(buffer),
                         error: false,
                         append: false,
                     });
@@ -5123,7 +5174,7 @@ impl App {
                 // category included: clean, unfiltered, it stays in the rail
                 // and its page carries the empty-state line.
                 ui.filter.is_empty()
-                    || sui::category_matches(&ui.fields, g, &ui.filter, &self.unknown_keys)
+                    || sui::category_matches(&ui.fields, g, ui.filter.text(), &self.unknown_keys)
             })
             .collect()
     }
@@ -5250,7 +5301,7 @@ impl App {
                 if let Some(ui) = self.settings_ui.as_mut() {
                     ui.editing = Some(crate::settings_ui::EditBuffer {
                         field_idx: idx,
-                        buffer: String::new(),
+                        buffer: TextField::default(),
                         error: false,
                         append: true,
                     });
@@ -5542,7 +5593,7 @@ impl App {
         if let Some(ui) = self.profiles_ui.as_mut() {
             ui.editing = Some(crate::settings_ui::EditBuffer {
                 field_idx: idx,
-                buffer: seed,
+                buffer: TextField::new(seed),
                 error: false,
                 append: false,
             });
@@ -5711,7 +5762,7 @@ impl App {
         let filter = self
             .picker
             .as_ref()
-            .map(|p| p.filter.to_lowercase())
+            .map(|p| p.filter.text().to_lowercase())
             .unwrap_or_default();
         let matches = |text: &str| filter.is_empty() || text.to_lowercase().contains(&filter);
 
@@ -8366,6 +8417,27 @@ impl ApplicationHandler<Wakeup> for App {
                             _ => {}
                         }
                     }
+                    // The filter is a text field: typing, ⌫, the arrows, and
+                    // every clipboard chord go through one place (#251).
+                    // Consulted after the overlay-switching chords above and
+                    // before the list's own keys, which `command_for`
+                    // declines — Enter, Escape, ↑/↓.
+                    if let Some(cmd) = command_for(&event.logical_key, self.modifiers) {
+                        let pasted = self.paste_text(&cmd);
+                        let mut copied = None;
+                        if let Some(p) = self.picker.as_mut() {
+                            let out = p.filter.apply(cmd, pasted.as_deref());
+                            if out.changed {
+                                p.selected = 0;
+                            }
+                            copied = out.copied;
+                        }
+                        if let Some(text) = copied {
+                            self.set_clipboard(text);
+                        }
+                        self.mark_chrome_dirty();
+                        return;
+                    }
                     match &event.logical_key {
                         Key::Named(NamedKey::Escape) => {
                             self.picker = None;
@@ -8411,38 +8483,6 @@ impl ApplicationHandler<Wakeup> for App {
                                 self.run_picker_action(action, el, shift);
                             }
                         }
-                        Key::Named(NamedKey::Backspace) => {
-                            if let Some(p) = self.picker.as_mut() {
-                                p.filter.pop();
-                                p.selected = 0;
-                            }
-                            self.mark_chrome_dirty();
-                        }
-                        // winit delivers the spacebar as Named(Space), not
-                        // Character(" ") — without this arm no filter can
-                        // ever contain a space. Found by typing one.
-                        Key::Named(NamedKey::Space) => {
-                            if let Some(p) = self.picker.as_mut() {
-                                p.filter.push(' ');
-                                p.selected = 0;
-                            }
-                            self.mark_chrome_dirty();
-                        }
-                        Key::Character(c) => {
-                            // Anything carrying a desktop modifier is a chord,
-                            // not text. The two that mean something here were
-                            // handled above; the rest are swallowed rather
-                            // than typed, or ⌘X would put an `x` in the filter.
-                            if !key::belongs_to_desktop(self.modifiers)
-                                && !self.modifiers.control_key()
-                            {
-                                if let Some(p) = self.picker.as_mut() {
-                                    p.filter.push_str(c.as_str());
-                                    p.selected = 0;
-                                }
-                                self.mark_chrome_dirty();
-                            }
-                        }
                         _ => {}
                     }
                     return;
@@ -8452,6 +8492,25 @@ impl ApplicationHandler<Wakeup> for App {
                 // the keyboard from it, so it is tested before both.
                 if self.value_picker.is_some() {
                     use winit::keyboard::{Key, NamedKey};
+                    // This filter is the one that had no modifier guard at
+                    // all, so ⌘V typed a literal `v` into it (#251).
+                    if let Some(cmd) = command_for(&event.logical_key, self.modifiers) {
+                        let pasted = self.paste_text(&cmd);
+                        let mut copied = None;
+                        if let Some(p) = self.value_picker.as_mut() {
+                            let out = p.filter.apply(cmd, pasted.as_deref());
+                            if out.changed {
+                                p.selected = 0;
+                                p.scroll_to_selected = true;
+                            }
+                            copied = out.copied;
+                        }
+                        if let Some(text) = copied {
+                            self.set_clipboard(text);
+                        }
+                        self.mark_chrome_dirty();
+                        return;
+                    }
                     let mut consumed = true;
                     match &event.logical_key {
                         Key::Named(NamedKey::Escape) => {
@@ -8486,32 +8545,6 @@ impl ApplicationHandler<Wakeup> for App {
                                 self.mark_chrome_dirty();
                             }
                         }
-                        Key::Named(NamedKey::Backspace) => {
-                            if let Some(p) = self.value_picker.as_mut() {
-                                p.filter.pop();
-                                p.selected = 0;
-                                p.scroll_to_selected = true;
-                                self.mark_chrome_dirty();
-                            }
-                        }
-                        // Spacebar arrives as Named(Space), not as a character;
-                        // family names are full of them.
-                        Key::Named(NamedKey::Space) => {
-                            if let Some(p) = self.value_picker.as_mut() {
-                                p.filter.push(' ');
-                                p.selected = 0;
-                                p.scroll_to_selected = true;
-                                self.mark_chrome_dirty();
-                            }
-                        }
-                        Key::Character(c) => {
-                            if let Some(p) = self.value_picker.as_mut() {
-                                p.filter.push_str(c);
-                                p.selected = 0;
-                                p.scroll_to_selected = true;
-                                self.mark_chrome_dirty();
-                            }
-                        }
                         _ => consumed = false,
                     }
                     if consumed {
@@ -8524,6 +8557,47 @@ impl ApplicationHandler<Wakeup> for App {
                 // so the order of these blocks carries no meaning.
                 if self.palette_ui.is_some() {
                     use winit::keyboard::{Key, NamedKey};
+                    // The overlay-switching chords outrank the filter — the
+                    // opening chord closes too, aliases included, resolved
+                    // through the table so ⌘/, ⌘? and ⌘⇧P agree. Ahead of
+                    // `command_for`, or ⌘X would cut instead of switching.
+                    match keymap::lookup(&event.logical_key, event.physical_key, self.modifiers)
+                        .map(|b| b.action)
+                    {
+                        Some(keymap::Action::TogglePalette) => {
+                            self.palette_ui = None;
+                            self.mark_chrome_dirty();
+                            return;
+                        }
+                        Some(keymap::Action::ToggleSettings) => {
+                            self.open_settings_tab();
+                            self.mark_chrome_dirty();
+                            return;
+                        }
+                        Some(keymap::Action::ToggleFleetPicker) => {
+                            self.toggle_picker();
+                            self.mark_chrome_dirty();
+                            return;
+                        }
+                        _ => {}
+                    }
+                    if let Some(cmd) = command_for(&event.logical_key, self.modifiers) {
+                        let pasted = self.paste_text(&cmd);
+                        let mut copied = None;
+                        if let Some(p) = self.palette_ui.as_mut() {
+                            let out = p.filter.apply(cmd, pasted.as_deref());
+                            if out.changed {
+                                p.selected = 0;
+                                p.scroll_to_selected = true;
+                            }
+                            copied = out.copied;
+                        }
+                        if let Some(text) = copied {
+                            self.set_clipboard(text);
+                        }
+                        self.mark_chrome_dirty();
+                        return;
+                    }
                     match &event.logical_key {
                         Key::Named(NamedKey::Escape) => {
                             self.palette_ui = None;
@@ -8551,44 +8625,6 @@ impl ApplicationHandler<Wakeup> for App {
                         Key::Named(NamedKey::PageUp) => {
                             if let Some(p) = self.palette_ui.as_mut() {
                                 p.scroll -= 300.0;
-                            }
-                        }
-                        Key::Named(NamedKey::Backspace) => {
-                            if let Some(p) = self.palette_ui.as_mut() {
-                                p.filter.pop();
-                                p.selected = 0;
-                                p.scroll_to_selected = true;
-                            }
-                        }
-                        // Spacebar arrives as Named(Space); see the picker.
-                        Key::Named(NamedKey::Space) => {
-                            if let Some(p) = self.palette_ui.as_mut() {
-                                p.filter.push(' ');
-                                p.selected = 0;
-                                p.scroll_to_selected = true;
-                            }
-                        }
-                        Key::Character(c) => {
-                            // The opening chord closes too, aliases included —
-                            // resolved through the table so ⌘/, ⌘? and ⌘⇧P
-                            // agree — and the sibling overlays' chords switch.
-                            match keymap::lookup(&event.logical_key, event.physical_key, self.modifiers)
-                                .map(|b| b.action)
-                            {
-                                Some(keymap::Action::TogglePalette) => self.palette_ui = None,
-                                Some(keymap::Action::ToggleSettings) => self.open_settings_tab(),
-                                Some(keymap::Action::ToggleFleetPicker) => self.toggle_picker(),
-                                _ => {
-                                    if !self.modifiers.control_key()
-                                        && !key::belongs_to_desktop(self.modifiers)
-                                    {
-                                        if let Some(p) = self.palette_ui.as_mut() {
-                                            p.filter.push_str(c.as_str());
-                                            p.selected = 0;
-                                            p.scroll_to_selected = true;
-                                        }
-                                    }
-                                }
                             }
                         }
                         _ => {}
@@ -8652,8 +8688,79 @@ impl ApplicationHandler<Wakeup> for App {
                         return;
                     }
 
+                    // A tab is not a modal: the tab-management chords keep
+                    // working over it — including ⌘W, which is how this tab
+                    // closes (§11). Ahead of the text path, or ⌘X would cut
+                    // the filter instead of doing whatever it is bound to.
+                    match keymap::lookup(&event.logical_key, event.physical_key, self.modifiers)
+                        .map(|b| b.action)
+                    {
+                        // ⌘, on the active settings tab is already where it
+                        // goes; swallow rather than reopen.
+                        Some(keymap::Action::ToggleSettings) => {
+                            self.mark_chrome_dirty();
+                            return;
+                        }
+                        Some(
+                            action @ (keymap::Action::ToggleFleetPicker
+                            | keymap::Action::TogglePalette
+                            | keymap::Action::CloseTab
+                            | keymap::Action::NewTab
+                            | keymap::Action::ToggleTabLayout
+                            | keymap::Action::ActivateTab(_)
+                            | keymap::Action::ActivateLastTab
+                            | keymap::Action::PrevTab
+                            | keymap::Action::NextTab),
+                        ) => {
+                            self.perform(action, el);
+                            self.mark_chrome_dirty();
+                            return;
+                        }
+                        _ => {}
+                    }
+
+                    // Text before navigation: `text_key` routes to the open
+                    // edit buffer when there is one and to the filter
+                    // otherwise, so typing, ⌫ and every clipboard chord have
+                    // one path instead of two copies that disagree (#251).
+                    if let Some(cmd) = command_for(&event.logical_key, self.modifiers) {
+                        // With no buffer open the arrows belong to the list —
+                        // ←/→ adjust the selected setting (§11), which
+                        // outranks a caret in a filter nobody is inside.
+                        let editing =
+                            self.settings_ui.as_ref().is_some_and(|ui| ui.editing.is_some());
+                        let navigation = matches!(
+                            cmd,
+                            TextCommand::Move { .. }
+                                | TextCommand::Home { .. }
+                                | TextCommand::End { .. }
+                        );
+                        // '/' focuses the filter (§11) — which is where every
+                        // other character already goes, so focusing it is
+                        // swallowing the slash. Inside a buffer it is a path
+                        // separator and must type.
+                        let focus_filter =
+                            !editing && cmd == TextCommand::Insert("/".to_string());
+                        if focus_filter {
+                            self.mark_chrome_dirty();
+                            return;
+                        }
+                        if editing || !navigation {
+                            let pasted = self.paste_text(&cmd);
+                            let copied = self
+                                .settings_ui
+                                .as_mut()
+                                .and_then(|ui| ui.text_key(cmd, pasted.as_deref()));
+                            if let Some(text) = copied {
+                                self.set_clipboard(text);
+                            }
+                            self.mark_chrome_dirty();
+                            return;
+                        }
+                    }
+
                     // A typed edit owns the keys before the list does — while
-                    // a buffer is open, a digit is a digit, never a filter.
+                    // a buffer is open, Enter commits it and Esc drops it.
                     if self.settings_ui.as_ref().is_some_and(|ui| ui.editing.is_some()) {
                         match &event.logical_key {
                             Key::Named(NamedKey::Escape) => {
@@ -8664,7 +8771,11 @@ impl ApplicationHandler<Wakeup> for App {
                             Key::Named(NamedKey::Enter) => {
                                 let edit = self.settings_ui.as_ref().and_then(|ui| {
                                     let edit = ui.editing.as_ref()?;
-                                    Some((edit.field_idx, edit.buffer.clone(), edit.append))
+                                    Some((
+                                        edit.field_idx,
+                                        edit.buffer.text().to_string(),
+                                        edit.append,
+                                    ))
                                 });
                                 match edit {
                                     // The add buffers append to the list;
@@ -8713,38 +8824,6 @@ impl ApplicationHandler<Wakeup> for App {
                                         }
                                     }
                                     None => {}
-                                }
-                            }
-                            Key::Named(NamedKey::Backspace) => {
-                                if let Some(edit) =
-                                    self.settings_ui.as_mut().and_then(|ui| ui.editing.as_mut())
-                                {
-                                    edit.buffer.pop();
-                                    edit.error = false;
-                                }
-                            }
-                            // Spacebar arrives as Named(Space); a path or
-                            // command with a space must be typeable.
-                            Key::Named(NamedKey::Space) => {
-                                if let Some(edit) =
-                                    self.settings_ui.as_mut().and_then(|ui| ui.editing.as_mut())
-                                {
-                                    edit.buffer.push(' ');
-                                    edit.error = false;
-                                }
-                            }
-                            Key::Character(c) => {
-                                if !self.modifiers.control_key()
-                                    && !key::belongs_to_desktop(self.modifiers)
-                                {
-                                    if let Some(edit) = self
-                                        .settings_ui
-                                        .as_mut()
-                                        .and_then(|ui| ui.editing.as_mut())
-                                    {
-                                        edit.buffer.push_str(c.as_str());
-                                        edit.error = false;
-                                    }
                                 }
                             }
                             _ => {}
@@ -8799,59 +8878,6 @@ impl ApplicationHandler<Wakeup> for App {
                                     false,
                                 );
                                 ui.scroll_to_selected = true;
-                            }
-                        }
-                        Key::Named(NamedKey::Backspace) => {
-                            if let Some(ui) = self.settings_ui.as_mut() {
-                                ui.filter.pop();
-                                ui.selected = 0;
-                                ui.scroll_to_selected = true;
-                            }
-                        }
-                        // Spacebar arrives as Named(Space); see the picker.
-                        Key::Named(NamedKey::Space) => {
-                            if let Some(ui) = self.settings_ui.as_mut() {
-                                ui.filter.push(' ');
-                                ui.selected = 0;
-                                ui.scroll_to_selected = true;
-                            }
-                        }
-                        Key::Character(c) => {
-                            match keymap::lookup(&event.logical_key, event.physical_key, self.modifiers)
-                                .map(|b| b.action)
-                            {
-                                // ⌘, on the active settings tab is already
-                                // where it goes; swallow rather than reopen.
-                                Some(keymap::Action::ToggleSettings) => {}
-                                // A tab is not a modal: the tab-management
-                                // chords keep working over it — including
-                                // ⌘W, which is how this tab closes (§11).
-                                Some(
-                                    action @ (keymap::Action::ToggleFleetPicker
-                                    | keymap::Action::TogglePalette
-                                    | keymap::Action::CloseTab
-                                    | keymap::Action::NewTab
-                                    | keymap::Action::ToggleTabLayout
-                                    | keymap::Action::ActivateTab(_)
-                                    | keymap::Action::ActivateLastTab
-                                    | keymap::Action::PrevTab
-                                    | keymap::Action::NextTab),
-                                ) => self.perform(action, el),
-                                _ => {
-                                    // '/' focuses the filter (§11) — which is
-                                    // where every other character already
-                                    // goes, so focusing is swallowing it.
-                                    if c.as_str() != "/"
-                                        && !self.modifiers.control_key()
-                                        && !key::belongs_to_desktop(self.modifiers)
-                                    {
-                                        if let Some(ui) = self.settings_ui.as_mut() {
-                                            ui.filter.push_str(c.as_str());
-                                            ui.selected = 0;
-                                            ui.scroll_to_selected = true;
-                                        }
-                                    }
-                                }
                             }
                         }
                         _ => {}
@@ -8914,6 +8940,87 @@ impl ApplicationHandler<Wakeup> for App {
                         return;
                     }
 
+                    // The tab-management chords, ahead of the text path —
+                    // §11's rule, taken whole (⌘W closes it via perform's
+                    // Profiles arm).
+                    match keymap::lookup(&event.logical_key, event.physical_key, self.modifiers)
+                        .map(|b| b.action)
+                    {
+                        // ⌘⇧, on the active Profiles tab is already where it
+                        // goes; swallow rather than reopen.
+                        Some(keymap::Action::OpenProfiles) => {
+                            self.mark_chrome_dirty();
+                            return;
+                        }
+                        Some(
+                            action @ (keymap::Action::ToggleFleetPicker
+                            | keymap::Action::TogglePalette
+                            | keymap::Action::ToggleSettings
+                            | keymap::Action::CloseTab
+                            | keymap::Action::NewTab
+                            | keymap::Action::ToggleTabLayout
+                            | keymap::Action::ActivateTab(_)
+                            | keymap::Action::ActivateLastTab
+                            | keymap::Action::PrevTab
+                            | keymap::Action::NextTab),
+                        ) => {
+                            self.perform(action, el);
+                            self.mark_chrome_dirty();
+                            return;
+                        }
+                        _ => {}
+                    }
+
+                    // §12's text path, the Settings tab's exactly (#251).
+                    if let Some(cmd) = command_for(&event.logical_key, self.modifiers) {
+                        let editing =
+                            self.profiles_ui.as_ref().is_some_and(|ui| ui.editing.is_some());
+                        // A LEADING digit jumps the rail (its drawn 1–9
+                        // hints); once a filter is live, digits filter like
+                        // any other character — the two meanings are
+                        // separated by the filter's emptiness, not by
+                        // guesswork. Inside a buffer a digit is always text.
+                        let rail_jump = (!editing)
+                            .then(|| match &cmd {
+                                TextCommand::Insert(s) => s.parse::<usize>().ok(),
+                                _ => None,
+                            })
+                            .flatten()
+                            .filter(|d| (1..=9).contains(d))
+                            .filter(|_| {
+                                self.profiles_ui.as_ref().is_some_and(|ui| ui.filter.is_empty())
+                            });
+                        if let Some(d) = rail_jump {
+                            self.profiles_select_rail(d);
+                            self.mark_chrome_dirty();
+                            return;
+                        }
+                        // '/' focuses the filter — where every other
+                        // character already goes (§11).
+                        if !editing && cmd == TextCommand::Insert("/".to_string()) {
+                            self.mark_chrome_dirty();
+                            return;
+                        }
+                        let navigation = matches!(
+                            cmd,
+                            TextCommand::Move { .. }
+                                | TextCommand::Home { .. }
+                                | TextCommand::End { .. }
+                        );
+                        if editing || !navigation {
+                            let pasted = self.paste_text(&cmd);
+                            let copied = self
+                                .profiles_ui
+                                .as_mut()
+                                .and_then(|ui| ui.text_key(cmd, pasted.as_deref()));
+                            if let Some(text) = copied {
+                                self.set_clipboard(text);
+                            }
+                            self.mark_chrome_dirty();
+                            return;
+                        }
+                    }
+
                     // A typed edit owns the keys before the list does.
                     if self.profiles_ui.as_ref().is_some_and(|ui| ui.editing.is_some()) {
                         match &event.logical_key {
@@ -8925,7 +9032,7 @@ impl ApplicationHandler<Wakeup> for App {
                             Key::Named(NamedKey::Enter) => {
                                 let edit = self.profiles_ui.as_ref().and_then(|ui| {
                                     let edit = ui.editing.as_ref()?;
-                                    Some((edit.field_idx, edit.buffer.clone()))
+                                    Some((edit.field_idx, edit.buffer.text().to_string()))
                                 });
                                 if let Some((idx, buffer)) = edit {
                                     let parsed = self
@@ -8956,36 +9063,6 @@ impl ApplicationHandler<Wakeup> for App {
                                                 edit.error = true;
                                             }
                                         }
-                                    }
-                                }
-                            }
-                            Key::Named(NamedKey::Backspace) => {
-                                if let Some(edit) =
-                                    self.profiles_ui.as_mut().and_then(|ui| ui.editing.as_mut())
-                                {
-                                    edit.buffer.pop();
-                                    edit.error = false;
-                                }
-                            }
-                            Key::Named(NamedKey::Space) => {
-                                if let Some(edit) =
-                                    self.profiles_ui.as_mut().and_then(|ui| ui.editing.as_mut())
-                                {
-                                    edit.buffer.push(' ');
-                                    edit.error = false;
-                                }
-                            }
-                            Key::Character(c) => {
-                                if !self.modifiers.control_key()
-                                    && !key::belongs_to_desktop(self.modifiers)
-                                {
-                                    if let Some(edit) = self
-                                        .profiles_ui
-                                        .as_mut()
-                                        .and_then(|ui| ui.editing.as_mut())
-                                    {
-                                        edit.buffer.push_str(c.as_str());
-                                        edit.error = false;
                                     }
                                 }
                             }
@@ -9044,80 +9121,6 @@ impl ApplicationHandler<Wakeup> for App {
                                 ui.scroll_to_selected = true;
                             }
                         }
-                        Key::Named(NamedKey::Backspace) => {
-                            if let Some(ui) = self.profiles_ui.as_mut() {
-                                ui.filter.pop();
-                                ui.selected = 0;
-                                ui.scroll_to_selected = true;
-                            }
-                        }
-                        Key::Named(NamedKey::Space) => {
-                            if let Some(ui) = self.profiles_ui.as_mut() {
-                                ui.filter.push(' ');
-                                ui.selected = 0;
-                                ui.scroll_to_selected = true;
-                            }
-                        }
-                        Key::Character(c) => {
-                            match keymap::lookup(&event.logical_key, event.physical_key, self.modifiers)
-                                .map(|b| b.action)
-                            {
-                                // ⌘⇧, on the active Profiles tab is already
-                                // where it goes; swallow rather than reopen.
-                                Some(keymap::Action::OpenProfiles) => {}
-                                // A tab is not a modal: the tab-management
-                                // chords keep working over it — ⌘W closes it
-                                // via perform's Profiles arm.
-                                Some(
-                                    action @ (keymap::Action::ToggleFleetPicker
-                                    | keymap::Action::TogglePalette
-                                    | keymap::Action::ToggleSettings
-                                    | keymap::Action::CloseTab
-                                    | keymap::Action::NewTab
-                                    | keymap::Action::ToggleTabLayout
-                                    | keymap::Action::ActivateTab(_)
-                                    | keymap::Action::ActivateLastTab
-                                    | keymap::Action::PrevTab
-                                    | keymap::Action::NextTab),
-                                ) => self.perform(action, el),
-                                _ => {
-                                    // A LEADING digit jumps the rail (its
-                                    // drawn 1–9 hints); once a filter is
-                                    // live, digits filter like any other
-                                    // character — the two meanings are
-                                    // separated by the filter's emptiness,
-                                    // not by guesswork.
-                                    let digit = c
-                                        .as_str()
-                                        .parse::<usize>()
-                                        .ok()
-                                        .filter(|d| (1..=9).contains(d));
-                                    let filter_empty = self
-                                        .profiles_ui
-                                        .as_ref()
-                                        .is_some_and(|ui| ui.filter.is_empty());
-                                    if let (Some(d), true) = (digit, filter_empty) {
-                                        if !self.modifiers.control_key()
-                                            && !key::belongs_to_desktop(self.modifiers)
-                                        {
-                                            self.profiles_select_rail(d);
-                                        }
-                                    } else if c.as_str() != "/"
-                                        && !self.modifiers.control_key()
-                                        && !key::belongs_to_desktop(self.modifiers)
-                                    {
-                                        // '/' focuses the filter (§11) —
-                                        // where every other character
-                                        // already goes.
-                                        if let Some(ui) = self.profiles_ui.as_mut() {
-                                            ui.filter.push_str(c.as_str());
-                                            ui.selected = 0;
-                                            ui.scroll_to_selected = true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
                         _ => {}
                     }
                     self.mark_chrome_dirty();
@@ -9135,23 +9138,33 @@ impl ApplicationHandler<Wakeup> for App {
                     // open — the settings tab's edit-buffer discipline. Esc
                     // drops the entry, not the screen; a second Esc leaves.
                     if self.screen == AppScreen::Fleet && self.enroll_entry.is_some() {
-                        // Paste lands in the box the way typing would — same
-                        // alphabet filter, same clamp — resolved through the
-                        // keymap so whatever chord the user bound to Paste
-                        // works here too. Without this the chord was
-                        // swallowed by the entry and an 8-character code had
-                        // to be typed by hand off another screen (#228).
-                        if let Some(binding) =
-                            keymap::lookup(&event.logical_key, event.physical_key, self.modifiers)
-                        {
-                            if matches!(binding.action, crate::keymap::Action::Paste) {
-                                let text = self
-                                    .clipboard
-                                    .as_mut()
-                                    .and_then(|c| c.get_text().ok())
-                                    .unwrap_or_default();
+                        // Paste and typing land in the box the same way —
+                        // same alphabet filter, same clamp. This box was the
+                        // only one that ever took a paste (#228); #251 gave
+                        // the other six the same path, and this one now
+                        // shares it, minus the free insert: a code has an
+                        // alphabet, so `push_code_chars` stays in the middle.
+                        if let Some(cmd) = command_for(&event.logical_key, self.modifiers) {
+                            let text = match &cmd {
+                                TextCommand::Insert(s) => Some(s.clone()),
+                                TextCommand::Paste => self.paste_text(&cmd),
+                                _ => None,
+                            };
+                            if let Some(text) = text {
                                 if let Some(edit) = self.enroll_entry.as_mut() {
                                     push_code_chars(edit, &text);
+                                }
+                                self.mark_chrome_dirty();
+                                return;
+                            }
+                            // ⌫ and the caret keys are ordinary text editing.
+                            if let Some(edit) = self.enroll_entry.as_mut() {
+                                let out = edit.buffer.apply(cmd, None);
+                                if out.changed {
+                                    edit.error = false;
+                                }
+                                if let Some(copied) = out.copied {
+                                    self.set_clipboard(copied);
                                 }
                                 self.mark_chrome_dirty();
                                 return;
@@ -9165,7 +9178,7 @@ impl ApplicationHandler<Wakeup> for App {
                                 let code = self
                                     .enroll_entry
                                     .as_ref()
-                                    .map(|e| e.buffer.trim().to_string())
+                                    .map(|e| e.buffer.text().trim().to_string())
                                     .unwrap_or_default();
                                 if code.is_empty() {
                                     // An empty Enter marks the box rather
@@ -9176,21 +9189,6 @@ impl ApplicationHandler<Wakeup> for App {
                                 } else {
                                     self.enroll_entry = None;
                                     self.spawn_enroll(code);
-                                }
-                            }
-                            Key::Named(NamedKey::Backspace) => {
-                                if let Some(edit) = self.enroll_entry.as_mut() {
-                                    edit.buffer.pop();
-                                    edit.error = false;
-                                }
-                            }
-                            Key::Character(c) => {
-                                if !self.modifiers.control_key()
-                                    && !key::belongs_to_desktop(self.modifiers)
-                                {
-                                    if let Some(edit) = self.enroll_entry.as_mut() {
-                                        push_code_chars(edit, c.as_str());
-                                    }
                                 }
                             }
                             _ => {}
@@ -10054,7 +10052,7 @@ mod code_entry_tests {
     fn entry() -> crate::settings_ui::EditBuffer {
         crate::settings_ui::EditBuffer {
             field_idx: 0,
-            buffer: String::new(),
+            buffer: TextField::default(),
             error: true,
             append: false,
         }
@@ -10068,12 +10066,13 @@ mod code_entry_tests {
         // that has to be pre-cleaned is barely better than no paste (#228).
         let mut edit = entry();
         push_code_chars(&mut edit, "  wxkm-4t9c\n");
-        assert_eq!(edit.buffer, "WXKM4T9C", "separators and whitespace drop, case folds");
+        assert_eq!(edit.buffer.text(), "WXKM4T9C", "separators and whitespace drop, case folds");
         assert!(!edit.error, "accepted input clears the error mark");
 
         push_code_chars(&mut edit, "MORE");
         assert_eq!(
-            edit.buffer, "WXKM4T9C",
+            edit.buffer.text(),
+            "WXKM4T9C",
             "the clamp holds for paste exactly as for a held key"
         );
     }
@@ -10082,7 +10081,7 @@ mod code_entry_tests {
     fn junk_pastes_change_nothing() {
         let mut edit = entry();
         push_code_chars(&mut edit, " \n\t—·—");
-        assert_eq!(edit.buffer, "", "nothing from the alphabet, nothing in the box");
+        assert_eq!(edit.buffer.text(), "", "nothing from the alphabet, nothing in the box");
         assert!(edit.error, "and an error mark is not cleared by input that put nothing in");
     }
 
@@ -10095,7 +10094,8 @@ mod code_entry_tests {
         let mut edit = entry();
         push_code_chars(&mut edit, "0O1IlLuUWX2Z");
         assert_eq!(
-            edit.buffer, "WX2Z",
+            edit.buffer.text(),
+            "WX2Z",
             "every excluded confusable drops; alphabet characters land in order"
         );
     }
@@ -10303,13 +10303,13 @@ mod palette_tests {
 
 #[cfg(test)]
 mod settings_ime_tests {
-    use super::SettingsUiState;
+    use super::{SettingsUiState, TextCommand, TextField};
 
     fn state() -> SettingsUiState {
         SettingsUiState {
             selected: 3,
             category: "Appearance".into(),
-            filter: String::new(),
+            filter: TextField::default(),
             scroll: 0.0,
             scroll_to_selected: false,
             actions: Vec::new(),
@@ -10329,7 +10329,7 @@ mod settings_ime_tests {
         // filter typed into the hidden shell instead.
         let mut ui = state();
         ui.commit_text("設定");
-        assert_eq!(ui.filter, "設定", "no edit open: the filter is where characters go");
+        assert_eq!(ui.filter.text(), "設定", "no edit open: the filter is where characters go");
         assert_eq!(ui.selected, 0, "a filter edit resets the selection, exactly like typing");
         assert!(ui.scroll_to_selected, "and brings it into view");
     }
@@ -10339,13 +10339,17 @@ mod settings_ime_tests {
         let mut ui = state();
         ui.editing = Some(crate::settings_ui::EditBuffer {
             field_idx: 0,
-            buffer: "nu ".into(),
+            buffer: TextField::new("nu "),
             error: true,
             append: false,
         });
         ui.commit_text("シェル");
         let edit = ui.editing.as_ref().expect("still editing");
-        assert_eq!(edit.buffer, "nu シェル", "a typed edit owns the characters, as the key path says");
+        assert_eq!(
+            edit.buffer.text(),
+            "nu シェル",
+            "a typed edit owns the characters, as the key path says"
+        );
         assert!(!edit.error, "new input clears a stale parse error, as typing does");
         assert!(ui.filter.is_empty(), "nothing leaks into the filter");
     }
@@ -10361,11 +10365,71 @@ mod settings_ime_tests {
         assert!(ui.filter.is_empty(), "the menu owns the keys");
         assert!(ui.editing.is_none());
     }
+
+    #[test]
+    fn paste_lands_in_an_open_edit_buffer() {
+        // The reported bug (#251): ⌘V in a settings text field did nothing at
+        // all. The guard that makes a chord "not text" is `super_key()`,
+        // which is also the paste chord, and the `return` under it stopped
+        // the global keymap table from ever seeing the key.
+        let mut ui = state();
+        ui.editing = Some(crate::settings_ui::EditBuffer {
+            field_idx: 0,
+            buffer: TextField::new("/bin/"),
+            error: true,
+            append: false,
+        });
+        ui.text_key(TextCommand::Paste, Some("zsh"));
+        let edit = ui.editing.as_ref().expect("still editing");
+        assert_eq!(edit.buffer.text(), "/bin/zsh", "the clipboard landed at the caret");
+        assert!(!edit.error, "and cleared the stale parse error, as typing does");
+        assert!(ui.filter.is_empty(), "nothing leaked into the filter");
+    }
+
+    #[test]
+    fn paste_lands_in_the_filter_when_no_edit_is_open() {
+        let mut ui = state();
+        ui.text_key(TextCommand::Paste, Some("font"));
+        assert_eq!(ui.filter.text(), "font", "the filter is where text goes with no buffer open");
+        assert_eq!(ui.selected, 0, "a filter edit resets the selection, exactly like typing");
+        assert!(ui.scroll_to_selected, "and brings it into view");
+    }
+
+    #[test]
+    fn a_copy_hands_the_selection_back_to_the_caller() {
+        // The app owns the clipboard handle, so `text_key` returns the text
+        // to write rather than writing it — the same seam paste comes in on.
+        let mut ui = state();
+        ui.editing = Some(crate::settings_ui::EditBuffer {
+            field_idx: 0,
+            buffer: TextField::new("obsidian"),
+            error: false,
+            append: false,
+        });
+        if let Some(edit) = ui.editing.as_mut() {
+            edit.buffer.select_all();
+        }
+        assert_eq!(
+            ui.text_key(TextCommand::Copy, None).as_deref(),
+            Some("obsidian"),
+            "the caller gets the text to put on the clipboard"
+        );
+    }
+
+    #[test]
+    fn an_open_dropdown_swallows_a_paste_too() {
+        // The menu owns the keys; a paste behind it must not edit a filter
+        // the user cannot see — the composed-text rule, for the clipboard.
+        let mut ui = state();
+        ui.menu = Some((1, 0));
+        ui.text_key(TextCommand::Paste, Some("nord"));
+        assert!(ui.filter.is_empty(), "the menu owns the keys");
+    }
 }
 
 #[cfg(test)]
 mod value_picker_tests {
-    use super::ValuePickerState;
+    use super::{TextField, ValuePickerState};
 
     fn picker(options: &[&str], filter: &str) -> ValuePickerState {
         ValuePickerState {
@@ -10374,7 +10438,7 @@ mod value_picker_tests {
             options: options.iter().map(|s| (*s).to_string()).collect(),
             visible: Vec::new(),
             selected: 0,
-            filter: filter.to_string(),
+            filter: TextField::new(filter),
             scroll: 0.0,
             scroll_to_selected: true,
         }

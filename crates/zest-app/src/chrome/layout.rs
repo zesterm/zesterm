@@ -828,9 +828,23 @@ fn picker_overlay(
         let (qtext, qcolor, caret_x, text_x) = if picker.filter.is_empty() {
             ("Search sessions, blocks, hosts".to_string(), colors.text_faint, qx, qx + 14.0 * s)
         } else {
-            let qw = measure(&picker.filter, prompt_px, false, 0.0).min(w * 0.6);
-            (picker.filter.clone(), colors.text_active, qx + qw + 2.0 * s, qx)
+            // Where the caret actually is, not where the text ends: arrowing
+            // back into a query has to show you where you are (#251).
+            let at = measure(&picker.filter[..picker.filter_caret.at], prompt_px, false, 0.0);
+            (picker.filter.clone(), colors.text_active, qx + at + 2.0 * s, qx)
         };
+        if let Some((lo, hi)) = picker.filter_caret.selection {
+            let (a, b) = (
+                measure(&picker.filter[..lo], prompt_px, false, 0.0),
+                measure(&picker.filter[..hi], prompt_px, false, 0.0),
+            );
+            out.rects.push(RectInstance::rounded(
+                [qx + a, qy + (qh - 18.0 * s) / 2.0, b - a, 18.0 * s],
+                2.0 * s,
+                colors.accent_soft,
+                no_clip,
+            ));
+        }
         let qw = measure(&qtext, prompt_px, false, 0.0).min(w * 0.6);
         out.texts.push(TextRun {
             text: qtext,
@@ -1236,16 +1250,39 @@ fn palette_overlay(
     } else {
         (palette.filter.clone(), colors.text_active)
     };
+    let filter_x = panel[0] + PICKER_PAD * s;
+    if let Some((lo, hi)) = palette.filter_caret.selection {
+        let (a, b) = (
+            measure(&palette.filter[..lo], m.font_px, false, 0.0),
+            measure(&palette.filter[..hi], m.font_px, false, 0.0),
+        );
+        out.rects.push(RectInstance::rounded(
+            [filter_x + a, panel[1] + PICKER_PAD * s, b - a, m.line_height],
+            2.0 * s,
+            colors.accent_soft,
+            panel,
+        ));
+    }
     out.texts.push(TextRun {
         px: m.font_px,
         bold: false,
             tracking: 0.0,
         text: filter_text,
-        pos: [panel[0] + PICKER_PAD * s, text_baseline(m, panel[1], filter_h)],
+        pos: [filter_x, text_baseline(m, panel[1], filter_h)],
         max_width: w - 2.0 * PICKER_PAD * s,
         color: filter_color,
         clip: panel,
     });
+    // The caret, once there is something to put it in. Over an empty
+    // placeholder it reads as a stray line rather than as a cursor.
+    if !palette.filter.is_empty() {
+        let at = measure(&palette.filter[..palette.filter_caret.at], m.font_px, false, 0.0);
+        out.rects.push(RectInstance::filled(
+            [filter_x + at, panel[1] + PICKER_PAD * s, (1.5 * s).max(1.0), m.line_height],
+            colors.text_active,
+            panel,
+        ));
+    }
     out.rects.push(RectInstance::filled(
         [panel[0], panel[1] + filter_h, w, HAIRLINE * s],
         colors.line,
@@ -2827,6 +2864,7 @@ mod tests {
             borderless(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
         mo.palette = Some(super::super::model::PaletteModel {
             filter: String::new(),
+            filter_caret: Default::default(),
             rows: Vec::new(),
             selected: 0,
             scroll: 0.0,
@@ -3091,6 +3129,7 @@ mod tests {
             ],
             selected: 1,
             filter: String::new(),
+            filter_caret: Default::default(),
             scroll: 0.0,
             ensure_visible: false,
             hosts_searched: 4,
@@ -3156,6 +3195,7 @@ mod tests {
             rows: palette_rows(2),
             selected: 1,
             filter: String::new(),
+            filter_caret: Default::default(),
             scroll: 0.0,
             ensure_visible: false,
         });
@@ -3201,6 +3241,7 @@ mod tests {
             rows,
             selected,
             filter: String::new(),
+            filter_caret: Default::default(),
             scroll: 1e9,
             ensure_visible: true,
         });
@@ -3342,6 +3383,7 @@ mod tests {
             empty: None,
             selected,
             filter: String::new(),
+            filter_caret: Default::default(),
             scroll: 0.0,
             ensure_visible,
             modified_total: 0,

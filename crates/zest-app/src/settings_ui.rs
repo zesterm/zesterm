@@ -30,7 +30,7 @@ pub enum RowAction {
 /// the input-mode collision is resolved by construction, not by guessing.
 pub struct EditBuffer {
     pub field_idx: usize,
-    pub buffer: String,
+    pub buffer: crate::text_field::TextField,
     /// The last Enter did not parse; drawn as an error until the text changes.
     pub error: bool,
     /// Enter *appends* to a list field (a new tag, a new env entry) instead
@@ -342,7 +342,9 @@ fn setting_row(
     });
     let cell = match editing {
         Some(edit) => SettingsValueCell::Editing {
-            buffer: edit.buffer.clone(),
+            buffer: edit.buffer.text().to_string(),
+            caret: edit.buffer.caret(),
+            selection: edit.buffer.selection(),
             error: edit.error,
         },
         None => value_cell(field, value, installed),
@@ -1106,7 +1108,12 @@ mod tests {
         let all = fields();
         let idx = all.iter().position(|f| f.key == "typography.size_pt").expect("exists");
         let edit =
-            EditBuffer { field_idx: idx, buffer: "18".to_string(), error: false, append: false };
+            EditBuffer {
+            field_idx: idx,
+            buffer: crate::text_field::TextField::new("18"),
+            error: false,
+            append: false,
+        };
         let (rows, _) = build_rows(
             &all,
             &values(),
@@ -1127,7 +1134,12 @@ mod tests {
             .expect("row exists");
         assert_eq!(
             cell,
-            SettingsValueCell::Editing { buffer: "18".to_string(), error: false },
+            SettingsValueCell::Editing {
+                buffer: "18".to_string(),
+                caret: 2,
+                selection: None,
+                error: false
+            },
             "while a buffer is open the row draws the buffer, or typing is invisible"
         );
     }

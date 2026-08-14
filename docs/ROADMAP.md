@@ -609,6 +609,23 @@ entry stay). The resulting work items, measurements in the handoff README — **
       a blank panel as if broken. Drive-by: `watch_config` now watches
       `zesterm.toml` in portable mode instead of a `config.toml` nobody
       writes.
+- [x] **One text field, for every entry in the app** ([#251](https://github.com/zesterm/zesterm/issues/251)).
+      `zest-app/src/text_field.rs`: a `TextField` with a caret and a
+      selection, and a pure `command_for` that decodes a key into a
+      `TextCommand`. The settings and profiles edit buffers, the settings,
+      profiles, palette, picker and value-picker filters, and the enrolment
+      code box all drive it, so caret motion (⌥ by word, Home/End), ⌘A, and
+      ⌘C/⌘X/⌘V — Ctrl+Shift too, as in the grid — work the same everywhere.
+      **Six of the seven entries could not be pasted into at all**: each
+      hand-rolled `Key::Character` behind `!belongs_to_desktop(mods)`, which
+      *is* `super_key()`, and then `return`ed before the global keymap
+      dispatch — so ⌘V was swallowed twice over, silently. #228 fixed one box
+      and left the rest; the seventh, the value picker's filter, had no guard
+      at all and typed a literal `v`. The caret is now a rect at the
+      insertion point instead of a `▏` appended to the run, with the entry
+      scrolled to the caret rather than the tail — the fix that makes
+      arrowing back into a long path mean anything. See "Traps already paid
+      for" in `AGENTS.md`.
 - [x] **The typed profiles layer** (design screen 12's config half,
       [docs/design/client-ui/](design/client-ui/README.md) §12; #130).
       `zest_config::profiles` — outside the `fs` feature, like `ui`, so the

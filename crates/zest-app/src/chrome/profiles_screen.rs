@@ -929,6 +929,7 @@ mod tests {
             ],
             selected: 1,
             filter: String::new(),
+            filter_caret: Default::default(),
             scroll: 0.0,
             ensure_visible: false,
             empty: None,

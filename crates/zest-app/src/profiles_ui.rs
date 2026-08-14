@@ -156,7 +156,9 @@ pub fn build_profile_rows(
             let value = effective_value(field, resolved, &overrides, ctx);
             let cell = match editing.filter(|e| e.field_idx == idx) {
                 Some(edit) => SettingsValueCell::Editing {
-                    buffer: edit.buffer.clone(),
+                    buffer: edit.buffer.text().to_string(),
+                    caret: edit.buffer.caret(),
+                    selection: edit.buffer.selection(),
                     error: edit.error,
                 },
                 None => cell_for(field, &value, resolved, ctx),

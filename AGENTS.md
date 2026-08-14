@@ -889,6 +889,22 @@ Each of these cost real time and is documented where it bites:
   the startup line is the only sign. Keychain keys access to the *binary*, so a
   fresh build is a fresh prompt. Start the daemon yourself with `--ephemeral`
   for the edit-run loop.
+- **A UI text entry that `return`s before the keymap table swallows every
+  chord that reaches it**, and the guard that makes a chord "not text" is the
+  same guard that eats ⌘V. Each entry hand-rolled `Key::Character` behind
+  `!key::belongs_to_desktop(mods)` — which *is* `super_key()` — so ⌘V fell to
+  `_ => {}`, and the `return` under the block stopped the global dispatch at
+  the bottom of `window_event` from ever seeing it. Nothing logs; the key
+  simply does nothing. The Ctrl+Shift+V spelling dies on the sibling
+  `control_key()` half, so it is broken on *both* platforms in two different
+  places, and neither is where anyone looks. #228 paid for this in the
+  enrolment code box and fixed only that box; #251 found the other six — the
+  settings and profiles edit buffers, four filters — plus the value picker's,
+  which had no guard at all and typed a literal `v`. The fix is one
+  `text_field::command_for` consulted **before** each block's own keys, and
+  the rule is that an entry never invents its own: `zest-app/src/text_field.rs`
+  owns caret, selection and every clipboard chord, and the call sites own only
+  Enter, Escape and their list navigation.
 - **The agent shell sets `NO_COLOR=1`**, and a pty child inherits it. PowerShell
   honours it by forcing `$PSStyle.OutputRendering = 'PlainText'`, which strips
   every escape *before* it reaches the pty — so a colour test launched from here
