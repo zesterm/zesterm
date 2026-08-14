@@ -506,9 +506,13 @@ fn caret_of(field: &TextField) -> crate::chrome::model::Caret {
 
 fn push_code_chars(edit: &mut crate::settings_ui::EditBuffer, text: &str) {
     for ch in text.chars() {
-        // The code is ASCII, so bytes and characters agree here and the
-        // clamp can read the length directly.
-        if edit.buffer.text().len() >= ENROLL_CODE_LENGTH {
+        // The code is ASCII, so bytes and characters agree here. The clamp
+        // counts what will *remain*: with a selection open — ⌘A before a
+        // paste, the obvious way to replace a code — the first insert
+        // removes it, and comparing the whole buffer would break the loop
+        // before it, leaving a full box that can never be retyped.
+        let selected = edit.buffer.selection().map_or(0, |(a, b)| b - a);
+        if edit.buffer.text().len().saturating_sub(selected) >= ENROLL_CODE_LENGTH {
             break;
         }
         let up = ch.to_ascii_uppercase();
@@ -10075,6 +10079,21 @@ mod code_entry_tests {
             "WXKM4T9C",
             "the clamp holds for paste exactly as for a held key"
         );
+    }
+
+    #[test]
+    fn select_all_then_paste_replaces_a_full_code() {
+        // The clamp counts what will remain, not what is there: with the box
+        // full and everything selected, breaking on the current length would
+        // leave a code that can never be replaced — and ⌘A-then-paste is
+        // exactly how someone corrects a mistyped one.
+        let mut edit = entry();
+        push_code_chars(&mut edit, "WXKM4T9C");
+        assert_eq!(edit.buffer.text(), "WXKM4T9C", "the box is full");
+
+        edit.buffer.select_all();
+        push_code_chars(&mut edit, "2345PQRS");
+        assert_eq!(edit.buffer.text(), "2345PQRS", "the selection was replaced, not refused");
     }
 
     #[test]
