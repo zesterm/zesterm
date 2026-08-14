@@ -50,6 +50,22 @@ pub fn srgb_to_linear(v: f32) -> f32 {
     }
 }
 
+/// Sides of a rect, for [`RectInstance::border_omit`].
+///
+/// CSS gets a one-sided stroke by giving the other three a width of zero, and
+/// the *taper* falls out of that: a `border-left` on a box with `border-radius`
+/// thins to nothing as the corner arc turns into the zero-width top border. The
+/// block header's state rail and the active tab's accent rule are both that
+/// shape, so the pipeline has to be able to say which sides a border skips —
+/// clipping a full-thickness ring cuts it square instead, which is visibly the
+/// wrong picture.
+pub mod border_sides {
+    pub const TOP: u32 = 1 << 0;
+    pub const RIGHT: u32 = 1 << 1;
+    pub const BOTTOM: u32 = 1 << 2;
+    pub const LEFT: u32 = 1 << 3;
+}
+
 /// Shape selector for the rect pipeline.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +103,14 @@ pub struct RectInstance {
     pub shadow_blur: f32,
     pub shadow_alpha: f32,
     pub shape: u32,
+    /// Sides whose border is *not* drawn, from [`border_sides`].
+    ///
+    /// Phrased as an omission rather than a set of sides on purpose: zero is
+    /// both what `Zeroable` produces and the honest reading "omit nothing", so
+    /// every `..RectInstance::filled(..)` call site keeps its full ring without
+    /// being touched. A set-of-sides field would default to "no border at all"
+    /// and silently erase every existing stroke.
+    pub border_omit: u32,
 }
 
 impl RectInstance {
@@ -104,6 +128,7 @@ impl RectInstance {
             shadow_blur: 0.0,
             shadow_alpha: 0.0,
             shape: RectShape::RoundedBox as u32,
+            border_omit: 0,
         }
     }
 
@@ -202,7 +227,13 @@ mod tests {
         // vertex attributes need no 16-byte padding; only uniforms do, which is
         // why GlyphInstance carries none.
         assert_eq!(std::mem::size_of::<GlyphInstance>(), 64);
-        assert_eq!(std::mem::size_of::<RectInstance>(), 112);
+        // 116, not 112: `border_omit` is worth its four bytes. Rect instances
+        // are bounded by runs of same-coloured background, a few thousand a
+        // frame, where the glyphs above are tens of thousands -- and the
+        // alternative was packing the mask into `shape`'s spare bits, which
+        // saves nothing measurable and hides the field from anyone reading the
+        // struct.
+        assert_eq!(std::mem::size_of::<RectInstance>(), 116);
         assert_eq!(std::mem::size_of::<DecorInstance>(), 64);
         // std140/430 alignment: uniform buffers need 16-byte alignment.
         assert_eq!(std::mem::size_of::<Globals>() % 16, 0);
@@ -244,5 +275,21 @@ mod tests {
         assert_eq!(r.border_width, 0.0);
         assert_eq!(r.shape, RectShape::RoundedBox as u32);
         assert!(r.border.is_transparent());
+    }
+
+    #[test]
+    fn a_rect_omits_no_side_unless_asked() {
+        // Every bordered rect in the app is written as a struct update over
+        // `filled`, so this default is what keeps their rings whole. Flip the
+        // sense of the field and each one silently loses its border.
+        let r = RectInstance::filled([0.0, 0.0, 10.0, 20.0], LinearRgba::opaque(255, 0, 0), [0.0, 0.0, 100.0, 100.0]);
+        assert_eq!(r.border_omit, 0, "zero must mean a border on all four sides");
+        assert_eq!(RectInstance::rounded([0.0, 0.0, 10.0, 20.0], 4.0, LinearRgba::TRANSPARENT, [0.0; 4]).border_omit, 0);
+    }
+
+    #[test]
+    fn the_four_sides_are_distinct_bits() {
+        use border_sides::{BOTTOM, LEFT, RIGHT, TOP};
+        assert_eq!(TOP | RIGHT | BOTTOM | LEFT, 0b1111, "one bit each, no overlap");
     }
 }

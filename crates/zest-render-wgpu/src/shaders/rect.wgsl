@@ -16,6 +16,7 @@ struct RectInstance {
     @location(7) shadow_blur: f32,
     @location(8) shadow_alpha: f32,
     @location(9) shape: u32,
+    @location(10) border_omit: u32,
 };
 
 struct RectVsOut {
@@ -29,10 +30,16 @@ struct RectVsOut {
     @location(6) clip_rect: vec4<f32>,
     @location(7) params: vec3<f32>,   // border_width, shadow_blur, shadow_alpha
     @location(8) @interpolate(flat) shape: u32,
+    @location(9) @interpolate(flat) border_omit: u32,
 };
 
 const SHAPE_ROUNDED_BOX: u32 = 0u;
 const SHAPE_HULL_OF_TWO: u32 = 1u;
+
+const SIDE_TOP: u32 = 1u;
+const SIDE_RIGHT: u32 = 2u;
+const SIDE_BOTTOM: u32 = 4u;
+const SIDE_LEFT: u32 = 8u;
 
 @vertex
 fn vs_rect(@builtin(vertex_index) vi: u32, inst: RectInstance) -> RectVsOut {
@@ -64,6 +71,7 @@ fn vs_rect(@builtin(vertex_index) vi: u32, inst: RectInstance) -> RectVsOut {
     out.clip_rect = inst.clip;
     out.params = vec3<f32>(inst.border_width, inst.shadow_blur, inst.shadow_alpha);
     out.shape = inst.shape;
+    out.border_omit = inst.border_omit;
     return out;
 }
 
@@ -85,6 +93,47 @@ fn sd_round_box(p: vec2<f32>, rect: vec4<f32>, radii: vec4<f32>) -> f32 {
 
     let d = abs(q) - half + vec2<f32>(r);
     return length(max(d, vec2<f32>(0.0))) + min(max(d.x, d.y), 0.0) - r;
+}
+
+// How far each side moves inwards to reach the border's inner edge, as
+// (top, right, bottom, left). A side whose border is omitted does not move.
+fn border_inset(bw: f32, omit: u32) -> vec4<f32> {
+    return vec4<f32>(
+        select(bw, 0.0, (omit & SIDE_TOP) != 0u),
+        select(bw, 0.0, (omit & SIDE_RIGHT) != 0u),
+        select(bw, 0.0, (omit & SIDE_BOTTOM) != 0u),
+        select(bw, 0.0, (omit & SIDE_LEFT) != 0u),
+    );
+}
+
+// The size is clamped at zero: a border wider than the box it rings would
+// otherwise give `sd_round_box` a negative half-extent, and a negative radius
+// with it, which reads as a small solid blob in the middle rather than as the
+// solid stroke it should be.
+fn inset_rect(rect: vec4<f32>, inset: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(
+        rect.x + inset.w,
+        rect.y + inset.x,
+        max(rect.z - inset.w - inset.y, 0.0),
+        max(rect.w - inset.x - inset.z, 0.0),
+    );
+}
+
+// Each corner shrinks by the larger of the two insets that meet there. That
+// choice is the whole taper: with only `left` inset, the inner top-left arc
+// lands tangent to the outer one at the top of the box, so the ring closes to
+// zero exactly where the corner stops being vertical -- which is what CSS
+// draws for `border-left` on a `border-radius` box.
+fn inset_radii(radii: vec4<f32>, inset: vec4<f32>) -> vec4<f32> {
+    return max(
+        vec4<f32>(
+            radii.x - max(inset.w, inset.x),   // top-left:     left, top
+            radii.y - max(inset.y, inset.x),   // top-right:    right, top
+            radii.z - max(inset.y, inset.z),   // bottom-right: right, bottom
+            radii.w - max(inset.w, inset.z),   // bottom-left:  left, bottom
+        ),
+        vec4<f32>(0.0),
+    );
 }
 
 @fragment
@@ -118,10 +167,20 @@ fn fs_rect(in: RectVsOut) -> @location(0) vec4<f32> {
         color = vec4<f32>(0.0, 0.0, 0.0, s * shadow_alpha);
     }
 
-    // Border, then fill inside it.
+    // Border, then fill inside it. The inner edge is a rounded box inset per
+    // side rather than `d + bw`, which only ever produces a uniform ring. The
+    // two agree exactly when nothing is omitted: offsetting a rounded box's SDF
+    // by `bw` *is* the box deflated by `bw` with every radius reduced by `bw`,
+    // so this is not a change for the rects that ask for all four sides.
     let bw = in.params.x;
     if bw > 0.0 {
-        let inner = 1.0 - smoothstep(-aa, aa, d + bw);
+        let inset = border_inset(bw, in.border_omit);
+        let radii_in = inset_radii(in.radii, inset);
+        var di = sd_round_box(in.pixel, inset_rect(in.rect, inset), radii_in);
+        if in.shape == SHAPE_HULL_OF_TWO {
+            di = min(di, sd_round_box(in.pixel, inset_rect(in.rect_b, inset), radii_in));
+        }
+        let inner = 1.0 - smoothstep(-aa, aa, di);
         let ring = max(coverage - inner, 0.0);
         color = over(in.fill * inner, color);
         color = over(in.border * ring, color);

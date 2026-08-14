@@ -11,7 +11,7 @@
 //! in a compact, state-coloured form. The live prompt — a block still in
 //! `Prompt` state — is never overlaid; that is where the user is typing.
 
-use zest_render_wgpu::{LinearRgba, RectInstance};
+use zest_render_wgpu::{border_sides, LinearRgba, RectInstance};
 
 use super::hit::{ChromeHitMap, HitRegion};
 use super::layout::TextRun;
@@ -109,10 +109,6 @@ pub fn layout_blocks(
         }
 
         let fill = if v.running { colors.panel_bg } else { colors.block_header_bg };
-        out.rects.push(RectInstance::rounded(band, RADIUS * s, fill, clip));
-        out.hit.push(band, HitRegion::BlockHeader(v.id));
-
-        // The state rail. Radius 1: a 2px rect cannot honestly round more.
         let rail_color = if v.interrupted {
             colors.text_faint
         } else if v.running {
@@ -124,12 +120,20 @@ pub fn layout_blocks(
         } else {
             colors.success
         };
-        out.rects.push(RectInstance::rounded(
-            [band[0], band[1], RAIL * s, band[3]],
-            1.0 * s,
-            rail_color,
-            clip,
-        ));
+        // The state rail is the header's own left border, not a rect beside it:
+        // the mock is `border-radius:8px; border-left:2px solid <state>` on one
+        // box, and CSS thins that stroke to nothing as the corner arc turns into
+        // the zero-width top border. On a header barely taller than two radii
+        // the rail is therefore mostly curve — it reads as `(`, not as a bar,
+        // and a separate rect cannot produce that at any radius.
+        out.rects.push(RectInstance {
+            radii: [RADIUS * s; 4],
+            border: rail_color,
+            border_width: RAIL * s,
+            border_omit: border_sides::TOP | border_sides::RIGHT | border_sides::BOTTOM,
+            ..RectInstance::filled(band, fill, clip)
+        });
+        out.hit.push(band, HitRegion::BlockHeader(v.id));
 
         // Fold chevron. Its hit region is wider than its glyph — a 6px
         // triangle is not a target. Drawn only when there is output to hide:
@@ -397,5 +401,46 @@ mod tests {
         assert_eq!(format_duration(410), "0.41s");
         assert_eq!(format_duration(51_200), "51.2s");
         assert_eq!(format_duration(252_000), "4m 12s");
+    }
+
+    #[test]
+    fn the_rail_is_the_headers_own_left_border() {
+        // The rail used to be a second rect laid over the band's left edge,
+        // which is a straight bar with square ends however it is rounded — a
+        // 2px-wide box cannot taper into an 8px corner. The mock is one box
+        // with `border-left`, and the taper is the browser's, so the rail has
+        // to be this box's border or it cannot look right.
+        let area = [0.0, 100.0, 800.0, 400.0];
+        let b = layout_blocks(&[view(7, (2, 3))], area, 20.0, 2.0, &colors(), None, 0.0, &mut measure);
+        let band = [0.0, 100.0 + 2.0 * 20.0, 800.0, 20.0];
+        let header: Vec<_> = b.rects.iter().filter(|r| r.rect == band).collect();
+        assert_eq!(header.len(), 1, "one box, not a band plus a rail beside it");
+        let h = header[0];
+        assert_eq!(h.border_width, RAIL * 2.0, "the rail is 2 logical px, scaled");
+        assert_eq!(h.radii, [RADIUS * 2.0; 4], "all four corners round, as `border-radius:8px` does");
+        assert_eq!(
+            h.border_omit,
+            border_sides::TOP | border_sides::RIGHT | border_sides::BOTTOM,
+            "left only — the other three sides are what the stroke tapers into"
+        );
+        assert_eq!(h.border, colors().success, "exit 0 inks the rail green");
+        assert_eq!(h.fill, colors().block_header_bg);
+    }
+
+    #[test]
+    fn every_block_state_reaches_the_rail() {
+        // Read off the header's border rather than a second rect: the states
+        // are the only thing the rail says, so losing one is silent.
+        let area = [0.0, 0.0, 800.0, 400.0];
+        let c = colors();
+        let rail = |v: BlockView| {
+            let b = layout_blocks(&[v], area, 20.0, 1.0, &c, None, 0.0, &mut measure);
+            b.rects.iter().find(|r| r.border_width > 0.0 && r.rect[2] == 800.0).expect("a header").border
+        };
+        assert_eq!(rail(view(1, (0, 1))), c.success, "exit 0");
+        assert_eq!(rail(BlockView { failed: true, ..view(1, (0, 1)) }), c.danger, "non-zero exit");
+        assert_eq!(rail(BlockView { running: true, ..view(1, (0, 1)) }), c.warn, "still running");
+        assert_eq!(rail(BlockView { no_output: true, ..view(1, (0, 1)) }), c.text_faint, "printed nothing");
+        assert_eq!(rail(BlockView { interrupted: true, ..view(1, (0, 1)) }), c.text_faint, "the host went away");
     }
 }
