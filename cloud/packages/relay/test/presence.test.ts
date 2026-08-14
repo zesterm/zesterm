@@ -104,6 +104,39 @@ function suite(mode: string, evicting: boolean): void {
     );
   });
 
+  it('a link that went quiet can come back without waiting to be re-parked', async () => {
+    // The recovery path, and the reason the two "not online" cases re-arm
+    // differently. A daemon whose pings were merely late — a stalled network,
+    // a laptop resuming — must be able to return to online on its own. Giving
+    // up here would latch a machine into "asleep" until its next attach, which
+    // is the failure this whole change is about.
+    const r = relay();
+    const control = await parked(r);
+
+    const quiet = NOW + CONTROL_SEEN_REFRESH_MS;
+    r.platform.autoResponseAt.set(control, new Date(quiet - KEEPALIVE_STALE_MS - 1));
+    r.platform.storage.alarm = null;
+    await r.room().refreshPresence(quiet);
+
+    assert.equal(r.db.controlSeen.get(HOST), null, 'gone quiet, so not online');
+    assert.equal(
+      r.platform.storage.alarm,
+      quiet + CONTROL_SEEN_REFRESH_MS,
+      'but the socket is still held, so the object keeps looking — unlike the case where the link has actually gone',
+    );
+
+    // The pings resume.
+    const back = quiet + CONTROL_SEEN_REFRESH_MS;
+    r.platform.autoResponseAt.set(control, new Date(back - 1_000));
+    await r.room().refreshPresence(back);
+
+    assert.equal(
+      r.db.controlSeen.get(HOST),
+      back,
+      'and it is online again on the next refresh, with nothing having had to re-park it',
+    );
+  });
+
   it('a link that has never been pinged yet still counts as parked', async () => {
     // `getWebSocketAutoResponseTimestamp` is `null` until the platform has
     // answered one, which is the ordinary state of a link that parked seconds

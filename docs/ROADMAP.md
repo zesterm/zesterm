@@ -1471,8 +1471,15 @@ is now unblocked and building.
       laptop's key is revoked.
       **Enrolment is the spine, discovery decorates it.** The account's list is
       durable and survives a machine being asleep; presence attaches once there
-      is a relay to learn it from. Until then `last seen` is the only honest
-      thing to show. A seed-backed key is named as such on screen — a browser
+      is a relay to learn it from. That relay now exists and presence is
+      attached (#237): the room records whether a daemon's control link is
+      *parked*, not merely that it once arrived, and `GET /api/hosts` answers
+      `online` against a bound so a room that died without its close handler
+      decays instead of lying. It had to be the room, because the keepalives
+      are answered beneath the Durable Object and never wake it — so the
+      liveness signal is `getWebSocketAutoResponseTimestamp` read on an alarm
+      that runs only while a link is parked. Before that the fleet screen had
+      only `last seen`, and a machine you could open a shell on read *asleep*. A seed-backed key is named as such on screen — a browser
       on the fallback path is working, not secure, and a row that looks like
       every other row is a comfortable lie about the one that matters.
 - [x] **The tabbed chrome** (#150; `docs/design/client-ui/` §1–§2) — the shell

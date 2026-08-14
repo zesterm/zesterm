@@ -541,15 +541,22 @@ export class RelayRoom {
   async refreshPresence(now: number): Promise<void> {
     const parked = parkedLiveness(this.#state, now);
 
-    if (parked === null || !parked.alive) {
-      // Nothing parked, or something parked that has stopped answering
-      // keepalives. Either way this machine is not reachable through us, and
-      // the column must stop saying otherwise.
-      //
-      // A host id is still needed to clear the row, and when no link is left
-      // there is none to read — the close handler does that clearing, while
-      // this branch covers the link that is present and silent.
-      if (parked !== null) await clearControlSeen(this.#env.DB, parked.host);
+    // No link at all: nothing to report and nobody to report it for, so the
+    // object stops waking. The close handler already cleared the column —
+    // there is no host id here to clear it with anyway.
+    if (parked === null) return;
+
+    if (!parked.alive) {
+      // A link that is still held but has stopped answering keepalives. The
+      // column must stop saying this machine is reachable.
+      await clearControlSeen(this.#env.DB, parked.host);
+      // **Still re-armed**, unlike the no-link case, and the difference
+      // matters: the socket is right there, so a daemon whose pings were
+      // merely late — a stalled network, a suspended laptop coming back —
+      // has to be able to return to `online` without waiting for something
+      // to re-park it. Stopping here would latch a recoverable machine into
+      // "asleep" until its next attach, which is the failure #237 is about.
+      await armPresenceRefresh(this.#state.storage, now);
       return;
     }
 
