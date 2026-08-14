@@ -343,6 +343,25 @@ mod tests {
     }
 
     #[test]
+    fn the_band_the_layout_draws_routes_the_wheel_to_the_grid() {
+        // #256, closed at both ends. `hit.rs` pins what each *region* means;
+        // this pins that the rectangle actually drawn answers with one of
+        // those regions — the property that broke, since the band is pushed
+        // at full grid width and the wheel asked only whether *anything* was
+        // hit. Feed the real layout's answer through the real classifier.
+        let area = [0.0, 100.0, 800.0, 400.0];
+        let b = layout_blocks(&[view(7, (2, 3))], area, 20.0, 1.0, &colors(), None, 0.0, &mut measure);
+        let band_y = 100.0 + 2.0 * 20.0 + 10.0;
+        for x in [INSET + 4.0, 400.0, 795.0] {
+            assert_eq!(
+                super::super::hit::wheel_target(b.hit.hit(x, band_y), None),
+                super::super::hit::WheelTarget::Grid,
+                "x={x} is over a header the layout drew inside the grid, so the wheel scrolls the session"
+            );
+        }
+    }
+
+    #[test]
     fn a_block_with_nothing_to_fold_offers_no_chevron() {
         // `cd ..` printed nothing and a running command has not finished, so
         // `fold_row_map` declines both. The header used to draw a chevron and

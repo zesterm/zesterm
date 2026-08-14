@@ -15,7 +15,7 @@ use zest_render_wgpu::{Chrome, Renderer, Scene, Viewport};
 use zest_input::{key, mouse, select, MouseState};
 use crate::block_actions;
 use crate::pipeline_cache;
-use crate::chrome::hit::{CaptionButton, HitRegion};
+use crate::chrome::hit::{self, CaptionButton, HitRegion, WheelTarget};
 use crate::chrome::layout::ChromeLayout;
 use crate::chrome::model::{
     ChromeMetrics, ChromeModel, TabModel, TabOrigin, TabPresence, WindowControls,
@@ -7271,6 +7271,43 @@ impl App {
         // Only a presented frame satisfies the chrome's damage; clearing the
         // latch on a skipped one is how a blank window gets stuck blank.
         self.chrome_dirty = false;
+        // Last, against the map this frame just built and after the latch is
+        // cleared — either order the other way swallows the frame it asks for.
+        self.revalidate_hover();
+    }
+
+    /// Re-read what the pointer is over, against the hit map this frame built.
+    ///
+    /// `chrome_hover` is otherwise written only by `CursorMoved`, which cannot
+    /// report a change it did not cause — and block headers ride the
+    /// scrollback, so a wheel moves one *under* a pointer that never moved.
+    /// The affordance then stays attached to the block that scrolled away.
+    /// Harmless while wheeling over a header did nothing (#256); visible the
+    /// moment it works.
+    ///
+    /// Reads the maps directly rather than through `chrome_hit`, which would
+    /// call `refresh_chrome` from inside the frame that just built it. Only on
+    /// an actual change, so this converges in one extra frame and an idle
+    /// window still costs none.
+    fn revalidate_hover(&mut self) {
+        // A drag keeps the grid, exactly as in `CursorMoved`: a selection
+        // dragged across a header must not die there.
+        if self.mouse.is_dragging() {
+            return;
+        }
+        let (x, y) = (self.pointer_pos.0 as f32, self.pointer_pos.1 as f32);
+        let over = self
+            .chrome_layout
+            .as_ref()
+            .and_then(|l| l.hit.hit(x, y))
+            .or_else(|| self.block_hits.hit(x, y));
+        if over != self.chrome_hover {
+            self.chrome_hover = over;
+            // Not the bare `chrome_dirty` latch: `hover` feeds the *cached*
+            // layout too, so dropping the cache is the only answer that is
+            // right for both layers.
+            self.mark_chrome_dirty();
+        }
     }
 
     /// Re-read the config and apply whatever changed, at its own cost.
@@ -9480,30 +9517,18 @@ impl ApplicationHandler<Wakeup> for App {
                     }
                     return;
                 }
-                // Over ANY of the settings tab's regions, the wheel belongs
-                // to settings — a gap in this list sent the scroll to the
-                // strip or the session behind the tab. An open dropdown menu
-                // swallows it without scrolling: moving the rows would slide
-                // the menu's anchor out from under it.
-                match self.chrome_hit(self.pointer_pos.0, self.pointer_pos.1) {
-                    Some(HitRegion::SettingsMenuRow(_)) => return,
-                    Some(
-                        HitRegion::SettingsPanel
-                        | HitRegion::SettingsRow(_)
-                        | HitRegion::SettingsToggle(_)
-                        | HitRegion::SettingsSlider(_)
-                        | HitRegion::SettingsReset(_)
-                        | HitRegion::SettingsCategory(_)
-                        | HitRegion::SettingsFilter
-                        | HitRegion::SettingsEditToml
-                        | HitRegion::SettingsSegment(..)
-                        | HitRegion::SettingsStep(..)
-                        | HitRegion::SettingsSelect(_)
-                        | HitRegion::SettingsListRemove(..)
-                        | HitRegion::SettingsListAdd(_)
-                        | HitRegion::SettingsListItem(..)
-                        | HitRegion::ProfilesChoice(..),
-                    ) => {
+                // Which surface owns this wheel is one classification over the
+                // whole hit map (`hit::wheel_target`), not a list maintained
+                // here. A list is what sent the scroll to the strip from a
+                // block header, from the unfocused pane of a split, and from
+                // any full-pane screen — a region nobody had classified fell
+                // to the catch-all, and the terminal simply stopped scrolling.
+                let hit = self.chrome_hit(self.pointer_pos.0, self.pointer_pos.1);
+                let pane_focus =
+                    self.tabs.active().and_then(|t| t.split.is_some().then_some(t.focus_right));
+                match hit::wheel_target(hit, pane_focus) {
+                    WheelTarget::Swallow => return,
+                    WheelTarget::Settings => {
                         let px = match delta {
                             MouseScrollDelta::LineDelta(_, y) => y * 40.0,
                             MouseScrollDelta::PixelDelta(p) => p.y as f32,
@@ -9523,26 +9548,28 @@ impl ApplicationHandler<Wakeup> for App {
                         }
                         return;
                     }
-                    _ => {}
-                }
-                // Over the strip, the wheel scrolls the strip.
-                if self.chrome_hit(self.pointer_pos.0, self.pointer_pos.1).is_some() {
-                    let px = match delta {
-                        MouseScrollDelta::LineDelta(x, y) => {
-                            let step = if x.abs() > y.abs() { x } else { y };
-                            step * 40.0
+                    WheelTarget::Strip => {
+                        // Its own `px`, and the difference is load-bearing: a
+                        // horizontal strip scrolls sideways, so the larger of
+                        // the two axes wins here and only here.
+                        let px = match delta {
+                            MouseScrollDelta::LineDelta(x, y) => {
+                                let step = if x.abs() > y.abs() { x } else { y };
+                                step * 40.0
+                            }
+                            MouseScrollDelta::PixelDelta(p) => {
+                                (if p.x.abs() > p.y.abs() { p.x } else { p.y }) as f32
+                            }
+                        };
+                        if px != 0.0 {
+                            // Layout clamps; storing the raw value would let the
+                            // scroll wander past the content and take clicks with it.
+                            self.strip_scroll -= px;
+                            self.mark_chrome_dirty();
                         }
-                        MouseScrollDelta::PixelDelta(p) => {
-                            (if p.x.abs() > p.y.abs() { p.x } else { p.y }) as f32
-                        }
-                    };
-                    if px != 0.0 {
-                        // Layout clamps; storing the raw value would let the
-                        // scroll wander past the content and take clicks with it.
-                        self.strip_scroll -= px;
-                        self.mark_chrome_dirty();
+                        return;
                     }
-                    return;
+                    WheelTarget::Grid => {}
                 }
 
                 let Some(session) = self.tabs.active_source() else { return };
