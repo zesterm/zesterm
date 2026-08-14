@@ -704,6 +704,19 @@ impl Grid {
         let owed = core::mem::take(&mut self.pending_restate);
         let below_cursor = self.rows - 1 - self.cursor.row.min(self.rows - 1);
         let k = owed.min(self.blank_tail()).min(below_cursor).min(self.scrollback_len);
+        // What this repaint had no room for goes back to the debt rather than
+        // being forfeited. A repaint is not necessarily the one a grow was
+        // waiting for: drag short, long, short again and the repaint that lands
+        // is for the *shrink*, whose viewport is full, so `k` is zero and the
+        // grow's rows are still owed. Dropping them there makes the gesture pay
+        // out only when the repaints happen to keep up with the mouse, which is
+        // a bug that reproduces on a slow machine and not on a fast one.
+        //
+        // Conserved rather than amplified — this only ever returns what came
+        // out of the debt — and every payment is bounded by the blank tail at
+        // the moment it is made, so a debt carried forward can never write over
+        // anything. A scroll or a screen erase cancels it outright.
+        self.restate_debt += owed - k;
         if k == 0 {
             return false;
         }
@@ -1518,6 +1531,38 @@ mod tests {
         conpty_grow_repaint(&mut g, 1);
 
         assert_eq!(g.scrollback_len(), before, "history was pulled down after a scroll cancelled it");
+    }
+
+    #[test]
+    fn a_repaint_with_no_room_leaves_the_debt_for_the_next_one() {
+        // The repaints do not have to keep up with the mouse, and on a slow
+        // machine they do not. Drag short, long, short again and the repaint
+        // that lands is the *shrink's*: its viewport is full, so there is
+        // nothing to give back and the grow's rows are still owed. Consuming
+        // what is pending on a settle that did nothing forfeits them, and the
+        // gesture then pays out only when the timing happens to be kind --
+        // which reproduces on one machine and not another, from a difference
+        // nobody would think to mention.
+        let mut g = Grid::new(30, 10, 500);
+        g.set_viewport_restated_elsewhere(true);
+        for row in 0..10 {
+            write_text(&mut g, row, &format!("line {row}"));
+        }
+        g.cursor.row = 9;
+
+        g.resize(30, 4, &Cell::default());
+        g.resize(30, 10, &Cell::default());
+        // The shrink's repaint, arriving after the grow was already applied.
+        g.resize(30, 4, &Cell::default());
+        conpty_grow_repaint(&mut g, 4);
+        assert_eq!(g.scrollback_len(), 6, "a full viewport had nothing to give back");
+
+        // And now the one the debt was always for.
+        g.resize(30, 10, &Cell::default());
+        conpty_grow_repaint(&mut g, 4);
+
+        assert_eq!(g.scrollback_len(), 0, "the debt was forfeited by a settle that did nothing");
+        assert_eq!(g.cursor.row, 9, "the prompt did not come back to the bottom row");
     }
 
     #[test]
