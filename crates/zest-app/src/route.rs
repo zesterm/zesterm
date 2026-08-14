@@ -45,10 +45,17 @@ pub enum HostRoute {
 /// **LAN beats relay when both exist.** They are not ranked by preference so
 /// much as by evidence: an address off an mDNS record that discovery currently
 /// calls `Online` has been seen this minute and costs a TCP connect, while the
-/// relay leg is a keychain read, a ticket mint and a TLS handshake. The
-/// gate on `Presence::Online` matters for the same reason — an address off an
-/// `Away` or `Unreachable` record is a dial that mostly times out, and the
-/// relay is the better answer for exactly those hosts.
+/// relay leg is a keychain read, a ticket mint and a TLS handshake.
+///
+/// The gate on `Presence::Online` earns its keep against exactly one state,
+/// and it is worth naming which. `Away` clears its own endpoints upstream —
+/// both paths in `Roster` that set it empty the list first, and a roster test
+/// pins that "a host that is away must offer no route" — so an `Away` host
+/// has no address for this to reject. `Unreachable` is the opposite and is the
+/// case: it is set on a host that *is* advertising, whose port refused a dial
+/// (#22's dead-daemon-behind-a-live-record), so the address is still there and
+/// still wrong. Without the gate that stale address would outrank a live
+/// tunnel to the same machine.
 ///
 /// `None` is honest and load-bearing: a card with no route takes no hit
 /// region, because an affordance that must fail is worse than none.
@@ -249,16 +256,23 @@ mod tests {
             "discovery has never heard of it; the account has, and the relay can reach it"
         );
 
-        // And an advertising host whose port refuses (#22's Unreachable) or
-        // that has gone Away is exactly the host the relay is the better
-        // answer for — the address is there and dialling it mostly times out.
-        for presence in [Presence::Away, Presence::Unreachable] {
-            let h = host(false, presence, Some("10.0.0.7:7717"), true);
-            assert!(
-                matches!(best_route(&h, None, RELAY, true), Some(HostRoute::Relay { .. })),
-                "{presence:?}: a stale address must not outrank a live tunnel"
-            );
-        }
+        // An advertising host whose port refuses (#22's Unreachable) keeps its
+        // address — that is the whole state, a dead daemon behind a live
+        // record — and it is exactly the host the tunnel is the answer for.
+        // This is the one case the `Presence::Online` gate exists for.
+        let refusing = host(false, Presence::Unreachable, Some("10.0.0.7:7717"), true);
+        assert!(
+            matches!(best_route(&refusing, None, RELAY, true), Some(HostRoute::Relay { .. })),
+            "a stale address must not outrank a live tunnel"
+        );
+
+        // `Away` reaches the same answer by a shorter road: `Roster` clears a
+        // record's endpoints on the way into that state, so there is no
+        // address for the gate to reject. Built with `None` deliberately — the
+        // pair (Away, Some(addr)) cannot occur, and a test that constructs it
+        // is pinning a state the roster forbids.
+        let asleep = host(false, Presence::Away, None, true);
+        assert!(matches!(best_route(&asleep, None, RELAY, true), Some(HostRoute::Relay { .. })));
     }
 
     #[test]

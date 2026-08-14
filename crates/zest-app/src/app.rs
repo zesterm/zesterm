@@ -42,7 +42,7 @@ const STARTUP_BUDGET_MS: u64 = 100;
 ///
 /// Only ever paid on the very first launch on a machine; after that the daemon
 /// is already running and finding it is a `connect` call.
-pub const DAEMON_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+pub(crate) const DAEMON_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub struct Config {
     pub font_families: Vec<String>,
