@@ -347,6 +347,25 @@ mod tests {
     }
 
     #[test]
+    fn the_band_the_layout_draws_routes_the_wheel_to_the_grid() {
+        // #256, closed at both ends. `hit.rs` pins what each *region* means;
+        // this pins that the rectangle actually drawn answers with one of
+        // those regions — the property that broke, since the band is pushed
+        // at full grid width and the wheel asked only whether *anything* was
+        // hit. Feed the real layout's answer through the real classifier.
+        let area = [0.0, 100.0, 800.0, 400.0];
+        let b = layout_blocks(&[view(7, (2, 3))], area, 20.0, 1.0, &colors(), None, 0.0, &mut measure);
+        let band_y = 100.0 + 2.0 * 20.0 + 10.0;
+        for x in [INSET + 4.0, 400.0, 795.0] {
+            assert_eq!(
+                super::super::hit::wheel_target(b.hit.hit(x, band_y), None),
+                super::super::hit::WheelTarget::Grid,
+                "x={x} is over a header the layout drew inside the grid, so the wheel scrolls the session"
+            );
+        }
+    }
+
+    #[test]
     fn a_block_with_nothing_to_fold_offers_no_chevron() {
         // `cd ..` printed nothing and a running command has not finished, so
         // `fold_row_map` declines both. The header used to draw a chevron and
@@ -394,6 +413,38 @@ mod tests {
             })
         });
         assert!(found, "the chips must be clickable where they are drawn");
+    }
+
+    #[test]
+    fn hovering_a_chip_keeps_the_chips_drawn() {
+        // What bounds `App::revalidate_hover`. It re-reads hover against the
+        // map each frame, and the chips exist in that map only while the
+        // block is hovered — so landing on one goes None → BlockHeader →
+        // BlockCopy over two frames. It stops there *because* of this: every
+        // region that reveals the chips also keeps them revealed. Were
+        // `hovered` to drop the chip regions from its arm, the chips would
+        // vanish, hover would fall back to the band, and the two would
+        // alternate for ever at one frame each — a terminal repainting at
+        // full rate with nothing on screen changing, which the 0%-idle
+        // guarantee exists to prevent.
+        let area = [0.0, 0.0, 800.0, 400.0];
+        let counts: Vec<usize> = [
+            HitRegion::BlockHeader(3),
+            HitRegion::BlockFold(3),
+            HitRegion::BlockCopy(3),
+            HitRegion::BlockRerun(3),
+        ]
+        .into_iter()
+        .map(|h| {
+            layout_blocks(&[view(3, (0, 1))], area, 20.0, 1.0, &colors(), Some(h), 0.0, &mut measure)
+                .rects
+                .len()
+        })
+        .collect();
+        assert!(
+            counts.iter().all(|n| *n == counts[0]),
+            "all four block regions must draw the same chrome, or hover oscillates: {counts:?}"
+        );
     }
 
     #[test]

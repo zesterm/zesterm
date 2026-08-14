@@ -2656,6 +2656,39 @@ mod tests {
     }
 
     #[test]
+    fn the_unfocused_panes_frame_does_not_hand_the_wheel_to_the_strip() {
+        // The second instance of #256, and the one nobody reported: `Pane` is
+        // pushed over the *whole frame* of the unfocused pane, so a wheel in
+        // the middle of a perfectly ordinary terminal scrolled the tab strip.
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut model = model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+        let pane = |focused| super::super::model::PaneModel {
+            host: "local".into(),
+            sub: "~/dev".into(),
+            focused,
+            accent: 0,
+        };
+        model.panes = Some([pane(true), pane(false)]);
+        let l = layout(&model, &colors(), &m, &mut measure);
+
+        // Deep inside the right (unfocused) pane's body, well clear of both
+        // its header and the frame's border.
+        let (_, right) = pane_frames(model.grid_area, m.scale);
+        let body = pane_body(right, m.scale);
+        let (x, y) = (body[0] + body[2] / 2.0, body[1] + body[3] / 2.0);
+        assert_eq!(
+            l.hit.hit(x, y),
+            Some(HitRegion::Pane(true)),
+            "the unfocused pane claims its whole frame — that is the click-to-focus target"
+        );
+        assert_ne!(
+            super::super::hit::wheel_target(l.hit.hit(x, y), Some(false)),
+            super::super::hit::WheelTarget::Strip,
+            "a wheel in the middle of a terminal must never scroll the tab strip"
+        );
+    }
+
+    #[test]
     fn the_close_button_wins_over_its_own_tab() {
         // TabClose is pushed after Tab, and the reverse-order lookup is what
         // makes that ordering meaningful. If this fails, close buttons are

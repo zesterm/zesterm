@@ -199,6 +199,135 @@ pub enum HitRegion {
     Resize(ResizeEdge),
 }
 
+/// What the wheel does where the pointer is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WheelTarget {
+    /// The session under the pointer: its scrollback, or the program's own
+    /// wheel when it asked for mouse reporting.
+    Grid,
+    /// The tab strip, horizontal or as the sidebar.
+    Strip,
+    /// The settings tab's rows pane, or the profiles editor's.
+    Settings,
+    /// Eaten: a surface that neither scrolls itself nor may let anything
+    /// beneath it scroll.
+    Swallow,
+}
+
+/// Which surface owns a wheel event that landed on `hit`.
+///
+/// `pane_focus_right` is `Some(focus_right)` while the active tab is split,
+/// `None` otherwise — a `Pane` region means different things either side of
+/// the focus, and the region alone cannot say which.
+///
+/// **Deliberately exhaustive — there is no `_` arm, and adding one re-opens
+/// the hole this closes.** A catch-all is what made block headers, the
+/// unfocused pane's frame, every full-pane screen and the approval modal the
+/// *strip's*: each is a region drawn inside the grid area that nobody had
+/// classified, so it fell through to "must be the strip" and the terminal
+/// stopped scrolling wherever one of them lay. Without the `_`, the next
+/// region added is an `error[E0004]` in this file — which is the file whose
+/// enum you are already editing. (#256.)
+#[must_use]
+pub fn wheel_target(hit: Option<HitRegion>, pane_focus_right: Option<bool>) -> WheelTarget {
+    use HitRegion as R;
+    let Some(hit) = hit else {
+        // Nothing in the chrome is under the pointer, so the pointer is on
+        // the terminal.
+        return WheelTarget::Grid;
+    };
+    match hit {
+        // Inside the grid area, drawn over the session's own rows. Headers
+        // ride the scrollback and their band spans the full grid width, so
+        // this arm is most of the pane on a shell with integration loaded.
+        R::BlockHeader(_) | R::BlockFold(_) | R::BlockCopy(_) | R::BlockRerun(_) => {
+            WheelTarget::Grid
+        }
+        // The focused pane's header band is that pane's; the unfocused pane's
+        // *whole frame* is in the map, and the wheel's tail resolves against
+        // `focused_view_rect`, so falling through there would scroll the pane
+        // the pointer is not over — a different wrong answer, not a fix.
+        // Routing per pane is a feature; doing nothing is the honest interim.
+        R::Pane(right) => {
+            if pane_focus_right == Some(right) {
+                WheelTarget::Grid
+            } else {
+                WheelTarget::Swallow
+            }
+        }
+
+        R::Strip
+        | R::Tab(_)
+        | R::TabClose(_)
+        | R::NewTab
+        | R::Drag
+        | R::PalettePill
+        | R::SidebarSearch
+        | R::FleetFooter
+        | R::CaptionButton(_) => WheelTarget::Strip,
+        // The one arm that keeps today's answer on purpose. The resize bands
+        // are pushed last of everything, so they overlay the strip *and* the
+        // grid and the region genuinely cannot say what is beneath it — in
+        // sidebar mode the W band lies over the sidebar, at the window's
+        // right edge it lies over the terminal. Either choice is wrong for
+        // one of them across a 5px strip; asking the map for the next region
+        // underneath is the real fix, and it is not this one.
+        R::Resize(_) => WheelTarget::Strip,
+
+        R::SettingsPanel
+        | R::SettingsRow(_)
+        | R::SettingsToggle(_)
+        | R::SettingsSlider(_)
+        | R::SettingsReset(_)
+        | R::SettingsCategory(_)
+        | R::SettingsFilter
+        | R::SettingsEditToml
+        | R::SettingsSegment(..)
+        | R::SettingsStep(..)
+        | R::SettingsSelect(_)
+        | R::SettingsListRemove(..)
+        | R::SettingsListAdd(_)
+        | R::SettingsListItem(..)
+        | R::ProfilesChoice(..) => WheelTarget::Settings,
+
+        // An open dropdown swallows without scrolling: moving the rows would
+        // slide the menu's anchor out from under it.
+        R::SettingsMenuRow(_) => WheelTarget::Swallow,
+        // A modal, and a full-pane screen that covers the grid: neither has a
+        // scroll of its own, and neither may let the strip scroll behind it.
+        R::ApprovalPanel
+        | R::ApprovalApprove
+        | R::ApprovalDeny
+        | R::ScreenPanel
+        | R::ThemeCard(_)
+        | R::FleetCard(_)
+        | R::FleetApproveDevice(_)
+        | R::FleetSignIn
+        | R::FleetLinkStart
+        | R::FleetLinkCancel
+        | R::FleetEnrollLocal
+        | R::FleetSignOut
+        | R::ProfilesRailRow(_)
+        | R::ProfilesNew
+        | R::ProfilesDuplicate
+        | R::ProfilesDelete => WheelTarget::Swallow,
+        // Unreachable in practice — the app returns on the open-overlay state
+        // before it ever consults the hit map — but the function is total,
+        // and these are the right answers if that early return is ever
+        // removed: an overlay that let the grid scroll beneath it would read
+        // as detached from the window it floats over.
+        R::PickerRow(_)
+        | R::PickerPanel
+        | R::PickerScrim
+        | R::PaletteRow(_)
+        | R::PalettePanel
+        | R::PaletteScrim
+        | R::LauncherRow(_)
+        | R::LauncherPanel
+        | R::LauncherScrim => WheelTarget::Swallow,
+    }
+}
+
 /// Rectangles to meanings, in draw order.
 #[derive(Debug, Default)]
 pub struct ChromeHitMap {
@@ -246,6 +375,134 @@ mod tests {
         assert_eq!(map.hit(85.0, 10.0), Some(HitRegion::NewTab));
         assert_eq!(map.hit(10.0, 10.0), Some(HitRegion::Strip));
         assert_eq!(map.hit(10.0, 40.0), None, "below the strip is the grid's problem");
+    }
+
+    #[test]
+    fn a_block_header_leaves_the_wheel_to_the_grid() {
+        // The regression test for #256. A header's band covers the grid's
+        // full width and rides the scrollback, so resting on one is resting
+        // on the terminal. Classified as the strip's, the wheel fed
+        // `strip_scroll` — which layout re-clamps to nothing — and returned
+        // before the grid: the pointer does not move during a wheel gesture,
+        // so the terminal simply stopped scrolling until the mouse did.
+        for region in [HitRegion::BlockHeader(7), HitRegion::BlockFold(7)] {
+            assert_eq!(
+                wheel_target(Some(region), None),
+                WheelTarget::Grid,
+                "{region:?} is drawn inside the grid area, so the wheel is the session's"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_under_the_pointer_is_the_grids() {
+        assert_eq!(
+            wheel_target(None, None),
+            WheelTarget::Grid,
+            "no chrome under the pointer means the pointer is on the terminal"
+        );
+    }
+
+    #[test]
+    fn the_strip_and_the_sidebar_still_take_the_wheel() {
+        // The other direction of #256: a fix that hands everything to the
+        // grid would leave an overflowing tab strip unscrollable, which is
+        // the feature the catch-all was written for in the first place.
+        for region in [
+            HitRegion::Strip,
+            HitRegion::NewTab,
+            HitRegion::Drag,
+            HitRegion::PalettePill,
+            HitRegion::SidebarSearch,
+            HitRegion::FleetFooter,
+            HitRegion::CaptionButton(CaptionButton::Close),
+        ] {
+            assert_eq!(
+                wheel_target(Some(region), None),
+                WheelTarget::Strip,
+                "{region:?} is the strip's own furniture"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_focused_pane_gives_the_wheel_to_the_grid() {
+        // `Pane` is pushed over the focused pane's header band *and* the
+        // whole frame of the unfocused one, so the region alone cannot say
+        // which side it means — the focus does.
+        assert_eq!(
+            wheel_target(Some(HitRegion::Pane(false)), Some(false)),
+            WheelTarget::Grid,
+            "the focused pane's own header band belongs to that pane"
+        );
+        // Not Grid: the wheel path's tail resolves against
+        // `focused_view_rect`, so falling through would scroll the pane the
+        // pointer is *not* over. Doing nothing is the honest interim, and it
+        // still beats scrolling the tab strip, which is what it did.
+        assert_eq!(
+            wheel_target(Some(HitRegion::Pane(true)), Some(false)),
+            WheelTarget::Swallow,
+            "the unfocused pane is not routed per pane yet"
+        );
+        assert_eq!(
+            wheel_target(Some(HitRegion::Pane(true)), None),
+            WheelTarget::Swallow,
+            "a Pane region with no split is stale chrome; it must not reach the strip"
+        );
+    }
+
+    #[test]
+    fn every_settings_region_scrolls_settings() {
+        // The direct successor to the hand-maintained list this replaced,
+        // whose own comment recorded that "a gap in this list sent the scroll
+        // to the strip or the session behind the tab".
+        for region in [
+            HitRegion::SettingsPanel,
+            HitRegion::SettingsRow(0),
+            HitRegion::SettingsToggle(0),
+            HitRegion::SettingsSlider(0),
+            HitRegion::SettingsReset(0),
+            HitRegion::SettingsCategory(0),
+            HitRegion::SettingsFilter,
+            HitRegion::SettingsEditToml,
+            HitRegion::SettingsSegment(0, 0),
+            HitRegion::SettingsStep(0, true),
+            HitRegion::SettingsSelect(0),
+            HitRegion::SettingsListRemove(0, 0),
+            HitRegion::SettingsListAdd(0),
+            HitRegion::SettingsListItem(0, 0),
+            HitRegion::ProfilesChoice(0, 0),
+        ] {
+            assert_eq!(
+                wheel_target(Some(region), None),
+                WheelTarget::Settings,
+                "{region:?} is the settings pane's"
+            );
+        }
+        assert_eq!(
+            wheel_target(Some(HitRegion::SettingsMenuRow(0)), None),
+            WheelTarget::Swallow,
+            "moving the rows would slide the open menu's anchor out from under it"
+        );
+    }
+
+    #[test]
+    fn a_surface_that_covers_the_grid_swallows_the_wheel() {
+        // The same defect as the block header's, in three places nobody had
+        // reported: a screen that covers the grid has no scroll of its own,
+        // so classifying it as the strip's scrolled the tab strip *behind* it.
+        for region in [
+            HitRegion::ScreenPanel,
+            HitRegion::FleetCard(0),
+            HitRegion::ThemeCard(0),
+            HitRegion::ApprovalPanel,
+        ] {
+            assert_eq!(
+                wheel_target(Some(region), None),
+                WheelTarget::Swallow,
+                "{region:?} covers the grid and scrolls nothing"
+            );
+        }
     }
 
     #[test]
