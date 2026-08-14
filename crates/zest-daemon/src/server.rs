@@ -327,6 +327,15 @@ pub struct Connection {
     /// connection's lock across `on_bytes`, so the work happens off-thread
     /// and the answer rides the wake the writer is already blocked on.
     enroll_result: Arc<Mutex<Option<HostMessage>>>,
+    /// The mailbox above holds exactly one answer, so this connection runs
+    /// exactly one enrolment at a time: set when a worker is spawned,
+    /// cleared only when its answer has been *drained* for delivery — a
+    /// second `Enroll` in between would otherwise overwrite a result nobody
+    /// has read yet, and one caller would wait for ever on an answer the
+    /// other received. A second ask is refused with an honest
+    /// `EnrollResult`; enrolment is a one-shot human act, and the app's
+    /// button disables itself in flight anyway.
+    enroll_running: bool,
     /// Called once, when the handshake completes.
     ///
     /// The LAN listener uses it to disarm its watchdog and release its
@@ -432,6 +441,7 @@ impl Connection {
             remote: remote.into(),
             decided: Arc::new(Mutex::new(None)),
             enroll_result: Arc::new(Mutex::new(None)),
+            enroll_running: false,
             on_ready: None,
             on_pending: None,
             waker: None,
@@ -928,6 +938,15 @@ impl Connection {
                             .into(),
                     }];
                 };
+                if self.enroll_running {
+                    return vec![HostMessage::EnrollResult {
+                        ok: false,
+                        account: None,
+                        message: "an enrolment is already running; wait for it to finish"
+                            .into(),
+                    }];
+                }
+                self.enroll_running = true;
                 let identity = Arc::clone(self.auth.authenticator().identity());
                 let label = self.auth.authenticator().label().to_string();
                 let cell = Arc::clone(&self.enroll_result);
@@ -965,6 +984,9 @@ impl Connection {
                     },
                 );
                 if let Err(e) = spawned {
+                    // No worker ever ran, so nothing will be drained; free
+                    // the slot here or this connection could never try again.
+                    self.enroll_running = false;
                     return vec![HostMessage::EnrollResult {
                         ok: false,
                         account: None,
@@ -1341,9 +1363,14 @@ impl Connection {
     }
 
     /// The enrolment outcome, if a worker settled one. Writer-loop drained,
-    /// like [`Self::take_decision`].
+    /// like [`Self::take_decision`]; draining is also what frees the
+    /// one-answer mailbox for the next `Enroll`.
     pub fn take_enroll_result(&mut self) -> Vec<HostMessage> {
-        self.enroll_result.lock().expect("enroll lock").take().into_iter().collect()
+        let taken = self.enroll_result.lock().expect("enroll lock").take();
+        if taken.is_some() {
+            self.enroll_running = false;
+        }
+        taken.into_iter().collect()
     }
 
     fn no_such(session: SessionAddr) -> HostMessage {
@@ -1971,6 +1998,93 @@ mod tests {
                 .is_some(),
             "the token must land in the daemon's own store, exactly like --enroll"
         );
+    }
+
+    /// A control plane that answers only when the test says so — how a
+    /// worker is held parked mid-claim.
+    struct ParkedControlPlane {
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl crate::enroll::ControlPlane for ParkedControlPlane {
+        fn post_json(
+            &self,
+            _url: &str,
+            _body: &str,
+        ) -> Result<crate::enroll::Response, crate::enroll::EnrollError> {
+            self.release
+                .lock()
+                .expect("release lock")
+                .recv()
+                .expect("the test releases the claim");
+            Ok(crate::enroll::Response {
+                status: 200,
+                body: r#"{"token":"tok-1","account":"andy"}"#.into(),
+            })
+        }
+    }
+
+    #[test]
+    fn a_second_enroll_is_refused_while_the_first_is_still_running() {
+        // The mailbox holds one answer, so the connection must run one
+        // enrolment at a time: without the refusal, a second Enroll's worker
+        // overwrites a result nobody has drained yet, and one caller waits
+        // for ever on an answer the other received (review finding on #232).
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let secrets = Arc::new(zest_mesh::keystore::MemoryKeyStore::new());
+        let mut cfg = config();
+        cfg.enroll = Some(crate::EnrollSeam {
+            base_url: "https://control.test".into(),
+            http: Arc::new(ParkedControlPlane { release: std::sync::Mutex::new(gate) }),
+            secrets: Arc::clone(&secrets) as Arc<dyn zest_mesh::keystore::SecretStore>,
+        });
+        let mut c = Connection::new(
+            cfg,
+            Arc::new(Registry::new()),
+            crate::auth::Auth::Transport(test_authenticator()),
+            "test",
+        );
+        let mut peer = authenticate(&mut c);
+
+        let out = peer.send(&mut c, &ClientMessage::Enroll { code: "FIRSTCODE".into() });
+        assert!(out.is_empty(), "the first Enroll goes to its worker: {out:?}");
+
+        // The first worker is parked inside the claim; a second ask must be
+        // refused now, honestly, without touching the worker or its mailbox.
+        let out = peer.send(&mut c, &ClientMessage::Enroll { code: "SECONDCODE".into() });
+        let [HostMessage::EnrollResult { ok: false, message, .. }] = &out[..] else {
+            panic!("a concurrent Enroll must be refused with an EnrollResult, got {out:?}");
+        };
+        assert!(
+            message.contains("already running"),
+            "the refusal says what is happening, not a mechanism: {message}"
+        );
+
+        // Release the first claim: its own result — not the second's refusal,
+        // not an overwrite — arrives through the drain.
+        release.send(()).expect("worker is waiting");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let result = loop {
+            let msgs = c.take_enroll_result();
+            if !msgs.is_empty() {
+                break msgs;
+            }
+            assert!(Instant::now() < deadline, "the first enrolment never settled");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let [HostMessage::EnrollResult { ok: true, account, .. }] = &result[..] else {
+            panic!("the first Enroll must still get its own result, got {result:?}");
+        };
+        assert_eq!(account.as_deref(), Some("andy"));
+
+        // Drained means free: the connection can enrol again (re-enrolling a
+        // machine is a thing people do — the store probe's own comment).
+        let out = peer.send(&mut c, &ClientMessage::Enroll { code: "THIRDCODE".into() });
+        assert!(
+            out.is_empty(),
+            "after the drain a fresh Enroll must reach a worker again: {out:?}"
+        );
+        release.send(()).expect("third worker is waiting");
     }
 
     #[test]
