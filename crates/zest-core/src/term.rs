@@ -466,8 +466,15 @@ impl TermState {
     /// the rows coming back into the viewport carry the very ids the blocks
     /// anchored on before the drag started, and they name their own output
     /// again by arriving.
+    ///
+    /// The *active* grid, matching where the latch was armed. Settling the
+    /// primary unconditionally instead reads as harmless — the alt screen has no
+    /// scrollback to give back — and is not: with a full-screen program up, the
+    /// alt grid's latch is never cleared, so every DECTCEM change afterwards
+    /// retries the settle, and it retries it against the primary grid, whose
+    /// debt belongs to a resize the repaint in hand knows nothing about.
     pub(crate) fn settle_restate(&mut self) {
-        if !self.grid.settle_restate() {
+        if !self.grid_mut().settle_restate() {
             return;
         }
         // The viewport/scrollback boundary moved, which is the one change a

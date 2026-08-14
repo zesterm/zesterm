@@ -476,6 +476,13 @@ impl Grid {
         if n == 0 {
             return;
         }
+        // Same reason as `scroll_up`: the rows a shrink displaced are no longer
+        // the ones immediately above the viewport once the content has moved,
+        // whichever direction it moved in. The rule is "any scroll", and a rule
+        // the code applies to one of two directions is one that reads as
+        // deliberate and is not.
+        self.cancel_restate_debt();
+
         let (top, bottom) = (self.region.top, self.region.bottom);
         let n = n.min(bottom - top + 1);
         let base = self.active_base();
@@ -563,6 +570,7 @@ impl Grid {
                 // what "the lines pushed up and were lost" was.
                 let over_the_top = (self.rows - rows) - from_bottom;
                 if over_the_top > 0 {
+                    let banked = self.scrollback_len;
                     self.scrollback_len =
                         (self.scrollback_len + over_the_top).min(self.scrollback_limit);
                     // The cursor moved up with the content.
@@ -570,8 +578,15 @@ impl Grid {
                     // A restating pty gets these rows back on the way out, once
                     // its repaint has stopped blanking things. See the grow
                     // branch below and `settle_restate`.
+                    //
+                    // What was *banked*, not what went over the top: at the
+                    // scrollback limit the difference is rows that were
+                    // destroyed rather than kept, and on the alternate screen —
+                    // limit zero — that is all of them. Owing back rows nobody
+                    // has is how a grid with no history at all ends up with a
+                    // debt it can never pay and a latch it never clears.
                     if self.viewport_restated_elsewhere {
-                        self.restate_debt += over_the_top;
+                        self.restate_debt += self.scrollback_len - banked;
                     }
                 }
             } else if self.viewport_restated_elsewhere {
@@ -1503,6 +1518,73 @@ mod tests {
         conpty_grow_repaint(&mut g, 1);
 
         assert_eq!(g.scrollback_len(), before, "history was pulled down after a scroll cancelled it");
+    }
+
+    #[test]
+    fn a_reverse_index_cancels_the_debt_the_same_as_a_scroll() {
+        // The rule is "any scroll", because the displaced rows stop being the
+        // ones immediately above the viewport whichever direction the content
+        // moved. `scroll_down` is `RI` and `CSI T` -- rarer than `scroll_up`,
+        // which is exactly why a rule applied to one direction only survives
+        // review and then surprises somebody.
+        let mut g = Grid::new(30, 10, 500);
+        g.set_viewport_restated_elsewhere(true);
+        for row in 0..10 {
+            write_text(&mut g, row, &format!("line {row}"));
+        }
+        g.cursor.row = 9;
+
+        g.resize(30, 4, &Cell::default());
+        g.scroll_down(1, &Cell::default());
+        let before = g.scrollback_len();
+        g.resize(30, 10, &Cell::default());
+        conpty_grow_repaint(&mut g, 1);
+
+        assert_eq!(g.scrollback_len(), before, "a reverse index did not cancel the debt");
+    }
+
+    #[test]
+    fn a_grid_with_no_scrollback_never_owes_anything() {
+        // The alternate screen, whose limit is zero: rows that go over the top
+        // are destroyed rather than banked, so there is nothing to give back. A
+        // debt counted from what was displaced rather than from what was *kept*
+        // arms a latch on a grid that can never clear it, and every DECTCEM
+        // afterwards retries a settle that cannot do anything.
+        let mut g = Grid::new(30, 10, 0);
+        g.set_viewport_restated_elsewhere(true);
+        for row in 0..10 {
+            write_text(&mut g, row, &format!("line {row}"));
+        }
+        g.cursor.row = 9;
+
+        g.resize(30, 4, &Cell::default());
+        g.resize(30, 10, &Cell::default());
+        g.note_restatement_began(30, 10);
+
+        assert!(!g.restating(), "a grid with no history armed the settle latch");
+        assert!(!g.settle_restate(), "and it thought it had something to give back");
+    }
+
+    #[test]
+    fn the_debt_never_exceeds_what_scrollback_actually_kept() {
+        // The same arithmetic one step less extreme: at the limit, some of what
+        // goes over the top is kept and the rest is destroyed. Owing back the
+        // whole displacement would have the grow reach past the oldest line the
+        // grid holds.
+        let mut g = Grid::new(30, 10, 2);
+        g.set_viewport_restated_elsewhere(true);
+        for row in 0..10 {
+            write_text(&mut g, row, &format!("line {row}"));
+        }
+        g.cursor.row = 9;
+
+        g.resize(30, 4, &Cell::default());
+        assert_eq!(g.scrollback_len(), 2, "the limit did not bite");
+        g.resize(30, 10, &Cell::default());
+        conpty_grow_repaint(&mut g, 4);
+
+        assert_eq!(g.scrollback_len(), 0, "the two rows it did keep were not given back");
+        assert_eq!(g.total_lines(), 10, "the grow invented rows the grid never held");
     }
 
     #[test]

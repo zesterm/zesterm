@@ -1184,6 +1184,44 @@ fn dragging_the_height_down_and_back_puts_the_screen_back_as_it_was() {
 }
 
 #[test]
+fn a_repaint_while_a_full_screen_program_is_up_leaves_the_primary_grid_alone() {
+    // The latch is armed on whichever grid is active, so it has to be settled
+    // there too. Settling the primary unconditionally reads as harmless — the
+    // alt screen has no scrollback to give back, so what is there to get wrong —
+    // and is not: the primary is carrying a debt from the drag that happened
+    // before vim started, and an alt-screen repaint would pay it against a
+    // viewport ConPTY is describing for a different screen entirely.
+    // Eleven newlines, so the twelve rows are full and nothing has scrolled:
+    // every row of history below comes from the drag, which makes the count
+    // exact rather than something to work out.
+    let mut t = Terminal::new(40, 12, 500);
+    t.set_pty_restates_viewport(true);
+    for i in 0..11 {
+        t.advance(format!("line {i}\r\n").as_bytes());
+    }
+    t.advance(b"line 11");
+    assert_eq!(t.grid().scrollback_len(), 0, "the fixture scrolled before the drag");
+
+    // vim starts, and *then* the window is dragged — so the resize reaches both
+    // grids and the repaint that answers it describes the alternate screen.
+    // Cursor on the last row, where a full-screen program's status line puts
+    // it. It matters: with the cursor at the top a shrink gives up the blank
+    // rows below it and nothing goes over the top at all, so the alt grid never
+    // reaches the code this is about and the test passes for the wrong reason.
+    t.advance(b"\x1b[?1049h\x1b[12;1H");
+    t.resize(40, 4);
+    t.resize(40, 12);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 12, &["~"]));
+    t.advance(b"\x1b[?1049l");
+
+    assert_eq!(
+        t.grid().scrollback_len(),
+        8,
+        "an alt-screen repaint paid the primary grid's debt, against rows it never restated"
+    );
+}
+
+#[test]
 fn a_repaint_for_a_size_the_grid_has_left_is_sat_out() {
     // A drag emits resizes faster than ConPTY answers them, so a repaint laid
     // out for a size we have already left is routine rather than exotic. Its
