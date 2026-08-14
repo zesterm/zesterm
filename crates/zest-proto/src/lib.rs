@@ -450,8 +450,17 @@ pub struct SessionInfo {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct HostOffer {
     /// `std::env::consts::OS` — `windows`, `macos`, `linux`.
+    ///
+    /// `#[serde(default)]` like every other field here, and the reason is the
+    /// same one that made this a field rather than a new message: a required
+    /// field a future peer omits does not fail *softly*. Decoding the whole
+    /// `Sessions` message fails, and `DaemonClient::recv` maps that to a
+    /// transport error, which ends the connection — so one absent string would
+    /// cost a client its session list too.
+    #[serde(default)]
     pub os: String,
     /// `std::env::consts::ARCH` — `x86_64`, `aarch64`.
+    #[serde(default)]
     pub arch: String,
     /// The OS as the machine names itself — `Darwin 24.5.0`,
     /// `Linux 6.8.0-31-generic` — best effort.

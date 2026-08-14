@@ -16,6 +16,13 @@ import type { HostProfile } from "./HostProfile";
 export type HostOffer = { 
 /**
  * `std::env::consts::OS` — `windows`, `macos`, `linux`.
+ *
+ * `#[serde(default)]` like every other field here, and the reason is the
+ * same one that made this a field rather than a new message: a required
+ * field a future peer omits does not fail *softly*. Decoding the whole
+ * `Sessions` message fails, and `DaemonClient::recv` maps that to a
+ * transport error, which ends the connection — so one absent string would
+ * cost a client its session list too.
  */
 os: string, 
 /**

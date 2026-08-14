@@ -21,6 +21,7 @@
 //! file on a filesystem it has never seen. `cargo xtask check-deps` guards
 //! `zest-core`, not this crate, so the wasm fence is untouched.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -127,10 +128,30 @@ pub struct OfferSource {
     inner: Arc<Inner>,
 }
 
-#[derive(Debug)]
 struct Inner {
     offer: Mutex<HostOffer>,
     generation: AtomicU64,
+    /// Connections to wake when the offer changes, keyed by a token so `Drop`
+    /// can unregister — `Registry::watch`'s shape exactly.
+    ///
+    /// **Not optional decoration.** The serve loop blocks until something
+    /// wakes it, so without this a config edit moves the generation and then
+    /// waits for an unrelated event to carry it: a machine with an idle
+    /// session would publish its new profile list at the next keystroke, and
+    /// one with no sessions at all might never publish it. The generation diff
+    /// decides *whether* to send; this decides *when* anyone looks.
+    watchers: Mutex<HashMap<u64, Arc<dyn Fn() + Send + Sync>>>,
+    next_watcher: Mutex<u64>,
+}
+
+impl std::fmt::Debug for Inner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The wakers are `dyn` and the offer is behind a lock a formatter must
+        // not block on; the generation is the part a log line can act on.
+        f.debug_struct("OfferSource")
+            .field("generation", &self.generation.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
 }
 
 impl OfferSource {
@@ -142,6 +163,8 @@ impl OfferSource {
             inner: Arc::new(Inner {
                 offer: Mutex::new(offer),
                 generation: AtomicU64::new(1),
+                watchers: Mutex::new(HashMap::new()),
+                next_watcher: Mutex::new(0),
             }),
         }
     }
@@ -167,19 +190,45 @@ impl OfferSource {
         self.inner.offer.lock().expect("offer mutex").clone()
     }
 
-    /// Replace the offer, bumping the generation **only if it differs**.
+    /// Ask to be woken when the offer changes. Returns a token for [`Self::unwatch`].
+    pub fn watch(&self, waker: Arc<dyn Fn() + Send + Sync>) -> u64 {
+        let token = {
+            let mut next = self.inner.next_watcher.lock().expect("watcher id lock");
+            *next += 1;
+            *next
+        };
+        self.inner.watchers.lock().expect("watchers lock").insert(token, waker);
+        token
+    }
+
+    pub fn unwatch(&self, token: u64) {
+        self.inner.watchers.lock().expect("watchers lock").remove(&token);
+    }
+
+    /// Replace the offer, bumping the generation **only if it differs**, and
+    /// wake whoever is watching when it did.
     ///
     /// The equality check is the whole point rather than an optimisation: a
     /// file watcher fires several times for one save on every platform, and
     /// without it each of those would push an identical profile list to every
     /// attached client on the fleet.
     pub fn set(&self, offer: HostOffer) -> bool {
-        let mut held = self.inner.offer.lock().expect("offer mutex");
-        if *held == offer {
-            return false;
+        {
+            let mut held = self.inner.offer.lock().expect("offer mutex");
+            if *held == offer {
+                return false;
+            }
+            *held = offer;
+            self.inner.generation.fetch_add(1, Ordering::AcqRel);
         }
-        *held = offer;
-        self.inner.generation.fetch_add(1, Ordering::AcqRel);
+        // Outside the offer lock: a waker runs arbitrary caller code, and
+        // holding a lock across it is how a serve loop that reads the offer
+        // from its own thread would deadlock against the watcher that woke it.
+        let wakers: Vec<_> =
+            self.inner.watchers.lock().expect("watchers lock").values().cloned().collect();
+        for wake in wakers {
+            wake();
+        }
         true
     }
 

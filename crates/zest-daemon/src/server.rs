@@ -363,6 +363,11 @@ pub struct Connection {
     /// subscriber's very first `Sessions` carries the offer without needing a
     /// separate "send it once" flag.
     seen_offer_generation: u64,
+    /// Registration in [`crate::offer::OfferSource::watch`], for `Drop` to
+    /// release. Without it a config edit moves the generation and then waits
+    /// for an unrelated event to carry it — the serve loop blocks until
+    /// something wakes it.
+    offer_watch_token: Option<u64>,
     /// Registration in [`Registry::watch`], for `Drop` to release.
     watch_token: Option<u64>,
     /// The registry generation this connection last told its client about.
@@ -408,6 +413,11 @@ impl Drop for Connection {
         }
         if let Some(token) = self.pairing_watch_token.take() {
             self.auth.authenticator().queue().unwatch(token);
+        }
+        if let Some(token) = self.offer_watch_token.take() {
+            if let Some(source) = self.config.offer.as_ref() {
+                source.unwatch(token);
+            }
         }
         let had_subscriptions = !self.attached.is_empty();
         for (&id, &handle) in &self.attached {
@@ -456,6 +466,7 @@ impl Connection {
             watch_sessions: false,
             watch_hosts: false,
             seen_offer_generation: 0,
+            offer_watch_token: None,
             watch_token: None,
             seen_generation: 0,
             watch_pairings: false,
@@ -1278,6 +1289,15 @@ impl Connection {
             self.seen_generation = self.registry.generation();
             if let Some(waker) = self.waker.clone() {
                 self.watch_token = Some(self.registry.watch(waker));
+            }
+        }
+        // The offer subscription. Unlike sessions, `seen_offer_generation` is
+        // deliberately *not* snapped to current: a subscriber's first message
+        // must carry the offer, or a launcher sees this machine's profiles
+        // only after somebody edits them.
+        if self.watch_hosts && self.offer_watch_token.is_none() {
+            if let (Some(source), Some(waker)) = (self.config.offer.clone(), self.waker.clone()) {
+                self.offer_watch_token = Some(source.watch(waker));
             }
         }
         // The approval-modal subscription, gated by the transport: only a
@@ -2299,6 +2319,72 @@ mod tests {
             panic!("the edit must reach the watcher unprompted, got {pushed:?}");
         };
         assert_eq!(offer.profiles.len(), 2);
+    }
+
+    #[test]
+    fn a_config_edit_wakes_the_serve_loop_and_not_only_the_generation() {
+        // The half `a_config_edit_reaches_a_watcher_that_asked_nothing_else`
+        // cannot see, and the one that was missing: that test calls `poll`
+        // itself, so it passes whether or not anything would have *caused* a
+        // poll. The real serve loop blocks until something wakes it, so an
+        // offer change that bumps the generation and wakes nobody waits for an
+        // unrelated event to carry it — a machine with an idle session
+        // publishes its new profile list at the next keystroke, and one with
+        // no sessions at all may never publish it at all.
+        let (mut c, source) = conn_offering(offer_with(&["ubuntu"]));
+        let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let woken = Arc::clone(&woken);
+            c.set_waker(Box::new(move || {
+                woken.store(true, std::sync::atomic::Ordering::Release);
+            }));
+        }
+        let _peer = authenticate_identity(
+            &mut c,
+            &Arc::new(zest_mesh::identity::ClientIdentity::generate().expect("key")),
+            false,
+            false,
+            true,
+        );
+        woken.store(false, std::sync::atomic::Ordering::Release);
+
+        assert!(
+            !source.set(offer_with(&["ubuntu"])),
+            "precondition: an identical offer is not a change"
+        );
+        assert!(
+            !woken.load(std::sync::atomic::Ordering::Acquire),
+            "and must not wake anyone — a file watcher fires several times per save"
+        );
+
+        assert!(source.set(offer_with(&["ubuntu", "nightly"])), "a different offer is a change");
+        assert!(
+            woken.load(std::sync::atomic::Ordering::Acquire),
+            "a real edit must wake the connection, or the push waits for unrelated traffic"
+        );
+    }
+
+    #[test]
+    fn a_connection_that_did_not_subscribe_is_never_woken_by_an_offer() {
+        // The subscription is what registers the waker, so an attach-only
+        // connection must not be woken by somebody editing a config it will
+        // never be told about.
+        let (mut c, source) = conn_offering(offer_with(&["ubuntu"]));
+        let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let woken = Arc::clone(&woken);
+            c.set_waker(Box::new(move || {
+                woken.store(true, std::sync::atomic::Ordering::Release);
+            }));
+        }
+        let _peer = authenticate(&mut c);
+        woken.store(false, std::sync::atomic::Ordering::Release);
+
+        assert!(source.set(offer_with(&["ubuntu", "nightly"])));
+        assert!(
+            !woken.load(std::sync::atomic::Ordering::Acquire),
+            "no subscription, no wakeup"
+        );
     }
 
     #[test]
