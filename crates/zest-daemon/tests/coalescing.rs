@@ -90,6 +90,7 @@ fn serve_one(floor: Duration) -> TcpStream {
         // writing the shim is a filesystem dependency this test does not need.
         shell_integration: false,
         min_delta_interval: floor,
+        enroll: None,
     };
     let auth = Auth::Transport(Arc::new(Authenticator::new(
         identity,

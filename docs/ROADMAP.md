@@ -1865,6 +1865,18 @@ on each host. → ADR-005, ADR-006.
       forgets it, `--account` says what is held. Foreground flags, because a
       detached daemon has no terminal to be handed a one-shot code on.
 
+      **And now without the terminal** (#227): the signed-in app's fleet
+      screen shows "Enroll this machine" on the local card when the account
+      does not list it. The app mints a *host* code with its own device
+      token (`/api/enroll/code` accepts approved-device bearers for
+      `kind: 'host'` only — a leaked app token must not mint credentials for
+      further devices), carries it over a fresh loopback connection as
+      `ClientMessage::Enroll`, and the daemon runs the exact `--enroll`
+      claim off a worker, answering `EnrollResult`. Loopback-gated like
+      `PairingDecision`; an `--ephemeral` daemon refuses honestly; an old
+      daemon's "could not understand" surfaces as "run zest-daemon --enroll
+      <code>". `--enroll` itself remains, for headless boxes.
+
       **The seam was built before the transport, and it paid.** The signing,
       the JSON, what counts as a refusal and where the token goes are the parts
       that are wrong in ways nobody notices, and none of them needs a socket;

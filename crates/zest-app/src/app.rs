@@ -503,6 +503,53 @@ pub enum AccountState {
     Failed(String),
 }
 
+/// Where "Enroll this machine" stands (issue #227) — the local card's own
+/// little state machine, beside [`AccountState`] rather than inside it: the
+/// header describes the *app's* sign-in, this describes the *daemon's*
+/// membership, and a signed-in app on an unenrolled machine is the whole
+/// point of the button.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LocalEnroll {
+    Idle,
+    /// The worker is minting a code and carrying it to the daemon; the
+    /// button says so and stops being clickable until this settles.
+    InFlight,
+    /// The daemon claimed the code. Shown on the card until the account
+    /// listing refreshes and its `enrolled` row takes over.
+    Enrolled { account: Option<String> },
+    /// What went wrong, verbatim — the daemon and the control plane both
+    /// phrase their refusals as the person's next move.
+    Failed(String),
+}
+
+/// A daemon-side enrolment failure, as the card should say it.
+///
+/// The one translation is an old daemon: it answers a message it cannot
+/// decode with `Error { "could not understand that message" }` and keeps
+/// serving (`on_bytes`), which without this would surface as exactly that
+/// string — true, and useless. It becomes the person's actual next move,
+/// carrying the already-minted code so nothing is wasted. Everything else
+/// is shown verbatim.
+fn enroll_failure_text(e: &zest_daemon::DaemonError, code: &str) -> String {
+    match e {
+        zest_daemon::DaemonError::Refused(m) if m.contains("could not understand") => format!(
+            "this daemon predates in-app enrolment; run: zest-daemon --enroll {code}"
+        ),
+        other => other.to_string(),
+    }
+}
+
+/// A card row's value, bounded: a control-plane refusal can run long, and a
+/// value that overruns its own label reads as two broken rows.
+fn clip_row(text: &str) -> String {
+    const MAX: usize = 58;
+    if text.chars().count() <= MAX {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(MAX - 1).collect();
+    format!("{cut}\u{2026}")
+}
+
 #[derive(Clone)]
 enum PickerAction {
     /// A group label or an empty-state row; Enter does nothing.
@@ -1056,6 +1103,11 @@ pub struct App {
     /// The approve workers' handoff cell (`Some(None)` clears), drained by
     /// the same `Wakeup::AccountChanged` the account cell uses.
     devices_error_update: Arc<parking_lot::Mutex<Option<Option<String>>>>,
+    /// The local card's "Enroll this machine" state (issue #227).
+    local_enroll: LocalEnroll,
+    /// Its worker's handoff cell, riding `Wakeup::AccountChanged` like the
+    /// other account workers'.
+    local_enroll_update: Arc<parking_lot::Mutex<Option<LocalEnroll>>>,
     fonts: Option<Fonts>,
     palette: zest_core::PaletteSnapshot,
 
@@ -1259,6 +1311,8 @@ impl App {
             devices_view: Vec::new(),
             devices_error: None,
             devices_error_update: Arc::new(parking_lot::Mutex::new(None)),
+            local_enroll: LocalEnroll::Idle,
+            local_enroll_update: Arc::new(parking_lot::Mutex::new(None)),
             fonts: None,
             palette,
             chrome_colors,
@@ -2162,6 +2216,14 @@ impl App {
                         },
                     }
                 };
+                // The enroll button's gate (issue #227): signed in, and the
+                // window's daemon really is the loopback one. `route: None`
+                // is the in-process fallback — a pty this process owns, no
+                // daemon, nothing an account could list — and a Tcp route
+                // means the "local" card is a *remote* machine, whose
+                // loopback this app cannot reach. Both hide the button.
+                let can_enroll_local = matches!(self.account, AccountState::SignedIn { .. })
+                    && matches!(self.route, Some(HostRoute::LocalSocket(_)));
                 let cards = fleet_hosts
                     .iter()
                     .map(|h| {
@@ -2202,6 +2264,40 @@ impl App {
                         if h.enrolled {
                             rows.push(("account".into(), "enrolled".into(), 1));
                         }
+                        let mut enroll = None;
+                        if h.local && can_enroll_local && !h.enrolled {
+                            match &self.local_enroll {
+                                LocalEnroll::Idle => {
+                                    enroll = Some(crate::chrome::model::FleetEnroll {
+                                        label: "Enroll this machine".into(),
+                                        clickable: true,
+                                    });
+                                }
+                                LocalEnroll::InFlight => {
+                                    enroll = Some(crate::chrome::model::FleetEnroll {
+                                        label: "enrolling\u{2026}".into(),
+                                        clickable: false,
+                                    });
+                                }
+                                // The listing has not caught up yet; say what
+                                // happened until its `enrolled` row takes
+                                // over (the poke on settle hurries it).
+                                LocalEnroll::Enrolled { account } => {
+                                    let value = match account {
+                                        Some(a) => format!("enrolled with {a}"),
+                                        None => "enrolled".into(),
+                                    };
+                                    rows.push(("account".into(), value, 1));
+                                }
+                                LocalEnroll::Failed(message) => {
+                                    rows.push(("account".into(), clip_row(message), 2));
+                                    enroll = Some(crate::chrome::model::FleetEnroll {
+                                        label: "Enroll this machine".into(),
+                                        clickable: true,
+                                    });
+                                }
+                            }
+                        }
                         rows.push(("key".into(), h.host.short(), 0));
                         if let SessionsState::Fresh(sessions) = &h.sessions {
                             let n = sessions.len();
@@ -2223,6 +2319,7 @@ impl App {
                             // account-only card one.
                             open: self.best_route(h).is_some(),
                             rows,
+                            enroll,
                         }
                     })
                     .collect();
@@ -2490,6 +2587,77 @@ impl App {
             }
         });
         self.account_poke = Some(poke);
+    }
+
+    /// "Enroll this machine" (issue #227): mint a host code with the app's
+    /// own token, carry it to the local daemon over a fresh short-lived
+    /// loopback connection, surface how it went. All off the event loop —
+    /// two HTTPS round trips and a keychain sit on this path.
+    ///
+    /// A fresh connection, `decide_pairing`'s shape and reason: the standing
+    /// fleet-watch connection's thread is parked in `read`, and the daemon
+    /// gates `Enroll` on the transport, so a fresh loopback dial carries
+    /// exactly the same authority.
+    fn enroll_local_daemon(&mut self) {
+        if matches!(self.local_enroll, LocalEnroll::InFlight) {
+            return;
+        }
+        // The card only offers the button on a LocalSocket route, but a
+        // click races a route change; re-check rather than unwrap.
+        let Some(route @ HostRoute::LocalSocket(_)) = self.route.clone() else {
+            return;
+        };
+        self.local_enroll = LocalEnroll::InFlight;
+        self.mark_chrome_dirty();
+        let update = Arc::clone(&self.local_enroll_update);
+        let proxy = self.proxy.clone();
+        let spawned = std::thread::Builder::new().name("zest-enroll-local".into()).spawn(
+            move || {
+                let outcome = (|| -> Result<LocalEnroll, String> {
+                    let token = crate::cloud::stored_app_token(&zest_mesh::keystore::OsKeyStore)
+                        .map_err(|e| e.to_string())?
+                        .ok_or_else(|| "signed out; sign in first".to_string())?;
+                    let api = crate::cloud::HttpsAccountApi::new(
+                        zest_daemon::enroll::DEFAULT_CONTROL_PLANE,
+                        zest_cloud::tls::Roots::Platform,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    let code =
+                        crate::cloud::mint_host_code(&api, &token).map_err(|e| e.to_string())?;
+                    let identity = zest_mesh::identity::ClientIdentity::generate()
+                        .map(Arc::new)
+                        .map_err(|e| e.to_string())?;
+                    let (read, write) = (route.dialer())().map_err(|e| e.to_string())?;
+                    let mut daemon = zest_daemon::client::DaemonClient::connect(
+                        read,
+                        write,
+                        &identity,
+                        "zesterm-enroll",
+                        None,
+                        false,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    match daemon.enroll(&code) {
+                        Ok(done) if done.ok => Ok(LocalEnroll::Enrolled { account: done.account }),
+                        // The daemon's own refusal, verbatim: it is phrased
+                        // as the person's next move already.
+                        Ok(done) => Err(done.message),
+                        Err(e) => Err(enroll_failure_text(&e, &code)),
+                    }
+                })();
+                let state = match outcome {
+                    Ok(state) => state,
+                    Err(message) => LocalEnroll::Failed(message),
+                };
+                *update.lock() = Some(state);
+                let _ = proxy.send_event(Wakeup::AccountChanged);
+            },
+        );
+        if let Err(e) = spawned {
+            self.local_enroll =
+                LocalEnroll::Failed(format!("no thread for the enrolment: {e}"));
+            tracing::warn!(error = %e, "no thread for the local enrolment");
+        }
     }
 
     /// Read the stored app token off the event loop and post what it means.
@@ -4029,6 +4197,9 @@ impl App {
                 // No route: the card drew without a hit region, so this arm
                 // is only reachable by a click racing a snapshot change —
                 // ignoring it is the honest answer.
+            }
+            (HitRegion::FleetEnrollLocal, MouseButton::Left) => {
+                self.enroll_local_daemon();
             }
             (HitRegion::FleetApproveDevice(i), MouseButton::Left) => {
                 // Approve or vouch — which verb is the row's state, decided
@@ -7708,6 +7879,23 @@ impl ApplicationHandler<Wakeup> for App {
                         w.request_redraw();
                     }
                 }
+                let enroll_settled = self.local_enroll_update.lock().take();
+                if let Some(state) = enroll_settled {
+                    let enrolled = matches!(state, LocalEnroll::Enrolled { .. });
+                    self.local_enroll = state;
+                    self.mark_chrome_dirty();
+                    if enrolled {
+                        // The listing is what the card ultimately draws
+                        // from; hurry it so the account's own `enrolled` row
+                        // replaces the worker's transient message.
+                        if let Some(poke) = self.account_poke.as_ref() {
+                            poke.poke();
+                        }
+                    }
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                }
                 let settled = self.account_update.lock().take();
                 if let Some(state) = settled {
                     // Poke only on a *transition*: the watcher itself posts
@@ -10143,6 +10331,36 @@ mod tuning_tests {
         let t = resolve_text_tuning(&config(-5.0, 99.0));
         assert!((0.5..=2.5).contains(&t.gamma), "gamma clamped, got {}", t.gamma);
         assert!((0.0..=1.0).contains(&t.contrast), "contrast clamped, got {}", t.contrast);
+    }
+}
+
+#[cfg(test)]
+mod enroll_tests {
+    use super::enroll_failure_text;
+
+    #[test]
+    fn an_old_daemons_refusal_becomes_the_persons_next_move() {
+        // An old daemon answers the unknown `Enroll` tag with `Error("could
+        // not understand that message: …")` and keeps serving. Shown
+        // verbatim that is true and useless; the mapping names the fallback
+        // and carries the already-minted code, so the trip to the browser is
+        // not wasted.
+        let e = zest_daemon::DaemonError::Refused(
+            "could not understand that message: unknown variant `enroll`".into(),
+        );
+        let text = enroll_failure_text(&e, "ABCD1234");
+        assert!(
+            text.contains("zest-daemon --enroll ABCD1234"),
+            "the card must hand the person the exact command: {text}"
+        );
+
+        // Every other refusal keeps the daemon's own phrasing — it is
+        // already the person's next move.
+        let e = zest_daemon::DaemonError::Refused("only a local client may enroll this machine".into());
+        assert!(
+            enroll_failure_text(&e, "X").contains("only a local client"),
+            "a real refusal must not be rewritten"
+        );
     }
 }
 

@@ -109,6 +109,9 @@ pub enum HitRegion {
     FleetApproveDevice(usize),
     /// The fleet header's "Sign in with a code"; clicking opens the entry.
     FleetSignIn,
+    /// The local host card's "Enroll this machine" button (issue #227);
+    /// clicking mints a code and carries it to the loopback daemon.
+    FleetEnrollLocal,
     /// The fleet header's "Sign out"; clicking forgets this app's token.
     FleetSignOut,
     /// One row of the open picker, by index into its row list.

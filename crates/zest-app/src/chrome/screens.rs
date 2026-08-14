@@ -514,6 +514,41 @@ fn fleet(
             });
         }
 
+        // The enroll button (issue #227), right-aligned in the header band —
+        // the devices rows' button treatment. Pushed after the card's own
+        // region, so it outranks the card underneath it; not pushed at all
+        // while the worker is in flight, because a button that answers and
+        // does nothing teaches double-clicking.
+        if let Some(enroll) = &card.enroll {
+            let bpx = 11.0 * s;
+            let bw = measure(&enroll.label, bpx, false, 0.0);
+            let brect = [
+                cx + card_w - CARD_PAD * s - bw - 20.0 * s,
+                hy,
+                bw + 20.0 * s,
+                ACCOUNT_BTN_H * s,
+            ];
+            out.rects.push(RectInstance {
+                radii: [7.0 * s; 4],
+                border: if enroll.clickable { colors.accent } else { colors.line },
+                border_width: HAIRLINE * s,
+                ..RectInstance::filled(brect, colors.panel_bg, area)
+            });
+            if enroll.clickable {
+                out.hit.push(brect, HitRegion::FleetEnrollLocal);
+            }
+            out.texts.push(TextRun {
+                text: enroll.label.clone(),
+                pos: [brect[0] + 10.0 * s, baseline_in(brect[1], brect[3], bpx)],
+                max_width: bw + 2.0,
+                color: if enroll.clickable { colors.accent } else { colors.text_faint },
+                clip: area,
+                px: bpx,
+                bold: false,
+                tracking: 0.0,
+            });
+        }
+
         // Label/value rows.
         let mut ry = hy + 32.0 * s;
         for (label, value, role) in &card.rows {
@@ -805,6 +840,81 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), n, "every theme card must answer as itself");
+    }
+
+    #[test]
+    fn the_enroll_button_answers_only_while_clickable() {
+        // Issue #227: the local card offers "Enroll this machine". Clickable,
+        // it must answer as itself and outrank the card underneath (a click
+        // that opened a shell instead of enrolling would be a bad surprise);
+        // in flight, it must not answer at all — a button that answers and
+        // does nothing teaches double-clicking.
+        use crate::chrome::model::{FleetAccountAction, FleetAccountModel, FleetEnroll};
+        let account = FleetAccountModel {
+            line: "signed in as andy".into(),
+            action: FleetAccountAction::SignOut,
+            entry: None,
+            error: None,
+        };
+        let card = |clickable: bool| FleetCard {
+            name: "studio".into(),
+            local: true,
+            online: true,
+            pill: None,
+            open: true,
+            rows: vec![("key".into(), "1f2a3b4c".into(), 0)],
+            enroll: Some(FleetEnroll {
+                label: if clickable { "Enroll this machine" } else { "enrolling…" }.into(),
+                clickable,
+            }),
+        };
+        let area = [0.0, 46.0, 1200.0, 700.0];
+
+        let hits = |clickable: bool| {
+            let mut out = ChromeLayout::default();
+            screen_overlay(
+                &ScreenModel::Fleet {
+                    account: account.clone(),
+                    cards: vec![card(clickable)],
+                    devices: None,
+                },
+                area,
+                &colors(),
+                None,
+                1.0,
+                &mut measure,
+                &mut out,
+            );
+            let mut found = None;
+            for x in (0..1200).step_by(2) {
+                for y in (46..746).step_by(2) {
+                    if out.hit.hit(x as f32, y as f32) == Some(HitRegion::FleetEnrollLocal) {
+                        found = Some((x as f32, y as f32));
+                    }
+                }
+            }
+            (found, out)
+        };
+
+        let (found, out) = hits(true);
+        let (bx, by) = found.expect("the clickable button must answer somewhere");
+        assert!(
+            out.texts.iter().any(|t| t.text == "Enroll this machine"),
+            "…and carry its caption"
+        );
+        // The card is `open: true`, so everywhere else on it still opens a
+        // shell — the button is an island, not a takeover.
+        assert_eq!(
+            out.hit.hit(bx, by + 60.0),
+            Some(HitRegion::FleetCard(0)),
+            "below the button the card still answers as the card"
+        );
+
+        let (found, _) = hits(false);
+        assert!(
+            found.is_none(),
+            "an in-flight button must not answer — the worker is already going"
+        );
     }
 
     #[test]

@@ -65,6 +65,10 @@ const BEARER = new Set([
   '/api/devices',
   '/api/relay/ticket',
   '/api/attestations',
+  // The desktop app minting a *host* code for "Enroll this machine"
+  // (issue #227); which principals may mint which kinds is the handler's
+  // policy, stated in `mintEnrollCode`.
+  '/api/enroll/code',
 ]);
 
 /**

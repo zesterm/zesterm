@@ -53,6 +53,8 @@ pub use local::PipeStream;
 pub use server::{serve, Connection, Registry};
 pub use session::{Session, Update};
 
+use std::sync::Arc;
+
 use zest_proto::{HostId, SessionAddr, SessionId};
 
 /// What a daemon needs to know about itself.
@@ -140,6 +142,36 @@ pub struct DaemonConfig {
     /// bytes it skipped; this drops intermediate *frames*, which is the whole
     /// design. → ADR-004, ADR-009.
     pub min_delta_interval: std::time::Duration,
+    /// How a loopback connection enrols this machine (`ClientMessage::Enroll`,
+    /// issue #227): the control plane's base URL — `--control-plane` or the
+    /// default — plus the transport and the store the token lands in.
+    ///
+    /// `None` under `--ephemeral`, for `--enroll`'s own refusal reason: a key
+    /// that dies with the process must not claim an account row nothing can
+    /// ever answer for. Also `None` throughout the test harnesses, where a
+    /// daemon that could reach a control plane would be a daemon whose tests
+    /// fail on an aeroplane.
+    pub enroll: Option<EnrollSeam>,
+}
+
+/// Everything [`server`] needs to run `enroll::enroll` on a client's behalf.
+///
+/// The trait objects are the same injection seam `--enroll` has always had —
+/// `ControlPlane` exists precisely so a test can watch an enrolment without a
+/// socket — carried into the serving path.
+#[derive(Clone)]
+pub struct EnrollSeam {
+    pub base_url: String,
+    pub http: Arc<dyn enroll::ControlPlane + Send + Sync>,
+    pub secrets: Arc<dyn zest_mesh::keystore::SecretStore>,
+}
+
+impl std::fmt::Debug for EnrollSeam {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The transports are behind dyn on purpose; the URL is the one part
+        // of this a log line can act on.
+        f.debug_struct("EnrollSeam").field("base_url", &self.base_url).finish_non_exhaustive()
+    }
 }
 
 /// A session's lifecycle, as clients see it.

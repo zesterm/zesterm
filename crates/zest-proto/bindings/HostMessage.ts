@@ -43,7 +43,7 @@ expires_in_secs: number, resolved: boolean, } | { "t": "sessions", sessions: Arr
  * wrong the moment two clients create on one host concurrently —
  * each may adopt the other's shell. Absent on listings and pushes.
  */
-created: SessionId | null, } | { "t": "keyframe", session: SessionAddr, seq: Seq, cols: number, rows: number, rows_data: Array<RowPayload>, attrs: Array<AttrDef>, cursor: CursorState, 
+created: SessionId | null, } | { "t": "enroll_result", ok: boolean, account: string | null, message: string, } | { "t": "keyframe", session: SessionAddr, seq: Seq, cols: number, rows: number, rows_data: Array<RowPayload>, attrs: Array<AttrDef>, cursor: CursorState, 
 /**
  * `zest_core::Modes::bits()`. See [`DeltaOp::Modes`].
  *

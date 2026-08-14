@@ -161,6 +161,26 @@ pub enum ClientMessage {
     /// reaching the loopback socket demonstrates. Accepting it over the LAN
     /// would let one paired device enrol others.
     PairingDecision { client: ClientId, approve: bool },
+    /// Join this machine to an account, with a code the signed-in app minted.
+    ///
+    /// **Honoured on a loopback connection only**, `PairingDecision`'s rule
+    /// for `PairingDecision`'s reason: enrolling the machine is the authority
+    /// of whoever is logged in at it. The daemon signs the code with its own
+    /// host key, posts the claim to the control plane and keeps the token —
+    /// the exact work of `zest-daemon --enroll <code>`, reachable without a
+    /// terminal (issue #227). Answered by [`HostMessage::EnrollResult`], off
+    /// a worker: the claim is a keychain probe and an HTTPS round trip, and
+    /// the serve loop must not hold its connection lock across either.
+    ///
+    /// **A new tag, and the compatibility that costs.** Unlike an added
+    /// field, a variant an old daemon has never heard of does not decode —
+    /// but the daemon answers an unparseable message with `Error { "could
+    /// not understand that message" }` and keeps serving (see `on_bytes`),
+    /// and this message is only ever sent over loopback to the sender's own
+    /// daemon, on a person's click. The app treats that `Error` reply as
+    /// "daemon too old" and names the fallback (`--enroll`). See
+    /// docs/CONTRACTS.md.
+    Enroll { code: String },
     /// Resend the whole state; this client cannot apply what it is being sent.
     ///
     /// Detach-and-reattach has the same effect and is what a client had to do
@@ -283,6 +303,16 @@ pub enum HostMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         created: Option<SessionId>,
     },
+    /// How [`ClientMessage::Enroll`] went.
+    ///
+    /// Sent only to the connection that asked, once its worker settles. On
+    /// `ok`, `account` is who the machine now belongs to, as the control
+    /// plane names them (optional for `enroll()`'s reason: the display name
+    /// is the control plane's to withhold). On `!ok`, `message` is the
+    /// failure as the CLI would have printed it — the app shows it verbatim,
+    /// because "the control plane refused this enrolment (409): code already
+    /// used" is the person's next move and a summary of it is not.
+    EnrollResult { ok: bool, account: Option<String>, message: String },
     /// A complete grid state.
     ///
     /// Sent on attach, and whenever the client's ack has fallen so far behind

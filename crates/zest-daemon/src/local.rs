@@ -544,6 +544,7 @@ mod tests {
             relay: None,
             shell_integration: true,
             min_delta_interval: Duration::ZERO,
+            enroll: None,
         }
     }
 
@@ -711,6 +712,7 @@ mod unix_tests {
             relay: None,
             shell_integration: true,
             min_delta_interval: std::time::Duration::ZERO,
+            enroll: None,
         };
         let listen_path = p.clone();
         std::thread::spawn(move || {

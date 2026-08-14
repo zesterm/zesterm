@@ -32,6 +32,7 @@ const CANONICAL: Record<string, ClientMessage> = {
   },
   auth: { t: 'auth', signature: 'ef'.repeat(64) },
   pairing_decision: { t: 'pairing_decision', client: 'ab'.repeat(32), approve: false },
+  enroll: { t: 'enroll', code: 'GOLDCODE' },
   request_keyframe: { t: 'request_keyframe', session: SESSION },
   list_sessions: { t: 'list_sessions' },
   create_session: { t: 'create_session', command: 'htop', cwd: '/tmp', cols: 300, rows: 80 },

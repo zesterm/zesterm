@@ -779,3 +779,111 @@ test('platform is screened for control characters, exactly as label is', async (
   assert.deepEqual(still, { used_at: null }, 'and a refused claim leaves the code usable');
   db.close();
 });
+
+// --- minting with a machine token (issue #227) -----------------------------
+//
+// The "Enroll this machine" button: the desktop app holds a *device* token
+// and mints a `host` code on the person's behalf. The policy under test is
+// `mintEnrollCode`'s: an approved device may mint host codes only — a leaked
+// app token must not be able to mint credentials for further devices — and a
+// host token mints nothing at all.
+
+/** A machine: bearer, JSON, and deliberately no origin and no cookie. */
+function bearerPost(path: string, token: string, body: unknown): Request {
+  return new Request(`${ORIGIN}${path}`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Enrol a machine of `kind` and keep its bearer token. */
+async function machineToken(
+  db: TestDb,
+  cookie: string,
+  kind: 'host' | 'device',
+  seed: number,
+): Promise<string> {
+  const { code } = await mint(db, cookie, kind);
+  const key = await testKey(seed);
+  const label = `${kind}-${seed}`;
+  const role = kind === 'host' ? ('host' as const) : ('client' as const);
+  const res = await routeApi(
+    daemonPost('/api/enroll/claim', {
+      code,
+      hostId: key.id,
+      label,
+      sig: await signEnrollment({ key, code, label, role }),
+    }),
+    env(db),
+    fetch,
+    NOW,
+  );
+  assert.equal(res?.status, 200, `enrolling the ${kind} must succeed`);
+  const { token } = (await res!.json()) as { token: string };
+  return token;
+}
+
+test('a device token mints a host code, and a daemon can claim it', async () => {
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  // The first device a user enrols is born approved (registry.ts), which is
+  // the resolver's floor for answering bearer requests at all.
+  const app = await machineToken(db, cookie, 'device', 21);
+
+  const res = await routeApi(bearerPost('/api/enroll/code', app, { kind: 'host' }), env(db), fetch, NOW);
+  assert.equal(res?.status, 200, 'an approved device may add machines — the button is the point');
+  const { code } = (await res!.json()) as { code: string };
+
+  // The code it minted is a first-class code: a daemon claims it exactly as
+  // it would a cookie-minted one, and lands in the minting device's account.
+  const key = await testKey(22);
+  const claim = await routeApi(
+    daemonPost('/api/enroll/claim', {
+      code,
+      hostId: key.id,
+      label: 'studio',
+      sig: await signEnrollment({ key, code, label: 'studio', role: 'host' }),
+    }),
+    env(db),
+    fetch,
+    NOW,
+  );
+  assert.equal(claim?.status, 200, 'a device-minted code claims like any other');
+  const row = rowOf(db, `SELECT user_id FROM hosts WHERE id = ?`, key.id) as {
+    user_id: string;
+  };
+  assert.equal(row.user_id, 'user-a', 'the machine lands in the account that holds the device');
+  db.close();
+});
+
+test('a device token must not mint device codes', async () => {
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  const app = await machineToken(db, cookie, 'device', 23);
+
+  const res = await routeApi(
+    bearerPost('/api/enroll/code', app, { kind: 'device' }),
+    env(db),
+    fetch,
+    NOW,
+  );
+  assert.equal(
+    res?.status,
+    403,
+    'a leaked app token must not be able to mint credentials for further devices',
+  );
+  db.close();
+});
+
+test('a host token mints nothing', async () => {
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  const host = await machineToken(db, cookie, 'host', 24);
+
+  for (const kind of ['host', 'device'] as const) {
+    const res = await routeApi(bearerPost('/api/enroll/code', host, { kind }), env(db), fetch, NOW);
+    assert.equal(res?.status, 403, `machines do not add machines (kind ${kind})`);
+  }
+  db.close();
+});
