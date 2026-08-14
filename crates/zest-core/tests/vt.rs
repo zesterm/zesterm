@@ -1130,6 +1130,127 @@ fn conpty_repaint_after_a_squeeze(cols: usize, rows: usize, kept: &[&str]) -> Ve
 }
 
 #[test]
+fn dragging_the_height_down_and_back_puts_the_screen_back_as_it_was() {
+    // What the user actually reported, one issue after the test below: the
+    // blocks survived and the history survived, and the pane still came back
+    // with two lines of output and a prompt jammed against the top of an
+    // otherwise empty window. #200 stopped the *destruction*; the rows were
+    // simply never given back, because the pull that would give them back had
+    // to be skipped -- ConPTY's repaint would have blanked them.
+    //
+    // It only had to be skipped *until the repaint*. This drives the literal
+    // bytes ConPTY sends (#205, #224's checklist item) and asserts the whole
+    // gesture is reversible: same screen, same cursor, nothing left in history.
+    let mut t = Terminal::new(40, 12, 500);
+    t.set_pty_restates_viewport(true);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\n");
+    for i in 0..9 {
+        t.advance(format!("entry {i}\r\n").as_bytes());
+    }
+    t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    let before = t.screen_text();
+    let cursor_before = t.cursor();
+    let out = t.blocks().blocks()[0].output_line.expect("the command produced output");
+
+    t.resize(40, 1);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 1, &["$ "]));
+    t.resize(40, 12);
+    let _ = t.take_events();
+    t.advance(&conpty_repaint_after_a_squeeze(40, 12, &["$ "]));
+
+    // The host has to tell its clients, and it cannot tell them in a delta:
+    // rows that were history are on screen now, and a client applying deltas
+    // over that holds each of them twice.
+    assert!(
+        t.take_events().iter().any(|e| matches!(e, TermEvent::ViewportRebased)),
+        "the settle moved the boundary without asking anyone for a keyframe"
+    );
+    assert_eq!(t.screen_text(), before, "the drag was not reversible");
+    assert_eq!(t.cursor().row, cursor_before.row, "the prompt did not come back down");
+    assert_eq!(
+        t.grid().scrollback_len(),
+        0,
+        "the displaced rows are still parked in history with a blank screen below them"
+    );
+    // On the *screen* this time, not merely reachable as history: a block whose
+    // rows are only in scrollback renders as a card with nothing in it, which is
+    // what "everything disappeared" looked like.
+    for (n, line) in (out..out + 9).enumerate() {
+        let row = t.grid().row_of_line(line).unwrap_or_else(|| {
+            panic!("line {line} of the listing is not on screen after the drag")
+        });
+        assert_eq!(t.grid().row(row).text().trim_end(), format!("entry {n}"));
+    }
+}
+
+#[test]
+fn a_repaint_while_a_full_screen_program_is_up_leaves_the_primary_grid_alone() {
+    // The latch is armed on whichever grid is active, so it has to be settled
+    // there too. Settling the primary unconditionally reads as harmless — the
+    // alt screen has no scrollback to give back, so what is there to get wrong —
+    // and is not: the primary is carrying a debt from the drag that happened
+    // before vim started, and an alt-screen repaint would pay it against a
+    // viewport ConPTY is describing for a different screen entirely.
+    // Eleven newlines, so the twelve rows are full and nothing has scrolled:
+    // every row of history below comes from the drag, which makes the count
+    // exact rather than something to work out.
+    let mut t = Terminal::new(40, 12, 500);
+    t.set_pty_restates_viewport(true);
+    for i in 0..11 {
+        t.advance(format!("line {i}\r\n").as_bytes());
+    }
+    t.advance(b"line 11");
+    assert_eq!(t.grid().scrollback_len(), 0, "the fixture scrolled before the drag");
+
+    // vim starts, and *then* the window is dragged — so the resize reaches both
+    // grids and the repaint that answers it describes the alternate screen.
+    // Cursor on the last row, where a full-screen program's status line puts
+    // it. It matters: with the cursor at the top a shrink gives up the blank
+    // rows below it and nothing goes over the top at all, so the alt grid never
+    // reaches the code this is about and the test passes for the wrong reason.
+    t.advance(b"\x1b[?1049h\x1b[12;1H");
+    t.resize(40, 4);
+    t.resize(40, 12);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 12, &["~"]));
+    t.advance(b"\x1b[?1049l");
+
+    assert_eq!(
+        t.grid().scrollback_len(),
+        8,
+        "an alt-screen repaint paid the primary grid's debt, against rows it never restated"
+    );
+}
+
+#[test]
+fn a_repaint_for_a_size_the_grid_has_left_is_sat_out() {
+    // A drag emits resizes faster than ConPTY answers them, so a repaint laid
+    // out for a size we have already left is routine rather than exotic. Its
+    // `CSI 8;r;c t` names that stale size, which is how it can be told apart —
+    // and it has to be, because settling on it pays a grow's debt against a
+    // viewport that has since shrunk, dragging history down into rows the next
+    // repaint is about to blank. That is #200 arrived at from the other side.
+    let mut t = Terminal::new(40, 12, 500);
+    t.set_pty_restates_viewport(true);
+    for i in 0..12 {
+        t.advance(format!("line {i}\r\n").as_bytes());
+    }
+
+    t.resize(40, 4);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 4, &["line 11"]));
+    t.resize(40, 12);
+    let banked = t.grid().scrollback_len();
+
+    // The repaint for the 4-row viewport, arriving after the grow to 12.
+    t.advance(&conpty_repaint_after_a_squeeze(40, 4, &["line 11"]));
+
+    assert_eq!(
+        t.grid().scrollback_len(),
+        banked,
+        "a stale repaint settled the debt, so the rows it gave back are about to be blanked"
+    );
+}
+
+#[test]
 fn dragging_the_height_to_nothing_and_back_does_not_blank_every_block() {
     // The reported gesture, and the one the width-change story never covered:
     // drag the window's height down to nothing and back, and every block comes

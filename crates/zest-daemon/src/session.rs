@@ -181,6 +181,17 @@ impl Session {
                                         *slot = t;
                                     }
                                 }
+                                // The repaint that answered a grow has closed
+                                // and the grid gave back the rows the shrink
+                                // displaced, so the viewport/scrollback boundary
+                                // moved. No delta can say that -- there is no
+                                // `DeltaOp::Resize`, on purpose (`CONTRACTS.md`)
+                                // -- and a client applying deltas over it would
+                                // hold rows the host now calls visible while
+                                // still filing them as history. (#247)
+                                TermEvent::ViewportRebased => {
+                                    keyframe_everyone(&subscribers);
+                                }
                                 _ => {}
                             }
                         }
@@ -611,6 +622,23 @@ fn wake_subscribers(subscribers: &Mutex<HashMap<u64, Subscriber>>) {
     if let Ok(subs) = subscribers.lock() {
         for sub in subs.values() {
             (sub.wake)();
+        }
+    }
+}
+
+/// Owe every subscriber a full state rather than a delta.
+///
+/// For a change no delta can describe. The one there is today is the viewport
+/// giving back the rows a shrink displaced once a restating pty's repaint has
+/// closed (`TermEvent::ViewportRebased`): rows that were history are on screen,
+/// and a client applying deltas over that would hold the same lines twice —
+/// once in its own scrollback, once in the viewport — which is what
+/// `sliceBlocks` and every other id-ordered walk assume cannot happen. There is
+/// no `DeltaOp::Resize` on purpose; `docs/CONTRACTS.md` has the argument. (#247)
+fn keyframe_everyone(subscribers: &Mutex<HashMap<u64, Subscriber>>) {
+    if let Ok(mut subs) = subscribers.lock() {
+        for sub in subs.values_mut() {
+            sub.needs_keyframe = true;
         }
     }
 }
@@ -1121,6 +1149,34 @@ mod tests {
                 assert_eq!((k.cols, k.rows), (60, 20), "the keyframe must carry the new size");
             }
             other => panic!("the unchanged client was owed a keyframe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_rebased_viewport_owes_every_client_a_keyframe() {
+        // When a restating pty's repaint closes, the grid gives back the rows
+        // the shrink displaced and the viewport/scrollback boundary moves
+        // (#247). Deltas cannot say that -- there is no `DeltaOp::Resize` -- so
+        // a client left to apply them would go on filing those lines as history
+        // while the host calls them visible, and hold each of them twice.
+        //
+        // The reader thread's arm is one line calling this; what it has to do
+        // is here, because the arm itself needs a real ConPTY to reach.
+        let s = session("rebase");
+        let (a, _, _) = attach_at(&s, 80, 24);
+        let (b, _, _) = attach_at(&s, 80, 24);
+        wait_for(|| s.has_exited());
+        while s.poll(a).is_some() {}
+        while s.poll(b).is_some() {}
+        assert!(s.poll(a).is_none(), "the fixture is not quiet");
+
+        keyframe_everyone(&s.subscribers);
+
+        for (who, h) in [("a", a), ("b", b)] {
+            match s.poll(h) {
+                Some((_, _, Update::Keyframe(_))) => {}
+                other => panic!("client {who} was owed a keyframe, got {other:?}"),
+            }
         }
     }
 

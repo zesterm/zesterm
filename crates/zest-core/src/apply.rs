@@ -214,6 +214,21 @@ impl RemoteWriter<'_> {
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize) {
+        // A keyframe is about to restate every visible row, so a grow must not
+        // pull this replica's history down into rows that are about to be
+        // overwritten. It is ConPTY's argument one layer out, and it went wrong
+        // the same way: the pull moves those rows out of scrollback, the
+        // keyframe blanks what it now owns, and history is destroyed rather
+        // than misplaced -- host-side that was #200, and the client had been
+        // doing it all along because nothing here ever set the flag. (#247)
+        //
+        // Set on this door rather than where a replica is built, because *this
+        // door is what makes a terminal a replica*: a grid resized through it
+        // has its authority somewhere else by definition, and there is no
+        // second place to remember. A replica never settles the debt either --
+        // settling runs from the parser, and the module rule above is that
+        // nothing mixes the two.
+        self.state.set_viewport_restated_elsewhere(true);
         self.state.resize(cols, rows);
     }
 
@@ -318,6 +333,37 @@ mod tests {
         assert_eq!(t.grid().scrollback_len(), 0);
         t.remote().scroll(0, 2, 1);
         assert_eq!(t.grid().scrollback_len(), 1, "the displaced row became history");
+    }
+
+    #[test]
+    fn a_replica_grow_does_not_pull_its_own_history_into_the_viewport() {
+        // The keyframe that follows this resize restates every visible row, so
+        // rows pulled down to meet it are overwritten -- and the pull has
+        // already moved them out of scrollback, so they are gone from the client
+        // entirely while the host still holds them. That is #200 exactly, one
+        // layer out, and it was live in every client because nothing here ever
+        // told the grid it was a replica. (#247)
+        let mut t = Terminal::new(10, 6, 100);
+        for r in 0..6 {
+            t.remote().write_row(r, r as LineId, &row_of("line"), false);
+        }
+        t.remote().scroll(0, 5, 4);
+        // On the last row, so the shrink has no blank rows below the cursor to
+        // give up and has to take them over the top -- the real gesture, and the
+        // only one where a grow has anything to pull back.
+        t.remote().set_cursor(5, 0);
+        let history = t.grid().scrollback_len();
+        assert_eq!(history, 4, "the fixture did not build any history");
+
+        t.remote().resize(10, 3);
+        assert_eq!(t.grid().scrollback_len(), history + 3, "the shrink banked nothing");
+        t.remote().resize(10, 6);
+
+        assert_eq!(
+            t.grid().scrollback_len(),
+            history + 3,
+            "the grow pulled history into rows the keyframe is about to overwrite"
+        );
     }
 
     #[test]

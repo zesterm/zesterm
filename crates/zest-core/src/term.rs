@@ -43,6 +43,13 @@ pub enum TermEvent {
     SyncUpdate(bool),
     /// OSC 8: a hyperlink was opened (`Some`) or closed (`None`).
     Hyperlink(Option<String>),
+    /// A restating pty's repaint closed and the viewport/scrollback boundary
+    /// moved to give back what its grow displaced (`Grid::settle_restate`).
+    ///
+    /// Every subscriber needs a keyframe: rows that were history are on screen
+    /// now, and there is no delta that says so — `docs/CONTRACTS.md` has why
+    /// there is no `DeltaOp::Resize`, and this is the same argument. (#247)
+    ViewportRebased,
 }
 
 /// Damage accumulated since the last frame.
@@ -80,6 +87,10 @@ pub struct TermState {
     pub(crate) grid: Grid,
     /// The alternate screen, created lazily -- most sessions never enter it.
     pub(crate) alt_grid: Option<Grid>,
+    /// Kept here as well as on each grid because the alt grid is built later:
+    /// a flag set once at spawn has to reach a screen that does not exist yet.
+    /// See [`crate::grid::Grid::set_viewport_restated_elsewhere`].
+    pub(crate) viewport_restated_elsewhere: bool,
     /// Current SGR state, used as the template for newly written cells.
     pub(crate) template: Cell,
     pub(crate) saved_cursor: SavedCursor,
@@ -242,9 +253,14 @@ impl Terminal {
     /// Tell the terminal its pty restates the viewport after a resize.
     ///
     /// Asked of the transport (`PtyTransport::restates_on_resize`) and passed
-    /// on at spawn. See [`crate::grid::Grid::set_pty_restates_viewport`].
+    /// on at spawn. Named after the pty deliberately, where the grid's
+    /// [`crate::grid::Grid::set_viewport_restated_elsewhere`] is not: this is
+    /// the only caller that has a pty in hand, and the grid has two callers
+    /// with nothing in common but the consequence. A replica sets the same flag
+    /// through `Terminal::remote`, and a name that described a pty would have
+    /// gone on hiding that one — which is how it stayed hidden. (#247)
     pub fn set_pty_restates_viewport(&mut self, yes: bool) {
-        self.state.grid.set_pty_restates_viewport(yes);
+        self.state.set_viewport_restated_elsewhere(yes);
     }
 
     /// The visible screen as text. The workhorse of the test suite.
@@ -366,6 +382,7 @@ impl TermState {
         Self {
             grid: Grid::new(cols, rows, scrollback),
             alt_grid: None,
+            viewport_restated_elsewhere: false,
             template: Cell::default(),
             saved_cursor: SavedCursor::default(),
             saved_cursor_alt: SavedCursor::default(),
@@ -408,6 +425,16 @@ impl TermState {
         self.damage.mark_full();
     }
 
+    /// Set the flag on every grid this terminal has, and on the ones it has not
+    /// built yet. See the field.
+    pub(crate) fn set_viewport_restated_elsewhere(&mut self, yes: bool) {
+        self.viewport_restated_elsewhere = yes;
+        self.grid.set_viewport_restated_elsewhere(yes);
+        if let Some(alt) = self.alt_grid.as_mut() {
+            alt.set_viewport_restated_elsewhere(yes);
+        }
+    }
+
     pub(crate) fn resize(&mut self, cols: usize, rows: usize) {
         // A width change rewraps, which renumbers lines -- so a selection
         // anchored to the old ids now names different text. Clearing it is what
@@ -433,6 +460,31 @@ impl TermState {
             self.prompt_end = None;
         }
         self.tabs = default_tabs(cols);
+        self.touch_full();
+    }
+
+    /// Pay back what a restating pty's grow owed, now that its repaint has
+    /// closed. See [`crate::grid::Grid::settle_restate`].
+    ///
+    /// The blocks need no re-anchoring: a height change renumbers nothing, so
+    /// the rows coming back into the viewport carry the very ids the blocks
+    /// anchored on before the drag started, and they name their own output
+    /// again by arriving.
+    ///
+    /// The *active* grid, matching where the latch was armed. Settling the
+    /// primary unconditionally instead reads as harmless — the alt screen has no
+    /// scrollback to give back — and is not: with a full-screen program up, the
+    /// alt grid's latch is never cleared, so every DECTCEM change afterwards
+    /// retries the settle, and it retries it against the primary grid, whose
+    /// debt belongs to a resize the repaint in hand knows nothing about.
+    pub(crate) fn settle_restate(&mut self) {
+        if !self.grid_mut().settle_restate() {
+            return;
+        }
+        // The viewport/scrollback boundary moved, which is the one change a
+        // delta cannot describe -- there is no `DeltaOp::Resize`, on purpose
+        // (`docs/CONTRACTS.md`). Subscribers need a whole new picture.
+        self.events.push(TermEvent::ViewportRebased);
         self.touch_full();
     }
 
@@ -520,10 +572,13 @@ impl TermState {
     /// while a full-screen program is up `grid()` answers for the alternate
     /// screen, whose ids restart at zero.
     fn oldest_retained_line(&self) -> LineId {
-        // Active space: this counts back from the top of the *live* screen, so
-        // reading it through the display would move the eviction horizon every
-        // time someone scrolled.
-        self.grid.active_row(0).id.saturating_sub(self.grid.scrollback_len() as LineId)
+        // Read off the oldest row rather than counted back from the top of the
+        // live screen. Counting is only right while the ids are contiguous, and
+        // `truncate_bottom` leaves gaps — see `Grid::oldest_line_id`. It also
+        // makes the display irrelevant, which the count needed active space to
+        // achieve: the oldest row held is the oldest row held wherever anyone
+        // happens to be looking.
+        self.grid.oldest_line_id()
     }
 
     /// Drop blocks whose lines have all fallen out of scrollback.
@@ -680,6 +735,12 @@ impl TermState {
             // using it own the whole display and their content is not history.
             let mut alt = Grid::new(cols, rows, 0);
             alt.clear_all(&self.template);
+            // Whoever restates the primary grid's viewport restates this one
+            // too. It changes nothing today -- with no scrollback there is
+            // nothing for a grow to pull back, so both branches coincide -- and
+            // depending on that is how the two grids quietly diverge the first
+            // time the alt screen gains history.
+            alt.set_viewport_restated_elsewhere(self.viewport_restated_elsewhere);
             self.alt_grid = Some(alt);
             self.modes |= Modes::ALT_SCREEN;
         } else {

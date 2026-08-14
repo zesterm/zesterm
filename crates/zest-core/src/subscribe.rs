@@ -118,9 +118,13 @@ impl ChangeSource for crate::Terminal {
         // The first line still held, which is where scrollback begins. A client
         // asking for anything older is asking for something that has been
         // evicted, and needs to be told so rather than handed blanks.
-        // Active space, for the same reason as `oldest_retained_line`: a client
-        // is asking what the host still holds, not where anyone is looking.
-        self.grid().active_row(0).id.saturating_sub(self.grid().scrollback_len() as u64)
+        //
+        // Read off the oldest row rather than counted back from the top of the
+        // live screen: the ids are not necessarily contiguous, and subtracting
+        // across a gap names a line that never existed. See
+        // `Grid::oldest_line_id`. It is still what the host *holds* rather than
+        // what anyone is looking at, which was the point of using active space.
+        self.grid().oldest_line_id()
     }
 }
 
