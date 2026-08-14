@@ -109,4 +109,19 @@ export interface RoomState {
    * strings and the platform compares them literally.
    */
   setWebSocketAutoResponse(pair?: AutoResponsePair): void;
+  /**
+   * When the platform last auto-answered a keepalive on `ws`, or `null`.
+   *
+   * The only window the room has onto a parked link's liveness. The daemon
+   * pings every thirty seconds, but `setWebSocketAutoResponse` means workerd
+   * answers beneath the object and `webSocketMessage` is never called — so the
+   * pings cannot wake anything, by design (ADR-009). What they *do* leave is
+   * this timestamp, recorded without a wake, which the room reads whenever it
+   * is up for its own reasons. → `room/presence.ts`, and #237.
+   *
+   * `Date | null` rather than a number because that is the platform's shape;
+   * `null` means it has recorded none for this socket, which is the ordinary
+   * state of a link that has just parked and not yet been pinged.
+   */
+  getWebSocketAutoResponseTimestamp(ws: Sock): Date | null;
 }

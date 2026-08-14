@@ -163,22 +163,32 @@ export async function sweepSpentTickets(storage: RoomStorage, now: number): Prom
 }
 
 /**
- * Arm the sweep for `at`, unless one is already pending.
+ * Arm the sweep for `at`, unless something is already due no later.
  *
  * There is one alarm per object, so `setAlarm` replaces rather than adds:
- * re-arming on every attach would slide the sweep forward for as long as a host
- * keeps receiving them, and a busy room would never sweep at all. A pending
- * alarm is always no later than the first unswept entry's expiry, so leaving it
- * alone is what keeps the set bounded.
+ * re-arming unconditionally on every attach would slide the sweep forward for
+ * as long as a host keeps receiving them, and a busy room would never sweep at
+ * all. The rule that avoids both failure modes is **only ever move the alarm
+ * earlier**, which keeps the invariant this file relies on — a pending alarm
+ * is always no later than the first unswept entry's expiry — while leaving
+ * room for a second user of the one alarm.
+ *
+ * That second user now exists (`room/presence.ts`, #237) and follows the same
+ * rule, so whichever need is soonest wins and neither can starve the other:
+ * the presence refresh is five minutes out, a spent ticket expires in one, and
+ * `RelayRoom.alarm` does both jobs whenever it fires. Checking only for
+ * "nothing pending" was correct while the sweep was alone, and would have let
+ * a parked host's refresh delay every sweep behind it by up to that interval.
  *
  * A failure is swallowed rather than failing the claim, on `touchHost`'s
  * argument: the id is recorded, this attach is honest, and refusing it would
  * take a browser offline over the *housekeeping*. The cost is one unswept entry
- * until the next attach finds no pending alarm and arms one.
+ * until the next attach arms one.
  */
 async function armSweep(storage: RoomStorage, at: number): Promise<void> {
   try {
-    if ((await storage.getAlarm()) !== null) return;
+    const pending = await storage.getAlarm();
+    if (pending !== null && pending <= at) return;
     await storage.setAlarm(at);
   } catch {
     // See above.

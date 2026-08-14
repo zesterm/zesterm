@@ -1,0 +1,28 @@
+-- Is this machine's control link still parked? (#237)
+--
+-- `last_seen_at` cannot answer that and never could. It records *arrival* --
+-- the relay stamps it when a daemon's control link connects, and
+-- `resolveMachineToken` refreshes it at hour granularity -- so a machine that
+-- connected and died looks exactly like one parked and waiting. The fleet
+-- screen read that as "asleep" for a machine you could attach to right now,
+-- which is the one fact the screen is read for.
+--
+-- This column is the other question: not "when did we last hear from it" but
+-- "as of when was its link demonstrably alive". The relay writes it while the
+-- link is parked and clears it when the link goes, and `/api/hosts` turns it
+-- into a boolean against a bound -- so a room evicted without its close
+-- handler decays to offline instead of lying forever. The bound lives in
+-- `@zesterm/cloud-shared` because two separately-deployed Workers have to
+-- agree on it: the relay refreshes on that cadence, the web Worker reads it.
+--
+-- NULL means "no live control link known", which is the honest state for every
+-- existing row and for every machine that has never dialled a relay -- so
+-- there is no backfill, and the default is right by construction.
+--
+-- Deliberately NOT a boolean. A flag has no way to expire, and the failure
+-- being fixed here is a screen that states something it cannot know; a
+-- timestamp read against a bound can only ever be stale in the direction that
+-- decays to "asleep", which is the safe way round -- the attach path already
+-- names its own failure (`CLOSE_HOST_ABSENT`, `CLOSE_PIPE_DIAL_TIMEOUT`) when
+-- a machine listed as present does not answer.
+ALTER TABLE hosts ADD COLUMN control_seen_at INTEGER;

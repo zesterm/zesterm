@@ -11,6 +11,8 @@
  * `exec`, adding it here is a visible decision rather than a discovery.
  */
 
+import { controlLinkIsLive } from '@zesterm/cloud-shared';
+
 export interface D1Result<T> {
   readonly results: T[];
 }
@@ -100,6 +102,15 @@ export interface HostRow {
   readonly platform: string;
   readonly enrolled_at: number;
   readonly last_seen_at: number | null;
+  /**
+   * When the relay last had proof this machine's control link was parked, or
+   * `null` for one that has never dialled in — or whose link has gone.
+   *
+   * Written only by the relay Worker (`room/presence.ts`), read only here, and
+   * never handed to a client raw: the bound it is read against is the server's
+   * business, so `publicHost` answers a boolean. → migration 0007, #237.
+   */
+  readonly control_seen_at: number | null;
   readonly revoked_at: number | null;
 }
 
@@ -127,6 +138,20 @@ export interface PublicHost {
   readonly platform: string;
   readonly enrolledAt: number;
   readonly lastSeenAt: number | null;
+  /**
+   * Can this machine be reached through the relay right now?
+   *
+   * A boolean rather than the timestamp behind it, deliberately: how stale a
+   * parked link may be before it stops counting is a fact about the relay's
+   * refresh cadence, and a client that had to know it is a client that will
+   * eventually disagree with the server about what "online" means. #237 is
+   * what happens when a screen has to guess this — it guessed "asleep" for a
+   * machine that opens a shell instantly.
+   *
+   * `false` also covers "no relay in this deployment", which is right: the
+   * fleet screen's other sources (mDNS on the LAN) are what speak for those.
+   */
+  readonly online: boolean;
 }
 
 export interface PublicDevice {
@@ -152,13 +177,17 @@ export interface PublicDevice {
 // Field by field, for the reason `publicUser` is: both tables will grow
 // columns, `do_id` is already one of them, and a spread ships each new one to
 // the browser by default.
-export function publicHost(row: HostRow): PublicHost {
+// `now` because one of the fields is a *verdict* rather than a column: the
+// freshness of `control_seen_at` is only meaningful against a clock, and
+// resolving it here means every caller answers the same question the same way.
+export function publicHost(row: HostRow, now: number): PublicHost {
   return {
     id: row.id,
     label: row.label,
     platform: row.platform,
     enrolledAt: row.enrolled_at,
     lastSeenAt: row.last_seen_at,
+    online: controlLinkIsLive(row.control_seen_at, now),
   };
 }
 

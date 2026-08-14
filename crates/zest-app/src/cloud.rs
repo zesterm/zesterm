@@ -407,6 +407,17 @@ pub struct AccountHost {
     /// never dialled in.
     #[allow(dead_code, reason = "the fleet card's `last seen` row is the consumer, later in #190's arc")]
     pub last_seen_ms: Option<u64>,
+    /// Whether the relay can reach this machine **right now** — its control
+    /// link is parked and was proved alive within the control plane's own
+    /// bound.
+    ///
+    /// A boolean off the wire rather than a timestamp we age ourselves: how
+    /// stale a parked link may be before it stops counting is the relay's
+    /// refresh cadence, and a client that re-derived it would eventually
+    /// disagree with the server about what online means. Absent — an older
+    /// control plane — reads as `false`, which degrades to exactly the
+    /// behaviour that shipped before #237. (`online` in `PublicHost`.)
+    pub relay_online: bool,
 }
 
 /// What `GET /api/hosts` answers: the fleet as the account knows it.
@@ -442,6 +453,8 @@ pub fn fetch_hosts(api: &dyn AccountApi, token: &str) -> Result<AccountHosts, Cl
         label: String,
         #[serde(rename = "lastSeenAt", default)]
         last_seen_at: Option<u64>,
+        #[serde(default)]
+        online: bool,
     }
     #[derive(serde::Deserialize)]
     struct Answer {
@@ -461,7 +474,12 @@ pub fn fetch_hosts(api: &dyn AccountApi, token: &str) -> Result<AccountHosts, Cl
         hosts: answer
             .hosts
             .into_iter()
-            .map(|r| AccountHost { host: r.id, label: r.label, last_seen_ms: r.last_seen_at })
+            .map(|r| AccountHost {
+                host: r.id,
+                label: r.label,
+                last_seen_ms: r.last_seen_at,
+                relay_online: r.online,
+            })
             .collect(),
     })
 }
@@ -1143,6 +1161,39 @@ mod tests {
             ),
             "a ticket under a dead token is the same fact"
         );
+    }
+
+    #[test]
+    fn the_relay_online_flag_is_read_and_an_older_control_plane_reads_false() {
+        // #237's wire half. `online` is a *verdict* the control plane reaches
+        // against its own bound, so the app reads it rather than re-deriving
+        // it from a timestamp — two implementations of "how stale is too
+        // stale" is two answers that eventually differ.
+        let api = FakeAccountApi::answering(
+            200,
+            &format!(
+                r#"{{"hosts":[{{"id":"{}","label":"win","online":true}},{{"id":"{}","label":"attic","online":false}}]}}"#,
+                hex(&[0x22; 32]),
+                hex(&[0x23; 32])
+            ),
+        );
+        let got = fetch_hosts(&api, "zt1_x").expect("a listing parses");
+        assert!(
+            got.hosts[0].relay_online,
+            "the machine whose control link is parked is the one the fleet screen must \
+             stop calling asleep"
+        );
+        assert!(!got.hosts[1].relay_online, "and an enrolled machine that is off is not");
+
+        // A Worker deployed before 0007 sends no `online` at all. Reading that
+        // as false degrades to exactly the behaviour that shipped before this
+        // change, rather than to a parse error that empties the fleet screen.
+        let older = FakeAccountApi::answering(
+            200,
+            &format!(r#"{{"hosts":[{{"id":"{}","label":"win"}}]}}"#, hex(&[0x22; 32])),
+        );
+        let got = fetch_hosts(&older, "zt1_x").expect("an older control plane still parses");
+        assert!(!got.hosts[0].relay_online, "absent is not online");
     }
 
     #[test]

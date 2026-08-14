@@ -23,6 +23,12 @@ export {
 export { signingPreimage, type Role, type Purpose } from './sig.ts';
 
 export {
+  CONTROL_SEEN_BOUND_MS,
+  CONTROL_SEEN_REFRESH_MS,
+  controlLinkIsLive,
+} from './presence.ts';
+
+export {
   ATTACH_TICKET_AUDIENCE,
   ATTACH_TICKET_SIGNATURE_LEN,
   ATTACH_TICKET_TTL_MS,

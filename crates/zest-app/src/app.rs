@@ -2260,8 +2260,11 @@ impl App {
                 let cards = fleet_hosts
                     .iter()
                     .map(|h| {
-                        let online =
-                            h.local || h.presence == zest_mesh::discovery::Presence::Online;
+                        // `is_online`, not `presence == Online`: the card is
+                        // the surface #237 was reported against, and a machine
+                        // reachable only through the relay has no discovery
+                        // presence to be `Online` in.
+                        let online = h.is_online();
                         let mut rows: Vec<(String, String, u8)> = Vec::new();
                         // Only what is actually known: an os row we cannot
                         // fill would be a dash pretending to be a fact.
@@ -2597,7 +2600,14 @@ impl App {
                     hosts: listing
                         .hosts
                         .into_iter()
-                        .map(|h| AccountEntry { host: h.host, label: h.label })
+                        .map(|h| AccountEntry {
+                            host: h.host,
+                            label: h.label,
+                            // The fact #237 was about: dropping this here is
+                            // what left `snapshot()` with nothing to say about
+                            // a machine only the account knows.
+                            relay_online: h.relay_online,
+                        })
                         .collect(),
                     devices: devices
                         .into_iter()
@@ -3745,8 +3755,7 @@ impl App {
                     f.snapshot()
                         .into_iter()
                         .map(|h| {
-                            let online = h.local
-                                || h.presence == zest_mesh::discovery::Presence::Online;
+                            let online = h.is_online();
                             (h.label, online, h.local)
                         })
                         .collect()
@@ -4093,7 +4102,6 @@ impl App {
         // host; the vertical layout pins them above the footer instead.
         let sidebar = (self.config.tabs.position == zest_config::settings::TabsPosition::Left)
             .then(|| {
-                use zest_mesh::discovery::Presence;
                 let mut groups: Vec<crate::chrome::model::HostGroup> = Vec::new();
                 for (i, tm) in tab_models.iter().enumerate() {
                     if tm.kind != crate::chrome::model::TabKind::Session {
@@ -4120,15 +4128,14 @@ impl App {
                         label: tm.host.clone(),
                         accent: tm.accent,
                         sub,
-                        online: fleet.is_none_or(|h| h.local || h.presence == Presence::Online),
+                        online: fleet.is_none_or(crate::fleet::FleetHost::is_online),
                         tabs: vec![i],
                     });
                 }
-                let online = fleet_hosts
-                    .iter()
-                    .filter(|h| h.local || h.presence == Presence::Online)
-                    .count()
-                    .max(1);
+                // The footer says "N hosts online · M asleep", and until #237 a
+                // relay-reachable machine was counted in M — the same wrong
+                // answer the card gave, in a second place.
+                let online = fleet_hosts.iter().filter(|h| h.is_online()).count().max(1);
                 let asleep = fleet_hosts.len().saturating_sub(online);
                 crate::chrome::model::SidebarModel {
                     groups,
@@ -5776,11 +5783,20 @@ impl App {
         let mut session_rows = Vec::new();
         let mut host_rows = Vec::new();
         for host in &fleet_hosts {
-            let presence = match host.presence {
-                zest_mesh::discovery::Presence::Online => TabPresence::Online,
-                zest_mesh::discovery::Presence::Away => TabPresence::Away,
-                zest_mesh::discovery::Presence::Unseen => TabPresence::Unseen,
-                zest_mesh::discovery::Presence::Unreachable => TabPresence::Unreachable,
+            // Reachability first, discovery's word second. The picker prints
+            // this as a word beside a dot — "unseen" for a machine that opens
+            // a shell on the next keystroke is #237 wearing the palette's
+            // clothes — and `is_online` is the same rule the card and the
+            // sidebar counts read.
+            let presence = if host.is_online() {
+                TabPresence::Online
+            } else {
+                match host.presence {
+                    zest_mesh::discovery::Presence::Online => TabPresence::Online,
+                    zest_mesh::discovery::Presence::Away => TabPresence::Away,
+                    zest_mesh::discovery::Presence::Unseen => TabPresence::Unseen,
+                    zest_mesh::discovery::Presence::Unreachable => TabPresence::Unreachable,
+                }
             };
             // How this host is dialled: the window's own route for the local
             // machine, its advertised endpoint otherwise.

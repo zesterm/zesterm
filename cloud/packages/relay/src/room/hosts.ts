@@ -103,9 +103,57 @@ export async function hostIsEnrolled(args: {
  */
 export async function touchHost(db: D1Binding, host: string, now: number): Promise<void> {
   try {
-    await db.prepare(`UPDATE hosts SET last_seen_at = ? WHERE id = ?`).bind(now, host).run();
+    // Both columns in one statement, because parking is the one moment both
+    // facts are true and it costs nothing to say so twice. They are different
+    // claims and #237 is what happens when one is read as the other:
+    // `last_seen_at` is *arrival* and never expires, `control_seen_at` is
+    // *liveness as of now* and is read against a bound.
+    await db
+      .prepare(`UPDATE hosts SET last_seen_at = ?, control_seen_at = ? WHERE id = ?`)
+      .bind(now, now, host)
+      .run();
   } catch {
     // Swallowed deliberately, and swallowed *here* rather than at the call
     // site, so a second caller cannot reintroduce the bug by forgetting.
+  }
+}
+
+/**
+ * Keep the liveness column fresh while a link is parked — the alarm's write.
+ *
+ * Separate from `touchHost` because it must *not* move `last_seen_at`: that
+ * column answers "when did this machine last dial in", and a refresh every
+ * five minutes would turn it into "now", for ever, for any machine that is
+ * merely still plugged in. Two facts, two columns, two writers.
+ */
+export async function refreshControlSeen(
+  db: D1Binding,
+  host: string,
+  now: number,
+): Promise<void> {
+  try {
+    await db.prepare(`UPDATE hosts SET control_seen_at = ? WHERE id = ?`).bind(now, host).run();
+  } catch {
+    // `touchHost`'s argument, and more so: this runs on an alarm with no peer
+    // waiting on it, and the column decays to `offline` on its own if the
+    // write keeps failing — which is the safe direction.
+  }
+}
+
+/**
+ * The link is gone: say so now rather than letting the bound say it later.
+ *
+ * The close handler is the only chance to be *prompt* about a machine going
+ * away — the bound is what covers the case where there is no close handler at
+ * all (an evicted or killed room), and a bound is by construction slower than
+ * the truth. Clearing here is what makes a lid closing show up on the fleet
+ * screen in seconds instead of minutes.
+ */
+export async function clearControlSeen(db: D1Binding, host: string): Promise<void> {
+  try {
+    await db.prepare(`UPDATE hosts SET control_seen_at = NULL WHERE id = ?`).bind(host).run();
+  } catch {
+    // See above. A failure here costs one machine shown online until the
+    // bound expires it, which is exactly the state this call is optimising.
   }
 }
