@@ -336,8 +336,9 @@ pub trait PtyTransport: Send {
     /// ConPTY is; a unix pty sends nothing back at all. The owner needs this
     /// because a restating pty has the *last word* on the viewport's contents,
     /// which changes what the grid may safely put there — see
-    /// `Grid::set_pty_restates_viewport`. `false` is the safe default: it means
-    /// "assume nothing is coming", which is what a pty that says nothing wants.
+    /// `Grid::set_viewport_restated_elsewhere`, which a replica sets for the
+    /// same reason one layer out. `false` is the safe default: it means "assume
+    /// nothing is coming", which is what a pty that says nothing wants.
     fn restates_on_resize(&self) -> bool {
         false
     }

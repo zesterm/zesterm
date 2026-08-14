@@ -253,8 +253,12 @@ impl Terminal {
     /// Tell the terminal its pty restates the viewport after a resize.
     ///
     /// Asked of the transport (`PtyTransport::restates_on_resize`) and passed
-    /// on at spawn. See
-    /// [`crate::grid::Grid::set_viewport_restated_elsewhere`].
+    /// on at spawn. Named after the pty deliberately, where the grid's
+    /// [`crate::grid::Grid::set_viewport_restated_elsewhere`] is not: this is
+    /// the only caller that has a pty in hand, and the grid has two callers
+    /// with nothing in common but the consequence. A replica sets the same flag
+    /// through `Terminal::remote`, and a name that described a pty would have
+    /// gone on hiding that one — which is how it stayed hidden. (#247)
     pub fn set_pty_restates_viewport(&mut self, yes: bool) {
         self.state.set_viewport_restated_elsewhere(yes);
     }

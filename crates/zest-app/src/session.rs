@@ -140,7 +140,8 @@ impl Session {
         let wake = Arc::new(wake);
 
         let mut term = Terminal::new(size.cols as usize, size.rows as usize, scrollback);
-        // See the daemon's spawn, and `Grid::set_pty_restates_viewport`. (#200)
+        // See the daemon's spawn, and `Grid::set_viewport_restated_elsewhere`.
+        // (#200, #247)
         term.set_pty_restates_viewport(pty.restates_on_resize());
         let terminal = Arc::new(FairMutex::new(term));
         let needs_redraw = Arc::new(AtomicBool::new(false));
