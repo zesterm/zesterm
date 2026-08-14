@@ -2845,9 +2845,28 @@ impl App {
                 granted.grant,
             ));
 
+            let expired = || {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as u64)
+                    >= granted.expires_at
+            };
+            let gave_up = || {
+                AccountState::Failed("the browser approval expired — try again".into())
+            };
+
             loop {
                 std::thread::sleep(LINK_POLL);
                 if generation.load(std::sync::atomic::Ordering::SeqCst) != mine {
+                    return;
+                }
+                // Expiry decides *before* the claim does. Checked only after,
+                // a grant that died during the sleep still bought one more
+                // claim, and the server's collapsed refusal reads "the
+                // browser said no" — a refusal nobody made, about a page the
+                // person may never have opened.
+                if expired() {
+                    post(gave_up());
                     return;
                 }
                 match crate::cloud::claim_link(&identity, &granted.grant, base, &http, &store) {
@@ -2856,7 +2875,14 @@ impl App {
                         return;
                     }
                     Ok(LinkOutcome::Refused(message)) => {
-                        post(AccountState::Failed(format!("the browser said no: {message}")));
+                        // The same reading for the race the check above
+                        // cannot close: the grant can die between it and the
+                        // server's own read of the clock.
+                        post(if expired() {
+                            gave_up()
+                        } else {
+                            AccountState::Failed(format!("the browser said no: {message}"))
+                        });
                         return;
                     }
                     // Pending keeps polling; a transport blip does too — the
@@ -2864,15 +2890,6 @@ impl App {
                     // would fail hand-offs on exactly the flaky networks
                     // this flow exists to spare people typing codes on.
                     Ok(LinkOutcome::Pending) | Err(_) => {}
-                }
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_millis() as u64);
-                if now >= granted.expires_at {
-                    post(AccountState::Failed(
-                        "the browser approval expired — try again".into(),
-                    ));
-                    return;
                 }
             }
         });

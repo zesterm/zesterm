@@ -169,6 +169,10 @@ pub fn native_control_inset(_window: &winit::window::Window) -> Option<(f64, f64
 /// a filesystem path, and shoving one through a `Path` invites separator
 /// rewriting on exactly the platform (`cmd /c start`) where it matters.
 pub fn open_url(url: &str) {
+    if !url_is_shell_safe(url) {
+        tracing::warn!(url, "refusing to open a URL a shell could reparse");
+        return;
+    }
     #[cfg(windows)]
     // The empty quoted argument is start's window title slot — open_path's
     // note; and `start` is the one launcher that hands a URL scheme to the
@@ -181,6 +185,30 @@ pub fn open_url(url: &str) {
     if let Err(e) = result {
         tracing::warn!(error = %e, url, "could not open the browser");
     }
+}
+
+/// Whether a URL may be handed to a launcher that re-parses what it is given.
+///
+/// `cmd /c start` is a shell: `&`, `|`, `<`, `>`, `^` and `%` are
+/// metacharacters there, so a URL carrying one is a second command or a
+/// silent failure rather than a page. **Refused rather than quoted** — cmd's
+/// quoting interacts with `^` and `%` in ways subtle enough that a quoting
+/// bug would be invisible until it was an injection, and nothing legitimate
+/// here contains them: the URL is this app's control-plane origin plus a
+/// base64url grant id, and base64url is `[A-Za-z0-9_-]`. `https` for the same
+/// reason `zest_cloud::http::Endpoint` insists on it — the flow's own
+/// requests cannot speak anything else, so a page on another scheme is a
+/// misconfiguration, not a destination.
+///
+/// Checked on every platform rather than under `#[cfg(windows)]`, so the rule
+/// is exercised wherever the tests run and cannot rot on the one platform
+/// that needs it.
+fn url_is_shell_safe(url: &str) -> bool {
+    url.starts_with("https://")
+        && url.len() > "https://".len()
+        && !url
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || "\"'`&|<>^%".contains(c))
 }
 
 pub fn open_path(path: &std::path::Path) {
@@ -197,5 +225,45 @@ pub fn open_path(path: &std::path::Path) {
     let result = std::process::Command::new("xdg-open").arg(path).spawn();
     if let Err(e) = result {
         tracing::warn!(error = %e, path = %path.display(), "could not open the file externally");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::url_is_shell_safe;
+
+    #[test]
+    fn the_link_pages_own_url_is_openable() {
+        assert!(url_is_shell_safe(
+            "https://zesterm.sigx.workers.dev/link?grant=Ab_9-xYz01234567890abcdefghijklmnopqrstuv"
+        ));
+        assert!(
+            url_is_shell_safe("https://127.0.0.1:8787/link?grant=abc"),
+            "a port and a loopback host are ordinary, and a dev control plane uses both"
+        );
+    }
+
+    #[test]
+    fn a_url_a_shell_could_reparse_is_refused() {
+        // `cmd /c start` re-parses its argument, so each of these is a second
+        // command or a silent non-open rather than a page. Quoting is not the
+        // mechanism here — refusal is — because cmd's rules around `^` and
+        // `%` are subtle enough that a quoting bug hides until it is an
+        // injection.
+        for bad in [
+            "https://host/link?grant=a&calc",
+            "https://host/link?grant=a|whoami",
+            "https://host/link?grant=a>out.txt",
+            "https://host/link?grant=a<in.txt",
+            "https://host/link?grant=a^b",
+            "https://host/link?grant=%PATH%",
+            "https://host/link?grant=\"a\"",
+            "https://host/link?grant=a b",
+            "http://host/link?grant=a",
+            "https://",
+            "",
+        ] {
+            assert!(!url_is_shell_safe(bad), "{bad:?} must not reach a launcher");
+        }
     }
 }
