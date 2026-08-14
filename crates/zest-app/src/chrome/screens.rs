@@ -228,12 +228,18 @@ fn account_header(
             tracking: 0.0,
         });
     } else {
-        let button = match model.action {
+        // One verb per action, in the header's own button treatment. The
+        // signed-out header draws two doors side by side (#226).
+        let verb = |action: FleetAccountAction| match action {
             FleetAccountAction::None => None,
             FleetAccountAction::SignIn => Some(("Sign in with a code", HitRegion::FleetSignIn)),
+            FleetAccountAction::SignInBrowser => {
+                Some(("Sign in with browser", HitRegion::FleetLinkStart))
+            }
+            FleetAccountAction::CancelLink => Some(("Cancel", HitRegion::FleetLinkCancel)),
             FleetAccountAction::SignOut => Some(("Sign out", HitRegion::FleetSignOut)),
         };
-        if let Some((label, region)) = button {
+        for (label, region) in [verb(model.action), verb(model.second)].into_iter().flatten() {
             let bpx = 11.0 * s;
             let tw = measure(label, bpx, false, 0.0);
             let rect = [x, top + (h - ACCOUNT_BTN_H * s) / 2.0, tw + 20.0 * s, ACCOUNT_BTN_H * s];
@@ -254,7 +260,7 @@ fn account_header(
                 bold: false,
                 tracking: 0.0,
             });
-            x = rect[0] + rect[2] + 14.0 * s;
+            x = rect[0] + rect[2] + 10.0 * s;
         }
         if let Some(error) = &model.error {
             out.texts.push(TextRun {
@@ -853,6 +859,7 @@ mod tests {
         let account = FleetAccountModel {
             line: "signed in as andy".into(),
             action: FleetAccountAction::SignOut,
+            second: FleetAccountAction::None,
             entry: None,
             error: None,
         };
