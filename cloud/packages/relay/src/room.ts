@@ -426,28 +426,36 @@ export class RelayRoom {
       return;
     }
 
-    // #241: the host is demonstrably parked — `readyControlLink` found it and
-    // it just took an `open` — so this is the cheapest moment to notice that
-    // its presence is not being maintained, and fix it.
-    //
-    // A link that parked *before* the presence code deployed has no
-    // `control_seen_at` and no alarm, because both are written when a link
-    // parks; nothing retroactively observes a connection older than the code.
-    // It would read asleep until something made it re-park, which for a
-    // healthy daemon can be days. The same hole opens whenever a room loses
-    // its alarm while the link stays up.
-    //
-    // Guarded on nothing being scheduled, so steady state pays nothing: a link
-    // already being refreshed skips the write, and only the broken case costs
-    // one. After the `open` rather than before it, so the host is already
-    // dialling back while this runs — the heal must not sit in front of an
-    // attach that a person is waiting on.
-    if (!scheduledOnArrival) {
-      await this.refreshPresence(now);
-    }
-
     if (!(await this.#dialBack(id, timeoutMs))) {
       ws.close(CLOSE_PIPE_DIAL_TIMEOUT, 'the host did not dial back');
+      return;
+    }
+
+    // #241: repair a link whose presence nobody is maintaining.
+    //
+    // Both `control_seen_at` and the refresh alarm are written when a link
+    // *parks*, so a connection older than that code has neither — nothing
+    // retroactively observes a socket established before the code that would
+    // have watched it — and the host reads asleep until something re-parks it.
+    // The same hole opens whenever a room loses its alarm while the link
+    // stays up.
+    //
+    // **After the dial-back, and that position is load-bearing twice over.**
+    // `#dialBack` is what registers the resolver in `#dialling`, so an `await`
+    // between the `open` frame and that call is a window in which the host's
+    // dial finds no pending pipe and is refused — an intermittent attach
+    // failure landing exactly on the rooms that need healing. And a host that
+    // has actually dialled back is stronger evidence than one whose socket
+    // merely accepted a frame: it answered.
+    //
+    // Only on success, so a link that was told to dial and did not is left to
+    // the bound rather than being recorded as alive.
+    //
+    // Guarded on nothing having been scheduled when the attach arrived, so
+    // steady state pays nothing: a link already being refreshed skips the
+    // write, and only the broken case costs one.
+    if (!scheduledOnArrival) {
+      await this.refreshPresence(now);
     }
   }
 

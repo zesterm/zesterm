@@ -159,8 +159,8 @@ function suite(mode: string, evicting: boolean): void {
     // #241. `control_seen_at` and the refresh alarm are both written when a
     // link *parks*, so a connection older than the deploy has neither and
     // reads asleep for ever — nothing retroactively observes it. The room
-    // wakes on attach, and a ready control link at that moment is live proof,
-    // so that is where it gets fixed.
+    // wakes on attach, and a host that dials back there has just proved it is
+    // alive, so that is where it gets fixed.
     const r = relay();
     const control = await parked(r);
 
@@ -169,14 +169,16 @@ function suite(mode: string, evicting: boolean): void {
     r.db.controlSeen.set(HOST, null);
     r.platform.storage.alarm = null;
     r.db.controlRefreshes = 0;
+    r.platform.autoResponseAt.set(control, new Date(NOW - 1_000));
 
-    const later = NOW + 60_000;
-    r.platform.autoResponseAt.set(control, new Date(later - 1_000));
-    await r.attach('browser', { now: later });
+    // A whole pipe, not a bare attach: the repair runs only once the host has
+    // dialled back, so a test that never dials would pass without exercising
+    // it at all.
+    await r.pipe(control);
 
     assert.equal(
       r.db.controlSeen.get(HOST),
-      later,
+      NOW,
       'the first attach is enough: the card stops saying asleep about a machine that just served one',
     );
     assert.ok(
@@ -185,16 +187,36 @@ function suite(mode: string, evicting: boolean): void {
     );
   });
 
+  it('a host that never dials back is not recorded as alive', async () => {
+    // The other half of "only on success". A link that was told to dial and
+    // did not is a zombie, and healing it would be the #237 lie again — a
+    // machine called online that nobody can reach.
+    const r = relay();
+    await parked(r);
+    r.db.controlSeen.set(HOST, null);
+    r.platform.storage.alarm = null;
+    r.db.controlRefreshes = 0;
+
+    // No host leg, so the dial times out.
+    await r.attach('browser', { timeoutMs: 20 });
+
+    assert.equal(
+      r.db.controlSeen.get(HOST),
+      null,
+      'the attach failed, so nothing about this machine was proved and nothing is claimed',
+    );
+  });
+
   it('an attach on a healthy room writes nothing extra', async () => {
     // The bound. Parking already armed the refresh, so presence is being
     // maintained and an attach has nothing to add — the heal must not become
     // a D1 write per attach for every room in the fleet.
     const r = relay();
-    await parked(r);
+    const control = await parked(r);
     assert.ok(r.platform.storage.alarm !== null, 'parking schedules the refresh');
     const refreshes = r.db.controlRefreshes;
 
-    await r.attach('browser', { now: NOW + 1_000 });
+    await r.pipe(control);
 
     assert.equal(
       r.db.controlRefreshes,
