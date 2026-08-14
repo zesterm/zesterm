@@ -753,6 +753,15 @@ the stream, which a quiescence heuristic is not: a 200-column repaint with
 colour can exceed the 64 KiB parse chunk, and settling mid-repaint would move
 the boundary under rows still being written.
 
+**The announced size is checked, not ignored.** A drag emits resizes faster
+than ConPTY answers them, so a repaint laid out for a size the grid has already
+left is routine. `CSI 8;r;c t` names that size, which is the only way to tell
+one apart — and it has to be told apart, because settling on a stale repaint
+pays a grow's debt against a viewport that has since shrunk, dragging history
+into rows the *next* repaint is about to blank. That is #200 arrived at from the
+other side, and it is a large loss rather than a subtle one: measured at nine
+rows of scrollback down to one, in a twelve-row pane.
+
 **Either direction of DECTCEM closes it.** ConPTY restores the inner program's
 visibility state, so a full-screen program that keeps its cursor hidden ends the
 repaint with `?25l` and never sends `?25h`. Keying off `?25h` alone would leave

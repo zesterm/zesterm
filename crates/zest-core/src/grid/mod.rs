@@ -631,8 +631,16 @@ impl Grid {
     /// documented on [`Grid::resize`]'s grow branch is starting — it is not the
     /// XTWINOPS request of the same name, and nothing here obeys it. It matters
     /// because it opens the window in which [`Self::settle_restate`] may run.
-    pub fn note_restatement_began(&mut self) {
-        if self.pending_restate > 0 {
+    ///
+    /// The announced size is checked rather than ignored, and that is what ties
+    /// a repaint to the resize that caused it. A drag emits resizes faster than
+    /// repaints come back, so a repaint laid out for a size the grid has already
+    /// left is one to sit out: settling on it would pay a grow's debt against a
+    /// viewport that has since been shrunk, dragging history down into rows the
+    /// *next* repaint is about to blank — which is #200 again, arrived at from
+    /// the other side.
+    pub fn note_restatement_began(&mut self, cols: usize, rows: usize) {
+        if self.pending_restate > 0 && (cols, rows) == (self.cols, self.rows) {
             self.restating = true;
         }
     }

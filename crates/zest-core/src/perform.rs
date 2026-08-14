@@ -123,7 +123,8 @@ impl vte::Perform for TermState {
             // with (#205), which makes it the one unambiguous marker for "the
             // restatement starts here". That is all it is taken as. (#247)
             ('t', _) if !private && arg(0, 0) == 8 => {
-                self.grid_mut().note_restatement_began();
+                let (rows, cols) = (arg(1, 0), arg(2, 0));
+                self.grid_mut().note_restatement_began(cols, rows);
             }
 
             // --- modes ---

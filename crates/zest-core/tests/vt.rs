@@ -1184,6 +1184,35 @@ fn dragging_the_height_down_and_back_puts_the_screen_back_as_it_was() {
 }
 
 #[test]
+fn a_repaint_for_a_size_the_grid_has_left_is_sat_out() {
+    // A drag emits resizes faster than ConPTY answers them, so a repaint laid
+    // out for a size we have already left is routine rather than exotic. Its
+    // `CSI 8;r;c t` names that stale size, which is how it can be told apart —
+    // and it has to be, because settling on it pays a grow's debt against a
+    // viewport that has since shrunk, dragging history down into rows the next
+    // repaint is about to blank. That is #200 arrived at from the other side.
+    let mut t = Terminal::new(40, 12, 500);
+    t.set_pty_restates_viewport(true);
+    for i in 0..12 {
+        t.advance(format!("line {i}\r\n").as_bytes());
+    }
+
+    t.resize(40, 4);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 4, &["line 11"]));
+    t.resize(40, 12);
+    let banked = t.grid().scrollback_len();
+
+    // The repaint for the 4-row viewport, arriving after the grow to 12.
+    t.advance(&conpty_repaint_after_a_squeeze(40, 4, &["line 11"]));
+
+    assert_eq!(
+        t.grid().scrollback_len(),
+        banked,
+        "a stale repaint settled the debt, so the rows it gave back are about to be blanked"
+    );
+}
+
+#[test]
 fn dragging_the_height_to_nothing_and_back_does_not_blank_every_block() {
     // The reported gesture, and the one the width-change story never covered:
     // drag the window's height down to nothing and back, and every block comes
