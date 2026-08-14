@@ -74,6 +74,29 @@ pub fn resolve_host(
     }
 }
 
+/// The target for a host the *user* picked, rather than one a profile named.
+///
+/// The `ask_host` flow (design §12): the picker was opened to choose a
+/// host-agnostic profile's machine, and a host row is the choice. The route is
+/// already decided — the picker built it — so the only question left is the one
+/// [`resolve_host`] answers for a label, asked by id instead.
+///
+/// **"Local" is the fleet row's word, never the route variant's.** A
+/// `--attach`ed window's own route is a `Tcp` one, so `route.is_local()` — the
+/// obvious spelling, and the one this replaced — sends a launch on the window's
+/// already-proven route down the cold path: a connecting placeholder tab and up
+/// to [`MAX_DIALS`] retries to reach the daemon it is currently talking to.
+#[must_use]
+pub fn resolve_picked_host(host: HostId, route: HostRoute, fleet: &[FleetHost]) -> HostTarget {
+    match fleet.iter().find(|h| h.host == host) {
+        Some(h) if h.local => HostTarget::Local,
+        // Not in the snapshot is not a refusal: the picker drew a row for it a
+        // moment ago and handed us a route it built. A roster that has since
+        // swept the record must not turn a click into nothing.
+        _ => HostTarget::Remote { host, route },
+    }
+}
+
 /// The command line a launched session runs.
 ///
 /// Precedence, outermost first: the profile's own `command` (which
@@ -213,6 +236,43 @@ mod tests {
             resolve_host(Some("forge"), &fleet, None, Some("wss://relay.example"), false),
             HostTarget::Unroutable { .. }
         ));
+    }
+
+    #[test]
+    fn a_picked_host_is_local_by_the_rosters_word_not_by_its_routes_shape() {
+        // `--attach`: the window's own route is a Tcp one, and the machine it
+        // reaches is the fleet's `local` row. Asking `route.is_local()` — the
+        // obvious spelling — answers false, which sends an ask_host launch on
+        // an already-proven route down the connecting-tab-and-retries path to
+        // dial the daemon it is currently talking to.
+        let attached = HostRoute::Tcp("10.0.0.7:7717".to_string());
+        let mut here = host("forge", true, Some("10.0.0.7:7717"));
+        here.host = HostId::from_bytes([7; 32]);
+        let fleet = [here, host("pi", false, Some("10.0.0.9:7717"))];
+
+        assert!(
+            !attached.is_local(),
+            "precondition: the window's own route really is a Tcp one here"
+        );
+        assert_eq!(
+            resolve_picked_host(HostId::from_bytes([7; 32]), attached.clone(), &fleet),
+            HostTarget::Local,
+            "the row says this is our machine; the launch rides the window's route"
+        );
+
+        // Any other row is remote, carrying whatever route the picker built.
+        assert_eq!(
+            resolve_picked_host(HostId::from_bytes([2; 32]), attached.clone(), &fleet),
+            HostTarget::Remote { host: HostId::from_bytes([2; 32]), route: attached.clone() }
+        );
+
+        // And a host the roster has swept since the row was drawn is still a
+        // launch: the picker handed us a route it built a moment ago, and
+        // turning that click into nothing would be the worse answer.
+        assert_eq!(
+            resolve_picked_host(HostId::from_bytes([9; 32]), attached.clone(), &[]),
+            HostTarget::Remote { host: HostId::from_bytes([9; 32]), route: attached }
+        );
     }
 
     #[test]

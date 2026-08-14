@@ -5886,28 +5886,21 @@ impl App {
                 // choose this profile's host, and this row is the choice.
                 if let Some(name) = pending_profile {
                     let meta = crate::launcher::profile_meta(&self.settings, &name);
+                    let fleet = self.fleet.as_ref().map(|f| f.snapshot()).unwrap_or_default();
+                    // The picked host's display name, for the provenance line
+                    // — the profile itself pinned none (that is what ask_host
+                    // means).
+                    let label = fleet
+                        .iter()
+                        .find(|h| h.host == host)
+                        .map(|h| h.label.clone())
+                        .unwrap_or_default();
                     // Every route the picker can build now carries a launch,
                     // relay included (#250). Before that this arm fell through
                     // to a plain shell for `Relay`, so an ask_host profile
                     // pointed at a machine off this LAN silently lost its
                     // command and its appearance.
-                    let target = if route.is_local() {
-                        crate::launch::HostTarget::Local
-                    } else {
-                        crate::launch::HostTarget::Remote { host, route }
-                    };
-                    // The picked host's display name, for the provenance
-                    // line — the profile itself pinned none (that is what
-                    // ask_host means).
-                    let label = self
-                        .fleet
-                        .as_ref()
-                        .map(|f| f.snapshot())
-                        .unwrap_or_default()
-                        .iter()
-                        .find(|h| h.host == host)
-                        .map(|h| h.label.clone())
-                        .unwrap_or_default();
+                    let target = crate::launch::resolve_picked_host(host, route, &fleet);
                     self.launch_profile_at(&name, &meta, target, label);
                     return;
                 }
