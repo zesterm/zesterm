@@ -27,7 +27,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ATTACH_TICKET_TTL_MS, hex } from '@zesterm/cloud-shared';
+import { ATTACH_TICKET_TTL_MS, CONTROL_SEEN_REFRESH_MS, hex } from '@zesterm/cloud-shared';
 
 import { CLOSE_HOST_ABSENT } from '../src/room/control.ts';
 import { CLOSE_TICKET_REPLAYED } from '../src/room/pipe.ts';
@@ -206,7 +206,7 @@ function suite(mode: string, evicting: boolean): void {
     );
   });
 
-  it('the alarm handler is the sweep, on the platform’s own clock', async () => {
+  it('the alarm handler is the dispatcher: it sweeps, records presence, and re-arms for whichever is sooner', async () => {
     const r = relay();
     await parked(r);
     const spent = freshJti();
@@ -219,13 +219,30 @@ function suite(mode: string, evicting: boolean): void {
     const future = { exp: Date.now() + 600_000 };
     await r.platform.storage.put(spentTicketKey('still-live'), future);
 
+    const before = Date.now();
     await r.alarm();
+    const after = Date.now();
+
     assert.deepEqual(
       r.platform.storage.keys.filter((k) => k.startsWith('jti:')),
       [spentTicketKey('still-live')],
       'the handler has to reach the sweep, or the set is never swept in production however well the sweep itself is tested',
     );
-    assert.equal(r.platform.storage.alarm, future.exp, 'and it re-arms for what it kept');
+    // The second job, added by #237. Both run on every wake whoever asked for
+    // it, which is what makes an early wake harmless.
+    assert.equal(
+      r.db.controlRefreshes,
+      1,
+      'the handler has to reach the presence refresh too — it is the only thing that keeps a parked link readable as online, since its keepalives never wake the object',
+    );
+
+    const alarm = r.platform.storage.alarm;
+    assert.ok(alarm !== null, 'a parked host keeps the object on a schedule');
+    assert.ok(
+      alarm >= before + CONTROL_SEEN_REFRESH_MS && alarm <= after + CONTROL_SEEN_REFRESH_MS,
+      `the refresh is sooner than the surviving ticket's ${future.exp - before}ms, and the alarm ` +
+        `always holds the earliest of the two needs; got ${alarm - before}ms out`,
+    );
   });
 
   it('a ticket the storage cannot record admits nobody', async () => {

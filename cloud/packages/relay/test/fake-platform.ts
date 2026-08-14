@@ -141,14 +141,35 @@ class FakeStatement implements D1PreparedStatement {
   }
 
   async run(): Promise<unknown> {
-    if (!this.#query.includes('UPDATE hosts SET last_seen_at')) {
-      throw new Error(`the relay does not write this: ${this.#query}`);
+    // Three statements, told apart by their SET clause rather than by
+    // position: `touchHost` writes both columns on park, the alarm refreshes
+    // only the liveness one, and the close handler clears it. A fake that
+    // accepted any `UPDATE hosts` would let the refresh silently start moving
+    // `last_seen_at`, which is the one thing #237 says these two columns must
+    // never do to each other.
+    if (this.#query.includes('UPDATE hosts SET last_seen_at')) {
+      this.#db.updates += 1;
+      if (this.#db.failUpdates) throw new Error('D1_ERROR: network');
+      const [at, seen, id] = this.#values;
+      this.#db.lastSeen.set(String(id), Number(at));
+      this.#db.controlSeen.set(String(id), Number(seen));
+      return {};
     }
-    this.#db.updates += 1;
-    if (this.#db.failUpdates) throw new Error('D1_ERROR: network');
-    const [at, id] = this.#values;
-    this.#db.lastSeen.set(String(id), Number(at));
-    return {};
+    if (this.#query.includes('UPDATE hosts SET control_seen_at = NULL')) {
+      this.#db.controlClears += 1;
+      if (this.#db.failUpdates) throw new Error('D1_ERROR: network');
+      const [id] = this.#values;
+      this.#db.controlSeen.set(String(id), null);
+      return {};
+    }
+    if (this.#query.includes('UPDATE hosts SET control_seen_at')) {
+      this.#db.controlRefreshes += 1;
+      if (this.#db.failUpdates) throw new Error('D1_ERROR: network');
+      const [at, id] = this.#values;
+      this.#db.controlSeen.set(String(id), Number(at));
+      return {};
+    }
+    throw new Error(`the relay does not write this: ${this.#query}`);
   }
 }
 
@@ -157,9 +178,20 @@ export class FakeDb implements D1Binding {
   readonly enrolled = new Set<string>();
   readonly lastSeen = new Map<string, number>();
 
+  /**
+   * `hosts.control_seen_at`, with `null` for a row that has been cleared —
+   * which is a different state from a host that was never written at all, and
+   * the tests assert on both.
+   */
+  readonly controlSeen = new Map<string, number | null>();
+
   /** Counted apart, because only one of the two is cached. */
   selects = 0;
   updates = 0;
+
+  /** The alarm's refresh and the close handler's clear, counted apart from park. */
+  controlRefreshes = 0;
+  controlClears = 0;
 
   /** Make every `UPDATE` throw, as a D1 blip does. */
   failUpdates = false;
@@ -344,8 +376,20 @@ export class FakePlatform {
         this.autoResponse = pair ?? null;
         this.autoResponseCalls += 1;
       },
+      getWebSocketAutoResponseTimestamp: (ws) => this.autoResponseAt.get(ws) ?? null,
     };
   }
+
+  /**
+   * When the platform last auto-answered a keepalive, per socket.
+   *
+   * The room cannot observe the pings themselves — workerd answers them
+   * beneath the object — so this map *is* the mechanism under test, and a
+   * test sets it to say "this daemon is still pinging" or "this one stopped".
+   * Absent means the platform has recorded none, which is the ordinary state
+   * of a link that has just parked.
+   */
+  readonly autoResponseAt = new Map<Sock, Date>();
 
   /**
    * Every accepted socket, whatever its tags.

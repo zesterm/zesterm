@@ -9,9 +9,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { SESSION_COOKIE } from '@zesterm/cloud-shared';
+import { CONTROL_SEEN_BOUND_MS, SESSION_COOKIE } from '@zesterm/cloud-shared';
 
 import { createEnrollCode, enrolHost, spendEnrollCode } from '../src/db/registry.ts';
+import { createMachineToken } from '../src/db/machine-tokens.ts';
 import { createSession } from '../src/db/sessions.ts';
 import { routeApi } from '../src/router.ts';
 import { rowOf, seedUser, testDb, type TestDb } from './d1.ts';
@@ -43,14 +44,29 @@ async function signedIn(db: TestDb, userId: string): Promise<string> {
 
 function seedHost(
   db: TestDb,
-  args: { id: string; userId: string; label: string; enrolledAt?: number; revokedAt?: number },
+  args: {
+    id: string;
+    userId: string;
+    label: string;
+    enrolledAt?: number;
+    revokedAt?: number;
+    /** What the relay last recorded; absent means it has never dialled in. */
+    controlSeenAt?: number;
+  },
 ): void {
   db.raw
     .prepare(
-      `INSERT INTO hosts (id, user_id, label, platform, enrolled_at, revoked_at)
-       VALUES (?, ?, ?, 'macos', ?, ?)`,
+      `INSERT INTO hosts (id, user_id, label, platform, enrolled_at, revoked_at, control_seen_at)
+       VALUES (?, ?, ?, 'macos', ?, ?, ?)`,
     )
-    .run(args.id, args.userId, args.label, args.enrolledAt ?? NOW, args.revokedAt ?? null);
+    .run(
+      args.id,
+      args.userId,
+      args.label,
+      args.enrolledAt ?? NOW,
+      args.revokedAt ?? null,
+      args.controlSeenAt ?? null,
+    );
 }
 
 function seedDevice(db: TestDb, args: { id: string; userId: string; label: string }): void {
@@ -59,6 +75,24 @@ function seedDevice(db: TestDb, args: { id: string; userId: string; label: strin
       `INSERT INTO devices (id, user_id, label, kind, enrolled_at) VALUES (?, ?, ?, 'phone', ?)`,
     )
     .run(args.id, args.userId, args.label, NOW);
+}
+
+/**
+ * A live device bearer token for this account.
+ *
+ * Minted directly rather than through the enrol-by-code flow: what is under
+ * test here is that both principals read the same listing, and going the long
+ * way round would make the test about enrolment instead.
+ */
+async function deviceToken(db: TestDb, _cookie: string): Promise<string> {
+  seedDevice(db, { id: PHONE, userId: 'user-a', label: 'andy-phone' });
+  const { token } = await createMachineToken(db, {
+    userId: 'user-a',
+    kind: 'device',
+    principalId: PHONE,
+    now: NOW,
+  });
+  return token;
 }
 
 const get = (path: string, cookie?: string) =>
@@ -125,6 +159,9 @@ test('a host is described field by field, never as the row', async () => {
     'id',
     'label',
     'lastSeenAt',
+    // A verdict rather than the `control_seen_at` column behind it: the bound
+    // it is read against is the relay's own business (#237).
+    'online',
     'platform',
   ]);
   db.close();
@@ -322,5 +359,86 @@ test('a code cannot be spent twice, whatever the caller does', async () => {
   assert.deepEqual(rowOf(db, `SELECT used_by FROM enroll_codes WHERE code = ?`, code), {
     used_by: MAC,
   });
+  db.close();
+});
+
+
+// --- online, and why it is a verdict rather than a timestamp (#237) --------
+
+test('a machine whose control link is parked reads online', async () => {
+  // The bug in one test. Before this, the fleet screen had nothing to read but
+  // `lastSeenAt` — which records *arrival* and never expires — so a machine
+  // sitting there with a parked link was rendered "asleep" while clicking it
+  // opened a shell immediately.
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  seedHost(db, { id: MAC, userId: 'user-a', label: 'andy-mac', controlSeenAt: NOW });
+
+  const res = await routeApi(get('/api/hosts', cookie), env(db), fetch, NOW + 1_000);
+  const { hosts } = (await res!.json()) as { hosts: Array<{ online: boolean }> };
+  assert.equal(hosts[0]?.online, true, 'the relay proved this link was parked a second ago');
+  db.close();
+});
+
+test('a machine last proved alive longer ago than the bound is not online', async () => {
+  // The decay that keeps a room evicted without its close handler from lying
+  // for ever. Nothing can clear that row, so it has to expire on its own.
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  seedHost(db, { id: MAC, userId: 'user-a', label: 'andy-mac', controlSeenAt: NOW });
+
+  const inside = await routeApi(get('/api/hosts', cookie), env(db), fetch, NOW + CONTROL_SEEN_BOUND_MS - 1);
+  assert.equal(
+    ((await inside!.json()) as { hosts: Array<{ online: boolean }> }).hosts[0]?.online,
+    true,
+    'the last millisecond inside the bound is still online — an alarm is retried rather than punctual, and flapping a reachable machine is the failure being fixed',
+  );
+
+  const outside = await routeApi(get('/api/hosts', cookie), env(db), fetch, NOW + CONTROL_SEEN_BOUND_MS);
+  assert.equal(
+    ((await outside!.json()) as { hosts: Array<{ online: boolean }> }).hosts[0]?.online,
+    false,
+    'and at the bound exactly it is not: the relay stopped refreshing, so there is no longer any evidence anyone can reach it',
+  );
+  db.close();
+});
+
+test('a machine that has never dialled a relay is not online', async () => {
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  seedHost(db, { id: MAC, userId: 'user-a', label: 'andy-mac' });
+
+  const res = await routeApi(get('/api/hosts', cookie), env(db), fetch, NOW);
+  const { hosts } = (await res!.json()) as { hosts: Array<{ online: boolean; lastSeenAt: null }> };
+  assert.equal(
+    hosts[0]?.online,
+    false,
+    'enrolment is not reachability — a machine can be in the account and have never connected to anything',
+  );
+  assert.equal(hosts[0]?.lastSeenAt, null, 'and the two facts stay separate columns');
+  db.close();
+});
+
+test('the cookie and the device-bearer paths answer the same online', async () => {
+  // Two callers, one truth. The desktop app reads this list with a machine
+  // token and the browser with a session; a screen that disagreed with itself
+  // depending on which asked would be #237 again, one layer up.
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  seedHost(db, { id: MAC, userId: 'user-a', label: 'andy-mac', controlSeenAt: NOW });
+  const token = await deviceToken(db, cookie);
+
+  const asPerson = await routeApi(get('/api/hosts', cookie), env(db), fetch, NOW + 1_000);
+  const asDevice = await routeApi(
+    new Request(`${ORIGIN}/api/hosts`, { headers: { authorization: `Bearer ${token}` } }),
+    env(db),
+    fetch,
+    NOW + 1_000,
+  );
+
+  const person = ((await asPerson!.json()) as { hosts: Array<{ online: boolean }> }).hosts;
+  const device = ((await asDevice!.json()) as { hosts: Array<{ online: boolean }> }).hosts;
+  assert.equal(person[0]?.online, true);
+  assert.deepEqual(device, person, 'the same row, the same verdict, whoever is asking');
   db.close();
 });

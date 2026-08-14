@@ -240,6 +240,15 @@ export interface CardRow {
 /**
  * The dot and the words beside it.
  *
+ * **Not fed by `/api/hosts`'s `online` flag (#237), on purpose.** That flag
+ * exists for the desktop app, which has no way to ask a machine directly and
+ * was rendering relay-reachable hosts as asleep. This screen *dials* every
+ * enrolled machine through the relay (`liveDirectory`), so its evidence is a
+ * live socket rather than a column refreshed every five minutes — strictly
+ * better, and a second opinion here could only contradict it. The one case
+ * where nothing is dialling is a deployment with no relay, and there no
+ * daemon has a control link either, so the flag would be `false` throughout.
+ *
  * `asleep` is deliberately not `degraded`, and that is the whole point of this
  * type existing rather than a boolean. Over the relay most of a fleet is asleep
  * most of the time — a lid is shut, a desktop is off — and a screen that paints

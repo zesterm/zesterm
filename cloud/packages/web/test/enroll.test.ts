@@ -148,6 +148,10 @@ test('a machine that holds the key is enrolled into the code owner’s account',
     platform: 'macos',
     enrolledAt: NOW,
     lastSeenAt: null,
+    // Enrolling is not dialling in: the machine has proved its key to the
+    // control plane and has not yet parked a control link at the relay, which
+    // is the only thing that makes it reachable (#237).
+    online: false,
   });
   // The shape `zest-daemon`'s `enroll()` hard-requires: a non-empty `token` it
   // can store, and an `account` to print. The token itself is random, so what

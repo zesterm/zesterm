@@ -55,7 +55,8 @@ import {
   type ControlAttachment,
   type ControlErrorCode,
 } from './room/control.ts';
-import { hostIsEnrolled, touchHost } from './room/hosts.ts';
+import { clearControlSeen, hostIsEnrolled, refreshControlSeen, touchHost } from './room/hosts.ts';
+import { armPresenceRefresh, parkedLiveness } from './room/presence.ts';
 import { PIPE_DIAL_TIMEOUT_MS } from './room/limits.ts';
 import {
   CLOSE_PIPE_DIAL_TIMEOUT,
@@ -331,6 +332,12 @@ export class RelayRoom {
       at: now,
     } satisfies ControlAttachment);
     ws.send(readyMessage());
+
+    // From here the object has to wake on a schedule to keep saying so: the
+    // keepalives are answered beneath it and cannot. → `room/presence.ts`.
+    // After the `ready` frame, because a daemon waiting to be told it is
+    // parked must not be held up by housekeeping.
+    await armPresenceRefresh(this.#state.storage, now);
   }
 
   /**
@@ -450,8 +457,35 @@ export class RelayRoom {
    */
   webSocketClose(ws: Sock): void {
     const member = pipeMembership(this.#state, ws);
-    if (member === null) return;
-    this.#endPipe(member, pipePeer(this.#state, member));
+    if (member !== null) {
+      this.#endPipe(member, pipePeer(this.#state, member));
+      return;
+    }
+
+    // A control link going away is now worth bookkeeping after all, though
+    // still not for the pairing — for the fleet screen. The bound in
+    // `@zesterm/cloud-shared` is what covers a room that dies without ever
+    // reaching this line; this is what makes a closed lid show up in seconds
+    // rather than in fifteen minutes.
+    //
+    // Read before the socket is gone: the attachment is the only place the
+    // host id survives, and by the next handler call this socket is not in
+    // `getWebSockets` to be asked.
+    const attachment = readControlAttachment(ws);
+    if (attachment?.s !== 'ready') return;
+
+    // Cleared for the reason the replace path clears it, stated there at
+    // length: "ready" is a fact this room keeps, not one the platform does,
+    // and whether a socket that has closed still appears in `getWebSockets`
+    // depends on a handshake with a peer that may be gone. Without this the
+    // link would go on counting as parked — which means an attach dialled back
+    // through a dead socket, and an alarm re-arming every five minutes for
+    // ever on a room whose daemon has left.
+    ws.serializeAttachment(null);
+    // Deliberately not awaited: the platform's close handler is synchronous
+    // and nothing downstream needs the write to have landed. A failure is
+    // swallowed inside `clearControlSeen`, so there is no rejection to leak.
+    void clearControlSeen(this.#env.DB, attachment.host);
   }
 
   /**
@@ -466,24 +500,61 @@ export class RelayRoom {
   }
 
   /**
-   * The replay set's sweep, and at present the object has no other alarm.
+   * The object's one alarm, now with two users — so this is the dispatcher the
+   * previous version of this comment said the second one would need.
    *
    * Takes no clock, unlike every other method here: the platform calls this one
    * itself, with an `AlarmInvocationInfo` in the first position. A `now`
    * parameter defaulted the way `webSocketMessage`'s is would therefore be
    * handed an *object* in production and arithmetic on it would silently
-   * produce `NaN` — so the clock is read here and the sweep, which does take
-   * one, is what the tests drive.
+   * produce `NaN` — so the clock is read here and the two functions it
+   * delegates to, which both take one, are what the tests drive.
    *
-   * A second user of the alarm would need a dispatcher: there is one alarm per
-   * object, and whoever adds the second must schedule both, not replace this.
+   * **Both jobs run on every wake, whichever of them asked for it.** There is
+   * one alarm per object and `setAlarm` replaces rather than adds, so the two
+   * schedules are merged by each arming only when strictly earlier than what
+   * is pending (`armSweep`, `armPresenceRefresh`) and by this handler doing
+   * everything each time. An early wake is then harmless and a late one costs
+   * one interval, which is why the presence bound is three of them.
    *
    * Unguarded, unlike every storage call on the attach path. A throw here is
    * retried by the platform, which is what housekeeping wants; a throw there
    * would hand a browser a 500 it cannot read.
    */
   async alarm(): Promise<void> {
-    await sweepSpentTickets(this.#state.storage, Date.now());
+    const now = Date.now();
+    await sweepSpentTickets(this.#state.storage, now);
+    await this.refreshPresence(now);
+  }
+
+  /**
+   * Write down whether the daemon is still parked, and arrange to say it again.
+   *
+   * Public for the tests, which drive it with a clock the way `sweep` drives
+   * the sweep — `alarm()` above reads the wall clock and this is the half that
+   * can be reasoned about.
+   *
+   * The re-arm is conditional on there being something to report, and that is
+   * the whole of the cost story: a room whose daemon has gone stops waking, so
+   * an account with nothing dialled in is back to costing nothing.
+   */
+  async refreshPresence(now: number): Promise<void> {
+    const parked = parkedLiveness(this.#state, now);
+
+    if (parked === null || !parked.alive) {
+      // Nothing parked, or something parked that has stopped answering
+      // keepalives. Either way this machine is not reachable through us, and
+      // the column must stop saying otherwise.
+      //
+      // A host id is still needed to clear the row, and when no link is left
+      // there is none to read — the close handler does that clearing, while
+      // this branch covers the link that is present and silent.
+      if (parked !== null) await clearControlSeen(this.#env.DB, parked.host);
+      return;
+    }
+
+    await refreshControlSeen(this.#env.DB, parked.host, now);
+    await armPresenceRefresh(this.#state.storage, now);
   }
 
   /**

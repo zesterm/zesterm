@@ -169,7 +169,7 @@ export async function enrolHost(
     )
     .bind(args.id, args.userId, args.label, args.platform, args.now)
     .first<HostRow>();
-  return row === null ? null : publicHost(row);
+  return row === null ? null : publicHost(row, args.now);
 }
 
 /** The same shape for a browser, phone or desktop app. See `enrolHost`. */
@@ -257,7 +257,9 @@ export async function countDevices(
   return row ?? { pending: 0, approved: 0 };
 }
 
-export async function listHosts(db: Db, userId: string): Promise<PublicHost[]> {
+// `now` for the reason `publicHost` takes one: `online` is a verdict about how
+// fresh the relay's last proof of a parked link is, not a column.
+export async function listHosts(db: Db, userId: string, now: number): Promise<PublicHost[]> {
   const { results } = await db
     .prepare(
       `SELECT * FROM hosts
@@ -266,7 +268,9 @@ export async function listHosts(db: Db, userId: string): Promise<PublicHost[]> {
     )
     .bind(userId)
     .all<HostRow>();
-  return results.map(publicHost);
+  // An arrow rather than a bare reference: `map` passes the index as a second
+  // argument, which would silently become the clock.
+  return results.map((row) => publicHost(row, now));
 }
 
 export async function listDevices(db: Db, userId: string): Promise<PublicDevice[]> {

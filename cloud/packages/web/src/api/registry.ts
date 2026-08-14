@@ -49,7 +49,7 @@ export async function listRegistry(
     if (principal.kind === 'host') return json({ error: 'unauthorized' }, 401);
     const userId = principal.kind === 'user' ? principal.user.id : principal.userId;
     return json({
-      hosts: await listHosts(env.DB, userId),
+      hosts: await listHosts(env.DB, userId, now),
       relayOrigin: env.RELAY_ORIGIN ?? null,
     });
   }

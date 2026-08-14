@@ -124,6 +124,9 @@ mod tests {
             rtt_ms: None,
             sessions: crate::fleet::SessionsState::Unknown,
             enrolled: false,
+            // `resolve_host` picks a route from the address and never from
+            // presence, so this builder has nothing to say about it.
+            relay_online: false,
         }
     }
 

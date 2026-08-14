@@ -268,7 +268,11 @@ function suite(mode: string, evicting: boolean): void {
     await parked(r, 'first');
     assert.equal(r.db.selects, 1);
     assert.equal(r.db.updates, 1);
-    assert.equal(r.platform.storage.writes, 1, 'one write, seeding the cache');
+    assert.equal(
+      r.platform.storage.writes,
+      2,
+      'two writes: the positive cache, and the alarm that will keep `control_seen_at` fresh — the keepalives are answered beneath the object, so a parked link can only stay "online" by waking on a schedule (#237)',
+    );
 
     // Inside the minute. The dial and its answer share a clock, or the
     // challenge would go stale long before the cache does.
@@ -278,7 +282,11 @@ function suite(mode: string, evicting: boolean): void {
     assert.equal(lastFrame(again)['t'], 'ready');
     assert.equal(r.db.selects, 1, 'the lookup is cached for a minute in the object’s own storage');
     assert.equal(r.db.updates, 2, 'last_seen_at is not cached — it is the thing being recorded');
-    assert.equal(r.platform.storage.writes, 1, 'a cache hit writes nothing');
+    assert.equal(
+      r.platform.storage.writes,
+      2,
+      'a cache hit writes nothing — and neither does re-parking arm a second alarm, because presence only ever moves the alarm *earlier* and one is already pending',
+    );
 
     const afterMinute = NOW + HOST_LOOKUP_TTL_MS;
     const later = await r.dial('third', { now: afterMinute });
