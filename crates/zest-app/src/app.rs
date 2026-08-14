@@ -7287,8 +7287,15 @@ impl App {
     ///
     /// Reads the maps directly rather than through `chrome_hit`, which would
     /// call `refresh_chrome` from inside the frame that just built it. Only on
-    /// an actual change, so this converges in one extra frame and an idle
-    /// window still costs none.
+    /// an actual change, so an idle window still costs no frames.
+    ///
+    /// It settles in **at most two** extra frames, not one, and the second is
+    /// structural rather than a wobble: a block's action chips are pushed into
+    /// the hit map only while that block is hovered, so landing on one takes a
+    /// frame to reveal them (`None` → `BlockHeader`) and a frame to fall onto
+    /// the chip now drawn on top (`BlockHeader` → `BlockCopy`). It cannot go
+    /// further, because every region that reveals the chips also keeps them
+    /// revealed — `blocks.rs` matches all four on one arm.
     fn revalidate_hover(&mut self) {
         // A drag keeps the grid, exactly as in `CursorMoved`: a selection
         // dragged across a header must not die there.

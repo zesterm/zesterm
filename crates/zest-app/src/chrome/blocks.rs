@@ -412,6 +412,38 @@ mod tests {
     }
 
     #[test]
+    fn hovering_a_chip_keeps_the_chips_drawn() {
+        // What bounds `App::revalidate_hover`. It re-reads hover against the
+        // map each frame, and the chips exist in that map only while the
+        // block is hovered — so landing on one goes None → BlockHeader →
+        // BlockCopy over two frames. It stops there *because* of this: every
+        // region that reveals the chips also keeps them revealed. Were
+        // `hovered` to drop the chip regions from its arm, the chips would
+        // vanish, hover would fall back to the band, and the two would
+        // alternate for ever at one frame each — a terminal repainting at
+        // full rate with nothing on screen changing, which the 0%-idle
+        // guarantee exists to prevent.
+        let area = [0.0, 0.0, 800.0, 400.0];
+        let counts: Vec<usize> = [
+            HitRegion::BlockHeader(3),
+            HitRegion::BlockFold(3),
+            HitRegion::BlockCopy(3),
+            HitRegion::BlockRerun(3),
+        ]
+        .into_iter()
+        .map(|h| {
+            layout_blocks(&[view(3, (0, 1))], area, 20.0, 1.0, &colors(), Some(h), 0.0, &mut measure)
+                .rects
+                .len()
+        })
+        .collect();
+        assert!(
+            counts.iter().all(|n| *n == counts[0]),
+            "all four block regions must draw the same chrome, or hover oscillates: {counts:?}"
+        );
+    }
+
+    #[test]
     fn durations_print_at_the_designs_precision() {
         assert_eq!(format_duration(410), "0.41s");
         assert_eq!(format_duration(51_200), "51.2s");
