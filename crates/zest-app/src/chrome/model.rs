@@ -686,15 +686,38 @@ pub struct SettingsMenuOption {
 }
 
 /// A dropdown menu open on one settings row.
+///
+/// One menu for both kinds of choice: the schema's own variants, and the
+/// rosters the client brings (themes, installed families). Before #259 the
+/// second kind had no dropdown at all — a ▾ pill opened the ⌘K command
+/// palette, placeholder "type to run a command" included — because the menu
+/// could only read `field.variants`, which a roster is not.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SettingsMenuModel {
     /// Row index the menu is anchored to.
     pub row: usize,
+    /// Already filtered by the app — the same-pass discipline `PaletteRow`
+    /// and `PickerRow` use, so index `n` means the same thing to the
+    /// renderer and to the input path by construction.
     pub options: Vec<SettingsMenuOption>,
-    /// Index of the current value (the ✓), when it matches an option.
+    /// Index of the current value (the ✓), when it matches a *visible*
+    /// option.
     pub current: Option<usize>,
-    /// Index the keyboard is on.
+    /// Index into `options` the keyboard is on.
     pub selected: usize,
+    /// Draw the search row. Off for a handful of documented variants, where
+    /// a search box over four rows is noise; on for a roster.
+    pub searchable: bool,
+    pub filter: String,
+    pub filter_caret: Caret,
+    /// Scroll offset, physical pixels; layout clamps it.
+    pub scroll: f32,
+    /// Bring the selection into view this pass — keyboard only, so the wheel
+    /// scrolls freely.
+    pub ensure_visible: bool,
+    /// A last row that is not an option: "Browse all themes…", which opens
+    /// the gallery (design screen 8). Empty draws nothing.
+    pub footer: Option<String>,
 }
 
 /// The Settings tab's screen (design §11): category rail + content column,

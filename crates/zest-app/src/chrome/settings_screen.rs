@@ -60,6 +60,13 @@ const LIST_GAP: f32 = 4.0;
 const CHIP_H: f32 = 26.0;
 const MENU_W: f32 = 288.0;
 const MENU_RADIUS: f32 = 11.0;
+const MENU_ROW_H: f32 = 30.0;
+/// A row carrying a variant's doc comment underneath.
+const MENU_DOC_ROW_H: f32 = 46.0;
+const MENU_SEARCH_H: f32 = 30.0;
+/// Never collapse to a sliver: a menu with no room left still has to show a
+/// row or two, or opening it looks like nothing happened.
+const MENU_MIN_H: f32 = 120.0;
 // The §12 direct-choice cells (profiles editor; settings never builds them).
 const SCHEME_CELL_W: f32 = 60.0;
 const SCHEME_CELL_H: f32 = 32.0;
@@ -1344,17 +1351,39 @@ pub(super) fn dropdown_menu(
     out: &mut ChromeLayout,
 ) {
     let row_h = |o: &super::model::SettingsMenuOption| {
-        if o.doc.is_empty() { 30.0 * s } else { 46.0 * s }
+        if o.doc.is_empty() { MENU_ROW_H * s } else { MENU_DOC_ROW_H * s }
     };
     let pad = 6.0 * s;
-    let h = menu.options.iter().map(row_h).sum::<f32>() + 2.0 * pad;
     let w = MENU_W * s;
+    let search_h = if menu.searchable { MENU_SEARCH_H * s + HAIRLINE * s } else { 0.0 };
+    let footer_h = if menu.footer.is_some() { MENU_ROW_H * s + HAIRLINE * s } else { 0.0 };
+    let rows_h = menu.options.iter().map(row_h).sum::<f32>() + 2.0 * pad;
+
+    // The list scrolls; the panel does not grow past the pane. 266 installed
+    // families is what this exists for — a menu tall enough for all of them
+    // would be taller than any screen, which is why the roster used to open
+    // a centred modal instead of a dropdown at all.
+    let room_below = (area[1] + area[3]) - (anchor[1] + anchor[3] + 4.0 * s) - 8.0 * s;
+    let room_above = anchor[1] - area[1] - 12.0 * s;
+    let want = rows_h + search_h + footer_h;
+    // Below the pill; above it when there is more room there.
+    let below = want <= room_below || room_below >= room_above;
+    // The minimum is a floor on the *preferred* height, never a licence to
+    // leave the pane: a menu that overflowed rather than shrink would draw
+    // its last rows behind the footer bar, where they are unclickable and
+    // look like the list simply ends. In a pane too short for the floor the
+    // whole pane is the budget, and the list scrolls inside whatever is left.
+    let budget = (area[3] - 16.0 * s).max(0.0);
+    let h = want.max(MENU_MIN_H * s).min(if below { room_below } else { room_above }).min(budget);
+    let y = if below {
+        // Clamped up as well as down: `room_below` can be negative when the
+        // anchor sits under the footer, and an unclamped y then starts the
+        // panel past the bottom edge.
+        (anchor[1] + anchor[3] + 4.0 * s).min(area[1] + area[3] - h - 8.0 * s).max(area[1] + 8.0 * s)
+    } else {
+        (anchor[1] - h - 4.0 * s).max(area[1] + 8.0 * s)
+    };
     let x = (anchor[0] + anchor[2] - w).max(area[0] + 8.0 * s);
-    // Below the pill; above it when there is no room.
-    let mut y = anchor[1] + anchor[3] + 4.0 * s;
-    if y + h > area[1] + area[3] {
-        y = (anchor[1] - h - 4.0 * s).max(area[1] + 8.0 * s);
-    }
     let panel = [x, y, w, h];
     out.rects.push(RectInstance {
         radii: [MENU_RADIUS * s; 4],
@@ -1364,62 +1393,169 @@ pub(super) fn dropdown_menu(
         shadow_alpha: colors.shadow_alpha,
         ..RectInstance::filled(panel, colors.panel_bg, area)
     });
+    // First, so every region pushed after it wins where they overlap. What
+    // is left is the panel's own padding and rules — and those have to
+    // belong to the menu too, or a wheel over one of them scrolls the pane
+    // underneath and slides the anchor out from under the panel.
+    if let Some(hit) = intersect(panel, area) {
+        out.hit.push(hit, HitRegion::SettingsMenuPanel);
+    }
 
-    let mut ry = y + pad;
-    for (j, option) in menu.options.iter().enumerate() {
-        let rh = row_h(option);
-        let rect = [x + 4.0 * s, ry, w - 8.0 * s, rh];
-        if j == menu.selected {
-            out.rects.push(RectInstance::rounded(rect, 7.0 * s, colors.accent_soft, area));
-        }
-        out.hit.push(rect, HitRegion::SettingsMenuRow(j));
-        let base = baseline_in(ry, 30.0 * s, DESC_PX * s);
-        if menu.current == Some(j) {
-            out.texts.push(TextRun {
-                text: "\u{2713}".into(),
-                pos: [x + 12.0 * s, base],
-                max_width: 14.0 * s,
-                color: colors.accent,
-                clip: area,
-                px: 11.0 * s,
-                bold: false,
-                tracking: 0.0,
-            });
-        }
+    let mut list_top = y;
+    if menu.searchable {
+        let row = [x, y, w, MENU_SEARCH_H * s];
+        // Ahead of the options' regions, and never falling through to the
+        // scrim: clicking the search box must not dismiss the menu.
+        out.hit.push(row, HitRegion::SettingsMenuSearch);
+        let glyph_w = measure("\u{2315}", KEY_PX * s, false, 0.0);
         out.texts.push(TextRun {
-            text: option.label.clone(),
-            pos: [x + 30.0 * s, base],
-            max_width: w * 0.5,
-            color: colors.text_active,
-            clip: area,
-            px: DESC_PX * s,
-            bold: false,
-            tracking: 0.0,
-        });
-        let vw = measure(&option.value, KEY_PX * s, false, 0.0);
-        out.texts.push(TextRun {
-            text: option.value.clone(),
-            pos: [x + w - 14.0 * s - vw, base],
-            max_width: vw + 2.0,
+            text: "\u{2315}".into(),
+            pos: [x + 12.0 * s, baseline_in(y, row[3], KEY_PX * s)],
+            max_width: glyph_w + 2.0,
             color: colors.text_faint,
-            clip: area,
+            clip: panel,
             px: KEY_PX * s,
             bold: false,
             tracking: 0.0,
         });
-        if !option.doc.is_empty() {
+        let entry_x = x + 12.0 * s + glyph_w + 6.0 * s;
+        let entry = [entry_x, y, (x + w - entry_x - 8.0 * s).max(0.0), row[3]];
+        if menu.filter.is_empty() {
             out.texts.push(TextRun {
-                text: option.doc.clone(),
-                pos: [x + 30.0 * s, ry + 40.0 * s],
-                max_width: w - 44.0 * s,
+                text: "Search".into(),
+                pos: [entry_x + ENTRY_PAD * s, baseline_in(y, row[3], DESC_PX * s)],
+                max_width: entry[2],
                 color: colors.text_faint,
-                clip: area,
-                px: 10.5 * s,
+                clip: panel,
+                px: DESC_PX * s,
                 bold: false,
                 tracking: 0.0,
             });
+        } else {
+            text_entry(
+                &TextEntry {
+                    text: &menu.filter,
+                    caret: menu.filter_caret.at,
+                    selection: menu.filter_caret.selection,
+                    color: colors.text_active,
+                    selection_bg: colors.accent_soft,
+                    px: DESC_PX * s,
+                },
+                entry,
+                panel,
+                s,
+                measure,
+                out,
+            );
+        }
+        out.rects.push(RectInstance::filled(
+            [x, y + MENU_SEARCH_H * s, w, HAIRLINE * s],
+            colors.line,
+            panel,
+        ));
+        list_top += search_h;
+    }
+
+    let footer_top = y + h - footer_h;
+    let list = [x, list_top, w, (footer_top - list_top).max(0.0)];
+    // Clamped here rather than by the app: only layout knows how tall the
+    // options came out, and a scroll the app clamped against a stale height
+    // is a list that will not reach its last row.
+    let overflow = (rows_h - list[3]).max(0.0);
+    let scroll = menu.scroll.clamp(0.0, overflow);
+
+    let mut ry = list_top + pad - scroll;
+    for (j, option) in menu.options.iter().enumerate() {
+        let rh = row_h(option);
+        let rect = [x + 4.0 * s, ry, w - 8.0 * s, rh];
+        // Off-list rows are skipped whole: a hit region outside the panel
+        // would answer for a row nobody can see.
+        if ry + rh > list[1] && ry < list[1] + list[3] {
+            if j == menu.selected {
+                out.rects.push(RectInstance::rounded(rect, 7.0 * s, colors.accent_soft, list));
+            }
+            if let Some(hit) = intersect(rect, list) {
+                out.hit.push(hit, HitRegion::SettingsMenuRow(j));
+            }
+            let base = baseline_in(ry, MENU_ROW_H * s, DESC_PX * s);
+            if menu.current == Some(j) {
+                out.texts.push(TextRun {
+                    text: "\u{2713}".into(),
+                    pos: [x + 12.0 * s, base],
+                    max_width: 14.0 * s,
+                    color: colors.accent,
+                    clip: list,
+                    px: 11.0 * s,
+                    bold: false,
+                    tracking: 0.0,
+                });
+            }
+            out.texts.push(TextRun {
+                text: option.label.clone(),
+                pos: [x + 30.0 * s, base],
+                max_width: w * 0.5,
+                color: colors.text_active,
+                clip: list,
+                px: DESC_PX * s,
+                bold: false,
+                tracking: 0.0,
+            });
+            let vw = measure(&option.value, KEY_PX * s, false, 0.0);
+            out.texts.push(TextRun {
+                text: option.value.clone(),
+                pos: [x + w - 14.0 * s - vw, base],
+                max_width: vw + 2.0,
+                color: colors.text_faint,
+                clip: list,
+                px: KEY_PX * s,
+                bold: false,
+                tracking: 0.0,
+            });
+            if !option.doc.is_empty() {
+                out.texts.push(TextRun {
+                    text: option.doc.clone(),
+                    pos: [x + 30.0 * s, ry + 40.0 * s],
+                    max_width: w - 44.0 * s,
+                    color: colors.text_faint,
+                    clip: list,
+                    px: 10.5 * s,
+                    bold: false,
+                    tracking: 0.0,
+                });
+            }
         }
         ry += rh;
+    }
+
+    // Nothing matched: say so rather than presenting an empty panel, which
+    // reads as broken (the palette's rule, on the dropdown).
+    if menu.options.is_empty() {
+        out.texts.push(TextRun {
+            text: format!("nothing matches \u{201c}{}\u{201d}", menu.filter),
+            pos: [x + 30.0 * s, baseline_in(list_top + pad, MENU_ROW_H * s, DESC_PX * s)],
+            max_width: w - 44.0 * s,
+            color: colors.text_faint,
+            clip: list,
+            px: DESC_PX * s,
+            bold: false,
+            tracking: 0.0,
+        });
+    }
+
+    if let Some(footer) = &menu.footer {
+        out.rects.push(RectInstance::filled([x, footer_top, w, HAIRLINE * s], colors.line, panel));
+        let rect = [x + 4.0 * s, footer_top + HAIRLINE * s, w - 8.0 * s, MENU_ROW_H * s];
+        out.hit.push(rect, HitRegion::SettingsMenuFooter);
+        out.texts.push(TextRun {
+            text: footer.clone(),
+            pos: [x + 30.0 * s, baseline_in(rect[1], rect[3], DESC_PX * s)],
+            max_width: w - 44.0 * s,
+            color: colors.accent,
+            clip: panel,
+            px: DESC_PX * s,
+            bold: false,
+            tracking: 0.0,
+        });
     }
 }
 
@@ -1847,6 +1983,12 @@ mod tests {
             ],
             current: Some(1),
             selected: 0,
+            searchable: false,
+            filter: String::new(),
+            filter_caret: Default::default(),
+            scroll: 0.0,
+            ensure_visible: false,
+            footer: None,
         });
         let l = lay(&m, 1000.0, 700.0);
         let mut menu_rows = std::collections::HashSet::new();
@@ -1986,5 +2128,204 @@ mod tests {
             .filter(|w| (*w - measure("obsidian", 12.0, false, 0.0)).abs() < 1.0)
             .count();
         assert_eq!(sel, 1, "and it is exactly as wide as the eight selected bytes");
+    }
+
+    /// A roster menu of `n` options, searchable, anchored to row 0.
+    fn roster_menu(n: usize, filter: &str, footer: Option<&str>) -> SettingsMenuModel {
+        SettingsMenuModel {
+            row: 0,
+            options: (0..n)
+                .map(|i| SettingsMenuOption {
+                    label: format!("Family {i}"),
+                    value: format!("family-{i}"),
+                    doc: String::new(),
+                })
+                .collect(),
+            current: Some(0),
+            selected: 0,
+            searchable: true,
+            filter: filter.to_string(),
+            filter_caret: Default::default(),
+            scroll: 0.0,
+            ensure_visible: false,
+            footer: footer.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_long_roster_stays_inside_the_pane_and_scrolls() {
+        // 266 installed families is why the roster used to open a centred
+        // command-palette modal instead of a dropdown (#259). A menu tall
+        // enough for all of them would be taller than any screen; this one
+        // clips and scrolls instead.
+        let mut m = model(vec![cell_row(
+            SettingsValueCell::Select { value: "family-0".into() },
+            false,
+        )]);
+        m.menu = Some(roster_menu(200, "", None));
+        let area_bottom = 46.0 + 700.0;
+        let l = lay(&m, 1000.0, 700.0);
+        let panel = l
+            .rects
+            .iter()
+            .find(|r| (r.rect[2] - MENU_W).abs() < 0.01)
+            .expect("the menu panel is drawn");
+        assert!(
+            panel.rect[1] >= 46.0 && panel.rect[1] + panel.rect[3] <= area_bottom + 0.01,
+            "the panel is inside the pane: {:?} in 46..{area_bottom}",
+            panel.rect
+        );
+
+        let mut rows = std::collections::HashSet::new();
+        for x in (0..1000).step_by(2) {
+            for y in (46..746).step_by(2) {
+                if let Some(HitRegion::SettingsMenuRow(j)) = l.hit.hit(x as f32, y as f32) {
+                    rows.insert(j);
+                }
+            }
+        }
+        assert!(!rows.is_empty(), "the visible rows answer as themselves");
+        assert!(
+            rows.len() < 200,
+            "and only the visible ones do — a region for a row nobody can see \
+             would answer for a click that never lands on it: {} of 200",
+            rows.len()
+        );
+
+        // Scrolled down, a *later* row is reachable — the list really moves.
+        let mut scrolled = m.clone();
+        if let Some(menu) = scrolled.menu.as_mut() {
+            menu.scroll = 400.0;
+        }
+        let l2 = lay(&scrolled, 1000.0, 700.0);
+        let mut rows2 = std::collections::HashSet::new();
+        for x in (0..1000).step_by(2) {
+            for y in (46..746).step_by(2) {
+                if let Some(HitRegion::SettingsMenuRow(j)) = l2.hit.hit(x as f32, y as f32) {
+                    rows2.insert(j);
+                }
+            }
+        }
+        let top = *rows.iter().min().expect("some row");
+        let top2 = *rows2.iter().min().expect("some row");
+        assert!(top2 > top, "scrolling moved the list: first visible {top} -> {top2}");
+    }
+
+    #[test]
+    fn the_search_row_and_the_footer_answer_as_themselves() {
+        let mut m = model(vec![cell_row(
+            SettingsValueCell::Select { value: "family-0".into() },
+            false,
+        )]);
+        m.menu = Some(roster_menu(30, "", Some("Browse all themes…")));
+        let l = lay(&m, 1000.0, 700.0);
+        let mut search = false;
+        let mut footer = false;
+        for x in (0..1000).step_by(2) {
+            for y in (46..746).step_by(2) {
+                match l.hit.hit(x as f32, y as f32) {
+                    Some(HitRegion::SettingsMenuSearch) => search = true,
+                    Some(HitRegion::SettingsMenuFooter) => footer = true,
+                    _ => {}
+                }
+            }
+        }
+        assert!(search, "the search row answers — a click in it must not dismiss the menu");
+        assert!(footer, "and so does the footer that opens the gallery");
+    }
+
+    #[test]
+    fn a_search_matching_nothing_says_so() {
+        // An empty panel reads as broken rather than as empty — the
+        // palette's rule, on the dropdown.
+        let mut m = model(vec![cell_row(
+            SettingsValueCell::Select { value: "family-0".into() },
+            false,
+        )]);
+        let mut menu = roster_menu(0, "zzz", None);
+        menu.current = None;
+        m.menu = Some(menu);
+        let l = lay(&m, 1000.0, 700.0);
+        assert!(
+            l.texts.iter().any(|t| t.text.contains("nothing matches")),
+            "the menu says nothing matched"
+        );
+    }
+
+    #[test]
+    fn the_panel_never_leaves_the_pane_however_little_room_there_is() {
+        // The minimum height is a floor on what the menu *wants*, not a
+        // licence to overflow: a panel taller than the pane draws its last
+        // rows behind the footer bar, where they are unclickable and look
+        // like the list simply ending. Drive a pane far shorter than
+        // MENU_MIN_H, with the anchor at the very bottom — the worst case
+        // for both the clamp and the flip.
+        let mut drawn = 0;
+        for h in [400.0_f32, 200.0, 120.0, 90.0] {
+            let mut m = model(vec![cell_row(
+                SettingsValueCell::Select { value: "family-0".into() },
+                false,
+            )]);
+            m.menu = Some(roster_menu(200, "", Some("Browse all themes…")));
+            let l = lay(&m, 1000.0, h);
+            let area = [0.0, 46.0, 1000.0, h];
+            // A pane too short to lay the row out at all yields no anchor,
+            // and no anchor is no menu — correct, and not what this asserts.
+            let Some(panel) = l.rects.iter().find(|r| (r.rect[2] - MENU_W).abs() < 0.01) else {
+                continue;
+            };
+            drawn += 1;
+            assert!(
+                panel.rect[1] >= area[1] - 0.01
+                    && panel.rect[1] + panel.rect[3] <= area[1] + area[3] + 0.01,
+                "pane {h}: panel {:?} escaped {area:?}",
+                panel.rect
+            );
+        }
+        assert!(drawn > 0, "at least one pane was short enough to matter and tall enough to draw");
+    }
+
+    #[test]
+    fn the_whole_panel_belongs_to_the_menu_not_just_its_rows() {
+        // Padding, the rule under the search row and the gap beside a short
+        // row are all inside the panel. Left unclaimed they answer as
+        // `SettingsPanel`, and a wheel there scrolls the pane underneath —
+        // sliding the rows out from under the anchor the menu hangs off.
+        let mut m = model(vec![cell_row(
+            SettingsValueCell::Select { value: "family-0".into() },
+            false,
+        )]);
+        m.menu = Some(roster_menu(30, "", Some("Browse all themes…")));
+        let l = lay(&m, 1000.0, 700.0);
+        let panel = l
+            .rects
+            .iter()
+            .find(|r| (r.rect[2] - MENU_W).abs() < 0.01)
+            .expect("the menu panel is drawn")
+            .rect;
+        let mut stray = Vec::new();
+        let mut x = panel[0] + 1.0;
+        while x < panel[0] + panel[2] - 1.0 {
+            let mut y = panel[1] + 1.0;
+            while y < panel[1] + panel[3] - 1.0 {
+                match l.hit.hit(x, y) {
+                    Some(
+                        HitRegion::SettingsMenuPanel
+                        | HitRegion::SettingsMenuRow(_)
+                        | HitRegion::SettingsMenuSearch
+                        | HitRegion::SettingsMenuFooter,
+                    ) => {}
+                    other => stray.push((x, y, other)),
+                }
+                y += 2.0;
+            }
+            x += 2.0;
+        }
+        assert!(
+            stray.is_empty(),
+            "every point inside the panel is the menu's; {} were not, first {:?}",
+            stray.len(),
+            stray.first()
+        );
     }
 }

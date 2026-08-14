@@ -208,8 +208,8 @@ struct SettingsUiState {
     /// Installed families, scanned once at open — the font rows' fallback
     /// tags read this instead of re-scanning the system per rebuild.
     installed: Vec<String>,
-    /// An open dropdown menu: (row index, keyboard selection).
-    menu: Option<(usize, usize)>,
+    /// The open dropdown menu, when there is one.
+    menu: Option<MenuState>,
     /// A font-list drag in progress: (row index, item being dragged).
     /// Order is the setting; crossing another item reorders through the
     /// same write path as everything else.
@@ -270,8 +270,9 @@ struct ProfilesUiState {
     fields: Vec<zest_config::ui::UiField>,
     /// A typed edit in progress; while `Some`, characters belong to it.
     editing: Option<crate::settings_ui::EditBuffer>,
-    /// An open dropdown menu: (row index, keyboard selection) — backdrop's.
-    menu: Option<(usize, usize)>,
+    /// The open dropdown menu, when there is one — backdrop's, and §12's
+    /// theme and font rosters.
+    menu: Option<MenuState>,
     /// The last profile write that failed, shown as a banner.
     error: Option<String>,
 }
@@ -314,48 +315,6 @@ struct LauncherState {
     /// Which `+` opened it — decides where the panel hangs (§1 vs §2).
     anchor: crate::chrome::model::LauncherAnchor,
     actions: Vec<crate::launcher::LauncherAction>,
-}
-
-/// Choosing one value from a long list, drawn through the command palette's
-/// overlay because it is the same shape of thing: a filtered, scrollable list
-/// with one selection.
-///
-/// Cycling with the arrow keys is fine for five themes and useless for 266
-/// installed font families, which is what this exists for.
-struct ValuePickerState {
-    /// Index into the settings tab's `fields`.
-    field: usize,
-    /// Append the choice to a list value (the font stack's add row) instead
-    /// of replacing it.
-    append: bool,
-    /// Everything choosable, unfiltered and in display order.
-    options: Vec<String>,
-    /// Parallel to the drawn rows, same-pass built — the picker discipline
-    /// used by the palette and the settings overlay alike.
-    visible: Vec<String>,
-    selected: usize,
-    filter: TextField,
-    scroll: f32,
-    scroll_to_selected: bool,
-}
-
-impl ValuePickerState {
-    /// The options a filter admits, matched case-insensitively on a substring.
-    ///
-    /// Substring rather than prefix on purpose: the family someone wants is
-    /// `MesloLGM NF`, and they will type `meslo`, but it is just as likely to
-    /// be `nerd` or `mono`.
-    fn matching(&self) -> Vec<String> {
-        if self.filter.is_empty() {
-            return self.options.clone();
-        }
-        let needle = self.filter.text().to_lowercase();
-        self.options
-            .iter()
-            .filter(|o| o.to_lowercase().contains(&needle))
-            .cloned()
-            .collect()
-    }
 }
 
 /// Which full-pane screen the window shows in place of the grid.
@@ -409,6 +368,11 @@ const LINK_POLL: std::time::Duration = std::time::Duration::from_secs(3);
 /// one screen cannot be mis-typed into another.
 const ENROLL_CODE_ALPHABET: &str = "23456789ABCDEFGHJKMNPQRSTVWXYZ";
 
+/// The theme dropdown's last row. The gallery (design screen 8) shows each
+/// theme's swatches, which a 288px menu cannot; the dropdown is the quick
+/// in-place choice and this keeps the browsing one click away.
+const BROWSE_THEMES: &str = "Browse all themes\u{2026}";
+
 /// Feed text into the code entry — one filter for typing and paste (#228).
 ///
 /// Uppercase first — a person reading a code off a screen may well type it
@@ -418,6 +382,141 @@ const ENROLL_CODE_ALPHABET: &str = "23456789ABCDEFGHJKMNPQRSTVWXYZ";
 /// a stray word around the code still land the code itself, and what keeps a
 /// `0` or an `I` (which no real code contains) from occupying a slot the
 /// real character then cannot fill.
+/// An open dropdown menu, on the Settings tab or the Profiles editor.
+///
+/// One menu for both kinds of choice. The schema's variants are read live off
+/// the field; a **roster** — themes, installed font families — is captured
+/// here when the menu opens, because it is neither in the schema nor cheap:
+/// scanning installed families is a real system call, and per-frame is what
+/// `open_value_picker`'s comment existed to avoid before this replaced it.
+struct MenuState {
+    /// Row index the menu hangs off.
+    row: usize,
+    /// Index into the *filtered* options the keyboard is on.
+    selected: usize,
+    /// Empty means "the field's schema variants".
+    roster: Vec<String>,
+    filter: TextField,
+    scroll: f32,
+    /// Bring the selection into view on the next layout — keyboard only.
+    scroll_to_selected: bool,
+    /// The font list's dashed ＋ row: choosing grows the stack instead of
+    /// replacing the value.
+    append: bool,
+}
+
+impl MenuState {
+    /// A menu over the field's own schema variants — the documented selects.
+    fn variants(row: usize) -> Self {
+        Self {
+            row,
+            selected: 0,
+            roster: Vec::new(),
+            filter: TextField::default(),
+            scroll: 0.0,
+            scroll_to_selected: true,
+            append: false,
+        }
+    }
+
+    /// A menu over a roster the client brought, starting on `current` so
+    /// opening it and pressing Enter is a no-op rather than a surprise.
+    fn roster(row: usize, roster: Vec<String>, current: Option<&str>) -> Self {
+        let selected =
+            current.and_then(|c| roster.iter().position(|o| o == c)).unwrap_or(0);
+        Self {
+            row,
+            selected,
+            roster,
+            filter: TextField::default(),
+            scroll: 0.0,
+            scroll_to_selected: true,
+            append: false,
+        }
+    }
+
+    /// The roster entries a filter admits, matched case-insensitively on a
+    /// substring.
+    ///
+    /// Prefix matching would be useless here: the family is "MesloLGM NF" and
+    /// the words someone reaches for are "meslo", "nerd" or "mono", only one
+    /// of which starts it.
+    fn matching(&self) -> Vec<String> {
+        let needle = self.filter.text().to_lowercase();
+        if needle.is_empty() {
+            return self.roster.clone();
+        }
+        self.roster.iter().filter(|o| o.to_lowercase().contains(&needle)).cloned().collect()
+    }
+
+    /// A roster big enough that scanning it beats scrolling it. Four
+    /// documented variants under a search box is noise; 266 families without
+    /// one is the reason this menu exists.
+    fn searchable(&self) -> bool {
+        self.roster.len() > 8
+    }
+}
+
+/// The open dropdown, resolved against the row it hangs off — same-pass, so
+/// a menu can never outlive its row.
+///
+/// Shared by the Settings tab and the Profiles editor, which is the point:
+/// the two builders were copies, and the copy is where the roster support
+/// would have gone into only one of them. `current` is the field's live
+/// value; the caller resolves it, because only it knows whether the field is
+/// a string or the font list's array.
+fn menu_model(
+    menu: &MenuState,
+    actions: &[crate::settings_ui::RowAction],
+    fields: &[zest_config::ui::UiField],
+    current: Option<&str>,
+    footer: Option<String>,
+) -> Option<crate::chrome::model::SettingsMenuModel> {
+    use crate::chrome::model::{SettingsMenuModel, SettingsMenuOption};
+    let field_idx = match actions.get(menu.row) {
+        Some(crate::settings_ui::RowAction::Field(i)) => *i,
+        _ => return None,
+    };
+    let field = fields.get(field_idx)?;
+    // A roster the client brought, or the schema's own variants. Both empty
+    // is a field with nothing to choose from, and no menu.
+    let options: Vec<SettingsMenuOption> = if menu.roster.is_empty() {
+        field
+            .variants
+            .iter()
+            .map(|v| SettingsMenuOption {
+                label: crate::settings_ui::humanize_value(&v.value),
+                value: v.value.clone(),
+                doc: v.description.lines().next().unwrap_or_default().to_string(),
+            })
+            .collect()
+    } else {
+        menu.matching()
+            .into_iter()
+            .map(|value| SettingsMenuOption {
+                label: crate::settings_ui::humanize_value(&value),
+                value,
+                doc: String::new(),
+            })
+            .collect()
+    };
+    if options.is_empty() && menu.roster.is_empty() {
+        return None;
+    }
+    Some(SettingsMenuModel {
+        row: menu.row,
+        current: current.and_then(|c| options.iter().position(|o| o.value == c)),
+        selected: menu.selected.min(options.len().saturating_sub(1)),
+        searchable: menu.searchable(),
+        filter: menu.filter.text().to_string(),
+        filter_caret: caret_of(&menu.filter),
+        scroll: menu.scroll,
+        ensure_visible: menu.scroll_to_selected,
+        footer,
+        options,
+    })
+}
+
 /// A field's caret, as the chrome model wants it.
 fn caret_of(field: &TextField) -> crate::chrome::model::Caret {
     crate::chrome::model::Caret { at: field.caret(), selection: field.selection() }
@@ -997,7 +1096,6 @@ pub struct App {
     /// The Profiles tab's editor state, while that tab exists (§12).
     profiles_ui: Option<ProfilesUiState>,
     /// Open over the settings overlay while a long-list field is being chosen.
-    value_picker: Option<ValuePickerState>,
     /// The + launcher menu's transient state, while open — one of the
     /// mutually exclusive overlays, like the three above.
     launcher: Option<LauncherState>,
@@ -1160,6 +1258,11 @@ pub struct App {
     /// `--screen`: the surface to open the window on. Dispatched once, in
     /// `resumed`, after the session exists and before the first frame.
     start_screen: Option<StartScreen>,
+    /// `--screen settings-menu`: open this field's dropdown once the tab has
+    /// built its rows. Deferred because a row index only exists after the
+    /// same pass that draws it — the same-pass discipline, met from the
+    /// other side.
+    start_menu_key: Option<String>,
     /// Set once the PNG is written (or has failed to write); the event loop
     /// exits at the next opportunity and `main` returns this.
     exit_code: Option<u8>,
@@ -1213,6 +1316,11 @@ pub enum StartScreen {
     /// The Profiles tab (design §12 — the placeholder pane, until the
     /// editor's work item lands).
     Profiles,
+    /// The Settings tab with the **theme dropdown open** — the one state
+    /// `--screenshot` could not otherwise reach, because opening a menu
+    /// takes a click. The dropdown is what #259 rebuilt, so a picture of it
+    /// has to be available to anyone reviewing this without a keyboard.
+    SettingsMenu,
 }
 
 impl App {
@@ -1261,7 +1369,6 @@ impl App {
             fleet: None,
             picker: None,
             palette_ui: None,
-            value_picker: None,
             settings_ui: None,
             profiles_ui: None,
             launcher: None,
@@ -1324,6 +1431,7 @@ impl App {
             screenshot: None,
             screenshot_at: None,
             start_screen: None,
+            start_menu_key: None,
             exit_code: None,
         }
     }
@@ -3032,7 +3140,6 @@ impl App {
                 // overlay (§11), and the menu floats over it like any pane.
                 self.picker = None;
                 self.palette_ui = None;
-                self.value_picker = None;
                 Some(LauncherState {
                     // Row 0 is the default row by construction, so opening
                     // and pressing ⏎ runs the default — the menu's header
@@ -3161,14 +3268,10 @@ impl App {
                     // go, never to the concealed session's shell. The
                     // picker and palette are checked first because the key
                     // path hands them the keys before the tab.
-                    if let Some(p) = self.value_picker.as_mut() {
-                        // The value picker takes the keys from the tab
-                        // (see the key path's ordering); a composed family
-                        // name belongs to its filter.
-                        p.filter.insert(&text);
-                        p.selected = 0;
-                        p.scroll_to_selected = true;
-                    } else if let Some(ui) = self.settings_ui.as_mut() {
+                    if let Some(ui) = self.settings_ui.as_mut() {
+                        // A composed family name belongs to the open
+                        // dropdown's search row when there is one — the key
+                        // path's ordering, which `commit_text` mirrors.
                         ui.commit_text(&text);
                     }
                     self.mark_chrome_dirty();
@@ -3507,30 +3610,6 @@ impl App {
             }
         });
 
-        // The value picker draws through the palette's overlay -- same shape of
-        // thing, and `PaletteRow` is display-only, so the chrome needs to know
-        // nothing about it.
-        let value_picker_model = self.value_picker.as_mut().map(|state| {
-            state.visible = state.matching();
-            state.selected = state.selected.min(state.visible.len().saturating_sub(1));
-            crate::chrome::model::PaletteModel {
-                rows: state
-                    .visible
-                    .iter()
-                    .map(|name| crate::chrome::model::PaletteRow::Command {
-                        name: name.clone(),
-                        chord: String::new(),
-                        runnable: true,
-                    })
-                    .collect(),
-                selected: state.selected,
-                filter: state.filter.text().to_string(),
-                filter_caret: caret_of(&state.filter),
-                scroll: state.scroll,
-                ensure_visible: state.scroll_to_selected,
-            }
-        });
-
         let palette_model = self.palette_ui.as_mut().map(|state| {
             let (rows, actions) = keymap::palette(state.filter.text());
             state.actions = actions;
@@ -3573,6 +3652,9 @@ impl App {
                 self.visible_categories(),
             )
         });
+        // Taken before the &mut borrow below, and taken *once*: opening the
+        // menu again on every rebuild would make it impossible to dismiss.
+        let start_menu_key = self.start_menu_key.take();
         let settings_model = self.settings_ui.as_mut().zip(settings_inputs).map(
             |(ui, (values, provenance, restart_pending, error, unknown_keys, visible_cats))| {
                 use crate::settings_ui as sui;
@@ -3649,35 +3731,42 @@ impl App {
                 // the end; land it on the nearest real row instead.
                 ui.selected = sui::nearest_field(&ui.actions, ui.selected);
 
-                // The open dropdown, resolved against the selected row's
-                // variants — same-pass, so the menu can never outlive the
-                // row it hangs off.
-                let menu = ui.menu.and_then(|(row, selected)| {
-                    let field_idx = match ui.actions.get(row) {
+                // `--screen settings-menu`, now that the rows exist. Opened
+                // through the same state Enter arms, so the flag can never
+                // show something a user could not have reached.
+                if let Some(key) = start_menu_key {
+                    if let Some(row) = ui.actions.iter().position(|a| {
+                        matches!(a, sui::RowAction::Field(i)
+                            if ui.fields.get(*i).is_some_and(|f| f.key == key))
+                    }) {
+                        ui.selected = row;
+                        let roster: Vec<String> =
+                            zest_theme::builtin::all().into_iter().map(|t| t.id).collect();
+                        let current = zest_config::ui::value_at(&values, &key)
+                            .and_then(serde_json::Value::as_str);
+                        ui.menu = Some(MenuState::roster(row, roster, current));
+                    }
+                }
+
+                let menu = ui.menu.as_ref().and_then(|menu| {
+                    let field_idx = match ui.actions.get(menu.row) {
                         Some(sui::RowAction::Field(i)) => *i,
                         _ => return None,
                     };
                     let field = ui.fields.get(field_idx)?;
-                    if field.variants.is_empty() {
-                        return None;
-                    }
-                    let current = zest_config::ui::value_at(&values, &field.key)
-                        .and_then(serde_json::Value::as_str)
-                        .and_then(|v| field.variants.iter().position(|o| o.value == v));
-                    Some(crate::chrome::model::SettingsMenuModel {
-                        row,
-                        options: field
-                            .variants
-                            .iter()
-                            .map(|v| crate::chrome::model::SettingsMenuOption {
-                                label: sui::humanize_value(&v.value),
-                                value: v.value.clone(),
-                                doc: v.description.lines().next().unwrap_or_default().to_string(),
-                            })
-                            .collect(),
-                        current,
-                        selected: selected.min(field.variants.len().saturating_sub(1)),
-                    })
+                    let value = zest_config::ui::value_at(&values, &field.key);
+                    // The font list's value is an array; its first entry is
+                    // the face the atlas actually shapes with, so that is the
+                    // one the ✓ belongs on.
+                    let current = match value {
+                        Some(serde_json::Value::Array(a)) => {
+                            a.first().and_then(serde_json::Value::as_str)
+                        }
+                        other => other.and_then(serde_json::Value::as_str),
+                    };
+                    let footer = (field.widget == zest_config::ui::Widget::ThemePicker)
+                        .then(|| BROWSE_THEMES.to_string());
+                    menu_model(menu, &ui.actions, &ui.fields, current, footer)
                 });
 
                 let config_path = zest_config::paths::config_file()
@@ -3787,36 +3876,26 @@ impl App {
                 // or past the end; land it on the nearest real row.
                 ui.selected = sui::nearest_field(&ui.actions, ui.selected);
 
-                // The open dropdown, resolved same-pass against the row's
-                // variants (window.backdrop's menu; the pickers have none).
+                // The open dropdown, resolved same-pass against the row —
+                // window.backdrop's variants, and §12's theme and font
+                // rosters, through the Settings tab's own builder.
                 let overrides = pui::overrides_json(&resolved);
-                let menu = ui.menu.and_then(|(row, selected)| {
-                    let field_idx = match ui.actions.get(row) {
+                let menu = ui.menu.as_ref().and_then(|menu| {
+                    let field_idx = match ui.actions.get(menu.row) {
                         Some(sui::RowAction::Field(i)) => *i,
                         _ => return None,
                     };
                     let field = ui.fields.get(field_idx)?;
-                    if field.variants.is_empty() {
-                        return None;
-                    }
-                    let current = pui::effective_value(field, &resolved, &overrides, &ctx);
-                    let current = current
-                        .as_str()
-                        .and_then(|v| field.variants.iter().position(|o| o.value == v));
-                    Some(crate::chrome::model::SettingsMenuModel {
-                        row,
-                        options: field
-                            .variants
-                            .iter()
-                            .map(|v| crate::chrome::model::SettingsMenuOption {
-                                label: sui::humanize_value(&v.value),
-                                value: v.value.clone(),
-                                doc: v.description.lines().next().unwrap_or_default().to_string(),
-                            })
-                            .collect(),
-                        current,
-                        selected: selected.min(field.variants.len().saturating_sub(1)),
-                    })
+                    let value = pui::effective_value(field, &resolved, &overrides, &ctx);
+                    let current = match &value {
+                        serde_json::Value::Array(a) => {
+                            a.first().and_then(serde_json::Value::as_str)
+                        }
+                        other => other.as_str(),
+                    };
+                    let footer = (field.widget == zest_config::ui::Widget::ThemePicker)
+                        .then(|| BROWSE_THEMES.to_string());
+                    menu_model(menu, &ui.actions, &ui.fields, current, footer)
                 });
 
                 let display_name =
@@ -4153,7 +4232,7 @@ impl App {
             settings_chord: keymap::chord_for(keymap::Action::ToggleSettings),
             picker: picker_model,
             // The picker wins: it opens *over* the settings tab's content.
-            palette: value_picker_model.or(palette_model),
+            palette: palette_model,
             settings: settings_model,
             launcher: launcher_model,
             notice,
@@ -4533,22 +4612,26 @@ impl App {
             }
             (HitRegion::SettingsMenuRow(opt), MouseButton::Left) => {
                 if self.profiles_tab_active() {
-                    let row = self.profiles_ui.as_ref().and_then(|ui| ui.menu).map(|(r, _)| r);
-                    if let Some(ui) = self.profiles_ui.as_mut() {
-                        ui.menu = None;
-                    }
-                    if let Some(row) = row {
-                        self.profiles_apply_variant(row, opt);
-                    }
+                    self.profiles_apply_menu_choice(opt);
                     return;
                 }
-                let row = self.settings_ui.as_ref().and_then(|ui| ui.menu).map(|(r, _)| r);
+                self.apply_menu_choice(opt);
+            }
+            // A click inside the menu keeps it: the search box is where the
+            // keys already go, so focusing it is swallowing the click, and a
+            // near-miss on the panel's padding must not dismiss what it was
+            // aiming at. Without these both fall through to the pane.
+            (HitRegion::SettingsMenuSearch | HitRegion::SettingsMenuPanel, MouseButton::Left) => {}
+            (HitRegion::SettingsMenuFooter, MouseButton::Left) => {
+                // "Browse all themes…": the gallery shows the swatches a
+                // 288px menu cannot.
                 if let Some(ui) = self.settings_ui.as_mut() {
                     ui.menu = None;
                 }
-                if let Some(row) = row {
-                    self.apply_variant(row, opt);
+                if let Some(ui) = self.profiles_ui.as_mut() {
+                    ui.menu = None;
                 }
+                self.show_screen(AppScreen::Themes);
             }
             (HitRegion::SettingsListRemove(row, item), MouseButton::Left) => {
                 self.remove_list_item(row, item);
@@ -4725,7 +4808,6 @@ impl App {
         self.leave_screen();
         self.picker = None;
         self.palette_ui = None;
-        self.value_picker = None;
         self.launcher = None;
         if self.settings_ui.is_none() {
             // The scan is a real cost, paid once at open — the font rows'
@@ -4754,7 +4836,6 @@ impl App {
     /// so closing drops it; the keyboard returns to the session underneath.
     fn close_settings_tab(&mut self) {
         self.settings_ui = None;
-        self.value_picker = None;
         self.tabs.close_settings();
         self.after_activation();
     }
@@ -4768,15 +4849,21 @@ impl App {
     ///
     /// Returns false when the row has nothing to pick from, so the caller can
     /// fall back to whatever it would otherwise have done.
-    fn open_value_picker(&mut self) -> bool {
+    /// Open the dropdown on the selected row over a *roster* the client
+    /// brings — themes, installed families. `false` when there is nothing to
+    /// choose from, so the caller can fall back to cycling rather than
+    /// swallowing the keypress.
+    ///
+    /// The roster is captured here, once, on the keypress that opens the
+    /// menu: enumerating installed families is a real system scan, and the
+    /// model is rebuilt on every dirty frame.
+    fn open_roster_menu(&mut self, append: bool) -> bool {
         let Some(idx) = self.selected_settings_field() else { return false };
         let Some(field) = self.settings_ui.as_ref().and_then(|ui| ui.fields.get(idx)) else {
             return false;
         };
-        let options = match field.widget {
+        let roster = match field.widget {
             zest_config::ui::Widget::FontList => {
-                // A real scan of installed families, so it happens here -- once,
-                // on the keypress that opens the list -- and never per frame.
                 self.fonts.as_mut().map(Fonts::installed_families).unwrap_or_default()
             }
             zest_config::ui::Widget::ThemePicker => {
@@ -4784,52 +4871,83 @@ impl App {
             }
             _ => return false,
         };
-        if options.is_empty() {
+        if roster.is_empty() {
             return false;
         }
-        // Start on the value already set, so opening the list and pressing
-        // Enter is a no-op rather than a surprise.
-        let current = self.settings_value_of(idx).and_then(|v| match &v {
-            serde_json::Value::Array(a) => {
-                a.first().and_then(|f| f.as_str().map(str::to_string))
-            }
-            serde_json::Value::String(s) => Some(s.clone()),
-            _ => None,
-        });
-        let selected = current
-            .and_then(|c| options.iter().position(|o| *o == c))
-            .unwrap_or(0);
-
-        self.value_picker = Some(ValuePickerState {
-            field: idx,
-            append: false,
-            visible: options.clone(),
-            options,
-            selected,
-            filter: TextField::default(),
-            scroll: 0.0,
-            scroll_to_selected: true,
-        });
+        // Start on the value already set, so opening the menu and pressing
+        // Enter is a no-op rather than a surprise. An *append* starts at the
+        // top instead: there is no current value for a face being added.
+        let current = (!append)
+            .then(|| self.settings_value_of(idx))
+            .flatten()
+            .and_then(|v| match &v {
+                serde_json::Value::Array(a) => {
+                    a.first().and_then(|f| f.as_str().map(str::to_string))
+                }
+                serde_json::Value::String(s) => Some(s.clone()),
+                _ => None,
+            });
+        let row = self.settings_ui.as_ref().map(|ui| ui.selected).unwrap_or(0);
+        if let Some(ui) = self.settings_ui.as_mut() {
+            let mut menu = MenuState::roster(row, roster, current.as_deref());
+            menu.append = append;
+            ui.menu = Some(menu);
+        }
         self.mark_chrome_dirty();
         true
     }
 
-    /// Take the picker's selection and write it to the field.
-    fn accept_value_picker(&mut self) {
-        let Some(state) = self.value_picker.take() else { return };
+    /// Write the dropdown's chosen option to the field it hangs off.
+    ///
+    /// `opt` indexes the *visible* options, which a live search has already
+    /// narrowed — the same-pass contract the model documents.
+    fn apply_menu_choice(&mut self, opt: usize) {
         self.mark_chrome_dirty();
-        let Some(chosen) = state.visible.get(state.selected).cloned() else { return };
-        let Some(field) = self.settings_ui.as_ref().and_then(|ui| ui.fields.get(state.field))
+        // Resolved *before* the menu is taken. Enter on a search that matched
+        // nothing used to close the dropdown and apply nothing, which reads
+        // as the menu breaking rather than as the filter being wrong — and
+        // leaves the person to reopen it and retype. A choice that cannot
+        // resolve leaves the menu exactly as it was, filter included.
+        let Some((field_idx, chosen)) = self.settings_ui.as_ref().and_then(|ui| {
+            let menu = ui.menu.as_ref()?;
+            let field_idx = match ui.actions.get(menu.row)? {
+                crate::settings_ui::RowAction::Field(i) => *i,
+                crate::settings_ui::RowAction::None => return None,
+            };
+            // A schema select still writes its variant; only a roster menu
+            // goes through the filtered list.
+            if menu.roster.is_empty() {
+                ui.fields.get(field_idx)?.variants.get(opt)?;
+                return Some((field_idx, None));
+            }
+            Some((field_idx, Some(menu.matching().get(opt)?.clone())))
+        }) else {
+            return;
+        };
+        let append = self
+            .settings_ui
+            .as_ref()
+            .and_then(|ui| ui.menu.as_ref())
+            .is_some_and(|m| m.append);
+        if let Some(ui) = self.settings_ui.as_mut() {
+            ui.menu = None;
+        }
+        let Some(chosen) = chosen else {
+            self.apply_variant_at(field_idx, opt);
+            return;
+        };
+        let Some(widget) =
+            self.settings_ui.as_ref().and_then(|ui| ui.fields.get(field_idx)).map(|f| f.widget)
         else {
             return;
         };
-        let value = if field.widget == zest_config::ui::Widget::FontList {
-            if state.append {
+        let value = if widget == zest_config::ui::Widget::FontList {
+            if append {
                 // The add row grows the stack (§11: the dashed row opens
-                // this picker); choosing a face already present is a no-op,
+                // this menu); choosing a face already present is a no-op,
                 // not a duplicate — the Curlz MT lesson, again.
                 let mut arr = self
-                    .settings_value_of(state.field)
+                    .settings_value_of(field_idx)
                     .and_then(|v| v.as_array().cloned())
                     .unwrap_or_default();
                 if arr.iter().any(|v| v.as_str() == Some(chosen.as_str())) {
@@ -4845,7 +4963,7 @@ impl App {
         } else {
             serde_json::Value::String(chosen)
         };
-        self.apply_edit(state.field, value);
+        self.apply_edit(field_idx, value);
     }
 
     /// The selected settings row's field index, when it is a real field.
@@ -4922,16 +5040,16 @@ impl App {
                     // the doc comments are the reason the menu exists.
                     let row = self.settings_ui.as_ref().map(|ui| ui.selected);
                     if let (Some(ui), Some(row)) = (self.settings_ui.as_mut(), row) {
-                        ui.menu = Some((row, 0));
+                        ui.menu = Some(MenuState::variants(row));
                     }
                 }
             }
-            // Long lists open a filtered picker instead of cycling. Stepping is
-            // fine for a handful of themes and useless for 266 installed font
-            // families, which is what this exists for -- the arrows still cycle
-            // for anyone who wants them.
+            // The rosters open the same dropdown the schema selects do,
+            // with a search row: stepping is fine for five themes and
+            // useless for 266 installed families. The arrows still cycle for
+            // anyone who wants them.
             Widget::FontList | Widget::ThemePicker => {
-                if !self.open_value_picker() {
+                if !self.open_roster_menu(false) {
                     // Nothing to choose from: fall back to cycling rather than
                     // swallowing the keypress.
                     self.adjust_selected_setting(1);
@@ -5156,11 +5274,20 @@ impl App {
     /// Write one of a select field's variants — segmented segments and
     /// dropdown rows both land here, and from here in `apply_edit`.
     fn apply_variant(&mut self, row: usize, opt: usize) {
-        let Some((idx, value)) = self.settings_field_of_row(row).and_then(|i| {
-            let field = self.settings_ui.as_ref()?.fields.get(i)?;
-            let variant = field.variants.get(opt)?;
-            Some((i, serde_json::Value::String(variant.value.clone())))
-        }) else {
+        let Some(idx) = self.settings_field_of_row(row) else { return };
+        self.apply_variant_at(idx, opt);
+    }
+
+    /// The same, by field index — what the dropdown has after it resolves its
+    /// row, and what keeps `apply_menu_choice` from resolving it twice.
+    fn apply_variant_at(&mut self, idx: usize, opt: usize) {
+        let Some(value) = self
+            .settings_ui
+            .as_ref()
+            .and_then(|ui| ui.fields.get(idx))
+            .and_then(|f| f.variants.get(opt))
+            .map(|v| serde_json::Value::String(v.value.clone()))
+        else {
             return;
         };
         self.apply_edit(idx, value);
@@ -5214,11 +5341,7 @@ impl App {
         }
         match widget {
             Widget::FontList => {
-                if self.open_value_picker() {
-                    if let Some(p) = self.value_picker.as_mut() {
-                        p.append = true;
-                    }
-                }
+                self.open_roster_menu(true);
             }
             Widget::TagList | Widget::KeyValue => {
                 if let Some(ui) = self.settings_ui.as_mut() {
@@ -5476,7 +5599,7 @@ impl App {
             Widget::Select => {
                 let row = self.profiles_ui.as_ref().map(|ui| ui.selected);
                 if let (Some(ui), Some(row)) = (self.profiles_ui.as_mut(), row) {
-                    ui.menu = Some((row, 0));
+                    ui.menu = Some(MenuState::variants(row));
                 }
             }
             // The fleet-picker-as-chooser belongs to the cross-host launch
@@ -5486,16 +5609,95 @@ impl App {
             Widget::Number | Widget::Slider | Widget::Text | Widget::Path => {
                 self.profiles_begin_edit(idx);
             }
-            // The direct-choice rows also answer Enter by stepping, so the
-            // keyboard can drive them without a pointer.
-            Widget::SchemePicker
-            | Widget::AccentPicker
-            | Widget::IconPicker
-            | Widget::FontList
-            | Widget::ThemePicker => self.profiles_adjust(1),
+            // The rosters open the Settings tab's dropdown — a ▾ pill should
+            // open, not cycle. Falling back to a step keeps the keypress
+            // meaning something when there is nothing to list.
+            Widget::FontList | Widget::ThemePicker => {
+                if !self.profiles_open_roster_menu() {
+                    self.profiles_adjust(1);
+                }
+            }
+            // The direct-choice rows answer Enter by stepping, so the
+            // keyboard can drive them without a pointer. These are swatch and
+            // tile rows (§12) — the choices are already all on screen, and a
+            // dropdown over them would hide what it is choosing between.
+            Widget::SchemePicker | Widget::AccentPicker | Widget::IconPicker => {
+                self.profiles_adjust(1);
+            }
             Widget::TagList | Widget::KeyValue => {}
         }
         self.mark_chrome_dirty();
+    }
+
+    /// The Settings tab's [`Self::open_roster_menu`], on §12's surface.
+    fn profiles_open_roster_menu(&mut self) -> bool {
+        let Some(idx) = self.profiles_selected_field() else { return false };
+        let Some(field) = self.profiles_ui.as_ref().and_then(|ui| ui.fields.get(idx)) else {
+            return false;
+        };
+        let roster = match field.widget {
+            zest_config::ui::Widget::FontList => {
+                self.fonts.as_mut().map(Fonts::installed_families).unwrap_or_default()
+            }
+            zest_config::ui::Widget::ThemePicker => {
+                zest_theme::builtin::all().into_iter().map(|t| t.id).collect()
+            }
+            _ => return false,
+        };
+        if roster.is_empty() {
+            return false;
+        }
+        // The profile's *own* value, not the resolved one — the seeding rule
+        // `profiles_seed_of` documents: the ✓ marks what this profile sets,
+        // not what it inherits.
+        let current = self.profiles_seed_of(idx).and_then(|v| match &v {
+            serde_json::Value::Array(a) => a.first().and_then(|f| f.as_str().map(str::to_string)),
+            serde_json::Value::String(s) => Some(s.clone()),
+            _ => None,
+        });
+        let row = self.profiles_ui.as_ref().map(|ui| ui.selected).unwrap_or(0);
+        if let Some(ui) = self.profiles_ui.as_mut() {
+            ui.menu = Some(MenuState::roster(row, roster, current.as_deref()));
+        }
+        self.mark_chrome_dirty();
+        true
+    }
+
+    /// Write the profiles dropdown's chosen option — `apply_menu_choice`,
+    /// through §12's write path.
+    fn profiles_apply_menu_choice(&mut self, opt: usize) {
+        self.mark_chrome_dirty();
+        // Resolved before the menu is taken, for the Settings tab's reason:
+        // Enter on a search that matched nothing must leave the dropdown
+        // alone rather than close it having applied nothing.
+        let Some((row, chosen)) = self.profiles_ui.as_ref().and_then(|ui| {
+            let menu = ui.menu.as_ref()?;
+            if menu.roster.is_empty() {
+                return Some((menu.row, None));
+            }
+            Some((menu.row, Some(menu.matching().get(opt)?.clone())))
+        }) else {
+            return;
+        };
+        if let Some(ui) = self.profiles_ui.as_mut() {
+            ui.menu = None;
+        }
+        let Some(chosen) = chosen else {
+            self.profiles_apply_variant(row, opt);
+            return;
+        };
+        let Some(idx) = self.profiles_field_of_row(row) else { return };
+        let Some(widget) =
+            self.profiles_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| f.widget)
+        else {
+            return;
+        };
+        let value = if widget == zest_config::ui::Widget::FontList {
+            serde_json::Value::Array(vec![serde_json::Value::String(chosen)])
+        } else {
+            serde_json::Value::String(chosen)
+        };
+        self.profiles_apply_edit(idx, value);
     }
 
     /// Open a typed edit on a profiles field, seeded with the profile's own
@@ -7863,6 +8065,16 @@ impl ApplicationHandler<Wakeup> for App {
             // Over the default screen, exactly as clicking the + would.
             Some(StartScreen::Launcher) => self.toggle_launcher(),
             Some(StartScreen::Profiles) => self.open_profiles_tab(),
+            Some(StartScreen::SettingsMenu) => {
+                self.open_settings_tab();
+                // The theme row lives under Appearance, and its index does
+                // not exist until the rows are built — so the category moves
+                // now and the menu opens on the pass that has them.
+                if let Some(ui) = self.settings_ui.as_mut() {
+                    ui.category = "Appearance".to_string();
+                }
+                self.start_menu_key = Some("appearance.theme".to_string());
+            }
             None => {}
         }
 
@@ -8457,70 +8669,6 @@ impl ApplicationHandler<Wakeup> for App {
                     return;
                 }
 
-                // The value picker sits *over* the settings overlay and takes
-                // the keyboard from it, so it is tested before both.
-                if self.value_picker.is_some() {
-                    use winit::keyboard::{Key, NamedKey};
-                    // This filter is the one that had no modifier guard at
-                    // all, so ⌘V typed a literal `v` into it (#251).
-                    if let Some(cmd) = command_for(&event.logical_key, self.modifiers) {
-                        let pasted = self.paste_text(&cmd);
-                        let mut copied = None;
-                        if let Some(p) = self.value_picker.as_mut() {
-                            let out = p.filter.apply(cmd, pasted.as_deref());
-                            if out.changed {
-                                p.selected = 0;
-                                p.scroll_to_selected = true;
-                            }
-                            copied = out.copied;
-                        }
-                        if let Some(text) = copied {
-                            self.set_clipboard(text);
-                        }
-                        self.mark_chrome_dirty();
-                        return;
-                    }
-                    let mut consumed = true;
-                    match &event.logical_key {
-                        Key::Named(NamedKey::Escape) => {
-                            self.value_picker = None;
-                            self.mark_chrome_dirty();
-                        }
-                        Key::Named(NamedKey::Enter) => self.accept_value_picker(),
-                        Key::Named(NamedKey::ArrowDown) => {
-                            if let Some(p) = self.value_picker.as_mut() {
-                                let last = p.visible.len().saturating_sub(1);
-                                p.selected = (p.selected + 1).min(last);
-                                p.scroll_to_selected = true;
-                                self.mark_chrome_dirty();
-                            }
-                        }
-                        Key::Named(NamedKey::ArrowUp) => {
-                            if let Some(p) = self.value_picker.as_mut() {
-                                p.selected = p.selected.saturating_sub(1);
-                                p.scroll_to_selected = true;
-                                self.mark_chrome_dirty();
-                            }
-                        }
-                        Key::Named(NamedKey::PageDown) => {
-                            if let Some(p) = self.value_picker.as_mut() {
-                                p.scroll += 300.0;
-                                self.mark_chrome_dirty();
-                            }
-                        }
-                        Key::Named(NamedKey::PageUp) => {
-                            if let Some(p) = self.value_picker.as_mut() {
-                                p.scroll -= 300.0;
-                                self.mark_chrome_dirty();
-                            }
-                        }
-                        _ => consumed = false,
-                    }
-                    if consumed {
-                        return;
-                    }
-                }
-
                 // The open command palette likewise owns the keyboard. It and
                 // the picker are mutually exclusive (the toggles enforce it),
                 // so the order of these blocks carries no meaning.
@@ -8610,18 +8758,56 @@ impl ApplicationHandler<Wakeup> for App {
 
                     // The open dropdown menu owns the keys before everything.
                     if self.settings_ui.as_ref().is_some_and(|ui| ui.menu.is_some()) {
+                        // How many rows the menu is *showing* — a live search
+                        // has already narrowed a roster, and clamping the
+                        // selection against the unfiltered count would let
+                        // ↓ run off the end of what is drawn.
                         let options = self
                             .settings_ui
                             .as_ref()
                             .and_then(|ui| {
-                                let (row, _) = ui.menu?;
-                                let i = match ui.actions.get(row) {
+                                let menu = ui.menu.as_ref()?;
+                                if !menu.roster.is_empty() {
+                                    return Some(menu.matching().len());
+                                }
+                                let i = match ui.actions.get(menu.row) {
                                     Some(crate::settings_ui::RowAction::Field(i)) => *i,
                                     _ => return None,
                                 };
                                 ui.fields.get(i).map(|f| f.variants.len())
                             })
                             .unwrap_or(0);
+                        // The search row is a text field like any other, and
+                        // only on a searchable menu: on a four-variant select
+                        // a stray letter must not silently start filtering
+                        // something with no visible box (#259).
+                        let searchable = self
+                            .settings_ui
+                            .as_ref()
+                            .and_then(|ui| ui.menu.as_ref())
+                            .is_some_and(MenuState::searchable);
+                        if searchable {
+                            if let Some(cmd) = command_for(&event.logical_key, self.modifiers) {
+                                let pasted = self.paste_text(&cmd);
+                                let mut copied = None;
+                                if let Some(menu) =
+                                    self.settings_ui.as_mut().and_then(|ui| ui.menu.as_mut())
+                                {
+                                    let out = menu.filter.apply(cmd, pasted.as_deref());
+                                    if out.changed {
+                                        menu.selected = 0;
+                                        menu.scroll = 0.0;
+                                        menu.scroll_to_selected = true;
+                                    }
+                                    copied = out.copied;
+                                }
+                                if let Some(text) = copied {
+                                    self.set_clipboard(text);
+                                }
+                                self.mark_chrome_dirty();
+                                return;
+                            }
+                        }
                         match &event.logical_key {
                             Key::Named(NamedKey::Escape) => {
                                 if let Some(ui) = self.settings_ui.as_mut() {
@@ -8629,26 +8815,46 @@ impl ApplicationHandler<Wakeup> for App {
                                 }
                             }
                             Key::Named(NamedKey::Enter) => {
-                                let menu = self.settings_ui.as_ref().and_then(|ui| ui.menu);
-                                if let Some(ui) = self.settings_ui.as_mut() {
-                                    ui.menu = None;
-                                }
-                                if let Some((row, sel)) = menu {
-                                    self.apply_variant(row, sel);
+                                let sel = self
+                                    .settings_ui
+                                    .as_ref()
+                                    .and_then(|ui| ui.menu.as_ref())
+                                    .map(|m| m.selected);
+                                if let Some(sel) = sel {
+                                    self.apply_menu_choice(sel);
                                 }
                             }
                             Key::Named(NamedKey::ArrowDown) => {
-                                if let Some((_, sel)) =
+                                if let Some(menu) =
                                     self.settings_ui.as_mut().and_then(|ui| ui.menu.as_mut())
                                 {
-                                    *sel = (*sel + 1).min(options.saturating_sub(1));
+                                    menu.selected =
+                                        (menu.selected + 1).min(options.saturating_sub(1));
+                                    menu.scroll_to_selected = true;
                                 }
                             }
                             Key::Named(NamedKey::ArrowUp) => {
-                                if let Some((_, sel)) =
+                                if let Some(menu) =
                                     self.settings_ui.as_mut().and_then(|ui| ui.menu.as_mut())
                                 {
-                                    *sel = sel.saturating_sub(1);
+                                    menu.selected = menu.selected.saturating_sub(1);
+                                    menu.scroll_to_selected = true;
+                                }
+                            }
+                            Key::Named(NamedKey::PageDown) => {
+                                if let Some(menu) =
+                                    self.settings_ui.as_mut().and_then(|ui| ui.menu.as_mut())
+                                {
+                                    menu.scroll += 300.0;
+                                    menu.scroll_to_selected = false;
+                                }
+                            }
+                            Key::Named(NamedKey::PageUp) => {
+                                if let Some(menu) =
+                                    self.settings_ui.as_mut().and_then(|ui| ui.menu.as_mut())
+                                {
+                                    menu.scroll -= 300.0;
+                                    menu.scroll_to_selected = false;
                                 }
                             }
                             _ => {}
@@ -8862,18 +9068,56 @@ impl ApplicationHandler<Wakeup> for App {
 
                     // The open dropdown menu owns the keys before everything.
                     if self.profiles_ui.as_ref().is_some_and(|ui| ui.menu.is_some()) {
+                        // How many rows the menu is *showing* — a live search
+                        // has already narrowed a roster, and clamping the
+                        // selection against the unfiltered count would let
+                        // ↓ run off the end of what is drawn.
                         let options = self
                             .profiles_ui
                             .as_ref()
                             .and_then(|ui| {
-                                let (row, _) = ui.menu?;
-                                let i = match ui.actions.get(row) {
+                                let menu = ui.menu.as_ref()?;
+                                if !menu.roster.is_empty() {
+                                    return Some(menu.matching().len());
+                                }
+                                let i = match ui.actions.get(menu.row) {
                                     Some(crate::settings_ui::RowAction::Field(i)) => *i,
                                     _ => return None,
                                 };
                                 ui.fields.get(i).map(|f| f.variants.len())
                             })
                             .unwrap_or(0);
+                        // The search row is a text field like any other, and
+                        // only on a searchable menu: on a four-variant select
+                        // a stray letter must not silently start filtering
+                        // something with no visible box (#259).
+                        let searchable = self
+                            .profiles_ui
+                            .as_ref()
+                            .and_then(|ui| ui.menu.as_ref())
+                            .is_some_and(MenuState::searchable);
+                        if searchable {
+                            if let Some(cmd) = command_for(&event.logical_key, self.modifiers) {
+                                let pasted = self.paste_text(&cmd);
+                                let mut copied = None;
+                                if let Some(menu) =
+                                    self.profiles_ui.as_mut().and_then(|ui| ui.menu.as_mut())
+                                {
+                                    let out = menu.filter.apply(cmd, pasted.as_deref());
+                                    if out.changed {
+                                        menu.selected = 0;
+                                        menu.scroll = 0.0;
+                                        menu.scroll_to_selected = true;
+                                    }
+                                    copied = out.copied;
+                                }
+                                if let Some(text) = copied {
+                                    self.set_clipboard(text);
+                                }
+                                self.mark_chrome_dirty();
+                                return;
+                            }
+                        }
                         match &event.logical_key {
                             Key::Named(NamedKey::Escape) => {
                                 if let Some(ui) = self.profiles_ui.as_mut() {
@@ -8881,26 +9125,46 @@ impl ApplicationHandler<Wakeup> for App {
                                 }
                             }
                             Key::Named(NamedKey::Enter) => {
-                                let menu = self.profiles_ui.as_ref().and_then(|ui| ui.menu);
-                                if let Some(ui) = self.profiles_ui.as_mut() {
-                                    ui.menu = None;
-                                }
-                                if let Some((row, sel)) = menu {
-                                    self.profiles_apply_variant(row, sel);
+                                let sel = self
+                                    .profiles_ui
+                                    .as_ref()
+                                    .and_then(|ui| ui.menu.as_ref())
+                                    .map(|m| m.selected);
+                                if let Some(sel) = sel {
+                                    self.profiles_apply_menu_choice(sel);
                                 }
                             }
                             Key::Named(NamedKey::ArrowDown) => {
-                                if let Some((_, sel)) =
+                                if let Some(menu) =
                                     self.profiles_ui.as_mut().and_then(|ui| ui.menu.as_mut())
                                 {
-                                    *sel = (*sel + 1).min(options.saturating_sub(1));
+                                    menu.selected =
+                                        (menu.selected + 1).min(options.saturating_sub(1));
+                                    menu.scroll_to_selected = true;
                                 }
                             }
                             Key::Named(NamedKey::ArrowUp) => {
-                                if let Some((_, sel)) =
+                                if let Some(menu) =
                                     self.profiles_ui.as_mut().and_then(|ui| ui.menu.as_mut())
                                 {
-                                    *sel = sel.saturating_sub(1);
+                                    menu.selected = menu.selected.saturating_sub(1);
+                                    menu.scroll_to_selected = true;
+                                }
+                            }
+                            Key::Named(NamedKey::PageDown) => {
+                                if let Some(menu) =
+                                    self.profiles_ui.as_mut().and_then(|ui| ui.menu.as_mut())
+                                {
+                                    menu.scroll += 300.0;
+                                    menu.scroll_to_selected = false;
+                                }
+                            }
+                            Key::Named(NamedKey::PageUp) => {
+                                if let Some(menu) =
+                                    self.profiles_ui.as_mut().and_then(|ui| ui.menu.as_mut())
+                                {
+                                    menu.scroll -= 300.0;
+                                    menu.scroll_to_selected = false;
                                 }
                             }
                             _ => {}
@@ -9427,8 +9691,7 @@ impl ApplicationHandler<Wakeup> for App {
                 // An open modal overlay takes the wheel wholesale. The
                 // settings tab is below: not modal, so it scrolls only under
                 // the pointer, by hit region, like the strip does.
-                if self.picker.is_some() || self.palette_ui.is_some() || self.value_picker.is_some()
-                {
+                if self.picker.is_some() || self.palette_ui.is_some() {
                     let px = match delta {
                         MouseScrollDelta::LineDelta(_, y) => y * 40.0,
                         MouseScrollDelta::PixelDelta(p) => p.y as f32,
@@ -9438,9 +9701,6 @@ impl ApplicationHandler<Wakeup> for App {
                             p.scroll -= px;
                         }
                         if let Some(p) = self.palette_ui.as_mut() {
-                            p.scroll -= px;
-                        }
-                        if let Some(p) = self.value_picker.as_mut() {
                             p.scroll -= px;
                         }
                         self.mark_chrome_dirty();
@@ -9458,6 +9718,30 @@ impl ApplicationHandler<Wakeup> for App {
                     self.tabs.active().and_then(|t| t.split.is_some().then_some(t.focus_right));
                 match hit::wheel_target(hit, pane_focus) {
                     WheelTarget::Swallow => return,
+                    // An open dropdown scrolls its *own* list, not the rows
+                    // underneath: moving those would slide the anchor out
+                    // from under it, and a 266-family roster has to be
+                    // reachable by wheel (#259).
+                    WheelTarget::Menu => {
+                        let px = match delta {
+                            MouseScrollDelta::LineDelta(_, y) => y * 40.0,
+                            MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                        };
+                        for menu in [
+                            self.settings_ui.as_mut().and_then(|ui| ui.menu.as_mut()),
+                            self.profiles_ui.as_mut().and_then(|ui| ui.menu.as_mut()),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        {
+                            menu.scroll -= px;
+                            // The wheel must not snap back to the selection —
+                            // the `scroll_to_selected` rule every list keeps.
+                            menu.scroll_to_selected = false;
+                        }
+                        self.mark_chrome_dirty();
+                        return;
+                    }
                     WheelTarget::Settings => {
                         let px = match delta {
                             MouseScrollDelta::LineDelta(_, y) => y * 40.0,
@@ -10449,7 +10733,7 @@ mod settings_ime_tests {
         // route must agree, or a commit would edit a filter the user cannot
         // see behind the menu.
         let mut ui = state();
-        ui.menu = Some((1, 0));
+        ui.menu = Some(super::MenuState::variants(1));
         ui.commit_text("あ");
         assert!(ui.filter.is_empty(), "the menu owns the keys");
         assert!(ui.editing.is_none());
@@ -10510,27 +10794,24 @@ mod settings_ime_tests {
         // The menu owns the keys; a paste behind it must not edit a filter
         // the user cannot see — the composed-text rule, for the clipboard.
         let mut ui = state();
-        ui.menu = Some((1, 0));
+        ui.menu = Some(super::MenuState::variants(1));
         ui.text_key(TextCommand::Paste, Some("nord"));
         assert!(ui.filter.is_empty(), "the menu owns the keys");
     }
 }
 
 #[cfg(test)]
-mod value_picker_tests {
-    use super::{TextField, ValuePickerState};
+mod roster_menu_tests {
+    use super::{MenuState, TextField};
 
-    fn picker(options: &[&str], filter: &str) -> ValuePickerState {
-        ValuePickerState {
-            field: 0,
-            append: false,
-            options: options.iter().map(|s| (*s).to_string()).collect(),
-            visible: Vec::new(),
-            selected: 0,
-            filter: TextField::new(filter),
-            scroll: 0.0,
-            scroll_to_selected: true,
-        }
+    fn picker(options: &[&str], filter: &str) -> MenuState {
+        let mut menu = MenuState::roster(
+            0,
+            options.iter().map(|s| (*s).to_string()).collect(),
+            None,
+        );
+        menu.filter = TextField::new(filter);
+        menu
     }
 
     #[test]
@@ -10561,6 +10842,78 @@ mod value_picker_tests {
         // showing the whole list again, so Enter picks an arbitrary font.
         let p = picker(&["Cascadia Mono", "Consolas"], "zzz");
         assert!(p.matching().is_empty());
+    }
+
+    #[test]
+    fn a_roster_field_gets_a_menu_even_though_the_schema_has_no_variants() {
+        // The reported bug, at its root (#259): the menu builder bailed on
+        // `field.variants.is_empty()`, and a theme roster comes from
+        // `zest_theme::builtin::all()`, not from the schema. Arming the menu
+        // therefore produced nothing at all — "left the theme pill dead" —
+        // and the ⌘K command palette was used as the escape hatch, which is
+        // why clicking a ▾ said "type to run a command".
+        let fields = zest_config::ui::fields();
+        let idx = fields
+            .iter()
+            .position(|f| f.key == "appearance.theme")
+            .expect("appearance.theme exists");
+        assert!(
+            fields[idx].variants.is_empty(),
+            "the roster is the client's, so the schema has no variants — the bail's premise"
+        );
+        let actions = vec![crate::settings_ui::RowAction::Field(idx)];
+        let menu = MenuState::roster(
+            0,
+            vec!["obsidian".to_string(), "nord".to_string(), "paper".to_string()],
+            Some("nord"),
+        );
+        let model = super::menu_model(&menu, &actions, &fields, Some("nord"), None)
+            .expect("a roster field has a menu");
+        assert_eq!(model.options.len(), 3, "every theme is an option");
+        assert_eq!(model.current, Some(1), "the ✓ is on the theme that is set");
+        assert_eq!(model.selected, 1, "and the keyboard opens on it, so Enter is a no-op");
+    }
+
+    #[test]
+    fn a_choice_that_cannot_resolve_leaves_the_menu_alone() {
+        // Enter on a search that matched nothing used to *close* the
+        // dropdown having applied nothing, which reads as the menu breaking
+        // rather than as the filter being wrong — and leaves the person to
+        // reopen it and retype. `matching()` is what the choice resolves
+        // against, so an out-of-range index has no answer and must be a
+        // no-op, filter and all.
+        let mut menu = MenuState::roster(
+            0,
+            vec!["obsidian".to_string(), "nord".to_string()],
+            Some("nord"),
+        );
+        menu.filter = TextField::new("zzz");
+        assert!(menu.matching().is_empty(), "nothing matches, so Enter has nothing to apply");
+        assert_eq!(menu.matching().first(), None, "and the selection does not resolve");
+    }
+
+    #[test]
+    fn a_searched_menu_offers_only_what_matched() {
+        // `current` and `selected` index the *visible* options; resolving
+        // them against the unfiltered roster is how a menu picks the wrong
+        // entry the moment someone types.
+        let fields = zest_config::ui::fields();
+        let idx = fields
+            .iter()
+            .position(|f| f.key == "appearance.theme")
+            .expect("appearance.theme exists");
+        let actions = vec![crate::settings_ui::RowAction::Field(idx)];
+        let mut menu = MenuState::roster(
+            0,
+            vec!["obsidian".to_string(), "nord".to_string(), "paper".to_string()],
+            Some("nord"),
+        );
+        menu.filter = TextField::new("pa");
+        let model = super::menu_model(&menu, &actions, &fields, Some("nord"), None)
+            .expect("a menu, even with everything filtered out");
+        assert_eq!(model.options.len(), 1, "only `paper` matches");
+        assert_eq!(model.options[0].value, "paper");
+        assert_eq!(model.current, None, "the set theme is not among them, so no ✓");
     }
 }
 
