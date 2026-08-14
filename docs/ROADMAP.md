@@ -724,6 +724,33 @@ entry stay). The resulting work items, measurements in the handoff README — **
       also reduces every radius by `bw` — and a headless GPU test measures both
       halves: the stroke thins 8 → 4 → 2 px into the corner, and omitting
       nothing still rings all four sides at 8px.
+- [x] **A screen replaces the terminal rather than covering it**
+      ([#253](https://github.com/zesterm/zesterm/issues/253)). The fleet
+      directory, the theme gallery, the profiles pane and the Settings tab all
+      painted an opaque ground over a grid that was still being built — and an
+      opaque fill does not hide what is under its own edge, because the
+      outermost row and column of an SDF rect are antialiased to roughly 85%.
+      The block cursor at the grid origin bled through as a stray accent
+      bracket, coming and going with the cursor blink and so reading as a flake
+      rather than as geometry. `pane_is_covered` is now one predicate used by
+      both the block-header pass (which already had this reasoning inline) and
+      the scene build, which passes *no viewports* — so the terminal's cell
+      backgrounds and glyphs are no longer shaped, atlased and uploaded each
+      frame to be painted over. An `an_opaque_rect_does_not_hide_what_is_under_its_own_edge`
+      GPU test records the fact that made the old assumption wrong.
+- [x] **`--screenshot-delay` fires at all**
+      ([#255](https://github.com/zesterm/zesterm/issues/255)) — the half of
+      `--screenshot` that makes anything stateful capturable, and it had never
+      worked. Two faults, both invisible: the deadline was only ever *checked*
+      inside a redraw, and the wake-up's `request_redraw` reaches nothing
+      because screenshot mode never makes a window visible, so nothing was
+      captured and the process hung; meanwhile a deadline already in the past
+      produced `WaitUntil(now)`, which fires immediately and re-arms — 35,189
+      wake-ups in twelve seconds, a busy loop wearing the idle guarantee's
+      costume. `next_wake` makes an elapsed deadline its own answer and the
+      capture is driven from `about_to_wait` in place. Verified end to end:
+      a command that prints two seconds after launch is off the frame at
+      `--screenshot-delay 0` and on it at 3500.
 - [ ] Animation clock, the *spring* half. Springs `(response, damping)`, not
       easing curves — terminal motion is interruption-dominated and a spring
       absorbs a changed target with continuous velocity for free. Substep the

@@ -445,6 +445,26 @@ enum AppScreen {
     Profiles,
 }
 
+/// Whether a full-pane screen owns the grid area this frame — the fleet
+/// directory, the theme gallery, the profiles pane, or the Settings tab.
+///
+/// **Nothing of the terminal may be drawn when this is true**, and "covered by
+/// an opaque panel" is not the same thing. A screen's ground is one SDF rect,
+/// and an SDF rect's boundary pixels are antialiased: along its own outermost
+/// row and column it is roughly 85% opaque, not 100%. Whatever sits underneath
+/// therefore bleeds through a one-pixel frame. The symptom was a stray
+/// accent-coloured bracket at the pane's top-left corner (#253) — the block
+/// cursor, at the grid origin, showing through the screen's own edge, coming
+/// and going with the cursor blink and so reading as a flake rather than as
+/// geometry.
+///
+/// Skipping the grid entirely is also the cheaper answer: the terminal's cell
+/// backgrounds and every glyph on it were being shaped, atlased and uploaded
+/// each frame to be painted over.
+fn pane_is_covered(screen: AppScreen, settings_tab_active: bool) -> bool {
+    screen != AppScreen::Terminal || settings_tab_active
+}
+
 /// How long an enrolment code is — the server's `ENROLL_CODE_LENGTH`
 /// (`cloud/packages/web/src/enroll/codes.ts`), pinned here because the two
 /// ends are separate projects and nothing compiles both. The entry clamps at
@@ -6768,11 +6788,10 @@ impl App {
     /// The active session's blocks as the header pass wants them: which
     /// viewport rows each header covers, plus its state and pre-formatted
     /// labels. One short terminal lock; plain data out.
+    ///
+    /// Empty while a screen owns the pane — see [`pane_is_covered`].
     fn build_block_views(&self) -> Vec<crate::chrome::blocks::BlockView> {
-        // A full-pane screen covers the grid; headers floating above the
-        // fleet directory would be chrome over the wrong content. The
-        // settings tab covers it the same way.
-        if self.screen != AppScreen::Terminal || self.tabs.settings_active() {
+        if pane_is_covered(self.screen, self.tabs.settings_active()) {
             return Vec::new();
         }
         let Some(tab) = self.tabs.active() else { return Vec::new() };
@@ -7103,11 +7122,31 @@ impl App {
         // highest-leverage latency trick in the renderer.
         {
             let area = insets.grid_rect(gpu.config.width, gpu.config.height);
-            let split = self.tabs.active().and_then(|t| {
-                t.split.as_ref().map(|p| (p.source(), t.focus_right))
+            // `None` while a screen owns the pane: the terminal is then not
+            // built at all, rather than built and painted over. The outer
+            // `Option` also keeps the terminal lock untaken in that case.
+            let split = (!pane_is_covered(self.screen, self.tabs.settings_active())).then(|| {
+                self.tabs.active().and_then(|t| {
+                    t.split.as_ref().map(|p| (p.source(), t.focus_right))
+                })
             });
             match split {
-                Some((right_source, focus_right)) => {
+                None => {
+                    // A screen replaces the terminal; drawing it underneath
+                    // leaks a pixel of it around the screen's own antialiased
+                    // edge (see `pane_is_covered`).
+                    self.scene.build(
+                        &gpu.device,
+                        &gpu.queue,
+                        &mut gpu.renderer.atlas,
+                        fonts,
+                        metrics,
+                        backdrop,
+                        &[],
+                        &chrome,
+                    );
+                }
+                Some(Some((right_source, focus_right))) => {
                     // Two panes, two grids, one build — the slice the
                     // renderer took from day one finally gets its second
                     // element (CONTRACTS, "cheap now" #3).
@@ -7186,7 +7225,7 @@ impl App {
                         &chrome,
                     );
                 }
-                None => {
+                Some(None) => {
                     let identity = self.tabs.active().and_then(|t| t.identity.as_ref());
                     let term = session.terminal().lock();
                     // A grid held smaller than this pane by another attached
@@ -9650,29 +9689,64 @@ impl ApplicationHandler<Wakeup> for App {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        let now = std::time::Instant::now();
+        let shot = self.screenshot_at.map(|at| at.saturating_duration_since(now));
+        match next_wake(shot, self.anim_deadline()) {
+            // Drawn from here rather than asked for through the window,
+            // because in screenshot mode there is no window to ask: it is
+            // never made visible, so the OS never sends it a paint and
+            // `new_events`' `request_redraw` reaches nothing (#255).
+            NextWake::CaptureNow => self.redraw(),
+            NextWake::After(delay) => el.set_control_flow(ControlFlow::WaitUntil(now + delay)),
+            NextWake::Idle => el.set_control_flow(ControlFlow::Wait),
+        }
         // The PNG is written; leave through the front door so the pty, the
         // clipboard and the tab state all get their `Drop` rather than being
         // cut off by `process::exit`. The code travels back to `main` in the
-        // field, which is the whole reason it is a field.
+        // field, which is the whole reason it is a field. Checked *after* the
+        // capture above, which is what sets it.
         if self.exit_code.is_some() {
             el.exit();
-            return;
         }
-        // Wait for something to happen rather than polling — unless something
-        // on screen is animating, in which case the clock names the *one*
-        // deadline it needs. A resting window schedules nothing (the 0%-idle
-        // guarantee); a blinking cursor costs exactly its two frames a
-        // second, which is the price of the setting being on.
-        // The screenshot deadline is one more thing that wants waking for, and
-        // the earlier of the two wins — a blinking cursor must not push the
-        // capture past its delay, and the capture must not stop the cursor
-        // blinking in the frame it captures.
-        let now = std::time::Instant::now();
-        let shot = self.screenshot_at.map(|at| at.saturating_duration_since(now));
-        match [self.anim_deadline(), shot].into_iter().flatten().min() {
-            Some(delay) => el.set_control_flow(ControlFlow::WaitUntil(now + delay)),
-            None => el.set_control_flow(ControlFlow::Wait),
-        }
+    }
+}
+
+/// What the event loop should do once it runs out of work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NextWake {
+    /// A screenshot's delay has elapsed: draw the frame now, in place.
+    CaptureNow,
+    After(std::time::Duration),
+    /// Nothing is pending — sleep until the OS has something to say.
+    Idle,
+}
+
+/// Wait for something to happen rather than polling — unless something on
+/// screen is animating, in which case the clock names the *one* deadline it
+/// needs. A resting window schedules nothing (the 0%-idle guarantee); a
+/// blinking cursor costs exactly its two frames a second, which is the price of
+/// the setting being on. The screenshot deadline is one more thing that wants
+/// waking for, and the earlier of the two wins — a blinking cursor must not
+/// push the capture past its delay, and the capture must not stop the cursor
+/// blinking in the frame it captures.
+///
+/// An *elapsed* screenshot deadline is its own answer rather than a zero-length
+/// wait, and both halves of that matter. Scheduling `WaitUntil(now)` wakes the
+/// loop immediately and re-schedules the same thing, for ever: measured at
+/// 35,189 wake-ups in twelve seconds, a busy loop wearing the costume of the
+/// idle guarantee. And the wake-up could not have helped anyway, since what it
+/// does is ask the window to repaint and screenshot mode has no visible window
+/// to repaint. Both are why `--screenshot-delay` wrote nothing at all (#255).
+fn next_wake(
+    screenshot_in: Option<std::time::Duration>,
+    anim_in: Option<std::time::Duration>,
+) -> NextWake {
+    if screenshot_in == Some(std::time::Duration::ZERO) {
+        return NextWake::CaptureNow;
+    }
+    match [screenshot_in, anim_in].into_iter().flatten().min() {
+        Some(delay) => NextWake::After(delay),
+        None => NextWake::Idle,
     }
 }
 
@@ -10046,6 +10120,86 @@ fn to_core_palette(r: &zest_theme::ResolvedPalette) -> zest_core::PaletteSnapsho
     }
 }
 
+
+#[cfg(test)]
+mod next_wake_tests {
+    use super::{next_wake, NextWake};
+    use std::time::Duration;
+
+    #[test]
+    fn an_elapsed_screenshot_deadline_captures_instead_of_rescheduling() {
+        // The bug this pins is two bugs (#255). `WaitUntil(now)` fires at once
+        // and re-arms itself — 35,189 wake-ups in twelve seconds, measured —
+        // and every one of them was wasted, because waking asks the *window*
+        // to repaint and screenshot mode never shows one. So the capture has
+        // to be its own answer here, not a zero-length sleep.
+        assert_eq!(next_wake(Some(Duration::ZERO), None), NextWake::CaptureNow);
+        assert_eq!(
+            next_wake(Some(Duration::ZERO), Some(Duration::from_millis(500))),
+            NextWake::CaptureNow,
+            "and it outranks the animation clock — a blink must not defer the shot"
+        );
+    }
+
+    #[test]
+    fn the_earlier_deadline_wins_while_both_are_ahead() {
+        assert_eq!(
+            next_wake(Some(Duration::from_millis(400)), Some(Duration::from_millis(90))),
+            NextWake::After(Duration::from_millis(90)),
+            "a cursor blink inside the delay still gets its frame"
+        );
+        assert_eq!(
+            next_wake(Some(Duration::from_millis(30)), Some(Duration::from_millis(500))),
+            NextWake::After(Duration::from_millis(30)),
+            "and the capture is not pushed past its delay by a slow animation"
+        );
+    }
+
+    #[test]
+    fn a_resting_window_schedules_nothing() {
+        // The 0%-idle guarantee, in the one place that can break it.
+        assert_eq!(next_wake(None, None), NextWake::Idle);
+        assert_eq!(
+            next_wake(None, Some(Duration::from_millis(550))),
+            NextWake::After(Duration::from_millis(550))
+        );
+    }
+}
+
+#[cfg(test)]
+mod pane_cover_tests {
+    use super::{pane_is_covered, AppScreen};
+
+    #[test]
+    fn every_full_pane_screen_takes_the_terminal_off_the_frame() {
+        // The rule this table encodes is "not drawn", not "drawn and hidden":
+        // a screen's ground is one SDF rect, and the outermost row and column
+        // of an SDF rect are antialiased to roughly 85%, so the terminal
+        // underneath bleeds through a one-pixel frame however opaque the fill
+        // is. #253 was the block cursor doing exactly that at the pane's
+        // top-left corner.
+        for screen in [AppScreen::Fleet, AppScreen::Themes, AppScreen::Profiles] {
+            assert!(pane_is_covered(screen, false), "{screen:?} owns the whole pane");
+        }
+        assert!(
+            pane_is_covered(AppScreen::Terminal, true),
+            "the Settings tab covers the pane without being an AppScreen of its own"
+        );
+        assert!(
+            !pane_is_covered(AppScreen::Terminal, false),
+            "the terminal is the terminal — this is the everyday frame and it must build"
+        );
+    }
+
+    #[test]
+    fn an_overlay_is_not_a_cover() {
+        // The palette, the launcher and the fleet picker float *over* the
+        // terminal and it has to keep rendering underneath them. They are not
+        // in this predicate at all, and the check that they stay out of it is
+        // that `AppScreen` is still `Terminal` while they are open.
+        assert!(!pane_is_covered(AppScreen::Terminal, false));
+    }
+}
 
 #[cfg(test)]
 mod code_entry_tests {
