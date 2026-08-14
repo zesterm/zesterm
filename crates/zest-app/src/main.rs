@@ -29,6 +29,7 @@ mod source;
 mod status;
 mod tabs;
 mod tabs_state;
+mod text_field;
 
 use winit::event_loop::EventLoop;
 
