@@ -1054,6 +1054,45 @@ mod tests {
     }
 
     #[test]
+    fn an_opaque_rect_does_not_hide_what_is_under_its_own_edge() {
+        // Not a defect to fix here — it is what antialiasing *is*, and it is
+        // why rounded corners are smooth. It is recorded because a caller
+        // reasoned the other way and was wrong: a full-pane screen was painted
+        // over the terminal on the assumption that an opaque fill hides it, and
+        // the block cursor bled through the screen's outermost row and column
+        // as a stray bracket (#253, `zest-app`'s `pane_is_covered`). Anything
+        // that must not be seen must not be *drawn*.
+        //
+        // Both rects land on integer bounds and the second exactly covers the
+        // first, so nothing here depends on subpixel placement.
+        let cover = RectInstance::filled(
+            [16.0, 16.0, 96.0, 96.0],
+            LinearRgba::opaque(0x30, 0x30, 0x30),
+            [0.0, 0.0, 128.0, 128.0],
+        );
+        let under = RectInstance::filled(
+            [16.0, 16.0, 96.0, 96.0],
+            LinearRgba::opaque(255, 0, 0),
+            [0.0, 0.0, 128.0, 128.0],
+        );
+        let Some(px) = rect_pixels(vec![under, cover], PROBE) else { return };
+        let at = |x: u32, y: u32| {
+            let i = ((y * PROBE + x) * 4) as usize;
+            [px[i], px[i + 1], px[i + 2]]
+        };
+        let edge = at(16, 60); // the cover's outermost column
+        let inside = at(20, 60); // four pixels in, fully covered
+        assert!(
+            edge[0] > inside[0] + 20,
+            "the covered rect's own edge column leaks what is beneath it: edge {edge:?} vs interior {inside:?}"
+        );
+        assert!(
+            inside[0] < 80,
+            "and four pixels in it does not, so this really is an edge effect: {inside:?}"
+        );
+    }
+
+    #[test]
     fn a_solid_fill_survives_the_frame() {
         // The bug this pins: text_gamma was applied in the resolve pass, which
         // sees the *finished* frame, so `pow(rgb, 1/1.3)` landed on every pixel
