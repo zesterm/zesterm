@@ -353,6 +353,22 @@ impl Grid {
         (index < self.storage.len()).then(|| self.storage.row(index))
     }
 
+    /// The id of the oldest line still held, scrollback included.
+    ///
+    /// Read off the row rather than computed as `active_row(0).id -
+    /// scrollback_len`, which both callers used to do and which is only right
+    /// while the ids are contiguous. They are not, necessarily: `truncate_bottom`
+    /// destroys the newest rows without rewinding the counter — the shrink path
+    /// has always done that with the blank rows below the cursor, and
+    /// [`Self::settle_restate`] does it with the blanks a grow minted. Subtract
+    /// a count from an id across a gap and the answer lands *inside* it, so the
+    /// host offers clients scrollback from a line it has never held and cannot
+    /// answer for. Storage is never empty, so this always has a row to read.
+    #[must_use]
+    pub fn oldest_line_id(&self) -> LineId {
+        self.storage.row(0).id
+    }
+
     #[must_use]
     pub fn cell(&self, row: usize, col: usize) -> Option<&Cell> {
         self.row(row).get(col)
@@ -681,13 +697,15 @@ impl Grid {
         self.scrollback_len -= k;
         self.cursor.row += k;
         // The rows just dropped are the blanks `resize_rows` minted at grow
-        // time, and `truncate_bottom` does not rewind the counter. Left alone
-        // the gap makes `oldest_retained_line` — `active_row(0).id -
-        // scrollback_len`, in `subscribe.rs` and `term.rs` — name a line the
-        // grid no longer holds, so the host offers clients scrollback it cannot
-        // answer for.
-        let last = self.storage.len() - 1;
-        self.storage.set_next_id(self.storage.row(last).id + 1);
+        // time, so this leaves a gap in the numbering — `truncate_bottom` does
+        // not rewind the counter, and `set_next_id` is monotonic on purpose, so
+        // it cannot be asked to. Rewinding it would be worse than the gap: ids
+        // are never reused, and the shrink path's `truncate_bottom` drops rows
+        // that were on screen and may already be named by a client's blocks.
+        //
+        // Nothing needs them contiguous. What did was `oldest_line_id`'s two
+        // callers, which counted back from the top of the live screen and
+        // therefore landed inside the gap; they read the oldest row instead.
         // Storage lost `k` rows off the end, so holding a scrolled-back reader
         // on the same text means giving back the same `k`.
         self.display_offset = self.display_offset.saturating_sub(k).min(self.scrollback_len);
@@ -1488,14 +1506,19 @@ mod tests {
     }
 
     #[test]
-    fn a_settled_restate_leaves_no_gap_in_the_line_numbering() {
-        // `truncate_bottom` drops the newest rows without rewinding the id
-        // counter, and the rows the settle drops are the blanks the grow minted.
-        // A gap makes `oldest_retained_line` -- computed as `active_row(0).id -
-        // scrollback_len`, in `subscribe.rs` and `term.rs` -- name a line older
-        // than any the grid holds, so the host offers clients scrollback it
-        // cannot answer for.
-        let mut g = Grid::new(30, 10, 500);
+    fn the_retention_horizon_survives_a_gap_in_the_numbering() {
+        // `truncate_bottom` destroys the newest ids without rewinding the
+        // counter, so the numbering has gaps: the shrink path has always left
+        // them with the blank rows below the cursor, and `settle_restate` leaves
+        // one with the blanks a grow minted. That is fine in itself -- ids are
+        // never reused, which is the property blocks and clients rely on.
+        //
+        // What was not fine is counting back from the top of the live screen to
+        // find the oldest line held (`active_row(0).id - scrollback_len`, in
+        // both `subscribe.rs` and `term.rs`). Subtract a count from an id across
+        // a gap and the answer lands *inside* it, so the host tells every client
+        // it may request scrollback from a line that has never existed.
+        let mut g = Grid::new(30, 10, 8);
         g.set_viewport_restated_elsewhere(true);
         for row in 0..10 {
             write_text(&mut g, row, &format!("line {row}"));
@@ -1506,14 +1529,23 @@ mod tests {
         g.resize(30, 10, &Cell::default());
         conpty_grow_repaint(&mut g, 4);
 
-        let ids: Vec<LineId> = (0..g.total_lines()).map(|i| g.line(i).unwrap().id).collect();
-        for pair in ids.windows(2) {
-            assert_eq!(pair[1], pair[0] + 1, "the ids jumped: {ids:?}");
+        // Scroll until the recycling has taken the oldest ids and the live
+        // screen sits the far side of the gap, which is where the arithmetic
+        // stops agreeing with reality.
+        for _ in 0..15 {
+            g.scroll_up(1, &Cell::default());
         }
-        let oldest = g.active_row(0).id - g.scrollback_len() as LineId;
+
+        let held: Vec<LineId> = (0..g.total_lines()).map(|i| g.line(i).unwrap().id).collect();
+        assert!(held.windows(2).any(|p| p[1] != p[0] + 1), "the fixture has no gap: {held:?}");
+        assert_eq!(
+            g.oldest_line_id(),
+            held[0],
+            "the horizon does not name the oldest line the grid holds"
+        );
         assert!(
-            g.lines_by_id(oldest, 1).len() == 1 || g.scrollback_len() == 0,
-            "the retention horizon names a line the grid does not hold"
+            g.lines_by_id(g.oldest_line_id(), 1).len() == 1,
+            "the horizon names a line the grid cannot answer for: {held:?}"
         );
     }
 

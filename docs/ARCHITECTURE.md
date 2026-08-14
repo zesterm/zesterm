@@ -787,6 +787,22 @@ predicate rather than a ConPTY-specific one, set by the transport on a host and
 by `Terminal::remote` on a client. A replica never settles: settling runs from
 the parser, and nothing may mix the parser with the delta stream.
 
+### Line ids have gaps, and that is not the thing to fix
+
+`truncate_bottom` destroys the newest ids without rewinding the counter. The
+shrink path has always done that with the blank rows below the cursor, and the
+settle does it with the blanks a grow minted. Rewinding would be the worse
+repair: ids are never reused, which is exactly what blocks and clients index on,
+and the shrink drops rows that were on screen and may already be named.
+
+So the gaps stay and the arithmetic goes. Both callers that wanted "the oldest
+line still held" computed it as `active_row(0).id - scrollback_len`, which is
+only right while the numbering is contiguous; across a gap the answer lands
+*inside* it, and the host tells every client it may request scrollback from a
+line that has never existed. `Grid::oldest_line_id` reads the oldest row
+instead. Measured on a grid with an eight-line scrollback: the count said 13,
+the oldest row held was 7, and 13 was in the gap.
+
 ### The cost
 
 The boundary moving is a change no delta can describe — there is no

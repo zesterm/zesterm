@@ -561,10 +561,13 @@ impl TermState {
     /// while a full-screen program is up `grid()` answers for the alternate
     /// screen, whose ids restart at zero.
     fn oldest_retained_line(&self) -> LineId {
-        // Active space: this counts back from the top of the *live* screen, so
-        // reading it through the display would move the eviction horizon every
-        // time someone scrolled.
-        self.grid.active_row(0).id.saturating_sub(self.grid.scrollback_len() as LineId)
+        // Read off the oldest row rather than counted back from the top of the
+        // live screen. Counting is only right while the ids are contiguous, and
+        // `truncate_bottom` leaves gaps — see `Grid::oldest_line_id`. It also
+        // makes the display irrelevant, which the count needed active space to
+        // achieve: the oldest row held is the oldest row held wherever anyone
+        // happens to be looking.
+        self.grid.oldest_line_id()
     }
 
     /// Drop blocks whose lines have all fallen out of scrollback.
