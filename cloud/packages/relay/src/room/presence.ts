@@ -72,11 +72,18 @@ export interface ParkedLiveness {
 /**
  * The parked link's liveness, or `null` when there is no ready link at all.
  *
- * The three answers are deliberately distinct. `null` is "nothing is parked" —
- * clear the column. `alive: false` is "something is parked and has gone
- * silent" — also clear it, but it is a different fact and a future log line
- * will want to say which. `alive: true` is the only one that writes a
- * timestamp.
+ * The three answers are deliberately distinct, and they do **not** all lead to
+ * a write:
+ *
+ * - `alive: true` — the only answer that writes a timestamp.
+ * - `alive: false` — parked and gone silent. The caller clears the column,
+ *   and can, because this answer still carries the host id.
+ * - `null` — no ready link at all, and therefore *no host id to clear a row
+ *   by*. The caller cannot write anything here, and does not try: the column
+ *   was already cleared by the close handler for a link that closed, and for
+ *   one lost without a close it decays on its own once the bound passes. That
+ *   the two silent cases are handled by different mechanisms is the reason
+ *   they are different return values rather than one falsy answer.
  *
  * **A missing auto-response timestamp counts as alive**, and that is the
  * careful part. `null` there means the platform has recorded none *yet* — the
