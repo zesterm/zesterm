@@ -1479,7 +1479,8 @@ is now unblocked and building.
       are answered beneath the Durable Object and never wake it — so the
       liveness signal is `getWebSocketAutoResponseTimestamp` read on an alarm
       that runs only while a link is parked. Before that the fleet screen had
-      only `last seen`, and a machine you could open a shell on read *asleep*. A seed-backed key is named as such on screen — a browser
+      only `last seen`, and a machine you could open a shell on read *asleep*.
+      A seed-backed key is named as such on screen — a browser
       on the fallback path is working, not secure, and a row that looks like
       every other row is a comfortable lie about the one that matters.
 - [x] **The tabbed chrome** (#150; `docs/design/client-ui/` §1–§2) — the shell
