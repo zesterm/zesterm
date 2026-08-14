@@ -452,21 +452,29 @@ enum AppScreen {
 /// header sizes for it.
 const ENROLL_CODE_LENGTH: usize = 8;
 
+/// The characters a code can contain — the server's `ENROLL_CODE_ALPHABET`
+/// (`cloud/packages/web/src/enroll/codes.ts`), pinned like the length above.
+/// No `0/O`, `1/I/L` or `U`: the confusables were excluded so a code read off
+/// one screen cannot be mis-typed into another.
+const ENROLL_CODE_ALPHABET: &str = "23456789ABCDEFGHJKMNPQRSTVWXYZ";
+
 /// Feed text into the code entry — one filter for typing and paste (#228).
 ///
-/// The code alphabet is uppercase ASCII alphanumerics (the server's
-/// `ENROLL_CODE_ALPHABET`), so filter to that and uppercase per character — a
-/// person reading a code off a screen may well type it lowercase, and making
-/// them notice would be a refusal about nothing. Everything else is dropped
-/// rather than sent to be refused, which is also what lets a paste carrying
-/// whitespace or a stray word around the code still land the code itself.
+/// Uppercase first — a person reading a code off a screen may well type it
+/// lowercase, and making them notice would be a refusal about nothing — then
+/// keep only the alphabet's own characters. Everything else is dropped rather
+/// than sent to be refused: that is what lets a paste carrying whitespace or
+/// a stray word around the code still land the code itself, and what keeps a
+/// `0` or an `I` (which no real code contains) from occupying a slot the
+/// real character then cannot fill.
 fn push_code_chars(edit: &mut crate::settings_ui::EditBuffer, text: &str) {
     for ch in text.chars() {
         if edit.buffer.len() >= ENROLL_CODE_LENGTH {
             break;
         }
-        if ch.is_ascii_alphanumeric() {
-            edit.buffer.push(ch.to_ascii_uppercase());
+        let up = ch.to_ascii_uppercase();
+        if ENROLL_CODE_ALPHABET.contains(up) {
+            edit.buffer.push(up);
             edit.error = false;
         }
     }
@@ -9692,6 +9700,20 @@ mod code_entry_tests {
         push_code_chars(&mut edit, " \n\t—·—");
         assert_eq!(edit.buffer, "", "nothing from the alphabet, nothing in the box");
         assert!(edit.error, "and an error mark is not cleared by input that put nothing in");
+    }
+
+    #[test]
+    fn confusables_are_dropped_because_no_code_contains_them() {
+        // The alphabet excludes 0/O, 1/I/L and U precisely so a code cannot
+        // be misread between screens. Letting them into the box would spend
+        // slots the real characters then cannot fill, and the eventual
+        // refusal would name the code rather than the typo.
+        let mut edit = entry();
+        push_code_chars(&mut edit, "0O1IlLuUWX2Z");
+        assert_eq!(
+            edit.buffer, "WX2Z",
+            "every excluded confusable drops; alphabet characters land in order"
+        );
     }
 }
 
