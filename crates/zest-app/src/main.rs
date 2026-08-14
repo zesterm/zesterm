@@ -126,7 +126,11 @@ fn screen_from(value: Option<&str>) -> Result<app::StartScreen, String> {
         Some("palette") => Ok(app::StartScreen::Palette),
         Some("launcher") => Ok(app::StartScreen::Launcher),
         Some("profiles") => Ok(app::StartScreen::Profiles),
-        _ => Err("--screen needs one of fleet|themes|settings|palette|launcher|profiles".into()),
+        Some("settings-menu") => Ok(app::StartScreen::SettingsMenu),
+        _ => Err(
+            "--screen needs one of fleet|themes|settings|settings-menu|palette|launcher|profiles"
+                .into(),
+        ),
     }
 }
 
@@ -438,10 +442,12 @@ fn parse_args(args: &[String]) -> Result<Flags, EarlyExit> {
                      --attach-probe    report what attaching to the daemon cost, then exit\n\
                      --no-daemon       own the pty in this process, do not attach\n\
                      --new-session     start a fresh shell instead of restoring your tabs\n\
-                     --screen <name>   open on fleet|themes|settings|palette|launcher|\n\
-                     \x20                 profiles instead of the terminal ('palette' is\n\
-                     \x20                 the ⌘K search, not the keymap's command palette;\n\
-                     \x20                 'launcher' is the + menu over the default screen).\n\
+                     --screen <name>   open on fleet|themes|settings|settings-menu|\n\
+                     \x20                 palette|launcher|profiles instead of the terminal\n\
+                     \x20                 ('palette' is the ⌘K search, not the keymap's\n\
+                     \x20                 command palette; 'launcher' is the + menu over the\n\
+                     \x20                 default screen; 'settings-menu' is Settings with\n\
+                     \x20                 the theme dropdown open).\n\
                      \x20                 Composes with\n\
                      \x20                 --screenshot; screen content is live state, and\n\
                      \x20                 --screenshot already implies --no-daemon, which\n\

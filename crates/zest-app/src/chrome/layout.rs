@@ -3323,6 +3323,12 @@ mod tests {
                     }],
                     current: Some(0),
                     selected: 0,
+                    searchable: false,
+                    filter: String::new(),
+                    filter_caret: Default::default(),
+                    scroll: 0.0,
+                    ensure_visible: false,
+                    footer: None,
                 });
             }
             mo.settings = Some(screen);

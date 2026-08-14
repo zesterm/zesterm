@@ -626,6 +626,24 @@ entry stay). The resulting work items, measurements in the handoff README — **
       scrolled to the caret rather than the tail — the fix that makes
       arrowing back into a long path mean anything. See "Traps already paid
       for" in `AGENTS.md`.
+- [x] **One dropdown, for schema variants and client rosters alike**
+      ([#259](https://github.com/zesterm/zesterm/issues/259)). The Theme pill
+      drew a ▾ and opened the **⌘K command palette** — placeholder "type to
+      run a command" included — because `Widget::ThemePicker` activated a
+      `ValuePickerState` rendered through `PaletteModel`. The anchored
+      `dropdown_menu` it should have used bailed on
+      `field.variants.is_empty()`, and a theme roster comes from
+      `zest_theme::builtin::all()`, not the schema, so arming the menu
+      produced nothing at all. `SettingsMenuModel` now carries a filter, a
+      scroll and an optional footer; past ~8 options the menu grows a search
+      row, and the list scrolls inside a panel bounded by the pane instead of
+      growing past it — 266 installed families is the case that earns both,
+      and the reason the palette was borrowed in the first place. `MenuState`
+      captures the roster when the menu opens, because enumerating families is
+      a real scan and the model rebuilds every dirty frame. Profiles' theme
+      and font pills open it too, instead of silently cycling. The theme
+      gallery (screen 8) stays, one click away behind a `Browse all themes…`
+      footer. `ValuePickerState` and its palette reuse are gone.
 - [x] **The typed profiles layer** (design screen 12's config half,
       [docs/design/client-ui/](design/client-ui/README.md) §12; #130).
       `zest_config::profiles` — outside the `fs` feature, like `ui`, so the
