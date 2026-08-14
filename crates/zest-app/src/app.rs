@@ -4617,10 +4617,11 @@ impl App {
                 }
                 self.apply_menu_choice(opt);
             }
-            // A click in the search box keeps the menu: it is where the keys
-            // already go, so focusing it is swallowing the click. Without
-            // this it falls through and dismisses what it was aiming at.
-            (HitRegion::SettingsMenuSearch, MouseButton::Left) => {}
+            // A click inside the menu keeps it: the search box is where the
+            // keys already go, so focusing it is swallowing the click, and a
+            // near-miss on the panel's padding must not dismiss what it was
+            // aiming at. Without these both fall through to the pane.
+            (HitRegion::SettingsMenuSearch | HitRegion::SettingsMenuPanel, MouseButton::Left) => {}
             (HitRegion::SettingsMenuFooter, MouseButton::Left) => {
                 // "Browse all themes…": the gallery shows the swatches a
                 // 288px menu cannot.
@@ -4901,26 +4902,47 @@ impl App {
     /// `opt` indexes the *visible* options, which a live search has already
     /// narrowed — the same-pass contract the model documents.
     fn apply_menu_choice(&mut self, opt: usize) {
-        let Some(menu) = self.settings_ui.as_mut().and_then(|ui| ui.menu.take()) else { return };
         self.mark_chrome_dirty();
-        let field_idx = match self.settings_ui.as_ref().and_then(|ui| ui.actions.get(menu.row)) {
-            Some(crate::settings_ui::RowAction::Field(i)) => *i,
-            _ => return,
+        // Resolved *before* the menu is taken. Enter on a search that matched
+        // nothing used to close the dropdown and apply nothing, which reads
+        // as the menu breaking rather than as the filter being wrong — and
+        // leaves the person to reopen it and retype. A choice that cannot
+        // resolve leaves the menu exactly as it was, filter included.
+        let Some((field_idx, chosen)) = self.settings_ui.as_ref().and_then(|ui| {
+            let menu = ui.menu.as_ref()?;
+            let field_idx = match ui.actions.get(menu.row)? {
+                crate::settings_ui::RowAction::Field(i) => *i,
+                crate::settings_ui::RowAction::None => return None,
+            };
+            // A schema select still writes its variant; only a roster menu
+            // goes through the filtered list.
+            if menu.roster.is_empty() {
+                ui.fields.get(field_idx)?.variants.get(opt)?;
+                return Some((field_idx, None));
+            }
+            Some((field_idx, Some(menu.matching().get(opt)?.clone())))
+        }) else {
+            return;
         };
-        // A schema select still writes its variant; only a roster menu goes
-        // through the filtered list.
-        if menu.roster.is_empty() {
+        let append = self
+            .settings_ui
+            .as_ref()
+            .and_then(|ui| ui.menu.as_ref())
+            .is_some_and(|m| m.append);
+        if let Some(ui) = self.settings_ui.as_mut() {
+            ui.menu = None;
+        }
+        let Some(chosen) = chosen else {
             self.apply_variant_at(field_idx, opt);
             return;
-        }
-        let Some(chosen) = menu.matching().get(opt).cloned() else { return };
+        };
         let Some(widget) =
             self.settings_ui.as_ref().and_then(|ui| ui.fields.get(field_idx)).map(|f| f.widget)
         else {
             return;
         };
         let value = if widget == zest_config::ui::Widget::FontList {
-            if menu.append {
+            if append {
                 // The add row grows the stack (§11: the dashed row opens
                 // this menu); choosing a face already present is a no-op,
                 // not a duplicate — the Curlz MT lesson, again.
@@ -5644,14 +5666,27 @@ impl App {
     /// Write the profiles dropdown's chosen option — `apply_menu_choice`,
     /// through §12's write path.
     fn profiles_apply_menu_choice(&mut self, opt: usize) {
-        let Some(menu) = self.profiles_ui.as_mut().and_then(|ui| ui.menu.take()) else { return };
         self.mark_chrome_dirty();
-        if menu.roster.is_empty() {
-            self.profiles_apply_variant(menu.row, opt);
+        // Resolved before the menu is taken, for the Settings tab's reason:
+        // Enter on a search that matched nothing must leave the dropdown
+        // alone rather than close it having applied nothing.
+        let Some((row, chosen)) = self.profiles_ui.as_ref().and_then(|ui| {
+            let menu = ui.menu.as_ref()?;
+            if menu.roster.is_empty() {
+                return Some((menu.row, None));
+            }
+            Some((menu.row, Some(menu.matching().get(opt)?.clone())))
+        }) else {
             return;
+        };
+        if let Some(ui) = self.profiles_ui.as_mut() {
+            ui.menu = None;
         }
-        let Some(idx) = self.profiles_field_of_row(menu.row) else { return };
-        let Some(chosen) = menu.matching().get(opt).cloned() else { return };
+        let Some(chosen) = chosen else {
+            self.profiles_apply_variant(row, opt);
+            return;
+        };
+        let Some(idx) = self.profiles_field_of_row(row) else { return };
         let Some(widget) =
             self.profiles_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| f.widget)
         else {
@@ -10837,6 +10872,24 @@ mod roster_menu_tests {
         assert_eq!(model.options.len(), 3, "every theme is an option");
         assert_eq!(model.current, Some(1), "the ✓ is on the theme that is set");
         assert_eq!(model.selected, 1, "and the keyboard opens on it, so Enter is a no-op");
+    }
+
+    #[test]
+    fn a_choice_that_cannot_resolve_leaves_the_menu_alone() {
+        // Enter on a search that matched nothing used to *close* the
+        // dropdown having applied nothing, which reads as the menu breaking
+        // rather than as the filter being wrong — and leaves the person to
+        // reopen it and retype. `matching()` is what the choice resolves
+        // against, so an out-of-range index has no answer and must be a
+        // no-op, filter and all.
+        let mut menu = MenuState::roster(
+            0,
+            vec!["obsidian".to_string(), "nord".to_string()],
+            Some("nord"),
+        );
+        menu.filter = TextField::new("zzz");
+        assert!(menu.matching().is_empty(), "nothing matches, so Enter has nothing to apply");
+        assert_eq!(menu.matching().first(), None, "and the selection does not resolve");
     }
 
     #[test]

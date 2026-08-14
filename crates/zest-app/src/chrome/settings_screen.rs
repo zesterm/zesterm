@@ -1368,9 +1368,18 @@ pub(super) fn dropdown_menu(
     let want = rows_h + search_h + footer_h;
     // Below the pill; above it when there is more room there.
     let below = want <= room_below || room_below >= room_above;
-    let h = want.min(if below { room_below } else { room_above }).max(MENU_MIN_H * s);
+    // The minimum is a floor on the *preferred* height, never a licence to
+    // leave the pane: a menu that overflowed rather than shrink would draw
+    // its last rows behind the footer bar, where they are unclickable and
+    // look like the list simply ends. In a pane too short for the floor the
+    // whole pane is the budget, and the list scrolls inside whatever is left.
+    let budget = (area[3] - 16.0 * s).max(0.0);
+    let h = want.max(MENU_MIN_H * s).min(if below { room_below } else { room_above }).min(budget);
     let y = if below {
-        anchor[1] + anchor[3] + 4.0 * s
+        // Clamped up as well as down: `room_below` can be negative when the
+        // anchor sits under the footer, and an unclamped y then starts the
+        // panel past the bottom edge.
+        (anchor[1] + anchor[3] + 4.0 * s).min(area[1] + area[3] - h - 8.0 * s).max(area[1] + 8.0 * s)
     } else {
         (anchor[1] - h - 4.0 * s).max(area[1] + 8.0 * s)
     };
@@ -1384,6 +1393,13 @@ pub(super) fn dropdown_menu(
         shadow_alpha: colors.shadow_alpha,
         ..RectInstance::filled(panel, colors.panel_bg, area)
     });
+    // First, so every region pushed after it wins where they overlap. What
+    // is left is the panel's own padding and rules — and those have to
+    // belong to the menu too, or a wheel over one of them scrolls the pane
+    // underneath and slides the anchor out from under the panel.
+    if let Some(hit) = intersect(panel, area) {
+        out.hit.push(hit, HitRegion::SettingsMenuPanel);
+    }
 
     let mut list_top = y;
     if menu.searchable {
@@ -2233,6 +2249,83 @@ mod tests {
         assert!(
             l.texts.iter().any(|t| t.text.contains("nothing matches")),
             "the menu says nothing matched"
+        );
+    }
+
+    #[test]
+    fn the_panel_never_leaves_the_pane_however_little_room_there_is() {
+        // The minimum height is a floor on what the menu *wants*, not a
+        // licence to overflow: a panel taller than the pane draws its last
+        // rows behind the footer bar, where they are unclickable and look
+        // like the list simply ending. Drive a pane far shorter than
+        // MENU_MIN_H, with the anchor at the very bottom — the worst case
+        // for both the clamp and the flip.
+        let mut drawn = 0;
+        for h in [400.0_f32, 200.0, 120.0, 90.0] {
+            let mut m = model(vec![cell_row(
+                SettingsValueCell::Select { value: "family-0".into() },
+                false,
+            )]);
+            m.menu = Some(roster_menu(200, "", Some("Browse all themes…")));
+            let l = lay(&m, 1000.0, h);
+            let area = [0.0, 46.0, 1000.0, h];
+            // A pane too short to lay the row out at all yields no anchor,
+            // and no anchor is no menu — correct, and not what this asserts.
+            let Some(panel) = l.rects.iter().find(|r| (r.rect[2] - MENU_W).abs() < 0.01) else {
+                continue;
+            };
+            drawn += 1;
+            assert!(
+                panel.rect[1] >= area[1] - 0.01
+                    && panel.rect[1] + panel.rect[3] <= area[1] + area[3] + 0.01,
+                "pane {h}: panel {:?} escaped {area:?}",
+                panel.rect
+            );
+        }
+        assert!(drawn > 0, "at least one pane was short enough to matter and tall enough to draw");
+    }
+
+    #[test]
+    fn the_whole_panel_belongs_to_the_menu_not_just_its_rows() {
+        // Padding, the rule under the search row and the gap beside a short
+        // row are all inside the panel. Left unclaimed they answer as
+        // `SettingsPanel`, and a wheel there scrolls the pane underneath —
+        // sliding the rows out from under the anchor the menu hangs off.
+        let mut m = model(vec![cell_row(
+            SettingsValueCell::Select { value: "family-0".into() },
+            false,
+        )]);
+        m.menu = Some(roster_menu(30, "", Some("Browse all themes…")));
+        let l = lay(&m, 1000.0, 700.0);
+        let panel = l
+            .rects
+            .iter()
+            .find(|r| (r.rect[2] - MENU_W).abs() < 0.01)
+            .expect("the menu panel is drawn")
+            .rect;
+        let mut stray = Vec::new();
+        let mut x = panel[0] + 1.0;
+        while x < panel[0] + panel[2] - 1.0 {
+            let mut y = panel[1] + 1.0;
+            while y < panel[1] + panel[3] - 1.0 {
+                match l.hit.hit(x, y) {
+                    Some(
+                        HitRegion::SettingsMenuPanel
+                        | HitRegion::SettingsMenuRow(_)
+                        | HitRegion::SettingsMenuSearch
+                        | HitRegion::SettingsMenuFooter,
+                    ) => {}
+                    other => stray.push((x, y, other)),
+                }
+                y += 2.0;
+            }
+            x += 2.0;
+        }
+        assert!(
+            stray.is_empty(),
+            "every point inside the panel is the menu's; {} were not, first {:?}",
+            stray.len(),
+            stray.first()
         );
     }
 }

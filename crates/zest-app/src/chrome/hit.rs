@@ -173,6 +173,13 @@ pub enum HitRegion {
     /// `options` are already filtered, so this is not a variant index once a
     /// search is live.
     SettingsMenuRow(usize),
+    /// The open dropdown's panel — pushed *first*, so its own rows override
+    /// it where they overlap and everything else it covers (padding, the
+    /// rule under the search row, the gap beside a short row) still belongs
+    /// to the menu. Without it those gaps fell through to the settings pane
+    /// underneath, and a wheel there scrolled the rows out from under the
+    /// anchor.
+    SettingsMenuPanel,
     /// The open dropdown's search row. Clicking it is a no-op that must not
     /// fall through to the scrim and dismiss the menu.
     SettingsMenuSearch,
@@ -302,9 +309,10 @@ pub fn wheel_target(hit: Option<HitRegion>, pane_focus_right: Option<bool>) -> W
         // An open dropdown scrolls its own list — a roster of 266 installed
         // families does not fit in a 288px panel, and the rows underneath
         // must not move: that would slide the anchor out from under it.
-        R::SettingsMenuRow(_) | R::SettingsMenuSearch | R::SettingsMenuFooter => {
-            WheelTarget::Menu
-        }
+        R::SettingsMenuPanel
+        | R::SettingsMenuRow(_)
+        | R::SettingsMenuSearch
+        | R::SettingsMenuFooter => WheelTarget::Menu,
         // A modal, and a full-pane screen that covers the grid: neither has a
         // scroll of its own, and neither may let the strip scroll behind it.
         R::ApprovalPanel
@@ -496,6 +504,7 @@ mod tests {
         // changed is that the rows *underneath* must not move: that would
         // slide the anchor out from under the menu.
         for region in [
+            HitRegion::SettingsMenuPanel,
             HitRegion::SettingsMenuRow(0),
             HitRegion::SettingsMenuSearch,
             HitRegion::SettingsMenuFooter,
