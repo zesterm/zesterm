@@ -183,6 +183,20 @@ export async function claimEnrollCode(request: Request, env: Env, now: number): 
   // claimant name the role would hand that separation straight back.
   const role = codeRow.kind === 'host' ? 'host' : 'client';
   if (!(await verifyEnrollment({ role, code, key, label, signature }))) {
+    // One deliberate crack in the no-oracle rule (#228): a signature that
+    // verifies under the *other* role proves the caller signed over this very
+    // code — they typed a machine code into the app, or the reverse — and
+    // "mint a fresh one" sends them straight back to mint another of the same
+    // wrong kind. Naming the kind grants nothing new: a live code is a bearer
+    // credential whoever holds it can already spend under its own kind (the
+    // comment above `refused`), so the most an attacker gains here is
+    // learning a code is live one request before spending it — a request they
+    // would have spent anyway. A dead code still verifies under neither role
+    // and lands in `refused`, exactly as before.
+    const other = role === 'host' ? 'client' : 'host';
+    if (await verifyEnrollment({ role: other, code, key, label, signature })) {
+      return json({ error: 'wrong_kind', kind: codeRow.kind }, 400);
+    }
     // Same answer as an unknown code -- see `refused` above.
     return refused();
   }

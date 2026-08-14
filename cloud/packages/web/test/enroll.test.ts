@@ -169,6 +169,45 @@ test('a machine that holds the key is enrolled into the code owner’s account',
   db.close();
 });
 
+test('a machine code claimed as a device is named, and not burnt', async () => {
+  // #228, found by use: 'Add a machine' was clicked, the code went into the
+  // app's sign-in, and the collapsed refusal said 'mint a fresh one' — which
+  // mints another code of the same wrong kind. The caller here proved they
+  // hold the code (their signature verifies over it, just under the other
+  // role), and a live code is already spendable by its holder, so naming the
+  // kind hands over nothing an attacker could not already take.
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  const key = await testKey(7);
+
+  for (const [minted, signedAs] of [
+    ['host', 'client'],
+    ['device', 'host'],
+  ] as const) {
+    const { code } = await mint(db, cookie, minted);
+    const res = await routeApi(
+      daemonPost('/api/enroll/claim', {
+        code,
+        hostId: key.id,
+        sig: await signEnrollment({ key, code, label: 'confused', role: signedAs }),
+        label: 'confused',
+      }),
+      env(db),
+      fetch,
+      NOW,
+    );
+    assert.equal(res?.status, 400);
+    assert.deepEqual(
+      await res!.json(),
+      { error: 'wrong_kind', kind: minted },
+      `a ${minted} code answered with a ${signedAs} signature names the mismatch`,
+    );
+    const still = rowOf(db, `SELECT used_at FROM enroll_codes WHERE code = ?`, code);
+    assert.deepEqual(still, { used_at: null }, 'and the code stays usable under its own kind');
+  }
+  db.close();
+});
+
 test('a wrong signature does not burn the code', async () => {
   // The ordering this endpoint exists to get right. Verify, then spend --
   // reversed, anyone who can reach the endpoint can make a person mint codes

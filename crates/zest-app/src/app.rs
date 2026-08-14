@@ -452,6 +452,34 @@ enum AppScreen {
 /// header sizes for it.
 const ENROLL_CODE_LENGTH: usize = 8;
 
+/// The characters a code can contain — the server's `ENROLL_CODE_ALPHABET`
+/// (`cloud/packages/web/src/enroll/codes.ts`), pinned like the length above.
+/// No `0/O`, `1/I/L` or `U`: the confusables were excluded so a code read off
+/// one screen cannot be mis-typed into another.
+const ENROLL_CODE_ALPHABET: &str = "23456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/// Feed text into the code entry — one filter for typing and paste (#228).
+///
+/// Uppercase first — a person reading a code off a screen may well type it
+/// lowercase, and making them notice would be a refusal about nothing — then
+/// keep only the alphabet's own characters. Everything else is dropped rather
+/// than sent to be refused: that is what lets a paste carrying whitespace or
+/// a stray word around the code still land the code itself, and what keeps a
+/// `0` or an `I` (which no real code contains) from occupying a slot the
+/// real character then cannot fill.
+fn push_code_chars(edit: &mut crate::settings_ui::EditBuffer, text: &str) {
+    for ch in text.chars() {
+        if edit.buffer.len() >= ENROLL_CODE_LENGTH {
+            break;
+        }
+        let up = ch.to_ascii_uppercase();
+        if ENROLL_CODE_ALPHABET.contains(up) {
+            edit.buffer.push(up);
+            edit.error = false;
+        }
+    }
+}
+
 /// Whether this window's user is signed in to an account (issue #190).
 ///
 /// `Unknown` is the startup state and stays it until the Fleet screen is
@@ -653,6 +681,12 @@ fn fleet_device_rows(
 fn enroll_failure(e: &zest_daemon::enroll::EnrollError) -> String {
     use zest_daemon::enroll::EnrollError;
     match e {
+        // The one named refusal (#228): an "Add a machine" code typed in
+        // here. "Mint a fresh one" would send the person straight back to the
+        // same wrong button — twice, as it happened.
+        EnrollError::Refused { message, .. } if message == "wrong_kind" => {
+            "that code is for a machine — in the browser use Add a device instead".into()
+        }
         // The Worker deliberately answers a dead code and a bad signature
         // identically (no liveness oracle), so the next move is the same
         // whatever the refusal said: mint a fresh code.
@@ -8728,6 +8762,28 @@ impl ApplicationHandler<Wakeup> for App {
                     // open — the settings tab's edit-buffer discipline. Esc
                     // drops the entry, not the screen; a second Esc leaves.
                     if self.screen == AppScreen::Fleet && self.enroll_entry.is_some() {
+                        // Paste lands in the box the way typing would — same
+                        // alphabet filter, same clamp — resolved through the
+                        // keymap so whatever chord the user bound to Paste
+                        // works here too. Without this the chord was
+                        // swallowed by the entry and an 8-character code had
+                        // to be typed by hand off another screen (#228).
+                        if let Some(binding) =
+                            keymap::lookup(&event.logical_key, event.physical_key, self.modifiers)
+                        {
+                            if matches!(binding.action, crate::keymap::Action::Paste) {
+                                let text = self
+                                    .clipboard
+                                    .as_mut()
+                                    .and_then(|c| c.get_text().ok())
+                                    .unwrap_or_default();
+                                if let Some(edit) = self.enroll_entry.as_mut() {
+                                    push_code_chars(edit, &text);
+                                }
+                                self.mark_chrome_dirty();
+                                return;
+                            }
+                        }
                         match &event.logical_key {
                             Key::Named(NamedKey::Escape) => {
                                 self.enroll_entry = None;
@@ -8760,25 +8816,7 @@ impl ApplicationHandler<Wakeup> for App {
                                     && !key::belongs_to_desktop(self.modifiers)
                                 {
                                     if let Some(edit) = self.enroll_entry.as_mut() {
-                                        // The code alphabet is uppercase
-                                        // ASCII alphanumerics (the server's
-                                        // ENROLL_CODE_ALPHABET), so filter to
-                                        // that and uppercase per character —
-                                        // a person reading a code off a
-                                        // screen may well type it lowercase,
-                                        // and making them notice would be a
-                                        // refusal about nothing. Anything
-                                        // else typed is dropped rather than
-                                        // sent to be refused.
-                                        for ch in c.as_str().chars() {
-                                            if edit.buffer.len() >= ENROLL_CODE_LENGTH {
-                                                break;
-                                            }
-                                            if ch.is_ascii_alphanumeric() {
-                                                edit.buffer.push(ch.to_ascii_uppercase());
-                                                edit.error = false;
-                                            }
-                                        }
+                                        push_code_chars(edit, c.as_str());
                                     }
                                 }
                             }
@@ -9624,6 +9662,60 @@ fn to_core_palette(r: &zest_theme::ResolvedPalette) -> zest_core::PaletteSnapsho
     }
 }
 
+
+#[cfg(test)]
+mod code_entry_tests {
+    use super::*;
+
+    fn entry() -> crate::settings_ui::EditBuffer {
+        crate::settings_ui::EditBuffer {
+            field_idx: 0,
+            buffer: String::new(),
+            error: true,
+            append: false,
+        }
+    }
+
+    #[test]
+    fn a_pasted_code_survives_its_wrapping() {
+        // The realistic clipboard: the code copied with whitespace around it,
+        // or the whole "type this code" line. What must land is the code —
+        // filtered to the alphabet, uppercased, clamped — because a paste
+        // that has to be pre-cleaned is barely better than no paste (#228).
+        let mut edit = entry();
+        push_code_chars(&mut edit, "  wxkm-4t9c\n");
+        assert_eq!(edit.buffer, "WXKM4T9C", "separators and whitespace drop, case folds");
+        assert!(!edit.error, "accepted input clears the error mark");
+
+        push_code_chars(&mut edit, "MORE");
+        assert_eq!(
+            edit.buffer, "WXKM4T9C",
+            "the clamp holds for paste exactly as for a held key"
+        );
+    }
+
+    #[test]
+    fn junk_pastes_change_nothing() {
+        let mut edit = entry();
+        push_code_chars(&mut edit, " \n\t—·—");
+        assert_eq!(edit.buffer, "", "nothing from the alphabet, nothing in the box");
+        assert!(edit.error, "and an error mark is not cleared by input that put nothing in");
+    }
+
+    #[test]
+    fn confusables_are_dropped_because_no_code_contains_them() {
+        // The alphabet excludes 0/O, 1/I/L and U precisely so a code cannot
+        // be misread between screens. Letting them into the box would spend
+        // slots the real characters then cannot fill, and the eventual
+        // refusal would name the code rather than the typo.
+        let mut edit = entry();
+        push_code_chars(&mut edit, "0O1IlLuUWX2Z");
+        assert_eq!(
+            edit.buffer, "WX2Z",
+            "every excluded confusable drops; alphabet characters land in order"
+        );
+    }
+}
 
 #[cfg(test)]
 mod fleet_device_row_tests {
