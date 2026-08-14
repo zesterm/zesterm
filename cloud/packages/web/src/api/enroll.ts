@@ -69,7 +69,7 @@ export function labelOk(label: string): boolean {
  * Empty is allowed, unlike a label: a daemon that does not know its platform
  * omits the field, and that is not an error.
  */
-function platformOk(platform: string): boolean {
+export function platformOk(platform: string): boolean {
   return [...platform].length <= PLATFORM_MAX && !CONTROL.test(platform);
 }
 

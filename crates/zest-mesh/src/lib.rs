@@ -34,6 +34,7 @@ pub mod discovery;
 pub mod enroll;
 pub mod identity;
 pub mod keystore;
+pub mod link;
 pub mod pairing;
 pub mod secure;
 pub mod trust;

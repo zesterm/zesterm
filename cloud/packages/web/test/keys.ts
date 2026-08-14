@@ -16,6 +16,7 @@ import {
   type AttestationFields,
 } from '@zesterm/cloud-shared';
 import { enrollmentPreimage, type Role } from '../src/enroll/preimage.ts';
+import { linkClaim, linkRequest } from '../src/enroll/link-preimage.ts';
 import { registerPreimage } from '../src/enroll/register-preimage.ts';
 
 export interface TestKey {
@@ -67,4 +68,16 @@ export async function attestationBlob(
   const message = attestationMessage({ v: 1, ...fields, by: fields.by ?? key.id });
   const sig = await signAsync(signingPreimage('client', 'device-attestation', message), key.seed);
   return encodeAttestation(message, sig);
+}
+
+/** What the desktop app sends to ask for a link grant. */
+export async function signLinkRequest(key: TestKey, label: string): Promise<string> {
+  const message = linkRequest(await getPublicKeyAsync(key.seed), label);
+  return hex(await signAsync(signingPreimage('client', 'enrollment', message), key.seed));
+}
+
+/** What the desktop app sends to spend one. */
+export async function signLinkClaim(key: TestKey, grant: string): Promise<string> {
+  const message = linkClaim(grant, await getPublicKeyAsync(key.seed));
+  return hex(await signAsync(signingPreimage('client', 'enrollment', message), key.seed));
 }

@@ -23,9 +23,10 @@ import type { Bootstrap } from './bootstrap.ts';
 import type { DeviceKey } from './device-key.ts';
 import { Login } from './components/Login.tsx';
 import { Fleet } from './components/Fleet.tsx';
+import { LinkApprove } from './components/LinkApprove.tsx';
 import { NotFound } from './components/NotFound.tsx';
 import { ThemeGallery } from './components/ThemeGallery.tsx';
-import { SHELL_CHILD_PATHS, SHELL_PATH } from './route-table.ts';
+import { SHELL_CHILD_PATHS, SHELL_PATH, safeNextPath } from './route-table.ts';
 
 export interface AppContext {
   readonly bootstrap: Bootstrap;
@@ -46,17 +47,25 @@ export interface AppContext {
  * already states — the daemon still challenges the device key underneath.
  */
 export function requireAccount(ctx: AppContext): NavigationGuard {
-  return () => {
+  return (to) => {
     if (ctx.bootstrap.mode === 'local') return true;
-    return ctx.bootstrap.user === null ? '/login' : true;
+    if (ctx.bootstrap.user !== null) return true;
+    // The destination rides along, so it survives the whole OAuth round trip:
+    // Login threads it into `/auth/login?next=…`, the Worker's `safeNext`
+    // vets it again, and the callback lands back where the person was going.
+    // Without this, `/link?grant=…` — a URL another device just opened — would
+    // dead-end at the fleet screen with the grant lost.
+    return `/login?next=${encodeURIComponent(to.fullPath)}`;
   };
 }
 
-/** Signed in already? `/login` is not somewhere to be. */
+/** Signed in already? `/login` is not somewhere to be — go where `next` says. */
 function skipIfSignedIn(ctx: AppContext): NavigationGuard {
-  return () => {
-    if (ctx.bootstrap.mode === 'local') return '/hosts';
-    return ctx.bootstrap.user === null ? true : '/hosts';
+  return (to) => {
+    const raw = to.query['next'];
+    const next = safeNextPath(typeof raw === 'string' ? raw : undefined);
+    if (ctx.bootstrap.mode === 'local') return next;
+    return ctx.bootstrap.user === null ? true : next;
   };
 }
 
@@ -71,9 +80,18 @@ export function routerPlugin(ctx: AppContext) {
   // inside the render rather than captured at setup -- otherwise arriving at
   // `/login?error=1` from the callback would show no error on a route that was
   // already mounted.
-  const LoginRoute = component(() => () => (
-    <Login failed={useQuery()['error'] !== undefined} />
-  ));
+  const LoginRoute = component(() => () => {
+    const query = useQuery();
+    const rawNext = query['next'];
+    return (
+      <Login
+        failed={query['error'] !== undefined}
+        next={safeNextPath(typeof rawNext === 'string' ? rawNext : undefined)}
+      />
+    );
+  });
+
+  const LinkRoute = component(() => () => <LinkApprove bootstrap={ctx.bootstrap} />);
 
   const FleetRoute = component(() => () => (
     <Fleet bootstrap={ctx.bootstrap} device={ctx.device} theme={ctx.theme} />
@@ -110,6 +128,11 @@ export function routerPlugin(ctx: AppContext) {
       // path; on the local path the gate is a pass-through, and the gallery
       // works identically there — the theme id never crosses the wire.
       { path: '/themes', component: ThemesRoute, beforeEnter: gate },
+      // The device link approval page (#226). Behind the gate, which is what
+      // makes the whole hand-off work signed out: the gate carries
+      // `/link?grant=…` through OAuth as `next`, and the person lands back
+      // here with their session — grant intact.
+      { path: '/link', component: LinkRoute, beforeEnter: gate },
       // Unknown paths must not quietly render the session list: the Worker's
       // asset fallback serves index.html for *any* path, so a typo arrives
       // here looking exactly like a real route.

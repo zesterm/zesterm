@@ -16,3 +16,28 @@ export const SHELL_PATH = '/hosts';
  * live under the `/hosts` record without sharing its prefix.
  */
 export const SHELL_CHILD_PATHS: readonly string[] = ['/h/:hostId', '/h/:hostId/s/:sessionId'];
+
+/**
+ * Where to land after signing in — the client mirror of the Worker's
+ * `safeNext`, and the same rules for the same reason: `next` rides through a
+ * login URL, and one that is allowed to be absolute turns the login into an
+ * open redirect wearing this origin's credibility.
+ *
+ * `//evil.example` is the case a naive `startsWith('/')` misses (a
+ * protocol-relative URL), and `/\evil.example` is the same trick after some
+ * browsers normalise the backslash. `/login` itself is refused too — a `next`
+ * pointing back at the gate would bounce a signed-in visitor in a loop the
+ * server never sees.
+ *
+ * Duplicated rather than imported because the Worker cannot share code with
+ * this workspace; `routes.test.ts` pins the two rule sets against the same
+ * cases the Worker's own tests use.
+ */
+export function safeNextPath(raw: string | undefined): string {
+  if (raw === undefined || raw === '') return SHELL_PATH;
+  if (!raw.startsWith('/')) return SHELL_PATH;
+  if (raw.startsWith('//')) return SHELL_PATH;
+  if (raw.startsWith('/\\')) return SHELL_PATH;
+  if (raw === '/login' || raw.startsWith('/login?')) return SHELL_PATH;
+  return raw;
+}

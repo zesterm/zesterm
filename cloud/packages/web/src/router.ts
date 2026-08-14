@@ -14,6 +14,7 @@
 import { readCookie, SESSION_COOKIE } from '@zesterm/cloud-shared';
 
 import { approveDevice, listAccountAttestations } from './api/attest.ts';
+import { approveLink, claimLink, denyLink, getLinkGrant, startLink } from './api/link.ts';
 import { registerDevice } from './api/devices.ts';
 import { claimEnrollCode, mintEnrollCode } from './api/enroll.ts';
 import { listRegistry, revokeRegistryEntry } from './api/registry.ts';
@@ -27,19 +28,24 @@ import { csrfOk, csrfOkWithoutOrigin, json } from './http.ts';
 /**
  * The routes that are **not** protected by the `Origin` half of the CSRF rule.
  *
- * Exactly one, and it is here as a named exception rather than as a condition
- * buried in a handler, so that adding a second is a visible act. `/api/enroll/
- * claim` is answered by `zest-daemon` on someone's Mac: no browser, no origin
- * header, and — the part that makes the exemption sound rather than merely
- * convenient — no session cookie either. CSRF is the forgery of a request that
- * succeeds on credentials the page never had to know; a route that consults no
- * such credential has nothing to forge. See `csrfOkWithoutOrigin`.
+ * A named list rather than conditions buried in handlers, so that adding one
+ * is a visible act. All three are answered by a machine — `zest-daemon` on
+ * someone's Mac, or the desktop app linking itself (#226): no browser, no
+ * origin header, and — the part that makes the exemption sound rather than
+ * merely convenient — no session cookie either. CSRF is the forgery of a
+ * request that succeeds on credentials the page never had to know; a route
+ * that consults no such credential has nothing to forge. See
+ * `csrfOkWithoutOrigin`.
  *
  * The corollary is a rule about the handler, not about this list: anything on
- * it must never read the session cookie. `/api/enroll/claim` authenticates with
- * a code the account minted and an Ed25519 signature over it.
+ * it must never read the session cookie. `/api/enroll/claim` authenticates
+ * with a code the account minted plus an Ed25519 signature over it;
+ * `/api/link/start` and `/api/link/claim` with signatures over the
+ * `zesterm-link-v1` messages. The link *approval* is deliberately NOT here —
+ * it is the account-holder's act, an ordinary cookie route under the full
+ * rule.
  */
-const ORIGINLESS = new Set(['/api/enroll/claim']);
+const ORIGINLESS = new Set(['/api/enroll/claim', '/api/link/start', '/api/link/claim']);
 
 /**
  * The routes that also answer machines — `Authorization: Bearer` from a daemon
@@ -73,6 +79,12 @@ const APPROVE = /^\/api\/devices\/([^/]+)\/approve$/;
 
 /** `/api/hosts/:id/revoke`, `/api/devices/:id/revoke`. */
 const REVOKE = /^\/api\/(hosts|devices)\/([^/]+)\/revoke$/;
+
+/** `GET /api/link/:id` — the approval page's read. Cookie, full CSRF. */
+const LINK_GET = /^\/api\/link\/([^/]+)$/;
+
+/** `POST /api/link/:id/approve`, `POST /api/link/:id/deny`. Cookie, full CSRF. */
+const LINK_ACT = /^\/api\/link\/([^/]+)\/(approve|deny)$/;
 
 export async function routeApi(
   request: Request,
@@ -159,6 +171,29 @@ export async function routeApi(
   if (path === '/api/hosts' || path === '/api/devices') {
     if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
     return listRegistry(request, env, path === '/api/hosts' ? 'host' : 'device', now);
+  }
+
+  // The two ORIGINLESS halves first, then the cookie-authenticated remainder
+  // of /api/link — exact paths before the :id patterns, so `start` and
+  // `claim` can never be read as grant ids.
+  if (path === '/api/link/start') {
+    if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+    return startLink(request, env, now);
+  }
+  if (path === '/api/link/claim') {
+    if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+    return claimLink(request, env, now);
+  }
+  const linkAct = LINK_ACT.exec(path);
+  if (linkAct !== null) {
+    if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+    const [, id = '', act = ''] = linkAct;
+    return act === 'approve' ? approveLink(request, env, id, now) : denyLink(request, env, id, now);
+  }
+  const linkGet = LINK_GET.exec(path);
+  if (linkGet !== null) {
+    if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+    return getLinkGrant(request, env, linkGet[1] ?? '', now);
   }
 
   if (path === '/api/attestations') {

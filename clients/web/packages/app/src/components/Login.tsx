@@ -8,7 +8,13 @@
 
 import { component } from 'sigx';
 
-export const Login = component<{ failed: boolean }>((ctx) => () => (
+/**
+ * `next` is where the OAuth round trip should land — already vetted by the
+ * route's `safeNextPath`, encoded here because it rides inside a query value
+ * of the login URL. The Worker's `safeNext` vets it once more on the far
+ * side; neither trusts the other to have done it.
+ */
+export const Login = component<{ failed: boolean; next: string }>((ctx) => () => (
   <div class="shell centered">
     <div class="card">
       <h1>zesterm</h1>
@@ -21,7 +27,10 @@ export const Login = component<{ failed: boolean }>((ctx) => () => (
         </p>
       ) : null}
 
-      <a class="button primary" href="/auth/login?provider=github&amp;next=/hosts">
+      <a
+        class="button primary"
+        href={`/auth/login?provider=github&next=${encodeURIComponent(ctx.props.next)}`}
+      >
         Continue with GitHub
       </a>
 
