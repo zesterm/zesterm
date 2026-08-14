@@ -670,7 +670,7 @@ impl Grid {
     /// viewport that has since been shrunk, dragging history down into rows the
     /// *next* repaint is about to blank — which is #200 again, arrived at from
     /// the other side.
-    pub fn note_restatement_began(&mut self, cols: usize, rows: usize) {
+    pub(crate) fn note_restatement_began(&mut self, cols: usize, rows: usize) {
         if self.pending_restate > 0 && (cols, rows) == (self.cols, self.rows) {
             self.restating = true;
         }
@@ -678,7 +678,7 @@ impl Grid {
 
     /// Whether a restatement is in progress and has not yet been settled.
     #[must_use]
-    pub fn restating(&self) -> bool {
+    pub(crate) fn restating(&self) -> bool {
         self.restating
     }
 
@@ -699,7 +699,7 @@ impl Grid {
     /// actually took, so a grow never invents history; the blank tail is how
     /// much of the viewport the repaint had nothing for, so a full screen
     /// settles to nothing; and `scrollback_len` is what there is to give.
-    pub fn settle_restate(&mut self) -> bool {
+    pub(crate) fn settle_restate(&mut self) -> bool {
         self.restating = false;
         let owed = core::mem::take(&mut self.pending_restate);
         let below_cursor = self.rows - 1 - self.cursor.row.min(self.rows - 1);
