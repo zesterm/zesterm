@@ -75,21 +75,24 @@ pub fn facts(default_shell: String) -> HostOffer {
     }
 }
 
-/// The kernel or OS version as the machine reports it.
+/// The OS version as the machine names itself, for the fleet card's row.
 ///
-/// One cheap syscall-equivalent per *reload*, not per connection — it lives
-/// behind [`OfferSource`]'s cached snapshot. Empty when the platform has no
-/// answer this crate can get without a dependency; the row is then simply not
-/// drawn.
+/// **The whole `uname -sr` string, not just the release**, because that row is
+/// the only place the *kernel's* name appears: `HostOffer::os` is
+/// `std::env::consts::OS`, which says `macos` where design §7's card says
+/// `Darwin 24.5.0`. A bare `24.5.0` beside `macos` is a worse row than either,
+/// and nothing else on the wire carries "Darwin".
+///
+/// One process spawn per *reload*, not per connection — it lives behind
+/// [`OfferSource`]'s cached snapshot. Empty when the platform has no answer
+/// this crate can get without a dependency; the row is then simply not drawn.
 fn os_version() -> String {
     #[cfg(unix)]
     {
-        // `uname -sr`, which is what design §7's mock shows
-        // ("Darwin 24.5.0", "Linux 6.8.0-31-generic"). Spawning a process is
-        // acceptable here and nowhere hotter: this runs once per config
-        // reload, off the serve loop.
+        // Exactly design §7's examples: "Darwin 24.5.0",
+        // "Linux 6.8.0-31-generic".
         std::process::Command::new("uname")
-            .arg("-r")
+            .arg("-sr")
             .output()
             .ok()
             .filter(|o| o.status.success())
@@ -279,14 +282,37 @@ mod tests {
         assert_eq!(offer.os, std::env::consts::OS);
         assert_eq!(offer.arch, std::env::consts::ARCH);
         assert_eq!(offer.default_shell, "zsh -l");
-        // `os_version` is best effort. On unix it should have found something;
-        // everywhere the rule is the same — a real answer or an empty string,
-        // never a placeholder that renders as a fact.
+        // Best effort, and the rule everywhere is the same: a real answer or
+        // an empty string, never a placeholder that renders as a fact.
         assert!(
-            !offer.os_version.contains('-') || !offer.os_version.trim().is_empty(),
-            "an unknown version is empty, never a dash"
+            offer.os_version.is_empty() || !offer.os_version.trim().is_empty(),
+            "an unknown version is empty, never whitespace or a dash"
         );
-        #[cfg(unix)]
-        assert!(!offer.os_version.is_empty(), "unix has `uname -r`");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_version_row_carries_the_kernel_name_as_well_as_the_release() {
+        // Asserted rather than commented, because the comment and the code
+        // drifted once already: `uname -r` alone gives `24.5.0`, and this row
+        // is the *only* place the kernel's name reaches a client —
+        // `HostOffer::os` is `std::env::consts::OS`, which says `macos` where
+        // design §7's card says `Darwin 24.5.0`.
+        let version = facts(String::new()).os_version;
+        assert!(!version.is_empty(), "unix has `uname`");
+        let kernel = std::process::Command::new("uname")
+            .arg("-s")
+            .output()
+            .expect("uname -s");
+        let kernel = String::from_utf8(kernel.stdout).expect("utf8");
+        let kernel = kernel.trim();
+        assert!(
+            version.starts_with(kernel),
+            "the row must lead with the kernel name ({kernel}), got {version:?}"
+        );
+        assert!(
+            version.len() > kernel.len(),
+            "and carry the release after it, got {version:?}"
+        );
     }
 }

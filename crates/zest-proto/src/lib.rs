@@ -453,11 +453,17 @@ pub struct HostOffer {
     pub os: String,
     /// `std::env::consts::ARCH` — `x86_64`, `aarch64`.
     pub arch: String,
-    /// The kernel or OS version as the machine reports it, best effort.
+    /// The OS as the machine names itself — `Darwin 24.5.0`,
+    /// `Linux 6.8.0-31-generic` — best effort.
     ///
-    /// Empty when unknown, never a placeholder: design §7's cards show only
-    /// what is actually known, and a dash pretending to be a fact is the
-    /// thing that rule exists to prevent.
+    /// Carries the kernel's *name* as well as its release, because this is the
+    /// only place that name reaches a client: [`Self::os`] is
+    /// `std::env::consts::OS`, which says `macos` where design §7's card says
+    /// `Darwin`.
+    ///
+    /// Empty when unknown, never a placeholder: those cards show only what is
+    /// actually known, and a dash pretending to be a fact is the thing that
+    /// rule exists to prevent.
     #[serde(default)]
     pub os_version: String,
     /// What a session with an empty `CreateSession.command` will run.
