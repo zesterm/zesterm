@@ -115,6 +115,34 @@ export function parkedLiveness(state: RoomState, now: number): ParkedLiveness | 
 }
 
 /**
+ * Is anything already scheduled to keep this room's presence fresh?
+ *
+ * The guard on the attach-time heal, and the reason that heal costs nothing
+ * in steady state. A pending alarm means the dispatcher will run
+ * `refreshPresence` when it fires, so an attach has nothing to add; no alarm
+ * at all means the column is not being maintained by anyone, which is exactly
+ * the state a link parked before this code deployed is left in.
+ *
+ * Deliberately "is *an* alarm pending" rather than "is a *presence* alarm
+ * pending": there is one alarm per object and the replay sweep shares it, so
+ * the two cannot be told apart — and they need not be, because
+ * `RelayRoom.alarm` does both jobs whoever asked for the wake. A sweep alarm
+ * therefore also repairs presence, one interval later; this only makes the
+ * repair immediate.
+ *
+ * A storage failure answers `true` — "assume something is scheduled" — so a
+ * blip skips the heal rather than writing D1 on every attach for as long as
+ * it lasts. The alarm path repairs it either way.
+ */
+export async function presenceIsScheduled(storage: RoomStorage): Promise<boolean> {
+  try {
+    return (await storage.getAlarm()) !== null;
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Ask to be woken in `CONTROL_SEEN_REFRESH_MS`, without moving an earlier alarm.
  *
  * There is one alarm per object and `setAlarm` **replaces**, so this is the

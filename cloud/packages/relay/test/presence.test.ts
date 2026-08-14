@@ -155,6 +155,54 @@ function suite(mode: string, evicting: boolean): void {
     );
   });
 
+  it('an attach repairs a link that parked before this code existed', async () => {
+    // #241. `control_seen_at` and the refresh alarm are both written when a
+    // link *parks*, so a connection older than the deploy has neither and
+    // reads asleep for ever — nothing retroactively observes it. The room
+    // wakes on attach, and a ready control link at that moment is live proof,
+    // so that is where it gets fixed.
+    const r = relay();
+    const control = await parked(r);
+
+    // Exactly the state a pre-deploy park leaves behind: the link is up, the
+    // column is empty, and nothing is scheduled to fill it.
+    r.db.controlSeen.set(HOST, null);
+    r.platform.storage.alarm = null;
+    r.db.controlRefreshes = 0;
+
+    const later = NOW + 60_000;
+    r.platform.autoResponseAt.set(control, new Date(later - 1_000));
+    await r.attach('browser', { now: later });
+
+    assert.equal(
+      r.db.controlSeen.get(HOST),
+      later,
+      'the first attach is enough: the card stops saying asleep about a machine that just served one',
+    );
+    assert.ok(
+      r.platform.storage.alarm !== null,
+      'and the refresh is scheduled from here on, so it stays online without needing another attach',
+    );
+  });
+
+  it('an attach on a healthy room writes nothing extra', async () => {
+    // The bound. Parking already armed the refresh, so presence is being
+    // maintained and an attach has nothing to add — the heal must not become
+    // a D1 write per attach for every room in the fleet.
+    const r = relay();
+    await parked(r);
+    assert.ok(r.platform.storage.alarm !== null, 'parking schedules the refresh');
+    const refreshes = r.db.controlRefreshes;
+
+    await r.attach('browser', { now: NOW + 1_000 });
+
+    assert.equal(
+      r.db.controlRefreshes,
+      refreshes,
+      'steady state pays nothing: the alarm is already keeping this column fresh',
+    );
+  });
+
   it('a closed link is cleared at once, rather than waiting out the bound', async () => {
     const r = relay();
     const control = await parked(r);

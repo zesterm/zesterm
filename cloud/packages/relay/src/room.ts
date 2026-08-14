@@ -56,7 +56,7 @@ import {
   type ControlErrorCode,
 } from './room/control.ts';
 import { clearControlSeen, hostIsEnrolled, refreshControlSeen, touchHost } from './room/hosts.ts';
-import { armPresenceRefresh, parkedLiveness } from './room/presence.ts';
+import { armPresenceRefresh, parkedLiveness, presenceIsScheduled } from './room/presence.ts';
 import { PIPE_DIAL_TIMEOUT_MS } from './room/limits.ts';
 import {
   CLOSE_PIPE_DIAL_TIMEOUT,
@@ -376,6 +376,13 @@ export class RelayRoom {
     // every redial already carries a fresh ticket. Spending only on success
     // would leave a captured one good for another try each time the host
     // happened to be asleep.
+    // Read *before* the ticket spend, which arms the sweep's alarm and would
+    // otherwise answer this question for us — there is one alarm per object,
+    // so a moment later "is anything scheduled" is always yes and the heal
+    // below could never fire. What matters is whether presence was being
+    // maintained when this attach arrived. One local storage read; no D1.
+    const scheduledOnArrival = await presenceIsScheduled(this.#state.storage);
+
     const claim = await claimAttachTicket({ storage: this.#state.storage, jti, now });
     if (claim !== 'claimed') {
       // Accepted before it is closed, as the host-absent branch below is and
@@ -417,6 +424,26 @@ export class RelayRoom {
       this.#dialling.delete(id);
       ws.close(CLOSE_HOST_ABSENT, 'no control link for this host');
       return;
+    }
+
+    // #241: the host is demonstrably parked — `readyControlLink` found it and
+    // it just took an `open` — so this is the cheapest moment to notice that
+    // its presence is not being maintained, and fix it.
+    //
+    // A link that parked *before* the presence code deployed has no
+    // `control_seen_at` and no alarm, because both are written when a link
+    // parks; nothing retroactively observes a connection older than the code.
+    // It would read asleep until something made it re-park, which for a
+    // healthy daemon can be days. The same hole opens whenever a room loses
+    // its alarm while the link stays up.
+    //
+    // Guarded on nothing being scheduled, so steady state pays nothing: a link
+    // already being refreshed skips the write, and only the broken case costs
+    // one. After the `open` rather than before it, so the host is already
+    // dialling back while this runs — the heal must not sit in front of an
+    // attach that a person is waiting on.
+    if (!scheduledOnArrival) {
+      await this.refreshPresence(now);
     }
 
     if (!(await this.#dialBack(id, timeoutMs))) {
