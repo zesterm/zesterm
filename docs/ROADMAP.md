@@ -705,6 +705,25 @@ entry stay). The resulting work items, measurements in the handoff README — **
       status segment "reconnecting" in danger until `Reattached`, and a block
       still "running" when its host went away shows a faint rail and says
       "interrupted".
+- [x] **The rect pipeline can stroke one side of a box, and the two places the
+      design asks for it stopped faking it** ([#248](https://github.com/zesterm/zesterm/issues/248)).
+      The block header's state rail is `border-radius:8px` + `border-left:2px`
+      in the mock and the tab's accent is `inset 0 2px 0` under
+      `9px 9px 0 0` — both are one-sided CSS strokes, and both *taper* to
+      nothing as the corner arc turns, which on a 22px header makes the rail
+      read as `(` rather than as a bar. `RectInstance` had one `border_width`
+      and rang the whole outline, so the rail was a separate straight rect and
+      the accent was a full-weight ring **clipped** to the top 11px — a clip
+      cuts, it cannot taper, and the chip wore two stubs down its sides.
+      `border_omit` names the sides to skip (zero = omit nothing, so no
+      existing rect moves) and the shader derives the border's inner edge as a
+      per-side inset rounded box instead of the uniform offset `d + bw`; each
+      corner shrinks by the larger of its two adjacent insets, which is the
+      tangency that closes the ring exactly where the taper should end. The two
+      are identical when nothing is omitted — deflating a rounded box by `bw`
+      also reduces every radius by `bw` — and a headless GPU test measures both
+      halves: the stroke thins 8 → 4 → 2 px into the corner, and omitting
+      nothing still rings all four sides at 8px.
 - [ ] Animation clock, the *spring* half. Springs `(response, damping)`, not
       easing curves — terminal motion is interruption-dominated and a spring
       absorbs a changed target with continuous velocity for free. Substep the

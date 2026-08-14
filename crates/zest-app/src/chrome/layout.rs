@@ -11,7 +11,7 @@
 //! the app passes `measure_ui_run`, the tests pass arithmetic.
 
 use zest_config::settings::TabsPosition;
-use zest_render_wgpu::{LinearRgba, RectInstance};
+use zest_render_wgpu::{border_sides, LinearRgba, RectInstance};
 
 use super::hit::{CaptionButton, ChromeHitMap, HitRegion, ResizeEdge};
 use super::model::{AccentChoice, ChromeMetrics, ChromeModel, LinkKind, TabKind, TabPresence};
@@ -1808,21 +1808,19 @@ fn horizontal(
         if active {
             // The mock's recipe, translated from CSS: `border: 1px line` with
             // `border-bottom: none`, and `box-shadow: inset 0 2px 0 accent` —
-            // the accent hugs the rounded top edge and curves with the
-            // corners, it is not a straight bar. Three SDF rects:
+            // the accent hugs the rounded top edge and *thins to nothing* as
+            // each corner turns vertical. Three SDF rects:
             //
-            // 1. The border ring, one hairline taller than the chip so its
-            //    bottom edge falls outside the strip clip — which is what
-            //    "no bottom border" means to a stroke that is a ring.
+            // 1. The border ring, with its bottom side omitted. It used to be
+            //    drawn one hairline taller so the bottom edge fell outside the
+            //    strip clip; the pipeline can say "no bottom border" now, so
+            //    the rect is the chip.
             out.rects.push(RectInstance {
                 radii: [TAB_RADIUS * s, TAB_RADIUS * s, 0.0, 0.0],
                 border: colors.line,
                 border_width: HAIRLINE * s,
-                ..RectInstance::filled(
-                    [chip[0], chip[1], chip[2], chip[3] + HAIRLINE * s],
-                    LinearRgba::TRANSPARENT,
-                    clip,
-                )
+                border_omit: border_sides::BOTTOM,
+                ..RectInstance::filled(chip, LinearRgba::TRANSPARENT, clip)
             });
             // 2. The fill, inside the border, running to the strip's bottom
             //    edge so the chip meets the pane with nothing drawn between.
@@ -1839,22 +1837,23 @@ fn horizontal(
                     clip,
                 )
             });
-            // 3. The inset accent: a 2px inner ring on the fill's geometry,
-            //    clipped to the corner region, so it traces the top edge and
-            //    bends around both curves exactly as the inset shadow does.
+            // 3. The inset accent: a 2px stroke on the fill's geometry with
+            //    every side but the top omitted, so it traces the top edge and
+            //    thins away into both curves exactly as the inset shadow does.
+            //    This used to be a full ring *clipped* to the top
+            //    `TAB_RADIUS + ACCENT_RULE` band, which is not the same picture
+            //    at all: a clip cuts a full-weight stroke off square, leaving
+            //    two stubs running down the chip's sides. Sitting one hairline
+            //    inside the ring keeps the `ui.line` border visible above it,
+            //    which is where an inset shadow sits relative to a border.
             //    In the tab's own accent (§12): the rule is the chrome's one
             //    per-tab concession, and it must agree with the glyph tile
             //    below or the chip names two identities at once.
-            let inset_clip = [
-                chip[0],
-                chip[1],
-                chip[2],
-                (TAB_RADIUS + ACCENT_RULE) * s,
-            ];
             out.rects.push(RectInstance {
                 radii: [(TAB_RADIUS - HAIRLINE) * s, (TAB_RADIUS - HAIRLINE) * s, 0.0, 0.0],
                 border: chip_accent,
                 border_width: ACCENT_RULE * s,
+                border_omit: border_sides::RIGHT | border_sides::BOTTOM | border_sides::LEFT,
                 ..RectInstance::filled(
                     [
                         chip[0] + HAIRLINE * s,
@@ -1863,7 +1862,7 @@ fn horizontal(
                         chip[3],
                     ],
                     LinearRgba::TRANSPARENT,
-                    inset_clip,
+                    clip,
                 )
             });
         } else if hovered {
@@ -3884,6 +3883,56 @@ mod tests {
         assert!(
             l.rects.iter().any(|r| r.fill == c.danger && r.rect[1] < 46.0),
             "and so does the glyph tile's ink"
+        );
+    }
+
+    #[test]
+    fn the_active_chips_accent_tapers_rather_than_being_cut() {
+        // `box-shadow: inset 0 2px 0` on a `9px 9px 0 0` box thins to nothing
+        // where each corner stops being horizontal. This was a full ring
+        // *clipped* to the top `TAB_RADIUS + ACCENT_RULE` band, which is a
+        // different picture: a clip cuts a full-weight stroke off square, so
+        // the chip wore two 2px stubs down its sides ending in a hard step.
+        // The taper has to be geometry — no clip can produce it.
+        let c = colors();
+        let m = metrics(1200.0, 800.0, 1.0);
+        let l = layout(&model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top), &c, &m, &mut measure);
+        let accent = l
+            .rects
+            .iter()
+            .find(|r| (r.border_width - ACCENT_RULE * m.scale).abs() < 1e-6)
+            .expect("the active chip draws its accent rule");
+        assert_eq!(
+            accent.border_omit,
+            border_sides::RIGHT | border_sides::BOTTOM | border_sides::LEFT,
+            "top only — the omitted sides are what the stroke tapers into"
+        );
+        assert!(
+            accent.clip[3] > (TAB_RADIUS + ACCENT_RULE) * m.scale,
+            "the clip is the strip viewport, not a band cutting the rule short"
+        );
+    }
+
+    #[test]
+    fn the_active_chip_has_no_bottom_border() {
+        // "border-bottom: none" — the chip's fill has to meet the pane with
+        // nothing drawn between. The ring used to be a hairline taller than the
+        // chip so its bottom edge fell outside the strip clip; that worked, but
+        // it made the rect a lie about the chip's geometry and every reader had
+        // to know why.
+        let c = colors();
+        let m = metrics(1200.0, 800.0, 1.0);
+        let l = layout(&model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top), &c, &m, &mut measure);
+        let ring = l
+            .rects
+            .iter()
+            .find(|r| r.border == c.line && r.radii == [TAB_RADIUS * m.scale, TAB_RADIUS * m.scale, 0.0, 0.0])
+            .expect("the active chip is outlined");
+        assert!((ring.border_width - HAIRLINE * m.scale).abs() < 1e-6, "a hairline, as `border: 1px` is");
+        assert_eq!(ring.border_omit, border_sides::BOTTOM);
+        assert!(
+            (ring.rect[3] - TAB_H * m.scale).abs() < 1e-6,
+            "the rect is the chip, not the chip plus a hairline of slack"
         );
     }
 

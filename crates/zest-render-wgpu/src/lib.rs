@@ -35,8 +35,8 @@ pub mod ui_text;
 pub use atlas::{Atlas, AtlasEntry, Cached};
 pub use capture::read_rgba;
 pub use instance::{
-    glyph_flags, DecorInstance, DecorKind, GlyphInstance, Globals, LinearRgba, RectInstance,
-    RectShape,
+    border_sides, glyph_flags, DecorInstance, DecorKind, GlyphInstance, Globals, LinearRgba,
+    RectInstance, RectShape,
 };
 pub use scene::{Chrome, Preedit, Scene, Viewport};
 pub use ui_text::{emit_ui_run, measure_ui_run};
@@ -830,7 +830,7 @@ fn make_pipeline(
 }
 
 fn rect_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
-    const ATTRS: [wgpu::VertexAttribute; 10] = wgpu::vertex_attr_array![
+    const ATTRS: [wgpu::VertexAttribute; 11] = wgpu::vertex_attr_array![
         0 => Float32x4,  // rect
         1 => Float32x4,  // rect_b
         2 => Float32x4,  // radii
@@ -841,6 +841,7 @@ fn rect_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
         7 => Float32,    // shadow_blur
         8 => Float32,    // shadow_alpha
         9 => Uint32,     // shape
+        10 => Uint32,    // border_omit
     ];
     wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<RectInstance>() as u64,
@@ -882,7 +883,7 @@ fn decor_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LinearRgba, Renderer, Scene, TextTuning};
+    use super::{border_sides, LinearRgba, RectInstance, Renderer, Scene, TextTuning};
 
     /// A headless device, or `None` where there is no adapter at all.
     ///
@@ -939,6 +940,117 @@ mod tests {
 
         let px = crate::read_rgba(&device, &queue, &texture, 4, 4, format);
         Some([px[0], px[1], px[2], px[3]])
+    }
+
+    /// Render `rects` over a black backdrop into a `size`-square target.
+    fn rect_pixels(rects: Vec<RectInstance>, size: u32) -> Option<Vec<u8>> {
+        let (device, queue) = headless()?;
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut renderer = Renderer::new(&device, format, zest_font::TextAntialias::Grayscale);
+        renderer.resize(&device, size, size);
+
+        // Every index left at 0 puts the whole vec in the overlay range, which
+        // is the only thing that matters here: it gets drawn once.
+        let scene = Scene { rects, backdrop: LinearRgba::opaque(0, 0, 0), ..Default::default() };
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("zest rect probe"),
+            size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let mut encoder = device.create_command_encoder(&Default::default());
+        renderer.render(&device, &queue, &mut encoder, &view, &scene);
+        queue.submit([encoder.finish()]);
+        Some(crate::read_rgba(&device, &queue, &texture, size, size, format))
+    }
+
+    /// A 128px box with a fat border, so one pixel of antialiasing cannot
+    /// swallow the thing being measured.
+    const PROBE: u32 = 128;
+    fn probe_rect(omit: u32) -> RectInstance {
+        RectInstance {
+            radii: [32.0; 4],
+            border: LinearRgba::opaque(255, 0, 0),
+            border_width: 8.0,
+            border_omit: omit,
+            ..RectInstance::filled(
+                [16.0, 16.0, 96.0, 96.0],
+                LinearRgba::opaque(0x30, 0x30, 0x30),
+                [0.0, 0.0, 128.0, 128.0],
+            )
+        }
+    }
+
+    /// Pixels along a scanline that are unmistakably the border's red, over the
+    /// left half only — a count in pixels, so a stroke's thickness is readable
+    /// straight off it.
+    fn red_across(px: &[u8], row: u32) -> u32 {
+        (0..PROBE / 2)
+            .filter(|x| {
+                let i = ((row * PROBE + x) * 4) as usize;
+                px[i] > 200 && px[i + 1] < 60
+            })
+            .count() as u32
+    }
+
+    /// The same, down a column, over the top half.
+    fn red_down(px: &[u8], col: u32) -> u32 {
+        (0..PROBE / 2)
+            .filter(|y| {
+                let i = ((y * PROBE + col) * 4) as usize;
+                px[i] > 200 && px[i + 1] < 60
+            })
+            .count() as u32
+    }
+
+    #[test]
+    fn a_one_sided_border_tapers_into_the_corners() {
+        // This is the whole point of `border_omit`, and it is the one thing a
+        // clipped ring cannot fake. CSS draws `border-left` on a rounded box by
+        // interpolating the stroke down to the (zero-width) top border's, so the
+        // 8px rail thins as the corner turns and is gone by the time the edge is
+        // horizontal. Clipping a full-weight ring instead cuts it off square,
+        // which reads as two stubs — the defect this replaced.
+        let Some(px) = rect_pixels(vec![probe_rect(border_sides::TOP | border_sides::RIGHT | border_sides::BOTTOM)], PROBE)
+        else {
+            return;
+        };
+
+        let straight = red_across(&px, 64); // the vertical run, full thickness
+        let mid_arc = red_across(&px, 28); // partway round the corner
+        let near_top = red_across(&px, 20); // nearly horizontal, nearly gone
+
+        assert!((7..=9).contains(&straight), "the straight run is the border's 8px, got {straight}");
+        assert!(
+            near_top < mid_arc && mid_arc < straight,
+            "the stroke must thin monotonically into the corner, got {straight} → {mid_arc} → {near_top}"
+        );
+        assert!(near_top > 0, "and still be drawn there — the arc is stroked, not clipped away");
+        assert_eq!(
+            red_down(&px, 64),
+            0,
+            "the top edge is omitted: nothing is drawn along it, only the taper reaching into it"
+        );
+    }
+
+    #[test]
+    fn omitting_nothing_still_rings_all_four_sides() {
+        // Zero is the `Zeroable` value and every existing bordered rect leaves
+        // the field there. The maths changed underneath them — an inset inner
+        // box rather than the SDF offset `d + bw` — and the two are only equal
+        // because deflating a rounded box by `bw` also reduces every radius by
+        // `bw`. If that identity is ever broken, every border in the app moves.
+        let Some(px) = rect_pixels(vec![probe_rect(0)], PROBE) else { return };
+        let left = red_across(&px, 64);
+        let top = red_down(&px, 64);
+        assert!((7..=9).contains(&left), "left border still 8px, got {left}");
+        assert!((7..=9).contains(&top), "top border still 8px, got {top}");
     }
 
     #[test]
@@ -1177,5 +1289,27 @@ mod tests {
             src.contains(&expected),
             "glyph.wgsl FLAG_FIXED is out of sync with glyph_flags::FIXED; expected `{expected}`"
         );
+    }
+
+    #[test]
+    fn shader_side_bits_match_the_instance_bits() {
+        // `border_omit` is a bitmask agreed between two files, and drift is
+        // invisible: the border skips a different edge, which reads as a design
+        // mistake in whoever's chrome happens to notice rather than as a
+        // constant that moved. Same reasoning as FLAG_FIXED above.
+        let src = include_str!("shaders/rect.wgsl");
+        for (name, value) in [
+            ("SIDE_TOP", border_sides::TOP),
+            ("SIDE_RIGHT", border_sides::RIGHT),
+            ("SIDE_BOTTOM", border_sides::BOTTOM),
+            ("SIDE_LEFT", border_sides::LEFT),
+        ] {
+            let expected = format!("const {name}: u32 = {value}u;");
+            assert!(
+                src.contains(&expected),
+                "rect.wgsl {name} is out of sync with border_sides::{}; expected `{expected}`",
+                name.trim_start_matches("SIDE_")
+            );
+        }
     }
 }
