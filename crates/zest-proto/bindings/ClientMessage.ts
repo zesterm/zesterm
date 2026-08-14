@@ -65,7 +65,25 @@ watch_sessions: boolean,
  * for `watch_sessions`' reason exactly: `#[serde(default)]` degrades
  * to today's behavior on an older daemon, which simply never pushes.
  */
-watch_pairings: boolean, } | { "t": "auth", signature: Sig64, } | { "t": "pairing_decision", client: ClientId, approve: boolean, } | { "t": "enroll", code: string, } | { "t": "request_keyframe", session: SessionAddr, } | { "t": "list_sessions" } | { "t": "create_session", 
+watch_pairings: boolean, 
+/**
+ * Ask what this machine can offer, and to be told when that changes.
+ *
+ * The launcher's subscription (#262). A client that sets it gets a
+ * [`HostOffer`] on the first `Sessions` reply and another whenever the
+ * far config reloads — which is how the `+` menu can show a machine's
+ * own profiles at all, and how a fleet card fills its `os` row with a
+ * fact rather than a dash.
+ *
+ * A field rather than a new message, for `watch_sessions`' reason
+ * exactly, and here the reason is sharper than it is there: a new
+ * `HostMessage` tag does not merely go unread on an older peer, it
+ * **kills the connection**, because `DaemonClient::recv` maps a frame
+ * it cannot decode to `DaemonError::Transport`. An old daemon ignores
+ * this flag and sends no offer; a new daemon sends none to a client
+ * that did not ask. Both degrade to exactly today's behaviour.
+ */
+watch_hosts: boolean, } | { "t": "auth", signature: Sig64, } | { "t": "pairing_decision", client: ClientId, approve: boolean, } | { "t": "enroll", code: string, } | { "t": "request_keyframe", session: SessionAddr, } | { "t": "list_sessions" } | { "t": "create_session", 
 /**
  * Empty means the host's default shell.
  */

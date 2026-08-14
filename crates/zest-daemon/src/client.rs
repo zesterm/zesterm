@@ -109,6 +109,13 @@ pub struct Watch {
     /// on loopback only — a daemon that will not take this connection's
     /// `PairingDecision` silently never subscribes it either.
     pub pairings: bool,
+    /// `Hello.watch_hosts`: send what this machine offers — its facts and its
+    /// own profiles — and push it again when the far config changes (#262).
+    ///
+    /// Unlike `pairings` this is honoured on every transport: a machine's
+    /// launch targets are what a client is there to see, and the whole point
+    /// is reading them from somewhere else.
+    pub hosts: bool,
 }
 
 /// An authenticated connection to one daemon.
@@ -150,7 +157,7 @@ impl DaemonClient {
             identity,
             label,
             expect_host,
-            Watch { sessions: watch_sessions, pairings: false },
+            Watch { sessions: watch_sessions, pairings: false, hosts: false },
             None,
         )
     }
@@ -195,7 +202,7 @@ impl DaemonClient {
             identity,
             label,
             expect_host,
-            Watch { sessions: watch_sessions, pairings: false },
+            Watch { sessions: watch_sessions, pairings: false, hosts: false },
             on_pending,
         )
     }
@@ -229,6 +236,7 @@ impl DaemonClient {
             dh: zest_proto::Pub32::from_bytes(hs.dh().0),
             watch_sessions: watch.sessions,
             watch_pairings: watch.pairings,
+            watch_hosts: watch.hosts,
         })?;
 
         // Challenge -> Auth -> Welcome. Two round trips on connect, which on a
@@ -324,10 +332,29 @@ impl DaemonClient {
 
     /// What sessions this host has.
     pub fn list(&mut self) -> Result<Vec<SessionInfo>, DaemonError> {
+        Ok(self.list_with_offer()?.0)
+    }
+
+    /// [`Self::list`], keeping the offer that rides the same reply.
+    ///
+    /// Two methods rather than one, and the reason is a bug this shape
+    /// prevents rather than taste. A `watch_hosts` connection's *first* offer
+    /// arrives on the first `Sessions` the host sends — which, for anything
+    /// that lists before it starts reading pushes, is this reply. The daemon
+    /// marks it sent on the way out, so a `list()` that drops it means the
+    /// push loop waits for a generation bump that will not come until somebody
+    /// edits a config on the far machine. Callers that subscribed must use
+    /// this one; `list()` stays for the many that did not.
+    ///
+    /// `None` means nothing new to say — this connection did not subscribe,
+    /// the far daemon publishes nothing, or it predates the field entirely.
+    pub fn list_with_offer(
+        &mut self,
+    ) -> Result<(Vec<SessionInfo>, Option<zest_proto::HostOffer>), DaemonError> {
         self.send(&ClientMessage::ListSessions)?;
         loop {
             match self.recv()? {
-                HostMessage::Sessions { sessions, .. } => return Ok(sessions),
+                HostMessage::Sessions { sessions, offer, .. } => return Ok((sessions, offer)),
                 HostMessage::Error { message, .. } => return Err(DaemonError::Refused(message)),
                 other => discarded("Sessions", &other),
             }
@@ -350,7 +377,7 @@ impl DaemonClient {
         })?;
         loop {
             match self.recv()? {
-                HostMessage::Sessions { sessions, created } => {
+                HostMessage::Sessions { sessions, created, .. } => {
                     // The daemon names the created session outright. The
                     // `.last()` fallback survives only for an older daemon
                     // that predates the field — where it is racy against a
@@ -600,6 +627,7 @@ mod tests {
             shell_integration: true,
             min_delta_interval: Duration::ZERO,
             enroll: None,
+            offer: None,
         };
         {
             let registry = Arc::clone(&registry);

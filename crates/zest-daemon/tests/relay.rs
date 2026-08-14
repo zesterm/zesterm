@@ -529,6 +529,7 @@ fn daemon(label: &str) -> Daemon {
         shell_integration: true,
         min_delta_interval: Duration::ZERO,
         enroll: None,
+        offer: None,
     };
     Daemon { identity, config, registry: Arc::new(Registry::new()), auth, trust, gate: Arc::new(Gate::new()) }
 }

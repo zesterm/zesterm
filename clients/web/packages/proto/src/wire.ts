@@ -440,11 +440,52 @@ export interface SessionInfo {
   readonly attached: boolean;
 }
 
+/** One launch target a machine publishes (#262). */
+export interface HostProfile {
+  readonly name: string;
+  /**
+   * Already folded through *that host's* `profiles.defaults`. Empty means the
+   * far host's own default shell — the same convention `create_session.command`
+   * uses, so a launch passes it straight through.
+   */
+  readonly command: string;
+  readonly starting_directory: string;
+  readonly icon: string;
+  readonly color_scheme: string;
+  readonly tab_color: number | null;
+}
+
+/**
+ * What a machine can offer: what it *is*, and what it can launch (#262).
+ *
+ * Facts, not a capability matrix — nothing here is matched on to decide
+ * whether a feature exists. An empty string means "unknown", and the row is
+ * simply not drawn rather than shown as a dash.
+ */
+export interface HostOffer {
+  readonly os: string;
+  readonly arch: string;
+  readonly os_version: string;
+  readonly default_shell: string;
+  readonly profiles: readonly HostProfile[];
+}
+
 export interface Sessions {
   readonly t: 'sessions';
   readonly sessions: readonly SessionInfo[];
   /** Set when this listing answers this connection's own `create_session`. */
   readonly created: bigint | null;
+  /**
+   * What this machine offers, when there is something new to say (#262).
+   *
+   * `null` covers three cases on purpose, and the client wants one branch for
+   * all of them: this connection did not set `watch_hosts`, the host publishes
+   * nothing, or nothing has changed since the last message. A daemon that
+   * predates the field lands here too. Sticky on the reader's side — an
+   * ordinary session push carries none, and clearing on one would blank a
+   * launcher's rows every time somebody opened a shell.
+   */
+  readonly offer: HostOffer | null;
 }
 
 export interface Scrollback {
@@ -611,6 +652,10 @@ export function parseHostMessage(v: unknown): HostMessage {
         created: o['created'] === undefined || o['created'] === null
           ? null
           : big(o['created'], 'sessions.created'),
+        // Same `skip_serializing_if` shape, and absent is the common case:
+        // every ordinary session push omits it.
+        offer:
+          o['offer'] === undefined || o['offer'] === null ? null : parseHostOffer(o['offer']),
       };
     case 'scrollback':
       return {
@@ -638,6 +683,42 @@ export function parseHostMessage(v: unknown): HostMessage {
     default:
       return { t, raw: o };
   }
+}
+
+export function parseHostProfile(v: unknown): HostProfile {
+  const o = obj(v, 'HostProfile');
+  return {
+    name: str(o['name'], 'HostProfile.name'),
+    // Every field but `name` is `#[serde(default)]` on the Rust side, so an
+    // absent one is an empty value rather than a malformed message.
+    command: o['command'] === undefined ? '' : str(o['command'], 'HostProfile.command'),
+    starting_directory:
+      o['starting_directory'] === undefined
+        ? ''
+        : str(o['starting_directory'], 'HostProfile.starting_directory'),
+    icon: o['icon'] === undefined ? '' : str(o['icon'], 'HostProfile.icon'),
+    color_scheme:
+      o['color_scheme'] === undefined ? '' : str(o['color_scheme'], 'HostProfile.color_scheme'),
+    tab_color:
+      o['tab_color'] === undefined || o['tab_color'] === null
+        ? null
+        : num(o['tab_color'], 'HostProfile.tab_color'),
+  };
+}
+
+export function parseHostOffer(v: unknown): HostOffer {
+  const o = obj(v, 'HostOffer');
+  return {
+    os: o['os'] === undefined ? '' : str(o['os'], 'HostOffer.os'),
+    arch: o['arch'] === undefined ? '' : str(o['arch'], 'HostOffer.arch'),
+    os_version: o['os_version'] === undefined ? '' : str(o['os_version'], 'HostOffer.os_version'),
+    default_shell:
+      o['default_shell'] === undefined ? '' : str(o['default_shell'], 'HostOffer.default_shell'),
+    profiles:
+      o['profiles'] === undefined
+        ? []
+        : arr(o['profiles'], 'HostOffer.profiles').map(parseHostProfile),
+  };
 }
 
 export function parseSessionInfo(v: unknown): SessionInfo {

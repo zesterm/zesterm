@@ -164,6 +164,7 @@ mod tests {
             reachability: None,
             rtt_ms: None,
             sessions: crate::fleet::SessionsState::Unknown,
+            offer: None,
             enrolled: false,
             relay_online: false,
         }

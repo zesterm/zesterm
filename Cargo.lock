@@ -5588,6 +5588,7 @@ dependencies = [
  "tungstenite",
  "windows-sys 0.60.2",
  "zest-cloud",
+ "zest-config",
  "zest-core",
  "zest-mesh",
  "zest-proto",

@@ -38,6 +38,7 @@ pub mod enroll;
 pub mod history;
 pub mod lan;
 pub mod local;
+pub mod offer;
 pub mod relay;
 pub mod relay_origin;
 pub mod server;
@@ -153,6 +154,14 @@ pub struct DaemonConfig {
     /// daemon that could reach a control plane would be a daemon whose tests
     /// fail on an aeroplane.
     pub enroll: Option<EnrollSeam>,
+    /// What this machine tells a client it can offer — its facts and its own
+    /// profiles (#262), pushed to connections that set `Hello.watch_hosts`.
+    ///
+    /// `None` means this daemon publishes nothing, which is what every test
+    /// harness wants and what a daemon built before this field did. A client
+    /// then sees `Sessions { offer: None }` — indistinguishable from an older
+    /// daemon, and handled by the same branch.
+    pub offer: Option<offer::OfferSource>,
 }
 
 /// Everything [`server`] needs to run `enroll::enroll` on a client's behalf.

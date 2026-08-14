@@ -141,6 +141,26 @@ impl ProfileResolved {
     }
 }
 
+/// [`Settings::profiles`](crate::Settings::profiles) re-rooted as the
+/// `toml::Table` every function here walks.
+///
+/// The resolver takes a whole config rather than a profiles map, because a
+/// profile's settings keys have to fall through the same cascade the root
+/// does. Callers holding a parsed `Settings` therefore have to put the map
+/// back under a `profiles` key first — one small encoding, which lived in
+/// `zest-app`'s launcher until the daemon needed it too (#262). Two copies of
+/// it would be two places for the key name to be spelled.
+#[must_use]
+pub fn root_of(settings: &crate::Settings) -> toml::Table {
+    let mut table = toml::Table::new();
+    for (key, profile) in &settings.profiles {
+        table.insert(key.clone(), toml::Value::Table(profile.clone()));
+    }
+    let mut root = toml::Table::new();
+    root.insert("profiles".into(), toml::Value::Table(table));
+    root
+}
+
 /// The ordinary profiles in a config, `defaults` excluded.
 ///
 /// The launcher menu and the profile rail both read this; `defaults` appears

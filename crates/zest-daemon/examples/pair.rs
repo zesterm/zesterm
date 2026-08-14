@@ -75,6 +75,7 @@ fn main() {
         dh: zest_proto::Pub32::from_bytes(hs.dh().0),
         watch_sessions: false,
         watch_pairings: false,
+        watch_hosts: false,
     };
     write(&mut stream, None, &hello);
 

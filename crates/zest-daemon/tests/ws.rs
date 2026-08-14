@@ -62,6 +62,7 @@ fn host() -> Host {
         shell_integration: true,
         min_delta_interval: std::time::Duration::ZERO,
         enroll: None,
+        offer: None,
     };
     let registry = Arc::new(Registry::new());
     std::thread::spawn(move || {
@@ -173,6 +174,7 @@ fn handshake(ws: &mut Ws, frames: &mut FrameReader, ch: &mut Chan, identity: &Ar
             dh: zest_proto::Pub32::from_bytes(hs.dh().0),
             watch_sessions: false,
             watch_pairings: false,
+            watch_hosts: false,
         },
     );
 
@@ -441,6 +443,7 @@ fn the_daemons_own_client_codec_interoperates() {
         dh: zest_proto::Pub32::from_bytes(hs.dh().0),
         watch_sessions: false,
         watch_pairings: false,
+        watch_hosts: false,
     })
     .expect("encode");
     std::io::Write::write_all(&mut writer, &hello).expect("write");

@@ -57,6 +57,7 @@ fn host() -> Host {
         shell_integration: true,
         min_delta_interval: std::time::Duration::ZERO,
         enroll: None,
+        offer: None,
     };
     let registry = Arc::new(Registry::new());
     std::thread::spawn(move || {
@@ -187,6 +188,7 @@ fn handshake(peer: &mut Peer, identity: &Arc<ClientIdentity>) -> (ClientMessage,
         dh: zest_proto::Pub32::from_bytes(hs.dh().0),
         watch_sessions: false,
         watch_pairings: false,
+        watch_hosts: false,
     });
 
     let challenge =
@@ -322,6 +324,7 @@ fn a_captured_proof_cannot_be_replayed_onto_a_second_connection() {
         dh: zest_proto::Pub32::from_bytes(hs.dh().0),
         watch_sessions: false,
         watch_pairings: false,
+        watch_hosts: false,
     });
     let challenge = second
         .wait_for(|m| matches!(m, HostMessage::Challenge { .. }))
@@ -369,6 +372,7 @@ fn a_captured_proof_cannot_be_replayed_onto_a_second_connection() {
         dh: zest_proto::Pub32::from_bytes([0x11; 32]),
         watch_sessions: false,
         watch_pairings: false,
+        watch_hosts: false,
     });
     assert!(
         third.wait_for(|m| matches!(m, HostMessage::Challenge { .. })).is_some(),
@@ -561,6 +565,7 @@ fn a_client_that_dialled_another_host_notices() {
         dh: zest_proto::Pub32::from_bytes(client_dh.0),
         watch_sessions: false,
         watch_pairings: false,
+        watch_hosts: false,
     });
     let challenge =
         stream.wait_for(|m| matches!(m, HostMessage::Challenge { .. })).expect("no challenge");

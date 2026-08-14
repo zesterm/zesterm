@@ -1052,6 +1052,7 @@ mod tests {
                 shell_integration: true,
                 min_delta_interval: std::time::Duration::ZERO,
                 enroll: None,
+                offer: None,
             };
             {
                 let registry = Arc::clone(&registry);
@@ -1902,6 +1903,7 @@ mod tests {
                 shell_integration: true,
                 min_delta_interval: Duration::ZERO,
                 enroll: None,
+                offer: None,
             };
             std::thread::spawn(move || {
                 let _ = listener.serve_forever(

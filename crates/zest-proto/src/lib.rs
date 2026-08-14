@@ -148,6 +148,23 @@ pub enum ClientMessage {
         /// to today's behavior on an older daemon, which simply never pushes.
         #[serde(default)]
         watch_pairings: bool,
+        /// Ask what this machine can offer, and to be told when that changes.
+        ///
+        /// The launcher's subscription (#262). A client that sets it gets a
+        /// [`HostOffer`] on the first `Sessions` reply and another whenever the
+        /// far config reloads — which is how the `+` menu can show a machine's
+        /// own profiles at all, and how a fleet card fills its `os` row with a
+        /// fact rather than a dash.
+        ///
+        /// A field rather than a new message, for `watch_sessions`' reason
+        /// exactly, and here the reason is sharper than it is there: a new
+        /// `HostMessage` tag does not merely go unread on an older peer, it
+        /// **kills the connection**, because `DaemonClient::recv` maps a frame
+        /// it cannot decode to `DaemonError::Transport`. An old daemon ignores
+        /// this flag and sends no offer; a new daemon sends none to a client
+        /// that did not ask. Both degrade to exactly today's behaviour.
+        #[serde(default)]
+        watch_hosts: bool,
     },
     /// The client's proof, answering [`HostMessage::Challenge`].
     ///
@@ -302,6 +319,23 @@ pub enum HostMessage {
         /// each may adopt the other's shell. Absent on listings and pushes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         created: Option<SessionId>,
+        /// What this machine can offer: its facts, and its own profiles.
+        ///
+        /// Sent only to connections that asked (`Hello.watch_hosts`), and only
+        /// when there is something new to say — `Some` on the first reply and
+        /// again whenever the host's config reloads, `None` on every ordinary
+        /// session push. `None` is therefore "nothing new", which is also
+        /// exactly what a daemon predating this field sends, so one reading
+        /// serves both.
+        ///
+        /// **On `Sessions` rather than a message of its own**, and that is the
+        /// honest cost of the no-new-tag rule rather than a natural fit — see
+        /// docs/CONTRACTS.md. It is less arbitrary than it first looks:
+        /// `Sessions` is already "what this host has to offer you", already
+        /// both the `ListSessions` reply and the watch push, and already what a
+        /// client re-reads on every reconnect.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offer: Option<HostOffer>,
     },
     /// How [`ClientMessage::Enroll`] went.
     ///
@@ -402,6 +436,86 @@ pub struct SessionInfo {
     pub attached: bool,
 }
 
+/// What a machine can offer a client: what it *is*, and what it can launch.
+///
+/// Answers two questions the protocol could not ask before (#262): the fleet
+/// card's `os` row, and the `+` launcher's "what can I run on that machine".
+/// Both were structurally unanswerable — `Welcome { host, label }` was the
+/// entire description of a machine a client ever received.
+///
+/// Facts, deliberately, and not a capability matrix. Nothing here is matched
+/// on to decide whether a feature is available; it is rendered, and a client
+/// that meets an empty string shows one row fewer.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct HostOffer {
+    /// `std::env::consts::OS` — `windows`, `macos`, `linux`.
+    ///
+    /// `#[serde(default)]` like every other field here, and the reason is the
+    /// same one that made this a field rather than a new message: a required
+    /// field a future peer omits does not fail *softly*. Decoding the whole
+    /// `Sessions` message fails, and `DaemonClient::recv` maps that to a
+    /// transport error, which ends the connection — so one absent string would
+    /// cost a client its session list too.
+    #[serde(default)]
+    pub os: String,
+    /// `std::env::consts::ARCH` — `x86_64`, `aarch64`.
+    #[serde(default)]
+    pub arch: String,
+    /// The OS as the machine names itself — `Darwin 24.5.0`,
+    /// `Linux 6.8.0-31-generic` — best effort.
+    ///
+    /// Carries the kernel's *name* as well as its release, because this is the
+    /// only place that name reaches a client: [`Self::os`] is
+    /// `std::env::consts::OS`, which says `macos` where design §7's card says
+    /// `Darwin`.
+    ///
+    /// Empty when unknown, never a placeholder: those cards show only what is
+    /// actually known, and a dash pretending to be a fact is the thing that
+    /// rule exists to prevent.
+    #[serde(default)]
+    pub os_version: String,
+    /// What a session with an empty `CreateSession.command` will run.
+    ///
+    /// So a launcher row for a remote profile with no command of its own can
+    /// say what it will start, instead of showing this machine's shell for a
+    /// session that will run the far one's.
+    #[serde(default)]
+    pub default_shell: String,
+    /// This machine's own launch targets, resolved through its own Defaults.
+    #[serde(default)]
+    pub profiles: Vec<HostProfile>,
+}
+
+/// One launch target a machine publishes.
+///
+/// The launcher-facing half of `zest_config::profiles::ProfileMeta`, and
+/// notably **not** its `host` or `ask_host` fields: a profile published by a
+/// machine is pinned to that machine by construction, and re-sending a `host`
+/// key invites a client to resolve a label against its own fleet and send the
+/// launch somewhere else entirely.
+///
+/// Values arrive already folded through that host's `profiles.defaults`, so a
+/// client renders and launches what it was told rather than re-running a
+/// cascade over a config it does not have.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct HostProfile {
+    pub name: String,
+    /// Empty means this host's default shell — the same convention
+    /// `CreateSession.command` uses, so a launch can pass it straight through.
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub starting_directory: String,
+    #[serde(default)]
+    pub icon: String,
+    #[serde(default)]
+    pub color_scheme: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_color: Option<u8>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ProtoError {
     #[error("protocol version {theirs} is not compatible with {ours}")]
@@ -436,10 +550,78 @@ mod tests {
             dh: Pub32::from_bytes([6; 32]),
             watch_sessions: false,
             watch_pairings: false,
+            watch_hosts: false,
         };
         let json = serde_json::to_string(&msg).expect("serialize");
         let back: ClientMessage = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn a_peer_that_predates_the_host_offer_decodes_on_both_sides() {
+        // #262 added one field to each enum, and the whole justification for
+        // that shape over a new variant rests on this test. A new tag would
+        // not merely go unread on an older peer: `DaemonClient::recv` maps an
+        // undecodable `HostMessage` to a transport error, which tears the
+        // connection down. So both directions must parse.
+
+        // A client built before `watch_hosts`: the daemon must read it as an
+        // ordinary unsubscribed connection, not refuse the message.
+        let json = r#"{"t":"hello","version":3,
+            "client":"0101010101010101010101010101010101010101010101010101010101010101",
+            "label":"old","nonce":"0404040404040404040404040404040404040404040404040404040404040404",
+            "dh":"0606060606060606060606060606060606060606060606060606060606060606",
+            "watch_sessions":true,"watch_pairings":false}"#;
+        let parsed: ClientMessage = serde_json::from_str(json).expect("a pre-#262 Hello decodes");
+        assert!(
+            matches!(parsed, ClientMessage::Hello { watch_hosts: false, watch_sessions: true, .. }),
+            "the absent field is 'did not subscribe', and the rest still reads"
+        );
+
+        // A daemon built before `offer`: the client must read its listing.
+        let json = r#"{"t":"sessions","sessions":[]}"#;
+        let parsed: HostMessage = serde_json::from_str(json).expect("a pre-#262 Sessions decodes");
+        assert!(
+            matches!(parsed, HostMessage::Sessions { offer: None, created: None, .. }),
+            "no offer means 'nothing new to say' — the same branch a current daemon takes \
+             on an ordinary session push, so the client needs one reading and not two"
+        );
+    }
+
+    #[test]
+    fn an_absent_offer_is_absent_on_the_wire_rather_than_a_null() {
+        // `skip_serializing_if` is what keeps the common case free: every
+        // ordinary session push carries no offer, and a machine with tabs open
+        // on it sends a great many of those.
+        let msg = HostMessage::Sessions { sessions: Vec::new(), created: None, offer: None };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(!json.contains("offer"), "an absent offer costs no bytes: {json}");
+
+        let msg = HostMessage::Sessions {
+            sessions: Vec::new(),
+            created: None,
+            offer: Some(HostOffer { os: "linux".into(), ..Default::default() }),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let back: HostMessage = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(msg, back, "and a present one round-trips");
+    }
+
+    #[test]
+    fn a_published_profile_names_no_host_of_its_own() {
+        // Structural, not a convention: a profile published by a machine is
+        // pinned to that machine by construction. A `host` field here would
+        // invite a client to resolve a label against its *own* fleet and send
+        // the launch somewhere else entirely — the one way this feature could
+        // run a command on the wrong computer.
+        let json = serde_json::to_string(&HostProfile {
+            name: "ubuntu".into(),
+            command: "wsl.exe -d Ubuntu".into(),
+            ..Default::default()
+        })
+        .expect("serialize");
+        assert!(!json.contains("\"host\""), "no host key travels with a profile: {json}");
+        assert!(!json.contains("ask_host"), "nor an ask_host: {json}");
     }
 
     #[test]
@@ -541,6 +723,7 @@ mod tests {
             dh: Pub32::default(),
             watch_sessions: false,
             watch_pairings: false,
+            watch_hosts: false,
         };
         let ClientMessage::Hello { nonce, dh, .. } = msg else { panic!("expected Hello") };
         assert!(nonce.is_absent());

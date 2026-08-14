@@ -158,6 +158,16 @@ pub struct FleetHost {
     /// enrolment is the spine, discovery decorates) — an enrolled host stays
     /// in the listing when mDNS has never heard of it.
     pub enrolled: bool,
+    /// What this machine says it can offer: its os, its arch, its default
+    /// shell, and its own profiles (#262). `None` for a host nothing has
+    /// connected to yet, and for one whose daemon predates the field — which
+    /// read the same way on purpose, since neither has told us anything.
+    #[allow(
+        dead_code,
+        reason = "the launcher's host groups and the fleet card's os row read this; \
+                  landed here first so the wire change ships whole (#249)"
+    )]
+    pub offer: Option<zest_proto::HostOffer>,
     /// The relay had proof of a parked control link when the listing was
     /// fetched — so this machine is reachable through the tunnel even when
     /// nothing on this network has ever heard of it.
@@ -215,6 +225,11 @@ struct State {
     /// than expected from discovery.
     local: Option<(HostId, String)>,
     sessions: HashMap<HostId, SessionsState>,
+    /// What each host said it can offer — its facts and its own profiles
+    /// (#262). Sticky on purpose: an absent `offer` on a session push means
+    /// "nothing new to say", so a host keeps its last answer until it sends a
+    /// different one or the watcher drops it.
+    offers: HashMap<HostId, zest_proto::HostOffer>,
     /// Last successful probe's round trip per host, milliseconds. The probe
     /// was already paying for this connect; keeping the elapsed time is what
     /// turns "LAN direct" into "LAN direct 0.4 ms".
@@ -446,14 +461,25 @@ impl FleetModel {
             // connection, and the approval modal is its second tenant. On a
             // remote daemon the flag is silently not honoured, which is the
             // right degradation — that machine's approvals are not ours.
-            zest_daemon::client::Watch { sessions: true, pairings: true },
+            //
+            // Hosts too (#262): what this machine can offer — its facts and
+            // its own profiles. Honoured on every transport, unlike pairings,
+            // because reading a machine's launch targets is the whole point.
+            zest_daemon::client::Watch { sessions: true, pairings: true, hosts: true },
         )?;
         let host = client.host();
 
-        let sessions = client.list()?;
+        // `list_with_offer`, not `list`: the first offer rides this very
+        // reply, and the daemon marks it sent on the way out — dropping it
+        // here would leave the launcher waiting for a generation bump that
+        // only a config edit on the far machine can produce.
+        let (sessions, offer) = client.list_with_offer()?;
         {
             let mut state = inner.state.lock();
             state.sessions.insert(host, SessionsState::Fresh(sessions));
+            if let Some(offer) = offer {
+                state.offers.insert(host, offer);
+            }
         }
         inner.mark_changed();
 
@@ -461,9 +487,16 @@ impl FleetModel {
         // current truth for this host.
         loop {
             match client.next_message()? {
-                zest_proto::HostMessage::Sessions { sessions, .. } => {
+                zest_proto::HostMessage::Sessions { sessions, offer, .. } => {
                     let mut state = inner.state.lock();
                     state.sessions.insert(host, SessionsState::Fresh(sessions));
+                    // Absent means "nothing new to say", never "it has none":
+                    // an ordinary session push carries no offer, and clearing
+                    // on one would blank the launcher's rows every time
+                    // somebody opened a shell.
+                    if let Some(offer) = offer {
+                        state.offers.insert(host, offer);
+                    }
                     drop(state);
                     inner.mark_changed();
                 }
@@ -516,6 +549,7 @@ impl FleetModel {
                 reachability: Some(zest_mesh::Reachability::Loopback),
                 rtt_ms: state.rtt.get(host).copied(),
                 sessions: state.sessions.get(host).cloned().unwrap_or_default(),
+                offer: state.offers.get(host).cloned(),
                 enrolled: false,
                 // Discovery's rows carry no account fact; `merge_account`
                 // is what lays one over them.
@@ -544,6 +578,7 @@ impl FleetModel {
                         .get(&record.peer.host)
                         .cloned()
                         .unwrap_or_default(),
+                    offer: state.offers.get(&record.peer.host).cloned(),
                     enrolled: false,
                     relay_online: false,
                 });
@@ -646,6 +681,10 @@ fn merge_account(out: &mut Vec<FleetHost>, account: Option<&[AccountEntry]>) {
                 reachability: Some(zest_mesh::Reachability::Cloud),
                 rtt_ms: None,
                 sessions: SessionsState::default(),
+                // Nothing has connected to this machine, so it has told us
+                // nothing — the same `None` a daemon predating the field
+                // produces, and read the same way.
+                offer: None,
                 enrolled: true,
                 relay_online: entry.relay_online,
             });
@@ -728,6 +767,7 @@ mod tests {
             reachability: Some(zest_mesh::Reachability::Lan),
             rtt_ms: Some(0.4),
             sessions: SessionsState::default(),
+            offer: None,
             enrolled: false,
             relay_online: false,
         }

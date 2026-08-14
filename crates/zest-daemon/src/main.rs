@@ -449,6 +449,12 @@ fn main() {
             http: Arc::new(enroll::HttpsControlPlane::new(Roots::Platform)),
             secrets: Arc::clone(&store) as Arc<dyn zest_mesh::keystore::SecretStore>,
         }),
+        // What this machine tells clients it can offer (#262). Built from its
+        // own config here rather than lazily per connection, so the read and
+        // the `uname` happen once at start instead of on a serve loop.
+        offer: Some(zest_daemon::offer::OfferSource::from_config(
+            zest_pty::CommandSpec::default_shell().command_line,
+        )),
     };
 
     tracing::info!(
@@ -464,6 +470,37 @@ fn main() {
     if let Some(sync) = attest {
         sync.spawn(Arc::clone(&file_trust), Arc::clone(&queue));
     }
+
+    // Keep the offer honest while the daemon runs (#262). Editing a profile on
+    // *this* machine has to reach the launcher on every other one — without
+    // this the offer is whatever the config said at start, and a machine that
+    // has been up for a week publishes a week-old profile list.
+    //
+    // The `Watcher` is held for the process's life on purpose: dropping it
+    // stops the watching, and a `let _ =` here would arm a reload that fires
+    // exactly never.
+    let _config_watch = config.offer.as_ref().and_then(|source| {
+        let path = zest_config::paths::config_file().or_else(|| {
+            zest_config::paths::config_dir().map(|d| d.join(zest_config::paths::CONFIG_FILE))
+        })?;
+        let source = source.clone();
+        // `Watcher` already debounces, and `OfferSource::set` drops a reload
+        // that changed nothing — so a save that touches an unrelated setting
+        // costs one file read here and no wire traffic at all.
+        match zest_config::watch::Watcher::new(&path, move || {
+            if source.reload(zest_pty::CommandSpec::default_shell().command_line) {
+                tracing::info!("config changed; publishing an updated offer");
+            }
+        }) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                // Not fatal: the daemon serves fine with a stale offer, and a
+                // machine without an inotify budget should still have shells.
+                tracing::warn!(error = %e, "cannot watch the config; the offer will not refresh");
+                None
+            }
+        }
+    });
 
     // Someone has to be able to say yes. Without an approver, an unknown client
     // waits two minutes and is denied -- correct, and useless if there is

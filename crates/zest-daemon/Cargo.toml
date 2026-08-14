@@ -22,6 +22,13 @@ zest-core.workspace = true
 zest-pty.workspace = true
 zest-proto.workspace = true
 zest-mesh.workspace = true
+# This machine's own profiles, so it can publish them (#262). The daemon
+# deliberately had no settings reader until now — `DaemonConfig::shell_integration`
+# records the trade as "neither is worth doing before someone needs the switch" —
+# and a machine that cannot read its own profiles cannot offer them to a launcher
+# on another machine. `check-deps` guards `zest-core`, not this crate, so the
+# wasm fence is untouched.
+zest-config.workspace = true
 # The workspace's one owner of TLS and HTTP, and the first crate to depend on
 # it — `--enroll` posts through it. rustls therefore reaches this binary and,
 # through it, `zest-app`, which is what #68's boundary says should happen: TLS

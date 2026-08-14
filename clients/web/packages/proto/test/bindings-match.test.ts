@@ -19,6 +19,8 @@
 import { test } from 'node:test';
 
 import type { AttrDef as GenAttrDef } from '@zest/bindings/AttrDef';
+import type { HostOffer as GenHostOffer } from '@zest/bindings/HostOffer';
+import type { HostProfile as GenHostProfile } from '@zest/bindings/HostProfile';
 import type { CellMarks as GenCellMarks } from '@zest/bindings/CellMarks';
 import type { CursorState as GenCursorState } from '@zest/bindings/CursorState';
 import type { DeltaOp as GenDeltaOp } from '@zest/bindings/DeltaOp';
@@ -26,7 +28,17 @@ import type { Delta as GenDelta } from '@zest/bindings/Delta';
 import type { RowPayload as GenRowPayload } from '@zest/bindings/RowPayload';
 import type { Run as GenRun } from '@zest/bindings/Run';
 
-import type { AttrDef, CellMarks, CursorState, Delta, DeltaOp, RowPayload, Run } from '../src/wire.ts';
+import type {
+  AttrDef,
+  CellMarks,
+  CursorState,
+  Delta,
+  DeltaOp,
+  HostOffer,
+  HostProfile,
+  RowPayload,
+  Run,
+} from '../src/wire.ts';
 
 /** Compiles only if `Generated` is assignable to `Ours`. */
 type Accepts<Generated extends Ours, Ours> = true;
@@ -34,6 +46,19 @@ type Accepts<Generated extends Ours, Ours> = true;
 // Exact, no exclusions needed.
 type _Marks = Accepts<GenCellMarks, CellMarks>;
 type _Cursor = Accepts<GenCursorState, CursorState>;
+
+/**
+ * The host offer (#262) is exact in both directions, and it is worth saying
+ * why it needs no exclusion when so much else here does.
+ *
+ * Every field but `HostProfile.name` is `#[serde(default)]`, so an older peer
+ * may omit any of them — but `ts-rs` types them as required, which is the
+ * *decoded* shape rather than the wire one, and that is exactly what `wire.ts`
+ * produces: the parser substitutes `''`, `[]` or `null` for an absent key. The
+ * two agree because the parser does the work, not because the wire is strict.
+ */
+type _HostProfile = Accepts<GenHostProfile, HostProfile>;
+type _HostOffer = Accepts<GenHostOffer, HostOffer>;
 
 /**
  * `Run.marks` is excluded, and this is the reason.

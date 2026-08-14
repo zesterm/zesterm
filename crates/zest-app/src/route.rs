@@ -198,6 +198,9 @@ mod tests {
             reachability: None,
             rtt_ms: None,
             sessions: crate::fleet::SessionsState::Unknown,
+            // Routing reads reachability and enrolment; what a host can offer
+            // says nothing about how to get there.
+            offer: None,
             enrolled,
             relay_online: false,
         }

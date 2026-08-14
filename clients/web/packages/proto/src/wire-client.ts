@@ -47,6 +47,13 @@ export type ClientMessage =
        * host's, which always writes the field.
        */
       readonly watch_pairings: boolean;
+      /**
+       * Ask what this machine can offer — its facts and its own profiles —
+       * and to be told when that changes (#262). Honoured on every transport,
+       * unlike `watch_pairings`: reading a machine's launch targets from
+       * somewhere else is the whole point.
+       */
+      readonly watch_hosts: boolean;
     }
   | {
       readonly t: 'auth';
@@ -137,6 +144,7 @@ export function encodeClientMessageBody(msg: ClientMessage): Uint8Array {
         dh: msg.dh,
         watch_sessions: msg.watch_sessions,
         watch_pairings: msg.watch_pairings,
+        watch_hosts: msg.watch_hosts,
       };
       break;
     case 'auth':

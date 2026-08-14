@@ -6,6 +6,7 @@ import type { ClientId } from "./ClientId";
 import type { CursorState } from "./CursorState";
 import type { Delta } from "./Delta";
 import type { HostId } from "./HostId";
+import type { HostOffer } from "./HostOffer";
 import type { Nonce32 } from "./Nonce32";
 import type { Pub32 } from "./Pub32";
 import type { RowPayload } from "./RowPayload";
@@ -43,7 +44,25 @@ expires_in_secs: number, resolved: boolean, } | { "t": "sessions", sessions: Arr
  * wrong the moment two clients create on one host concurrently —
  * each may adopt the other's shell. Absent on listings and pushes.
  */
-created: SessionId | null, } | { "t": "enroll_result", ok: boolean, account: string | null, message: string, } | { "t": "keyframe", session: SessionAddr, seq: Seq, cols: number, rows: number, rows_data: Array<RowPayload>, attrs: Array<AttrDef>, cursor: CursorState, 
+created: SessionId | null, 
+/**
+ * What this machine can offer: its facts, and its own profiles.
+ *
+ * Sent only to connections that asked (`Hello.watch_hosts`), and only
+ * when there is something new to say — `Some` on the first reply and
+ * again whenever the host's config reloads, `None` on every ordinary
+ * session push. `None` is therefore "nothing new", which is also
+ * exactly what a daemon predating this field sends, so one reading
+ * serves both.
+ *
+ * **On `Sessions` rather than a message of its own**, and that is the
+ * honest cost of the no-new-tag rule rather than a natural fit — see
+ * docs/CONTRACTS.md. It is less arbitrary than it first looks:
+ * `Sessions` is already "what this host has to offer you", already
+ * both the `ListSessions` reply and the watch push, and already what a
+ * client re-reads on every reconnect.
+ */
+offer: HostOffer | null, } | { "t": "enroll_result", ok: boolean, account: string | null, message: string, } | { "t": "keyframe", session: SessionAddr, seq: Seq, cols: number, rows: number, rows_data: Array<RowPayload>, attrs: Array<AttrDef>, cursor: CursorState, 
 /**
  * `zest_core::Modes::bits()`. See [`DeltaOp::Modes`].
  *

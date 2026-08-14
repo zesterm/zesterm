@@ -355,6 +355,19 @@ pub struct Connection {
     waker: Option<Arc<dyn Fn() + Send + Sync>>,
     /// This client asked (`Hello.watch_sessions`) to hear listing changes.
     watch_sessions: bool,
+    /// This client asked (`Hello.watch_hosts`) what this machine offers, and
+    /// to be told when that changes (#262).
+    watch_hosts: bool,
+    /// The offer generation this connection last told its client about. `0`
+    /// means "has never sent one", and `OfferSource` starts at 1, so a
+    /// subscriber's very first `Sessions` carries the offer without needing a
+    /// separate "send it once" flag.
+    seen_offer_generation: u64,
+    /// Registration in [`crate::offer::OfferSource::watch`], for `Drop` to
+    /// release. Without it a config edit moves the generation and then waits
+    /// for an unrelated event to carry it — the serve loop blocks until
+    /// something wakes it.
+    offer_watch_token: Option<u64>,
     /// Registration in [`Registry::watch`], for `Drop` to release.
     watch_token: Option<u64>,
     /// The registry generation this connection last told its client about.
@@ -401,6 +414,11 @@ impl Drop for Connection {
         if let Some(token) = self.pairing_watch_token.take() {
             self.auth.authenticator().queue().unwatch(token);
         }
+        if let Some(token) = self.offer_watch_token.take() {
+            if let Some(source) = self.config.offer.as_ref() {
+                source.unwatch(token);
+            }
+        }
         let had_subscriptions = !self.attached.is_empty();
         for (&id, &handle) in &self.attached {
             if let Some(s) = self.registry.get(SessionId(id)) {
@@ -446,6 +464,9 @@ impl Connection {
             on_pending: None,
             waker: None,
             watch_sessions: false,
+            watch_hosts: false,
+            seen_offer_generation: 0,
+            offer_watch_token: None,
             watch_token: None,
             seen_generation: 0,
             watch_pairings: false,
@@ -539,6 +560,34 @@ impl Connection {
         Ok(out)
     }
 
+    /// This machine's offer, if this connection asked for it and has not
+    /// already been told this version of it (#262).
+    ///
+    /// Three ways to get `None`, and they are deliberately one branch on the
+    /// client: this connection did not set `Hello.watch_hosts`, this daemon
+    /// publishes no offer at all (`DaemonConfig::offer` is `None`), or nothing
+    /// has changed since the last time. A client that predates the field, and
+    /// a daemon that does, both land here too — so "no offer on this message"
+    /// has exactly one meaning everywhere: *nothing new to say*.
+    ///
+    /// Marks as sent on the way out. That is a side effect in a getter, which
+    /// buys the honesty of the alternative: every caller pushes the message it
+    /// returns into `out`, and a separate "now mark it" call is a line one of
+    /// the three would eventually forget — resending the whole profile list on
+    /// every session poll.
+    fn offer_if_new(&mut self) -> Option<zest_proto::HostOffer> {
+        if !self.watch_hosts {
+            return None;
+        }
+        let source = self.config.offer.as_ref()?;
+        let generation = source.generation();
+        if generation == self.seen_offer_generation {
+            return None;
+        }
+        self.seen_offer_generation = generation;
+        Some(source.snapshot())
+    }
+
     /// Anything the attached sessions have produced since the last call.
     pub fn poll(&mut self) -> Vec<HostMessage> {
         self.poll_with(true)
@@ -566,6 +615,20 @@ impl Connection {
                 out.push(HostMessage::Sessions {
                     sessions: self.registry.list(self.config.host),
                     created: None,
+                    offer: self.offer_if_new(),
+                });
+            }
+        }
+        // An offer that changed with no session change of its own still has to
+        // reach a subscriber — a config edit moves the profile list and moves
+        // nothing in the registry, and without this the far launcher would show
+        // the old rows until somebody happened to open a shell.
+        if self.watch_hosts && matches!(self.gate, Gate::Served) {
+            if let Some(offer) = self.offer_if_new() {
+                out.push(HostMessage::Sessions {
+                    sessions: self.registry.list(self.config.host),
+                    created: None,
+                    offer: Some(offer),
                 });
             }
         }
@@ -751,9 +814,11 @@ impl Connection {
                 dh,
                 watch_sessions,
                 watch_pairings,
+                watch_hosts,
             } => {
                 self.watch_sessions = watch_sessions;
                 self.watch_pairings = watch_pairings;
+                self.watch_hosts = watch_hosts;
                 let Some(h) = self.handshake_mut() else {
                     return vec![HostMessage::Error {
                         session: None,
@@ -1000,6 +1065,7 @@ impl Connection {
                 vec![HostMessage::Sessions {
                     sessions: self.registry.list(self.config.host),
                     created: None,
+                    offer: self.offer_if_new(),
                 }]
             }
 
@@ -1025,6 +1091,7 @@ impl Connection {
                             // heuristic, and it hands one of two concurrent
                             // creators the other one's shell.
                             created: Some(created.id),
+                            offer: self.offer_if_new(),
                         }]
                     }
                     Err(e) => vec![HostMessage::Error {
@@ -1222,6 +1289,15 @@ impl Connection {
             self.seen_generation = self.registry.generation();
             if let Some(waker) = self.waker.clone() {
                 self.watch_token = Some(self.registry.watch(waker));
+            }
+        }
+        // The offer subscription. Unlike sessions, `seen_offer_generation` is
+        // deliberately *not* snapped to current: a subscriber's first message
+        // must carry the offer, or a launcher sees this machine's profiles
+        // only after somebody edits them.
+        if self.watch_hosts && self.offer_watch_token.is_none() {
+            if let (Some(source), Some(waker)) = (self.config.offer.clone(), self.waker.clone()) {
+                self.offer_watch_token = Some(source.watch(waker));
             }
         }
         // The approval-modal subscription, gated by the transport: only a
@@ -1688,16 +1764,17 @@ mod tests {
     fn authenticate_with(c: &mut Connection, watch_sessions: bool) -> Peer {
         let client =
             std::sync::Arc::new(zest_mesh::identity::ClientIdentity::generate().expect("client key"));
-        authenticate_identity(c, &client, watch_sessions, false)
+        authenticate_identity(c, &client, watch_sessions, false, false)
     }
 
     /// The full handshake for a caller that needs to pick the identity (to
-    /// pre-trust it) or to watch the approval queue.
+    /// pre-trust it) or to watch the approval queue or the host's offer.
     fn authenticate_identity(
         c: &mut Connection,
         client: &std::sync::Arc<zest_mesh::identity::ClientIdentity>,
         watch_sessions: bool,
         watch_pairings: bool,
+        watch_hosts: bool,
     ) -> Peer {
         let client = std::sync::Arc::clone(client);
         // The shared client handshake, not a hand-rolled one: a test peer that
@@ -1719,6 +1796,7 @@ mod tests {
                 dh: zest_proto::Pub32::from_bytes(hs.dh().0),
                 watch_sessions,
                 watch_pairings,
+                watch_hosts,
             },
         );
         let [HostMessage::Challenge { nonce, host, label, version, dh, signature }] = &out[..]
@@ -1768,6 +1846,7 @@ mod tests {
             shell_integration: true,
             min_delta_interval: Duration::ZERO,
             enroll: None,
+            offer: None,
         }
     }
 
@@ -1843,7 +1922,7 @@ mod tests {
         let identity = std::sync::Arc::new(
             zest_mesh::identity::ClientIdentity::generate().expect("client key"),
         );
-        let mut peer = authenticate_identity(&mut watcher, &identity, false, true);
+        let mut peer = authenticate_identity(&mut watcher, &identity, false, true, false);
 
         let pushed = watcher.poll();
         let [HostMessage::PairingRequested {
@@ -2103,7 +2182,7 @@ mod tests {
             crate::auth::Auth::Proof(auth),
             "192.168.1.9:50000",
         );
-        let mut peer = authenticate_identity(&mut lan, &identity, false, false);
+        let mut peer = authenticate_identity(&mut lan, &identity, false, false, false);
         let out = peer.send(&mut lan, &ClientMessage::Enroll { code: "GOLDCODE".into() });
         let [HostMessage::Error { message, .. }] = &out[..] else {
             panic!("a remote Enroll must be refused with an Error, got {out:?}");
@@ -2111,6 +2190,221 @@ mod tests {
         assert!(
             message.contains("local"),
             "the refusal names the rule, not a mechanism: {message}"
+        );
+    }
+
+    /// A connection on a daemon that publishes `offer`.
+    fn conn_offering(offer: zest_proto::HostOffer) -> (Connection, crate::offer::OfferSource) {
+        let source = crate::offer::OfferSource::new(offer);
+        let mut cfg = config();
+        cfg.offer = Some(source.clone());
+        (
+            Connection::new(
+                cfg,
+                Arc::new(Registry::new()),
+                crate::auth::Auth::Transport(test_authenticator()),
+                "test",
+            ),
+            source,
+        )
+    }
+
+    fn offer_with(profiles: &[&str]) -> zest_proto::HostOffer {
+        zest_proto::HostOffer {
+            os: "macos".into(),
+            arch: "aarch64".into(),
+            os_version: "24.5.0".into(),
+            default_shell: "zsh -l".into(),
+            profiles: profiles
+                .iter()
+                .map(|n| zest_proto::HostProfile {
+                    name: (*n).to_string(),
+                    command: format!("run-{n}"),
+                    ..Default::default()
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_subscriber_is_told_what_this_machine_offers_and_a_non_subscriber_is_not() {
+        // The whole point of #262: a launcher on another machine can only
+        // list this one's profiles if this one says what they are.
+        let (mut c, _source) = conn_offering(offer_with(&["ubuntu", "pwsh"]));
+        let mut peer = authenticate_identity(
+            &mut c,
+            &Arc::new(zest_mesh::identity::ClientIdentity::generate().expect("key")),
+            false,
+            false,
+            true,
+        );
+        let out = peer.send(&mut c, &ClientMessage::ListSessions);
+        let [HostMessage::Sessions { offer: Some(offer), .. }] = &out[..] else {
+            panic!("a watch_hosts listing must carry the offer, got {out:?}");
+        };
+        assert_eq!(offer.os, "macos");
+        assert_eq!(offer.default_shell, "zsh -l", "so a remote row can say what it will run");
+        let names: Vec<&str> = offer.profiles.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["ubuntu", "pwsh"]);
+
+        // And a client that did not ask gets nothing — the profile list is not
+        // free, and a connection attaching to one session should not carry it.
+        let (mut quiet, _source) = conn_offering(offer_with(&["ubuntu"]));
+        let mut peer = authenticate(&mut quiet);
+        let out = peer.send(&mut quiet, &ClientMessage::ListSessions);
+        assert!(
+            matches!(&out[..], [HostMessage::Sessions { offer: None, .. }]),
+            "no subscription, no offer: {out:?}"
+        );
+    }
+
+    #[test]
+    fn the_offer_is_sent_once_and_again_only_when_it_changes() {
+        // The generation diff, and the reason it is not an optimisation: a
+        // session listing is polled constantly, and re-sending every profile
+        // on this machine with each one would put the whole config on the wire
+        // per keystroke.
+        let (mut c, source) = conn_offering(offer_with(&["ubuntu"]));
+        let mut peer = authenticate_identity(
+            &mut c,
+            &Arc::new(zest_mesh::identity::ClientIdentity::generate().expect("key")),
+            false,
+            false,
+            true,
+        );
+        let first = peer.send(&mut c, &ClientMessage::ListSessions);
+        assert!(matches!(&first[..], [HostMessage::Sessions { offer: Some(_), .. }]));
+
+        let second = peer.send(&mut c, &ClientMessage::ListSessions);
+        assert!(
+            matches!(&second[..], [HostMessage::Sessions { offer: None, .. }]),
+            "nothing changed, so nothing is repeated: {second:?}"
+        );
+
+        // A config edit on this machine moves the generation, and the very
+        // next message carries the new list — without this, a profile written
+        // on the far machine is invisible until something restarts.
+        assert!(source.set(offer_with(&["ubuntu", "nightly"])), "a different offer is a change");
+        let third = peer.send(&mut c, &ClientMessage::ListSessions);
+        let [HostMessage::Sessions { offer: Some(offer), .. }] = &third[..] else {
+            panic!("a changed offer must be re-sent, got {third:?}");
+        };
+        assert_eq!(offer.profiles.len(), 2);
+    }
+
+    #[test]
+    fn a_config_edit_reaches_a_watcher_that_asked_nothing_else() {
+        // The push that has no session change behind it. A config edit moves
+        // the profile list and moves nothing in the registry, so without its
+        // own branch in `poll_with` the far launcher would show the old rows
+        // until somebody happened to open a shell.
+        let (mut c, source) = conn_offering(offer_with(&["ubuntu"]));
+        let mut peer = authenticate_identity(
+            &mut c,
+            &Arc::new(zest_mesh::identity::ClientIdentity::generate().expect("key")),
+            false,
+            false,
+            true,
+        );
+        // Drain the first offer, so what follows is only what the edit caused.
+        let _ = peer.send(&mut c, &ClientMessage::ListSessions);
+        assert!(
+            c.poll().iter().all(|m| !matches!(m, HostMessage::Sessions { .. })),
+            "a quiet daemon pushes nothing"
+        );
+
+        source.set(offer_with(&["ubuntu", "nightly"]));
+        let pushed = c.poll();
+        let [HostMessage::Sessions { offer: Some(offer), .. }] = &pushed[..] else {
+            panic!("the edit must reach the watcher unprompted, got {pushed:?}");
+        };
+        assert_eq!(offer.profiles.len(), 2);
+    }
+
+    #[test]
+    fn a_config_edit_wakes_the_serve_loop_and_not_only_the_generation() {
+        // The half `a_config_edit_reaches_a_watcher_that_asked_nothing_else`
+        // cannot see, and the one that was missing: that test calls `poll`
+        // itself, so it passes whether or not anything would have *caused* a
+        // poll. The real serve loop blocks until something wakes it, so an
+        // offer change that bumps the generation and wakes nobody waits for an
+        // unrelated event to carry it — a machine with an idle session
+        // publishes its new profile list at the next keystroke, and one with
+        // no sessions at all may never publish it at all.
+        let (mut c, source) = conn_offering(offer_with(&["ubuntu"]));
+        let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let woken = Arc::clone(&woken);
+            c.set_waker(Box::new(move || {
+                woken.store(true, std::sync::atomic::Ordering::Release);
+            }));
+        }
+        let _peer = authenticate_identity(
+            &mut c,
+            &Arc::new(zest_mesh::identity::ClientIdentity::generate().expect("key")),
+            false,
+            false,
+            true,
+        );
+        woken.store(false, std::sync::atomic::Ordering::Release);
+
+        assert!(
+            !source.set(offer_with(&["ubuntu"])),
+            "precondition: an identical offer is not a change"
+        );
+        assert!(
+            !woken.load(std::sync::atomic::Ordering::Acquire),
+            "and must not wake anyone — a file watcher fires several times per save"
+        );
+
+        assert!(source.set(offer_with(&["ubuntu", "nightly"])), "a different offer is a change");
+        assert!(
+            woken.load(std::sync::atomic::Ordering::Acquire),
+            "a real edit must wake the connection, or the push waits for unrelated traffic"
+        );
+    }
+
+    #[test]
+    fn a_connection_that_did_not_subscribe_is_never_woken_by_an_offer() {
+        // The subscription is what registers the waker, so an attach-only
+        // connection must not be woken by somebody editing a config it will
+        // never be told about.
+        let (mut c, source) = conn_offering(offer_with(&["ubuntu"]));
+        let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let woken = Arc::clone(&woken);
+            c.set_waker(Box::new(move || {
+                woken.store(true, std::sync::atomic::Ordering::Release);
+            }));
+        }
+        let _peer = authenticate(&mut c);
+        woken.store(false, std::sync::atomic::Ordering::Release);
+
+        assert!(source.set(offer_with(&["ubuntu", "nightly"])));
+        assert!(
+            !woken.load(std::sync::atomic::Ordering::Acquire),
+            "no subscription, no wakeup"
+        );
+    }
+
+    #[test]
+    fn a_daemon_that_publishes_nothing_reads_like_one_that_predates_the_field() {
+        // Three ways to get `offer: None` — did not subscribe, daemon
+        // publishes none, nothing changed — and the client must not need to
+        // tell them apart. `config()` carries no offer, which is both the test
+        // harness and an older daemon.
+        let (mut c, _registry) = conn();
+        let mut peer = authenticate_identity(
+            &mut c,
+            &Arc::new(zest_mesh::identity::ClientIdentity::generate().expect("key")),
+            false,
+            false,
+            true,
+        );
+        let out = peer.send(&mut c, &ClientMessage::ListSessions);
+        assert!(
+            matches!(&out[..], [HostMessage::Sessions { offer: None, .. }]),
+            "subscribed to a daemon with nothing to say: {out:?}"
         );
     }
 
@@ -2154,7 +2448,7 @@ mod tests {
             crate::auth::Auth::Proof(Arc::clone(&auth)),
             "192.168.1.9:50000",
         );
-        let _peer = authenticate_identity(&mut lan, &identity, false, true);
+        let _peer = authenticate_identity(&mut lan, &identity, false, true, false);
 
         let (_handle, _decided) = pending_request(&auth, ClientId::from_bytes([0xd1; 32]));
         let pushed = lan.poll();
@@ -2201,7 +2495,7 @@ mod tests {
 
         // The creator's reply names its session outright — the `.last()`
         // heuristic hands one of two concurrent creators the other's shell.
-        let [HostMessage::Sessions { sessions, created: Some(id) }] = &out[..] else {
+        let [HostMessage::Sessions { sessions, created: Some(id), .. }] = &out[..] else {
             panic!("expected a Sessions reply naming the created session, got {out:?}");
         };
         assert_eq!(sessions.last().map(|s| s.addr.session), Some(*id));
@@ -2213,7 +2507,7 @@ mod tests {
         );
         let pushed = watcher.poll();
         assert!(
-            matches!(&pushed[..], [HostMessage::Sessions { sessions, created: None }]
+            matches!(&pushed[..], [HostMessage::Sessions { sessions, created: None, .. }]
                 if sessions.len() == 1),
             "the watcher's poll must carry the listing push, got {pushed:?}"
         );
@@ -2314,6 +2608,7 @@ mod tests {
                 dh: zest_proto::Pub32::from_bytes(hs.dh().0),
                 watch_sessions: false,
                 watch_pairings: false,
+                watch_hosts: false,
             },
         );
         let [HostMessage::Challenge { nonce, host, label, version, dh, signature }] = &out[..]
@@ -2347,6 +2642,7 @@ mod tests {
             dh: zest_proto::Pub32::from_bytes([8; 32]),
             watch_sessions: false,
             watch_pairings: false,
+            watch_hosts: false,
         }
     }
 
@@ -2547,6 +2843,7 @@ mod tests {
                 dh: zest_proto::Pub32::from_bytes([8; 32]),
                 watch_sessions: false,
                 watch_pairings: false,
+                watch_hosts: false,
             },
         );
         assert!(

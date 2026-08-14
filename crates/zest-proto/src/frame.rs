@@ -149,6 +149,7 @@ mod tests {
             dh: crate::Pub32::from_bytes([7; 32]),
             watch_sessions: false,
             watch_pairings: false,
+            watch_hosts: false,
         }
     }
 

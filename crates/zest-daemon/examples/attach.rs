@@ -145,6 +145,7 @@ fn run<R: Read + Send + 'static, W: Write + Send + 'static>(
             dh: zest_proto::Pub32::from_bytes(hs.dh().0),
             watch_sessions: false,
             watch_pairings: false,
+            watch_hosts: false,
         },
     );
     // The session is created once the handshake completes, not before: a host
