@@ -586,8 +586,17 @@ impl Grid {
                 // the repaint itself wrote, and history dropped into them lands
                 // where nothing will overwrite it. Note what is owed and pay it
                 // in `settle_restate`, when the repaint closes. (#247)
-                self.pending_restate = (rows - self.rows).min(self.restate_debt);
-                self.restate_debt -= self.pending_restate;
+                //
+                // Accumulated, never assigned: a drag is a stream of resizes,
+                // so several grows can land before any repaint closes. Each one
+                // moves its share of the debt into what is pending, and
+                // overwriting instead would drop every share but the last --
+                // shrink 10 -> 4 then grow 4 -> 6 -> 10 owes 6 rows and would
+                // give back 4, so the gesture comes out *nearly* reversible,
+                // which is the hardest kind of wrong to notice.
+                let owed = (rows - self.rows).min(self.restate_debt);
+                self.pending_restate += owed;
+                self.restate_debt -= owed;
             } else {
                 // Growing pulls rows back down out of scrollback before it
                 // adds blank ones, so dragging a window smaller and back is one
@@ -1416,6 +1425,33 @@ mod tests {
                 format!("line {row}"),
                 "row {row} did not survive the drag"
             );
+        }
+    }
+
+    #[test]
+    fn several_grows_before_one_repaint_still_give_back_everything() {
+        // A drag is a stream of resizes, not two: `ResizeObserver` and the
+        // window server both fire throughout one gesture, so several grows
+        // landing before any repaint closes is the common case rather than the
+        // corner. What is pending therefore accumulates -- assigning it instead
+        // drops every share but the last, and the drag comes out *nearly*
+        // reversible, which is the hardest kind of wrong to notice.
+        let mut g = Grid::new(30, 10, 500);
+        g.set_viewport_restated_elsewhere(true);
+        for row in 0..10 {
+            write_text(&mut g, row, &format!("line {row}"));
+        }
+        g.cursor.row = 9;
+
+        g.resize(30, 4, &Cell::default());
+        g.resize(30, 6, &Cell::default());
+        g.resize(30, 10, &Cell::default());
+        conpty_grow_repaint(&mut g, 4);
+
+        assert_eq!(g.scrollback_len(), 0, "the intermediate grow's share of the debt was dropped");
+        assert_eq!(g.cursor.row, 9, "the prompt did not come back to the bottom row");
+        for row in 0..10 {
+            assert_eq!(g.row(row).text().trim_end(), format!("line {row}"));
         }
     }
 
