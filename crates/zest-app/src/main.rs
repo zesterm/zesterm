@@ -22,6 +22,7 @@ mod pipeline_cache;
 mod platform;
 mod profiles_ui;
 mod remote;
+mod route;
 mod session;
 mod settings_ui;
 mod source;

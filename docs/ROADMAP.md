@@ -2199,6 +2199,28 @@ three facts about Cloudflare that changed after #59 was written.
       `cloud::mint_ticket` and reuses the daemon's own relay diallers for
       the TLS leg, so there is one answer to the Winsock read-poll trap,
       not two.
+
+      **And then only one surface could use it** (#250). The route rule was
+      written three times — `App::best_route` for the fleet screen's cards, an
+      inline `host.address.map(HostRoute::Tcp)` in the ⌘K picker, and a third
+      derivation in `launch::resolve_host` for profile launches — and only the
+      first ever learned the relay arm. So an enrolled machine off this LAN
+      could be opened by clicking its card and by nothing else: its ⌘K row took
+      no action, a session on it could not be attached, and a profile pinned to
+      it put up a connecting tab that settled failed with *"host 'forge'
+      advertises no address to dial"* — a message about the LAN for a machine
+      nobody was trying to reach over the LAN. The rule now lives once, pure,
+      in `zest-app`'s `route.rs`, with its truth table under `cargo test`
+      instead of behind a two-machine ritual; `HostTarget::Remote` carries a
+      `HostRoute` rather than a bare address, so the launch worker dials
+      whatever answered and does not care which transport it was.
+
+      The picker's extra `presence != Unreachable` guard went with it, and that
+      is the part worth remembering: it was right while every route was a LAN
+      one and became exactly backwards once routes could be tunnels, because a
+      machine whose advertised port refuses is *precisely* the one the relay is
+      the answer for. A second gate on top of a rule that already encodes the
+      same fact is a place for the two to disagree, and they did.
 - [x] **`zest-cloud`, and the workspace's first TLS stack.** The one crate that
       owns rustls and HTTP, with `cargo xtask check-deps` growing a boundary
       that keeps them out of every crate that crosses to wasm or to a client.
