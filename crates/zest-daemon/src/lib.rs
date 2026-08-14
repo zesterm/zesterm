@@ -39,6 +39,7 @@ pub mod history;
 pub mod lan;
 pub mod local;
 pub mod relay;
+pub mod relay_origin;
 pub mod server;
 pub mod session;
 pub mod ws;

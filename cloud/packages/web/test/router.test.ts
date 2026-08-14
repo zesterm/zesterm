@@ -36,7 +36,7 @@ test('bootstrap says cloud, and signed out when there is no cookie', async () =>
   db.close();
 });
 
-test('bootstrap reports the relay origin when there is one, and /api/me never does', async () => {
+test('bootstrap reports the relay origin when there is one, and a person\'s /api/me never does', async () => {
   // On the envelope rather than baked into the bundle, for the reason `mode` is:
   // one `vite build` serves both the sidecar and the edge, so a `VITE_*`
   // variable would mean the bundle that was tested is not the bundle shipped.
@@ -47,8 +47,10 @@ test('bootstrap reports the relay origin when there is one, and /api/me never do
   const boot = await routeApi(get('/api/bootstrap'), withRelay);
   assert.deepEqual(await boot!.json(), { mode: 'cloud', user: null, relayOrigin: relay });
 
-  // `/api/me` is "who is this" and nothing else; a second place to learn the
-  // relay's address is a second place for it to be stale.
+  // For a *person* `/api/me` is "who is this" and nothing else; a second place
+  // for the browser to learn the relay's address is a second place for it to be
+  // stale. A machine's answer does carry it (#229) — see machine-tokens.test.ts
+  // — because a daemon cannot read `/api/bootstrap` at all.
   assert.deepEqual(await (await routeApi(get('/api/me'), withRelay))!.json(), { user: null });
   db.close();
 });

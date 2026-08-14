@@ -215,7 +215,57 @@ test('/api/me answers a machine with its principal, and the userId attestations 
   assert.deepEqual(await res!.json(), {
     user: null,
     principal: { kind: 'device', id: device.id, userId: 'user-a' },
+    // Carried for every machine principal, browsers included: `env()` here is a
+    // deployment that has a relay.
+    relayOrigin: RELAY,
   });
+
+  // And on a deployment with none, present-and-null rather than absent: a
+  // daemon that could not tell "no relay here" from "I failed to read the
+  // field" would retry for ever against an account with nothing to give it.
+  const { RELAY_ORIGIN: _dropped, ...noRelay } = env(db);
+  const bare = await routeApi(bearer('/api/me', device.token), noRelay, fetch, NOW);
+  assert.deepEqual(await bare!.json(), {
+    user: null,
+    principal: { kind: 'device', id: device.id, userId: 'user-a' },
+    relayOrigin: null,
+  });
+  db.close();
+});
+
+test('a host token learns its relay origin from /api/me, which is the only route open to it', async () => {
+  // #229: a machine that holds a cloud token must be reachable without anyone
+  // passing `--relay`, and this is where it learns where to park its control
+  // link. `/api/bootstrap` needs a session cookie and `/api/hosts` refuses
+  // host tokens on purpose, so widening either to carry one string would cost
+  // a real boundary — the host answer below is deliberately the whole of what
+  // a serving machine may learn about its account.
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  const host = await enrolled(db, cookie, 'host', 9);
+  const relay = 'https://zesterm-relay.sigx.workers.dev';
+
+  const res = await routeApi(
+    bearer('/api/me', host.token),
+    { ...env(db), RELAY_ORIGIN: relay },
+    fetch,
+    NOW,
+  );
+  assert.equal(res?.status, 200);
+  assert.deepEqual(await res!.json(), {
+    user: null,
+    principal: { kind: 'host', id: host.id, userId: 'user-a' },
+    relayOrigin: relay,
+  });
+
+  // And it still cannot enumerate the fleet: the field is not a widening.
+  const hosts = await routeApi(
+    bearer('/api/hosts', host.token),
+    { ...env(db), RELAY_ORIGIN: relay },
+    fetch,
+    NOW,
+  );
+  assert.equal(hosts?.status, 401, 'a host token has no business listing its owner\'s machines');
   db.close();
 });
 
