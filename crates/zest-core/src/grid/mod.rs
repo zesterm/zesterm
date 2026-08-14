@@ -123,13 +123,33 @@ pub struct Grid {
     scrollback_len: usize,
     /// Viewport offset from the bottom, in lines. 0 means "at the bottom".
     display_offset: usize,
-    /// Whether the pty restates the whole viewport after a resize.
+    /// Whether something other than this grid has the last word on the viewport
+    /// after a resize.
     ///
-    /// ConPTY does; a unix pty sends nothing back. It changes one decision —
-    /// see the grow branch of [`Grid::resize`] — and it is a plain bool rather
-    /// than a `cfg` because this crate must build for wasm and knows nothing
-    /// about platforms. The host asks its transport and passes the answer on.
-    pty_restates_viewport: bool,
+    /// Two things do, and they are the same argument one layer apart. ConPTY
+    /// restates the whole viewport when it is resized, where a unix pty sends
+    /// nothing back. And a *replica* — a grid deltas are applied into rather
+    /// than parsed into — is about to be handed a keyframe that restates every
+    /// visible row. Either way a grow must not pull history down into rows that
+    /// are about to be overwritten; see the grow branch of [`Grid::resize`].
+    ///
+    /// A plain bool rather than a `cfg` because this crate must build for wasm
+    /// and knows nothing about platforms. The host asks its transport and passes
+    /// the answer on; a replica sets it by being resized through
+    /// `Terminal::remote`.
+    viewport_restated_elsewhere: bool,
+    /// Rows a restating shrink pushed over the top that a matching grow owes
+    /// back once the repaint has had its say. See [`Grid::settle_restate`].
+    ///
+    /// Owed only while those rows are still the ones immediately above the
+    /// viewport, so anything that moves the content on cancels it — which is
+    /// what stops `clear` followed by a grow from resurrecting the history the
+    /// user just asked to be rid of.
+    restate_debt: usize,
+    /// What the grow asked for, waiting on the repaint that answers it.
+    pending_restate: usize,
+    /// Whether that repaint has been seen to begin (`CSI 8 ; rows ; cols t`).
+    restating: bool,
     pub cursor: Cursor,
     pub region: ScrollRegion,
 }
@@ -161,19 +181,22 @@ impl Grid {
             capture_evicted: false,
             scrollback_len: 0,
             display_offset: 0,
-            pty_restates_viewport: false,
+            viewport_restated_elsewhere: false,
+            restate_debt: 0,
+            pending_restate: 0,
+            restating: false,
             cursor: Cursor::default(),
             region: ScrollRegion::full(rows),
         }
     }
 
-    /// Tell the grid its pty restates the viewport after a resize.
+    /// Tell the grid that something else has the last word on its viewport.
     ///
     /// See the field, and the grow branch of [`Self::resize`]. Off by default,
-    /// which is the unix answer and the answer for a grid that has no pty at
-    /// all — a client applying deltas, or a test.
-    pub fn set_pty_restates_viewport(&mut self, yes: bool) {
-        self.pty_restates_viewport = yes;
+    /// which is the unix answer and the answer for a grid that is nobody's
+    /// replica — a local session on a pty that says nothing back, or a test.
+    pub fn set_viewport_restated_elsewhere(&mut self, yes: bool) {
+        self.viewport_restated_elsewhere = yes;
     }
 
     #[must_use]
@@ -354,6 +377,10 @@ impl Grid {
         let region_height = self.region.bottom - self.region.top + 1;
         let n = n.min(region_height);
 
+        // The content has moved on, so the rows a shrink displaced are no longer
+        // the ones above the viewport and are not owed back. See the field.
+        self.cancel_restate_debt();
+
         let full_screen = self.region.top == 0 && self.region.bottom == self.rows - 1;
         if full_screen {
             self.scroll_screen_up(n, template);
@@ -524,9 +551,15 @@ impl Grid {
                         (self.scrollback_len + over_the_top).min(self.scrollback_limit);
                     // The cursor moved up with the content.
                     self.cursor.row = self.cursor.row.saturating_sub(over_the_top);
+                    // A restating pty gets these rows back on the way out, once
+                    // its repaint has stopped blanking things. See the grow
+                    // branch below and `settle_restate`.
+                    if self.viewport_restated_elsewhere {
+                        self.restate_debt += over_the_top;
+                    }
                 }
-            } else if self.pty_restates_viewport {
-                // Nothing comes back out of scrollback, because the pty is
+            } else if self.viewport_restated_elsewhere {
+                // Nothing comes back out of scrollback *yet*, because the pty is
                 // about to restate this viewport and would blank whatever we
                 // put in it.
                 //
@@ -544,9 +577,17 @@ impl Grid {
                 // Leaving the boundary alone gives the repaint fresh rows to
                 // blank and keeps the history above it, which is also exactly
                 // what ConPTY and Windows Terminal do with their own buffers.
-                // The reversible-drag property below is a *unix* property; it
-                // was never reachable here, because the repaint always had the
-                // last word.
+                //
+                // What this used to conclude — that the reversible drag below is
+                // a *unix* property, unreachable here because the repaint always
+                // has the last word — is half right. The repaint does have the
+                // last word, so the pull cannot happen *before* it. It can
+                // happen after: by then the tail of the viewport is blank rows
+                // the repaint itself wrote, and history dropped into them lands
+                // where nothing will overwrite it. Note what is owed and pay it
+                // in `settle_restate`, when the repaint closes. (#247)
+                self.pending_restate = (rows - self.rows).min(self.restate_debt);
+                self.restate_debt -= self.pending_restate;
             } else {
                 // Growing pulls rows back down out of scrollback before it
                 // adds blank ones, so dragging a window smaller and back is one
@@ -571,6 +612,90 @@ impl Grid {
         self.cursor.pending_wrap = false;
         self.display_offset = self.display_offset.min(self.scrollback_len);
         reindex
+    }
+
+    // --- the restating pty's repaint -------------------------------------
+
+    /// The pty announced that it is restating the viewport (`CSI 8 ; r ; c t`).
+    ///
+    /// Only ConPTY sends this, and only as a *notification* that the repaint
+    /// documented on [`Grid::resize`]'s grow branch is starting — it is not the
+    /// XTWINOPS request of the same name, and nothing here obeys it. It matters
+    /// because it opens the window in which [`Self::settle_restate`] may run.
+    pub fn note_restatement_began(&mut self) {
+        if self.pending_restate > 0 {
+            self.restating = true;
+        }
+    }
+
+    /// Whether a restatement is in progress and has not yet been settled.
+    #[must_use]
+    pub fn restating(&self) -> bool {
+        self.restating
+    }
+
+    /// Give back what the grow owed, now that the repaint has had its last word.
+    ///
+    /// Returns whether anything moved — the caller needs to know, because the
+    /// viewport/scrollback boundary moving is the one change deltas cannot
+    /// describe (`docs/CONTRACTS.md`), so it costs a keyframe.
+    ///
+    /// The repaint leaves the restated content at the top of the viewport and
+    /// blank rows below it, because ConPTY grows its own buffer at the bottom
+    /// and has nothing to put there. Dropping those blank rows and moving the
+    /// boundary down by the same number slides the viewport *up* over storage:
+    /// history returns to the screen, the prompt returns to the bottom row, and
+    /// `storage.len()` is unchanged, so `rows` never moves.
+    ///
+    /// Every bound here is load-bearing. `pending_restate` is what the shrink
+    /// actually took, so a grow never invents history; the blank tail is how
+    /// much of the viewport the repaint had nothing for, so a full screen
+    /// settles to nothing; and `scrollback_len` is what there is to give.
+    pub fn settle_restate(&mut self) -> bool {
+        self.restating = false;
+        let owed = core::mem::take(&mut self.pending_restate);
+        let below_cursor = self.rows - 1 - self.cursor.row.min(self.rows - 1);
+        let k = owed.min(self.blank_tail()).min(below_cursor).min(self.scrollback_len);
+        if k == 0 {
+            return false;
+        }
+
+        self.storage.truncate_bottom(k);
+        self.scrollback_len -= k;
+        self.cursor.row += k;
+        // The rows just dropped are the blanks `resize_rows` minted at grow
+        // time, and `truncate_bottom` does not rewind the counter. Left alone
+        // the gap makes `oldest_retained_line` — `active_row(0).id -
+        // scrollback_len`, in `subscribe.rs` and `term.rs` — name a line the
+        // grid no longer holds, so the host offers clients scrollback it cannot
+        // answer for.
+        let last = self.storage.len() - 1;
+        self.storage.set_next_id(self.storage.row(last).id + 1);
+        // Storage lost `k` rows off the end, so holding a scrolled-back reader
+        // on the same text means giving back the same `k`.
+        self.display_offset = self.display_offset.saturating_sub(k).min(self.scrollback_len);
+        true
+    }
+
+    /// How many rows at the bottom of the viewport are blank.
+    fn blank_tail(&self) -> usize {
+        let base = self.active_base();
+        (0..self.rows)
+            .rev()
+            .take_while(|r| self.storage.row(base + r).trimmed_len() == 0)
+            .count()
+    }
+
+    /// Forget what a restating grow owed.
+    ///
+    /// Called wherever the content moves on, because the debt is only ever owed
+    /// while the displaced rows are still the ones immediately above the
+    /// viewport. After a scroll or a screen erase they are not, and paying it
+    /// would drag unrelated history onto the screen.
+    pub(crate) fn cancel_restate_debt(&mut self) {
+        self.restate_debt = 0;
+        self.pending_restate = 0;
+        self.restating = false;
     }
 
     /// Rewrap every logical line to a new width.
@@ -839,6 +964,9 @@ impl Grid {
         }
         self.cursor = Cursor::default();
         self.region = ScrollRegion::full(self.rows);
+        // A cleared screen is all blank tail, so an unpaid restate debt would
+        // pull history straight back onto the screen the user just cleared.
+        self.cancel_restate_debt();
     }
 
     /// The viewport as plain text, one line per row, trailing blanks trimmed.
@@ -1202,7 +1330,7 @@ mod tests {
         // and they are no longer in scrollback either, because the pull moved
         // the boundary past them. History destroyed, not misplaced. (#200)
         let mut g = Grid::new(30, 10, 500);
-        g.set_pty_restates_viewport(true);
+        g.set_viewport_restated_elsewhere(true);
         for row in 0..10 {
             write_text(&mut g, row, &format!("line {row}"));
         }
@@ -1226,6 +1354,161 @@ mod tests {
         for (row, line) in history.iter().enumerate() {
             assert_eq!(line.text().trim_end(), format!("line {row}"));
         }
+    }
+
+    /// Rebuild what the repaint leaves behind, without a ConPTY.
+    ///
+    /// It restates from home, so the rows it still has land at the *top* and it
+    /// blanks the rest — which is the whole shape of the bug: content high in a
+    /// tall window with the prompt stranded above a blank half. `tests/vt.rs`
+    /// drives the literal bytes; here the question is only what the boundary
+    /// does afterwards, so the bytes would be ceremony.
+    fn conpty_grow_repaint(g: &mut Grid, kept: usize) {
+        let rows = g.rows();
+        // Active space throughout, never `row()`: the repaint writes the live
+        // screen, and a reader who is scrolled back must not change what ConPTY
+        // is taken to have said.
+        let texts: Vec<String> =
+            (0..kept).map(|r| g.active_row(r).text().trim_end().to_string()).collect();
+        for row in 0..rows {
+            let cols = g.cols();
+            g.erase_in_row(row, 0, cols - 1, &Cell::default());
+        }
+        for (row, text) in texts.iter().enumerate() {
+            write_text(g, row, text);
+        }
+        g.cursor.row = kept - 1;
+        g.settle_restate();
+    }
+
+    #[test]
+    fn a_restating_grow_gives_the_history_back_once_the_repaint_has_landed() {
+        // The other half of the test above, and the bug that was reported: the
+        // history was safe, and it stayed above the viewport for ever. What the
+        // user saw was a window dragged short and back with two lines of output
+        // and a prompt jammed against the top of an otherwise empty pane.
+        //
+        // The pull is not wrong -- its *timing* was. Before the repaint it
+        // hands ConPTY rows to blank; after it, the tail of the viewport is
+        // blank rows the repaint itself wrote and nothing will write again.
+        let mut g = Grid::new(30, 10, 500);
+        g.set_viewport_restated_elsewhere(true);
+        for row in 0..10 {
+            write_text(&mut g, row, &format!("line {row}"));
+        }
+        g.cursor.row = 9;
+
+        g.resize(30, 4, &Cell::default());
+        g.resize(30, 10, &Cell::default());
+        assert_eq!(
+            g.scrollback_len(),
+            6,
+            "history must still be above the viewport until the repaint has spoken (#200)"
+        );
+
+        conpty_grow_repaint(&mut g, 4);
+
+        assert_eq!(g.scrollback_len(), 0, "the grow never paid back what the shrink took");
+        assert_eq!(g.cursor.row, 9, "the prompt did not come back to the bottom row");
+        for row in 0..10 {
+            assert_eq!(
+                g.row(row).text().trim_end(),
+                format!("line {row}"),
+                "row {row} did not survive the drag"
+            );
+        }
+    }
+
+    #[test]
+    fn a_restating_grow_gives_nothing_back_if_the_screen_scrolled_in_between() {
+        // The debt is only owed while the displaced rows are still the ones
+        // immediately above the viewport. Once anything scrolls they are not,
+        // and paying it would drag unrelated history down onto the screen --
+        // most visibly after a `clear`, where every row below the cursor is
+        // blank and the pull would undo exactly what the user asked for.
+        let mut g = Grid::new(30, 10, 500);
+        g.set_viewport_restated_elsewhere(true);
+        for row in 0..10 {
+            write_text(&mut g, row, &format!("line {row}"));
+        }
+        g.cursor.row = 9;
+
+        g.resize(30, 4, &Cell::default());
+        g.scroll_up(1, &Cell::default());
+        let before = g.scrollback_len();
+        g.resize(30, 10, &Cell::default());
+
+        conpty_grow_repaint(&mut g, 1);
+
+        assert_eq!(g.scrollback_len(), before, "history was pulled down after a scroll cancelled it");
+    }
+
+    #[test]
+    fn a_settled_restate_leaves_no_gap_in_the_line_numbering() {
+        // `truncate_bottom` drops the newest rows without rewinding the id
+        // counter, and the rows the settle drops are the blanks the grow minted.
+        // A gap makes `oldest_retained_line` -- computed as `active_row(0).id -
+        // scrollback_len`, in `subscribe.rs` and `term.rs` -- name a line older
+        // than any the grid holds, so the host offers clients scrollback it
+        // cannot answer for.
+        let mut g = Grid::new(30, 10, 500);
+        g.set_viewport_restated_elsewhere(true);
+        for row in 0..10 {
+            write_text(&mut g, row, &format!("line {row}"));
+        }
+        g.cursor.row = 9;
+
+        g.resize(30, 4, &Cell::default());
+        g.resize(30, 10, &Cell::default());
+        conpty_grow_repaint(&mut g, 4);
+
+        let ids: Vec<LineId> = (0..g.total_lines()).map(|i| g.line(i).unwrap().id).collect();
+        for pair in ids.windows(2) {
+            assert_eq!(pair[1], pair[0] + 1, "the ids jumped: {ids:?}");
+        }
+        let oldest = g.active_row(0).id - g.scrollback_len() as LineId;
+        assert!(
+            g.lines_by_id(oldest, 1).len() == 1 || g.scrollback_len() == 0,
+            "the retention horizon names a line the grid does not hold"
+        );
+    }
+
+    #[test]
+    fn settling_holds_a_scrolled_back_reader_on_the_same_text() {
+        // The settle drops rows off the end of storage, and `viewport_base` is
+        // measured from that end -- so leaving the offset alone slides the view
+        // forward by exactly the rows it gave back. Nothing else in the resize
+        // path asserts on `display_offset` at all, which is how this would have
+        // shipped as "scrolling back jumps after you resize".
+        // Deep enough history that the reader is genuinely scrolled back past
+        // what the settle gives away. Scrolled back *less* than that and the
+        // view cannot hold still -- the viewport swallows the whole of storage
+        // and there is nowhere left to be scrolled to, which is a clamp rather
+        // than a jump.
+        let mut g = Grid::new(30, 10, 500);
+        for i in 0..30 {
+            if i > 0 {
+                g.scroll_up(1, &Cell::default());
+            }
+            write_text(&mut g, 9, &format!("line {i}"));
+        }
+        g.cursor.row = 9;
+        // Only now, so the scrolling above does not cancel the debt it creates.
+        g.set_viewport_restated_elsewhere(true);
+
+        g.resize(30, 4, &Cell::default());
+        g.scroll_display(10);
+        let reading = g.row(0).text().trim_end().to_string();
+        assert_eq!(reading, "line 16", "the fixture is not where this test thinks it is");
+
+        g.resize(30, 10, &Cell::default());
+        conpty_grow_repaint(&mut g, 4);
+
+        assert_eq!(
+            g.row(0).text().trim_end(),
+            reading,
+            "the text under the reader moved when the grow settled"
+        );
     }
 
     #[test]

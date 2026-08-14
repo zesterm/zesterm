@@ -552,8 +552,33 @@ Each of these cost real time and is documented where it bites:
   index stayed perfectly intact — which reads as "all my blocks are gone" and
   sends you looking at the block index, where nothing is wrong. The transport
   answers `PtyTransport::restates_on_resize` and the grid takes it as
-  `set_pty_restates_viewport`; a plain bool, because `zest-core` must build for
-  wasm and knows nothing about platforms. (#200)
+  `set_viewport_restated_elsewhere`; a plain bool, because `zest-core` must
+  build for wasm and knows nothing about platforms. (#200)
+
+  **The pull is not wrong — its *timing* was, and the fix for one is the bug
+  for the other.** #200 concluded the reversible drag was unreachable here and
+  removed the pull outright, which stopped the destruction and left the rows
+  stranded: a full screen dragged short and back came back as two lines and a
+  prompt at the top of an empty window, history parked above the viewport for
+  ever. The repaint has the last word, so the pull cannot happen *before* it;
+  after it the tail of the viewport is blank rows the repaint itself wrote and
+  nothing will write again. `Grid::settle_restate` pays the debt there,
+  triggered off the repaint's own DECTCEM bracket around `CSI 8;r;c t` — a
+  byte-stream property, not a timeout, because a wide repaint can exceed the
+  64 KiB parse chunk and settling mid-repaint moves the boundary under rows
+  still being written. **Both directions of DECTCEM close it**: ConPTY restores
+  the inner program's cursor visibility, so a full-screen app that keeps its
+  cursor hidden never sends `?25h` and keying off that alone leaves those
+  sessions unfixed with nothing to see. ADR-013. (#247)
+
+  **And the same trap one layer out, which had been live in every client since
+  the mesh existed:** a replica grid — one deltas are applied into — is about
+  to be handed a keyframe that restates every visible row, so its grow must not
+  pull either. Nothing ever set the flag on one, because the flag was named
+  after the pty. `Terminal::remote` sets it now, on the door rather than at
+  construction: that door is what *makes* a terminal a replica, so there is no
+  second place to forget. A name that describes one of two callers is how the
+  other one goes unnoticed. (#247)
 - **A row overwritten in place keeps a stale `wrapped`, and the next reflow
   believes it.** `wrapped` is one fact in two places — `Row::wrapped` and
   `CellFlags::WRAPLINE` on the last cell, written together by

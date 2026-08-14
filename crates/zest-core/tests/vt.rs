@@ -1130,6 +1130,60 @@ fn conpty_repaint_after_a_squeeze(cols: usize, rows: usize, kept: &[&str]) -> Ve
 }
 
 #[test]
+fn dragging_the_height_down_and_back_puts_the_screen_back_as_it_was() {
+    // What the user actually reported, one issue after the test below: the
+    // blocks survived and the history survived, and the pane still came back
+    // with two lines of output and a prompt jammed against the top of an
+    // otherwise empty window. #200 stopped the *destruction*; the rows were
+    // simply never given back, because the pull that would give them back had
+    // to be skipped -- ConPTY's repaint would have blanked them.
+    //
+    // It only had to be skipped *until the repaint*. This drives the literal
+    // bytes ConPTY sends (#205, #224's checklist item) and asserts the whole
+    // gesture is reversible: same screen, same cursor, nothing left in history.
+    let mut t = Terminal::new(40, 12, 500);
+    t.set_pty_restates_viewport(true);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\n");
+    for i in 0..9 {
+        t.advance(format!("entry {i}\r\n").as_bytes());
+    }
+    t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    let before = t.screen_text();
+    let cursor_before = t.cursor();
+    let out = t.blocks().blocks()[0].output_line.expect("the command produced output");
+
+    t.resize(40, 1);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 1, &["$ "]));
+    t.resize(40, 12);
+    let _ = t.take_events();
+    t.advance(&conpty_repaint_after_a_squeeze(40, 12, &["$ "]));
+
+    // The host has to tell its clients, and it cannot tell them in a delta:
+    // rows that were history are on screen now, and a client applying deltas
+    // over that holds each of them twice.
+    assert!(
+        t.take_events().iter().any(|e| matches!(e, TermEvent::ViewportRebased)),
+        "the settle moved the boundary without asking anyone for a keyframe"
+    );
+    assert_eq!(t.screen_text(), before, "the drag was not reversible");
+    assert_eq!(t.cursor().row, cursor_before.row, "the prompt did not come back down");
+    assert_eq!(
+        t.grid().scrollback_len(),
+        0,
+        "the displaced rows are still parked in history with a blank screen below them"
+    );
+    // On the *screen* this time, not merely reachable as history: a block whose
+    // rows are only in scrollback renders as a card with nothing in it, which is
+    // what "everything disappeared" looked like.
+    for (n, line) in (out..out + 9).enumerate() {
+        let row = t.grid().row_of_line(line).unwrap_or_else(|| {
+            panic!("line {line} of the listing is not on screen after the drag")
+        });
+        assert_eq!(t.grid().row(row).text().trim_end(), format!("entry {n}"));
+    }
+}
+
+#[test]
 fn dragging_the_height_to_nothing_and_back_does_not_blank_every_block() {
     // The reported gesture, and the one the width-change story never covered:
     // drag the window's height down to nothing and back, and every block comes

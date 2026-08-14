@@ -106,6 +106,21 @@ export class GridView {
     // so they render as blocks with no rows: the pane looks like every block
     // vanished when only the client's copy of the text did. Carry them over
     // instead; there is nothing to fetch and nothing to renumber. (#200)
+    //
+    // A height *grow* is the same trade run backwards and needs the inverse
+    // move. The host gives those rows back — the unix grid pulls them out of
+    // scrollback, and a restating one settles once its repaint closes (#247) —
+    // so the keyframe's rows now start *earlier* than they did, and every row
+    // it re-delivers is one this client already filed into `scrollback`. Left
+    // there they are in both halves of the `scrollback ++ rows` walk
+    // `sliceBlocks` does, whose whole premise is that the concatenation is the
+    // session in order with nothing repeated: each line is filed into its block
+    // twice, and `BlocksPane` keys its rows by line id, so a keyed list gets
+    // duplicate keys. A drag is dozens of keyframes, not two.
+    //
+    // Dropping the overlap is the exact inverse of the append above, and the
+    // rule both halves come from: `scrollback` is what is strictly *older* than
+    // the viewport, which a shrink adds to and a grow takes back.
     if (!renumbered) {
       const firstNew = k.rows_data.find((r) => r.line !== NO_LINE)?.line;
       const lastHeld = this.scrollback.at(-1)?.line;
@@ -113,7 +128,18 @@ export class GridView {
         const displaced = this.rows.filter(
           (r) => r.line !== NO_LINE && r.line < firstNew && (lastHeld === undefined || r.line > lastHeld),
         );
+        // What the viewport is losing off the top becomes history…
         if (displaced.length > 0) this.scrollback = [...this.scrollback, ...displaced];
+        // …and what it is taking back stops being history. Keyed on the lines
+        // the keyframe actually carries rather than on everything at or above
+        // `firstNew`, which is the same set for any state a session can really
+        // be in and drops strictly less otherwise: a row this client holds that
+        // the viewport does not name is not something to throw away on the
+        // strength of an id comparison.
+        else if (lastHeld !== undefined && lastHeld >= firstNew) {
+          const onScreen = new Set(k.rows_data.map((r) => r.line));
+          this.scrollback = this.scrollback.filter((r) => !onScreen.has(r.line));
+        }
       }
     }
     this.rows = [...k.rows_data];

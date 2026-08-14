@@ -706,3 +706,82 @@ which is the point: the mistake is now unrepresentable, not merely avoided.
   `u64::MAX`, Profiles `u64::MAX - 1`. Two parallel work items independently
   picked `u64::MAX`; a test now asserts the pair differs, because the
   collision was not hypothetical — it happened, in review, on the same day.
+
+## ADR-013 — The restater owns the viewport for one repaint, and we own it after
+
+**Status:** accepted (#247), for the *height* axis. The width axis is #224 and
+is deliberately not decided here.
+
+ConPTY answers a resize by restating the whole viewport, and its pseudoconsole
+buffer is only as tall as that viewport. So a shrink discards what no longer
+fits from *its* buffer while our grid keeps it as scrollback, and a grow
+repaints the little it kept and blanks the rest. **Our grid holds more of the
+session than the restater does**, which is the fact everything here follows
+from.
+
+#200 asked who owns the viewport and had two candidates, both of which its own
+measurements ruled out: "the restater owns it" discards real history for a
+lossy copy, and "detect divergence and drop the blocks" evicts text we still
+hold. It settled on a third — leave the boundary alone on a grow — and
+concluded the reversible drag was a *unix* property, unreachable here because
+the repaint always has the last word.
+
+**The repaint does have the last word. That bounds *when*, not *whether*.**
+
+### The rule
+
+The restater owns every visible row from the moment it is told to resize until
+its repaint closes. We own the viewport again after that, and the first thing
+we do with it is give back the rows the shrink displaced.
+
+Before the repaint the pull is destructive and #200 is right: rows pulled down
+are blanked by the repaint, and the pull has already moved them out of
+scrollback, so it is history destroyed rather than misplaced. After the repaint
+the same pull is free — the tail of the viewport is blank rows the repaint
+itself wrote and nothing will write again, and dropping them moves the viewport
+window *up* over storage without touching anything the restater said.
+
+### Why this is a byte-stream property and not a timeout
+
+The repaint is bracketed: `ESC[?25l ESC[8;<rows>;<cols>t ESC[H`, every row
+restated, then the cursor restored and DECTCEM set back to whatever the inner
+program had (#205). `CSI 8;r;c t` is XTWINOPS "resize the text area" — a
+request *to* a terminal that nothing in `zest-core` obeys, and which no ordinary
+program sends inbound, which is what makes it an unambiguous marker. Arming on
+it and settling on the next DECTCEM change is independent of how a read split
+the stream, which a quiescence heuristic is not: a 200-column repaint with
+colour can exceed the 64 KiB parse chunk, and settling mid-repaint would move
+the boundary under rows still being written.
+
+**Either direction of DECTCEM closes it.** ConPTY restores the inner program's
+visibility state, so a full-screen program that keeps its cursor hidden ends the
+repaint with `?25l` and never sends `?25h`. Keying off `?25h` alone would leave
+the debt unpaid for exactly those sessions and look like the fix simply not
+working.
+
+### What bounds the pull
+
+A debt, not the shape of the screen. `restate_debt` is what a restating shrink
+actually pushed over the top, so a grow can never invent history; and it is
+cancelled by any scroll or whole-screen erase, because the rows are only owed
+while they are still the ones immediately above the viewport. Without that,
+`clear` followed by a grow pulls history straight back onto the screen the user
+just cleared — every row below the cursor is blank, so the shape of the screen
+alone cannot tell the two cases apart.
+
+### One flag, two restaters
+
+A *replica* — a grid deltas are applied into rather than parsed into — is in the
+same position for the same reason: the keyframe it is about to be handed
+restates every visible row. `Grid::viewport_restated_elsewhere` is therefore one
+predicate rather than a ConPTY-specific one, set by the transport on a host and
+by `Terminal::remote` on a client. A replica never settles: settling runs from
+the parser, and nothing may mix the parser with the delta stream.
+
+### The cost
+
+The boundary moving is a change no delta can describe — there is no
+`DeltaOp::Resize`, on purpose (`docs/CONTRACTS.md`) — so a settle costs every
+subscriber a keyframe (`TermEvent::ViewportRebased`). One per completed drag
+rather than one per `ResizeObserver` tick, because only a grow that is owed
+something arms it.

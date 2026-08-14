@@ -481,6 +481,71 @@ test('a height-change keyframe keeps the rows that scrolled out of the viewport'
   assert.equal(rows[1]?.runs[0]?.text, 'line 1');
 });
 
+test('a height grow takes its rows back out of scrollback instead of holding them twice', () => {
+  // The other half of the gesture above, and the half that was missing: the
+  // host gives those rows back when the window grows again, so the keyframe
+  // re-delivers lines this client already filed as history. Kept in both
+  // places they are yielded twice by the `scrollback ++ rows` walk — the same
+  // line filed into its block twice, and duplicate keys in the pane's keyed
+  // row list. (#247)
+  const view = new GridView();
+  const kf = (lines: bigint[]): void =>
+    view.applyKeyframe({
+      cols: 20,
+      rows_data: lines.map((l) => synthRow(l, `line ${l}`)),
+      attrs: [],
+      cursor: CURSOR,
+      modes: 0,
+      blocks: [synthBlock(0, 0n, 1n, 7n)],
+      blocks_from: 0,
+    });
+
+  kf([0n, 1n, 2n, 3n, 4n, 5n, 6n, 7n]);
+  kf([6n, 7n]); // shrunk: 0..5 became history
+  assert.equal(view.scrollback.length, 6, 'the shrink did not bank the displaced rows');
+
+  kf([0n, 1n, 2n, 3n, 4n, 5n, 6n, 7n]); // grown back: the host gave them back
+
+  assert.deepEqual(
+    view.scrollback.map((r) => r.line),
+    [],
+    'rows the viewport took back are still filed as history',
+  );
+  const { slices } = sliceBlocks(view);
+  const rows = [...(slices[0]?.promptRows ?? []), ...(slices[0]?.outputRows ?? [])];
+  assert.equal(rows.length, 8, `the block rendered ${rows.length} rows for 8 lines`);
+  assert.deepEqual(
+    rows.map((r) => r.line),
+    [0n, 1n, 2n, 3n, 4n, 5n, 6n, 7n],
+    'a line was rendered twice',
+  );
+});
+
+test('dragging the height repeatedly does not accumulate duplicates', () => {
+  // `ResizeObserver` fires throughout a drag, so one gesture is dozens of
+  // keyframes rather than two. Whatever the round trip does wrong it does
+  // dozens of times, which is why this asserts on the shape after several
+  // rather than trusting one to generalise. (#247)
+  const view = new GridView();
+  const kf = (lines: bigint[]): void =>
+    view.applyKeyframe({
+      cols: 20,
+      rows_data: lines.map((l) => synthRow(l, `line ${l}`)),
+      attrs: [],
+      cursor: CURSOR,
+      modes: 0,
+    });
+
+  kf([0n, 1n, 2n, 3n]);
+  for (let i = 0; i < 5; i++) {
+    kf([2n, 3n]);
+    kf([0n, 1n, 2n, 3n]);
+  }
+
+  const seen = [...view.scrollback, ...view.rows].filter((r) => r.line !== NO_LINE).map((r) => r.line);
+  assert.deepEqual(seen, [0n, 1n, 2n, 3n], `a drag left ${seen.length} rows for 4 lines`);
+});
+
 test('a width-change keyframe still discards the rows it cannot renumber', () => {
   // The counterpart, and the reason the carry-over above is gated on the
   // width: a reflow renumbers every id, so displaced rows cannot be filed

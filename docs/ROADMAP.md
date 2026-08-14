@@ -2054,13 +2054,15 @@ three facts about Cloudflare that changed after #59 was written.
       blanks what it no longer holds and the pull has already moved those rows
       out of history. Growing now leaves the boundary alone when the transport
       says it restates (`PtyTransport::restates_on_resize` →
-      `Grid::set_pty_restates_viewport`), which is also what ConPTY and Windows
-      Terminal do with their own buffers. The reversible-drag property is a
-      *unix* property and keeps working there; it was never reachable on
-      Windows, because the repaint always had the last word. The web client
-      gained the other half: a height-change keyframe carries the displaced
-      viewport rows into its own scrollback instead of dropping the only copy
-      it had.
+      `Grid::set_viewport_restated_elsewhere`), which is also what ConPTY and
+      Windows Terminal do with their own buffers. The web client gained the
+      other half: a height-change keyframe carries the displaced viewport rows
+      into its own scrollback instead of dropping the only copy it had.
+
+      This concluded that the reversible drag was a *unix* property, never
+      reachable on Windows because the repaint always had the last word. **The
+      repaint does have the last word, and that is an argument about timing
+      rather than about reachability** — see #247, which finished the job.
 
       **What remains, measured rather than guessed, and split out as #224.** One
       settled *width* resize still leaves the viewport's content fourteen rows
@@ -2077,6 +2079,45 @@ three facts about Cloudflare that changed after #59 was written.
       divergence is purely vertical, and it is the same asymmetry the height
       half fixed — so #224 wants an ADR argued against those numbers rather
       than against #200's older assumptions.
+- [x] **A height drag is one reversible gesture on Windows too** (#247).
+      #200 stopped the height drag *destroying* history and left it stranded:
+      the rows a shrink displaced stayed above the viewport for ever, so
+      dragging a full screen short and back returned a pane with two lines of
+      output and the prompt jammed against the top of an empty window. Reported
+      from all three clients at once, which reads as a client bug and is not —
+      they were three faithful renderings of one Windows host's viewport, and a
+      Mac-hosted session through the same clients survived the same drag.
+
+      The pull #200 removed was not wrong, its *timing* was. Before ConPTY's
+      repaint it hands the repaint rows to blank; after it, the tail of the
+      viewport is blank rows the repaint itself wrote and nothing will write
+      again. So the grid now notes what a restating shrink took (`restate_debt`)
+      and pays it back in `Grid::settle_restate` when the repaint closes,
+      dropping the blank tail and moving the boundary down — the viewport slides
+      *up* over storage, history returns to the screen, the prompt returns to
+      the bottom row. The repaint is bracketed in DECTCEM around `CSI 8;r;c t`
+      (#205), so the trigger is a property of the byte stream rather than of a
+      timeout or of how a read happened to split. Either direction closes it: a
+      full-screen program that keeps its cursor hidden never sends `?25h` at
+      all. The debt is cancelled by any scroll or screen erase, which is what
+      stops `clear` followed by a grow from resurrecting what was just cleared.
+
+      Two more found on the same path. **Every client replica took the unix
+      branch**: `Terminal::remote` never set the flag, so a client applying a
+      keyframe pulled its own history into rows the keyframe was about to
+      overwrite — #200's destruction reproduced one layer out, in every client,
+      against any host. The flag is now set by the replica door itself, which is
+      what makes a terminal a replica. And **the web client's displaced-row
+      carry-over was one-directional**: it banked rows on a shrink and never
+      un-banked them on a grow, so every re-delivered line sat in both halves of
+      `sliceBlocks`'s `scrollback ++ rows` walk — filed into its block twice,
+      and duplicate keys in a keyed list, dozens of times per drag because
+      `ResizeObserver` fires throughout one.
+
+      The boundary moving is a change no delta can describe, so it travels as
+      `TermEvent::ViewportRebased` and every subscriber is owed a keyframe.
+      ADR-013 records who owns the viewport when the restater holds less of the
+      session than we do — the height axis; #224 is still the width one.
 - [ ] **The relay Worker and its Durable Object.** A control link the daemon
       parks, an attach ticket the browser carries on `Sec-WebSocket-Protocol`
       (not the query string — a secret in a URL lands in referrers, edge logs

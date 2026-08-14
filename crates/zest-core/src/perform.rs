@@ -114,6 +114,18 @@ impl vte::Perform for TermState {
                 self.touch_full();
             }
 
+            // --- the restating pty's repaint ---
+            //
+            // `CSI 8 ; rows ; cols t` is XTWINOPS "resize the text area", a
+            // request *to* a terminal that nothing here obeys — a program does
+            // not get to resize the user's window. ConPTY emits it in the other
+            // direction, as the first thing in the repaint it answers a resize
+            // with (#205), which makes it the one unambiguous marker for "the
+            // restatement starts here". That is all it is taken as. (#247)
+            ('t', _) if !private && arg(0, 0) == 8 => {
+                self.grid_mut().note_restatement_began();
+            }
+
             // --- modes ---
             ('h', _) if private => self.set_private_modes(params, true),
             ('l', _) if private => self.set_private_modes(params, false),
@@ -375,6 +387,12 @@ impl TermState {
                 }
                 self.prompt_end = None;
                 self.pending_command = None;
+                // A cleared screen is all blank tail, so a restate debt left
+                // owing would let the next grow pull history straight back onto
+                // the screen the user just cleared. Modes 2 and 3 only, for the
+                // reason above: mode 0 is the line editor repainting, and
+                // ConPTY's own repaint can arrive either side of it. (#247)
+                self.grid_mut().cancel_restate_debt();
             }
             _ => {}
         }
@@ -452,7 +470,25 @@ impl TermState {
                     self.goto(0, 0);
                 }
                 7 => self.modes.set(Modes::AUTO_WRAP, enable),
-                25 => self.modes.set(Modes::SHOW_CURSOR, enable),
+                25 => {
+                    self.modes.set(Modes::SHOW_CURSOR, enable);
+                    // ConPTY brackets its resize repaint in DECTCEM: it hides
+                    // the cursor, restates the viewport, puts the cursor back
+                    // and restores visibility. So the first DECTCEM *after* the
+                    // `CSI 8 t` that opened the restatement is the repaint
+                    // closing, and from there the viewport is settled: its tail
+                    // is blank rows nothing will write again, which is where the
+                    // history a shrink displaced can safely go. (#247)
+                    //
+                    // Either direction closes it. The final state is whatever
+                    // the inner program had, so a full-screen app that keeps its
+                    // cursor hidden ends the repaint with `?25l` and never sends
+                    // `?25h` at all; keying off one of them would leave the debt
+                    // unpaid for exactly those sessions.
+                    if self.grid().restating() {
+                        self.settle_restate();
+                    }
+                }
                 66 => self.modes.set(Modes::APP_KEYPAD, enable),
                 1000 => self.modes.set(Modes::MOUSE_CLICK, enable),
                 1002 => self.modes.set(Modes::MOUSE_DRAG, enable),
