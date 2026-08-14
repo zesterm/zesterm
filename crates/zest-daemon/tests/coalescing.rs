@@ -91,6 +91,7 @@ fn serve_one(floor: Duration) -> TcpStream {
         shell_integration: false,
         min_delta_interval: floor,
         enroll: None,
+        offer: None,
     };
     let auth = Auth::Transport(Arc::new(Authenticator::new(
         identity,

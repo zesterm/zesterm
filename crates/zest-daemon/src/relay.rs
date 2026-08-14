@@ -1330,6 +1330,7 @@ mod tests {
             shell_integration: true,
             min_delta_interval: Duration::ZERO,
             enroll: None,
+            offer: None,
         };
         assert_eq!(
             pipe_config(&base).min_delta_interval,

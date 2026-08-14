@@ -810,3 +810,86 @@ The boundary moving is a change no delta can describe — there is no
 subscriber a keyframe (`TermEvent::ViewportRebased`). One per completed drag
 rather than one per `ResizeObserver` tick, because only a grow that is owed
 something arms it.
+
+---
+
+## ADR-014 — A host publishes its own profiles
+
+**Status:** accepted (#262).
+
+Launch targets on a machine are *that machine's* fact. `zest-daemon` reads its
+own `Settings::profiles`, resolves each through its own `profiles.defaults`, and
+publishes the result to any client that asks. A `+` launcher three time zones
+away lists the Windows box's WSL distros because the Windows box said so.
+
+### The alternative, and why it loses
+
+The obvious cheaper design keeps every profile in the *viewer's* config and pins
+each to a host by label — which is what `ProfileMeta::host` already does, and
+what shipped in #175. It works, and it does not scale past one person's laptop:
+a profile for `wsl.exe -d Ubuntu-24.04` with a starting directory of
+`\\wsl$\Ubuntu-24.04\home\andy` is a fact about the Windows box that the Mac has
+to be told, by hand, and told again when it changes. Every machine's config
+accumulates a stale copy of every other machine's. Design §12 asks for
+*"Found on this fleet: 2 WSL distros, 1 SSH host. Generate profiles"*, and
+nothing local can answer that question.
+
+**The local pin stays anyway**, and the two are not in competition. A profile
+that means "production" — red window, a specific command — belongs to the
+*person*, wherever it runs; that is the same argument `color_from` makes for the
+tab accent, generalised. So a launcher shows both: a machine's own published
+profiles, and the viewer's profiles pinned to that machine, grouped under the
+host that will run them. On a name collision the local one wins, because it is
+the one the user can edit.
+
+### Resolved on the host, not on the client
+
+The published `command` and `starting_directory` have already fallen through
+that host's `profiles.defaults`. The client cannot do this itself — it does not
+hold the far config, and a half-specified profile inheriting its command from a
+`defaults` table nobody sent would arrive as a row promising nothing.
+
+The corollary is the field that is deliberately **absent**: a `HostProfile`
+carries no `host` and no `ask_host`. A profile published by a machine is pinned
+to that machine by construction, and re-sending a `host` key would invite a
+client to resolve a label against its *own* fleet — the one way this feature
+could run a command on the wrong computer. A test asserts neither key reaches
+the wire.
+
+### It rides `Sessions`, and that is a cost rather than a fit
+
+`HostMessage` is `#[serde(tag = "t")]`, so a new variant is not additive. That
+is the usual reason to avoid one; here it is sharper, and it was read rather
+than assumed: `DaemonClient::recv` maps a frame it cannot decode to
+`DaemonError::Transport`, which **tears the connection down**. A new daemon
+pushing a `HostInfo` variant would therefore disconnect every older app on the
+fleet — strictly worse than the `Enroll`/`EnrollResult` precedent, which is
+loopback-only and answered by an `Error` the sender can read.
+
+So the offer is an `Option` field on `HostMessage::Sessions`, and `Hello` gained
+a `watch_hosts` bool. Less tidy than its own message, and the honest trade:
+`Sessions` is already "what this host has to offer you", already both the
+`ListSessions` reply and the watch push, and already what a client re-reads on
+every reconnect.
+
+**`None` means "nothing new to say"** — not "it has none". It covers a
+connection that did not subscribe, a daemon that publishes nothing, a message
+with no change behind it, and a peer that predates the field, deliberately, so
+a client needs one branch rather than four. The reader is sticky: an ordinary
+session push carries no offer, and clearing on one would blank a launcher's rows
+every time somebody opened a shell.
+
+### What it cost: `zest-daemon` now depends on `zest-config`
+
+It did not before, and that was a decision rather than an oversight —
+`DaemonConfig::shell_integration`'s doc comment records it as *"neither is worth
+doing before someone needs the switch"*. Someone does: a machine that cannot
+read its own profiles cannot publish them. `cargo xtask check-deps` guards
+`zest-core`, not this crate, so the wasm fence is untouched.
+
+The dependency also buys the half that makes this live rather than
+connect-time-only: `zest_config::watch` fires on a config edit, `OfferSource`
+re-reads, and a generation bump pushes to every subscriber. `OfferSource::set`
+drops a reload that changed nothing — not an optimisation, since a file watcher
+fires several times per save on every platform, and without it each of those
+would put the whole profile list on the wire for every attached client.

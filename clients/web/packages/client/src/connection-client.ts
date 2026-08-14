@@ -111,6 +111,10 @@ export class ConnectionClient {
       // The entire point of this connection: pushes when anyone, anywhere,
       // changes the list.
       watchSessions: true,
+      // And what that machine can launch (#262). This is the long-lived
+      // per-host connection the fleet holds open, so it is the one place the
+      // offer is worth asking for — a session attach does not need it.
+      watchHosts: true,
       ...(this.#options.expectedHost === undefined
         ? {}
         : { expectedHost: this.#options.expectedHost }),

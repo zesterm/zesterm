@@ -26,7 +26,7 @@ paragraph of justification attached.
 |---|---|---|---|
 | `PtyTransport` | `zest-pty/src/lib.rs` | **frozen** — `hangup` added, see below | WS-C, WS-D, WS-F |
 | `HostId`, `ClientId`, `SessionId`, `SessionAddr` | `zest-proto/src/ids.rs` | **frozen** | WS-F, WS-G, WS-H |
-| `ClientMessage`, `HostMessage`, `SessionInfo` | `zest-proto/src/lib.rs` | **frozen** at v3 — additive `Hello.watch_pairings` and `PairingRequested` expiry/tombstone fields for the approval modal, plus the `Enroll`/`EnrollResult` pair (new tags, loopback-scoped — see below) | WS-F, WS-G |
+| `ClientMessage`, `HostMessage`, `SessionInfo`, `HostOffer`, `HostProfile` | `zest-proto/src/lib.rs` | **frozen** at v3 — additive `Hello.watch_pairings` and `PairingRequested` expiry/tombstone fields for the approval modal; the `Enroll`/`EnrollResult` pair (new tags, loopback-scoped — see below); and additive `Hello.watch_hosts` + `Sessions.offer` carrying `HostOffer`/`HostProfile`, see below | WS-F, WS-G |
 | `Delta`, `DeltaOp`, `Run`, `RowPayload`, `AttrDef` | `zest-proto/src/delta.rs` | **frozen** at v3 — unchanged in content, but the frame carrying it is now ciphertext | WS-F, WS-G |
 | `Nonce32`, `Sig64`, `Pub32`, `AuthFailure` | `zest-proto/src/auth.rs` | **frozen** — `Nonce32`/`Sig64` arrived with v2, `Pub32` with v3 | WS-F, WS-G, WS-H |
 | `SecureChannel`, `Sealer`, `Opener`, `EphemeralDh`, `DhPublic` | `zest-mesh/src/secure.rs` | **frozen** at v3 — the browser has a second implementation, pinned to `fixtures/handshake.json` | WS-F, WS-G, WS-H |
@@ -159,6 +159,60 @@ Consumers landed in the same commit: the daemon (loopback-gated handler, the
 claim off a worker), the app (the fleet card's button), the TS wire types
 (`wire-client.ts` — encoder parity requires every golden to have a
 construction), and the regenerated bindings and `client-messages.json`.
+
+### Additive, and therefore not a bump: what a host offers
+
+`Hello` gained `watch_hosts` and `HostMessage::Sessions` gained
+`offer: Option<HostOffer>`, with `HostOffer`/`HostProfile` arriving beside
+them — all `#[serde(default)]`, so a peer on either side that predates them
+decodes exactly as before. `PROTOCOL_VERSION` stays at 3. (#262)
+
+**Why the new-tag hazard is worse here than the `Enroll` paragraph above
+admits, and this was read rather than assumed.** That justification leans on
+`on_bytes` answering an undecodable message with `Error { … }` and *keeping the
+connection*. The client half does not do the same thing: `DaemonClient::recv`
+(`zest-daemon/src/client.rs`) maps a `HostMessage` it cannot decode to
+`DaemonError::Transport`, which ends the connection. A new `HostMessage`
+variant pushed by a new daemon would therefore **disconnect every older app on
+the fleet** — not merely go unread. `Enroll`/`EnrollResult` escapes this only
+because it is loopback-only, sent to the sender's own daemon, and the reply
+never reaches a client that predates it. Nothing about a fleet-wide push is
+like that. So: fields.
+
+**On `Sessions` rather than a message of its own**, which is the honest cost of
+the rule above rather than a natural fit. It is less arbitrary than it looks —
+`Sessions` is already "what this host has to offer you", already both the
+`ListSessions` reply and the watch push, and already what a client re-reads on
+every reconnect.
+
+**`None` means "nothing new to say", never "it has none."** One reading covers
+four cases on purpose: this connection did not subscribe, the daemon publishes
+nothing, nothing has changed since the last message, or the peer predates the
+field. The reader must therefore be **sticky** — an ordinary session push
+carries no offer, and clearing on one would blank a launcher's rows every time
+somebody opened a shell. The daemon marks an offer sent as it emits it, so a
+caller that lists before it starts reading pushes must use
+`DaemonClient::list_with_offer` rather than `list`; the offer rides that first
+reply, and dropping it means waiting for a generation bump that only a config
+edit on the far machine can produce.
+
+**A published profile carries no `host` and no `ask_host`.** Structural, not a
+convention: a profile published by a machine is pinned to that machine by
+construction, and re-sending a `host` key would invite a client to resolve a
+label against its *own* fleet and send the launch somewhere else — the one way
+this feature could run a command on the wrong computer. A test asserts neither
+key reaches the wire. → ADR-014.
+
+Consumers landed in the same commit: `zest-proto` (the types and the `ts`
+bindings), `zest-daemon` (`offer.rs`, the serve loop's generation diff, the
+`zest-config` dependency and the config watcher, `Watch { hosts }`,
+`list_with_offer`), `zest-app` (`FleetHost::offer`, the fleet watcher's
+subscription), the TS wire types (`wire.ts` parses absent-tolerantly and
+`wire-client.ts` encodes `watch_hosts` — the encoder is held byte-equal to
+`rmp_serde`, which always writes the field), `@zesterm/client`'s handshake and
+`ConnectionClient`, and the regenerated `client-messages.json` golden — whose
+`hello` entry now sets `watch_hosts: true`, because a flag that is `false` in
+the one canonical encoding proves only that it can be omitted.
 
 ### Additive, and therefore not a bump: the approval-modal subscription
 

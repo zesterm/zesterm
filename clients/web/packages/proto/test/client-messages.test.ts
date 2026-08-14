@@ -29,6 +29,8 @@ const CANONICAL: Record<string, ClientMessage> = {
     dh: '2d'.repeat(32),
     watch_sessions: true,
     watch_pairings: false,
+    // `true` in the golden on purpose — see fixture_dump.rs.
+    watch_hosts: true,
   },
   auth: { t: 'auth', signature: 'ef'.repeat(64) },
   pairing_decision: { t: 'pairing_decision', client: 'ab'.repeat(32), approve: false },

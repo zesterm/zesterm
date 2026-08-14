@@ -36,6 +36,14 @@ export interface HandshakeOptions {
   readonly signer: ClientSigner;
   readonly label: string;
   readonly watchSessions: boolean;
+  /**
+   * Ask what this machine offers — its facts and its own profiles (#262).
+   *
+   * Unlike `watch_pairings` this is honoured on every transport, so a browser
+   * really does get an answer. Defaults to off: a connection opened to attach
+   * to one session has no use for the far machine's whole profile list.
+   */
+  readonly watchHosts?: boolean;
   /** Pin the host id an advertisement or directory claimed; omit for a hand-typed address. */
   readonly expectedHost?: string;
   /** For tests: a fixed nonce instead of a random one. */
@@ -98,6 +106,7 @@ export class HandshakeDriver {
       // Never from a browser: approvals are loopback authority, and the
       // daemon would silently not subscribe us anyway.
       watch_pairings: false,
+      watch_hosts: this.#options.watchHosts ?? false,
     };
   }
 

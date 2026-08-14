@@ -715,6 +715,11 @@ fn write_client_messages(path: &Path) {
                 dh: zest_proto::Pub32::from_bytes([0x2d; 32]),
                 watch_sessions: true,
                 watch_pairings: false,
+                // `true` rather than the default, so the golden actually
+                // exercises the field #262 added: a flag that is always false
+                // in the one canonical encoding proves only that it can be
+                // omitted, which is not the property this fixture is for.
+                watch_hosts: true,
             },
         ),
         ("auth", ClientMessage::Auth { signature: Sig64::from_bytes([0xef; 64]) }),

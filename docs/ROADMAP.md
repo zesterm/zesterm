@@ -68,7 +68,7 @@ and its number (48ms) is reported rather than gated.
 | `zest-proto` | ✅ protocol 2, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, cell-for-cell conformance, chaos-resync, command blocks |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store, sealed channel |
 | `zest-cloud` | ✅ the fence held in both directions: rustls (ring) landed here and `check-deps` stayed green with no list edited, and `zest-daemon`'s `--enroll` is now a real consumer — `TlsDuplex`, one connection as two independently owned halves, a one-request HTTP POST over it, `Endpoint` — and `zest-daemon`'s `--relay` is the second, dialling `TlsDuplex` per pipe under ADR-009's dial-back |
-| `zest-daemon` | ✅ session ownership *and* lifecycle, protocol loop, loopback *and* LAN transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing |
+| `zest-daemon` | ✅ session ownership *and* lifecycle, protocol loop, loopback *and* LAN transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing, **and it publishes its own profiles** (#262) |
 
 ### What works end to end today
 
@@ -103,6 +103,13 @@ and its number (48ms) is reported rather than gated.
   had. Either way blocks appear against the prompt the user already has, and no
   file of theirs is touched. VS Code's OSC 633 is understood too, for anyone who
   has its integration.
+- **A machine says what it is and what it can launch.** A daemon reads its own
+  `profiles` table, resolves each through its own `defaults`, and publishes the
+  result — plus its os, arch and default shell — to any client that asks
+  (`Hello.watch_hosts`). Editing a profile on the far machine pushes a fresh
+  offer to everything attached. This is what makes the `+` menu able to list
+  another machine's launch targets at all, and what lets a fleet card fill its
+  `os` row with a fact rather than a dash. → ADR-014, #262.
 - **Acting on a block.** `Cmd`/`Ctrl+Shift` + `O` copies what the last command
   printed — its output alone, not the prompt and not the command — and `R` runs
   it again. The same chord plus a click does it for any block in scrollback.
