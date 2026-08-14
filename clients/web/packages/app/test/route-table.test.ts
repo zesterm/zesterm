@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { createMemoryHistory, createRouter } from '@sigx/router';
 
-import { SHELL_CHILD_PATHS, SHELL_PATH } from '../src/route-table.ts';
+import { SHELL_CHILD_PATHS, SHELL_PATH, safeNextPath } from '../src/route-table.ts';
 
 // The exact record shape routes.tsx builds, minus the components — the
 // RouterView key is derived from paths alone, so this is the whole mechanism.
@@ -77,5 +77,24 @@ test('the child paths are absolute', () => {
       path.startsWith('/h/'),
       `'${path}' must start with '/h/' — a relative child joins under ${SHELL_PATH} and never matches a real /h/… URL`,
     );
+  }
+});
+
+test('safeNextPath mirrors the Worker safeNext, plus the loop the server never sees', () => {
+  // The same cases the Worker's own tests use, so the two vetting layers
+  // cannot silently disagree about what a safe destination is.
+  const cases: Array<[string | undefined, string, string]> = [
+    [undefined, '/hosts', 'absent means the ordinary landing'],
+    ['', '/hosts', 'empty is absent'],
+    ['/link?grant=abc', '/link?grant=abc', 'the hand-off URL this exists to carry'],
+    ['/themes', '/themes', 'any ordinary path passes through'],
+    ['https://evil.example', '/hosts', 'an absolute URL is an open redirect'],
+    ['//evil.example', '/hosts', 'protocol-relative is the case startsWith("/") misses'],
+    ['/\\evil.example', '/hosts', 'the backslash spelling some browsers normalise to //'],
+    ['/login', '/hosts', 'next pointing back at the gate would bounce forever'],
+    ['/login?next=%2Fhosts', '/hosts', 'and so would the parameterised spelling'],
+  ];
+  for (const [raw, want, why] of cases) {
+    assert.equal(safeNextPath(raw), want, why);
   }
 });

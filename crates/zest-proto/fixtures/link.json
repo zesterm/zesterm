@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "notes": [
+    "Signing preimage: \"zesterm-sig-v1\\0client\\0enrollment\\0\" ++ message (NUL bytes              literal). Plain Ed25519 over that -- no Ed25519ctx, no prehash. No new Purpose:              the zesterm-link-v1 domain separates these from zesterm-enroll-v1 and              zesterm-register-v1 at byte 8, before any caller-supplied field.",
+    "Request message: \"zesterm-link-v1\" (15 bytes, no terminator) ++ 0x01 ++              key (32 raw bytes) ++ u16be(len(label)) ++ label. Lengths count UTF-8 BYTES,              never UTF-16 code units -- the astral case is what catches `.length`.",
+    "Claim message: \"zesterm-link-v1\" ++ 0x02 ++ u16be(len(grant)) ++ grant ++              key (32 raw bytes). The tag byte is load-bearing: both messages share the              domain and carry the same key plus one variable string in opposite orders,              so without it their disjointness would rest on key bytes never resembling a              length prefix. The cross-replay case pins the refusal."
+  ],
+  "cases": [
+    {
+      "name": "request",
+      "seed": "4444444444444444444444444444444444444444444444444444444444444444",
+      "key": "d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48",
+      "verify_as": "request",
+      "label": "andy-desktop",
+      "message": "7a65737465726d2d6c696e6b2d763101d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48000c616e64792d6465736b746f70",
+      "signature": "88f4cd29b75c5483de89c222f04d962fff8a08b16575ab6bd3a9b7501274ca32544e0e3ee03b6093129ba6b540d66d3d1e112550fcfe4442883d52162bbb4e05",
+      "expect_verify": true,
+      "note": "the ordinary ask: proof of key possession under a label"
+    },
+    {
+      "name": "request-astral",
+      "seed": "4444444444444444444444444444444444444444444444444444444444444444",
+      "key": "d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48",
+      "verify_as": "request",
+      "label": "desktop 😀",
+      "message": "7a65737465726d2d6c696e6b2d763101d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48000c6465736b746f7020f09f9880",
+      "signature": "ac62bcdbf242e32fd3737e422d50c21529498d0cd9ed33dd65838fc74b704b1c42683079bcd193341ccc81be203bd04ebe516bb71fc5d1b2c80dca2b5f9e3301",
+      "expect_verify": true,
+      "note": "the label's length prefix is 12 (bytes), not 10 (UTF-16 units); a reader counting code units builds a different message and fails here by name"
+    },
+    {
+      "name": "claim",
+      "seed": "4444444444444444444444444444444444444444444444444444444444444444",
+      "key": "d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48",
+      "verify_as": "claim",
+      "grant": "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo",
+      "message": "7a65737465726d2d6c696e6b2d763102002b576c7061576c7061576c7061576c7061576c7061576c7061576c7061576c7061576c7061576c7061576c6fd759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48",
+      "signature": "ca507489ccc540bec8bf495b9f9410854dc6147409913fcd06c69bd0169b777f43f9d3753af1d1f1d345df790c60121ca2c7a8032238936a811edeb81b22100f",
+      "expect_verify": true,
+      "note": "the spend: grant ++ key, so a grant id captured from a browser URL claims nothing without the key"
+    },
+    {
+      "name": "request-replayed-as-claim",
+      "seed": "4444444444444444444444444444444444444444444444444444444444444444",
+      "key": "d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48",
+      "verify_as": "claim",
+      "grant": "andy-desktop",
+      "message": "7a65737465726d2d6c696e6b2d763102000c616e64792d6465736b746f70d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48",
+      "signature": "88f4cd29b75c5483de89c222f04d962fff8a08b16575ab6bd3a9b7501274ca32544e0e3ee03b6093129ba6b540d66d3d1e112550fcfe4442883d52162bbb4e05",
+      "expect_verify": false,
+      "note": "MUST verify false: a valid approval-phase signature presented as a claim -- the tag byte is what refuses it"
+    }
+  ]
+}
