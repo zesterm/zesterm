@@ -452,6 +452,12 @@ enum AppScreen {
 /// header sizes for it.
 const ENROLL_CODE_LENGTH: usize = 8;
 
+/// How often the browser hand-off polls its claim (#226). Three seconds:
+/// fast enough that "I clicked Approve" and "the app noticed" feel like one
+/// event, slow enough that a ten-minute grant costs two hundred cheap
+/// pending answers, not a hammer.
+const LINK_POLL: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// The characters a code can contain — the server's `ENROLL_CODE_ALPHABET`
 /// (`cloud/packages/web/src/enroll/codes.ts`), pinned like the length above.
 /// No `0/O`, `1/I/L` or `U`: the confusables were excluded so a code read off
@@ -494,6 +500,10 @@ pub enum AccountState {
     /// An enrolment worker is in flight; the header says so and offers
     /// nothing clickable until it settles.
     Enrolling,
+    /// The browser hand-off (#226) is waiting for someone to click Approve.
+    /// Carries the app key's fingerprint — the eight hex characters the
+    /// approval page also shows, for the person to compare.
+    Linking { fingerprint: String },
     /// A token is stored. The name is `None` when only the token is known —
     /// the account's display name is not persisted, so a restart shows
     /// "signed in" until an enrolment or a hosts fetch supplies it again.
@@ -1077,6 +1087,12 @@ pub struct App {
     /// sign-outs settle here and post `Wakeup::AccountChanged`; the event
     /// loop drains it. Last write wins, which is also the coalescing.
     account_update: Arc<parking_lot::Mutex<Option<AccountState>>>,
+    /// Which browser hand-off is current (#226). Every `spawn_link` bumps
+    /// it and the poller checks it before each claim and before posting, so
+    /// a cancelled or superseded poller stops instead of overwriting the
+    /// state its replacement owns. Enrol and sign-out bump it too — any
+    /// other door opening closes this one.
+    link_generation: Arc<std::sync::atomic::AtomicU64>,
     /// An enrolment code being typed on the Fleet screen. While it exists,
     /// characters belong to it and not to the terminal — the settings tab's
     /// edit-buffer discipline (only `buffer` and `error` are live here;
@@ -1305,6 +1321,7 @@ impl App {
             remote_identity: None,
             account: AccountState::Unknown,
             account_update: Arc::new(parking_lot::Mutex::new(None)),
+            link_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             enroll_entry: None,
             account_poke: None,
             fleet_view: Vec::new(),
@@ -2173,6 +2190,7 @@ impl App {
                     FleetAccountModel {
                         line: "Sign in with a code".into(),
                         action: FleetAccountAction::None,
+                        second: FleetAccountAction::None,
                         entry: Some(crate::chrome::model::SettingsValueCell::Editing {
                             buffer: edit.buffer.clone(),
                             error: edit.error,
@@ -2184,18 +2202,31 @@ impl App {
                         AccountState::Unknown => FleetAccountModel {
                             line: String::new(),
                             action: FleetAccountAction::None,
+                            second: FleetAccountAction::None,
                             entry: None,
                             error: None,
                         },
                         AccountState::SignedOut => FleetAccountModel {
                             line: "not signed in".into(),
                             action: FleetAccountAction::SignIn,
+                            second: FleetAccountAction::SignInBrowser,
                             entry: None,
                             error: None,
                         },
                         AccountState::Enrolling => FleetAccountModel {
                             line: "enrolling…".into(),
                             action: FleetAccountAction::None,
+                            second: FleetAccountAction::None,
+                            entry: None,
+                            error: None,
+                        },
+                        // The anti-phishing half (#226): the fingerprint here
+                        // and the one on the approval page are the same eight
+                        // hex characters, and the person compares them.
+                        AccountState::Linking { fingerprint } => FleetAccountModel {
+                            line: format!("approve in your browser — key {fingerprint}"),
+                            action: FleetAccountAction::CancelLink,
+                            second: FleetAccountAction::None,
                             entry: None,
                             error: None,
                         },
@@ -2205,12 +2236,14 @@ impl App {
                                 None => "signed in".into(),
                             },
                             action: FleetAccountAction::SignOut,
+                            second: FleetAccountAction::None,
                             entry: None,
                             error: None,
                         },
                         AccountState::Failed(message) => FleetAccountModel {
                             line: "not signed in".into(),
                             action: FleetAccountAction::SignIn,
+                            second: FleetAccountAction::SignInBrowser,
                             entry: None,
                             error: Some(message.clone()),
                         },
@@ -2696,6 +2729,8 @@ impl App {
                 return;
             }
         };
+        // A code sign-in supersedes any browser hand-off still polling.
+        self.link_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.account = AccountState::Enrolling;
         let label = self.local_machine_label();
         let update = Arc::clone(&self.account_update);
@@ -2725,6 +2760,8 @@ impl App {
     /// The header keeps saying "signed in" until the worker settles — the
     /// delete is near-instant, and an "enrolling…" interim would be a lie.
     fn spawn_sign_out(&mut self) {
+        // Signing out also abandons any hand-off still polling.
+        self.link_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let update = Arc::clone(&self.account_update);
         let proxy = self.proxy.clone();
         let spawned = std::thread::Builder::new().name("zest-app-cloud".into()).spawn(move || {
@@ -2743,6 +2780,115 @@ impl App {
             tracing::warn!(error = %e, "could not start the sign-out worker");
             self.account = AccountState::Failed("could not sign out — try again".into());
         }
+        self.mark_chrome_dirty();
+    }
+
+    /// Start the browser hand-off (#226): ask for a grant, open the system
+    /// browser at the approval page, and poll the claim until someone
+    /// answers or the grant dies.
+    ///
+    /// The identity loads here, on the click (`spawn_enroll`'s keychain
+    /// trade), and the throwaway fallback is refused — a device row bound
+    /// to a key that evaporates on restart is the enrol rule restated. The
+    /// header flips to `Linking` immediately, fingerprint included, so the
+    /// person has the string to compare *before* the browser page appears.
+    fn spawn_link(&mut self) {
+        let identity = match self.durable_identity() {
+            Ok(i) => i,
+            Err(reason) => {
+                self.account = AccountState::Failed(reason);
+                self.mark_chrome_dirty();
+                return;
+            }
+        };
+        // This hand-off supersedes any previous one still polling: the
+        // server rotates the grant on the second start (one live grant per
+        // key), so the old poller's grant is dead either way — the bump is
+        // what keeps its last claim from overwriting this state.
+        let generation = Arc::clone(&self.link_generation);
+        let mine = generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        self.account = AccountState::Linking {
+            fingerprint: crate::cloud::key_fingerprint(identity.client_id()),
+        };
+        let label = self.local_machine_label();
+        let update = Arc::clone(&self.account_update);
+        let proxy = self.proxy.clone();
+        let spawned = std::thread::Builder::new().name("zest-app-link".into()).spawn(move || {
+            use crate::cloud::LinkOutcome;
+            let base = zest_daemon::enroll::DEFAULT_CONTROL_PLANE;
+            let http =
+                zest_daemon::enroll::HttpsControlPlane::new(zest_cloud::tls::Roots::Platform);
+            let store = zest_mesh::keystore::OsKeyStore;
+
+            // Posts only if this hand-off is still the current one — a
+            // cancelled or superseded poller's outcome is nobody's news.
+            let post = |state: AccountState| {
+                if generation.load(std::sync::atomic::Ordering::SeqCst) == mine {
+                    post_account(&update, &proxy, state);
+                }
+            };
+
+            let granted = match crate::cloud::start_link(&identity, &label, base, &http, &store)
+            {
+                Ok(g) => g,
+                Err(e) => {
+                    post(AccountState::Failed(enroll_failure(&e)));
+                    return;
+                }
+            };
+            // The browser opens only after the grant exists — an approval
+            // page for a grant that failed to mint is a 404 with no story.
+            crate::platform::open_url(&format!(
+                "{}{}?grant={}",
+                base.trim_end_matches('/'),
+                crate::cloud::LINK_PAGE_PATH,
+                granted.grant,
+            ));
+
+            loop {
+                std::thread::sleep(LINK_POLL);
+                if generation.load(std::sync::atomic::Ordering::SeqCst) != mine {
+                    return;
+                }
+                match crate::cloud::claim_link(&identity, &granted.grant, base, &http, &store) {
+                    Ok(LinkOutcome::SignedIn { account }) => {
+                        post(AccountState::SignedIn { account });
+                        return;
+                    }
+                    Ok(LinkOutcome::Refused(message)) => {
+                        post(AccountState::Failed(format!("the browser said no: {message}")));
+                        return;
+                    }
+                    // Pending keeps polling; a transport blip does too — the
+                    // grant outlives a dropped packet, and giving up on one
+                    // would fail hand-offs on exactly the flaky networks
+                    // this flow exists to spare people typing codes on.
+                    Ok(LinkOutcome::Pending) | Err(_) => {}
+                }
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as u64);
+                if now >= granted.expires_at {
+                    post(AccountState::Failed(
+                        "the browser approval expired — try again".into(),
+                    ));
+                    return;
+                }
+            }
+        });
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "could not start the link worker");
+            self.account = AccountState::Failed("could not start the sign-in worker".into());
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// Stop waiting on the browser. Local only, and honestly so: the grant
+    /// lives its ten minutes out server-side, where an unclaimed approval
+    /// enrols nobody — the claim signature is the thing that was cancelled.
+    fn cancel_link(&mut self) {
+        self.link_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.account = AccountState::SignedOut;
         self.mark_chrome_dirty();
     }
 
@@ -4206,6 +4352,12 @@ impl App {
                 // where the row was built (`fleet_device_rows`), against the
                 // same snapshot this index resolves into.
                 self.spawn_approve(i);
+            }
+            (HitRegion::FleetLinkStart, MouseButton::Left) => {
+                self.spawn_link();
+            }
+            (HitRegion::FleetLinkCancel, MouseButton::Left) => {
+                self.cancel_link();
             }
             (HitRegion::FleetSignIn, MouseButton::Left) => {
                 // A fresh, empty entry: the keyboard owns it from here
@@ -9011,6 +9163,17 @@ impl ApplicationHandler<Wakeup> for App {
                             _ => {}
                         }
                         self.mark_chrome_dirty();
+                        return;
+                    }
+
+                    // While the browser hand-off waits, Esc cancels it before
+                    // it leaves the screen — the code entry's layered-Esc
+                    // discipline, applied to the other sign-in door.
+                    if self.screen == AppScreen::Fleet
+                        && matches!(self.account, AccountState::Linking { .. })
+                        && matches!(&event.logical_key, Key::Named(NamedKey::Escape))
+                    {
+                        self.cancel_link();
                         return;
                     }
 

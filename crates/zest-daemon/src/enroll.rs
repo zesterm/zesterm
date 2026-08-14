@@ -190,6 +190,12 @@ pub enum EnrollError {
     /// bytes would otherwise sign identical bytes.
     #[error("{0}")]
     Preimage(#[from] zest_mesh::enroll::EnrollError),
+    /// The link-flow twin of `Preimage` (#226): a grant id or label too long
+    /// to encode unambiguously. Its own variant because the two preimage
+    /// families are separate types on purpose, and stringifying one into the
+    /// other would lose which flow refused.
+    #[error("{0}")]
+    LinkPreimage(#[from] zest_mesh::link::LinkError),
 }
 
 /// What this machine got out of enrolling.

@@ -209,6 +209,12 @@ pub enum FleetAccountAction {
     None,
     /// "Sign in with a code" — opens the code entry.
     SignIn,
+    /// "Sign in with browser" — the hand-off flow (#226): a grant, the
+    /// system browser, and a poll until someone clicks Approve.
+    SignInBrowser,
+    /// "Cancel" — stop waiting on the browser; the grant just expires
+    /// server-side.
+    CancelLink,
     /// "Sign out" — forgets this app's token.
     SignOut,
 }
@@ -222,6 +228,9 @@ pub struct FleetAccountModel {
     /// The header sentence ("signed in as andy", "not signed in").
     pub line: String,
     pub action: FleetAccountAction,
+    /// A second affordance beside the first — the signed-out header offers
+    /// both sign-in doors (#226). `None` everywhere one button is the truth.
+    pub second: FleetAccountAction,
     /// The enrolment code being typed, drawn with the §11 editing cell
     /// machinery; `None` when no entry is open.
     pub entry: Option<SettingsValueCell>,

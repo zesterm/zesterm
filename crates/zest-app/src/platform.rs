@@ -164,6 +164,25 @@ pub fn native_control_inset(_window: &winit::window::Window) -> Option<(f64, f64
 /// and a handler that fails does so in the OS's own UI. `cmd /c start` on
 /// Windows (`start` is a cmd built-in, not a program), `open` on macOS,
 /// `xdg-open` elsewhere.
+/// Hand a URL to the default browser — the sign-in hand-off's approval page
+/// (#226). [`open_path`]'s per-OS table with a string argument: a URL is not
+/// a filesystem path, and shoving one through a `Path` invites separator
+/// rewriting on exactly the platform (`cmd /c start`) where it matters.
+pub fn open_url(url: &str) {
+    #[cfg(windows)]
+    // The empty quoted argument is start's window title slot — open_path's
+    // note; and `start` is the one launcher that hands a URL scheme to the
+    // browser rather than the shell.
+    let result = std::process::Command::new("cmd").args(["/c", "start", "", url]).spawn();
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open").arg(url).spawn();
+    if let Err(e) = result {
+        tracing::warn!(error = %e, url, "could not open the browser");
+    }
+}
+
 pub fn open_path(path: &std::path::Path) {
     #[cfg(windows)]
     // The empty quoted argument is start's window title slot: without it a

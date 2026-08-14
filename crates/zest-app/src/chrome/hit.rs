@@ -109,6 +109,10 @@ pub enum HitRegion {
     FleetApproveDevice(usize),
     /// The fleet header's "Sign in with a code"; clicking opens the entry.
     FleetSignIn,
+    /// "Sign in with browser" (#226); clicking starts the hand-off.
+    FleetLinkStart,
+    /// "Cancel" while the hand-off waits; clicking stops the poller.
+    FleetLinkCancel,
     /// The local host card's "Enroll this machine" button (issue #227);
     /// clicking mints a code and carries it to the loopback daemon.
     FleetEnrollLocal,
