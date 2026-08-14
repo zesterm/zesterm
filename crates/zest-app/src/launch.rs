@@ -13,6 +13,7 @@ use std::time::Duration;
 use zest_proto::HostId;
 
 use crate::fleet::FleetHost;
+use crate::route::{best_route, HostRoute};
 
 /// Where a profile launch should dial, resolved against the fleet snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,15 +21,21 @@ pub enum HostTarget {
     /// The window's own machine: the profile pinned no host, or pinned the
     /// host this window runs on. Launches ride the window's existing route.
     Local,
-    /// A remote host with an advertised address. Dialled per tab; presence
-    /// deliberately does not gate this — a sleeping host still gets a
-    /// connecting tab and the worker's retries, not a refusal (§12: "a
+    /// A remote host and the transport that reaches it. Dialled per tab;
+    /// presence deliberately does not gate this — a sleeping host still gets
+    /// a connecting tab and the worker's retries, not a refusal (§12: "a
     /// profile whose host is asleep still launches").
-    Remote { host: HostId, addr: String },
-    /// No dialable route: a label the fleet has never seen, or a host
-    /// advertising an empty address set (the DNS-SD instance-name trap).
-    /// Still a launch — the tab goes up connecting and settles failed with
-    /// this message — never a panic and never a silent log line.
+    ///
+    /// The route rather than a bare address, so a launch reaches an enrolled
+    /// machine through the relay exactly as a fleet card does (#250). One
+    /// variant rather than a second `Relay` arm: the worker calls
+    /// `route.dialer()` and does not care which transport answered.
+    Remote { host: HostId, route: HostRoute },
+    /// No dialable route: a label the fleet has never seen, or a host with
+    /// no evidence of any kind — no advertisement, no enrolment, or an
+    /// account with no relay. Still a launch — the tab goes up connecting
+    /// and settles failed with this message — never a panic and never a
+    /// silent log line.
     Unroutable { error: String },
 }
 
@@ -39,17 +46,28 @@ pub enum HostTarget {
 /// ASCII only, deliberately: a Unicode fold needs a table this crate does
 /// not carry, and a host label that differs only by non-ASCII case is a
 /// hostname nobody can type reliably anyway.
+///
+/// The three trailing arguments are [`best_route`]'s, passed through rather
+/// than re-derived: before #250 this function knew only `FleetHost::address`,
+/// so a profile pinned to an enrolled machine that mDNS could not see
+/// resolved `Unroutable` while its fleet card opened a shell immediately.
 #[must_use]
-pub fn resolve_host(label: Option<&str>, fleet: &[FleetHost]) -> HostTarget {
+pub fn resolve_host(
+    label: Option<&str>,
+    fleet: &[FleetHost],
+    local: Option<&HostRoute>,
+    relay_origin: Option<&str>,
+    signed_in: bool,
+) -> HostTarget {
     let Some(label) = label.map(str::trim).filter(|l| !l.is_empty()) else {
         return HostTarget::Local;
     };
     match fleet.iter().find(|h| h.label.eq_ignore_ascii_case(label)) {
         Some(h) if h.local => HostTarget::Local,
-        Some(h) => match &h.address {
-            Some(addr) => HostTarget::Remote { host: h.host, addr: addr.clone() },
+        Some(h) => match best_route(h, local, relay_origin, signed_in) {
+            Some(route) => HostTarget::Remote { host: h.host, route },
             None => HostTarget::Unroutable {
-                error: format!("host '{label}' advertises no address to dial"),
+                error: format!("no way to reach host '{label}' right now"),
             },
         },
         None => HostTarget::Unroutable { error: format!("host '{label}' is not in the fleet") },
@@ -124,10 +142,15 @@ mod tests {
             rtt_ms: None,
             sessions: crate::fleet::SessionsState::Unknown,
             enrolled: false,
-            // `resolve_host` picks a route from the address and never from
-            // presence, so this builder has nothing to say about it.
             relay_online: false,
         }
+    }
+
+    /// The common case: a LAN fleet, no account. The route rule's own truth
+    /// table lives in `route.rs`; these pin what *label resolution* does with
+    /// its answer.
+    fn on_lan(label: Option<&str>, fleet: &[FleetHost]) -> HostTarget {
+        resolve_host(label, fleet, None, None, false)
     }
 
     #[test]
@@ -136,10 +159,10 @@ mod tests {
         // window's route, and pinning the window's own machine is the same
         // thing said explicitly.
         let fleet = [host("studio", true, None), host("forge", false, Some("10.0.0.7:7717"))];
-        assert_eq!(resolve_host(None, &fleet), HostTarget::Local);
-        assert_eq!(resolve_host(Some("studio"), &fleet), HostTarget::Local);
+        assert_eq!(on_lan(None, &fleet), HostTarget::Local);
+        assert_eq!(on_lan(Some("studio"), &fleet), HostTarget::Local);
         assert_eq!(
-            resolve_host(Some(""), &fleet),
+            on_lan(Some(""), &fleet),
             HostTarget::Local,
             "an empty label is the file's spelling of unset, like profiles.rs reads it"
         );
@@ -149,17 +172,47 @@ mod tests {
     fn a_remote_label_resolves_to_its_advertised_address() {
         let fleet = [host("studio", true, None), host("forge", false, Some("10.0.0.7:7717"))];
         assert_eq!(
-            resolve_host(Some("forge"), &fleet),
+            on_lan(Some("forge"), &fleet),
             HostTarget::Remote {
                 host: HostId::from_bytes([2; 32]),
-                addr: "10.0.0.7:7717".to_string()
+                route: HostRoute::Tcp("10.0.0.7:7717".to_string())
             }
         );
         assert_eq!(
-            resolve_host(Some("FORGE"), &fleet),
-            resolve_host(Some("forge"), &fleet),
+            on_lan(Some("FORGE"), &fleet),
+            on_lan(Some("forge"), &fleet),
             "labels are display names; case must not decide which machine runs a shell"
         );
+    }
+
+    #[test]
+    fn a_profile_pinned_to_an_enrolled_host_off_this_lan_launches_through_the_relay() {
+        // The hole #250 closes, and the one that reads as a broken feature:
+        // this exact host's fleet card opened a shell immediately (the card
+        // was the only caller that knew about the relay), while the profile
+        // pinned to it put up a connecting tab that settled failed with "host
+        // 'forge' advertises no address to dial" — a message about the LAN
+        // for a machine nobody was trying to reach over the LAN.
+        let mut forge = host("forge", false, None);
+        forge.presence = Presence::Unseen;
+        forge.enrolled = true;
+        let fleet = [host("studio", true, None), forge];
+
+        assert_eq!(
+            resolve_host(Some("forge"), &fleet, None, Some("wss://relay.example"), true),
+            HostTarget::Remote {
+                host: HostId::from_bytes([2; 32]),
+                route: HostRoute::Relay {
+                    host: HostId::from_bytes([2; 32]),
+                    relay_origin: "wss://relay.example".to_string(),
+                },
+            }
+        );
+        // And signed out it is honestly unroutable rather than silently local.
+        assert!(matches!(
+            resolve_host(Some("forge"), &fleet, None, Some("wss://relay.example"), false),
+            HostTarget::Unroutable { .. }
+        ));
     }
 
     #[test]
@@ -168,15 +221,19 @@ mod tests {
         // connecting state, and settles failed carrying this message — a
         // typo'd host must never be a silent warn! or a crash.
         let fleet = [host("studio", true, None)];
-        let HostTarget::Unroutable { error } = resolve_host(Some("gone"), &fleet) else {
+        let HostTarget::Unroutable { error } = on_lan(Some("gone"), &fleet) else {
             panic!("an unknown label must resolve Unroutable");
         };
         assert!(error.contains("gone"), "the error names the label: {error}");
 
-        // A host found but with an empty address set (the DNS-SD trap) is
-        // the same shape: present in the listing, nothing to dial.
+        // A host found but with an empty address set (the DNS-SD trap) and
+        // nothing else to go on is the same shape: present in the listing,
+        // nothing to dial.
         let fleet = [host("sleepy", false, None)];
-        assert!(matches!(resolve_host(Some("sleepy"), &fleet), HostTarget::Unroutable { .. }));
+        let HostTarget::Unroutable { error } = on_lan(Some("sleepy"), &fleet) else {
+            panic!("a host with no route must resolve Unroutable");
+        };
+        assert!(error.contains("sleepy"), "the error names the label: {error}");
     }
 
     #[test]
