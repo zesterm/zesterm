@@ -125,6 +125,17 @@ export async function routeApi(
     // which is how the desktop app learns the `userId` its attestations must
     // carry — and `user` stays present-but-null so nothing switches on a
     // missing key.
+    //
+    // A machine's answer also carries `relayOrigin`, and only a machine's
+    // (#229). A daemon holding a cloud token has to learn where to park its
+    // control link, and every other place that says so is closed to it: a
+    // *person* reads `/api/bootstrap`, which needs a session cookie, and
+    // `/api/hosts` refuses host tokens on purpose — a machine serving shells
+    // has no business enumerating its owner's other machines. Widening that
+    // listing to get one string would trade a real boundary for a field. The
+    // person's answer here is unchanged and still carries nothing: the rule
+    // is that the *browser* learns the relay in one place, not that this
+    // route never mentions it, and a daemon has no bootstrap to read.
     const principal = await requestPrincipal(request, env, now);
     if (principal === null) return json({ user: null });
     return principal.kind === 'user'
@@ -132,6 +143,10 @@ export async function routeApi(
       : json({
           user: null,
           principal: { kind: principal.kind, id: principal.id, userId: principal.userId },
+          // `null`, never absent, for `/api/bootstrap`'s reason: "this
+          // deployment has no relay" is an answer, and a daemon that cannot
+          // tell it from a field it failed to read would retry for ever.
+          relayOrigin: env.RELAY_ORIGIN ?? null,
         });
   }
 

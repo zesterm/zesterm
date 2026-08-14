@@ -59,10 +59,15 @@ fn main() {
              --ws-bind <addr>    which interface (default 0.0.0.0)\n\
              --ws-port <port>    preferred port (default 7718)\n\
              --relay <url>       dial this relay so the machine is reachable\n\
-             \x20                   from anywhere, without opening a port\n\
-             \x20                   (off by default; --relay-url is the same\n\
-             \x20                   flag). wss://host, or http://127.0.0.1:8787\n\
-             \x20                   for a relay running on this machine\n\
+             \x20                   from anywhere, without opening a port.\n\
+             \x20                   An enrolled machine dials its account's\n\
+             \x20                   relay on its own, so this is an override\n\
+             \x20                   (--relay-url is the same flag). wss://host,\n\
+             \x20                   or http://127.0.0.1:8787 for a relay\n\
+             \x20                   running on this machine\n\
+             --no-relay          do not dial any relay, even when enrolled.\n\
+             \x20                   The machine stays reachable on the LAN and\n\
+             \x20                   on loopback, and shows as asleep from away\n\
              --min-delta-interval <ms>\n\
              \x20                   least time between updates for one client\n\
              \x20                   (default 0 -- send as fast as the shell\n\
@@ -165,6 +170,14 @@ fn main() {
                     identity.host_id().short()
                 );
                 println!("the token is kept in {}", store.describe_secret_store());
+                // #229: the step nobody could have guessed. Enrolment is what
+                // records the intent to be reachable, so say what it now buys
+                // — a person who reads only this line should not end up
+                // staring at a fleet screen that says asleep.
+                println!(
+                    "from its next start this machine dials the account's relay, \
+                     so it is reachable from anywhere (--no-relay opts out)"
+                );
             }
             // The mirror of the app's #228 mapping: a device code fed to
             // --enroll. The generic refusal would say "get a fresh code",
@@ -188,6 +201,17 @@ fn main() {
         match enroll::forget_token(store.as_ref()) {
             Ok(true) => {
                 println!("forgot the token kept in {}", store.describe_secret_store());
+                // The cached relay origin goes with the token that justified
+                // it. Leaving it behind would have the next start dial an
+                // account this machine no longer belongs to -- which the relay
+                // would refuse, once every backoff, for ever.
+                let cache = zest_daemon::relay_origin::OriginCache::at(
+                    zest_daemon::relay_origin::OriginCache::default_path(),
+                );
+                if let Err(e) = cache.clear() {
+                    tracing::warn!(error = %e, path = %cache.path().display(),
+                        "could not forget the cached relay origin");
+                }
                 // Said plainly, because the comfortable reading is the wrong
                 // one: this drops *this machine's* copy and nothing else. The
                 // account keeps listing the host until it is revoked there.
@@ -339,6 +363,52 @@ fn main() {
     }
 
     let listen_lan = flag("--listen-lan");
+
+    // Where the relay comes from, if anywhere (#229). An enrolled machine is a
+    // machine its owner wants reachable, so holding a cloud token is the
+    // instruction — no flag required, `--no-relay` to opt out. The decision is
+    // a pure function over six inputs because a table of six booleans reasoned
+    // about in prose is how the undiscoverable `--relay` requirement happened
+    // in the first place. → relay_origin.rs.
+    let control_plane =
+        opt("--control-plane").unwrap_or_else(|| enroll::DEFAULT_CONTROL_PLANE.to_string());
+    let origin_cache = zest_daemon::relay_origin::OriginCache::at(
+        zest_daemon::relay_origin::OriginCache::default_path(),
+    );
+    let relay_choice = {
+        let explicit = opt("--relay").or_else(|| opt("--relay-url"));
+        if flag("--no-relay") && explicit.is_some() {
+            // Both given: the safe direction wins, and it is said out loud
+            // rather than resolved silently, because the person meant one of
+            // them and cannot tell which one took effect from the outside.
+            tracing::warn!("--no-relay overrides --relay; this machine will not dial a relay");
+        }
+        zest_daemon::relay_origin::choose(&zest_daemon::relay_origin::RelayInputs {
+            ephemeral,
+            explicit,
+            no_relay: flag("--no-relay"),
+            // Three states, never two. An `Err` here is a locked keychain or a
+            // keyring that has not come up yet -- **not** a machine that never
+            // enrolled -- and folding the two together made relay dialling
+            // vanish from an enrolled machine with nothing said. It is said
+            // here, and `choose` still dials a cached origin, because what
+            // authorizes the link is the host key rather than this token.
+            token: match enroll::stored_token(store.as_ref()) {
+                Ok(Some(_)) => zest_daemon::relay_origin::Token::Held,
+                Ok(None) => zest_daemon::relay_origin::Token::Absent,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        store = %store.describe_secret_store(),
+                        "could not read the cloud token; falling back to the cached relay origin"
+                    );
+                    zest_daemon::relay_origin::Token::Unreadable
+                }
+            },
+            cached: origin_cache.load(),
+        })
+    };
+
     let config = DaemonConfig {
         host: identity.host_id(),
         label,
@@ -353,12 +423,16 @@ fn main() {
         ws_port: opt("--ws-port")
             .and_then(|p| p.parse().ok())
             .unwrap_or(zest_daemon::ws::DEFAULT_PORT),
-        // Two spellings of one flag, and no default value behind either. The
-        // relay a machine should dial is a property of the *account* — the web
-        // client is already handed its relay origin at runtime rather than
-        // building one in — and nothing is deployed yet, so a built-in URL here
-        // would be a guess this daemon presented as configuration.
-        relay: opt("--relay").or_else(|| opt("--relay-url")),
+        // What this start can dial *now*, with nothing to wait for: the
+        // `--relay` flag, or an origin a previous start cached. Still no
+        // built-in URL — the relay a machine dials is a property of the
+        // account, and a constant here would be a guess presented as
+        // configuration. When the answer has to be fetched, this is `None` and
+        // the link comes up on a worker below, after the listeners.
+        relay: match &relay_choice {
+            zest_daemon::relay_origin::RelayChoice::Dial(url) => Some(url.clone()),
+            _ => None,
+        },
         shell_integration: !flag("--no-shell-integration"),
         // Zero unless asked. The relay transport is what needs a floor, and it
         // sets its own; a flag exists so the effect can be seen on loopback
@@ -450,6 +524,39 @@ fn main() {
                 error = %e,
                 "not dialling the relay; loopback and the LAN are unaffected"
             );
+        }
+    }
+
+    // The account's relay, when this start had nothing cached to dial — and a
+    // refresh when it did. **After** everything above, on a thread of its own,
+    // because the answer comes from the network and ADR-005 says a local
+    // terminal survives Cloudflare being unreachable: the listeners are
+    // already serving by the time this runs, and a failure here costs a log
+    // line. → relay_origin.rs.
+    match &relay_choice {
+        zest_daemon::relay_origin::RelayChoice::Off(why) => {
+            tracing::debug!(?why, "not dialling a relay");
+        }
+        choice => {
+            let asking = matches!(choice, zest_daemon::relay_origin::RelayChoice::AskAccount);
+            // A `--relay` override is not refreshed: the flag is the answer,
+            // and asking the account what it thinks would only produce a log
+            // line contradicting the command line.
+            let refreshing = matches!(choice, zest_daemon::relay_origin::RelayChoice::Dial(_))
+                && opt("--relay").or_else(|| opt("--relay-url")).is_none();
+            if asking || refreshing {
+                start_relay_discovery(
+                    asking,
+                    origin_cache,
+                    &control_plane,
+                    &store,
+                    &identity,
+                    &config,
+                    &registry,
+                    &auth,
+                    &gate,
+                );
+            }
         }
     }
 
@@ -626,6 +733,125 @@ fn start_relay(
         .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+/// Learn the account's relay origin, and bring the link up once it is known.
+///
+/// On a thread, and after the listeners: the origin comes from the network, so
+/// doing it inline would put somebody else's cloud on this daemon's startup
+/// path — the one thing ADR-005 says a local terminal must never depend on.
+///
+/// `dial_when_found` separates the two jobs this does. When nothing was cached
+/// the fetch is what brings the link up, so its answer is dialled immediately.
+/// When a cached origin is already dialling, the fetch is only a refresh: a
+/// changed answer is written down and takes effect on the next start, because
+/// tearing a live control link down and rebuilding it under a running fleet is
+/// a much larger change than #229, and an account that moves its relay does it
+/// approximately never.
+///
+/// Retries are the attestation sync's cadence and posture — jittered, failing
+/// soft, forever — for its reason: the machine that most needs a relay is the
+/// laptop that boots on a train, and giving up after one attempt would leave it
+/// unreachable until somebody restarted the daemon.
+#[allow(clippy::too_many_arguments)]
+fn start_relay_discovery(
+    dial_when_found: bool,
+    cache: zest_daemon::relay_origin::OriginCache,
+    control_plane: &str,
+    store: &Arc<dyn CredentialStore>,
+    identity: &Arc<HostIdentity>,
+    config: &DaemonConfig,
+    registry: &Arc<Registry>,
+    auth: &Arc<Authenticator>,
+    gate: &Arc<zest_daemon::Gate>,
+) {
+    let Some(source) = zest_daemon::relay_origin::HttpsOriginSource::new(
+        store.as_ref(),
+        control_plane,
+        Roots::Platform,
+    ) else {
+        return;
+    };
+
+    let identity = Arc::clone(identity);
+    let config = config.clone();
+    let registry = Arc::clone(registry);
+    let auth = Arc::clone(auth);
+    let gate = Arc::clone(gate);
+    let spawned = std::thread::Builder::new()
+        .name("zest-daemon-relay-origin".into())
+        .spawn(move || {
+            use zest_daemon::relay_origin::OriginSource as _;
+            let mut attempt = 0u32;
+            loop {
+                match source.relay_origin() {
+                    Ok(Some(origin)) => {
+                        match cache.store(&origin) {
+                            Ok(true) if !dial_when_found => tracing::info!(
+                                relay = %origin,
+                                "the account moved its relay; dialling it from the next start"
+                            ),
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!(
+                                error = %e,
+                                "could not cache the relay origin; the next start will ask again"
+                            ),
+                        }
+                        if dial_when_found {
+                            if let Err(e) =
+                                start_relay(&origin, &identity, &config, &registry, &auth, &gate)
+                            {
+                                tracing::error!(
+                                    error = %e,
+                                    relay = %origin,
+                                    "not dialling the account's relay; loopback and the LAN are unaffected"
+                                );
+                            }
+                        }
+                        return;
+                    }
+                    Ok(None) => {
+                        // An answer, not a failure: this deployment has no
+                        // relay. Retrying would be asking a settled question
+                        // every five minutes for the life of the process.
+                        tracing::info!(
+                            "the account publishes no relay; this machine is reachable on the LAN only"
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        attempt += 1;
+                        tracing::warn!(
+                            error = %e,
+                            attempt,
+                            "could not learn the account's relay origin; will retry"
+                        );
+                    }
+                }
+                // Jittered, so every daemon on an account that came back after
+                // an outage does not ask again in step.
+                std::thread::sleep(retry_backoff(attempt));
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "no thread to learn the account's relay origin");
+    }
+}
+
+/// Five minutes, then fifteen, jittered ±25%.
+///
+/// The attestation sync's ladder, deliberately: both ask the same control
+/// plane on behalf of the same machine, and two schedules would mean two
+/// answers to "how hard does an enrolled daemon lean on the account".
+fn retry_backoff(attempt: u32) -> std::time::Duration {
+    let base = if attempt <= 1 {
+        std::time::Duration::from_secs(5 * 60)
+    } else {
+        std::time::Duration::from_secs(15 * 60)
+    };
+    let fraction = zest_mesh::identity::Nonce::random()
+        .map_or(0.5, |n| f64::from(n.as_bytes()[0]) / 255.0);
+    base.mul_f64(0.75 + 0.5 * fraction)
 }
 
 /// Ask on stdin when a device wants to pair.

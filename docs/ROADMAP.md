@@ -1444,6 +1444,21 @@ is now unblocked and building.
       outright, hand-paired or not; pairing at the machine restores it, and
       `--forget` still works with the account unreachable. Still open: an
       end-to-end run against the deployed Worker, and the desktop approve UI.
+- [x] **An enrolled daemon dials its relay by itself** (#229) — found by the
+      owner walking the product's own pitch: both machines enrolled, both apps
+      signed in, and every fleet row reading *asleep*, because reachability
+      needed a `--relay` flag nobody had heard of and nothing persisted.
+      Holding a cloud token is now the instruction. The origin comes from
+      `GET /api/me` — the only route a host token reaches, since `/api/hosts`
+      refuses them on purpose — and is cached beside `trust.toml`, so the
+      second start dials with the control plane down. The fetch runs on a
+      worker *after* the listeners, per ADR-005: no cloud on the startup path,
+      a failure costs a log line and a jittered retry. `--relay` overrides,
+      `--no-relay` opts out, `--ephemeral` never dials by itself.
+      Still open: bringing the link up on a *running* daemon after the app's
+      in-app enrolment (#227) — it needs a post-enrolment bring-up seam that
+      the attestation sync wants too, so today that machine is reachable from
+      its next start rather than immediately.
 - [x] **The fleet screen reads the account** — `GET /api/hosts` and
       `/api/devices`, with revoke on both.
       The plan called for a separate `/settings/devices`; that was wrong and

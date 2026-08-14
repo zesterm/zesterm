@@ -412,9 +412,14 @@ zest-daemon --socket <path>                    # serve this machine's terminals
 zest-daemon --listen-lan                       # serve other machines too (off by default)
 zest-daemon --listen-ws                        # serve browsers over WebSocket (off by default, port 7718)
 zest-daemon --relay <url>                      # dial a relay so this machine is reachable from
-                                               #   anywhere, opening no port (off by default).
+                                               #   anywhere, opening no port. An *enrolled* machine
+                                               #   dials its account's relay on its own (#229), so
+                                               #   this is an override; the origin comes from
+                                               #   `GET /api/me` and is cached beside trust.toml.
                                                #   wss://host, or http://127.0.0.1:8787 for a relay
                                                #   on this machine — plaintext is loopback-only
+zest-daemon --no-relay                         # dial no relay, even when enrolled (LAN and loopback
+                                               #   are unaffected; --ephemeral never dials by itself)
 zest-daemon --min-delta-interval <ms>          # coalescing floor; 0 (off) unless the transport asks
                                                #   (--relay sets 30ms per pipe)
 zest-daemon --identity                         # this host's public key
