@@ -52,6 +52,7 @@ fn discarded(waiting_for: &str, msg: &HostMessage) {
         HostMessage::AuthPending { .. } => "AuthPending",
         HostMessage::AuthFailed { .. } => "AuthFailed",
         HostMessage::PairingRequested { .. } => "PairingRequested",
+        HostMessage::EnrollResult { .. } => "EnrollResult",
         HostMessage::Sessions { .. } => "Sessions",
         HostMessage::Keyframe { .. } => "Keyframe",
         HostMessage::Update { .. } => "Update",
@@ -84,6 +85,16 @@ pub struct Halves {
 /// how many seconds the host will still honour it. See
 /// [`DaemonClient::connect_with`].
 pub type OnPending<'a> = &'a dyn Fn(&str, u32);
+
+/// How [`DaemonClient::enroll`] went, as the daemon said it.
+#[derive(Debug, Clone)]
+pub struct EnrollOutcome {
+    pub ok: bool,
+    /// Who the machine now belongs to, when the control plane said.
+    pub account: Option<String>,
+    /// On `!ok`: the failure as the CLI would print it, for showing verbatim.
+    pub message: String,
+}
 
 /// What this connection's `Hello` subscribes to.
 ///
@@ -426,6 +437,31 @@ impl DaemonClient {
         }
     }
 
+    /// Ask this daemon to join an account with `code`, and wait for how it
+    /// went.
+    ///
+    /// Blocking, deliberately: the daemon does the claim on a worker and
+    /// answers when it settles, and this call's only caller is itself a
+    /// worker thread (the app's enroll button). Loopback only — elsewhere
+    /// the daemon refuses with an `Error`, which lands here as `Refused`.
+    ///
+    /// **A daemon that predates `Enroll` also answers `Error`** — "could not
+    /// understand that message" — rather than closing (see `on_bytes`), so
+    /// an old daemon under a new app surfaces as a `Refused` naming exactly
+    /// that, and the caller can tell the person about `--enroll`.
+    pub fn enroll(&mut self, code: &str) -> Result<EnrollOutcome, DaemonError> {
+        self.send(&ClientMessage::Enroll { code: code.to_string() })?;
+        loop {
+            match self.recv()? {
+                HostMessage::EnrollResult { ok, account, message } => {
+                    return Ok(EnrollOutcome { ok, account, message });
+                }
+                HostMessage::Error { message, .. } => return Err(DaemonError::Refused(message)),
+                other => discarded("EnrollResult", &other),
+            }
+        }
+    }
+
     /// Answer a pending pairing request: allow (or refuse) `client` to attach.
     ///
     /// Fire-and-forget on the wire, like `close`: the daemon sends no reply
@@ -563,6 +599,7 @@ mod tests {
             relay: None,
             shell_integration: true,
             min_delta_interval: Duration::ZERO,
+            enroll: None,
         };
         {
             let registry = Arc::clone(&registry);

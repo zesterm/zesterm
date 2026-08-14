@@ -32,7 +32,7 @@ import { createMachineToken } from '../db/machine-tokens.ts';
 import { findUser } from '../db/users.ts';
 import { looksLikeEnrollCode } from '../enroll/codes.ts';
 import { KEY_LEN, SIGNATURE_LEN, verifyEnrollment } from '../enroll/preimage.ts';
-import { currentUser } from './session.ts';
+import { requestPrincipal } from './principal.ts';
 
 /** Exported for `devices.ts`: registration renders into the same screen. */
 export const DEVICE_KINDS: readonly DeviceKind[] = ['browser', 'phone', 'desktop'];
@@ -74,15 +74,24 @@ function platformOk(platform: string): boolean {
 }
 
 /**
- * `POST /api/enroll/code` — mint a code for the signed-in person to carry.
+ * `POST /api/enroll/code` — mint a code for the signed-in person to carry,
+ * or for their desktop app to carry on their behalf (issue #227).
  *
  * The response is the *only* time the code exists outside the database in a
  * readable form, which is fine: the row is what makes it spendable, and a code
  * without its row is eight characters of nothing.
+ *
+ * **Who may mint what — the policy, in one place.** A signed-in person mints
+ * either kind. An **approved device** bearer (the desktop app; approval is
+ * `resolveMachineToken`'s floor) mints `host` codes only: adding machines is
+ * the "Enroll this machine" button's whole point, but a leaked app token
+ * must not be able to mint credentials for *further devices* — that would
+ * turn one stolen token into a stream of them. A host token mints nothing:
+ * machines do not add machines.
  */
 export async function mintEnrollCode(request: Request, env: Env, now: number): Promise<Response> {
-  const user = await currentUser(request, env, now);
-  if (user === null) return json({ error: 'unauthorized' }, 401);
+  const principal = await requestPrincipal(request, env, now);
+  if (principal === null) return json({ error: 'unauthorized' }, 401);
 
   const body = await jsonObject(request);
   const kind = body?.['kind'];
@@ -90,7 +99,18 @@ export async function mintEnrollCode(request: Request, env: Env, now: number): P
     return json({ error: 'bad_request', detail: "kind must be 'host' or 'device'" }, 400);
   }
 
-  const minted = await createEnrollCode(env.DB, user.id, kind, now);
+  if (principal.kind === 'host') {
+    return json({ error: 'forbidden', detail: 'a host token cannot mint enroll codes' }, 403);
+  }
+  if (principal.kind === 'device' && kind !== 'host') {
+    return json(
+      { error: 'forbidden', detail: 'a device token can only mint host codes' },
+      403,
+    );
+  }
+
+  const userId = principal.kind === 'user' ? principal.user.id : principal.userId;
+  const minted = await createEnrollCode(env.DB, userId, kind, now);
   return json(minted);
 }
 

@@ -725,6 +725,10 @@ fn write_client_messages(path: &Path) {
                 approve: false,
             },
         ),
+        (
+            "enroll",
+            ClientMessage::Enroll { code: "GOLDCODE".into() },
+        ),
         ("request_keyframe", ClientMessage::RequestKeyframe { session: addr }),
         ("list_sessions", ClientMessage::ListSessions),
         (

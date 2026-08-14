@@ -1329,6 +1329,7 @@ mod tests {
             relay: Some("wss://relay.example".into()),
             shell_integration: true,
             min_delta_interval: Duration::ZERO,
+            enroll: None,
         };
         assert_eq!(
             pipe_config(&base).min_delta_interval,

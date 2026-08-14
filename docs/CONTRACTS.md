@@ -26,7 +26,7 @@ paragraph of justification attached.
 |---|---|---|---|
 | `PtyTransport` | `zest-pty/src/lib.rs` | **frozen** — `hangup` added, see below | WS-C, WS-D, WS-F |
 | `HostId`, `ClientId`, `SessionId`, `SessionAddr` | `zest-proto/src/ids.rs` | **frozen** | WS-F, WS-G, WS-H |
-| `ClientMessage`, `HostMessage`, `SessionInfo` | `zest-proto/src/lib.rs` | **frozen** at v3 — additive `Hello.watch_pairings` and `PairingRequested` expiry/tombstone fields for the approval modal, see below | WS-F, WS-G |
+| `ClientMessage`, `HostMessage`, `SessionInfo` | `zest-proto/src/lib.rs` | **frozen** at v3 — additive `Hello.watch_pairings` and `PairingRequested` expiry/tombstone fields for the approval modal, plus the `Enroll`/`EnrollResult` pair (new tags, loopback-scoped — see below) | WS-F, WS-G |
 | `Delta`, `DeltaOp`, `Run`, `RowPayload`, `AttrDef` | `zest-proto/src/delta.rs` | **frozen** at v3 — unchanged in content, but the frame carrying it is now ciphertext | WS-F, WS-G |
 | `Nonce32`, `Sig64`, `Pub32`, `AuthFailure` | `zest-proto/src/auth.rs` | **frozen** — `Nonce32`/`Sig64` arrived with v2, `Pub32` with v3 | WS-F, WS-G, WS-H |
 | `SecureChannel`, `Sealer`, `Opener`, `EphemeralDh`, `DhPublic` | `zest-mesh/src/secure.rs` | **frozen** at v3 — the browser has a second implementation, pinned to `fixtures/handshake.json` | WS-F, WS-G, WS-H |
@@ -134,6 +134,31 @@ subscriber.
    consumer is worse than either shape.
 4. Update the table in the same commit. A row that no longer describes the code is worse than no
    row, because it is believed.
+
+### Two new tags, and why they are safe here: `Enroll` / `EnrollResult`
+
+The one shape this file warns against — a new variant in a tagged enum — is
+what "Enroll this machine" needed (issue #227): `ClientMessage::Enroll` and
+`HostMessage::EnrollResult`. A marker field had nothing to ride on (no
+existing message means "do work and answer me"), so here is the justification
+paragraph the rule asks for.
+
+**Why the unknown-tag hazard does not bite.** `Enroll` is only ever sent
+over loopback to the sender's *own* daemon, on a person's click — never
+broadcast, never over the LAN, never to a host someone else runs. An old
+daemon receiving it does not disconnect: `on_bytes` answers any message it
+cannot decode with `Error { "could not understand that message" }` and keeps
+serving — deliberately, and pinned by its own comment ("dropping the
+connection over it would make every upgrade a hard cutover"). The app treats
+exactly that reply as "daemon too old" and shows the fallback with the
+already-minted code: `run: zest-daemon --enroll <code>`. `EnrollResult`
+travels only to the connection that sent `Enroll`, so no client that
+predates it can ever receive it. `PROTOCOL_VERSION` stays at 3.
+
+Consumers landed in the same commit: the daemon (loopback-gated handler, the
+claim off a worker), the app (the fleet card's button), the TS wire types
+(`wire-client.ts` — encoder parity requires every golden to have a
+construction), and the regenerated bindings and `client-messages.json`.
 
 ### Additive, and therefore not a bump: the approval-modal subscription
 

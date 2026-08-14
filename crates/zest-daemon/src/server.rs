@@ -321,6 +321,12 @@ pub struct Connection {
     /// Written by the approval callback on whichever thread resolved it, read
     /// by the writer loop after it is woken.
     decided: Arc<Mutex<Option<zest_mesh::pairing::Decision>>>,
+    /// An `EnrollResult` a worker settled while this connection waited —
+    /// `decided`'s shape for `decided`'s reason: the enrolment is a keychain
+    /// probe and an HTTPS round trip, and the reader thread holds this
+    /// connection's lock across `on_bytes`, so the work happens off-thread
+    /// and the answer rides the wake the writer is already blocked on.
+    enroll_result: Arc<Mutex<Option<HostMessage>>>,
     /// Called once, when the handshake completes.
     ///
     /// The LAN listener uses it to disarm its watchdog and release its
@@ -425,6 +431,7 @@ impl Connection {
             auth,
             remote: remote.into(),
             decided: Arc::new(Mutex::new(None)),
+            enroll_result: Arc::new(Mutex::new(None)),
             on_ready: None,
             on_pending: None,
             waker: None,
@@ -893,6 +900,80 @@ impl Connection {
                 Vec::new()
             }
 
+            ClientMessage::Enroll { code } => {
+                // Loopback only, `PairingDecision`'s gate verbatim: joining
+                // the machine to an account is the authority of whoever is
+                // logged in at it.
+                if !self.auth.may_approve_devices() {
+                    tracing::warn!(
+                        remote = %self.remote,
+                        "a remote connection tried to enroll this machine"
+                    );
+                    return vec![HostMessage::Error {
+                        session: None,
+                        message: "only a local client may enroll this machine".into(),
+                    }];
+                }
+                let Some(seam) = self.config.enroll.clone() else {
+                    // An --ephemeral daemon, honestly: its key dies with the
+                    // process, so an account row for it would name a host
+                    // nobody can ever reach (the `--enroll` flag refuses for
+                    // the same reason).
+                    return vec![HostMessage::EnrollResult {
+                        ok: false,
+                        account: None,
+                        message: "this daemon cannot enroll: its key is ephemeral \
+                                  (start it without --ephemeral, or run \
+                                  zest-daemon --enroll <code>)"
+                            .into(),
+                    }];
+                };
+                let identity = Arc::clone(self.auth.authenticator().identity());
+                let label = self.auth.authenticator().label().to_string();
+                let cell = Arc::clone(&self.enroll_result);
+                let waker = self.waker.clone();
+                let spawned = std::thread::Builder::new().name("zest-enroll".into()).spawn(
+                    move || {
+                        let outcome = crate::enroll::enroll(
+                            &identity,
+                            &code,
+                            &label,
+                            &seam.base_url,
+                            seam.http.as_ref(),
+                            seam.secrets.as_ref(),
+                        );
+                        let msg = match outcome {
+                            Ok(enrolled) => HostMessage::EnrollResult {
+                                ok: true,
+                                account: enrolled.account,
+                                message: String::new(),
+                            },
+                            // Rendered as the CLI renders it — `Display` is
+                            // what `zest-daemon: {e}` prints — because the
+                            // message is the person's next move and the app
+                            // shows it verbatim.
+                            Err(e) => HostMessage::EnrollResult {
+                                ok: false,
+                                account: None,
+                                message: e.to_string(),
+                            },
+                        };
+                        *cell.lock().expect("enroll lock") = Some(msg);
+                        if let Some(w) = &waker {
+                            w();
+                        }
+                    },
+                );
+                if let Err(e) = spawned {
+                    return vec![HostMessage::EnrollResult {
+                        ok: false,
+                        account: None,
+                        message: format!("no thread for the enrolment: {e}"),
+                    }];
+                }
+                Vec::new()
+            }
+
             ClientMessage::ListSessions => {
                 vec![HostMessage::Sessions {
                     sessions: self.registry.list(self.config.host),
@@ -1259,6 +1340,12 @@ impl Connection {
         }
     }
 
+    /// The enrolment outcome, if a worker settled one. Writer-loop drained,
+    /// like [`Self::take_decision`].
+    pub fn take_enroll_result(&mut self) -> Vec<HostMessage> {
+        self.enroll_result.lock().expect("enroll lock").take().into_iter().collect()
+    }
+
     fn no_such(session: SessionAddr) -> HostMessage {
         HostMessage::Error {
             session: Some(session),
@@ -1406,6 +1493,7 @@ where
             // already blocked on, so nothing polls and no lock is held across
             // however long someone took to answer.
             outgoing.extend(c.take_decision());
+            outgoing.extend(c.take_enroll_result());
             outgoing.extend(c.poll_with(updates));
         }
         if updates {
@@ -1652,6 +1740,7 @@ mod tests {
             relay: None,
             shell_integration: true,
             min_delta_interval: Duration::ZERO,
+            enroll: None,
         }
     }
 
@@ -1796,6 +1885,136 @@ mod tests {
         assert_eq!(
             pairing_expiry_secs(zest_mesh::pairing::APPROVAL_TIMEOUT),
             u32::try_from(zest_mesh::pairing::APPROVAL_TIMEOUT.as_secs()).expect("fits"),
+        );
+    }
+
+    /// A control plane that says yes, and remembers being asked.
+    struct FakeControlPlane {
+        asked: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl crate::enroll::ControlPlane for FakeControlPlane {
+        fn post_json(
+            &self,
+            url: &str,
+            _body: &str,
+        ) -> Result<crate::enroll::Response, crate::enroll::EnrollError> {
+            self.asked.lock().expect("asked lock").push(url.to_string());
+            Ok(crate::enroll::Response {
+                status: 200,
+                body: r#"{"token":"tok-1","account":"andy"}"#.into(),
+            })
+        }
+    }
+
+    #[test]
+    fn a_loopback_enroll_runs_the_claim_and_answers_with_the_account() {
+        // Issue #227's daemon half: the app sends the code it minted, and the
+        // daemon does exactly what `--enroll` does — sign, post, keep the
+        // token — answering off a worker so the serve loop never holds its
+        // connection lock across a keychain probe or an HTTPS round trip.
+        let asked: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let secrets = Arc::new(zest_mesh::keystore::MemoryKeyStore::new());
+        let mut cfg = config();
+        cfg.enroll = Some(crate::EnrollSeam {
+            base_url: "https://control.test".into(),
+            http: Arc::new(FakeControlPlane { asked: Arc::clone(&asked) }),
+            secrets: Arc::clone(&secrets) as Arc<dyn zest_mesh::keystore::SecretStore>,
+        });
+        let mut c = Connection::new(
+            cfg,
+            Arc::new(Registry::new()),
+            crate::auth::Auth::Transport(test_authenticator()),
+            "test",
+        );
+        let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let woken = Arc::clone(&woken);
+            c.set_waker(Box::new(move || {
+                woken.store(true, std::sync::atomic::Ordering::Release);
+            }));
+        }
+        let mut peer = authenticate(&mut c);
+
+        let out = peer.send(&mut c, &ClientMessage::Enroll { code: "GOLDCODE".into() });
+        assert!(out.is_empty(), "the reply comes off the worker, not the serve loop: {out:?}");
+
+        // The worker settles and wakes the writer, which drains the result.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let result = loop {
+            let msgs = c.take_enroll_result();
+            if !msgs.is_empty() {
+                break msgs;
+            }
+            assert!(Instant::now() < deadline, "the enrolment never settled");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let [HostMessage::EnrollResult { ok, account, .. }] = &result[..] else {
+            panic!("expected an EnrollResult, got {result:?}");
+        };
+        assert!(ok, "a control plane that said yes must reach the app as yes");
+        assert_eq!(account.as_deref(), Some("andy"), "…naming the account");
+        assert!(
+            woken.load(std::sync::atomic::Ordering::Acquire),
+            "the worker must wake the writer, or the answer sits until traffic"
+        );
+        assert_eq!(
+            asked.lock().expect("asked lock").as_slice(),
+            ["https://control.test/api/enroll/claim"],
+            "the claim goes to the seam's URL and the claim path"
+        );
+        use zest_mesh::keystore::SecretStore as _;
+        assert!(
+            secrets
+                .load_secret(zest_mesh::keystore::CLOUD_TOKEN_NAME)
+                .expect("store readable")
+                .is_some(),
+            "the token must land in the daemon's own store, exactly like --enroll"
+        );
+    }
+
+    #[test]
+    fn a_remote_connection_may_not_enroll_this_machine() {
+        // `PairingDecision`'s gate, `PairingDecision`'s reason: a trusted LAN
+        // device is allowed in, not allowed to bind this machine to an
+        // account. The refusal is immediate — no worker, no control plane.
+        let auth = test_authenticator();
+        let identity = std::sync::Arc::new(
+            zest_mesh::identity::ClientIdentity::generate().expect("client key"),
+        );
+        auth.trust_now(identity.client_id(), "trusted-lan").expect("trust");
+        let mut lan = Connection::new(
+            config(),
+            Arc::new(Registry::new()),
+            crate::auth::Auth::Proof(auth),
+            "192.168.1.9:50000",
+        );
+        let mut peer = authenticate_identity(&mut lan, &identity, false, false);
+        let out = peer.send(&mut lan, &ClientMessage::Enroll { code: "GOLDCODE".into() });
+        let [HostMessage::Error { message, .. }] = &out[..] else {
+            panic!("a remote Enroll must be refused with an Error, got {out:?}");
+        };
+        assert!(
+            message.contains("local"),
+            "the refusal names the rule, not a mechanism: {message}"
+        );
+    }
+
+    #[test]
+    fn an_ephemeral_daemon_says_it_cannot_enroll() {
+        // config() carries no seam, which is exactly the --ephemeral daemon:
+        // its key dies with the process, so an account row for it would name
+        // a host nobody can ever reach. The answer is an honest EnrollResult
+        // rather than silence.
+        let (mut c, _registry) = conn();
+        let mut peer = authenticate(&mut c);
+        let out = peer.send(&mut c, &ClientMessage::Enroll { code: "GOLDCODE".into() });
+        let [HostMessage::EnrollResult { ok: false, message, .. }] = &out[..] else {
+            panic!("expected an immediate refusal, got {out:?}");
+        };
+        assert!(
+            message.contains("--enroll"),
+            "the refusal names the person's fallback: {message}"
         );
     }
 

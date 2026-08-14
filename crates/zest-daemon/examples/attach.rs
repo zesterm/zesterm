@@ -395,6 +395,11 @@ fn run<R: Read + Send + 'static, W: Write + Send + 'static>(
                 HostMessage::PairingRequested { label, code, remote, .. } => {
                     eprintln!("[attach] {label} at {remote} is asking to pair, code {code}");
                 }
+                // This probe never sends Enroll; logged rather than silently
+                // eaten so a misdirected reply is at least visible.
+                HostMessage::EnrollResult { ok, message, .. } => {
+                    eprintln!("[attach] unexpected EnrollResult (ok={ok}): {message}");
+                }
             }
         }
     }

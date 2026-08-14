@@ -280,6 +280,18 @@ pub struct FleetCard {
     /// Label/value rows: path, key, sessions — only what is actually known.
     /// The value colour is by role: 0 plain, 1 success, 2 warn.
     pub rows: Vec<(String, String, u8)>,
+    /// The local card's "Enroll this machine" button (issue #227) — present
+    /// while the app is signed in, the window's daemon is the real loopback
+    /// one, and the account does not yet list this machine.
+    pub enroll: Option<FleetEnroll>,
+}
+
+/// The enroll button, as drawn: its caption, and whether it answers —
+/// `clickable: false` is the in-flight worker saying "not again".
+#[derive(Debug, Clone, PartialEq)]
+pub struct FleetEnroll {
+    pub label: String,
+    pub clickable: bool,
 }
 
 /// One card of the theme gallery (design screen 8). Colours arrive as raw

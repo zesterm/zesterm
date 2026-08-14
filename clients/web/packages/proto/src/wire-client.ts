@@ -54,6 +54,13 @@ export type ClientMessage =
       readonly signature: string;
     }
   | { readonly t: 'pairing_decision'; readonly client: string; readonly approve: boolean }
+  /**
+   * Join the machine to an account (issue #227). Loopback-only, like
+   * `pairing_decision`; a browser client never sends it — the type exists
+   * because the encoder is held byte-equal to the host's goldens, which
+   * cover every variant.
+   */
+  | { readonly t: 'enroll'; readonly code: string }
   | { readonly t: 'request_keyframe'; readonly session: SessionAddrLike }
   | { readonly t: 'list_sessions' }
   | {
@@ -137,6 +144,9 @@ export function encodeClientMessageBody(msg: ClientMessage): Uint8Array {
       break;
     case 'pairing_decision':
       wire = { t: msg.t, client: msg.client, approve: msg.approve };
+      break;
+    case 'enroll':
+      wire = { t: msg.t, code: msg.code };
       break;
     case 'request_keyframe':
       wire = { t: msg.t, session: addr(msg.session) };

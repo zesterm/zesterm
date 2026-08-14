@@ -88,14 +88,14 @@ fn main() {
     // small-order point that `verifying_key` already rejects, so nothing signed
     // under it could ever have verified.
     let ephemeral = flag("--ephemeral");
-    let store: Box<dyn CredentialStore> = if ephemeral {
+    let store: Arc<dyn CredentialStore> = if ephemeral {
         // For the edit-run loop. `keyring` keys access to the *binary*, so on
         // macOS every rebuild re-prompts for the keychain -- and the outcome of
         // that is a developer who turns authentication off to get work done.
-        Box::new(MemoryKeyStore::new())
+        Arc::new(MemoryKeyStore::new())
     } else {
         match zest_mesh::keystore::OsKeyStore::new() {
-            Ok(s) => Box::new(s),
+            Ok(s) => Arc::new(s),
             Err(e) => {
                 tracing::error!(error = %e, "no credential store; refusing to start");
                 eprintln!(
@@ -356,6 +356,15 @@ fn main() {
         min_delta_interval: opt("--min-delta-interval")
             .and_then(|ms| ms.parse().ok())
             .map_or(std::time::Duration::ZERO, std::time::Duration::from_millis),
+        // The serving path's `--enroll` (issue #227): same URL, same trust
+        // anchors, same store — and absent under --ephemeral for the same
+        // refusal `--enroll` itself makes above.
+        enroll: (!ephemeral).then(|| zest_daemon::EnrollSeam {
+            base_url: opt("--control-plane")
+                .unwrap_or_else(|| enroll::DEFAULT_CONTROL_PLANE.to_string()),
+            http: Arc::new(enroll::HttpsControlPlane::new(Roots::Platform)),
+            secrets: Arc::clone(&store) as Arc<dyn zest_mesh::keystore::SecretStore>,
+        }),
     };
 
     tracing::info!(

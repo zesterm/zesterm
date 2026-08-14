@@ -322,6 +322,36 @@ pub fn mint_ticket(
         .ok_or_else(|| CloudError::BadAnswer(format!("no ticket in {:?}", clip(&got.body))))
 }
 
+/// Mint a host enrol code with the app's own token (issue #227).
+///
+/// The policy this leans on is the Worker's: an **approved device** bearer
+/// may mint `host` codes — adding machines is the enroll button's whole
+/// point — and nothing else; minting *device* codes stays a signed-in
+/// person's act, so a leaked app token cannot manufacture credentials for
+/// further devices.
+pub fn mint_host_code(api: &dyn AccountApi, token: &str) -> Result<String, CloudError> {
+    let got = api
+        .post("/api/enroll/code", token, r#"{"kind":"host"}"#)
+        .map_err(|e| CloudError::Transport(e.to_string()))?;
+    if got.status == 401 {
+        return Err(CloudError::SignedOut);
+    }
+    if !(200..300).contains(&got.status) {
+        return Err(CloudError::BadAnswer(format!("{}: {}", got.status, clip(&got.body))));
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Answer {
+        code: Option<String>,
+    }
+    let answer: Answer = serde_json::from_str(&got.body)
+        .map_err(|e| CloudError::BadAnswer(format!("{e}; body was {:?}", clip(&got.body))))?;
+    answer
+        .code
+        .filter(|c| !c.is_empty())
+        .ok_or_else(|| CloudError::BadAnswer(format!("no code in {:?}", clip(&got.body))))
+}
+
 /// One device the account lists — the fleet screen's devices section.
 ///
 /// `kind` and `status` stay strings on purpose: their variants are the
