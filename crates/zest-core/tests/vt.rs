@@ -1781,25 +1781,45 @@ fn a_recorded_conpty_drag_comes_back_as_it_was() {
     // these; the chunk stamps are what place them. Driving it any other way
     // would mean trusting a marker in the stream, and the absence of one on the
     // grow is exactly what this test is about.
+    //
+    // The stamps are already relative to the start of the capture
+    // (`started.elapsed()` in `pty_dump`), so they are used as they are.
+    // Re-basing them on the first chunk would shift everything by the time the
+    // shell took to say anything — 433ms in this recording, against margins of
+    // ~100ms, which is enough to put a resize *after* the repaint it is
+    // supposed to precede. That is the ordering #200 is about, and it would
+    // read as this test's assertions being wrong rather than its clock.
     const SHRINK_AT_US: u128 = 1_400_000;
     const GROW_AT_US: u128 = 3_600_000;
 
     let chunks = parse_vtrec_timed(&bytes);
-    let start = chunks.first().map_or(0, |&(us, _)| us);
-    let (mut shrunk, mut grown) = (false, false);
-    for (us, chunk) in &chunks {
-        let elapsed = us - start;
-        if !shrunk && elapsed >= SHRINK_AT_US {
+    let (mut shrunk, mut grown) = (None, None);
+    for (i, (us, chunk)) in chunks.iter().enumerate() {
+        if shrunk.is_none() && *us >= SHRINK_AT_US {
             t.resize(100, 8);
-            shrunk = true;
+            shrunk = Some(i);
         }
-        if !grown && elapsed >= GROW_AT_US {
+        if grown.is_none() && *us >= GROW_AT_US {
             t.resize(100, 30);
-            grown = true;
+            grown = Some(i);
         }
         t.advance(chunk);
     }
-    assert!(shrunk && grown, "the recording does not contain both halves of the drag");
+
+    // Each resize has to land immediately before the repaint that answers it,
+    // and asserting that keeps a re-recording honest: shift the timing and this
+    // says so, instead of quietly replaying a repaint into a grid of the wrong
+    // size and failing somewhere further down where the cause is not visible.
+    let shrink_repaint = &chunks[shrunk.expect("the recording never reached the shrink")].1;
+    let grow_repaint = &chunks[grown.expect("the recording never reached the grow")].1;
+    assert!(
+        shrink_repaint.windows(4).any(|w| w == b"\x1b[8;"),
+        "the shrink resize did not land just before the repaint that announces it"
+    );
+    assert!(
+        grow_repaint.windows(6).any(|w| w == b"\x1b[?25l"),
+        "the grow resize did not land just before a repaint"
+    );
 
     // The listing is back on screen rather than parked above it, and the last
     // line of it sits where it did before the drag rather than seven rows down
