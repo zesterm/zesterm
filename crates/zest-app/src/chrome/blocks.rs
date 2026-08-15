@@ -47,6 +47,16 @@ pub struct BlockView {
     pub folded_lines: usize,
     /// The host went away mid-run: rail faint, metadata says "interrupted".
     pub interrupted: bool,
+    /// Viewport rows the *whole* block covers, `[first, last)`, clipped —
+    /// header and output together. Only the click target: the rail itself is
+    /// drawn a layer down, in the grid, because chrome paints over the glyphs
+    /// (see `zest_render_wgpu::BlockBand`).
+    pub hit_rows: (usize, usize),
+    /// This block is the pane's selection: accent rail, accentSoft band.
+    pub selected: bool,
+    /// Its ⋯ menu is open, so the affordance stays drawn even though the
+    /// pointer has left the header for the menu.
+    pub menu_open: bool,
 }
 
 /// The per-frame output: instances to append after the cached chrome, and a
@@ -56,6 +66,9 @@ pub struct BlockChrome {
     pub rects: Vec<RectInstance>,
     pub texts: Vec<TextRun>,
     pub hit: ChromeHitMap,
+    /// The `⋯` rect this pass drew, and whose block. The menu hangs off it, so
+    /// the affordance and its menu come from one computation and cannot drift.
+    pub menu_anchor: Option<(u32, [f32; 4])>,
 }
 
 // Geometry, logical px (design screen 3). The band runs the full grid
@@ -67,11 +80,15 @@ const RADIUS: f32 = 8.0;
 const RAIL: f32 = 2.0;
 const HPAD: f32 = 12.0;
 const GAP: f32 = 10.0;
-const CHIP_PAD: f32 = 7.0;
 const CHIP_RADIUS: f32 = 5.0;
+/// The ⋯ affordance's square.
+const DOTS: f32 = 16.0;
+/// The rail's click strip. Wider than the 2px rule, because a 2px target is
+/// not a target — but well under half a cell, so the first character of an
+/// output row stays selectable by a press a hair to its right.
+const RAIL_HIT: f32 = 8.0;
 const META_PX: f32 = 11.0;
 const CMD_PX: f32 = 12.5;
-const CHIP_PX: f32 = 10.0;
 
 fn baseline_in(y: f32, h: f32, px: f32) -> f32 {
     y + (h + px * 0.72) / 2.0
@@ -108,8 +125,27 @@ pub fn layout_blocks(
             continue;
         }
 
-        let fill = if v.running { colors.panel_bg } else { colors.block_header_bg };
-        let rail_color = if v.interrupted {
+        // The rail strip first, over the block's whole height, so the band
+        // pushed after it wins inside the header rows: push order is draw
+        // order, and the lookup walks it backwards.
+        let (e0, e1) = v.hit_rows;
+        if e1 > e0 {
+            out.hit.push(
+                [area[0], area[1] + e0 as f32 * cell_h, RAIL_HIT * s, (e1 - e0) as f32 * cell_h],
+                HitRegion::BlockRail(v.id),
+            );
+        }
+
+        let fill = if v.selected {
+            colors.accent_soft
+        } else if v.running {
+            colors.panel_bg
+        } else {
+            colors.block_header_bg
+        };
+        let rail_color = if v.selected {
+            colors.accent
+        } else if v.interrupted {
             colors.text_faint
         } else if v.running {
             colors.warn
@@ -161,39 +197,45 @@ pub fn layout_blocks(
             });
         }
 
-        // Right-to-left: chips on hover, then outcome, duration, cwd.
+        // Right-to-left: the ⋯ slot, then outcome, duration, cwd.
+        //
+        // The slot is reserved whether or not the affordance is drawn, so the
+        // metadata does not slide sideways when the pointer arrives — the rule
+        // the chevron's comment already states for the left edge. The two
+        // chips this replaced did jump, every time.
         let mut right = band[0] + band[2] - HPAD * s;
+        let dots = [right - DOTS * s, band[1] + (band[3] - DOTS * s) / 2.0, DOTS * s, DOTS * s];
+        right = dots[0] - GAP * s;
         let hovered = matches!(
             hover,
             Some(
                 HitRegion::BlockHeader(h)
                     | HitRegion::BlockFold(h)
-                    | HitRegion::BlockCopy(h)
-                    | HitRegion::BlockRerun(h)
+                    | HitRegion::BlockRail(h)
+                    | HitRegion::BlockMenu(h)
             ) if h == v.id
         );
-        if hovered {
-            for (label, region) in [
-                ("re-run \u{2318}\u{21e7}R", HitRegion::BlockRerun(v.id)),
-                ("copy output \u{2318}\u{21e7}O", HitRegion::BlockCopy(v.id)),
-            ] {
-                let w = measure(label, CHIP_PX * s, false, 0.0) + 2.0 * CHIP_PAD * s;
-                let chip_h = 16.0 * s;
-                let chip = [right - w, band[1] + (band[3] - chip_h) / 2.0, w, chip_h];
-                out.rects.push(RectInstance::rounded(chip, CHIP_RADIUS * s, colors.accent_soft, clip));
-                out.hit.push(chip, region);
-                out.texts.push(TextRun {
-                    text: label.into(),
-                    pos: [chip[0] + CHIP_PAD * s, baseline_in(chip[1], chip[3], CHIP_PX * s)],
-                    max_width: w,
-                    color: colors.accent,
-                    clip,
-                    px: CHIP_PX * s,
-                    bold: false,
-                    tracking: 0.0,
-                });
-                right = chip[0] - 5.0 * s;
-            }
+        // Every region that reveals it also keeps it revealed, and the menu
+        // being open holds it there while the pointer is off in the menu.
+        // Without that, hover would alternate frame by frame — the affordance
+        // vanishing moves the pointer back onto the band, which reveals it
+        // again (`App::revalidate_hover`, #256).
+        if hovered || v.menu_open {
+            out.rects.push(RectInstance::rounded(dots, CHIP_RADIUS * s, colors.accent_soft, clip));
+            out.hit.push(dots, HitRegion::BlockMenu(v.id));
+            let label = "\u{22ef}";
+            let w = measure(label, CMD_PX * s, false, 0.0);
+            out.texts.push(TextRun {
+                text: label.into(),
+                pos: [dots[0] + (dots[2] - w) / 2.0, baseline_in(dots[1], dots[3], CMD_PX * s)],
+                max_width: dots[2],
+                color: colors.accent,
+                clip,
+                px: CMD_PX * s,
+                bold: false,
+                tracking: 0.0,
+            });
+            out.menu_anchor = Some((v.id, dots));
         }
 
         let mut meta = |text: &str, color: LinearRgba, right: &mut f32, out: &mut BlockChrome| {
@@ -328,6 +370,9 @@ mod tests {
             foldable: true,
             folded_lines: 0,
             interrupted: false,
+            hit_rows: rows,
+            selected: false,
+            menu_open: false,
         }
     }
 
@@ -386,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn hover_grows_the_action_chips_and_they_answer() {
+    fn hover_reveals_the_menu_affordance_and_it_answers() {
         let area = [0.0, 0.0, 800.0, 400.0];
         let quiet =
             layout_blocks(&[view(3, (0, 1))], area, 20.0, 1.0, &colors(), None, 0.0, &mut measure);
@@ -400,39 +445,58 @@ mod tests {
             0.0,
             &mut measure,
         );
-        assert!(
-            hovered.rects.len() > quiet.rects.len(),
-            "hover must reveal the chips"
-        );
+        assert!(hovered.rects.len() > quiet.rects.len(), "hover must reveal the affordance");
         let found = (0..800).step_by(2).any(|x| {
-            (0..20).step_by(2).any(|y| {
-                matches!(
-                    hovered.hit.hit(x as f32, y as f32),
-                    Some(HitRegion::BlockCopy(3) | HitRegion::BlockRerun(3))
-                )
-            })
+            (0..20)
+                .step_by(2)
+                .any(|y| hovered.hit.hit(x as f32, y as f32) == Some(HitRegion::BlockMenu(3)))
         });
-        assert!(found, "the chips must be clickable where they are drawn");
+        assert!(found, "the affordance must be clickable where it is drawn");
+        assert_eq!(
+            hovered.menu_anchor.map(|(id, _)| id),
+            Some(3),
+            "and it must report where it drew, so the menu hangs off the same rect"
+        );
     }
 
     #[test]
-    fn hovering_a_chip_keeps_the_chips_drawn() {
+    fn the_metadata_does_not_move_when_the_affordance_appears() {
+        // The two chips this replaced were laid out only when hovered, so the
+        // right-aligned metadata slid sideways every time the pointer arrived
+        // — the exact jitter the chevron's slot is reserved to prevent on the
+        // left. The slot is now reserved whether or not anything fills it.
+        let area = [0.0, 0.0, 800.0, 400.0];
+        let x_of = |hover| {
+            layout_blocks(&[view(3, (0, 1))], area, 20.0, 1.0, &colors(), hover, 0.0, &mut measure)
+                .texts
+                .iter()
+                .find(|t| t.text == "exit 0")
+                .map(|t| t.pos[0])
+        };
+        assert_eq!(
+            x_of(None),
+            x_of(Some(HitRegion::BlockHeader(3))),
+            "the outcome label must not move under the pointer"
+        );
+    }
+
+    #[test]
+    fn hovering_the_affordance_keeps_it_drawn() {
         // What bounds `App::revalidate_hover`. It re-reads hover against the
-        // map each frame, and the chips exist in that map only while the
-        // block is hovered — so landing on one goes None → BlockHeader →
-        // BlockCopy over two frames. It stops there *because* of this: every
-        // region that reveals the chips also keeps them revealed. Were
-        // `hovered` to drop the chip regions from its arm, the chips would
-        // vanish, hover would fall back to the band, and the two would
-        // alternate for ever at one frame each — a terminal repainting at
-        // full rate with nothing on screen changing, which the 0%-idle
+        // map each frame, and the ⋯ exists in that map only while the block is
+        // hovered — so landing on it goes None → BlockHeader → BlockMenu over
+        // two frames. It stops there *because* of this: every region that
+        // reveals the affordance also keeps it revealed. Narrow that arm and
+        // the ⋯ vanishes, hover falls back to the band, and the two alternate
+        // for ever at one frame each — a terminal repainting at full rate with
+        // nothing on screen changing, which is the exact failure the 0%-idle
         // guarantee exists to prevent.
         let area = [0.0, 0.0, 800.0, 400.0];
         let counts: Vec<usize> = [
             HitRegion::BlockHeader(3),
             HitRegion::BlockFold(3),
-            HitRegion::BlockCopy(3),
-            HitRegion::BlockRerun(3),
+            HitRegion::BlockRail(3),
+            HitRegion::BlockMenu(3),
         ]
         .into_iter()
         .map(|h| {
@@ -445,6 +509,73 @@ mod tests {
             counts.iter().all(|n| *n == counts[0]),
             "all four block regions must draw the same chrome, or hover oscillates: {counts:?}"
         );
+    }
+
+    #[test]
+    fn an_open_menu_holds_its_affordance_without_the_pointer() {
+        // The pointer is off in the menu, not on the header. Without this the
+        // ⋯ blinks out the moment the menu it opened appears.
+        let area = [0.0, 0.0, 800.0, 400.0];
+        let v = BlockView { menu_open: true, ..view(3, (0, 1)) };
+        let out = layout_blocks(&[v], area, 20.0, 1.0, &colors(), None, 0.0, &mut measure);
+        assert_eq!(out.menu_anchor.map(|(id, _)| id), Some(3));
+    }
+
+    #[test]
+    fn the_rail_strip_makes_the_whole_block_clickable_and_the_band_still_wins() {
+        // The click target the one-row header never was: a block's *extent*.
+        // The band is pushed after the rail, so the header rows still answer
+        // as the header — push order is draw order and the lookup walks it
+        // backwards.
+        let area = [0.0, 100.0, 800.0, 400.0];
+        let v = BlockView { hit_rows: (2, 9), ..view(7, (2, 3)) };
+        let b = layout_blocks(&[v], area, 20.0, 1.0, &colors(), None, 0.0, &mut measure);
+        let band_y = 100.0 + 2.0 * 20.0 + 10.0;
+        let body_y = 100.0 + 6.0 * 20.0 + 10.0;
+        assert_eq!(
+            b.hit.hit(1.0, body_y),
+            Some(HitRegion::BlockRail(7)),
+            "the gutter beside the output selects the block"
+        );
+        assert_eq!(
+            b.hit.hit(1.0, band_y),
+            Some(HitRegion::BlockFold(7)),
+            "inside the header the band's own affordances still win"
+        );
+        assert_eq!(
+            b.hit.hit(400.0, body_y),
+            None,
+            "and the output itself stays the grid's, or text is unselectable"
+        );
+    }
+
+    #[test]
+    fn a_selected_block_takes_the_accent_without_moving_anything() {
+        // Selection is a colour change, not a layout change: the same rects in
+        // the same places, so lighting a block cannot shift the text under it.
+        let area = [0.0, 0.0, 800.0, 400.0];
+        let plain =
+            layout_blocks(&[view(3, (0, 1))], area, 20.0, 1.0, &colors(), None, 0.0, &mut measure);
+        let lit = layout_blocks(
+            &[BlockView { selected: true, ..view(3, (0, 1)) }],
+            area,
+            20.0,
+            1.0,
+            &colors(),
+            None,
+            0.0,
+            &mut measure,
+        );
+        assert_eq!(plain.rects.len(), lit.rects.len(), "no rect appears or leaves");
+        let c = colors();
+        assert!(
+            lit.rects.iter().any(|r| r.fill == c.accent_soft),
+            "the selected band takes accentSoft"
+        );
+        // `border`, not `fill`: the header's rail is the band's own left
+        // border rather than a rect beside it — see the comment where it is
+        // drawn for why a separate rect cannot produce that shape.
+        assert!(lit.rects.iter().any(|r| r.border == c.accent), "and its rail the accent");
     }
 
     #[test]

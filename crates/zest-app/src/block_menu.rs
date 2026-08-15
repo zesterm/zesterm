@@ -120,7 +120,11 @@ pub fn build_rows(
                 enabled,
             }
         });
-        actions.push(action);
+        // A disabled row carries no action, which is what "disabled" *means*:
+        // the click path, the keyboard step and the hit map then all refuse it
+        // by asking one question instead of three, and cannot come to
+        // disagree about which rows are live.
+        actions.push(if enabled { action } else { BlockMenuAction::None });
     }
     (rows, actions)
 }
@@ -128,11 +132,11 @@ pub fn build_rows(
 /// Move the keyboard selection to the next row that does something.
 ///
 /// Stops at the ends rather than wrapping, and steps over dividers *and*
-/// disabled rows — the same list the click path refuses, so the keyboard
-/// cannot reach a row the mouse cannot.
+/// disabled rows — which is one test, since a disabled row's action is
+/// `None`. The keyboard therefore cannot reach a row the mouse refuses.
 #[must_use]
-pub fn step(rows: &[BlockMenuRow], actions: &[BlockMenuAction], from: usize, down: bool) -> usize {
-    let actionable = |i: &usize| is_actionable(rows, actions, *i);
+pub fn step(actions: &[BlockMenuAction], from: usize, down: bool) -> usize {
+    let actionable = |i: &usize| is_actionable(actions, *i);
     if down {
         (from + 1..actions.len()).find(actionable).unwrap_or(from)
     } else {
@@ -140,11 +144,10 @@ pub fn step(rows: &[BlockMenuRow], actions: &[BlockMenuAction], from: usize, dow
     }
 }
 
-/// Whether row `i` can be chosen: not a divider, and not drawn faint.
+/// Whether row `i` can be chosen: neither a divider nor drawn faint.
 #[must_use]
-pub fn is_actionable(rows: &[BlockMenuRow], actions: &[BlockMenuAction], i: usize) -> bool {
+pub fn is_actionable(actions: &[BlockMenuAction], i: usize) -> bool {
     matches!(actions.get(i), Some(a) if *a != BlockMenuAction::None)
-        && matches!(rows.get(i), Some(BlockMenuRow::Action { enabled: true, .. }))
 }
 
 /// The first row the keyboard should land on when the menu opens.
@@ -152,8 +155,8 @@ pub fn is_actionable(rows: &[BlockMenuRow], actions: &[BlockMenuAction], i: usiz
 /// Not simply `0`: the first row is `Fold`, which a block with nothing to fold
 /// draws faint — opening onto it and pressing Enter would do nothing at all.
 #[must_use]
-pub fn first_actionable(rows: &[BlockMenuRow], actions: &[BlockMenuAction]) -> usize {
-    (0..actions.len()).find(|i| is_actionable(rows, actions, *i)).unwrap_or(0)
+pub fn first_actionable(actions: &[BlockMenuAction]) -> usize {
+    (0..actions.len()).find(|i| is_actionable(actions, *i)).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -201,10 +204,14 @@ mod tests {
         let (rows, actions) = rows_for(&t, &t.blocks().blocks()[0], false);
         assert_eq!(rows.len(), actions.len(), "one action per drawn row");
         for (i, action) in actions.iter().enumerate() {
+            let live = match &rows[i] {
+                BlockMenuRow::Divider => false,
+                BlockMenuRow::Action { enabled, .. } => *enabled,
+            };
             assert_eq!(
-                *action == BlockMenuAction::None,
-                matches!(rows[i], BlockMenuRow::Divider),
-                "row {i} and its action disagree about being a divider"
+                live,
+                *action != BlockMenuAction::None,
+                "row {i} and its action disagree about whether it does anything"
             );
         }
     }
@@ -216,17 +223,17 @@ mod tests {
         let mut t = Terminal::new(40, 8, 200);
         // Printed nothing and cannot fold: the first two rows are both dead.
         t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07true\x1b]133;C\x07\r\n\x1b]133;D;0\x07");
-        let (rows, actions) = rows_for(&t, t.blocks().last().expect("one block"), false);
+        let (_rows, actions) = rows_for(&t, t.blocks().last().expect("one block"), false);
 
-        let mut at = first_actionable(&rows, &actions);
-        assert!(is_actionable(&rows, &actions, at), "the menu opens on a live row");
+        let mut at = first_actionable(&actions);
+        assert!(is_actionable(&actions, at), "the menu opens on a live row");
         for _ in 0..actions.len() * 2 {
-            at = step(&rows, &actions, at, true);
-            assert!(is_actionable(&rows, &actions, at), "stepping down landed on a dead row");
+            at = step(&actions, at, true);
+            assert!(is_actionable(&actions, at), "stepping down landed on a dead row");
         }
         for _ in 0..actions.len() * 2 {
-            at = step(&rows, &actions, at, false);
-            assert!(is_actionable(&rows, &actions, at), "stepping up landed on a dead row");
+            at = step(&actions, at, false);
+            assert!(is_actionable(&actions, at), "stepping up landed on a dead row");
         }
     }
 

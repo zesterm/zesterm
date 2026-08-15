@@ -1115,8 +1115,10 @@ and the palette's block rows are specified in
       chord plus a click does the same for a specific block anywhere in
       scrollback, which is the thing a keyboard shortcut cannot express.
 
-      Both target the most recent block *with output*, not the block the cursor
-      is in: at a prompt the cursor's block has printed nothing, which is the
+      Both target the **selected** block, falling back to the most recent block
+      *with output* when nothing is selected — which is a session nobody has
+      clicked in, and was the whole behaviour until #266. Never the block the
+      cursor is in: at a prompt that block has printed nothing, which is the
       state a terminal spends most of its life in.
 
       Writing this found a real bug in the markers. `133;C` fires before the
@@ -1129,8 +1131,8 @@ and the palette's block rows are specified in
 - [x] **Block folding, and the headers to fold from** (design screen 3,
       [docs/design/client-ui/](design/client-ui/README.md)). Headers are a
       per-frame pure pass over the visible rows — state rail, recomposed
-      command, cwd/duration/exit metadata from the new block timestamps, hover
-      action chips — drawn over the block's prompt rows; the live prompt is
+      command, cwd/duration/exit metadata from the new block timestamps, a
+      hover-revealed ⋯ — drawn over the block's prompt rows; the live prompt is
       never overlaid and the alt screen is skipped. Folding is the planned
       renderer change, landed: `Viewport.row_map` names the absolute rows to
       draw (`fold_row_map` compacts over folded output, pulling scrollback
@@ -1167,6 +1169,41 @@ and the palette's block rows are specified in
       genuine renderer change is folding — skipping folded rows while building
       the viewport, which is `zest-app`'s grid extract rather than chrome.
 
+- [x] **A block you can point at: rail, selection, and a ⋯ menu** (#266). The
+      state rail now runs a block's whole height rather than stopping at its
+      header, so a block has a visible extent; clicking that rail or the header
+      selects the block, and the two hover chips become one `⋯` opening a menu
+      (fold · copy output/command/both · re-run, and in a new tab · select the
+      block's text). `⌘⇧O`/`⌘⇧R` retarget to the selection, with the old
+      "most recent with output" as the fallback.
+
+      **The rail could not live with the header chrome**, which is where it
+      obviously belongs and where the first attempt put it. Chrome rects paint
+      *over* grid glyphs and `letterbox` returns a cell-exact rect with
+      `INSET = 0`, so a 2px rail there shaves the left edge off column 0 on
+      every output row — and an `accent_soft` wash, alpha 1.0 after
+      `oklch::flatten`, erases the output outright. It goes in the grid layer
+      instead, reusing what already solves exactly this for text selection:
+      `Viewport::selection` + `emit_selection`, under the glyphs, keyed on
+      **absolute line id**. Keying on lines rather than rows deletes four
+      problems a row-based version solves by hand — scrolling, folding (hidden
+      lines are simply never asked about), a header scrolled off the top, and
+      clipping at both edges.
+
+      Under the glyphs is correct and still not enough: any line starting at
+      column 0 then hides the rail, and a rail that comes and goes with the
+      indentation of the output reads as a rendering fault. It takes the window
+      padding — space no cell can occupy — or it does not draw at all.
+
+      Two more found by looking at it rather than reasoning about it. A running
+      block's rail must end at the **cursor**, not at the viewport's last row:
+      `block_actions`' own `last_line` is right for copying, where
+      `selection_text` trims the blanks, and wrong for a rail, which drew one
+      running command down the whole empty half of the window. And
+      `block_menu::build_rows` takes the terminal, because `output_line` being
+      set is not the same question as "there is output to copy" — the `C`
+      marker sets it before anything is printed, so `true` and `cd ..` have one
+      and print nothing.
 - [x] **What `cls` destroys** (#124). `ESC[2J` blanks cells without renumbering,
       so every block kept claiming line ids whose content was gone — and the
       shell reuses those very ids for the next prompt. A stale block *has* an

@@ -898,6 +898,8 @@ pub struct ChromeModel {
     /// enforces, so layout never has to rank it against the others. While
     /// it is open the `+` wears selSoft fill and accent ink (design §1).
     pub launcher: Option<LauncherModel>,
+    /// A block's ⋯ menu, when open (design §3).
+    pub block_menu: Option<BlockMenuModel>,
     /// A window-level line the user must be able to read *now* — today, the
     /// pairing approval prompt ("waiting for approval on forge — code
     /// 481502"), which exists while an attach worker blocks on a person at

@@ -253,7 +253,7 @@ pub static BINDINGS: &[Binding] = &[
         ChordKey::Char("o"),
         Action::CopyBlockOutput,
         "O",
-        "Copy last command's output",
+        "Copy the block's output",
         Category::Blocks,
     ),
     b(
@@ -261,7 +261,7 @@ pub static BINDINGS: &[Binding] = &[
         ChordKey::Char("r"),
         Action::RerunLastCommand,
         "R",
-        "Re-run last command",
+        "Re-run the block",
         Category::Blocks,
     ),
     // Scrollback paging. The shift is what makes it unambiguous: bare PgUp
@@ -484,7 +484,11 @@ pub static MOUSE_SHORTCUTS: &[MouseShortcut] = &[
     },
     MouseShortcut { gesture: if MAC { "⌥ Drag" } else { "Alt+Drag" }, name: "Rectangular selection" },
     MouseShortcut { gesture: "Middle-click", name: "Paste" },
-    MouseShortcut { gesture: "Right-click", name: "Copy the selection, else paste" },
+    MouseShortcut { gesture: "Click a block's rail", name: "Select that block" },
+    MouseShortcut {
+        gesture: "Right-click",
+        name: "The selection, else a block's menu, else paste",
+    },
     MouseShortcut { gesture: "Double-click title bar", name: "Zoom the window" },
 ];
 
