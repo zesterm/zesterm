@@ -14,7 +14,16 @@
 //! cargo run -p zest-pty --example pty_dump                      # default shell, interactive
 //! cargo run -p zest-pty --example pty_dump -- --cmd "cmd.exe /c echo hi"
 //! cargo run -p zest-pty --example pty_dump -- --record vim.vtrec --cmd "vim"
+//!
+//! # a height drag: fill the screen, shrink, grow back
+//! cargo run -p zest-pty --example pty_dump -- --record resize-drag.vtrec \
+//!     --cmd "pwsh -NoLogo -c ls; Start-Sleep 6" \
+//!     --size 100x30 --resize 100x8 --resize 100x30
 //! ```
+//!
+//! `--resize` may be given more than once and the steps run in order, which is
+//! what a *drag* needs: the shrink and the grow answer differently, and it is
+//! the grow's repaint that `Grid::settle_restate` turns on (#247).
 
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,8 +41,10 @@ fn main() {
     let mut record_path = None;
     let mut raw = false;
     let mut idle_exit = None::<Duration>;
-    let mut resize_to = None::<PtySize>;
-    let mut resize_after = None::<Duration>;
+    let mut spawn_size = PtySize::new(120, 30);
+    // Each `--resize` with the delay in force when it was parsed, in order.
+    let mut resizes: Vec<(PtySize, Duration)> = Vec::new();
+    let mut resize_after = Duration::from_millis(1500);
 
     let mut i = 0;
     while i < args.len() {
@@ -58,21 +69,46 @@ fn main() {
                 idle_exit = args.get(i + 1).and_then(|s| s.parse().ok()).map(Duration::from_millis);
                 i += 2;
             }
+            // The size the pty is spawned at. Worth stating rather than
+            // inheriting the default when a recording is going to be replayed:
+            // the grid the replay builds has to start where this one did.
+            "--size" => {
+                let Some(size) = args.get(i + 1).and_then(|s| parse_size(s)) else {
+                    eprintln!("--size wants <cols>x<rows>, e.g. 100x30");
+                    std::process::exit(2);
+                };
+                spawn_size = size;
+                i += 2;
+            }
             // Resize the pty mid-capture, which is the only way to see what a
             // shell emits in answer. ConPTY repaints on a resize and what that
             // repaint contains decides whether the block index survives it --
             // an ED would take every block on screen with it. Inferring that
             // from a rendered pane is guesswork; this shows the bytes. (#200)
+            //
+            // **Repeatable, and that is the point rather than a convenience.**
+            // A drag is a shrink *and* a grow, and the two answer differently:
+            // the shrink's repaint restates what still fits, the grow's restates
+            // what it kept and blanks the rest. It is the grow that
+            // `Grid::settle_restate` turns on (#247), and one resize per capture
+            // cannot reach it -- there is nothing to grow back from.
             "--resize" => {
-                resize_to = args.get(i + 1).and_then(|s| parse_size(s));
-                if resize_to.is_none() {
+                let Some(size) = args.get(i + 1).and_then(|s| parse_size(s)) else {
                     eprintln!("--resize wants <cols>x<rows>, e.g. 40x30");
                     std::process::exit(2);
-                }
+                };
+                resizes.push((size, resize_after));
                 i += 2;
             }
+            // Applies to every `--resize` *after* it on the command line, so a
+            // drag can pause differently before each step. Order matters here in
+            // a way it does not for the other flags.
             "--resize-after-ms" => {
-                resize_after = args.get(i + 1).and_then(|s| s.parse().ok()).map(Duration::from_millis);
+                let Some(ms) = args.get(i + 1).and_then(|s| s.parse().ok()) else {
+                    eprintln!("--resize-after-ms wants milliseconds");
+                    std::process::exit(2);
+                };
+                resize_after = Duration::from_millis(ms);
                 i += 2;
             }
             other => {
@@ -86,9 +122,15 @@ fn main() {
     if let Some(cl) = command_line {
         spec.command_line = cl;
     }
-    eprintln!("[pty_dump] spawning: {}", spec.command_line);
+    // The size is logged because a `.vtrec` does not record it and a replay
+    // needs it: the bytes before the first resize were laid out for this width,
+    // so a grid built at another one wraps them somewhere ConPTY never did.
+    eprintln!(
+        "[pty_dump] spawning at {}x{}: {}",
+        spawn_size.cols, spawn_size.rows, spec.command_line
+    );
 
-    let mut pty = match zest_pty::NativePty::spawn(&spec, PtySize::new(120, 30)) {
+    let mut pty = match zest_pty::NativePty::spawn(&spec, spawn_size) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("[pty_dump] spawn failed: {e}");
@@ -161,13 +203,16 @@ fn main() {
     // The resize, once the shell has had time to print a prompt and whatever
     // `--cmd` produced. Marked in the stream so the repaint that follows is
     // unambiguous -- everything after this line is the shell's answer to it.
-    if let Some(size) = resize_to {
-        std::thread::sleep(resize_after.unwrap_or(Duration::from_millis(1500)));
+    for (size, after) in &resizes {
+        std::thread::sleep(*after);
         eprintln!("\n[pty_dump] --- resize to {}x{} ---", size.cols, size.rows);
-        match pty.resize(size) {
+        match pty.resize(*size) {
             Ok(()) => {}
             Err(e) => eprintln!("[pty_dump] resize failed: {e}"),
         }
+        // Let this repaint finish before the next resize is asked for. Two
+        // overlapping repaints are a capture nobody can reason about, and the
+        // recording would be of the tool rather than of ConPTY.
         std::thread::sleep(Duration::from_millis(800));
         eprintln!("\n[pty_dump] --- end of the resize repaint ---");
     }
