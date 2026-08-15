@@ -746,7 +746,15 @@ fn write_client_messages(path: &Path) {
                 rows: 80,
             },
         ),
-        ("attach", ClientMessage::Attach { session: addr, cols: 120, rows: 40 }),
+        ("attach", ClientMessage::Attach { session: addr, cols: 120, rows: 40, observe: false }),
+        // Both spellings, because the flag is the whole difference between a
+        // client that shrinks somebody's window and one that does not (#274),
+        // and a second implementation that dropped it would encode a valid
+        // `attach` that silently votes.
+        (
+            "attach_observing",
+            ClientMessage::Attach { session: addr, cols: 120, rows: 40, observe: true },
+        ),
         ("detach", ClientMessage::Detach { session: addr }),
         (
             "input",

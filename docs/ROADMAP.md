@@ -210,6 +210,7 @@ below means "do not touch this file".
 | **F** | [`zest-proto` + `zest-daemon`](#ws-f) | `crates/zest-proto/`, `crates/zest-daemon/` | Protocol + daemon ✅ · **applier, app attach, LAN listener next** | [#4](https://github.com/zesterm/zesterm/issues/4) |
 | **G** | [Web client](#ws-g) | `clients/web/`, `zest-proto/fixtures/` | Decoder, renderer, app, deploy, accounts, fleet, tabbed chrome ✅ · **devices screen, local echo next** | [#8](https://github.com/zesterm/zesterm/issues/8) |
 | **H** | [Mesh identity, discovery, transports](#ws-h) | `crates/zest-mesh/`, `crates/zest-cloud/`, `cloud/` | Identity, discovery, pairing, accounts ✅ · the relay Worker and the daemon's `--relay` leg ✅ · **the web client's second data plane next** ([#59](https://github.com/zesterm/zesterm/issues/59)) | [#7](https://github.com/zesterm/zesterm/issues/7) |
+| **I** | [AI is a client of the daemon](#ws-i) | `crates/zest-mcp/` (not yet), `zest-proto`, `zest-daemon` | Open — `Attach.observe` ✅ (#274), the MCP server next | [#60](https://github.com/zesterm/zesterm/issues/60) |
 
 **Ordering that mattered, and is now settled.** B landed before A, so `zest-app`
 is free of input code and A can fill it with chrome. C1 landed before D, so
@@ -1764,6 +1765,75 @@ is now unblocked and building.
       the origin trusts nothing in the path at all. → M6.
 - [ ] Remote access **off by default**, persistent indicator, audit log.
 
+### WS-I — AI is a client of the daemon, not a feature of the app
+
+Every AI terminal shipping today is a chat sidebar over a byte stream: the agent
+scrapes a pty with regular expressions, guesses when a command finished, and
+drowns in progress-bar noise. The three things that make that shape unnecessary
+are already here — a headless VT emulator producing typed state (ADR-001),
+semantic command blocks carrying command, cwd, exit code and timestamps, and a
+multi-client delta protocol addressing sessions `(HostId, SessionId)` across
+machines and sealed end to end (ADR-004, ADR-006, ADR-008).
+
+So the decision is **an agent is a client**: it pairs with a device key,
+attaches, receives the deltas the window receives, and writes
+`ClientMessage::Input`. No new data plane, no second VT emulator, no privileged
+in-process surface. Everything below is cheap *because* of that reframing, and
+it replaces M5's one-line `AiActor` bullet. → [#60](https://github.com/zesterm/zesterm/issues/60).
+
+- [x] **`Attach.observe` — the abstention a paneless client needs.** The daemon
+      always had the state (`Subscriber.size` is an `Option`, and `None` never
+      constrains); nothing could ask for it, so a headless reader had to invent
+      a size and join an arbitration it has no stake in. And a vote equal to
+      the current size *pins* it, permanently and silently: `reconcile_size`
+      reports no change when the minimum does not move, so the human dragging
+      their window bigger pushes nothing and the observer is never told to let
+      go. The one piece of this workstream with no client-side workaround, and
+      the real prerequisite for the MCP server — which #60 does not mention at
+      all. → #274, CONTRACTS.
+- [ ] **`crates/zest-mcp` — the agent client.** An MCP server that is a paired
+      device speaking the existing protocol: `hosts`, `sessions`, `screen`,
+      `blocks`, `output`, `changed_since`, `input`, and `run`. Reuses
+      `DaemonClient` and `Applier` into a real `Terminal`, so the grid an agent
+      reads is the conformance-tested one rather than a second implementation.
+      Local-host first; the fleet follows, gated on a host advertising the
+      observer attach. → #274.
+- [ ] **`run`, and why it is the primitive.** Agent harnesses cannot tell when a
+      command finished in an interactive shell and inject sentinels to fake it.
+      We parse OSC 133 `D` host-side and hold the shell's own exit code — in
+      the user's *interactive* shell, with their venv, ssh-agent and kubectl
+      context. A timeout does not kill: the block stays `Running` and its
+      partial output comes back, so a command sitting at `Password:` can be
+      answered, which is the case a sentinel cannot distinguish from success.
+      `run_isolated` covers the shells with no integration (bash and fish are
+      unwritten, cmd.exe is a permanent no) and is the only **unforgeable**
+      exit code in the system, because it comes from `HostMessage::Exited`
+      rather than from a marker any program can print.
+- [ ] **Tokens per build, measured.** Byte stream vs delta vs block output for
+      `cargo build`, `npm install`, `pytest`. ADR-004 claims ~1 MB of bytes
+      against ~3 KB of delta for `cat 1MB`; the agent-facing number belongs
+      beside it. Note they are two different numbers — the delta is *transport*
+      efficiency, text-per-changed-row is *model* efficiency.
+- [ ] **Provenance.** An author on `Block`, so scrollback records who ran what.
+      Needs the daemon to stop forgetting: `welcome()` reads the `ClientId` and
+      then `Gate::Served` drops the transcript, so `Input` reaches the session
+      with nothing to attribute. Core cannot hold a `ClientId` (`zest-proto`
+      depends on `zest-core`, not the reverse), so it holds 32 opaque bytes and
+      the wire converts, as `LineId` becomes `i64` today.
+- [ ] **An agent may not approve devices.** `may_approve_devices()` is a
+      property of the *transport* alone, so any loopback client can answer
+      `PairingDecision` and enrol an arbitrary remote key, unattended. Worth
+      closing while a general local gate is not: a hostile process writes
+      `trust.toml` directly and no gate stops it, but a prompt-injected
+      *cooperating* agent has only the tools it was given.
+- [ ] Per-block consent and redaction, fleet-wide block search, the agent pane.
+
+**Deliberately not built:** no chat sidebar; no agent loop of our own (harnesses
+improve monthly and a terminal shipping an inferior one ages badly — be the
+substrate); no streaming "watch and react" tool, whose absence is what keeps
+prompt injection needing the agent to be steered rather than firing on its own;
+no scrollback in the cloud by default.
+
 ---
 
 # Milestones
@@ -2092,7 +2162,14 @@ on each host. → ADR-005, ADR-006.
       carries the transcript, its hash, both directional keys and records
       straddling the 2²⁴ ratchet — it caught a full-HKDF-vs-Expand mistake in
       the second implementation on first use.
-- [ ] `AiActor` over sigx `streams:`, per-block consent, redaction.
+- [ ] ~~`AiActor` over sigx `streams:`, per-block consent, redaction.~~ —
+      **replaced by [WS-I](#ws-i)** (#60, #274). The bullet assumed AI was a
+      feature of the app, reached through an actor. It is a *client*: it pairs
+      with a device key and speaks the protocol the phone speaks, so the work is
+      an MCP server rather than an actor, and the interesting parts — `run`
+      against a real interactive shell, provenance, consent — all live where
+      sessions already do. Per-block consent and redaction survive the move and
+      are still unbuilt; there is no `Redactor` anywhere today.
 
 ---
 

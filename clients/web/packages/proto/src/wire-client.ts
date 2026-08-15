@@ -82,6 +82,16 @@ export type ClientMessage =
       readonly session: SessionAddrLike;
       readonly cols: number;
       readonly rows: number;
+      /**
+       * Take no part in the size arbitration.
+       *
+       * The session runs at the smallest attached client, so a subscriber with
+       * no pane -- an agent, a probe -- otherwise pins it at whatever size it
+       * invented, for as long as it watches (#274). Still send `cols`/`rows`:
+       * a daemon predating the flag counts them as an ordinary vote, which
+       * pins rather than shrinks.
+       */
+      readonly observe?: boolean;
     }
   | { readonly t: 'detach'; readonly session: SessionAddrLike }
   | { readonly t: 'input'; readonly session: SessionAddrLike; readonly bytes: Uint8Array }
@@ -166,7 +176,16 @@ export function encodeClientMessageBody(msg: ClientMessage): Uint8Array {
       wire = { t: msg.t, command: msg.command, cwd: msg.cwd, cols: msg.cols, rows: msg.rows };
       break;
     case 'attach':
-      wire = { t: msg.t, session: addr(msg.session), cols: msg.cols, rows: msg.rows };
+      wire = {
+        t: msg.t,
+        session: addr(msg.session),
+        cols: msg.cols,
+        rows: msg.rows,
+        // Always written, never conditional on being true: `rmp_serde`'s
+        // `to_vec_named` emits every field, and byte parity with the Rust
+        // encoder is what `client-messages.json` checks.
+        observe: msg.observe ?? false,
+      };
       break;
     case 'detach':
       wire = { t: msg.t, session: addr(msg.session) };

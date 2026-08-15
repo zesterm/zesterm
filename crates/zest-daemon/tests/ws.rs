@@ -240,7 +240,7 @@ fn a_paired_device_drives_a_session_over_websocket() {
     };
     assert_eq!(sessions.len(), 1, "the session was not created");
 
-    send(&mut ws, &mut ch, &ClientMessage::Attach { session: sessions[0].addr, cols: 80, rows: 24 });
+    send(&mut ws, &mut ch, &ClientMessage::Attach { session: sessions[0].addr, cols: 80, rows: 24, observe: false });
     let keyframe = wait_for(&mut ws, &mut frames, &mut ch, |m| matches!(m, HostMessage::Keyframe { .. }));
     assert!(keyframe.is_some(), "every attach starts from a keyframe, on every transport");
 }

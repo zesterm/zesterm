@@ -38,7 +38,11 @@ const CANONICAL: Record<string, ClientMessage> = {
   request_keyframe: { t: 'request_keyframe', session: SESSION },
   list_sessions: { t: 'list_sessions' },
   create_session: { t: 'create_session', command: 'htop', cwd: '/tmp', cols: 300, rows: 80 },
+  // Left without `observe` on purpose: the field is optional on this side, and
+  // this is what pins that omitting it still encodes the `false` the host
+  // writes. `attach_observing` covers the other value.
   attach: { t: 'attach', session: SESSION, cols: 120, rows: 40 },
+  attach_observing: { t: 'attach', session: SESSION, cols: 120, rows: 40, observe: true },
   detach: { t: 'detach', session: SESSION },
   input: { t: 'input', session: SESSION, bytes: Uint8Array.of(0x1b, 0x5b, 0x41, 0x80, 0xff) },
   resize: { t: 'resize', session: SESSION, cols: 80, rows: 24 },
