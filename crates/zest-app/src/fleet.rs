@@ -1,12 +1,20 @@
 //! The app's view of the fleet: hosts, presence, and their sessions.
 //!
-//! Aggregates three sources the picker draws from — mDNS discovery (which
+//! Aggregates four sources the picker draws from — mDNS discovery (which
 //! hosts exist and where), the dial prober (whether an advertised host
-//! actually answers, #22's `Unreachable`), and a watching connection to the
-//! window's own daemon (its live session list, pushed via
-//! `Hello.watch_sessions`). All of it runs off the main thread and posts one
-//! coalesced [`Wakeup::FleetChanged`] per burst of change, so the 0%-idle
-//! guarantee survives a chatty network.
+//! actually answers, #22's `Unreachable`), the account listing (which machines
+//! are ours, and whether the relay can reach them), and **one watching
+//! connection per reachable host** (its live session list and its published
+//! profiles, pushed via `Hello.watch_sessions` / `watch_hosts`). All of it runs
+//! off the main thread and posts one coalesced [`Wakeup::FleetChanged`] per
+//! burst of change, so the 0%-idle guarantee survives a chatty network.
+//!
+//! **The last of those was one connection until #265** — the window's own
+//! daemon, over loopback — so every remote host's session list was `Unknown`
+//! for ever and four surfaces were wrong because of it. The window's machine is
+//! still watched by [`FleetModel::watch`], because that connection also carries
+//! the approval queue; every other host is watched by the supervisor, which
+//! reconciles [`watcher_plan`] against the roster whenever something changes.
 //!
 //! The roster itself stays socket-free by design (`zest-mesh`); the prober
 //! here is the app-owned dialer that feeds it evidence, exactly as
@@ -38,6 +46,17 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long to wait before re-establishing a broken watch connection.
 const REWATCH_MIN: Duration = Duration::from_millis(500);
 const REWATCH_MAX: Duration = Duration::from_secs(10);
+
+/// The remote-watcher supervisor's backstop, for when nothing rings its
+/// doorbell (#265).
+///
+/// Reconciliation is normally driven by observations — a host appearing over
+/// mDNS or in the account listing rings it on the same change that made the
+/// host visible. This is the case neither observes: a machine that *is*
+/// advertising, whose daemon was down when we last dialled, comes back with
+/// nothing new for discovery to say. Fifteen seconds, against a reconcile that
+/// is a map comparison when there is nothing to do.
+const SUPERVISE_INTERVAL: Duration = Duration::from_secs(15);
 
 /// How often the account listing is re-read while signed in. A minute,
 /// jittered ±25% so several windows do not poll the control plane in step;
@@ -125,7 +144,6 @@ impl AccountPoke {
 
 /// What is known about one host's session list.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code, reason = "remote-host fetches (picker-open dials) construct the other states")]
 pub enum SessionsState {
     /// Never asked.
     #[default]
@@ -133,6 +151,13 @@ pub enum SessionsState {
     /// A listing is on its way.
     Fetching,
     Fresh(Vec<SessionInfo>),
+    /// The dial or the listing failed, carrying why.
+    ///
+    /// The message is written and not yet drawn: the fleet card's "could not
+    /// reach" row is #249's next item. Kept rather than dropped because the
+    /// state machine is what this PR is for, and a `Failed` with nothing in it
+    /// would have to be widened again by the commit that renders it.
+    #[allow(dead_code, reason = "the fleet card's failure row reads this (#249)")]
     Failed(String),
 }
 
@@ -159,14 +184,19 @@ pub struct FleetHost {
     /// in the listing when mDNS has never heard of it.
     pub enrolled: bool,
     /// What this machine says it can offer: its os, its arch, its default
-    /// shell, and its own profiles (#262). `None` for a host nothing has
-    /// connected to yet, and for one whose daemon predates the field — which
-    /// read the same way on purpose, since neither has told us anything.
-    #[allow(
-        dead_code,
-        reason = "the launcher's host groups and the fleet card's os row read this; \
-                  landed here first so the wire change ships whole (#249)"
-    )]
+    /// shell, and its own profiles (#262).
+    ///
+    /// **`None` is the ordinary state, not an error.** Every reachable host is
+    /// *asked* since #265, which is what makes this reachable at all — but the
+    /// answer is absent until that host's first listing lands, and stays absent
+    /// for a daemon that predates the field or one nothing can reach. All three
+    /// read the same way on purpose: nobody has told us anything, so nothing is
+    /// drawn. A consumer that treats `None` as "it has no profiles" would show
+    /// an empty group for a machine whose watcher simply has not connected yet.
+    ///
+    /// Not *drawn* anywhere yet — the launcher's host groups and the fleet
+    /// card's `os` row are #249's next items.
+    #[allow(dead_code, reason = "the launcher's host groups and the fleet card read this (#249)")]
     pub offer: Option<zest_proto::HostOffer>,
     /// The relay had proof of a parked control link when the listing was
     /// fetched — so this machine is reachable through the tunnel even when
@@ -197,6 +227,104 @@ impl FleetHost {
     pub fn is_online(&self) -> bool {
         self.local || self.presence == Presence::Online || self.relay_online
     }
+}
+
+
+/// Which remote hosts should be watched, and which watchers should stop
+/// (#265).
+///
+/// Pure over the facts, so the rule is a `cargo test` rather than something
+/// only two machines and a network can demonstrate. [`FleetModel`]'s
+/// supervisor is the plumbing around it.
+#[derive(Debug, Default, PartialEq)]
+pub struct WatcherPlan {
+    /// Hosts with a route and no watcher yet, and how to reach each.
+    pub start: Vec<(HostId, crate::route::HostRoute)>,
+    /// Hosts being watched that no longer have a route.
+    pub stop: Vec<HostId>,
+}
+
+/// Decide the plan.
+///
+/// **The local host is never in it.** The window's own machine is watched by
+/// the connection `FleetModel::watch` holds — the one that also carries the
+/// approval queue — so including it here would open a second connection to the
+/// same daemon and double every listing push.
+///
+/// Routability is [`crate::route::best_route`], not a second rule: a host this
+/// can reach is exactly a host a fleet card or a ⌘K row can open (#250). That
+/// also means a machine reachable only through the relay is watched, which is
+/// the case the whole tunnel exists for.
+#[must_use]
+pub fn watcher_plan(
+    hosts: &[FleetHost],
+    watching: &std::collections::BTreeSet<HostId>,
+    relay_origin: Option<&str>,
+    signed_in: bool,
+) -> WatcherPlan {
+    let mut start = Vec::new();
+    let mut routable = std::collections::BTreeSet::new();
+    for host in hosts.iter().filter(|h| !h.local) {
+        let Some(route) = crate::route::best_route(host, None, relay_origin, signed_in) else {
+            continue;
+        };
+        routable.insert(host.host);
+        if !watching.contains(&host.host) {
+            start.push((host.host, route));
+        }
+    }
+    let stop = watching.difference(&routable).copied().collect();
+    WatcherPlan { start, stop }
+}
+
+/// How long to wait before asking an unavailable credential store again.
+///
+/// The supervisor reconciles on every observation, and a machine with no store
+/// would otherwise re-enter it on every mDNS packet. On macOS that path can
+/// raise a Keychain prompt, which turns one refusal into a stream of dialogs —
+/// so the retry is deliberately slow rather than absent: a locked keychain does
+/// get unlocked, and a fleet that stayed empty until the next launch would be
+/// the worse failure.
+const IDENTITY_RETRY: Duration = Duration::from_secs(60);
+
+/// The supervisor's device key, and what it has already said about not having
+/// one.
+#[derive(Default)]
+struct IdentityCache {
+    key: Option<Arc<ClientIdentity>>,
+    /// The warning has been emitted; later failures go to `debug`.
+    complained: bool,
+    failed_at: Option<std::time::Instant>,
+}
+
+impl IdentityCache {
+    /// Whether the store is worth asking right now.
+    fn may_retry(&self, now: std::time::Instant) -> bool {
+        self.failed_at.is_none_or(|at| now.duration_since(at) >= IDENTITY_RETRY)
+    }
+}
+
+/// Write one host's listing into the model, unless its watcher has been retired.
+///
+/// Pure over the state, so the rule the race turns on is a `cargo test` rather
+/// than a comment: the caller holds the same lock the supervisor clears under,
+/// and hands the flag it read inside it.
+fn apply_listing(
+    state: &mut State,
+    host: HostId,
+    retired: bool,
+    sessions: Vec<zest_proto::SessionInfo>,
+    offer: Option<zest_proto::HostOffer>,
+) -> bool {
+    if retired {
+        return false;
+    }
+    state.sessions.insert(host, SessionsState::Fresh(sessions));
+    // Absent means "nothing new to say", never "it has none".
+    if let Some(offer) = offer {
+        state.offers.insert(host, offer);
+    }
+    true
 }
 
 /// One push from the daemon's approval queue, forwarded to the app.
@@ -239,6 +367,13 @@ struct State {
     /// before the first fetch and after a sign-out — in either case there is
     /// no account speaking, and the listing decays to discovery alone.
     account: Option<AccountListing>,
+    /// The remote hosts a watcher is currently held open to, and the flag
+    /// that asks each one to stop (#265).
+    ///
+    /// Keyed by `HostId` rather than by label: a machine that gets renamed is
+    /// the same machine, and re-dialling it because its display name changed
+    /// would drop a live session list for a cosmetic edit.
+    watchers: HashMap<HostId, Arc<AtomicBool>>,
 }
 
 struct Inner {
@@ -251,10 +386,23 @@ struct Inner {
     /// [`FleetModel::decide_pairing`] — the decision dials fresh rather than
     /// writing into a watcher parked in `read`.
     decide_dial: parking_lot::Mutex<Option<Arc<dyn Fn() -> Dialer + Send + Sync>>>,
+    /// Nudges the remote-watcher supervisor to reconcile (#265).
+    ///
+    /// Rung by [`Inner::mark_changed`], so a host appearing on the network or
+    /// in the account listing gets a watcher on the same observation that made
+    /// it visible, rather than at the next poll boundary. `bounded(1)` and
+    /// `try_send`: a reconcile already queued is the same reconcile, and the
+    /// discovery thread must never block on it.
+    reconcile: crossbeam_channel::Sender<()>,
 }
 
 impl Inner {
     fn mark_changed(&self) {
+        // The supervisor is rung on every observation, not only the first of a
+        // burst: the UI latch below coalesces because a repaint is expensive,
+        // while a reconcile is a map comparison and must not be skipped — the
+        // *second* change in a burst is often the one that adds a host.
+        let _ = self.reconcile.try_send(());
         if !self.dirty.swap(true, Ordering::AcqRel) {
             let _ = self.proxy.send_event(Wakeup::FleetChanged);
         }
@@ -272,11 +420,13 @@ impl FleetModel {
     /// `local` is the window's own daemon, when it has one.
     pub fn start(proxy: EventLoopProxy<Wakeup>, local: Option<(HostId, String)>) -> Self {
         let local_id = local.as_ref().map_or(HostId::from_bytes([0; 32]), |(h, _)| *h);
+        let (reconcile, reconcile_rx) = crossbeam_channel::bounded(1);
         let inner = Arc::new(Inner {
             proxy,
             dirty: AtomicBool::new(false),
             state: parking_lot::Mutex::new(State { local, ..State::default() }),
             decide_dial: parking_lot::Mutex::new(None),
+            reconcile,
         });
 
         // The browser: observations land in the roster on the mesh thread;
@@ -294,6 +444,7 @@ impl FleetModel {
         }
 
         Self::spawn_prober(&inner);
+        Self::spawn_supervisor(&inner, reconcile_rx);
         Self { inner }
     }
 
@@ -525,6 +676,289 @@ impl FleetModel {
         }
     }
 
+
+    /// Keep one watching connection open to every remote host that has a
+    /// route (#265).
+    ///
+    /// **The hole this closes.** Until now exactly one connection existed —
+    /// the window's own daemon, over loopback — so every remote
+    /// `FleetHost.sessions` was `Unknown` for ever. Four surfaces were wrong
+    /// because of it, each reading as its own small bug: the ⌘K palette's
+    /// Sessions group was local-only, a fleet card showed no session count for
+    /// any machine but this one, the vertical sidebar's host groups held only
+    /// tabs already open here, and `FleetHost::offer` — a machine's published
+    /// profiles, which is the launcher's whole input (#262) — was never filled.
+    ///
+    /// One connection per reachable host, held open, which is the honest cost
+    /// of a live listing and exactly what the browser already pays
+    /// (`clients/web/packages/app/src/live-directory.ts` holds one
+    /// `ConnectionClient` per enrolled machine).
+    ///
+    /// Reconciles on a doorbell rather than a timer, so a machine that has just
+    /// appeared is watched on the same observation that made it visible; the
+    /// timeout is a backstop for the case where nothing rings.
+    fn spawn_supervisor(inner: &Arc<Inner>, rx: crossbeam_channel::Receiver<()>) {
+        let inner = Arc::clone(inner);
+        let spawned =
+            std::thread::Builder::new().name("zest-fleet-hosts".into()).spawn(move || {
+                // Loaded once, on this thread, on first need: the keychain
+                // stays off the startup path, and off every path for someone
+                // who never leaves loopback.
+                let mut identity = IdentityCache::default();
+                loop {
+                    Self::reconcile_watchers(&inner, &mut identity);
+                    // A ring or a backstop, whichever comes first. The
+                    // backstop matters for the case nothing observes: a host
+                    // whose daemon was down when we last looked comes back
+                    // without discovery having anything new to say.
+                    let _ = rx.recv_timeout(SUPERVISE_INTERVAL);
+                }
+            });
+        if let Err(e) = spawned {
+            tracing::warn!(
+                error = %e,
+                "no fleet supervisor; only this machine's sessions will be listed"
+            );
+        }
+    }
+
+    /// Start a watcher for every routable remote host, stop the rest.
+    ///
+    /// Plumbing only — [`watcher_plan`] owns the decision and carries its tests.
+    fn reconcile_watchers(inner: &Arc<Inner>, identity: &mut IdentityCache) {
+        let hosts = Self::snapshot_of(inner);
+        let plan = {
+            let state = inner.state.lock();
+            let relay_origin = state.account.as_ref().and_then(|a| a.relay_origin.clone());
+            let signed_in = state.account.is_some();
+            let watching = state.watchers.keys().copied().collect();
+            drop(state);
+            watcher_plan(&hosts, &watching, relay_origin.as_deref(), signed_in)
+        };
+        if plan.start.is_empty() && plan.stop.is_empty() {
+            return;
+        }
+
+        {
+            let mut state = inner.state.lock();
+            for host in &plan.stop {
+                if let Some(stop) = state.watchers.remove(host) {
+                    stop.store(true, Ordering::Release);
+                }
+                // Back to unknown, never a stale `Fresh`: a listing we can no
+                // longer refresh is a claim about sessions that may not exist,
+                // and showing it is worse than showing nothing.
+                state.sessions.remove(host);
+                state.offers.remove(host);
+            }
+        }
+        if !plan.stop.is_empty() {
+            inner.mark_changed();
+        }
+        if plan.start.is_empty() {
+            return;
+        }
+
+        // Only now is a credential worth reading — someone who never leaves
+        // loopback never reaches this line.
+        let Some(identity) = Self::remote_identity(identity) else { return };
+        for (host, route) in plan.start {
+            let stop = Arc::new(AtomicBool::new(false));
+            inner.state.lock().watchers.insert(host, Arc::clone(&stop));
+            Self::spawn_host_watcher(inner, host, route, Arc::clone(&identity), stop);
+        }
+    }
+
+    /// The stored device key, for dialling machines that are not this one.
+    ///
+    /// Never a throwaway, unlike the attach path's fallback: a watcher redials
+    /// for as long as the window is open, and a key that changes per connection
+    /// would make every far host ask a person to approve it again, every time.
+    /// Better to list no sessions than to become a source of prompts.
+    fn remote_identity(cache: &mut IdentityCache) -> Option<Arc<ClientIdentity>> {
+        if let Some(key) = cache.key.as_ref() {
+            return Some(Arc::clone(key));
+        }
+        if !cache.may_retry(std::time::Instant::now()) {
+            return None;
+        }
+        match ClientIdentity::load_or_create(&zest_mesh::keystore::OsKeyStore) {
+            Ok(i) => {
+                let key = Arc::new(i);
+                cache.key = Some(Arc::clone(&key));
+                Some(key)
+            }
+            Err(e) => {
+                // Once at `warn`, then quiet. The supervisor reconciles on
+                // every observation, so a machine with no credential store
+                // would otherwise emit this on every mDNS packet — and, worse
+                // than the noise, re-enter the credential store each time. On
+                // macOS that path can raise a Keychain prompt, so retrying it
+                // per observation turns one refusal into a stream of dialogs.
+                if cache.complained {
+                    tracing::debug!(error = %e, "still no credential store");
+                } else {
+                    cache.complained = true;
+                    tracing::warn!(
+                        error = %e,
+                        "no credential store; remote session lists will stay empty"
+                    );
+                }
+                cache.failed_at = Some(std::time::Instant::now());
+                None
+            }
+        }
+    }
+
+    /// One host's watcher: dial, list, then block on pushes, redialling with
+    /// backoff until asked to stop.
+    fn spawn_host_watcher(
+        inner: &Arc<Inner>,
+        host: HostId,
+        route: crate::route::HostRoute,
+        identity: Arc<ClientIdentity>,
+        stop: Arc<AtomicBool>,
+    ) {
+        let owned = Arc::clone(inner);
+        let spawned = std::thread::Builder::new()
+            .name(format!("zest-fleet-{}", host.short()))
+            .spawn(move || {
+                let inner = owned;
+                let mut wait = REWATCH_MIN;
+                while !stop.load(Ordering::Acquire) {
+                    {
+                        let mut state = inner.state.lock();
+                        // Under the lock, like every other write here: a
+                        // retired watcher must not resurrect the entry the
+                        // supervisor just removed.
+                        if !stop.load(Ordering::Acquire) {
+                            // Only if nothing is known yet: a redial after a
+                            // drop must not blank a listing that is still the
+                            // best answer anyone has.
+                            state.sessions.entry(host).or_insert(SessionsState::Fetching);
+                        }
+                    }
+                    match Self::watch_host_once(&inner, host, &route, &identity, &stop) {
+                        Ok(()) => wait = REWATCH_MIN,
+                        Err(e) => {
+                            tracing::debug!(
+                                host = %host.short(),
+                                error = %e,
+                                "remote fleet watch ended"
+                            );
+                            let mut state = inner.state.lock();
+                            let told = !stop.load(Ordering::Acquire)
+                                && match state.sessions.get_mut(&host) {
+                                    // Only over a `Fetching`: a failure must not
+                                    // overwrite a listing that is still the best
+                                    // answer anyone has.
+                                    Some(slot @ SessionsState::Fetching) => {
+                                        *slot = SessionsState::Failed(e.to_string());
+                                        true
+                                    }
+                                    _ => false,
+                                };
+                            drop(state);
+                            if told {
+                                inner.mark_changed();
+                            }
+                        }
+                    }
+                    if stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    std::thread::sleep(wait);
+                    wait = (wait * 2).min(REWATCH_MAX);
+                }
+                tracing::debug!(host = %host.short(), "remote fleet watcher stopped");
+            });
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, host = %host.short(), "no thread for a fleet watcher");
+            inner.state.lock().watchers.remove(&host);
+        }
+    }
+
+    /// Publish a listing for `host`, unless this watcher has been retired.
+    ///
+    /// **The flag is read under the state lock, and that is the whole point.**
+    /// A watcher can be parked in `read` — or mid-dial — when the supervisor
+    /// decides its host has no route, and the supervisor's "set the flag,
+    /// clear the listing" runs as one critical section. Checking `stop` outside
+    /// this lock leaves a window where a late reply lands *after* the clear and
+    /// puts the listing back, permanently: the host is already out of
+    /// `watchers`, so nothing will ever clear it again, and the fleet shows
+    /// sessions for a machine it cannot reach. That is exactly the stale-`Fresh`
+    /// the clear exists to prevent, arriving by the back door.
+    ///
+    /// Returns whether anything was published, so the caller only wakes the UI
+    /// when it was.
+    fn publish(
+        inner: &Arc<Inner>,
+        host: HostId,
+        stop: &AtomicBool,
+        sessions: Vec<zest_proto::SessionInfo>,
+        offer: Option<zest_proto::HostOffer>,
+    ) -> bool {
+        let mut state = inner.state.lock();
+        let published =
+            apply_listing(&mut state, host, stop.load(Ordering::Acquire), sessions, offer);
+        drop(state);
+        if published {
+            inner.mark_changed();
+        }
+        published
+    }
+
+    /// One connection to one remote host, until it dies.
+    fn watch_host_once(
+        inner: &Arc<Inner>,
+        host: HostId,
+        route: &crate::route::HostRoute,
+        identity: &Arc<ClientIdentity>,
+        stop: &AtomicBool,
+    ) -> Result<(), crate::remote::RemoteError> {
+        let (read, write) = (route.dialer())()?;
+        let mut client = DaemonClient::connect_watching(
+            read,
+            write,
+            identity,
+            "zesterm-fleet",
+            // The address came from an advertisement or an account listing,
+            // which are claims; the host signs first precisely so this can be
+            // checked before anything is revealed.
+            Some(host),
+            // Sessions and the offer, never pairings: another machine's
+            // approval queue is not ours to show. The daemon would refuse the
+            // flag off-loopback anyway — not sending it is saying so here
+            // rather than relying on the far end to say it.
+            zest_daemon::client::Watch { sessions: true, pairings: false, hosts: true },
+        )?;
+
+        // `list_with_offer`, not `list`: a subscriber's first offer rides this
+        // very reply and the daemon marks it sent, so dropping it would leave
+        // the launcher waiting for a config edit on the far machine (#262).
+        // The dial and the listing both take time, and the supervisor may
+        // have retired this watcher while they did.
+        let (sessions, offer) = client.list_with_offer()?;
+        if !Self::publish(inner, host, stop, sessions, offer) {
+            return Ok(());
+        }
+
+        loop {
+            // Only the listing matters here; a remote host's other pushes
+            // (its approval queue) are never subscribed to.
+            let message = client.next_message()?;
+            if stop.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            if let zest_proto::HostMessage::Sessions { sessions, offer, .. } = message {
+                if !Self::publish(inner, host, stop, sessions, offer) {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     /// Clear the change latch; returns whether anything had changed. The
     /// main thread calls this when it consumes [`Wakeup::FleetChanged`].
     pub fn take_changed(&self) -> bool {
@@ -536,7 +970,13 @@ impl FleetModel {
     /// not reshuffle between polls).
     #[must_use]
     pub fn snapshot(&self) -> Vec<FleetHost> {
-        let state = self.inner.state.lock();
+        Self::snapshot_of(&self.inner)
+    }
+
+    /// [`Self::snapshot`] over an `Inner` directly, for the background threads
+    /// that hold one but no `FleetModel`.
+    fn snapshot_of(inner: &Arc<Inner>) -> Vec<FleetHost> {
+        let state = inner.state.lock();
         let mut out = Vec::new();
 
         if let Some((host, label)) = &state.local {
@@ -771,6 +1211,208 @@ mod tests {
             enrolled: false,
             relay_online: false,
         }
+    }
+
+
+    fn watching(ids: &[HostId]) -> std::collections::BTreeSet<HostId> {
+        ids.iter().copied().collect()
+    }
+
+    const RELAY: Option<&str> = Some("wss://relay.example");
+
+    #[test]
+    fn a_missing_credential_store_is_asked_again_slowly_not_every_observation() {
+        // The supervisor reconciles on every observation, and mDNS is chatty.
+        // Without a backoff a machine with no credential store re-enters it on
+        // every packet — and the noise is the lesser problem: on macOS that
+        // path can raise a Keychain prompt, so retrying per observation turns
+        // one refusal into a stream of dialogs.
+        //
+        // Absent is wrong too, though. A locked keychain gets unlocked, and a
+        // fleet that stayed empty until the next launch would be the worse
+        // failure — so this asserts the retry happens, just slowly.
+        let start = std::time::Instant::now();
+        let mut cache = IdentityCache::default();
+        assert!(cache.may_retry(start), "nothing has failed yet");
+
+        cache.failed_at = Some(start);
+        assert!(!cache.may_retry(start + Duration::from_secs(1)), "not on the next observation");
+        assert!(!cache.may_retry(start + IDENTITY_RETRY - Duration::from_millis(1)));
+        assert!(cache.may_retry(start + IDENTITY_RETRY), "but eventually, so a lock can lift");
+    }
+
+    #[test]
+    fn a_retired_watcher_cannot_put_a_listing_back() {
+        // The race, and it is the nastiest kind: permanent. A watcher can be
+        // parked in `read` when the supervisor decides its host has no route,
+        // and the supervisor's "set the flag, clear the listing" runs as one
+        // critical section. A late reply that landed *after* the clear would
+        // reinsert the listing — and nothing would ever clear it again, since
+        // the host is already out of `watchers`. The fleet would show sessions
+        // for a machine it cannot reach, for the life of the window.
+        //
+        // The flag is therefore read under the same lock, and this is that
+        // rule with the lock taken out of the picture.
+        let host = HostId::from_bytes([2; 32]);
+        let info = || {
+            vec![zest_proto::SessionInfo {
+                addr: zest_proto::SessionAddr::new(host, zest_proto::SessionId(1)),
+                title: "zsh".into(),
+                cwd: "/".into(),
+                cols: 80,
+                rows: 24,
+                alt_screen: false,
+                attached: false,
+            }]
+        };
+        let offer = || Some(zest_proto::HostOffer { os: "linux".into(), ..Default::default() });
+
+        let mut state = State::default();
+        assert!(apply_listing(&mut state, host, false, info(), offer()), "a live watcher writes");
+        assert!(matches!(state.sessions.get(&host), Some(SessionsState::Fresh(s)) if s.len() == 1));
+        assert!(state.offers.contains_key(&host));
+
+        // The supervisor's clear, as `reconcile_watchers` performs it.
+        state.sessions.remove(&host);
+        state.offers.remove(&host);
+
+        assert!(
+            !apply_listing(&mut state, host, true, info(), offer()),
+            "a retired watcher must not write"
+        );
+        assert!(!state.sessions.contains_key(&host), "and the clear must survive it");
+        assert!(!state.offers.contains_key(&host));
+    }
+
+    #[test]
+    fn an_absent_offer_leaves_the_last_one_standing() {
+        // Sticky, because "no offer on this message" means *nothing new to
+        // say* (#262) — an ordinary session push carries none, and clearing on
+        // one would blank a launcher's rows every time somebody opened a shell.
+        let host = HostId::from_bytes([2; 32]);
+        let mut state = State::default();
+        apply_listing(
+            &mut state,
+            host,
+            false,
+            Vec::new(),
+            Some(zest_proto::HostOffer { os: "linux".into(), ..Default::default() }),
+        );
+        apply_listing(&mut state, host, false, Vec::new(), None);
+        assert_eq!(
+            state.offers.get(&host).map(|o| o.os.as_str()),
+            Some("linux"),
+            "the second push said nothing about the offer, so the first still stands"
+        );
+    }
+
+    #[test]
+    fn every_routable_remote_host_gets_a_watcher_and_the_local_one_never_does() {
+        // The hole #265 closes: before this, one connection existed — the
+        // window's own daemon — so every remote host's session list was
+        // `Unknown` for ever, and four surfaces were wrong because of it.
+        let forge = HostId::from_bytes([2; 32]);
+        let mut local = discovered(HostId::from_bytes([1; 32]), "studio");
+        local.local = true;
+        let hosts = [local, discovered(forge, "forge")];
+
+        let plan = watcher_plan(&hosts, &watching(&[]), None, false);
+        assert_eq!(
+            plan.start,
+            vec![(forge, crate::route::HostRoute::Tcp("192.168.1.9:7717".into()))],
+            "the remote host is watched over its advertised address"
+        );
+        assert!(
+            plan.start.iter().all(|(h, _)| *h != HostId::from_bytes([1; 32])),
+            "the local machine is watched by FleetModel::watch — a second \
+             connection to the same daemon would double every push"
+        );
+        assert!(plan.stop.is_empty());
+    }
+
+    #[test]
+    fn a_settled_fleet_plans_nothing_at_all() {
+        // Two properties in one, and the second is load-bearing.
+        //
+        // The supervisor reconciles on every observation, and mDNS is chatty:
+        // without the first, one machine on the network would accumulate a
+        // watcher per advertisement.
+        //
+        // And an empty plan is what keeps the 0%-idle guarantee true across
+        // this change. The supervisor wakes on a doorbell and on a 15s
+        // backstop; on a settled fleet it must find nothing to do, because the
+        // caller only marks the model changed when the plan is not empty. A
+        // rule that re-proposed a host already watched would repaint the
+        // window every fifteen seconds, for ever, saying nothing.
+        let forge = HostId::from_bytes([2; 32]);
+        let pi = HostId::from_bytes([3; 32]);
+        let mut relayed = discovered(pi, "pi");
+        relayed.presence = Presence::Unseen;
+        relayed.address = None;
+        relayed.enrolled = true;
+        let mut local = discovered(HostId::from_bytes([1; 32]), "studio");
+        local.local = true;
+
+        let hosts = [local, discovered(forge, "forge"), relayed];
+        let plan = watcher_plan(&hosts, &watching(&[forge, pi]), RELAY, true);
+        assert_eq!(
+            plan,
+            WatcherPlan::default(),
+            "a settled fleet is no work — both routes are held and nothing has gone"
+        );
+    }
+
+    #[test]
+    fn a_host_that_loses_its_route_has_its_watcher_stopped() {
+        // A machine that goes away must not leave a listing standing: a
+        // `Fresh` nobody can refresh is a claim about sessions that may no
+        // longer exist, and the caller clears it on exactly this signal.
+        let gone = HostId::from_bytes([9; 32]);
+        let plan = watcher_plan(&[], &watching(&[gone]), None, false);
+        assert_eq!(plan.stop, vec![gone]);
+        assert!(plan.start.is_empty());
+    }
+
+    #[test]
+    fn an_enrolled_host_off_this_lan_is_watched_through_the_relay() {
+        // The case the tunnel exists for, and the one a rule of its own would
+        // have missed — routability is `route::best_route`, so this agrees
+        // with what a fleet card and a ⌘K row can open (#250).
+        let far = HostId::from_bytes([3; 32]);
+        let mut host = discovered(far, "pi");
+        host.presence = Presence::Unseen;
+        host.address = None;
+        host.enrolled = true;
+
+        let plan = watcher_plan(&[host.clone()], &watching(&[]), RELAY, true);
+        assert!(
+            matches!(plan.start[..], [(h, crate::route::HostRoute::Relay { .. })] if h == far),
+            "enrolled and signed in: the relay is the route, got {:?}",
+            plan.start
+        );
+
+        // Signed out, the same host has no route at all — and a watcher held
+        // over from before must stop rather than redial something that cannot
+        // mint a ticket.
+        let plan = watcher_plan(&[host], &watching(&[far]), RELAY, false);
+        assert!(plan.start.is_empty());
+        assert_eq!(plan.stop, vec![far], "sign-out takes the route with it");
+    }
+
+    #[test]
+    fn a_host_with_no_route_is_neither_started_nor_counted() {
+        // An advertisement with an empty address set (the DNS-SD instance-name
+        // trap) and an unenrolled unseen host both read as "nothing to dial".
+        // Neither should produce a watcher that spends its life failing.
+        let mut empty = discovered(HostId::from_bytes([4; 32]), "sleepy");
+        empty.address = None;
+        let mut unseen = discovered(HostId::from_bytes([5; 32]), "ghost");
+        unseen.presence = Presence::Unseen;
+        unseen.address = None;
+
+        let plan = watcher_plan(&[empty, unseen], &watching(&[]), RELAY, true);
+        assert!(plan.start.is_empty(), "no evidence, no watcher: {:?}", plan.start);
+        assert!(plan.stop.is_empty());
     }
 
     #[test]

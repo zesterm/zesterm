@@ -103,6 +103,15 @@ and its number (48ms) is reported rather than gated.
   had. Either way blocks appear against the prompt the user already has, and no
   file of theirs is touched. VS Code's OSC 633 is understood too, for anyone who
   has its integration.
+- **Every machine's sessions, not just this one's.** The app holds one watching
+  connection per reachable host — LAN or relay, chosen by the same rule the
+  fleet cards and the ⌘K picker read — so the palette's Sessions group, the
+  cards' session counts and the sidebar's host groups describe the whole fleet
+  rather than the machine you happen to be sitting at. Until #265 exactly one
+  connection existed and every remote listing was `Unknown` for ever. The
+  supervisor reconciles on observations rather than on a timer, and a settled
+  fleet plans nothing — which is what keeps 0%-idle true with N connections
+  open.
 - **A machine says what it is and what it can launch.** A daemon reads its own
   `profiles` table, resolves each through its own `defaults`, and publishes the
   result — plus its os, arch and default shell — to any client that asks
