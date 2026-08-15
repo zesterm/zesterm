@@ -2360,6 +2360,31 @@ three facts about Cloudflare that changed after #59 was written.
       `TermEvent::ViewportRebased` and every subscriber is owed a keyframe.
       ADR-013 records who owns the viewport when the restater holds less of the
       session than we do — the height axis; #224 is still the width one.
+- [x] **A recorded drag, and the fix it caught** (#271).
+      #247 shipped and the gesture was confirmed working from a Mac against a
+      Windows host — and the settle it is named for had never run once.
+      `pty_dump` could not record a drag (one `--resize` per capture, a
+      hard-coded spawn size), so there was nothing to check the synthetic tests
+      against; both flags are fixed, and `corpus/resize-drag.vtrec` is the
+      first resize capture in the corpus.
+
+      Replaying it left seventeen rows in history and the reported screen. The
+      settle armed on `CSI 8;<rows>;<cols>t`, and **ConPTY announces the size on
+      the way down and not on the way back** — the way back being the half the
+      settle exists for. Every test passed throughout because the helper emitted
+      an announcement ConPTY does not. What was confirmed working was the other
+      two fixes in #247: a blocks-pane client renders its own scrollback joined
+      to the viewport, so once the replica stopped destroying its history and
+      the web client stopped duplicating rows, the listing appeared in the pane
+      while the host's viewport was still wrong underneath. Remote hid it;
+      locally it would have been visible.
+
+      Arming is now on what both halves share — the cursor hidden and homed —
+      and `Drag::Down`/`Drag::Up` is a parameter of the helper rather than a
+      detail inside it. The staleness guard is asymmetric as a result and
+      ADR-013 says so: an announced repaint can be told apart from one the grid
+      has outrun, an unannounced one cannot, and what protects that case is the
+      settle's own bounds rather than a marker.
 - [ ] **The relay Worker and its Durable Object.** A control link the daemon
       parks, an attach ticket the browser carries on `Sec-WebSocket-Protocol`
       (not the query string — a secret in a URL lands in referrers, edge logs

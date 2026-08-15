@@ -549,6 +549,30 @@ fn parse_vtrec(bytes: &[u8]) -> Vec<Vec<u8>> {
     out
 }
 
+/// The same, keeping the microsecond stamps.
+///
+/// `resize-drag.vtrec` needs them: a `.vtrec` records bytes and nothing else,
+/// so the only way to replay a resize at the point the recorder made it is by
+/// when it happened. See the test.
+fn parse_vtrec_timed(bytes: &[u8]) -> Vec<(u128, Vec<u8>)> {
+    let mut out = Vec::new();
+    let Some(body) = bytes.strip_prefix(b"VTREC1\n") else {
+        panic!("not a vtrec file");
+    };
+    let mut i = 0;
+    while i + 12 <= body.len() {
+        let us = u64::from_le_bytes(body[i..i + 8].try_into().unwrap()) as u128;
+        let len = u32::from_le_bytes(body[i + 8..i + 12].try_into().unwrap()) as usize;
+        i += 12;
+        if i + len > body.len() {
+            break;
+        }
+        out.push((us, body[i..i + len].to_vec()));
+        i += len;
+    }
+    out
+}
+
 #[test]
 fn ansi_fixtures_parse_without_panicking() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/ansi");
@@ -1110,14 +1134,45 @@ fn erasing_a_wrapped_row_to_its_end_stops_it_being_wrapped() {
     );
 }
 
+/// Which half of a drag a repaint is answering.
+///
+/// **The two are not the same bytes, and assuming they were is what let #247
+/// ship broken.** `corpus/resize-drag.vtrec` has both halves of one real drag:
+///
+/// ```text
+/// Down:  ESC[?25l  ESC[8;<rows>;<cols>t  ESC[H  <rows, each ESC[K>              ESC[?25h
+/// Up:    ESC[?25l                        ESC[H  <rows, each ESC[K>  ESC[<r>;1H  ESC[?25h
+/// ```
+///
+/// `<r>` is where the shell's cursor really is, which is the *kept* row count
+/// rather than the viewport's: the grow restates what it still had and leaves
+/// the cursor at the end of it. `corpus/resize-drag.vtrec` has `ESC[8;1H` after
+/// seven restated rows and a blank.
+///
+/// ConPTY announces the new size on the way **down** and not on the way back,
+/// and only the way back positions the cursor at the end. The settle exists for
+/// the way back, so a helper that announced both taught every test that the
+/// marker was there when it was not. (#271)
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Drag {
+    Down,
+    Up,
+}
+
 /// A repaint from a pty whose buffer is only as tall as the viewport.
 ///
 /// ConPTY's is. Shrink to a few rows and everything that no longer fits is
 /// gone from it for good; grow back and it restates the little it kept and
 /// **blanks the rest** — every one of those blank lines terminated with
 /// `ESC[K`, which is most of what a real capture consists of.
-fn conpty_repaint_after_a_squeeze(cols: usize, rows: usize, kept: &[&str]) -> Vec<u8> {
-    let mut out = format!("\x1b[?25l\x1b[8;{rows};{cols}t\x1b[H");
+///
+/// See [`Drag`] for why the direction is a parameter rather than a detail.
+fn conpty_repaint_after_a_squeeze(cols: usize, rows: usize, kept: &[&str], dir: Drag) -> Vec<u8> {
+    let mut out = String::from("\x1b[?25l");
+    if dir == Drag::Down {
+        out.push_str(&format!("\x1b[8;{rows};{cols}t"));
+    }
+    out.push_str("\x1b[H");
     for r in 0..rows {
         if r > 0 {
             out.push_str("\r\n");
@@ -1125,7 +1180,10 @@ fn conpty_repaint_after_a_squeeze(cols: usize, rows: usize, kept: &[&str]) -> Ve
         out.push_str(kept.get(r).copied().unwrap_or(""));
         out.push_str("\x1b[K");
     }
-    out.push_str(&format!("\x1b[{};1H\x1b[?25h", kept.len().max(1)));
+    if dir == Drag::Up {
+        out.push_str(&format!("\x1b[{};1H", kept.len().max(1)));
+    }
+    out.push_str("\x1b[?25h");
     out.into_bytes()
 }
 
@@ -1153,10 +1211,10 @@ fn dragging_the_height_down_and_back_puts_the_screen_back_as_it_was() {
     let out = t.blocks().blocks()[0].output_line.expect("the command produced output");
 
     t.resize(40, 1);
-    t.advance(&conpty_repaint_after_a_squeeze(40, 1, &["$ "]));
+    t.advance(&conpty_repaint_after_a_squeeze(40, 1, &["$ "], Drag::Down));
     t.resize(40, 12);
     let _ = t.take_events();
-    t.advance(&conpty_repaint_after_a_squeeze(40, 12, &["$ "]));
+    t.advance(&conpty_repaint_after_a_squeeze(40, 12, &["$ "], Drag::Up));
 
     // The host has to tell its clients, and it cannot tell them in a delta:
     // rows that were history are on screen now, and a client applying deltas
@@ -1211,7 +1269,7 @@ fn a_repaint_while_a_full_screen_program_is_up_leaves_the_primary_grid_alone() {
     t.advance(b"\x1b[?1049h\x1b[12;1H");
     t.resize(40, 4);
     t.resize(40, 12);
-    t.advance(&conpty_repaint_after_a_squeeze(40, 12, &["~"]));
+    t.advance(&conpty_repaint_after_a_squeeze(40, 12, &["~"], Drag::Up));
     t.advance(b"\x1b[?1049l");
 
     assert_eq!(
@@ -1236,12 +1294,12 @@ fn a_repaint_for_a_size_the_grid_has_left_is_sat_out() {
     }
 
     t.resize(40, 4);
-    t.advance(&conpty_repaint_after_a_squeeze(40, 4, &["line 11"]));
+    t.advance(&conpty_repaint_after_a_squeeze(40, 4, &["line 11"], Drag::Down));
     t.resize(40, 12);
     let banked = t.grid().scrollback_len();
 
     // The repaint for the 4-row viewport, arriving after the grow to 12.
-    t.advance(&conpty_repaint_after_a_squeeze(40, 4, &["line 11"]));
+    t.advance(&conpty_repaint_after_a_squeeze(40, 4, &["line 11"], Drag::Down));
 
     assert_eq!(
         t.grid().scrollback_len(),
@@ -1281,11 +1339,11 @@ fn dragging_the_height_to_nothing_and_back_does_not_blank_every_block() {
 
     // Down to a single row. ConPTY keeps that row and discards the rest.
     t.resize(40, 1);
-    t.advance(&conpty_repaint_after_a_squeeze(40, 1, &["$ "]));
+    t.advance(&conpty_repaint_after_a_squeeze(40, 1, &["$ "], Drag::Down));
 
     // And back up. It restates the one line it still has, and blanks eleven.
     t.resize(40, 12);
-    t.advance(&conpty_repaint_after_a_squeeze(40, 12, &["$ "]));
+    t.advance(&conpty_repaint_after_a_squeeze(40, 12, &["$ "], Drag::Up));
 
     assert_eq!(t.blocks().blocks().len(), 2, "the blocks were never the problem");
     for (n, line) in (out..out + 9).enumerate() {
@@ -1691,4 +1749,105 @@ fn a_real_oh_my_posh_prompt_keeps_its_segment_colours() {
     // than consuming the 49 as part of the colour.
     let text = t.screen_text();
     assert!(text.contains("andy@"), "prompt text missing: {text:?}");
+}
+
+
+/// A real ConPTY height drag: 100x30, down to 100x8, back to 100x30.
+///
+/// The recording that made this worth having also broke the fix it was meant to
+/// guard. #247 armed the settle on `CSI 8 ; r ; c t`, on the strength of #205's
+/// single capture of a *shrink*. This capture has both halves of one drag and
+/// they are not the same shape:
+///
+/// ```text
+/// shrink:  ESC[?25l  ESC[8;8;100t  ESC[H  <rows, each ESC[K>  ESC[?25h
+/// grow:    ESC[?25l                ESC[H  <rows, each ESC[K>  ESC[8;1H ESC[?25h
+/// ```
+///
+/// **ConPTY announces the size on the way down and not on the way back**, and
+/// the way back is the one the settle exists for — so it never ran, and every
+/// synthetic test went on passing because the helper emitted an announcement
+/// ConPTY does not. That is the whole argument for replaying real bytes.
+#[test]
+fn a_recorded_conpty_drag_comes_back_as_it_was() {
+    let bytes =
+        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/corpus/resize-drag.vtrec"))
+            .expect("corpus/resize-drag.vtrec");
+
+    // The geometry is part of the fixture and is not in the file: the listing
+    // before the first resize was laid out for 100 columns, and a grid at any
+    // other width wraps it somewhere ConPTY never did. `tests/README.md` says
+    // so beside the recipe.
+    let mut t = Terminal::new(100, 30, 500);
+    t.set_pty_restates_viewport(true);
+
+    // Nor is *when* the recorder resized. `pty_dump` waits 1500ms before each
+    // step and 800ms after it for the repaint, so the two land either side of
+    // these; the chunk stamps are what place them. Driving it any other way
+    // would mean trusting a marker in the stream, and the absence of one on the
+    // grow is exactly what this test is about.
+    //
+    // The stamps are already relative to the start of the capture
+    // (`started.elapsed()` in `pty_dump`), so they are used as they are.
+    // Re-basing them on the first chunk would shift everything by the time the
+    // shell took to say anything — 433ms in this recording, against margins of
+    // ~100ms, which is enough to put a resize *after* the repaint it is
+    // supposed to precede. That is the ordering #200 is about, and it would
+    // read as this test's assertions being wrong rather than its clock.
+    const SHRINK_AT_US: u128 = 1_400_000;
+    const GROW_AT_US: u128 = 3_600_000;
+
+    let chunks = parse_vtrec_timed(&bytes);
+    let (mut shrunk, mut grown) = (None, None);
+    for (i, (us, chunk)) in chunks.iter().enumerate() {
+        if shrunk.is_none() && *us >= SHRINK_AT_US {
+            t.resize(100, 8);
+            shrunk = Some(i);
+        }
+        if grown.is_none() && *us >= GROW_AT_US {
+            t.resize(100, 30);
+            grown = Some(i);
+        }
+        t.advance(chunk);
+    }
+
+    // Each resize has to land immediately before the repaint that answers it,
+    // and asserting that keeps a re-recording honest: shift the timing and this
+    // says so, instead of quietly replaying a repaint into a grid of the wrong
+    // size and failing somewhere further down where the cause is not visible.
+    let shrink_repaint = &chunks[shrunk.expect("the recording never reached the shrink")].1;
+    let grow_repaint = &chunks[grown.expect("the recording never reached the grow")].1;
+    assert!(
+        shrink_repaint.windows(4).any(|w| w == b"\x1b[8;"),
+        "the shrink resize did not land just before the repaint that announces it"
+    );
+    assert!(
+        grow_repaint.windows(6).any(|w| w == b"\x1b[?25l"),
+        "the grow resize did not land just before a repaint"
+    );
+
+    // The listing is back on screen rather than parked above it, and the last
+    // line of it sits where it did before the drag rather than seven rows down
+    // from the top of an otherwise empty window.
+    assert_eq!(
+        t.grid().scrollback_len(),
+        0,
+        "the grow never gave back what the shrink took: {} rows still in history",
+        t.grid().scrollback_len()
+    );
+    let screen = t.screen_text();
+    for name in ["AGENTS.md", "Cargo.lock", "README.md", "rust-toolchain.toml"] {
+        assert!(screen.contains(name), "{name} is not on screen after the drag");
+    }
+    let last_ink = screen
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .map(|(i, _)| i)
+        .max()
+        .expect("a blank screen");
+    assert!(
+        last_ink >= 23,
+        "the content is bunched at the top: last non-blank row is {last_ink} of 30"
+    );
 }

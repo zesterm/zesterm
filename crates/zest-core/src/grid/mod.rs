@@ -148,8 +148,11 @@ pub struct Grid {
     restate_debt: usize,
     /// What the grow asked for, waiting on the repaint that answers it.
     pending_restate: usize,
-    /// Whether that repaint has been seen to begin (`CSI 8 ; rows ; cols t`).
+    /// Whether that repaint has been seen to begin.
     restating: bool,
+    /// Whether the repaint in hand announced a size this grid has already left,
+    /// and is therefore one to sit out. Cleared when it closes.
+    sitting_out: bool,
     pub cursor: Cursor,
     pub region: ScrollRegion,
 }
@@ -185,6 +188,7 @@ impl Grid {
             restate_debt: 0,
             pending_restate: 0,
             restating: false,
+            sitting_out: false,
             cursor: Cursor::default(),
             region: ScrollRegion::full(rows),
         }
@@ -671,9 +675,65 @@ impl Grid {
     /// *next* repaint is about to blank — which is #200 again, arrived at from
     /// the other side.
     pub(crate) fn note_restatement_began(&mut self, cols: usize, rows: usize) {
-        if self.pending_restate > 0 && (cols, rows) == (self.cols, self.rows) {
+        if self.pending_restate == 0 {
+            return;
+        }
+        if (cols, rows) == (self.cols, self.rows) {
+            self.restating = true;
+        } else {
+            // A repaint for a size this grid has already left. Sitting it out
+            // has to be *recorded* rather than merely not-armed, because the
+            // cursor-home that follows arms on its own and would undo the
+            // decision three bytes later.
+            self.sitting_out = true;
+        }
+    }
+
+    /// The pty homed the cursor while it was hidden, which is also how a
+    /// restatement starts.
+    ///
+    /// **Measured, and the reason this exists at all: ConPTY announces the size
+    /// on a shrink and not on a grow.** `corpus/resize-drag.vtrec` has both
+    /// repaints from one drag —
+    ///
+    /// ```text
+    /// shrink:  ESC[?25l  ESC[8;8;100t  ESC[H  <rows, each ESC[K>  ESC[?25h
+    /// grow:    ESC[?25l                ESC[H  <rows, each ESC[K>  ESC[8;1H ESC[?25h
+    /// ```
+    ///
+    /// — and the grow is the one [`Self::settle_restate`] exists for. Arming
+    /// only on `CSI 8 ; r ; c t` therefore never fired for the case it was
+    /// written for, which is exactly the shape of failure that leaves every
+    /// test green: the settle simply never ran and the pane looked as it always
+    /// had. (#271)
+    ///
+    /// What both repaints do share is hiding the cursor and homing it, in that
+    /// order, before writing a row. That is what this is. The window it opens
+    /// is narrow by construction — only a grow that is owed rows sets
+    /// `pending_restate` — so a full-screen program redrawing the same way
+    /// cannot arm it: the alternate screen has no scrollback, so nothing is
+    /// ever owed there.
+    ///
+    /// **This is a weaker guard than the announced case and the asymmetry is
+    /// real.** A repaint that names its size can be told apart from one the
+    /// grid has outrun; a grow's cannot, because there is nothing in it to
+    /// compare. What is left is the bound in [`Self::settle_restate`] — the
+    /// blank tail at the moment it runs — plus the unpaid remainder going back
+    /// to the debt, so an early settle is a no-op rather than damage.
+    pub(crate) fn note_cursor_homed_while_hidden(&mut self) {
+        if self.pending_restate > 0 && !self.sitting_out {
             self.restating = true;
         }
+    }
+
+    /// The repaint in hand has closed, however it went.
+    ///
+    /// Paired with the arming above rather than left to `settle_restate`,
+    /// because a repaint that was sat out never reaches that call and would
+    /// leave the flag set over the next one.
+    pub(crate) fn end_restatement_window(&mut self) {
+        self.restating = false;
+        self.sitting_out = false;
     }
 
     /// Whether a restatement is in progress and has not yet been settled.
@@ -700,7 +760,7 @@ impl Grid {
     /// much of the viewport the repaint had nothing for, so a full screen
     /// settles to nothing; and `scrollback_len` is what there is to give.
     pub(crate) fn settle_restate(&mut self) -> bool {
-        self.restating = false;
+        self.end_restatement_window();
         let owed = core::mem::take(&mut self.pending_restate);
         let below_cursor = self.rows - 1 - self.cursor.row.min(self.rows - 1);
         let k = owed.min(self.blank_tail()).min(below_cursor).min(self.scrollback_len);
@@ -758,7 +818,7 @@ impl Grid {
     pub(crate) fn cancel_restate_debt(&mut self) {
         self.restate_debt = 0;
         self.pending_restate = 0;
-        self.restating = false;
+        self.end_restatement_window();
     }
 
     /// Rewrap every logical line to a new width.

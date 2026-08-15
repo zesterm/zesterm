@@ -70,6 +70,33 @@ The prediction repaints PSReadLine does are in the recording on purpose: they ar
 why the hook states the command with `633;E` instead of leaving zesterm to read it
 back off the grid.
 
+### `resize-drag.vtrec` — a height drag through a real ConPTY
+
+The gesture #247 is about: fill the screen, drag the height down, drag it back.
+Recorded at **100x30**, shrunk to 100x8 and grown back:
+
+```powershell
+cargo run -p zest-pty --example pty_dump -- `
+  --record crates\zest-core\tests\corpus\resize-drag.vtrec `
+  --cmd "pwsh -NoLogo -c ls; Start-Sleep 6" `
+  --size 100x30 --resize 100x8 --resize 100x30
+```
+
+Two resizes rather than one, because a drag is a shrink *and* a grow and they
+answer differently — and it is the grow's repaint that `Grid::settle_restate`
+turns on. A capture with one resize cannot reach the thing being tested, which
+is why `--resize` is repeatable.
+
+**The spawn geometry is part of the fixture and is not in the file.** A `.vtrec`
+is timestamped bytes and nothing else, so the replay builds its grid at the size
+the recording was made at: the output before the first resize was laid out for
+that width, and a grid at another one wraps it somewhere ConPTY never did.
+`pty_dump` logs the size it spawned at for this reason, and the replay test
+hard-codes it beside the filename.
+
+The neutrality rule above applies as much here as anywhere — `ls` in a directory
+whose name is nobody's, with the default prompt.
+
 ### Recording more
 
 Worth adding as they become relevant: `vim`, `htop`/`btm`, `tmux`, a `cargo build`,
