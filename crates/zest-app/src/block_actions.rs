@@ -132,6 +132,26 @@ pub fn last_with_output(term: &Terminal) -> Option<Block> {
 /// paste into a bug report while it is still going.
 #[must_use]
 pub fn output_text(term: &Terminal, block: &Block) -> Option<String> {
+    let text = term.grid().selection_text(&output_selection(term, block)?);
+    let text = text.trim_end_matches('\n');
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// The rows a block's output occupies, as a selection.
+///
+/// The one the clipboard copies *and* the one "select block text" installs, so
+/// the two verbs cannot come to describe different rows — they were one
+/// expression buried inside [`output_text`] until a second caller needed it.
+///
+/// Absolute line ids, not viewport rows, which is what lets it survive
+/// scrolling and folding without translation: [`fold_row_map`] is a question
+/// about *drawing*, and a selection is stored below that.
+///
+/// Handles the running case, where `end_line` is `None` and the range ends at
+/// the newest line the grid holds. [`fold_range`] deliberately does not:
+/// folding needs a finished block, selecting does not.
+#[must_use]
+pub fn output_selection(term: &Terminal, block: &Block) -> Option<Selection> {
     // From where output began, not from the prompt: the point of the block
     // index is knowing the difference. Copying the prompt back into a bug
     // report is what "select the rough area with the mouse" already does badly.
@@ -140,15 +160,31 @@ pub fn output_text(term: &Terminal, block: &Block) -> Option<String> {
     if to < from {
         return None;
     }
-
-    let sel = Selection {
+    Some(Selection {
         anchor: AbsPos::new(from, 0),
         head: AbsPos::new(to, term.grid().cols().saturating_sub(1)),
         mode: SelectionMode::Line,
-    };
-    let text = term.grid().selection_text(&sel);
-    let text = text.trim_end_matches('\n');
-    (!text.is_empty()).then(|| text.to_string())
+    })
+}
+
+/// A block as one paste: what ran, then what it printed.
+///
+/// For the bug report and the chat message, which is the case the block index
+/// exists to serve — and the reason there is **no `$` sigil** on the command.
+/// A prompt character makes the result unpasteable, and [`output_text`]'s own
+/// contract is that a copied block never carries one.
+///
+/// `None` only when both halves are empty; a command that printed nothing is
+/// still worth copying, since "it printed nothing" is often the point.
+#[must_use]
+pub fn command_and_output(term: &Terminal, block: &Block) -> Option<String> {
+    let command = block.command.trim();
+    match (command.is_empty(), output_text(term, block)) {
+        (true, None) => None,
+        (true, Some(out)) => Some(out),
+        (false, None) => Some(command.to_string()),
+        (false, Some(out)) => Some(format!("{command}\n{out}")),
+    }
 }
 
 /// The bytes that would re-run this command.
@@ -273,6 +309,59 @@ mod tests {
         let mut t = Terminal::new(40, 8, 200);
         t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07true\x1b]133;C\x07\r\n\x1b]133;D;0\x07");
         assert_eq!(output_text(&t, t.blocks().last().expect("one block")), None);
+    }
+
+    #[test]
+    fn the_selection_that_copies_the_output_is_the_one_select_installs() {
+        // Why `output_selection` exists at all. "Copy output" and "select block
+        // text" are two verbs over one range, and the range was an expression
+        // buried inside `output_text` — a second caller would have written its
+        // own, and the two would have drifted a row apart at the first edge
+        // case, silently, in whichever direction nobody tested.
+        let t = session();
+        let finished = &t.blocks().blocks()[0];
+        let sel = output_selection(&t, finished).expect("a finished block has a range");
+        assert_eq!(
+            t.grid().selection_text(&sel).trim_end_matches('\n'),
+            output_text(&t, finished).expect("the same block copies"),
+            "the installed selection must read back exactly what the clipboard gets"
+        );
+    }
+
+    #[test]
+    fn a_running_block_can_still_be_selected_to_its_last_printed_row() {
+        // `fold_range` declines a running block — folding needs a finished one
+        // — so a selection built off that would refuse the case people most
+        // want: highlighting a build's output while it runs.
+        let t = session();
+        let running = t.blocks().last().expect("a running block");
+        assert!(running.is_running() && fold_range(running).is_none());
+        let sel = output_selection(&t, running).expect("a running block still selects");
+        assert_eq!(t.grid().selection_text(&sel).trim_end_matches('\n'), "building");
+    }
+
+    #[test]
+    fn copying_command_and_output_puts_the_command_first_and_no_prompt() {
+        // For the bug report: what ran, then what it printed. No `$`, because
+        // a sigil makes the result unpasteable — the same rule `output_text`
+        // already follows for the prompt line.
+        let t = session();
+        assert_eq!(
+            command_and_output(&t, &t.blocks().blocks()[0]).as_deref(),
+            Some("echo hi\nhi")
+        );
+    }
+
+    #[test]
+    fn a_command_that_printed_nothing_still_copies_as_a_block() {
+        // Unlike `output_text`, which returns `None` so a mis-aimed chord
+        // cannot clobber the clipboard: here the command *is* the content, and
+        // "it printed nothing" is frequently the thing being reported.
+        let mut t = Terminal::new(40, 8, 200);
+        t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07true\x1b]133;C\x07\r\n\x1b]133;D;0\x07");
+        let b = t.blocks().last().expect("one block");
+        assert_eq!(output_text(&t, b), None);
+        assert_eq!(command_and_output(&t, b).as_deref(), Some("true"));
     }
 
     #[test]

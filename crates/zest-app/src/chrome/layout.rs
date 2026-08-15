@@ -222,7 +222,7 @@ fn dot(rects: &mut Vec<RectInstance>, cx: f32, cy: f32, d: f32, color: LinearRgb
 /// The colour at a fraction of its own alpha. Colours here are premultiplied,
 /// so scaling every channel is the correct alpha multiply — the glyph tile's
 /// 12% wash is its ink through this.
-pub(super) fn washed(c: LinearRgba, f: f32) -> LinearRgba {
+pub(crate) fn washed(c: LinearRgba, f: f32) -> LinearRgba {
     LinearRgba([c.0[0] * f, c.0[1] * f, c.0[2] * f, c.0[3] * f])
 }
 

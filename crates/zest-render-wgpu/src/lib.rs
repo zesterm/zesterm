@@ -38,7 +38,7 @@ pub use instance::{
     border_sides, glyph_flags, DecorInstance, DecorKind, GlyphInstance, Globals, LinearRgba,
     RectInstance, RectShape,
 };
-pub use scene::{Chrome, Preedit, Scene, Viewport};
+pub use scene::{BlockBand, Chrome, Preedit, Scene, Viewport};
 pub use ui_text::{emit_ui_run, measure_ui_run};
 
 /// The offscreen format.

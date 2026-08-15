@@ -13,6 +13,44 @@ use crate::instance::{
     glyph_flags, DecorInstance, DecorKind, GlyphInstance, LinearRgba, RectInstance,
 };
 
+/// The block rail's width, physical px. Matches the header band's own rail
+/// (`chrome::blocks::RAIL`) so the two read as one rule down the block —
+/// they are drawn in different layers and cannot share a constant.
+const RAIL_PX: f32 = 2.0;
+
+/// Breathing room between the rail and the first column, physical px. Without
+/// it the rail reads as a left border on the text rather than as the block's
+/// own edge.
+const RAIL_GAP: f32 = 4.0;
+
+/// One command block's decoration: the state rail down its whole height, and
+/// a wash over it when it is the selected one.
+///
+/// **Absolute line ids, not viewport rows**, exactly like [`Viewport::selection`]
+/// — and for the same reason. A block's decoration has to survive scrolling
+/// (the lines move under the viewport), folding (the hidden rows are simply
+/// absent from `row_map`), a header that has scrolled off the top, and the
+/// clip at both edges. Named by row, every one of those is a case to handle;
+/// named by line, they are all the row loop asking `resolved_row` what it is
+/// drawing, which it does anyway.
+///
+/// This is also why it lives here rather than with the block *header* chrome,
+/// which is drawn a layer up: base-chrome rects paint over the grid's glyphs,
+/// so a rail drawn there would shave the left edge off column 0 on every
+/// output row, and a wash would erase the output outright.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlockBand {
+    /// Half-open absolute line range, `[from, to)`.
+    pub from: u64,
+    pub to: u64,
+    pub rail: LinearRgba,
+    /// The selected block's wash over its rows; `None` for every other block.
+    ///
+    /// Kept translucent by its caller: this is painted *under* the glyphs, but
+    /// an opaque fill would still flatten every cell background it covers.
+    pub wash: Option<LinearRgba>,
+}
+
 /// One terminal view: a grid, where to draw it, and how it is coloured.
 pub struct Viewport<'a> {
     /// Where this viewport sits, in physical pixels.
@@ -29,6 +67,23 @@ pub struct Viewport<'a> {
     /// `@sigx/terminal-ui` box — must stay opaque. Applying opacity to every
     /// cell double-darkens *and* makes every TUI look broken. → ADR-003.
     pub opacity: f32,
+    /// Command blocks to decorate: a rail down each, a wash under the selected
+    /// one. Empty on the everyday path and for a session with no shell
+    /// integration loaded.
+    pub blocks: &'a [BlockBand],
+    /// Free pixels immediately left of `rect`, for the block rail to live in.
+    ///
+    /// The rail cannot go *inside* the grid: chrome paints over the glyphs, so
+    /// drawing it a layer up shaves the left edge off column 0 on every row,
+    /// and drawing it here — under the glyphs, which is correct — means any
+    /// line starting at column 0 hides it. A rail that appears and disappears
+    /// with the indentation of the output reads as a rendering fault, so it
+    /// gets its own space or it does not draw at all.
+    ///
+    /// Comes from the window padding and the letterbox slack, which is space
+    /// no cell can ever occupy. `0.0` (padding turned off, a grid that fits
+    /// exactly) means no rail — the header band still carries its own.
+    pub gutter: f32,
     /// The active selection, if any.
     pub selection: Option<zest_core::Selection>,
     /// Colour of the selection highlight.
@@ -234,6 +289,11 @@ impl Scene {
             let y = oy + row as f32 * ch;
             self.emit_row_backgrounds(grid, row, vp, ox, y, cw, ch, clip);
         }
+
+        // Block decoration first, then the selection over it: a dragged
+        // selection is the more specific answer about the same rows, and the
+        // one the user is making right now.
+        self.emit_block_bands(grid, vp, ox, oy, cw, ch, clip);
 
         // Selection sits above cell backgrounds but below the glyphs, so text
         // stays readable through it.
@@ -545,6 +605,56 @@ impl Scene {
         }
     }
 
+    /// Rail and wash each visible row that belongs to a command block.
+    ///
+    /// Keyed on the absolute line id, like [`Self::emit_selection`] — so the
+    /// decoration moves with the text under a scroll, compacts through a fold
+    /// (the hidden lines are never drawn, so they are never asked about), and
+    /// draws a block whose header has scrolled off the top of the viewport
+    /// without that being a case anybody had to think about.
+    ///
+    /// The rail is a fixed 2 physical px rather than a fraction of a cell: it
+    /// is a rule, and a rule that thickens with the font stops reading as one.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_block_bands(
+        &mut self,
+        grid: &Grid,
+        vp: &Viewport<'_>,
+        ox: f32,
+        oy: f32,
+        cw: f32,
+        ch: f32,
+        clip: [f32; 4],
+    ) {
+        if vp.blocks.is_empty() {
+            return;
+        }
+        // The rail sits in the gutter, clear of every cell — see `Viewport::gutter`.
+        // Its clip has to be widened to match, since the viewport's own rect
+        // stops at the grid.
+        let reach = (RAIL_PX + RAIL_GAP).min(vp.gutter.max(0.0));
+        let rail_x = ox - reach;
+        let rail_clip = [clip[0] - reach, clip[1], clip[2] + reach, clip[3]];
+        let cols = grid.cols();
+        for row in 0..grid.rows() {
+            let Some(line) = resolved_row(grid, vp, row).map(|r| r.id) else { continue };
+            let Some(band) = vp.blocks.iter().find(|b| line >= b.from && line < b.to) else {
+                continue;
+            };
+            let y = oy + row as f32 * ch;
+            if let Some(wash) = band.wash {
+                self.rects.push(RectInstance::filled([ox, y, cols as f32 * cw, ch], wash, clip));
+            }
+            if reach >= RAIL_PX {
+                self.rects.push(RectInstance::filled(
+                    [rail_x, y, RAIL_PX, ch],
+                    band.rail,
+                    rail_clip,
+                ));
+            }
+        }
+    }
+
     /// Highlight the selected span on each visible row.
     ///
     /// Only visible rows: the selection may extend far into scrollback, but
@@ -784,12 +894,141 @@ mod tests {
             scroll_px: 0.0,
             focused: true,
             opacity,
+            blocks: &[],
+            gutter: 0.0,
             selection: None,
             selection_bg: Rgb::new(0x33, 0x44, 0x55),
             preedit: None,
             cursor_on: true,
             row_map: None,
         }
+    }
+
+    /// The rail rects a build emitted, as `(x, y)`, in order.
+    fn rails(scene: &Scene) -> Vec<(f32, f32)> {
+        scene
+            .rects
+            .iter()
+            .filter(|r| (r.rect[2] - RAIL_PX).abs() < f32::EPSILON)
+            .map(|r| (r.rect[0], r.rect[1]))
+            .collect()
+    }
+
+    fn band(from: u64, to: u64) -> BlockBand {
+        BlockBand { from, to, rail: LinearRgba::opaque(0x40, 0xd0, 0x80), wash: None }
+    }
+
+    /// A grid whose visible rows carry line ids `0..rows`.
+    fn lined(rows: usize, cols: usize) -> Grid {
+        Grid::new(cols, rows, 100)
+    }
+
+    #[test]
+    fn a_rail_needs_a_gutter_and_never_takes_a_cell() {
+        // The constraint the whole design turns on. Chrome paints *over* the
+        // glyphs, so a rail drawn a layer up shaves the left edge off column
+        // 0 on every row; drawn here, under them, any line starting at column
+        // 0 hides it instead. It gets its own space or it does not draw — a
+        // rail that comes and goes with the indentation of the output reads as
+        // a rendering fault, which is worse than no rail at all.
+        let p = palette();
+        let grid = lined(4, 10);
+        let bands = [band(0, 4)];
+
+        let mut with = Scene::default();
+        let vp = Viewport { blocks: &bands, gutter: 16.0, ..viewport(&grid, &p, 1.0) };
+        with.emit_block_bands(&grid, &vp, vp.rect[0], vp.rect[1], 8.0, 16.0, vp.rect);
+        assert!(!rails(&with).is_empty(), "a gutter is room enough for the rail");
+        for (x, _) in rails(&with) {
+            assert!(
+                x + RAIL_PX <= vp.rect[0],
+                "the rail must end before the first column begins, not overlap it"
+            );
+        }
+
+        let mut without = Scene::default();
+        let vp = Viewport { blocks: &bands, gutter: 0.0, ..viewport(&grid, &p, 1.0) };
+        without.emit_block_bands(&grid, &vp, vp.rect[0], vp.rect[1], 8.0, 16.0, vp.rect);
+        assert!(
+            rails(&without).is_empty(),
+            "with no padding there is nowhere honest to put it, so it is not drawn"
+        );
+    }
+
+    #[test]
+    fn a_rail_covers_its_lines_and_stops() {
+        // Named by line, not by row: the band is asked about whatever the row
+        // loop resolved, so a block that ends mid-screen rails exactly its own
+        // rows. An open-ended range once railed every blank row below a
+        // running command, down to the bottom of the window.
+        let p = palette();
+        let grid = lined(6, 10);
+        let bands = [band(1, 3)];
+        let mut scene = Scene::default();
+        let vp = Viewport { blocks: &bands, gutter: 16.0, ..viewport(&grid, &p, 1.0) };
+        scene.emit_block_bands(&grid, &vp, vp.rect[0], vp.rect[1], 8.0, 16.0, vp.rect);
+        assert_eq!(rails(&scene).len(), 2, "lines 1 and 2, and nothing else");
+    }
+
+    #[test]
+    fn a_rail_follows_its_lines_through_the_fold_view() {
+        // The property that made line ids the right key: `row_map` is how a
+        // fold compacts the view, and the rail reads the *resolved* row, so a
+        // folded block's hidden lines are never asked about and the rows that
+        // remain still rail. Keyed by viewport row this would have been a
+        // second fold implementation, drifting from the first.
+        let p = palette();
+        let grid = lined(6, 10);
+        // Draw line 4 where row 0 is, and line 0 where row 1 is: a fold view
+        // no plain row range could describe.
+        let map = [4usize, 0, usize::MAX, usize::MAX, usize::MAX, usize::MAX];
+        let bands = [band(4, 5)];
+        let mut scene = Scene::default();
+        let vp = Viewport {
+            blocks: &bands,
+            gutter: 16.0,
+            row_map: Some(&map),
+            ..viewport(&grid, &p, 1.0)
+        };
+        scene.emit_block_bands(&grid, &vp, vp.rect[0], vp.rect[1], 8.0, 16.0, vp.rect);
+        let rails = rails(&scene);
+        assert_eq!(rails.len(), 1, "only the one line the band names is drawn");
+        assert_eq!(rails[0].1, vp.rect[1], "and it rails the row that line landed on");
+    }
+
+    #[test]
+    fn the_bands_are_emitted_before_any_glyph() {
+        // Why this lives in the scene at all rather than with the block header
+        // chrome: the renderer draws grid rects, then grid glyphs, then chrome.
+        // Anything emitted after `chrome_rects_at` paints over the text.
+        let p = palette();
+        let grid = lined(3, 10);
+        let bands = [band(0, 3)];
+        let mut scene = Scene::default();
+        let vp = Viewport { blocks: &bands, gutter: 16.0, ..viewport(&grid, &p, 1.0) };
+        scene.emit_block_bands(&grid, &vp, vp.rect[0], vp.rect[1], 8.0, 16.0, vp.rect);
+        scene.append_chrome(&Chrome::default());
+        assert!(
+            scene.chrome_rects_at >= scene.rects.len(),
+            "every band rect must sit below the chrome boundary, or it covers the output"
+        );
+    }
+
+    #[test]
+    fn a_selected_blocks_wash_spans_the_columns_and_stays_translucent() {
+        // Under the glyphs but *over* every cell background, so an opaque
+        // fill would flatten a TUI's colours to one wash.
+        let p = palette();
+        let grid = lined(2, 10);
+        let wash = LinearRgba([0.05, 0.05, 0.1, 0.1]);
+        let bands = [BlockBand { wash: Some(wash), ..band(0, 2) }];
+        let mut scene = Scene::default();
+        let vp = Viewport { blocks: &bands, gutter: 16.0, ..viewport(&grid, &p, 1.0) };
+        scene.emit_block_bands(&grid, &vp, vp.rect[0], vp.rect[1], 8.0, 16.0, vp.rect);
+        let washes: Vec<_> =
+            scene.rects.iter().filter(|r| (r.rect[2] - 80.0).abs() < f32::EPSILON).collect();
+        assert_eq!(washes.len(), 2, "one per line, spanning all ten columns");
+        assert!(washes[0].fill.0[3] < 0.2, "a wash that opaque would erase the output");
     }
 
     #[test]

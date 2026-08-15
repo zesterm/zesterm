@@ -9,6 +9,7 @@
 
 mod app;
 mod block_actions;
+mod block_menu;
 mod chrome;
 mod cloud;
 mod console;

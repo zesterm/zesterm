@@ -317,6 +317,20 @@ struct LauncherState {
     actions: Vec<crate::launcher::LauncherAction>,
 }
 
+/// A block's open ⋯ menu (design §3), and the action list parallel to its
+/// drawn rows — built in one `block_menu::build_rows` pass, so index `n` means
+/// the same thing in both by construction, exactly as the launcher's does.
+struct BlockMenuState {
+    /// The block it acts on. Opening the menu also *selects* that block, so
+    /// the accent rail and the menu can never name different ones.
+    block: u32,
+    /// What the panel hangs off, physical px: the `⋯` rect the block pass drew
+    /// for a left click, or a zero-size rect at the pointer for a right click.
+    anchor: [f32; 4],
+    selected: usize,
+    actions: Vec<crate::block_menu::BlockMenuAction>,
+}
+
 /// Which full-pane screen the window shows in place of the grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppScreen {
@@ -1075,6 +1089,14 @@ pub struct App {
         zest_proto::SessionAddr,
         std::collections::BTreeSet<u32>,
     >,
+    /// The selected block, per session. A view decision like `folded_blocks`
+    /// beside it, and never on the wire for the same reason: two clients
+    /// watching one session may disagree about which block is "the" block.
+    /// Keyed by `focused_addr`, so a split tab's two panes select apart.
+    ///
+    /// **An id, not a row.** The selection has to survive scrolling, folding
+    /// and a reflow; all three move rows and none of them moves a `BlockId`.
+    selected_block: std::collections::HashMap<zest_proto::SessionAddr, u32>,
     /// When each session last produced output, stamped by the wake callbacks.
     /// Feeds the sidebar's age column; never pruned aggressively — a closed
     /// tab's entry is a few bytes and the map is per-window.
@@ -1099,6 +1121,12 @@ pub struct App {
     /// The + launcher menu's transient state, while open — one of the
     /// mutually exclusive overlays, like the three above.
     launcher: Option<LauncherState>,
+    /// A block's ⋯ menu, while open — one of the mutually exclusive overlays.
+    block_menu: Option<BlockMenuState>,
+    /// The `⋯` rect the block pass drew last frame, and whose block. The menu
+    /// hangs off it, so the affordance and its menu come from one computation
+    /// and cannot drift apart.
+    block_menu_anchor: Option<(u32, [f32; 4])>,
     /// The app tabs this window holds open (Profiles today) — the singleton
     /// state the launcher's Manage-profiles row and ⌘⇧, both go through.
     app_tabs: crate::tabs::AppTabs,
@@ -1362,6 +1390,7 @@ impl App {
             link_down: false,
             block_hits: crate::chrome::hit::ChromeHitMap::default(),
             folded_blocks: std::collections::HashMap::new(),
+            selected_block: std::collections::HashMap::new(),
             activity: ActivityMap::default(),
             route: None,
             client_identity: None,
@@ -1372,6 +1401,8 @@ impl App {
             settings_ui: None,
             profiles_ui: None,
             launcher: None,
+            block_menu: None,
+            block_menu_anchor: None,
             app_tabs: crate::tabs::AppTabs::default(),
             provenance,
             unknown_keys,
@@ -6896,6 +6927,148 @@ impl App {
         self.folded_blocks.get(&tab.focused_addr()).filter(|s| !s.is_empty())
     }
 
+    /// The active pane's selected block id, if it has one.
+    fn selected_block(&self) -> Option<u32> {
+        let tab = self.tabs.active()?;
+        self.selected_block.get(&tab.focused_addr()).copied()
+    }
+
+    /// Select a block in the active pane, or clear the selection.
+    fn set_selected_block(&mut self, id: Option<u32>) {
+        let Some(tab) = self.tabs.active() else { return };
+        let addr = tab.focused_addr();
+        let before = self.selected_block.get(&addr).copied();
+        if before == id {
+            return;
+        }
+        match id {
+            Some(id) => {
+                self.selected_block.insert(addr, id);
+            }
+            None => {
+                self.selected_block.remove(&addr);
+            }
+        }
+        // The rail and wash are grid-layer instances, so the *scene* has to be
+        // rebuilt, not just the chrome — marking only the chrome dirty leaves a
+        // click on a rail looking like it did nothing.
+        if let Some(s) = self.tabs.active_source() {
+            s.mark_dirty();
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// Drop a selection whose block has left the scrollback.
+    ///
+    /// Eviction, `erase_screen` and a re-anchor all drop blocks outright, so
+    /// the id is the only thing that can go stale — and a menu still open on a
+    /// block that no longer exists is worse than a stale highlight, so it goes
+    /// too. Called once per redraw, which is the only place that already holds
+    /// `&mut self` and a lock on the terminal.
+    fn prune_selected_block(&mut self) {
+        let Some(tab) = self.tabs.active() else { return };
+        let addr = tab.focused_addr();
+        let Some(&id) = self.selected_block.get(&addr) else { return };
+        let alive = {
+            let term = tab.focused_source().terminal();
+            let term = term.lock();
+            term.blocks().get(zest_core::BlockId(id)).is_some()
+        };
+        if !alive {
+            self.selected_block.remove(&addr);
+            self.block_menu = None;
+            self.mark_chrome_dirty();
+        }
+    }
+
+    /// The block a block action targets.
+    ///
+    /// The selected one while there is one, else the most recent block *with
+    /// output*. That fallback is the whole of the old behaviour and stays the
+    /// behaviour of a session nobody has clicked in — at a prompt the cursor's
+    /// own block has printed nothing, so "the block I am in" would copy air.
+    fn target_block(&self, term: &zest_core::Terminal) -> Option<zest_core::Block> {
+        self.selected_block()
+            .and_then(|id| term.blocks().get(zest_core::BlockId(id)).cloned())
+            .or_else(|| block_actions::last_with_output(term))
+    }
+
+    /// The rail-and-wash bands for one pane's blocks, in absolute line ids.
+    ///
+    /// Line ids rather than rows because these are consumed by the grid layer,
+    /// which resolves rows through the fold map anyway: a folded block's output
+    /// lines are simply never asked about, a scroll moves the bands with the
+    /// text, and a block whose header has scrolled off the top still rails the
+    /// rows that remain. All four fall out; none is a case here.
+    ///
+    /// Skips a block still at its prompt, matching the header pass — that is
+    /// where the user is typing, and decorating it would draw a finished-looking
+    /// frame around a half-typed command.
+    ///
+    /// A free function rather than a method: the call sites sit inside the
+    /// redraw's mutable borrow of the GPU, and it needs nothing from `App`
+    /// beyond the colours.
+    fn block_bands(
+        c: &ChromeColors,
+        term: &zest_core::Terminal,
+        selected: Option<u32>,
+        dead: bool,
+    ) -> Vec<zest_render_wgpu::BlockBand> {
+        if term.in_alt_screen() {
+            return Vec::new();
+        }
+        // A running block ends at the *cursor*, not at the bottom of the
+        // viewport. `block_actions`' own `last_line` uses the bottom row, and
+        // that is right for copying — `selection_text` trims the blanks — but
+        // a rail cannot trim: taking the bottom row drew one running command's
+        // rail down the whole empty half of the window.
+        //
+        // Active space either way, so the rail does not end wherever the user
+        // happened to have scrolled to.
+        let grid = term.grid();
+        let last_line = grid
+            .active_line_id_at(term.cursor().row.min(grid.rows().saturating_sub(1)))
+            .unwrap_or(0);
+        term.blocks()
+            .blocks()
+            .iter()
+            .filter_map(|b| {
+                let out_line = b.output_line?;
+                let running = b.is_running() && !dead;
+                let rail = if b.is_running() && dead {
+                    c.text_faint
+                } else if running {
+                    c.warn
+                } else if b.failed() {
+                    c.danger
+                } else if b.end_line.is_some_and(|e| e < out_line) {
+                    c.text_faint
+                } else {
+                    c.success
+                };
+                let is_selected = selected == Some(b.id.0);
+                Some(zest_render_wgpu::BlockBand {
+                    from: b.prompt_line,
+                    // Inclusive `end_line`, so `+ 1` converts to the half-open
+                    // range the row test wants — the same conversion, and for
+                    // the same reason, as `block_actions::fold_range`.
+                    //
+                    // A running block ends at the newest line the grid holds,
+                    // not at infinity: an open-ended range railed every blank
+                    // row below the output too, so one running command drew a
+                    // rail to the bottom of the window and the block looked
+                    // like it owned the rest of the session.
+                    to: b.end_line.map_or(last_line + 1, |e| e + 1),
+                    rail: if is_selected { c.accent } else { rail },
+                    // 10%, and it must stay well under 1.0: this is painted
+                    // beneath the glyphs but over every cell background, so an
+                    // opaque fill would flatten a TUI's colours to one wash.
+                    wash: is_selected.then(|| crate::chrome::layout::washed(c.accent, 0.10)),
+                })
+            })
+            .collect()
+    }
+
     /// A visual (clicked) row to the line it shows, through the fold view
     /// when one is active. What keeps selection, ⌘⇧-click and the renderer
     /// reading the same row list.
@@ -7118,6 +7291,10 @@ impl App {
         // Extracted under its own short lock, before the borrows below: the
         // views are plain data, and holding the terminal across atlas work
         // would stall the reader thread.
+        // Before the views: a selection whose block has been evicted must not
+        // reach the band builder, which would rail nothing and light nothing
+        // while the menu still claimed to be about it.
+        self.prune_selected_block();
         let block_views = self.build_block_views();
         self.anim_spin = block_views.iter().any(|v| v.running);
         let anim = self.anim_phase();
@@ -7138,6 +7315,10 @@ impl App {
             let bg = self.palette.background;
             zest_render_wgpu::LinearRgba::from_srgb(bg.r, bg.g, bg.b, self.config.opacity)
         };
+        // Copied out for the same reason as `backdrop`: the block bands are
+        // built inside the borrows below, and `ChromeColors` is `Copy`.
+        let band_colors = self.chrome_colors;
+        let selected_blocks = self.selected_block.clone();
         let (Some(gpu), Some(fonts), Some(session), Some(window)) = (
             self.gpu.as_mut(),
             self.fonts.as_mut(),
@@ -7296,6 +7477,10 @@ impl App {
                         crate::chrome::layout::pane_body(lf, scale),
                         crate::chrome::layout::pane_body(rf, scale),
                     );
+                    // Kept for the block rail's gutter: `lb`/`rb` are shadowed
+                    // by their letterboxed selves below, and the difference
+                    // between the two *is* the free space beside the grid.
+                    let (lb_body, rb_body) = (lb, rb);
                     let active_tab =
                         self.tabs.active().expect("split implies an active tab");
                     let left_source = active_tab.source();
@@ -7325,6 +7510,22 @@ impl App {
                         zest_render_wgpu::Preedit { text: &p.text, cursor: p.cursor }
                     });
                     let left_focused = !focus_right;
+                    // Per pane, and each looks up its *own* address: the panes
+                    // select independently, so reading `focused_addr` twice
+                    // would light the same block in both.
+                    let split = active_tab.split.as_ref().expect("split implies a pane");
+                    let bands_l = Self::block_bands(
+                        &band_colors,
+                        &term_l,
+                        selected_blocks.get(&active_tab.addr).copied(),
+                        active_tab.dead,
+                    );
+                    let bands_r = Self::block_bands(
+                        &band_colors,
+                        &term_r,
+                        selected_blocks.get(&split.addr).copied(),
+                        split.dead,
+                    );
                     let viewports = [
                         Viewport {
                             rect: lb,
@@ -7333,6 +7534,8 @@ impl App {
                             scroll_px: 0.0,
                             focused: self.focused && left_focused,
                             opacity: pane_opacity(self.config.opacity, left_identity),
+                            blocks: &bands_l,
+                            gutter: lb[0] - lb_body[0],
                             selection: term_l.selection(),
                             selection_bg: pane_selection_bg(self.selection_bg, left_identity),
                             preedit: if left_focused { preedit } else { None },
@@ -7346,6 +7549,8 @@ impl App {
                             scroll_px: 0.0,
                             focused: self.focused && focus_right,
                             opacity: pane_opacity(self.config.opacity, right_identity),
+                            blocks: &bands_r,
+                            gutter: rb[0] - rb_body[0],
                             selection: term_r.selection(),
                             selection_bg: pane_selection_bg(self.selection_bg, right_identity),
                             preedit: if focus_right { preedit } else { None },
@@ -7375,6 +7580,22 @@ impl App {
                         term.grid().rows(),
                         metrics,
                     );
+                    // The rail's room: the letterbox slack plus the window
+                    // padding, which `grid_rect` has already taken out of
+                    // `area` — both are space no cell can occupy.
+                    let scale = window.scale_factor() as f32;
+                    let gutter_px =
+                        (rect[0] - area[0]) + self.config.padding as f32 * scale;
+                    let (dead, addr) = self
+                        .tabs
+                        .active()
+                        .map_or((false, None), |t| (t.dead, Some(t.focused_addr())));
+                    let bands = Self::block_bands(
+                        &band_colors,
+                        &term,
+                        addr.and_then(|a| selected_blocks.get(&a).copied()),
+                        dead,
+                    );
                     self.scene.build(
                         &gpu.device,
                         &gpu.queue,
@@ -7389,6 +7610,8 @@ impl App {
                             scroll_px: 0.0,
                             focused: self.focused,
                             opacity: pane_opacity(self.config.opacity, identity),
+                            blocks: &bands,
+                            gutter: gutter_px,
                             selection: term.selection(),
                             selection_bg: pane_selection_bg(self.selection_bg, identity),
                             preedit: self.ime.preedit().map(|p| {

@@ -515,6 +515,38 @@ pub enum LauncherRow {
     ManageProfiles { chord: String },
 }
 
+/// One row of a block's ⋯ menu (design §3), ready to draw.
+///
+/// Display-only, the launcher/picker discipline: the app keeps a parallel
+/// action list built in the same pass, so index `n` means the same thing to
+/// the renderer and the input path by construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockMenuRow {
+    /// A verb, with its chord already platform-spelled (empty draws none —
+    /// the chrome does not know what a modifier is).
+    Action {
+        label: String,
+        chord: String,
+        /// `false` draws the label faint and pushes **no hit region**. An
+        /// affordance that answers a click by doing nothing is worse than
+        /// none — the rule the fold chevron already had to learn.
+        enabled: bool,
+    },
+    /// The hairline between groups of verbs.
+    Divider,
+}
+
+/// A block's open ⋯ menu.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlockMenuModel {
+    pub rows: Vec<BlockMenuRow>,
+    /// Index into `rows` the keyboard is on; always an actionable row.
+    pub selected: usize,
+    /// What the panel hangs off, physical px — the `⋯` rect, or a zero-size
+    /// rect at the pointer when a right click opened it.
+    pub anchor: [f32; 4],
+}
+
 /// The + launcher menu, when open.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LauncherModel {
