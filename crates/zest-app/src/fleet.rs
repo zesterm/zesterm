@@ -272,6 +272,29 @@ pub fn watcher_plan(
     WatcherPlan { start, stop }
 }
 
+/// Write one host's listing into the model, unless its watcher has been retired.
+///
+/// Pure over the state, so the rule the race turns on is a `cargo test` rather
+/// than a comment: the caller holds the same lock the supervisor clears under,
+/// and hands the flag it read inside it.
+fn apply_listing(
+    state: &mut State,
+    host: HostId,
+    retired: bool,
+    sessions: Vec<zest_proto::SessionInfo>,
+    offer: Option<zest_proto::HostOffer>,
+) -> bool {
+    if retired {
+        return false;
+    }
+    state.sessions.insert(host, SessionsState::Fresh(sessions));
+    // Absent means "nothing new to say", never "it has none".
+    if let Some(offer) = offer {
+        state.offers.insert(host, offer);
+    }
+    true
+}
+
 /// One push from the daemon's approval queue, forwarded to the app.
 ///
 /// Decoded here so the app's modal state never sees a wire type: `Requested`
@@ -760,10 +783,15 @@ impl FleetModel {
                 while !stop.load(Ordering::Acquire) {
                     {
                         let mut state = inner.state.lock();
-                        // Only if nothing is known yet: a redial after a drop
-                        // must not blank a listing that is still the best
-                        // answer anyone has.
-                        state.sessions.entry(host).or_insert(SessionsState::Fetching);
+                        // Under the lock, like every other write here: a
+                        // retired watcher must not resurrect the entry the
+                        // supervisor just removed.
+                        if !stop.load(Ordering::Acquire) {
+                            // Only if nothing is known yet: a redial after a
+                            // drop must not blank a listing that is still the
+                            // best answer anyone has.
+                            state.sessions.entry(host).or_insert(SessionsState::Fetching);
+                        }
                     }
                     match Self::watch_host_once(&inner, host, &route, &identity, &stop) {
                         Ok(()) => wait = REWATCH_MIN,
@@ -774,13 +802,21 @@ impl FleetModel {
                                 "remote fleet watch ended"
                             );
                             let mut state = inner.state.lock();
-                            if let Some(slot) = state.sessions.get_mut(&host) {
-                                if matches!(slot, SessionsState::Fetching) {
-                                    *slot = SessionsState::Failed(e.to_string());
-                                }
-                            }
+                            let told = !stop.load(Ordering::Acquire)
+                                && match state.sessions.get_mut(&host) {
+                                    // Only over a `Fetching`: a failure must not
+                                    // overwrite a listing that is still the best
+                                    // answer anyone has.
+                                    Some(slot @ SessionsState::Fetching) => {
+                                        *slot = SessionsState::Failed(e.to_string());
+                                        true
+                                    }
+                                    _ => false,
+                                };
                             drop(state);
-                            inner.mark_changed();
+                            if told {
+                                inner.mark_changed();
+                            }
                         }
                     }
                     if stop.load(Ordering::Acquire) {
@@ -795,6 +831,37 @@ impl FleetModel {
             tracing::warn!(error = %e, host = %host.short(), "no thread for a fleet watcher");
             inner.state.lock().watchers.remove(&host);
         }
+    }
+
+    /// Publish a listing for `host`, unless this watcher has been retired.
+    ///
+    /// **The flag is read under the state lock, and that is the whole point.**
+    /// A watcher can be parked in `read` — or mid-dial — when the supervisor
+    /// decides its host has no route, and the supervisor's "set the flag,
+    /// clear the listing" runs as one critical section. Checking `stop` outside
+    /// this lock leaves a window where a late reply lands *after* the clear and
+    /// puts the listing back, permanently: the host is already out of
+    /// `watchers`, so nothing will ever clear it again, and the fleet shows
+    /// sessions for a machine it cannot reach. That is exactly the stale-`Fresh`
+    /// the clear exists to prevent, arriving by the back door.
+    ///
+    /// Returns whether anything was published, so the caller only wakes the UI
+    /// when it was.
+    fn publish(
+        inner: &Arc<Inner>,
+        host: HostId,
+        stop: &AtomicBool,
+        sessions: Vec<zest_proto::SessionInfo>,
+        offer: Option<zest_proto::HostOffer>,
+    ) -> bool {
+        let mut state = inner.state.lock();
+        let published =
+            apply_listing(&mut state, host, stop.load(Ordering::Acquire), sessions, offer);
+        drop(state);
+        if published {
+            inner.mark_changed();
+        }
+        published
     }
 
     /// One connection to one remote host, until it dies.
@@ -825,33 +892,24 @@ impl FleetModel {
         // `list_with_offer`, not `list`: a subscriber's first offer rides this
         // very reply and the daemon marks it sent, so dropping it would leave
         // the launcher waiting for a config edit on the far machine (#262).
+        // The dial and the listing both take time, and the supervisor may
+        // have retired this watcher while they did.
         let (sessions, offer) = client.list_with_offer()?;
-        {
-            let mut state = inner.state.lock();
-            state.sessions.insert(host, SessionsState::Fresh(sessions));
-            if let Some(offer) = offer {
-                state.offers.insert(host, offer);
-            }
+        if !Self::publish(inner, host, stop, sessions, offer) {
+            return Ok(());
         }
-        inner.mark_changed();
 
         loop {
+            // Only the listing matters here; a remote host's other pushes
+            // (its approval queue) are never subscribed to.
+            let message = client.next_message()?;
             if stop.load(Ordering::Acquire) {
                 return Ok(());
             }
-            // Only the listing matters here; a remote host's other pushes
-            // (its approval queue) are never subscribed to.
-            if let zest_proto::HostMessage::Sessions { sessions, offer, .. } =
-                client.next_message()?
-            {
-                let mut state = inner.state.lock();
-                state.sessions.insert(host, SessionsState::Fresh(sessions));
-                // Absent means "nothing new to say", never "it has none".
-                if let Some(offer) = offer {
-                    state.offers.insert(host, offer);
+            if let zest_proto::HostMessage::Sessions { sessions, offer, .. } = message {
+                if !Self::publish(inner, host, stop, sessions, offer) {
+                    return Ok(());
                 }
-                drop(state);
-                inner.mark_changed();
             }
         }
     }
@@ -1116,6 +1174,71 @@ mod tests {
     }
 
     const RELAY: Option<&str> = Some("wss://relay.example");
+
+    #[test]
+    fn a_retired_watcher_cannot_put_a_listing_back() {
+        // The race, and it is the nastiest kind: permanent. A watcher can be
+        // parked in `read` when the supervisor decides its host has no route,
+        // and the supervisor's "set the flag, clear the listing" runs as one
+        // critical section. A late reply that landed *after* the clear would
+        // reinsert the listing — and nothing would ever clear it again, since
+        // the host is already out of `watchers`. The fleet would show sessions
+        // for a machine it cannot reach, for the life of the window.
+        //
+        // The flag is therefore read under the same lock, and this is that
+        // rule with the lock taken out of the picture.
+        let host = HostId::from_bytes([2; 32]);
+        let info = || {
+            vec![zest_proto::SessionInfo {
+                addr: zest_proto::SessionAddr::new(host, zest_proto::SessionId(1)),
+                title: "zsh".into(),
+                cwd: "/".into(),
+                cols: 80,
+                rows: 24,
+                alt_screen: false,
+                attached: false,
+            }]
+        };
+        let offer = || Some(zest_proto::HostOffer { os: "linux".into(), ..Default::default() });
+
+        let mut state = State::default();
+        assert!(apply_listing(&mut state, host, false, info(), offer()), "a live watcher writes");
+        assert!(matches!(state.sessions.get(&host), Some(SessionsState::Fresh(s)) if s.len() == 1));
+        assert!(state.offers.contains_key(&host));
+
+        // The supervisor's clear, as `reconcile_watchers` performs it.
+        state.sessions.remove(&host);
+        state.offers.remove(&host);
+
+        assert!(
+            !apply_listing(&mut state, host, true, info(), offer()),
+            "a retired watcher must not write"
+        );
+        assert!(!state.sessions.contains_key(&host), "and the clear must survive it");
+        assert!(!state.offers.contains_key(&host));
+    }
+
+    #[test]
+    fn an_absent_offer_leaves_the_last_one_standing() {
+        // Sticky, because "no offer on this message" means *nothing new to
+        // say* (#262) — an ordinary session push carries none, and clearing on
+        // one would blank a launcher's rows every time somebody opened a shell.
+        let host = HostId::from_bytes([2; 32]);
+        let mut state = State::default();
+        apply_listing(
+            &mut state,
+            host,
+            false,
+            Vec::new(),
+            Some(zest_proto::HostOffer { os: "linux".into(), ..Default::default() }),
+        );
+        apply_listing(&mut state, host, false, Vec::new(), None);
+        assert_eq!(
+            state.offers.get(&host).map(|o| o.os.as_str()),
+            Some("linux"),
+            "the second push said nothing about the offer, so the first still stands"
+        );
+    }
 
     #[test]
     fn every_routable_remote_host_gets_a_watcher_and_the_local_one_never_does() {
