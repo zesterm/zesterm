@@ -3330,23 +3330,38 @@ impl App {
             // rather than behind the screen (measured, not assumed). A
             // *failed* launch appended nothing, and leaving the screen for
             // it would trade the view the user had for a warn! in a log.
-            LauncherAction::Launch(name) => {
+            LauncherAction::Launch(target) => {
                 self.launcher = None;
                 self.mark_chrome_dirty();
-                self.launch_profile(&name);
+                self.launch_profile_ref(&target);
             }
             LauncherAction::LaunchDefault => {
                 self.launcher = None;
                 self.mark_chrome_dirty();
                 self.new_tab();
             }
-            LauncherAction::RunOnHost => {
+            LauncherAction::RunOnHost(target) => {
                 // The fleet picker is the "choose the machine" surface the
                 // design points ⇧⏎ at; toggle_launcher's exclusivity closed
                 // us already, but the order matters: toggle_picker closes
                 // every sibling, so the launcher must go first.
                 self.launcher = None;
                 self.toggle_picker();
+                // Carry the highlighted profile into the picker, so its host
+                // row launches *that* row somewhere else (#268). Until then
+                // ⇧⏎ dropped it and opened a plain shell, which made the
+                // menu's second action look like it did nothing much.
+                //
+                // Only a local one: `pending_profile` names a profile in this
+                // machine's config, and a published one is already pinned to
+                // the machine that published it — "run forge's `nightly` on
+                // pi" would mean sending forge's command line somewhere that
+                // never described it.
+                if let Some(crate::launcher::ProfileRef::Local(name)) = target {
+                    if let Some(p) = self.picker.as_mut() {
+                        p.pending_profile = Some(name);
+                    }
+                }
             }
             LauncherAction::ManageProfiles => {
                 self.launcher = None;
@@ -3749,6 +3764,7 @@ impl App {
                 .map(|i| i.name.clone());
             crate::launcher::build_rows(
                 &self.settings,
+                &self.fleet_view,
                 &fallback,
                 active_profile.as_deref(),
                 keymap::chord_for(keymap::Action::OpenProfiles),
@@ -6731,6 +6747,84 @@ impl App {
     /// Launch a named profile (a launcher row, or its digit) on the host its
     /// `host` key pins — the window's route when it pins none (issue #175,
     /// design §12's launch semantics).
+    /// Launch whichever kind of row the launcher offered (#268).
+    fn launch_profile_ref(&mut self, target: &crate::launcher::ProfileRef) {
+        match target {
+            crate::launcher::ProfileRef::Local(name) => self.launch_profile(name),
+            crate::launcher::ProfileRef::Remote { host, name } => {
+                self.launch_published(*host, name);
+            }
+        }
+    }
+
+    /// Launch a profile a *remote* machine published (#262).
+    ///
+    /// Runs what that machine said, on that machine — never re-resolved
+    /// against this one's config. Re-resolving the name locally would apply
+    /// our `profiles.defaults` to their profile, so a `nightly` on the build
+    /// box would silently inherit this laptop's command; and if we have no
+    /// profile by that name at all, the cascade answers empty-over-Defaults
+    /// rather than failing, which is worse — a row that launches something
+    /// plausible and wrong.
+    fn launch_published(&mut self, host: zest_proto::HostId, name: &str) {
+        let fleet = self.fleet.as_ref().map(|f| f.snapshot()).unwrap_or_default();
+        let Some(entry) = fleet.iter().find(|h| h.host == host) else {
+            // `host_id` rather than `host`: the machine is gone, so there is no
+            // label to give — and a field that means an id here and a label
+            // three lines down is a filter that silently matches neither.
+            tracing::warn!(host_id = %host.short(), "that machine has left the fleet");
+            return;
+        };
+        let Some(profile) = entry
+            .offer
+            .as_ref()
+            .and_then(|o| o.profiles.iter().find(|p| p.name == name))
+        else {
+            // The far config changed under an open menu. Nothing to launch and
+            // nothing to guess at.
+            tracing::warn!(host = %entry.label, profile = %name, "that machine no longer offers it");
+            return;
+        };
+
+        let identity = crate::tabs::ProfileIdentity::from_published(profile);
+        let label = entry.label.clone();
+        let target = crate::launch::resolve_picked_host(
+            host,
+            match self.best_route(entry) {
+                Some(route) => route,
+                None => {
+                    // §12: a launch at a host we cannot reach is still a
+                    // launch — a connecting tab that settles failed, saying
+                    // so — never a silent refusal.
+                    self.spawn_connecting_tab(
+                        name,
+                        identity,
+                        profile.command.clone(),
+                        profile.starting_directory.clone(),
+                        label.clone(),
+                        crate::launch::HostTarget::Unroutable {
+                            error: format!("no way to reach host '{label}' right now"),
+                        },
+                    );
+                    return;
+                }
+            },
+            &fleet,
+        );
+        let command = profile.command.clone();
+        let cwd = profile.starting_directory.clone();
+        match target {
+            crate::launch::HostTarget::Local => {
+                self.open_shell_tab(
+                    (!command.is_empty()).then_some(command),
+                    Some(identity),
+                    (!cwd.is_empty()).then_some(cwd),
+                );
+            }
+            target => self.spawn_connecting_tab(name, identity, command, cwd, label, target),
+        }
+    }
+
     fn launch_profile(&mut self, name: &str) {
         let meta = crate::launcher::profile_meta(&self.settings, name);
         if meta.ask_host {
@@ -6816,8 +6910,29 @@ impl App {
 
         let (cols, rows) = self.current_dims();
         let seed = self.palette_for(Some(&identity));
-        let shown_command = if command.is_empty() { "the host's default shell" } else { &command };
-        let provenance = format!("New session \u{b7} {name} on {host_label} \u{b7} {shown_command}");
+        // The same rule the launcher row used, from the same function: these
+        // read differently for one launch until they shared one — the row said
+        // `zsh -l` and the tab it opened said "the host's default shell".
+        //
+        // By id, never by label: `target` carries the machine this will
+        // actually dial, and two machines may share a display name — the same
+        // reason the launcher's group keys carry a `HostId`. An unroutable
+        // target has no id to match, and no far shell to know either.
+        let far_shell = match &target {
+            crate::launch::HostTarget::Remote { host, .. } => self
+                .fleet
+                .as_ref()
+                .map(|f| f.snapshot())
+                .unwrap_or_default()
+                .iter()
+                .find(|h| h.host == *host)
+                .and_then(|h| h.offer.as_ref())
+                .map(|o| o.default_shell.clone())
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        let shown = crate::launcher::shown_command(&command, &far_shell);
+        let provenance = format!("New session \u{b7} {name} on {host_label} \u{b7} {shown}");
         let pending = crate::tabs::PendingSession::new(
             cols,
             rows,
@@ -9043,7 +9158,20 @@ impl ApplicationHandler<Wakeup> for App {
                             // the selection sits; plain ⏎ runs the selected
                             // row — the default row, until the user moves.
                             if self.modifiers.shift_key() {
-                                self.run_launcher_action(crate::launcher::LauncherAction::RunOnHost);
+                                // Whatever is highlighted rides along; the
+                                // builder cannot know where the selection is,
+                                // so the chord fills it in here.
+                                let target = self.launcher.as_ref().and_then(|l| {
+                                    match l.actions.get(l.selected) {
+                                        Some(crate::launcher::LauncherAction::Launch(t)) => {
+                                            Some(t.clone())
+                                        }
+                                        _ => None,
+                                    }
+                                });
+                                self.run_launcher_action(
+                                    crate::launcher::LauncherAction::RunOnHost(target),
+                                );
                             } else {
                                 let action = self
                                     .launcher

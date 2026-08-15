@@ -103,6 +103,13 @@ and its number (48ms) is reported rather than gated.
   had. Either way blocks appear against the prompt the user already has, and no
   file of theirs is touched. VS Code's OSC 633 is understood too, for anyone who
   has its integration.
+- **The `+` menu spans the fleet.** Launch targets are grouped by the machine
+  that will run them — not by where the profile is defined, so a profile in this
+  laptop's config pinned to `forge` sits beside the ones `forge` publishes
+  itself. A name defined in both places shows once, and the local definition
+  wins, because it is the one you can open the editor on. One machine grows no
+  headers at all. `⇧⏎` carries the highlighted row to the host picker instead of
+  dropping it. → #268.
 - **Every machine's sessions, not just this one's.** The app holds one watching
   connection per reachable host — LAN or relay, chosen by the same rule the
   fleet cards and the ⌘K picker read — so the palette's Sessions group, the

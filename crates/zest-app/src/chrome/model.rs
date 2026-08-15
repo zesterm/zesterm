@@ -505,6 +505,21 @@ pub enum LauncherRow {
         active: bool,
         accent: AccentChoice,
     },
+    /// A host header: the machine the rows under it will run on (#268).
+    ///
+    /// Present only when the menu spans more than one machine — a
+    /// single-machine setup, which is most setups, must not grow chrome to say
+    /// so. Never actionable: the keyboard skips it and it takes no hit region,
+    /// because "which machine" is context here, not a thing to click.
+    Group {
+        /// `THIS MACHINE · studio`, `FORGE`, `ANY MACHINE`.
+        label: String,
+        /// The mono sub-label: `windows · LAN 0.4 ms`, `asleep`. Empty draws
+        /// none.
+        sub: String,
+        /// Drives the status dot, exactly as the sidebar's host headers do.
+        online: bool,
+    },
     /// The hairline between the launch targets and the two actions.
     Divider,
     /// "Run on another host…" — the fleet picker (⇧⏎).
