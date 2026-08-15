@@ -6769,7 +6769,10 @@ impl App {
     fn launch_published(&mut self, host: zest_proto::HostId, name: &str) {
         let fleet = self.fleet.as_ref().map(|f| f.snapshot()).unwrap_or_default();
         let Some(entry) = fleet.iter().find(|h| h.host == host) else {
-            tracing::warn!(host = %host.short(), "that machine has left the fleet");
+            // `host_id` rather than `host`: the machine is gone, so there is no
+            // label to give — and a field that means an id here and a label
+            // three lines down is a filter that silently matches neither.
+            tracing::warn!(host_id = %host.short(), "that machine has left the fleet");
             return;
         };
         let Some(profile) = entry

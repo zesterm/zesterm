@@ -242,7 +242,12 @@ pub fn build_rows(
     // Digits run 1..=9 across the whole menu, not per group: they are what the
     // keyboard presses, and a number that restarted at each header would name
     // several rows at once.
-    let mut digit = 0u8;
+    // `usize`, not `u8`: only the first nine rows get a digit, but the counter
+    // walks every launch row there is. A fleet of machines each publishing a
+    // handful of profiles passes 255 without trying, and a `u8` there panics in
+    // debug and wraps to a drawn `0` in release — a keystroke that names the
+    // wrong row, on the build that ships.
+    let mut digit = 0usize;
     let mut first = true;
     for group in &groups {
         if headed {
@@ -263,7 +268,7 @@ pub fn build_rows(
                 // only one group, and it is this machine.
                 host_label: None,
                 default: first,
-                digit: (digit <= 9).then_some(digit),
+                digit: (digit <= 9).then(|| u8::try_from(digit).unwrap_or(0)).filter(|d| *d > 0),
                 active: matches!(target, ProfileRef::Local(n) if Some(n.as_str()) == active_profile),
                 accent: *accent,
             });
@@ -695,6 +700,41 @@ mod tests {
                 digit_action_index(&actions, d),
                 "digit {d}: the drawn mapping and the input path's must agree"
             );
+        }
+    }
+
+    #[test]
+    fn a_menu_longer_than_a_byte_still_numbers_its_first_nine() {
+        // The counter walks every launch row; only nine get a digit. A `u8`
+        // counter panicked here in debug and wrapped to a drawn `0` in release
+        // — a keystroke naming the wrong row, on the build that ships. A fleet
+        // of machines each publishing a handful of profiles passes 255 without
+        // trying.
+        let published: Vec<(String, String)> =
+            (0..300).map(|i| (format!("p{i:03}"), "x".to_string())).collect();
+        let borrowed: Vec<(&str, &str)> =
+            published.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let fleet = [
+            host(1, "studio", true),
+            offering(host(2, "forge", false), "linux", &borrowed),
+        ];
+        let (rows, actions) =
+            build_rows(&settings_with(&[("here", "")]), &fleet, "sh", None, String::new());
+
+        let digits: Vec<u8> = rows
+            .iter()
+            .filter_map(|r| match r {
+                LauncherRow::Profile { digit, .. } => *digit,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(digits, (1..=9).collect::<Vec<u8>>(), "the first nine, and nothing else");
+        assert!(
+            rows.iter().filter(|r| matches!(r, LauncherRow::Profile { .. })).count() > 255,
+            "precondition: the menu really is longer than a byte"
+        );
+        for d in 1..=9u8 {
+            assert_eq!(digit_row(&rows, d), digit_action_index(&actions, d), "digit {d}");
         }
     }
 
