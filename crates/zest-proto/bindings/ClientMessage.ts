@@ -87,4 +87,4 @@ watch_hosts: boolean, } | { "t": "auth", signature: Sig64, } | { "t": "pairing_d
 /**
  * Empty means the host's default shell.
  */
-command: string, cwd: string, cols: number, rows: number, } | { "t": "attach", session: SessionAddr, cols: number, rows: number, } | { "t": "detach", session: SessionAddr, } | { "t": "input", session: SessionAddr, bytes: Array<number>, } | { "t": "resize", session: SessionAddr, cols: number, rows: number, } | { "t": "ack", session: SessionAddr, seq: Seq, } | { "t": "request_scrollback", session: SessionAddr, from_line: bigint, count: number, } | { "t": "close_session", session: SessionAddr, };
+command: string, cwd: string, cols: number, rows: number, } | { "t": "attach", session: SessionAddr, cols: number, rows: number, observe: boolean, } | { "t": "detach", session: SessionAddr, } | { "t": "input", session: SessionAddr, bytes: Array<number>, } | { "t": "resize", session: SessionAddr, cols: number, rows: number, } | { "t": "ack", session: SessionAddr, seq: Seq, } | { "t": "request_scrollback", session: SessionAddr, from_line: bigint, count: number, } | { "t": "close_session", session: SessionAddr, };

@@ -421,13 +421,47 @@ impl DaemonClient {
     /// Every attach starts with a keyframe, including a reattach: the host has
     /// no idea what this client still holds, and after a link drop neither
     /// does the client with any confidence.
+    ///
+    /// `cols`/`rows` are a vote in the size arbitration. A caller with no pane
+    /// to protect wants [`Self::attach_observing`] instead.
     pub fn attach(
         &mut self,
         addr: SessionAddr,
         cols: u16,
         rows: u16,
     ) -> Result<(u64, zest_proto::Keyframe), DaemonError> {
-        self.send(&ClientMessage::Attach { session: addr, cols, rows })?;
+        self.attach_with(addr, cols, rows, false)
+    }
+
+    /// Attach without voting on the session's size.
+    ///
+    /// For a client that renders nothing -- an agent, a probe, anything
+    /// headless. `attach` would make it the smallest attached client and hold
+    /// the session there for as long as it watched, which the human at the
+    /// window cannot undo and is never told about (#274).
+    ///
+    /// The size is still stated, and is still what an older daemon will count,
+    /// so pass what the session is already running at
+    /// ([`zest_proto::SessionInfo`]) rather than something invented: against a
+    /// daemon that predates the flag that turns a silent shrink into a
+    /// no-op.
+    pub fn attach_observing(
+        &mut self,
+        addr: SessionAddr,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(u64, zest_proto::Keyframe), DaemonError> {
+        self.attach_with(addr, cols, rows, true)
+    }
+
+    fn attach_with(
+        &mut self,
+        addr: SessionAddr,
+        cols: u16,
+        rows: u16,
+        observe: bool,
+    ) -> Result<(u64, zest_proto::Keyframe), DaemonError> {
+        self.send(&ClientMessage::Attach { session: addr, cols, rows, observe })?;
         loop {
             match self.recv()? {
                 HostMessage::Keyframe {

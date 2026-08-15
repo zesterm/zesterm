@@ -1101,7 +1101,7 @@ impl Connection {
                 }
             }
 
-            ClientMessage::Attach { session, cols, rows } => {
+            ClientMessage::Attach { session, cols, rows, observe } => {
                 let Some(s) = self.registry.get(session.session) else {
                     return vec![Self::no_such(session)];
                 };
@@ -1116,6 +1116,13 @@ impl Connection {
                 // The ask is a vote, not a command: the session sizes itself to
                 // the smallest attached client (#215), and the reply keyframe
                 // carries whatever was granted.
+                //
+                // An observer abstains. `attach_with` has always taken an
+                // `Option` and `reconcile_size` has always skipped a `None`;
+                // what did not exist was a way to say so from the wire, so a
+                // client with no pane had to invent a size and pin the session
+                // at it for ever (#274). The keyframe is unaffected either way
+                // -- abstaining is about the arbitration, not the subscription.
                 let waker = self.waker.clone();
                 let (handle, seq, keyframe) = s.attach_with(
                     Box::new(move || {
@@ -1123,7 +1130,7 @@ impl Connection {
                             w();
                         }
                     }),
-                    Some((cols, rows)),
+                    (!observe).then_some((cols, rows)),
                 );
                 self.attached.insert(session.session.0, handle);
                 // Another watcher's listing shows this session as attached now.
@@ -2786,7 +2793,7 @@ mod tests {
             rows: 24,
         });
         let addr = SessionAddr::new(config().host, SessionId(1));
-        peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+        peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
         // Wait for the echo's output so the session's sequence is really
         // nonzero. Attaching used to guarantee that by resizing the terminal
         // even to its existing size; arbitration made the equal-size attach a
@@ -2933,7 +2940,7 @@ mod tests {
         );
         let addr = registry.list(config().host)[0].addr;
 
-        let out = peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+        let out = peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
         assert!(matches!(&out[..], [HostMessage::Keyframe { .. }]), "{out:?}");
 
         assert!(
@@ -2963,7 +2970,7 @@ mod tests {
             },
         );
         let addr = registry.list(config().host)[0].addr;
-        peer_a.send(&mut a, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+        peer_a.send(&mut a, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
 
         let mut b = Connection::new(
             config(),
@@ -2972,7 +2979,7 @@ mod tests {
             "test2",
         );
         let mut peer_b = authenticate(&mut b);
-        let out = peer_b.send(&mut b, &ClientMessage::Attach { session: addr, cols: 100, rows: 40 });
+        let out = peer_b.send(&mut b, &ClientMessage::Attach { session: addr, cols: 100, rows: 40, observe: false });
 
         let s = registry.get(addr.session).expect("the session is attached");
         assert_eq!(
@@ -3004,7 +3011,7 @@ mod tests {
             },
         );
         let addr = registry.list(config().host)[0].addr;
-        peer_a.send(&mut a, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+        peer_a.send(&mut a, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
 
         let mut b = Connection::new(
             config(),
@@ -3013,13 +3020,177 @@ mod tests {
             "test2",
         );
         let mut peer_b = authenticate(&mut b);
-        peer_b.send(&mut b, &ClientMessage::Attach { session: addr, cols: 60, rows: 20 });
+        peer_b.send(&mut b, &ClientMessage::Attach { session: addr, cols: 60, rows: 20, observe: false });
 
         let s = registry.get(addr.session).expect("the session is attached");
         assert_eq!(s.size(), (60, 20), "the smallest attached client sets the session size");
 
         peer_b.send(&mut b, &ClientMessage::Detach { session: addr });
         assert_eq!(s.size(), (80, 24), "detaching the constraining client must give the space back");
+        registry.close(addr.session);
+    }
+
+    /// The whole point of `observe`: a client with no pane must be able to
+    /// watch without shrinking the one somebody is looking at.
+    ///
+    /// Asserted on the *session*, not on what the observer was sent, because
+    /// the observer sees a correct keyframe either way -- the damage is done
+    /// to the other client, which is exactly why this went unnoticed until an
+    /// agent needed it (#274).
+    #[test]
+    fn an_observer_attach_does_not_shrink_the_session() {
+        let (mut a, registry) = conn();
+        let mut peer_a = authenticate(&mut a);
+        peer_a.send(
+            &mut a,
+            &ClientMessage::CreateSession {
+                command: sleep_cmd(),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+            },
+        );
+        let addr = registry.list(config().host)[0].addr;
+        peer_a.send(&mut a, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
+
+        let mut b = Connection::new(
+            config(),
+            Arc::clone(&registry),
+            crate::auth::Auth::Transport(test_authenticator()),
+            "observer",
+        );
+        let mut peer_b = authenticate(&mut b);
+        // A size that *would* win the min, so a regression cannot pass by the
+        // observer happening to ask for something larger.
+        let out =
+            peer_b.send(&mut b, &ClientMessage::Attach { session: addr, cols: 60, rows: 20, observe: true });
+
+        let s = registry.get(addr.session).expect("the session is attached");
+        assert_eq!(
+            s.size(),
+            (80, 24),
+            "an observer voted in the size arbitration and shrank the human's window"
+        );
+        assert!(
+            matches!(&out[..], [HostMessage::Keyframe { cols: 80, rows: 24, .. }]),
+            "an observer must still be sent a keyframe, at the granted size: {out:?}"
+        );
+        registry.close(addr.session);
+    }
+
+    /// Abstaining is not the same as asking for the session's own size.
+    ///
+    /// A client that voted what it found would still pin the session there:
+    /// `reconcile_size` reports no change when the minimum does not move, so
+    /// the human growing their window pushes nothing and the observer is never
+    /// told it should raise its vote. This is the case with no client-side
+    /// workaround, and the reason `observe` had to exist on the wire.
+    #[test]
+    fn an_observer_does_not_pin_a_session_that_later_grows() {
+        let (mut a, registry) = conn();
+        let mut peer_a = authenticate(&mut a);
+        peer_a.send(
+            &mut a,
+            &ClientMessage::CreateSession {
+                command: sleep_cmd(),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+            },
+        );
+        let addr = registry.list(config().host)[0].addr;
+        peer_a.send(&mut a, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
+
+        let mut b = Connection::new(
+            config(),
+            Arc::clone(&registry),
+            crate::auth::Auth::Transport(test_authenticator()),
+            "observer",
+        );
+        let mut peer_b = authenticate(&mut b);
+        peer_b.send(&mut b, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: true });
+
+        // The human drags their window bigger.
+        peer_a.send(&mut a, &ClientMessage::Resize { session: addr, cols: 120, rows: 40 });
+
+        let s = registry.get(addr.session).expect("the session is attached");
+        assert_eq!(
+            s.size(),
+            (120, 40),
+            "the observer held the session at the size it attached to, and nothing \
+             could have told it to let go"
+        );
+        registry.close(addr.session);
+    }
+
+    /// An observer alone must not resize a session nobody is rendering.
+    ///
+    /// The session keeps the size it was created at. Without this a headless
+    /// reader attaching to a background session would silently reshape it,
+    /// and on Windows a resize is a full ConPTY repaint (#200) -- not cosmetic.
+    #[test]
+    fn an_observer_alone_leaves_the_session_at_its_creation_size() {
+        let (mut a, registry) = conn();
+        let mut peer_a = authenticate(&mut a);
+        peer_a.send(
+            &mut a,
+            &ClientMessage::CreateSession {
+                command: sleep_cmd(),
+                cwd: String::new(),
+                cols: 100,
+                rows: 30,
+            },
+        );
+        let addr = registry.list(config().host)[0].addr;
+        peer_a.send(&mut a, &ClientMessage::Attach { session: addr, cols: 40, rows: 10, observe: true });
+
+        let s = registry.get(addr.session).expect("the session is attached");
+        assert_eq!(
+            s.size(),
+            (100, 30),
+            "the only attached client abstained, so nothing declared a size and the \
+             session must keep its own"
+        );
+        registry.close(addr.session);
+    }
+
+    /// Re-attaching is how a vote is withdrawn, which is why `Resize` needed no
+    /// flag of its own. The handler already replaces a stale subscriber, so the
+    /// old vote must go with it rather than being counted for ever.
+    #[test]
+    fn re_attaching_as_an_observer_withdraws_the_vote() {
+        let (mut a, registry) = conn();
+        let mut peer_a = authenticate(&mut a);
+        peer_a.send(
+            &mut a,
+            &ClientMessage::CreateSession {
+                command: sleep_cmd(),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+            },
+        );
+        let addr = registry.list(config().host)[0].addr;
+        peer_a.send(&mut a, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
+
+        let mut b = Connection::new(
+            config(),
+            Arc::clone(&registry),
+            crate::auth::Auth::Transport(test_authenticator()),
+            "observer",
+        );
+        let mut peer_b = authenticate(&mut b);
+        peer_b.send(&mut b, &ClientMessage::Attach { session: addr, cols: 60, rows: 20, observe: false });
+        let s = registry.get(addr.session).expect("the session is attached");
+        assert_eq!(s.size(), (60, 20), "precondition: the second client is the binding minimum");
+
+        peer_b.send(&mut b, &ClientMessage::Attach { session: addr, cols: 60, rows: 20, observe: true });
+        assert_eq!(
+            s.size(),
+            (80, 24),
+            "re-attaching as an observer must drop the earlier vote, not leave it \
+             behind on a replaced subscriber"
+        );
         registry.close(addr.session);
     }
 
@@ -3041,7 +3212,7 @@ mod tests {
             },
         );
         let addr = registry.list(config().host)[0].addr;
-        peer_a.send(&mut a, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+        peer_a.send(&mut a, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
         // Drain whatever the attach owed.
         while !a.poll().is_empty() {}
 
@@ -3052,7 +3223,7 @@ mod tests {
             "test2",
         );
         let mut peer_b = authenticate(&mut b);
-        peer_b.send(&mut b, &ClientMessage::Attach { session: addr, cols: 60, rows: 20 });
+        peer_b.send(&mut b, &ClientMessage::Attach { session: addr, cols: 60, rows: 20, observe: false });
 
         let mut granted = None;
         wait_for(|| {
@@ -3088,7 +3259,7 @@ mod tests {
             },
         );
         let addr = registry.list(config().host)[0].addr;
-        peer_a.send(&mut a, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+        peer_a.send(&mut a, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
 
         let mut b = Connection::new(
             config(),
@@ -3129,7 +3300,7 @@ mod tests {
             },
         );
         let addr = registry.list(config().host)[0].addr;
-        peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+        peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
         // Drain the pushes the create and attach owed.
         while !watcher.poll().is_empty() {}
 
@@ -3167,7 +3338,7 @@ mod tests {
             },
         );
         let addr = registry.list(config().host)[0].addr;
-        peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+        peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
 
         peer.send(&mut c, &ClientMessage::Detach { session: addr });
         assert_eq!(registry.len(), 1, "detaching removed the session");
@@ -3256,7 +3427,7 @@ mod tests {
             },
         );
         let addr = registry.list(config().host)[0].addr;
-        peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+        peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
 
         assert!(
             wait_for(|| c
@@ -3318,7 +3489,7 @@ mod tests {
             "swept before the client that created it could attach; that client \
              now gets \"no session\" for a shell it asked for and that ran"
         );
-        let out = peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+        let out = peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
         assert!(
             matches!(&out[..], [HostMessage::Keyframe { .. }]),
             "attach must still succeed, and carry what the command printed: {out:?}"
@@ -3347,7 +3518,7 @@ mod tests {
                 },
             );
             let addr = registry.list(config().host)[0].addr;
-            peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+            peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
             let s = registry.get(addr.session).expect("just created");
             assert!(s.attached(), "the attach did not register a subscriber");
             s
@@ -3439,7 +3610,7 @@ mod tests {
         );
         let addr = registry.list(config().host)[0].addr;
         let session = registry.get(addr.session).expect("just created");
-        peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24 });
+        peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
 
         // Exit implies the reader drained the pty, so everything the child
         // printed is in the terminal — and it printed all of it after the

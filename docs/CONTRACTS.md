@@ -26,7 +26,7 @@ paragraph of justification attached.
 |---|---|---|---|
 | `PtyTransport` | `zest-pty/src/lib.rs` | **frozen** — `hangup` added, see below | WS-C, WS-D, WS-F |
 | `HostId`, `ClientId`, `SessionId`, `SessionAddr` | `zest-proto/src/ids.rs` | **frozen** | WS-F, WS-G, WS-H |
-| `ClientMessage`, `HostMessage`, `SessionInfo`, `HostOffer`, `HostProfile` | `zest-proto/src/lib.rs` | **frozen** at v3 — additive `Hello.watch_pairings` and `PairingRequested` expiry/tombstone fields for the approval modal; the `Enroll`/`EnrollResult` pair (new tags, loopback-scoped — see below); and additive `Hello.watch_hosts` + `Sessions.offer` carrying `HostOffer`/`HostProfile`, see below | WS-F, WS-G |
+| `ClientMessage`, `HostMessage`, `SessionInfo`, `HostOffer`, `HostProfile` | `zest-proto/src/lib.rs` | **frozen** at v3 — additive `Hello.watch_pairings` and `PairingRequested` expiry/tombstone fields for the approval modal; the `Enroll`/`EnrollResult` pair (new tags, loopback-scoped — see below); additive `Hello.watch_hosts` + `Sessions.offer` carrying `HostOffer`/`HostProfile`; and additive `Attach.observe`, the abstention a paneless client needs, see below | WS-F, WS-G, WS-I |
 | `Delta`, `DeltaOp`, `Run`, `RowPayload`, `AttrDef` | `zest-proto/src/delta.rs` | **frozen** at v3 — unchanged in content, but the frame carrying it is now ciphertext | WS-F, WS-G |
 | `Nonce32`, `Sig64`, `Pub32`, `AuthFailure` | `zest-proto/src/auth.rs` | **frozen** — `Nonce32`/`Sig64` arrived with v2, `Pub32` with v3 | WS-F, WS-G, WS-H |
 | `SecureChannel`, `Sealer`, `Opener`, `EphemeralDh`, `DhPublic` | `zest-mesh/src/secure.rs` | **frozen** at v3 — the browser has a second implementation, pinned to `fixtures/handshake.json` | WS-F, WS-G, WS-H |
@@ -491,12 +491,11 @@ A session has one pty and one grid, and several clients may be attached to it at
 the product, not an edge case. The sizes clients send are therefore **votes, not commands**: the
 daemon holds each subscriber's declared size and keeps the session at the **smallest attached
 client** (min cols, min rows), recomputed on attach, resize and detach, so every viewer sees a
-complete screen and larger viewers letterbox. An undeclared attach (none shipped today) never
-constrains, and the last detach changes nothing — the session outlives its clients and gets no
-parting resize. Equal recomputes touch nothing at all, because a pty resize is a ConPTY repaint on
-Windows (#200). → #215.
+complete screen and larger viewers letterbox. An undeclared attach never constrains, and the last
+detach changes nothing — the session outlives its clients and gets no parting resize. Equal
+recomputes touch nothing at all, because a pty resize is a ConPTY repaint on Windows (#200). → #215.
 
-**Nothing new is on the wire, and three client-side properties hold it up:**
+**Three client-side properties hold it up:**
 
 1. **`Keyframe.cols/rows` is the only carrier of shape, and it is authoritative.** When the
    arbitrated size changes, every other subscriber gets a forced keyframe (`needs_keyframe` +
@@ -519,6 +518,43 @@ exactly one size — so per-client anything can only ever mean viewports over on
 
 Consumers: `zest-daemon` (`session.rs::reconcile_size`), `zest-app` (`chrome/insets.rs::letterbox`,
 `remote.rs`), `clients/web` (`GridPane`/`grid-canvas.ts`, `session-client.ts`).
+
+#### Additive, and therefore not a bump: `Attach.observe`
+
+The paragraph above used to read *"an undeclared attach (none shipped today)"*, and that
+parenthesis was the whole gap. `Subscriber.size` has always been an `Option` and
+`reconcile_size` has always skipped a `None`, but `ClientMessage::Attach.cols/rows` are not
+`Option`, so nothing could ask for it. A client with no pane — an agent, a probe, anything
+headless — had to invent a size and thereby join an arbitration it has no stake in.
+
+That is worse than it sounds, and worse than a transient shrink. **A vote that equals the current
+size still pins it**: `reconcile_size` reports no change when the minimum does not move, so
+`Resize` never calls `registry.touch()`, no `Sessions` push goes out, and the human who just
+dragged their window bigger gets nothing while the observer is never told it should raise its
+vote. There is no client-side workaround — a paneless client's "what I asked" and "what the
+session is" are the same number, which is exactly the shape property 2 above assumes cannot
+exist. → #274.
+
+`Attach` therefore gains `#[serde(default)] observe: bool`. `true` passes `None` to
+`attach_with`; the subscription, the keyframe and the deltas are all unaffected — abstaining is
+about the arbitration, nothing else. `PROTOCOL_VERSION` stays 3.
+
+**`cols`/`rows` are still sent, and still mean what they always did**, which is what makes the
+degradation safe: a daemon predating the field ignores it and counts an ordinary vote, so an
+observer pins rather than shrinks. The obvious alternative — a `0, 0` sentinel, needing no new
+field at all — is why this is a field: `clamp_size` is `(cols.max(2), rows.max(1))`, so `0, 0`
+reaching an older daemon is a **2x1 terminal** for everyone attached.
+
+**A vote is withdrawn by re-attaching with `observe`, and `Resize` gets no flag.** Attaching twice
+on one connection is already how a client resyncs, and the handler already replaces the stale
+subscriber — so the old vote goes with it. A second spelling would be a second thing to keep
+consistent for no capability.
+
+Consumers landed in the same commit: `zest-proto`, `zest-daemon` (the `Attach` arm and
+`DaemonClient::attach_observing`), `clients/web` (`wire-client.ts` — encoder parity requires
+every golden to have a construction), and the regenerated bindings plus `client-messages.json`,
+which carries **both** spellings: a second implementation that dropped the flag would otherwise
+encode a valid `attach` that silently votes.
 
 ---
 

@@ -218,7 +218,34 @@ pub enum ClientMessage {
     /// The client states the size *it* will render at. A session attached from
     /// two devices at once is a real case — desk and phone — and the host
     /// reconciles rather than the last attach silently winning.
-    Attach { session: SessionAddr, cols: u16, rows: u16 },
+    ///
+    /// `observe` withdraws from that reconciliation: the subscriber receives
+    /// every keyframe and delta and casts **no vote**, which is what a client
+    /// with no pane needs. The daemon has always had the state for it
+    /// (`Subscriber.size` is an `Option`, and `None` never constrains); until
+    /// now nothing could ask for it, because these two fields are not
+    /// `Option`. A headless reader had to invent a size and thereby shrink
+    /// somebody's window — permanently, because `reconcile_size` reports no
+    /// change when the minimum does not move, so the human growing their
+    /// window pushes nothing and the observer never learns to let go.
+    ///
+    /// **`cols`/`rows` are still sent, and still mean what they always did.**
+    /// A daemon that predates this field ignores it and counts an ordinary
+    /// vote, so an observer degrades to pinning the session at the size it
+    /// found — recoverable, and unlike a `0, 0` sentinel, which `clamp_size`
+    /// would turn into a 2x1 terminal on exactly those older daemons.
+    ///
+    /// A vote is withdrawn by re-attaching with `observe`, not by a second
+    /// message: attaching twice on one connection is already how a client
+    /// resyncs, and the handler already replaces the stale subscriber. So
+    /// `Resize` needs no flag of its own, and does not get one.
+    Attach {
+        session: SessionAddr,
+        cols: u16,
+        rows: u16,
+        #[serde(default)]
+        observe: bool,
+    },
     /// Stop receiving updates. The session keeps running.
     Detach { session: SessionAddr },
     /// Keystrokes, already encoded to terminal bytes by the client.

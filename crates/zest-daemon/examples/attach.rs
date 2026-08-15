@@ -263,7 +263,7 @@ fn run<R: Read + Send + 'static, W: Write + Send + 'static>(
                         if let Some(s) = sessions.last() {
                             send(
                                 &writer,
-                                &ClientMessage::Attach { session: s.addr, cols: 100, rows: 30 },
+                                &ClientMessage::Attach { session: s.addr, cols: 100, rows: 30, observe: false },
                             );
                             *opened.lock().expect("session slot") = Some(s.addr);
                             attached = true;
