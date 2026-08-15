@@ -272,6 +272,33 @@ pub fn watcher_plan(
     WatcherPlan { start, stop }
 }
 
+/// How long to wait before asking an unavailable credential store again.
+///
+/// The supervisor reconciles on every observation, and a machine with no store
+/// would otherwise re-enter it on every mDNS packet. On macOS that path can
+/// raise a Keychain prompt, which turns one refusal into a stream of dialogs —
+/// so the retry is deliberately slow rather than absent: a locked keychain does
+/// get unlocked, and a fleet that stayed empty until the next launch would be
+/// the worse failure.
+const IDENTITY_RETRY: Duration = Duration::from_secs(60);
+
+/// The supervisor's device key, and what it has already said about not having
+/// one.
+#[derive(Default)]
+struct IdentityCache {
+    key: Option<Arc<ClientIdentity>>,
+    /// The warning has been emitted; later failures go to `debug`.
+    complained: bool,
+    failed_at: Option<std::time::Instant>,
+}
+
+impl IdentityCache {
+    /// Whether the store is worth asking right now.
+    fn may_retry(&self, now: std::time::Instant) -> bool {
+        self.failed_at.is_none_or(|at| now.duration_since(at) >= IDENTITY_RETRY)
+    }
+}
+
 /// Write one host's listing into the model, unless its watcher has been retired.
 ///
 /// Pure over the state, so the rule the race turns on is a `cargo test` rather
@@ -672,7 +699,7 @@ impl FleetModel {
                 // Loaded once, on this thread, on first need: the keychain
                 // stays off the startup path, and off every path for someone
                 // who never leaves loopback.
-                let mut identity: Option<Arc<ClientIdentity>> = None;
+                let mut identity = IdentityCache::default();
                 loop {
                     Self::reconcile_watchers(&inner, &mut identity);
                     // A ring or a backstop, whichever comes first. The
@@ -693,7 +720,7 @@ impl FleetModel {
     /// Start a watcher for every routable remote host, stop the rest.
     ///
     /// Plumbing only — [`watcher_plan`] owns the decision and carries its tests.
-    fn reconcile_watchers(inner: &Arc<Inner>, identity: &mut Option<Arc<ClientIdentity>>) {
+    fn reconcile_watchers(inner: &Arc<Inner>, identity: &mut IdentityCache) {
         let hosts = Self::snapshot_of(inner);
         let plan = {
             let state = inner.state.lock();
@@ -729,16 +756,7 @@ impl FleetModel {
 
         // Only now is a credential worth reading — someone who never leaves
         // loopback never reaches this line.
-        let identity = match identity {
-            Some(i) => Arc::clone(i),
-            None => match Self::remote_identity() {
-                Some(i) => {
-                    *identity = Some(Arc::clone(&i));
-                    i
-                }
-                None => return,
-            },
-        };
+        let Some(identity) = Self::remote_identity(identity) else { return };
         for (host, route) in plan.start {
             let stop = Arc::new(AtomicBool::new(false));
             inner.state.lock().watchers.insert(host, Arc::clone(&stop));
@@ -752,14 +770,36 @@ impl FleetModel {
     /// for as long as the window is open, and a key that changes per connection
     /// would make every far host ask a person to approve it again, every time.
     /// Better to list no sessions than to become a source of prompts.
-    fn remote_identity() -> Option<Arc<ClientIdentity>> {
+    fn remote_identity(cache: &mut IdentityCache) -> Option<Arc<ClientIdentity>> {
+        if let Some(key) = cache.key.as_ref() {
+            return Some(Arc::clone(key));
+        }
+        if !cache.may_retry(std::time::Instant::now()) {
+            return None;
+        }
         match ClientIdentity::load_or_create(&zest_mesh::keystore::OsKeyStore) {
-            Ok(i) => Some(Arc::new(i)),
+            Ok(i) => {
+                let key = Arc::new(i);
+                cache.key = Some(Arc::clone(&key));
+                Some(key)
+            }
             Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "no credential store; remote session lists will stay empty"
-                );
+                // Once at `warn`, then quiet. The supervisor reconciles on
+                // every observation, so a machine with no credential store
+                // would otherwise emit this on every mDNS packet — and, worse
+                // than the noise, re-enter the credential store each time. On
+                // macOS that path can raise a Keychain prompt, so retrying it
+                // per observation turns one refusal into a stream of dialogs.
+                if cache.complained {
+                    tracing::debug!(error = %e, "still no credential store");
+                } else {
+                    cache.complained = true;
+                    tracing::warn!(
+                        error = %e,
+                        "no credential store; remote session lists will stay empty"
+                    );
+                }
+                cache.failed_at = Some(std::time::Instant::now());
                 None
             }
         }
@@ -1174,6 +1214,27 @@ mod tests {
     }
 
     const RELAY: Option<&str> = Some("wss://relay.example");
+
+    #[test]
+    fn a_missing_credential_store_is_asked_again_slowly_not_every_observation() {
+        // The supervisor reconciles on every observation, and mDNS is chatty.
+        // Without a backoff a machine with no credential store re-enters it on
+        // every packet — and the noise is the lesser problem: on macOS that
+        // path can raise a Keychain prompt, so retrying per observation turns
+        // one refusal into a stream of dialogs.
+        //
+        // Absent is wrong too, though. A locked keychain gets unlocked, and a
+        // fleet that stayed empty until the next launch would be the worse
+        // failure — so this asserts the retry happens, just slowly.
+        let start = std::time::Instant::now();
+        let mut cache = IdentityCache::default();
+        assert!(cache.may_retry(start), "nothing has failed yet");
+
+        cache.failed_at = Some(start);
+        assert!(!cache.may_retry(start + Duration::from_secs(1)), "not on the next observation");
+        assert!(!cache.may_retry(start + IDENTITY_RETRY - Duration::from_millis(1)));
+        assert!(cache.may_retry(start + IDENTITY_RETRY), "but eventually, so a lock can lift");
+    }
 
     #[test]
     fn a_retired_watcher_cannot_put_a_listing_back() {
