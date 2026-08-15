@@ -128,8 +128,10 @@ fn screen_from(value: Option<&str>) -> Result<app::StartScreen, String> {
         Some("launcher") => Ok(app::StartScreen::Launcher),
         Some("profiles") => Ok(app::StartScreen::Profiles),
         Some("settings-menu") => Ok(app::StartScreen::SettingsMenu),
+        Some("profiles-rename") => Ok(app::StartScreen::ProfilesRename),
         _ => Err(
-            "--screen needs one of fleet|themes|settings|settings-menu|palette|launcher|profiles"
+            "--screen needs one of fleet|themes|settings|settings-menu|palette|launcher|\
+             profiles|profiles-rename"
                 .into(),
         ),
     }
@@ -444,11 +446,15 @@ fn parse_args(args: &[String]) -> Result<Flags, EarlyExit> {
                      --no-daemon       own the pty in this process, do not attach\n\
                      --new-session     start a fresh shell instead of restoring your tabs\n\
                      --screen <name>   open on fleet|themes|settings|settings-menu|\n\
-                     \x20                 palette|launcher|profiles instead of the terminal\n\
+                     \x20                 palette|launcher|profiles|profiles-rename\n\
+                     \x20                 instead of the terminal\n\
                      \x20                 ('palette' is the ⌘K search, not the keymap's\n\
                      \x20                 command palette; 'launcher' is the + menu over the\n\
                      \x20                 default screen; 'settings-menu' is Settings with\n\
-                     \x20                 the theme dropdown open).\n\
+                     \x20                 the theme dropdown open, and 'profiles-rename' is\n\
+                     \x20                 Profiles with the name entry open — both states a\n\
+                     \x20                 screenshot cannot otherwise reach, since opening\n\
+                     \x20                 them takes a click).\n\
                      \x20                 Composes with\n\
                      \x20                 --screenshot; screen content is live state, and\n\
                      \x20                 --screenshot already implies --no-daemon, which\n\

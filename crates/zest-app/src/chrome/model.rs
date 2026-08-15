@@ -421,6 +421,23 @@ pub struct ProfilePreviewModel {
     pub lines: Vec<String>,
 }
 
+/// A profile rename in flight (§12, #283).
+///
+/// `caret` and `selection` are **byte** offsets into `buffer`, straight off
+/// `TextField` — the same contract `SettingsValueCell::Editing` states, and
+/// for the same reason: the renderer measures `buffer[..caret]` to place the
+/// caret, so anything but a byte index would have to be converted here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProfileNameEdit {
+    pub buffer: String,
+    pub caret: usize,
+    pub selection: Option<(usize, usize)>,
+    /// Why the name cannot be committed, shown under the entry. The box wears
+    /// the warn border while this is `Some`, exactly like a settings row that
+    /// failed to parse.
+    pub error: Option<String>,
+}
+
 /// The Profiles tab's screen (design §12): a 248px profile rail and an
 /// editor column, drawn over the grid area while the Profiles pane is up.
 #[derive(Debug, Clone, PartialEq)]
@@ -431,6 +448,10 @@ pub struct ProfilesScreenModel {
     pub selected_rail: usize,
     /// Editor header: display name, resolved command line, pinned host.
     pub name: String,
+    /// A rename in progress (§12, #283): the buffer replaces the header name
+    /// with a text entry. `None` is the resting state, and Defaults never
+    /// carries one — the reserved parent cannot be renamed.
+    pub renaming: Option<ProfileNameEdit>,
     pub command: String,
     pub host_chip: Option<String>,
     pub icon: Option<String>,

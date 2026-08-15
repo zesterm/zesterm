@@ -27,6 +27,9 @@ const RAIL_TILE: f32 = 24.0;
 const DEFAULTS_GAP: f32 = 6.0;
 const HEAD_TILE: f32 = 34.0;
 const BTN_H: f32 = 26.0;
+/// The header name's click target and its rename entry share a height, so the
+/// box a click opens is exactly the box the pointer was over (#283).
+const NAME_INPUT_H: f32 = 26.0;
 const HAIRLINE: f32 = 1.0;
 const SECTION_PX: f32 = 10.5;
 
@@ -592,6 +595,74 @@ fn header(
     let name_px = 17.0 * s;
     let nx = tile[0] + tile[2] + 12.0 * s;
     let name_w = measure(&model.name, name_px, true, -0.01 * name_px).min((right - nx).max(0.0));
+
+    if let Some(edit) = &model.renaming {
+        // The settings row's editing recipe, in the header: 8px radii, accent
+        // border turning warn on a name that cannot be used, panel fill.
+        let ink = if edit.error.is_some() { colors.pill_warn_text } else { colors.accent };
+        let boxr = [
+            nx - 8.0 * s,
+            top + 1.0 * s,
+            (right - nx + 8.0 * s).max(80.0 * s),
+            NAME_INPUT_H * s,
+        ];
+        out.rects.push(RectInstance {
+            radii: [8.0 * s; 4],
+            border: ink,
+            border_width: HAIRLINE * s,
+            ..RectInstance::filled(boxr, colors.panel_bg, content)
+        });
+        ss::text_entry(
+            &ss::TextEntry {
+                text: &edit.buffer,
+                caret: edit.caret,
+                selection: edit.selection,
+                color: if edit.error.is_some() { colors.pill_warn_text } else { colors.text_active },
+                selection_bg: colors.accent_soft,
+                px: name_px,
+            },
+            boxr,
+            content,
+            s,
+            measure,
+            out,
+        );
+        if let Some(why) = &edit.error {
+            out.texts.push(TextRun {
+                text: why.clone(),
+                pos: [nx, boxr[1] + boxr[3] + 13.0 * s],
+                max_width: (right - nx).max(0.0),
+                color: colors.pill_warn_text,
+                clip: content,
+                px: 10.5 * s,
+                bold: false,
+                tracking: 0.0,
+            });
+        }
+        // The host chip and command line are suppressed while renaming: the
+        // entry spans the header's width and the error line sits where the
+        // command line would be. The tile and buttons stay — they are what
+        // says which profile is being renamed.
+        return top + HEAD_TILE * s + 14.0 * s;
+    }
+
+    // Defaults is the reserved parent and cannot be renamed, so it gets no
+    // region at all rather than one that refuses — an affordance that does
+    // nothing reads as broken (the §12 rule Delete already follows).
+    let renameable = model.can_delete;
+    if renameable && hover == Some(HitRegion::ProfilesName) {
+        // Before the text, so it sits behind it rather than over it.
+        out.rects.push(RectInstance {
+            radii: [6.0 * s; 4],
+            border: colors.line,
+            border_width: HAIRLINE * s,
+            ..RectInstance::filled(
+                [nx - 6.0 * s, top + 1.0 * s, name_w + 12.0 * s, NAME_INPUT_H * s],
+                colors.panel_bg,
+                content,
+            )
+        });
+    }
     out.texts.push(TextRun {
         text: model.name.clone(),
         pos: [nx, top + 15.0 * s],
@@ -602,6 +673,12 @@ fn header(
         bold: true,
         tracking: -0.01 * name_px,
     });
+    if renameable {
+        out.hit.push(
+            [nx - 6.0 * s, top + 1.0 * s, name_w + 12.0 * s, NAME_INPUT_H * s],
+            HitRegion::ProfilesName,
+        );
+    }
     if let Some(host) = &model.host_chip {
         let px = 10.0 * s;
         let tw = measure(host, px, false, 0.0);
@@ -930,6 +1007,7 @@ mod tests {
             selected: 1,
             filter: String::new(),
             filter_caret: Default::default(),
+            renaming: None,
             scroll: 0.0,
             ensure_visible: false,
             empty: None,
@@ -1001,6 +1079,7 @@ mod tests {
         let mut rail_rows = std::collections::HashSet::new();
         let mut choices = std::collections::HashSet::new();
         let mut seen_new = false;
+        let mut seen_name = false;
         let mut seen_dup = false;
         let mut seen_del = false;
         let mut seen_row = false;
@@ -1017,6 +1096,7 @@ mod tests {
                         choices.insert((row, opt));
                     }
                     Some(HitRegion::ProfilesNew) => seen_new = true,
+                    Some(HitRegion::ProfilesName) => seen_name = true,
                     Some(HitRegion::ProfilesDuplicate) => seen_dup = true,
                     Some(HitRegion::ProfilesDelete) => seen_del = true,
                     Some(HitRegion::SettingsRow(_)) => seen_row = true,
@@ -1033,6 +1113,7 @@ mod tests {
         }
         assert_eq!(rail_rows.len(), 2, "every rail row answers as itself");
         assert!(seen_new, "the dashed + New profile is clickable");
+        assert!(seen_name, "the header name answers, so it can be renamed (#283)");
         assert!(seen_dup, "Duplicate answers");
         assert!(seen_del, "Delete answers when allowed");
         assert!(seen_row, "field rows select on click");
@@ -1065,12 +1146,54 @@ mod tests {
                     Some(HitRegion::ProfilesDelete) => {
                         panic!("({x},{y}): Delete must not exist on Defaults")
                     }
+                    // Same rule, same reason (#283): `defaults` is the name
+                    // the whole cascade resolves through, so it is not
+                    // renameable — and an affordance that refuses reads as
+                    // broken, so it is absent rather than inert.
+                    Some(HitRegion::ProfilesName) => {
+                        panic!("({x},{y}): Defaults' name must not be renameable")
+                    }
                     Some(HitRegion::ProfilesDuplicate) => seen_dup = true,
                     _ => {}
                 }
             }
         }
         assert!(seen_dup, "Duplicate stays — copying Defaults into a profile is legal");
+    }
+
+    #[test]
+    fn a_rename_in_flight_replaces_the_name_with_an_entry() {
+        // The entry has to actually reach the layout: a model field the
+        // drawing ignores is the shape where the caret exists in state and
+        // never on screen.
+        let mut m = model(true);
+        m.renaming = Some(super::super::model::ProfileNameEdit {
+            buffer: "forge".into(),
+            caret: 5,
+            selection: None,
+            error: Some("a profile with that name already exists".into()),
+        });
+        let l = lay(&m, 1100.0, 720.0);
+        assert!(
+            l.texts.iter().any(|t| t.text == "forge"),
+            "the buffer is drawn, not the profile's stored name"
+        );
+        assert!(
+            l.texts.iter().any(|t| t.text == "a profile with that name already exists"),
+            "the reason a name is refused is on screen, not only in state"
+        );
+        // The name region is the resting affordance; while the entry is open
+        // the box IS the entry, so a click target over it would reopen what
+        // is already open.
+        let mut seen_name = false;
+        for x in (0..1100).step_by(2) {
+            for y in (46..766).step_by(2) {
+                if l.hit.hit(x as f32, y as f32) == Some(HitRegion::ProfilesName) {
+                    seen_name = true;
+                }
+            }
+        }
+        assert!(!seen_name, "the click-to-rename target is gone while renaming");
     }
 
     #[test]

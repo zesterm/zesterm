@@ -560,6 +560,42 @@ pub fn copy_name(existing: &[String], from: &str) -> String {
         .expect("the integers do not run out")
 }
 
+/// Why a profile cannot be renamed to `to`, or `None` when it can (#283).
+///
+/// The caller trims before offering the name here and writes exactly what it
+/// validated — validating one string and writing another is how a check that
+/// reads correctly passes something it rejected.
+///
+/// `to == from` is allowed and means "nothing changed": the name entry commits
+/// whether or not it was edited, and refusing a name for already being its own
+/// would make Enter an error on every unmodified field.
+#[must_use]
+pub fn rename_error(existing: &[String], from: &str, to: &str) -> Option<&'static str> {
+    if to == from {
+        return None;
+    }
+    if to.is_empty() {
+        return Some("a profile needs a name");
+    }
+    // `defaults` is the parent every other profile inherits from, so a second
+    // one is not a name collision but a broken cascade. `rail_names` carries
+    // it at index 0, so the collision check below would catch it anyway — this
+    // arm exists to say *why*, which the generic message cannot.
+    if to == profiles::RESERVED_PROFILE {
+        return Some("defaults is the parent every profile inherits from");
+    }
+    // A control character survives TOML quoting and reaches the rail, the tab
+    // chip and `[profiles.<name>]` as an escape nobody typed. Paste is how one
+    // arrives; nothing about the name entry stops it.
+    if to.chars().any(char::is_control) {
+        return Some("a profile name cannot contain control characters");
+    }
+    if existing.iter().any(|e| e == to) {
+        return Some("a profile with that name already exists");
+    }
+    None
+}
+
 /// What leaving an open edit should do (#272).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pending {
@@ -675,6 +711,37 @@ mod tests {
             error: false,
             append: false,
         })
+    }
+
+    #[test]
+    fn a_rename_is_refused_for_a_reason_the_user_can_read() {
+        // #283. Each arm is a different failure, and the messages differ
+        // because "already exists" is wrong for `defaults` — it exists, but
+        // the reason it cannot be taken is that the whole cascade resolves
+        // through it.
+        let names = vec!["defaults".to_string(), "wsl".to_string(), "mac".to_string()];
+        assert_eq!(rename_error(&names, "wsl", "forge"), None, "a free name is free");
+        assert_eq!(
+            rename_error(&names, "wsl", "wsl"),
+            None,
+            "committing an unchanged name is a no-op, not an error — the entry \
+             commits whether or not it was edited"
+        );
+        assert!(rename_error(&names, "wsl", "").is_some(), "a profile needs a name");
+        assert!(
+            rename_error(&names, "wsl", "mac").is_some(),
+            "renaming onto a live profile would destroy it silently"
+        );
+        assert_ne!(
+            rename_error(&names, "wsl", "defaults"),
+            rename_error(&names, "wsl", "mac"),
+            "the reserved parent is refused for its own reason, not as a collision"
+        );
+        assert!(
+            rename_error(&names, "wsl", "for\nge").is_some(),
+            "a pasted control character reaches the rail and the tab chip as an \
+             escape nobody typed"
+        );
     }
 
     #[test]

@@ -340,7 +340,7 @@ entry stay). The resulting work items, measurements in the handoff README — **
       first, a row per profile with glyph tile / `command · host` sub-line /
       digit, dashed `＋ New profile`; NO discovery line — #145), the editor
       header (34px tile, host chip, Duplicate / Delete — Defaults has no
-      Delete; rename rides Duplicate+Delete), the §12 live preview (the
+      Delete; the name renames in place — #283), the §12 live preview (the
       chip in the window's chrome, only the body in the profile's scheme,
       the caption saying so verbatim), and Launch / Appearance / Cursor
       sections in the settings tab's row shape. `profiles_ui.rs` builds
@@ -373,6 +373,18 @@ entry stay). The resulting work items, measurements in the handoff README — **
       The Settings tab has the same shape ([#275](https://github.com/zesterm/zesterm/issues/275)),
       and a profiles text row still takes no mouse click
       ([#276](https://github.com/zesterm/zesterm/issues/276)).
+      **A profile renames in place** →
+      [#283](https://github.com/zesterm/zesterm/issues/283): clicking the
+      header name turns it into a text entry (`zest_config::rename_profile`
+      moves the `toml_edit` item and its key decor, so comments, ordering and
+      the profile's place in the file survive — copy+remove would append it
+      last). Empty, `defaults`, a colliding name and a pasted control
+      character are each refused for their own stated reason, with the entry
+      left open. Open tabs are carried over **before** the reload, because
+      `reresolve_identities` resolves by name and a missing one resolves as
+      empty-over-Defaults silently — a tab left behind would lose its scheme
+      and accent with nothing to see. `--screen profiles-rename` photographs
+      the open entry, `settings-menu`'s argument applied again.
 - [x] Per-session palette machinery (README §12's chrome-vs-grid rule) →
       [#162](https://github.com/zesterm/zesterm/issues/162): a tab carries the
       resolved identity of the profile it launched from; its grid keeps its

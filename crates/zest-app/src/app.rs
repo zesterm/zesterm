@@ -270,6 +270,13 @@ struct ProfilesUiState {
     fields: Vec<zest_config::ui::UiField>,
     /// A typed edit in progress; while `Some`, characters belong to it.
     editing: Option<crate::settings_ui::EditBuffer>,
+    /// A rename of the header name in progress (#283). Separate from
+    /// `editing`, which is keyed by field index and structurally cannot name
+    /// the profile itself. The two are never both open: opening either closes
+    /// the other, so "where do characters go" has one answer.
+    renaming: Option<TextField>,
+    /// Why the typed name cannot be used, while it cannot.
+    rename_error: Option<String>,
     /// The open dropdown menu, when there is one — backdrop's, and §12's
     /// theme and font rosters.
     menu: Option<MenuState>,
@@ -296,7 +303,17 @@ impl ProfilesUiState {
         if self.menu.is_some() {
             return None;
         }
-        if let Some(edit) = self.editing.as_mut() {
+        // The name entry outranks both, so a rename cannot leak characters
+        // into the filter behind it (#283).
+        if let Some(name) = self.renaming.as_mut() {
+            let out = name.apply(cmd, clipboard);
+            if out.changed {
+                // Typing clears the complaint, exactly as it does for a field
+                // that failed to parse — the name is being fixed.
+                self.rename_error = None;
+            }
+            out.copied
+        } else if let Some(edit) = self.editing.as_mut() {
             let out = edit.buffer.apply(cmd, clipboard);
             if out.changed {
                 edit.error = false;
@@ -1356,6 +1373,11 @@ pub enum StartScreen {
     /// takes a click. The dropdown is what #259 rebuilt, so a picture of it
     /// has to be available to anyone reviewing this without a keyboard.
     SettingsMenu,
+    /// The Profiles tab with the **name entry open** on the first real
+    /// profile — `settings-menu`'s argument, for #283: clicking the header
+    /// name is a click, and a review of a rename affordance that cannot be
+    /// photographed is a review of the diff only.
+    ProfilesRename,
 }
 
 impl App {
@@ -3266,6 +3288,8 @@ impl App {
                 actions: Vec::new(),
                 fields: zest_config::profiles::fields(),
                 editing: None,
+                renaming: None,
+                rename_error: None,
                 menu: None,
                 error: None,
             });
@@ -4083,6 +4107,8 @@ impl App {
                     // inherits from. Losing the keystrokes beats writing them
                     // somewhere nobody asked for (#272).
                     ui.editing = None;
+                    ui.renaming = None;
+                    ui.rename_error = None;
                 }
                 let selected_rail = names.iter().position(|n| *n == ui.profile).unwrap_or(0);
                 let is_defaults = selected_rail == 0;
@@ -4148,7 +4174,16 @@ impl App {
                     .is_empty()
                     .then(|| format!("nothing matches \u{201c}{}\u{201d}", ui.filter.text()));
 
+                let renaming = ui.renaming.as_ref().map(|buffer| {
+                    crate::chrome::model::ProfileNameEdit {
+                        buffer: buffer.text().to_string(),
+                        caret: buffer.caret(),
+                        selection: buffer.selection(),
+                        error: ui.rename_error.clone(),
+                    }
+                });
                 Box::new(crate::chrome::model::ProfilesScreenModel {
+                    renaming,
                     rail: pui::build_rail(&settings, &fallback_command, &local_host),
                     selected_rail,
                     name: display_name,
@@ -4925,6 +4960,9 @@ impl App {
             }
             (HitRegion::ProfilesNew, MouseButton::Left) => {
                 self.profiles_new();
+            }
+            (HitRegion::ProfilesName, MouseButton::Left) => {
+                self.profiles_begin_rename();
             }
             (HitRegion::ProfilesDuplicate, MouseButton::Left) => {
                 self.profiles_duplicate();
@@ -6003,6 +6041,14 @@ impl App {
     /// does not parse: it stays on screen with its warn border and the caller
     /// must NOT move — leaving would destroy it, which is the whole of #272.
     fn profiles_commit_edit(&mut self) -> bool {
+        // The name entry leaves by the same rule as every field (#272/#283):
+        // one exit, one meaning. A name that will not validate keeps the entry
+        // open and blocks the exit, exactly as an unparseable value does.
+        if self.profiles_ui.as_ref().is_some_and(|ui| ui.renaming.is_some()) {
+            self.profiles_commit_rename();
+            // Still open means it was refused, so the caller must not leave.
+            return self.profiles_ui.as_ref().is_none_or(|ui| ui.renaming.is_none());
+        }
         let pending = match self.profiles_ui.as_mut() {
             Some(ui) => ui.take_pending_edit(),
             None => return true,
@@ -6018,6 +6064,101 @@ impl App {
                 true
             }
         }
+    }
+
+    /// Click the header name: open the rename entry, seeded and selected so
+    /// typing replaces the old name (#283).
+    ///
+    /// Defaults is refused here as well as undrawn — the screen pushes no
+    /// region for it, and a second guard costs nothing next to a cascade with
+    /// two parents.
+    fn profiles_begin_rename(&mut self) {
+        // Clicking the name while it is already the name entry is not a new
+        // edit; re-seeding would throw away what has been typed.
+        if self.profiles_ui.as_ref().is_some_and(|ui| ui.renaming.is_some()) {
+            return;
+        }
+        // Opening the name entry is leaving whatever field was open, so it
+        // commits like any other exit (#272).
+        if !self.profiles_commit_edit() {
+            return;
+        }
+        let Some(ui) = self.profiles_ui.as_mut() else { return };
+        if ui.profile == zest_config::profiles::RESERVED_PROFILE {
+            return;
+        }
+        let mut buffer = TextField::new(ui.profile.clone());
+        buffer.select_all();
+        ui.renaming = Some(buffer);
+        ui.rename_error = None;
+        self.mark_chrome_dirty();
+    }
+
+    /// Commit the rename entry: validate, write, reload, and carry the editor
+    /// and every open tab to the new name.
+    ///
+    /// A name that cannot be used keeps the entry open with the reason under
+    /// it — the same rule the field edits follow, and for the same reason: an
+    /// entry that closes on a refusal has destroyed what it refused.
+    fn profiles_commit_rename(&mut self) {
+        let Some((from, to)) = self.profiles_ui.as_ref().and_then(|ui| {
+            let typed = ui.renaming.as_ref()?.text().trim().to_string();
+            Some((ui.profile.clone(), typed))
+        }) else {
+            return;
+        };
+        let names = crate::profiles_ui::rail_names(&self.settings);
+        if let Some(why) = crate::profiles_ui::rename_error(&names, &from, &to) {
+            if let Some(ui) = self.profiles_ui.as_mut() {
+                ui.rename_error = Some(why.to_string());
+            }
+            self.mark_chrome_dirty();
+            return;
+        }
+        if from == to {
+            self.profiles_cancel_rename();
+            return;
+        }
+        let Some(target) = Self::config_target() else {
+            self.profiles_report("no config directory on this system");
+            return;
+        };
+        match zest_config::rename_profile(&target, &from, &to) {
+            Ok(()) => {
+                // Before the reload: `ProfileIdentity` re-resolves by name, and
+                // a name that no longer exists resolves as empty-over-Defaults
+                // *silently* (`tabs.rs`), so a tab left pointing at the old one
+                // would quietly lose its scheme, accent and icon with nothing
+                // to see. The tabs are renamed with the profile, not by it.
+                self.tabs.rename_profile(&from, &to);
+                self.reload_config();
+                if let Some(ui) = self.profiles_ui.as_mut() {
+                    ui.profile = to;
+                    ui.renaming = None;
+                    ui.rename_error = None;
+                    ui.scroll_to_selected = true;
+                    ui.error = None;
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, profile = %from, "could not rename the profile");
+                if let Some(ui) = self.profiles_ui.as_mut() {
+                    // On the entry rather than the banner: the name is what
+                    // failed, and that is where the user is looking.
+                    ui.rename_error = Some(format!("could not rename: {e}"));
+                }
+            }
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// Esc on the name entry: close it, keeping the profile's real name.
+    fn profiles_cancel_rename(&mut self) {
+        if let Some(ui) = self.profiles_ui.as_mut() {
+            ui.renaming = None;
+            ui.rename_error = None;
+        }
+        self.mark_chrome_dirty();
     }
 
     /// Open a typed edit on a profiles field, seeded with the profile's own
@@ -6145,8 +6286,14 @@ impl App {
     }
 
     /// Duplicate the edited profile under a unique sibling name and select
-    /// the copy. Renaming rides this plus Delete (§12 offered either shape;
-    /// this one keeps the header name read-only).
+    /// the copy.
+    ///
+    /// Renaming used to ride this plus Delete — §12 offered either shape and
+    /// that one kept the header name read-only. It cost more than it saved:
+    /// the copy is a different key, so every open tab launched from the
+    /// original silently degraded to Defaults and the ⌘1–9 ordering moved
+    /// underneath the user. `profiles_begin_rename` renames in place (#283);
+    /// Duplicate is now only ever a copy.
     fn profiles_duplicate(&mut self) {
         // Before the copy is taken, or the open buffer would ride into it and
         // a later Enter would write it to the copy instead of to the profile
@@ -6213,6 +6360,8 @@ impl App {
                     // misplaced-write half of #272. Only on the success arm:
                     // every path that deletes nothing must cost nothing.
                     ui.editing = None;
+                    ui.renaming = None;
+                    ui.rename_error = None;
                     ui.profile = zest_config::profiles::RESERVED_PROFILE.to_string();
                     ui.selected = 0;
                     ui.scroll = 0.0;
@@ -8756,6 +8905,21 @@ impl ApplicationHandler<Wakeup> for App {
             // Over the default screen, exactly as clicking the + would.
             Some(StartScreen::Launcher) => self.toggle_launcher(),
             Some(StartScreen::Profiles) => self.open_profiles_tab(),
+            Some(StartScreen::ProfilesRename) => {
+                self.open_profiles_tab();
+                // Rail row 0 is Defaults, which is not renameable — so this
+                // needs a real profile and says so when there is none, rather
+                // than photographing the resting screen and looking fixed.
+                if crate::profiles_ui::rail_names(&self.settings).len() > 1 {
+                    self.profiles_select_rail(1);
+                    self.profiles_begin_rename();
+                } else {
+                    tracing::warn!(
+                        "--screen profiles-rename needs a profile to rename; \
+                         this config has only Defaults"
+                    );
+                }
+            }
             Some(StartScreen::SettingsMenu) => {
                 self.open_settings_tab();
                 // The theme row lives under Appearance, and its index does
@@ -9956,8 +10120,13 @@ impl ApplicationHandler<Wakeup> for App {
 
                     // §12's text path, the Settings tab's exactly (#251).
                     if let Some(cmd) = command_for(&event.logical_key, self.modifiers) {
-                        let editing =
-                            self.profiles_ui.as_ref().is_some_and(|ui| ui.editing.is_some());
+                        // The name entry counts as a buffer for every
+                        // routing decision below: inside it a digit is text,
+                        // '/' is text, and ←/→ move its caret rather than the
+                        // row selection (#283).
+                        let editing = self.profiles_ui.as_ref().is_some_and(|ui| {
+                            ui.editing.is_some() || ui.renaming.is_some()
+                        });
                         // A LEADING digit jumps the rail (its drawn 1–9
                         // hints); once a filter is live, digits filter like
                         // any other character — the two meanings are
@@ -10002,6 +10171,18 @@ impl ApplicationHandler<Wakeup> for App {
                             self.mark_chrome_dirty();
                             return;
                         }
+                    }
+
+                    // The name entry owns the keys before the field edit
+                    // does; the two are never both open (#283).
+                    if self.profiles_ui.as_ref().is_some_and(|ui| ui.renaming.is_some()) {
+                        match &event.logical_key {
+                            Key::Named(NamedKey::Escape) => self.profiles_cancel_rename(),
+                            Key::Named(NamedKey::Enter) => self.profiles_commit_rename(),
+                            _ => {}
+                        }
+                        self.mark_chrome_dirty();
+                        return;
                     }
 
                     // A typed edit owns the keys before the list does.
@@ -11446,6 +11627,8 @@ mod profiles_edit_tests {
             actions: Vec::new(),
             fields: zest_config::profiles::fields(),
             editing: None,
+            renaming: None,
+            rename_error: None,
             menu: None,
             error: None,
         }

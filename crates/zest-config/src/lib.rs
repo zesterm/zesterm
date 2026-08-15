@@ -364,6 +364,58 @@ pub fn copy_profile(path: &Path, from: &str, to: &str) -> std::io::Result<()> {
 }
 
 #[cfg(feature = "fs")]
+/// Rename a profile in place, comments, ordering and position intact.
+///
+/// Not `copy_profile` + `remove_profile`: that pair appends the new table at
+/// the end of the document and deletes the old one, so a rename would silently
+/// reorder a hand-written file — and `[profiles.<name>]` is the one heading a
+/// person scrolls to. Moving the `Item` and re-stamping its position keeps the
+/// profile where its author put it.
+///
+/// A missing source is an error, like [`copy_profile`]'s and for the same
+/// reason. So is an existing destination: renaming onto a live profile would
+/// silently destroy it, and the editor cannot offer to merge two launch
+/// targets. `from == to` is a no-op rather than an error — the editor commits
+/// a name entry whether or not it changed.
+pub fn rename_profile(path: &Path, from: &str, to: &str) -> std::io::Result<()> {
+    if from == to {
+        return Ok(());
+    }
+    let existing = std::fs::read_to_string(path)?;
+    let mut doc: toml_edit::DocumentMut = existing
+        .parse()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e}")))?;
+
+    if doc.get("profiles").and_then(|p| p.get(to)).is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("a profile named `{to}` already exists"),
+        ));
+    }
+    let Some(profiles) = doc.get_mut("profiles").and_then(toml_edit::Item::as_table_mut) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no profile `{from}` to rename"),
+        ));
+    };
+    // `remove_entry` rather than `remove`: the old key carries the decor, and
+    // for a profile that decor is the blank line and the `# comment` a person
+    // wrote above `[profiles.<name>]`. Dropping it would rename the profile
+    // and silently delete the note explaining it.
+    let Some((old_key, source)) = profiles.remove_entry(from) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no profile `{from}` to rename"),
+        ));
+    };
+    let mut key = toml_edit::Key::new(to);
+    *key.leaf_decor_mut() = old_key.leaf_decor().clone();
+    *key.dotted_decor_mut() = old_key.dotted_decor().clone();
+    profiles.insert_formatted(&key, source);
+    std::fs::write(path, doc.to_string())
+}
+
+#[cfg(feature = "fs")]
 fn remove_at(path: &Path, parts: &[&str]) -> std::io::Result<()> {
     let Ok(existing) = std::fs::read_to_string(path) else {
         return Ok(());
@@ -607,6 +659,106 @@ mod tests {
             copy_profile(&path, "ghost", "ghost-2").is_err(),
             "copying a profile that is not there means the caller is stale; say so"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn renaming_keeps_the_comments_the_ordering_and_the_place() {
+        // Rename is not copy+remove: that appends the new table at the end of
+        // the file and deletes the old one, so a profile a person deliberately
+        // put first would silently move last — and `[profiles.<name>]` is the
+        // heading they scroll to.
+        let path = temp("rename-order");
+        std::fs::write(
+            &path,
+            "[profiles.ubuntu]\n# the penguin\ncommand = \"wsl.exe\"\n\n\
+             [profiles.mac]\ncommand = \"zsh\"\n\n[appearance]\ntheme = \"nord\"\n",
+        )
+        .expect("write");
+
+        rename_profile(&path, "ubuntu", "forge").expect("rename");
+
+        let text = std::fs::read_to_string(&path).expect("read");
+        let table: toml::Table = text.parse().expect("still valid toml");
+        let profiles = table["profiles"].as_table().expect("table");
+        assert!(!profiles.contains_key("ubuntu"), "the old name survived: {text}");
+        assert_eq!(
+            profiles["forge"]["command"].as_str(),
+            Some("wsl.exe"),
+            "the renamed profile lost its contents: {text}"
+        );
+        assert!(text.contains("# the penguin"), "the comment did not survive: {text}");
+        assert!(
+            text.find("[profiles.forge]") < text.find("[profiles.mac]"),
+            "the rename reordered the file: {text}"
+        );
+        assert_eq!(
+            table["appearance"]["theme"].as_str(),
+            Some("nord"),
+            "an unrelated root key was disturbed: {text}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn renaming_refuses_to_land_on_a_profile_that_exists() {
+        // Silently merging two launch targets is not something the editor can
+        // offer to undo, so the write must not happen at all.
+        let path = temp("rename-collision");
+        std::fs::write(
+            &path,
+            "[profiles.ubuntu]\ncommand = \"wsl.exe\"\n[profiles.mac]\ncommand = \"zsh\"\n",
+        )
+        .expect("write");
+
+        let err = rename_profile(&path, "ubuntu", "mac").expect_err("a collision is an error");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+
+        let table: toml::Table =
+            std::fs::read_to_string(&path).expect("read").parse().expect("valid toml");
+        let profiles = table["profiles"].as_table().expect("table");
+        assert_eq!(
+            profiles["mac"]["command"].as_str(),
+            Some("zsh"),
+            "the refused rename still overwrote the target"
+        );
+        assert!(profiles.contains_key("ubuntu"), "the refused rename still moved the source");
+
+        assert!(
+            rename_profile(&path, "ghost", "ghost-2").is_err(),
+            "renaming a profile that is not there means the caller is stale; say so"
+        );
+        rename_profile(&path, "mac", "mac").expect("renaming to the same name is a no-op");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_dotted_new_name_stays_one_key() {
+        // The twin of `a_dotted_profile_name_stays_one_key`, for the other end
+        // of a rename: `prod.eu` is ONE profile, not `[profiles.prod.eu]`.
+        let path = temp("rename-dotted");
+        std::fs::write(&path, "[profiles.staging]\ncommand = \"bash\"\n").expect("write");
+
+        rename_profile(&path, "staging", "prod.eu").expect("rename");
+
+        let text = std::fs::read_to_string(&path).expect("read");
+        let table: toml::Table = text.parse().expect("still valid toml");
+        let profiles = table["profiles"].as_table().expect("table");
+        assert_eq!(
+            profiles["prod.eu"]["command"].as_str(),
+            Some("bash"),
+            "a dotted name shattered into nested tables: {text}"
+        );
+        assert!(
+            !profiles.contains_key("prod"),
+            "the name was split on the dot: {text}"
+        );
+        // And the renamed profile is still writable under its new name.
+        write_profile_value(&path, "prod.eu", "host", toml_edit::Value::from("forge"))
+            .expect("write under the new name");
+        let table: toml::Table =
+            std::fs::read_to_string(&path).expect("read").parse().expect("valid toml");
+        assert_eq!(table["profiles"]["prod.eu"]["host"].as_str(), Some("forge"));
         let _ = std::fs::remove_file(&path);
     }
 
