@@ -81,10 +81,20 @@ pub fn profile_meta(settings: &Settings, name: &str) -> profiles::ProfileMeta {
     profiles::resolve_profile(&profiles_root(settings), name).meta
 }
 
+/// How the groups sort and, equally, what makes two of them the same group.
+///
+/// `(rank, label, host)`: rank puts `Any` first and this machine second, the
+/// label keeps the fleet alphabetical, and **the id is what separates two
+/// machines that happen to share a display name**. A label is a display name —
+/// `ProfileRef::Remote` carries an id for exactly this reason — so keying a
+/// group on the label alone would merge two machines' launch targets under one
+/// header, and pressing a row would run a command on whichever of them the map
+/// happened to hold.
+type GroupKey = (u8, String, Option<HostId>);
+
 /// One machine's worth of launch targets, before the rows are flattened.
 struct Group {
-    /// Sorts the groups: `Any` first, then this machine, then the fleet.
-    order: (u8, String),
+    order: GroupKey,
     label: String,
     sub: String,
     online: bool,
@@ -139,7 +149,7 @@ pub fn build_rows(
     }
 
     let local_label = fleet.iter().find(|h| h.local).map(|h| h.label.as_str());
-    let mut groups: BTreeMap<(u8, String), Group> = BTreeMap::new();
+    let mut groups: BTreeMap<GroupKey, Group> = BTreeMap::new();
 
     // This machine's own profiles first, so a name they share with a
     // published one wins: the local definition is the one the user can edit.
@@ -171,18 +181,7 @@ pub fn build_rows(
             let identity = ProfileIdentity::from_published(profile);
             group.entries.push((
                 profile.name.clone(),
-                if profile.command.is_empty() {
-                    // Empty means *that host's* default shell, and it may not
-                    // know what that is either — never this machine's, which
-                    // is how a Mac ends up promising to run pwsh.
-                    if offer.default_shell.is_empty() {
-                        "the host's default shell".to_string()
-                    } else {
-                        offer.default_shell.clone()
-                    }
-                } else {
-                    profile.command.clone()
-                },
+                shown_command(&profile.command, &offer.default_shell),
                 tab_accent(Some(&identity), 0),
                 ProfileRef::Remote { host: host.host, name: profile.name.clone() },
             ));
@@ -262,6 +261,27 @@ pub fn build_rows(
     (rows, actions)
 }
 
+/// What a row promises it will run, when the command may be the far host's own.
+///
+/// An empty command means *that host's* default shell — the same convention
+/// `CreateSession.command` uses — and a client cannot substitute its own, which
+/// is how a Mac row ends up promising `pwsh -NoLogo`. So: the far host's shell
+/// when it told us one, and an honest phrase when it did not.
+///
+/// Shared by the launcher row and the connecting tab's provenance line, because
+/// they disagreed once: the row read `zsh -l` and the tab it opened read "the
+/// host's default shell", for the same launch, three lines apart.
+#[must_use]
+pub fn shown_command(command: &str, host_default_shell: &str) -> String {
+    if !command.is_empty() {
+        return command.to_string();
+    }
+    if host_default_shell.is_empty() {
+        return "the host's default shell".to_string();
+    }
+    host_default_shell.to_string()
+}
+
 /// Which machine a locally-defined profile belongs under.
 fn bucket_for(ask_host: bool, host: Option<&str>, fleet: &[FleetHost]) -> Bucket {
     if ask_host {
@@ -284,16 +304,18 @@ fn bucket_for(ask_host: bool, host: Option<&str>, fleet: &[FleetHost]) -> Bucket
 
 /// The group a bucket names, created on first use.
 fn group_for<'a>(
-    groups: &'a mut BTreeMap<(u8, String), Group>,
+    groups: &'a mut BTreeMap<GroupKey, Group>,
     bucket: &Bucket,
     fleet: &[FleetHost],
     local_label: Option<&str>,
 ) -> &'a mut Group {
-    let (order, label, sub, online) = match bucket {
+    let (order, label, sub, online): (GroupKey, _, _, _) = match bucket {
         // First: these belong to no machine, and ⇧⏎ is what resolves them.
-        Bucket::Any => ((0, String::new()), "any machine".to_string(), String::new(), true),
+        Bucket::Any => {
+            ((0, String::new(), None), "any machine".to_string(), String::new(), true)
+        }
         Bucket::Here => (
-            (1, String::new()),
+            (1, String::new(), None),
             match local_label {
                 Some(l) => format!("this machine \u{b7} {l}"),
                 None => "this machine".to_string(),
@@ -305,7 +327,9 @@ fn group_for<'a>(
             let host = fleet.iter().find(|h| h.host == *id);
             let label = host.map_or_else(|| id.short(), |h| h.label.clone());
             (
-                (2, label.clone()),
+                // The id disambiguates two machines with one display name;
+                // the label still leads, so the fleet stays alphabetical.
+                (2, label.clone(), Some(*id)),
                 label,
                 host.map(host_sub).unwrap_or_default(),
                 host.is_some_and(FleetHost::is_online),
@@ -316,7 +340,7 @@ fn group_for<'a>(
         // sleeping host is a connecting tab, not a refusal — but the header
         // says not to expect much.
         Bucket::Unknown(label) => {
-            ((3, label.clone()), label.clone(), "not in the fleet".to_string(), false)
+            ((3, label.clone(), None), label.clone(), "not in the fleet".to_string(), false)
         }
     };
     groups.entry(order.clone()).or_insert_with(|| Group {
@@ -742,6 +766,64 @@ mod tests {
             })
             .expect("the published row");
         assert_eq!(command, "zsh -l", "the far host's default shell, which it told us");
+    }
+
+    #[test]
+    fn two_machines_sharing_a_display_name_stay_two_groups() {
+        // A label is a display name — `ProfileRef::Remote` carries an id for
+        // exactly this reason — so keying a group on the label alone merges two
+        // machines' launch targets under one header, and pressing a row runs a
+        // command on whichever of them the map happened to hold. Two laptops
+        // both called `mac` is not exotic.
+        let fleet = [
+            host(1, "studio", true),
+            offering(host(2, "mac", false), "macos", &[("build", "make")]),
+            offering(host(3, "mac", false), "macos", &[("test", "make test")]),
+        ];
+        let (rows, actions) =
+            build_rows(&settings_with(&[("here", "")]), &fleet, "sh", None, String::new());
+
+        let headers: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| match r {
+                LauncherRow::Group { label, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            headers.iter().filter(|l| **l == "mac").count(),
+            2,
+            "one header each, however alike they are called: {headers:?}"
+        );
+        // And each row still names the machine it will actually dial.
+        for (id, name) in [(2u8, "build"), (3u8, "test")] {
+            assert!(
+                actions.contains(&LauncherAction::Launch(ProfileRef::Remote {
+                    host: HostId::from_bytes([id; 32]),
+                    name: name.into(),
+                })),
+                "{name} must launch on the machine that published it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_row_and_the_tab_it_opens_promise_the_same_command() {
+        // These disagreed once, three lines apart: the row read `zsh -l` and
+        // the connecting tab it opened read "the host's default shell", for
+        // one launch. One function now answers both.
+        assert_eq!(shown_command("wsl.exe", "pwsh"), "wsl.exe", "its own command outranks");
+        assert_eq!(
+            shown_command("", "zsh -l"),
+            "zsh -l",
+            "empty means the far host's shell, and it told us which"
+        );
+        assert_eq!(
+            shown_command("", ""),
+            "the host's default shell",
+            "and an honest phrase when it did not — never this machine's shell, \
+             which is how a Mac row ends up promising pwsh"
+        );
     }
 
     #[test]
