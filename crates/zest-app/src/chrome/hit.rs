@@ -211,6 +211,9 @@ pub enum HitRegion {
     ProfilesRailRow(usize),
     /// The rail footer's dashed "＋ New profile".
     ProfilesNew,
+    /// The editor header's profile name; clicking it renames in place (§12,
+    /// #283). Never pushed for Defaults — it is the reserved parent.
+    ProfilesName,
     /// The editor header's Duplicate button.
     ProfilesDuplicate,
     /// The editor header's Delete button (absent on Defaults).
@@ -343,6 +346,7 @@ pub fn wheel_target(hit: Option<HitRegion>, pane_focus_right: Option<bool>) -> W
         | R::FleetSignOut
         | R::ProfilesRailRow(_)
         | R::ProfilesNew
+        | R::ProfilesName
         | R::ProfilesDuplicate
         | R::ProfilesDelete => WheelTarget::Swallow,
         // Unreachable in practice — the app returns on the open-overlay state

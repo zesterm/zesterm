@@ -398,11 +398,13 @@ cargo run --profile fast -p zest-app           # the terminal, quick rebuild
 ./target/fast/zesterm --theme paper --screenshot-size 1200x800 --screenshot out.png
 ./target/fast/zesterm --screen fleet --screenshot out.png
                                                # open on a design screen: fleet|themes|settings|
-                                               #   settings-menu|palette|launcher|profiles
+                                               #   settings-menu|palette|launcher|profiles|
+                                               #   profiles-rename
                                                # ('palette' = the ⌘K search; 'settings-menu' is Settings
-                                               #   with the theme dropdown open, the one state a
-                                               #   screenshot cannot otherwise reach — opening a menu
-                                               #   takes a click); works without --screenshot too
+                                               #   with the theme dropdown open and 'profiles-rename' is
+                                               #   Profiles with the name entry open — the states a
+                                               #   screenshot cannot otherwise reach, because opening
+                                               #   them takes a click); works without --screenshot too
 ./target/fast/zesterm --tabs-position left     # tab strip placement override, top|left
 cargo build --release && ./target/release/zesterm   # the shipping build
 cargo run -p zest-app  --example headless      # a terminal with no window

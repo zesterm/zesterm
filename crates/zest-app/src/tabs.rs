@@ -696,6 +696,25 @@ impl TabStrip {
         }
     }
 
+    /// Carry every tab launched from `from` over to the profile's new name
+    /// (#283).
+    ///
+    /// Must run *before* the reload that follows a rename, because
+    /// [`Self::reresolve_identities`] resolves by name and a name that no
+    /// longer exists resolves as empty-over-Defaults — silently, by design
+    /// (the never-crash rule). A tab left pointing at the old name would
+    /// therefore lose its scheme, accent and icon with nothing to see and
+    /// nothing logged, which reads as "renaming a profile broke my tabs".
+    pub fn rename_profile(&mut self, from: &str, to: &str) {
+        for tab in &mut self.tabs {
+            if let Some(identity) = &mut tab.identity {
+                if identity.name == from {
+                    identity.name = to.to_string();
+                }
+            }
+        }
+    }
+
     /// Add a tab and make it active — a new tab is something the user just
     /// asked for, so it takes the keyboard (from the Settings tab too).
     pub fn push(&mut self, tab: Tab) {
@@ -992,6 +1011,58 @@ mod tests {
             strip.iter().nth(1).unwrap().identity.is_none(),
             "a tab launched from no profile must not grow one on reload"
         );
+        for tab in [placeholder_addr(1), placeholder_addr(2)] {
+            strip.close(tab).expect("tab exists").kill();
+        }
+    }
+
+    #[test]
+    fn a_renamed_profile_carries_its_open_tabs_with_it() {
+        // #283. `reresolve_identities` resolves by name, and a name that no
+        // longer exists resolves as empty-over-Defaults *silently* — so a tab
+        // left on the old name loses its scheme, accent and icon with nothing
+        // to see and nothing logged. The rename must move the tabs first.
+        let settings = |scheme: &str| {
+            let mut s = zest_config::Settings::default();
+            let table: toml::Table = format!("color_scheme = \"{scheme}\"\ntab_color = 2\n")
+                .parse()
+                .expect("valid toml");
+            s.profiles.insert("forge".into(), table);
+            s
+        };
+
+        let mut strip = TabStrip::default();
+        let mut before = zest_config::Settings::default();
+        before.profiles.insert(
+            "ubuntu".into(),
+            "color_scheme = \"nord\"\ntab_color = 2\n".parse().expect("valid toml"),
+        );
+        strip.push(fake(1).with_identity(Some(ProfileIdentity::resolve(&before, "ubuntu"))));
+        strip.push(fake(2)); // a plain tab, to prove the rename leaves it alone
+
+        strip.rename_profile("ubuntu", "forge");
+        assert_eq!(
+            strip.iter().next().unwrap().identity.as_ref().expect("identity kept").name,
+            "forge",
+            "the tab still names the profile it was launched from"
+        );
+        assert!(
+            strip.iter().nth(1).unwrap().identity.is_none(),
+            "a tab launched from no profile must not grow one on a rename"
+        );
+
+        // And the re-resolve that follows now finds it, instead of quietly
+        // degrading the tab to Defaults.
+        strip.reresolve_identities(&settings("paper"));
+        let id = strip.iter().next().unwrap().identity.as_ref().expect("identity kept");
+        assert_eq!(
+            id.scheme.as_deref(),
+            Some("paper"),
+            "the renamed profile's scheme reached the tab; a stale name would \
+             have resolved as empty-over-Defaults and shown no scheme at all"
+        );
+        assert_eq!(id.tab_color, Some(2), "and its accent came with it");
+
         for tab in [placeholder_addr(1), placeholder_addr(2)] {
             strip.close(tab).expect("tab exists").kill();
         }
