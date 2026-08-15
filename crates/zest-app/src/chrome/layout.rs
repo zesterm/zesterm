@@ -110,7 +110,7 @@ const PILL_RADIUS: f32 = 7.0;
 const PILL_PAD: f32 = 9.0;
 const PILL_GAP: f32 = 6.0;
 const PILL_HPAD: f32 = 5.0;
-const HAIRLINE: f32 = 1.0;
+pub(super) const HAIRLINE: f32 = 1.0;
 const EDGE_PAD: f32 = 8.0;
 const BAR_PAD: f32 = 12.0;
 const TRAFFIC_PAD: f32 = 14.0;
@@ -182,7 +182,7 @@ const UI_STATUS: f32 = 10.5;
 /// exact per-face metrics would need the font here, and being one pixel
 /// off is invisible while being *inconsistent* is not — every band uses
 /// this one rule.
-fn baseline_in(band_y: f32, band_h: f32, px: f32) -> f32 {
+pub(super) fn baseline_in(band_y: f32, band_h: f32, px: f32) -> f32 {
     band_y + (band_h + px * 0.72) / 2.0
 }
 
@@ -222,7 +222,7 @@ fn dot(rects: &mut Vec<RectInstance>, cx: f32, cy: f32, d: f32, color: LinearRgb
 /// The colour at a fraction of its own alpha. Colours here are premultiplied,
 /// so scaling every channel is the correct alpha multiply — the glyph tile's
 /// 12% wash is its ink through this.
-pub(super) fn washed(c: LinearRgba, f: f32) -> LinearRgba {
+pub(crate) fn washed(c: LinearRgba, f: f32) -> LinearRgba {
     LinearRgba([c.0[0] * f, c.0[1] * f, c.0[2] * f, c.0[3] * f])
 }
 
@@ -328,6 +328,20 @@ pub fn layout(
         // the other overlays by the app's rule, so its place in this list
         // carries no ranking.
         launcher_overlay(launcher, model.hover, colors, m, measure, &mut out);
+    }
+    if let Some(menu) = &model.block_menu {
+        // Clamped inside the grid area rather than the window: its anchor is a
+        // block header, which lives there. Exclusive with the other overlays
+        // by the app's rule, so its place in this list carries no ranking.
+        super::block_menu::block_menu_overlay(
+            menu,
+            model.hover,
+            model.grid_area,
+            colors,
+            m,
+            measure,
+            &mut out,
+        );
     }
     if let Some(approval) = &model.approval {
         // Above every other overlay, deliberately: unlike them it opens on
@@ -2652,6 +2666,7 @@ mod tests {
             palette: None,
             settings: None,
             launcher: None,
+            block_menu: None,
             notice: None,
             approval: None,
         }
@@ -2690,6 +2705,91 @@ mod tests {
                 assert!(found.is_some(), "tab {n} must be clickable somewhere ({position:?})");
             }
         }
+    }
+
+    fn block_menu(anchor: [f32; 4]) -> super::super::model::BlockMenuModel {
+        use super::super::model::BlockMenuRow as R;
+        super::super::model::BlockMenuModel {
+            rows: vec![
+                R::Action { label: "Fold".into(), chord: String::new(), enabled: true },
+                R::Divider,
+                R::Action {
+                    label: "Copy output".into(),
+                    chord: "\u{2318}\u{21e7}O".into(),
+                    enabled: true,
+                },
+                R::Action { label: "Re-run".into(), chord: String::new(), enabled: false },
+            ],
+            selected: 0,
+            anchor,
+        }
+    }
+
+    #[test]
+    fn the_block_menu_is_in_the_cached_layout_so_it_outranks_the_headers() {
+        // What makes the menu win with no ranking code anywhere: `chrome_hit`
+        // consults *this* map first and the per-frame block hits only
+        // `.or_else(…)`, and the scrim covers the whole window. So while the
+        // menu is open no pointer event can reach a header, a rail or the grid.
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut model = model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+        model.block_menu = Some(block_menu([600.0, 300.0, 16.0, 16.0]));
+        let l = layout(&model, &colors(), &m, &mut measure);
+
+        assert_eq!(
+            l.hit.hit(20.0, 780.0),
+            Some(HitRegion::BlockMenuScrim),
+            "a far corner is the scrim's, so click-away dismisses"
+        );
+        let rows: Vec<usize> = (0..1200)
+            .step_by(4)
+            .flat_map(|x| (0..800).step_by(4).map(move |y| (x, y)))
+            .filter_map(|(x, y)| match l.hit.hit(x as f32, y as f32) {
+                Some(HitRegion::BlockMenuRow(i)) => Some(i),
+                _ => None,
+            })
+            .collect();
+        assert!(rows.contains(&0) && rows.contains(&2), "both live rows answer");
+        assert!(
+            !rows.contains(&1) && !rows.contains(&3),
+            "the divider and the faint row take no clicks, or they answer by doing nothing"
+        );
+        // And in the *overlay* layer specifically: base chrome draws its text
+        // after every base rect, so a panel emitted below the boundary has the
+        // block headers' own labels bleeding through it.
+        let panel_at = l
+            .rects
+            .iter()
+            .rposition(|r| r.shadow_blur > 0.0)
+            .expect("the menu panel casts a shadow");
+        assert!(
+            panel_at >= l.overlay_rects_at,
+            "panel at {panel_at} must sit at or past the overlay boundary {}",
+            l.overlay_rects_at
+        );
+    }
+
+    #[test]
+    fn the_block_menu_flips_above_an_anchor_near_the_bottom() {
+        // A block's ⋯ is a grid row, so it is near the bottom of the pane far
+        // more often than a settings dropdown ever is. Below it the panel
+        // would draw off the pane, where its rows are unclickable and the menu
+        // looks like it simply ends.
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut model = model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+        let area = model.grid_area;
+        let anchor = [600.0, area[1] + area[3] - 24.0, 16.0, 16.0];
+        model.block_menu = Some(block_menu(anchor));
+        let l = layout(&model, &colors(), &m, &mut measure);
+
+        let top = (0..800)
+            .find(|y| matches!(l.hit.hit(600.0, *y as f32), Some(HitRegion::BlockMenuPanel)))
+            .expect("the panel is somewhere on that column");
+        assert!(
+            (top as f32) < anchor[1],
+            "the panel must open upward from an anchor at the pane's foot"
+        );
+        assert!((top as f32) >= area[1], "and stay inside the pane");
     }
 
     #[test]

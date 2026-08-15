@@ -86,10 +86,24 @@ pub enum HitRegion {
     BlockHeader(u32),
     /// A block header's fold affordance; clicking folds/unfolds that block.
     BlockFold(u32),
-    /// The hover chip that copies the last command's output.
-    BlockCopy(u32),
-    /// The hover chip that re-runs the last command.
-    BlockRerun(u32),
+    /// A block's rail and the gutter strip beside it, the block's full height.
+    /// Clicking selects the whole block — the thing that makes a block's
+    /// *extent* clickable, which the one-row header never did.
+    BlockRail(u32),
+    /// The `⋯` affordance in a block's header; clicking opens its menu.
+    BlockMenu(u32),
+    /// One row of the open block menu, by index into the model's rows.
+    ///
+    /// A bare index, not `(block, row)`: the open menu already knows its
+    /// block, and a second copy is a second thing that can disagree — the rule
+    /// `LauncherRow` and `SettingsMenuRow` already follow.
+    BlockMenuRow(usize),
+    /// The block menu's panel between rows — swallows, so a near-miss beside a
+    /// row does not dismiss the way the scrim does.
+    BlockMenuPanel,
+    /// The full-window transparent region beneath the open block menu:
+    /// click-away dismisses without the press reaching the grid or a header.
+    BlockMenuScrim,
     /// A full-pane screen's ground (fleet, themes) — swallows what its
     /// cards do not claim; Esc is the way back.
     ScreenPanel,
@@ -256,7 +270,7 @@ pub fn wheel_target(hit: Option<HitRegion>, pane_focus_right: Option<bool>) -> W
         // Inside the grid area, drawn over the session's own rows. Headers
         // ride the scrollback and their band spans the full grid width, so
         // this arm is most of the pane on a shell with integration loaded.
-        R::BlockHeader(_) | R::BlockFold(_) | R::BlockCopy(_) | R::BlockRerun(_) => {
+        R::BlockHeader(_) | R::BlockFold(_) | R::BlockRail(_) | R::BlockMenu(_) => {
             WheelTarget::Grid
         }
         // The focused pane's header band is that pane's; the unfocused pane's
@@ -344,7 +358,13 @@ pub fn wheel_target(hit: Option<HitRegion>, pane_focus_right: Option<bool>) -> W
         | R::PaletteScrim
         | R::LauncherRow(_)
         | R::LauncherPanel
-        | R::LauncherScrim => WheelTarget::Swallow,
+        | R::LauncherScrim
+        // The block menu's own reason to swallow is stronger than the others'
+        // — its anchor is a *grid row*, so letting the grid scroll beneath it
+        // would slide the block out from under its own menu.
+        | R::BlockMenuRow(_)
+        | R::BlockMenuPanel
+        | R::BlockMenuScrim => WheelTarget::Swallow,
     }
 }
 

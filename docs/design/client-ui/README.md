@@ -223,9 +223,41 @@ cwd (`ui.faint`), duration (`ui.faint`), and outcome: `exit 0` in `success`, `ex
 in `danger`, or a running indicator (8px ring, 1.5px `warn`, transparent top, 0.9s
 linear spin) plus `running 4.2s`. Folded headers additionally show `N lines`.
 
-**Hover / focus on a block header** reveals two action chips, radius 5px,
-`ui.accentSoft` fill, `ui.accent` text, 10px: `copy output ⌘⇧O` and `re-run ⌘⇧R`.
-Both target the most recent block **with output**, not the block the cursor is in.
+**The state rail runs the block's full height** — header *and* output, not the
+header alone — so a block is one object you can see the edges of. It lives in the
+window padding, 2px wide with a 4px gap before the first column, and it is drawn
+**in the grid layer, beneath the glyphs**. That is not an implementation detail
+to tidy away: chrome paints over the text, so a rail drawn a layer up shaves the
+left edge off column 0 on every output row, and with no padding to live in there
+is nowhere honest to put it, so it is not drawn at all (the header keeps its own).
+
+**Selecting a block.** Clicking its rail or its header selects it: rail to
+`ui.accent`, header fill to `ui.accentSoft`, and a 10%-accent wash over the
+output rows. A press anywhere in the grid proper clears it — two selections lit
+at once, a block and a drag, would be two answers to "what does ⌘⇧O copy". Esc
+does **not** clear it; that key belongs to the shell.
+
+**Hover / focus on a block header** reveals a single 16px `⋯`, radius 5px,
+`ui.accentSoft` fill, `ui.accent` glyph, right-aligned before the metadata. Its
+slot is reserved whether or not it is drawn, so the metadata does not slide
+sideways when the pointer arrives.
+
+**The block menu** opens from the `⋯` or from a right-click on the block, panel
+236px wide, radius 10, `ui.panel` on a hairline `ui.line` with a 20px shadow,
+30px rows, flipping above its anchor near the foot of the pane. Rows, in order,
+with a hairline between each group: `Fold`/`Unfold` · `Copy output ⌘⇧O`,
+`Copy command`, `Copy command + output` · `Re-run ⌘⇧R`, `Re-run in new tab` ·
+`Select block text`. A row that cannot apply is drawn in `ui.faint` and takes no
+clicks — each is enabled by the very helper that performs it, so the menu can
+never offer something that then does nothing.
+
+**Right-click keeps the conhost convention where it is used:** a selection exists
+→ copy it; else the row's block has output → its menu; else paste. The live
+prompt has no output line, so right-click-to-paste at the prompt is untouched.
+
+`⌘⇧O` and `⌘⇧R` act on the **selected** block, falling back to the most recent
+block with output when nothing is selected — which is a session nobody has
+clicked in, and at a prompt the cursor's own block has printed nothing.
 
 **Block body:** `8px 12px 0 24px`, 12.5px mono, `ui.dim`, `white-space: pre`, with SGR
 colours applied per run. Collapsed when folded.
