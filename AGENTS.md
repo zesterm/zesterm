@@ -934,6 +934,21 @@ Each of these cost real time and is documented where it bites:
   the rule is that an entry never invents its own: `zest-app/src/text_field.rs`
   owns caret, selection and every clipboard chord, and the call sites own only
   Enter, Escape and their list navigation.
+
+  **And the second half, which the first fix shipped without: the grid's
+  clipboard chord is not the field's.** `key::is_clipboard_chord` is
+  `super || (ctrl && shift)` — correct for the *terminal*, where Ctrl+C must
+  stay SIGINT and Ctrl+V literal-next, which is the whole reason Ctrl+Shift+C/V
+  exist. Reused in a text field it excludes plain Ctrl, so on Windows and Linux
+  the field could not be pasted into **at all** while ⌘V worked on macOS. That
+  asymmetry is the trap: the fix was written and demonstrated on a Mac, where
+  it was complete, and the platform it was broken on is the primary one. A
+  field has no shell to protect — `text_field::field_clipboard_chord` takes
+  Super *or* Ctrl, and nothing on the grid path calls `command_for`, so
+  widening it cannot reach the terminal. Under plain Ctrl the letter may also
+  arrive as the control code it names (`0x16` for V), which the keymap's own
+  rows never see because they only ever match Ctrl+**Shift**, where the letter
+  arrives as a letter — so its evidence does not cover the case. (#270.)
 - **The agent shell sets `NO_COLOR=1`**, and a pty child inherits it. PowerShell
   honours it by forcing `$PSStyle.OutputRendering = 'PlainText'`, which strips
   every escape *before* it reaches the pty — so a colour test launched from here
