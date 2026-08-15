@@ -184,13 +184,18 @@ pub struct FleetHost {
     /// in the listing when mDNS has never heard of it.
     pub enrolled: bool,
     /// What this machine says it can offer: its os, its arch, its default
-    /// shell, and its own profiles (#262). `None` for a host nothing has
-    /// connected to yet, and for one whose daemon predates the field — which
-    /// read the same way on purpose, since neither has told us anything.
+    /// shell, and its own profiles (#262).
     ///
-    /// Populated for every reachable host since #265; still not *drawn* — the
-    /// launcher's host groups and the fleet card's `os` row are #249's next
-    /// items.
+    /// **`None` is the ordinary state, not an error.** Every reachable host is
+    /// *asked* since #265, which is what makes this reachable at all — but the
+    /// answer is absent until that host's first listing lands, and stays absent
+    /// for a daemon that predates the field or one nothing can reach. All three
+    /// read the same way on purpose: nobody has told us anything, so nothing is
+    /// drawn. A consumer that treats `None` as "it has no profiles" would show
+    /// an empty group for a machine whose watcher simply has not connected yet.
+    ///
+    /// Not *drawn* anywhere yet — the launcher's host groups and the fleet
+    /// card's `os` row are #249's next items.
     #[allow(dead_code, reason = "the launcher's host groups and the fleet card read this (#249)")]
     pub offer: Option<zest_proto::HostOffer>,
     /// The relay had proof of a parked control link when the listing was
