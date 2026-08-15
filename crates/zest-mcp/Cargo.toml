@@ -1,0 +1,28 @@
+[package]
+name = "zest-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "An MCP server that is a client of the zesterm daemon"
+
+[dependencies]
+# The wire types, and `Applier` -- the client-side state machine that turns
+# keyframes and deltas into a grid.
+zest-proto.workspace = true
+# A real replica terminal per attached session, so what an agent reads is the
+# conformance-tested grid rather than a second implementation of one. This is
+# the reason the crate is Rust.
+zest-core.workspace = true
+thiserror = { workspace = true }
+
+# Deliberately not here yet: `zest-daemon` (the connection), `zest-mesh` (the
+# agent's device key), and the MCP/async stack. Each arrives with the code that
+# uses it, so `cargo tree` keeps describing what this crate actually does.
+
+[dev-dependencies]
+# The recorded fixtures are JSON carrying hex wire bytes; the replay test reads
+# them the way any second implementation would.
+serde_json = { workspace = true }

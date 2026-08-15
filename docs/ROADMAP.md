@@ -217,7 +217,7 @@ below means "do not touch this file".
 | **F** | [`zest-proto` + `zest-daemon`](#ws-f) | `crates/zest-proto/`, `crates/zest-daemon/` | Protocol + daemon ✅ · **applier, app attach, LAN listener next** | [#4](https://github.com/zesterm/zesterm/issues/4) |
 | **G** | [Web client](#ws-g) | `clients/web/`, `zest-proto/fixtures/` | Decoder, renderer, app, deploy, accounts, fleet, tabbed chrome ✅ · **devices screen, local echo next** | [#8](https://github.com/zesterm/zesterm/issues/8) |
 | **H** | [Mesh identity, discovery, transports](#ws-h) | `crates/zest-mesh/`, `crates/zest-cloud/`, `cloud/` | Identity, discovery, pairing, accounts ✅ · the relay Worker and the daemon's `--relay` leg ✅ · **the web client's second data plane next** ([#59](https://github.com/zesterm/zesterm/issues/59)) | [#7](https://github.com/zesterm/zesterm/issues/7) |
-| **I** | [AI is a client of the daemon](#ws-i) | `crates/zest-mcp/` (not yet), `zest-proto`, `zest-daemon` | Open — `Attach.observe` ✅ (#274), the MCP server next | [#60](https://github.com/zesterm/zesterm/issues/60) |
+| **I** | [AI is a client of the daemon](#ws-i) | `crates/zest-mcp/`, `zest-proto`, `zest-daemon` | Open — `Attach.observe` ✅, `find_or_spawn` moved ✅, the replica reads a real recorded session ✅ (#274) · **the connection and the tools next** | [#60](https://github.com/zesterm/zesterm/issues/60) |
 
 **Ordering that mattered, and is now settled.** B landed before A, so `zest-app`
 is free of input code and A can fill it with chrome. C1 landed before D, so
@@ -1811,6 +1811,10 @@ it replaces M5's one-line `AiActor` bullet. → [#60](https://github.com/zesterm
       go. The one piece of this workstream with no client-side workaround, and
       the real prerequisite for the MCP server — which #60 does not mention at
       all. → #274, CONTRACTS.
+- [x] **`find_or_spawn` moved down to `zest-daemon`**, for the reason
+      `DaemonClient` moved down at protocol 3: a second local client needed it,
+      and the search order, the detaching and the "stop the moment the child
+      exits" rule are each a bug already paid for. → #274, CONTRACTS.
 - [ ] **`crates/zest-mcp` — the agent client.** An MCP server that is a paired
       device speaking the existing protocol: `hosts`, `sessions`, `screen`,
       `blocks`, `output`, `changed_since`, `input`, and `run`. Reuses
@@ -1818,6 +1822,15 @@ it replaces M5's one-line `AiActor` bullet. → [#60](https://github.com/zesterm
       reads is the conformance-tested one rather than a second implementation.
       Local-host first; the fleet follows, gated on a host advertising the
       observer attach. → #274.
+
+      **The reading half has landed**: `Replica` (a real `Terminal` driven by
+      `Applier`) and the addressing, held against the recorded corpus rather
+      than against a live shell — `blocks-zsh`, `vim-macos`, `dir-colors`,
+      `git-log` and `unicode-wide` replayed through `FrameReader` on every CI
+      platform, with nothing to spawn and nothing to time out. That is what
+      makes the shell-shaped half of this crate testable at all, and it is the
+      answer to the flakes that plague anything spawning a real shell (#285).
+      Still to come: the connection, the tools, and the MCP transport.
 - [ ] **`run`, and why it is the primitive.** Agent harnesses cannot tell when a
       command finished in an interactive shell and inject sentinels to fake it.
       We parse OSC 133 `D` host-side and hold the shell's own exit code — in
