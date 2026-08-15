@@ -353,6 +353,19 @@ entry stay). The resulting work items, measurements in the handoff README — **
       filter. Deliberately deferred: the fleet-picker-as-host-chooser (a
       picker row launches today; choosing belongs to the cross-host item)
       and `background_image` (#144).
+      **Leaving a field is a commit** →
+      [#272](https://github.com/zesterm/zesterm/issues/272): Enter was the
+      only exit that wrote, so clicking another profile, hitting Duplicate
+      or closing the tab dropped the buffer in silence — a pasted command
+      path simply vanished, while the swatch pickers next to it saved on a
+      single click. `profiles_ui::take_pending_edit` is the one decision
+      every exit routes through; Esc stays the only discard, an edit that
+      does not parse blocks the exit rather than being lost, and a buffer
+      whose profile disappeared is dropped rather than redirected into
+      `[profiles.defaults]`. Every bail that writes nothing now says why.
+      The Settings tab has the same shape ([#275](https://github.com/zesterm/zesterm/issues/275)),
+      and a profiles text row still takes no mouse click
+      ([#276](https://github.com/zesterm/zesterm/issues/276)).
 - [x] Per-session palette machinery (README §12's chrome-vs-grid rule) →
       [#162](https://github.com/zesterm/zesterm/issues/162): a tab carries the
       resolved identity of the profile it launched from; its grid keeps its

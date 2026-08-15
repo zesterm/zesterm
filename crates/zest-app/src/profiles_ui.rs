@@ -560,6 +560,50 @@ pub fn copy_name(existing: &[String], from: &str) -> String {
         .expect("the integers do not run out")
 }
 
+/// What leaving an open edit should do (#272).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pending {
+    /// Nothing was open; the caller may leave.
+    None,
+    /// Write this field, then leave.
+    Commit(usize, serde_json::Value),
+    /// The buffer does not parse. It stays open, flagged, and the caller must
+    /// NOT leave — a value that cannot be written must not be lost by looking
+    /// away from it.
+    Refused,
+}
+
+/// Take an open edit so the caller can write it.
+///
+/// Enter used to be the only thing that committed, so every other way out of a
+/// field — clicking the rail, Duplicate, closing the tab — dropped the buffer
+/// on the floor, and a pasted command path simply vanished (#272). Leaving a
+/// field is a commit; only Esc discards, and only Esc should.
+///
+/// Returns the parsed value rather than writing it because writing needs the
+/// config path and a reload, which live on `App` — and `App` has no tests. The
+/// decision belongs here, beside the tests that hold it.
+pub fn take_pending_edit(editing: &mut Option<EditBuffer>, fields: &[UiField]) -> Pending {
+    let Some(edit) = editing.as_mut() else { return Pending::None };
+    let idx = edit.field_idx;
+    // A buffer whose field index no longer names a field cannot be written and
+    // cannot be shown; keeping it open would trap the caller for ever.
+    let Some(field) = fields.get(idx) else {
+        *editing = None;
+        return Pending::None;
+    };
+    match settings_ui::parse_input(field, edit.buffer.text()) {
+        Some(value) => {
+            *editing = None;
+            Pending::Commit(idx, value)
+        }
+        None => {
+            edit.error = true;
+            Pending::Refused
+        }
+    }
+}
+
 /// TOML to JSON, structurally — the row builders speak `serde_json::Value`
 /// (the settings vocabulary), the resolver speaks `toml`.
 fn toml_to_json(value: &toml::Value) -> serde_json::Value {
@@ -618,6 +662,84 @@ mod tests {
         let values = window_values();
         let schemes = scheme_swatches();
         build_profile_rows(&fields(), resolved, &ctx(&values, &schemes, is_defaults), "", None, None)
+    }
+
+    fn field_index(key: &str) -> usize {
+        fields().iter().position(|f| f.key == key).unwrap_or_else(|| panic!("{key} is a field"))
+    }
+
+    fn open_edit(field_idx: usize, text: &str) -> Option<EditBuffer> {
+        Some(EditBuffer {
+            field_idx,
+            buffer: crate::text_field::TextField::new(text),
+            error: false,
+            append: false,
+        })
+    }
+
+    #[test]
+    fn leaving_a_field_hands_the_edit_back_instead_of_dropping_it() {
+        // #272: Enter was the only thing that committed, so a pasted command
+        // path died on the way out of the field — silently, and identically
+        // whether you clicked the rail, hit Duplicate or closed the tab.
+        let fields = fields();
+        let idx = field_index("command");
+        let mut editing = open_edit(idx, "/opt/homebrew/bin/fish");
+        assert_eq!(
+            take_pending_edit(&mut editing, &fields),
+            Pending::Commit(idx, serde_json::Value::String("/opt/homebrew/bin/fish".into())),
+            "leaving a field must hand the value back to be written, not drop it"
+        );
+        assert!(editing.is_none(), "a committed buffer closes");
+    }
+
+    #[test]
+    fn an_emptied_field_still_commits_because_empty_means_unset() {
+        // The file's spelling of "unset" is the empty string, and resolution
+        // falls back through Defaults for it — so clearing a field and
+        // leaving must write, not be mistaken for "nothing pending".
+        let fields = fields();
+        let idx = field_index("command");
+        let mut editing = open_edit(idx, "");
+        assert_eq!(
+            take_pending_edit(&mut editing, &fields),
+            Pending::Commit(idx, serde_json::Value::String(String::new())),
+            "clearing a field is an edit like any other"
+        );
+    }
+
+    #[test]
+    fn a_buffer_that_cannot_be_written_refuses_to_be_left() {
+        // The counterpart to committing on blur: a value that does not parse
+        // must not be silently destroyed by looking away from it either. It
+        // stays open, flagged, and the caller is told to stay put.
+        let fields = fields();
+        let idx = field_index("typography.size_pt");
+        let mut editing = open_edit(idx, "not a number");
+        assert_eq!(
+            take_pending_edit(&mut editing, &fields),
+            Pending::Refused,
+            "an unparseable buffer blocks the exit rather than being dropped"
+        );
+        let edit = editing.as_ref().expect("the buffer stays open");
+        assert!(edit.error, "and it says why");
+        assert_eq!(edit.buffer.text(), "not a number", "with the text intact");
+    }
+
+    #[test]
+    fn nothing_open_never_blocks_the_caller() {
+        let fields = fields();
+        let mut editing = None;
+        assert_eq!(take_pending_edit(&mut editing, &fields), Pending::None);
+    }
+
+    #[test]
+    fn a_buffer_naming_a_field_that_is_gone_is_dropped_not_stuck() {
+        // Keeping it would trap every exit for ever: it can be neither
+        // written nor shown, so `Refused` would be a door that never opens.
+        let mut editing = open_edit(9999, "orphan");
+        assert_eq!(take_pending_edit(&mut editing, &fields()), Pending::None);
+        assert!(editing.is_none(), "an unwritable orphan is dropped, not held");
     }
 
     #[test]

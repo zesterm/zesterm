@@ -611,6 +611,51 @@ mod tests {
     }
 
     #[test]
+    fn editing_a_copy_writes_only_the_copy() {
+        // #272 was reported as "duplicate a profile, change its command, and
+        // it is never saved" — which put the writer under suspicion. It is
+        // innocent, and this pins that: the loss was upstream, in an editor
+        // that only ever committed on Enter. If this test ever goes red the
+        // diagnosis was wrong and the writer really is at fault.
+        let path = temp("copy-then-edit");
+        std::fs::write(
+            &path,
+            "# hand-written\n[profiles.wsl]\ncommand = \"wsl.exe\"\n\n[appearance]\ntheme = \"nord\"\n",
+        )
+        .expect("write");
+
+        copy_profile(&path, "wsl", "wsl-2").expect("copy");
+        write_profile_value(
+            &path,
+            "wsl-2",
+            "command",
+            toml_edit::Value::from("/opt/homebrew/bin/fish"),
+        )
+        .expect("write the copy's command");
+
+        let text = std::fs::read_to_string(&path).expect("read");
+        let table: toml::Table = text.parse().expect("still valid toml");
+        let profiles = table["profiles"].as_table().expect("table");
+        assert_eq!(
+            profiles["wsl-2"]["command"].as_str(),
+            Some("/opt/homebrew/bin/fish"),
+            "the copy did not take the edit: {text}"
+        );
+        assert_eq!(
+            profiles["wsl"]["command"].as_str(),
+            Some("wsl.exe"),
+            "editing the copy changed its source: {text}"
+        );
+        assert_eq!(
+            table["appearance"]["theme"].as_str(),
+            Some("nord"),
+            "an unrelated root key was disturbed: {text}"
+        );
+        assert!(text.contains("# hand-written"), "the comment did not survive: {text}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn creating_a_profile_writes_only_its_header_and_is_idempotent() {
         // "＋ New profile" (design §12): an empty table is a valid launch
         // target, so creation writes the header alone — and re-creating an
