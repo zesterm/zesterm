@@ -743,24 +743,50 @@ window *up* over storage without touching anything the restater said.
 
 ### Why this is a byte-stream property and not a timeout
 
-The repaint is bracketed: `ESC[?25l ESC[8;<rows>;<cols>t ESC[H`, every row
-restated, then the cursor restored and DECTCEM set back to whatever the inner
-program had (#205). `CSI 8;r;c t` is XTWINOPS "resize the text area" — a
-request *to* a terminal that nothing in `zest-core` obeys, and which no ordinary
-program sends inbound, which is what makes it an unambiguous marker. Arming on
-it and settling on the next DECTCEM change is independent of how a read split
-the stream, which a quiescence heuristic is not: a 200-column repaint with
-colour can exceed the 64 KiB parse chunk, and settling mid-repaint would move
-the boundary under rows still being written.
+The repaint is bracketed by DECTCEM: the cursor is hidden, the viewport is
+restated from home, the cursor is put back and visibility restored to whatever
+the inner program had. Settling on the DECTCEM that closes it is independent of
+how a read split the stream, which a quiescence heuristic is not: a 200-column
+repaint with colour can exceed the 64 KiB parse chunk, and settling mid-repaint
+would move the boundary under rows still being written.
 
-**The announced size is checked, not ignored.** A drag emits resizes faster
-than ConPTY answers them, so a repaint laid out for a size the grid has already
-left is routine. `CSI 8;r;c t` names that size, which is the only way to tell
-one apart — and it has to be told apart, because settling on a stale repaint
-pays a grow's debt against a viewport that has since shrunk, dragging history
-into rows the *next* repaint is about to blank. That is #200 arrived at from the
-other side, and it is a large loss rather than a subtle one: measured at nine
-rows of scrollback down to one, in a twelve-row pane.
+**The two halves of a drag are not the same bytes, and assuming they were
+shipped this broken.** #247 armed on `CSI 8;<rows>;<cols>t` — XTWINOPS "resize
+the text area", which no ordinary program sends inbound, so an unambiguous
+marker — on the strength of #205's single capture. #205 captured a *shrink*.
+`corpus/resize-drag.vtrec` has both halves of one real drag:
+
+```text
+Down:  ESC[?25l  ESC[8;8;100t  ESC[H  <rows, each ESC[K>              ESC[?25h
+Up:    ESC[?25l                ESC[H  <rows, each ESC[K>  ESC[8;1H    ESC[?25h
+```
+
+ConPTY announces the size on the way down and **not on the way back** — and the
+way back is the half the settle exists for, so it never ran. Every synthetic
+test passed throughout, because the test helper emitted an announcement ConPTY
+does not. Nothing logged, nothing failed, and the pane looked exactly as it had
+before the fix. This is the argument for replaying recorded bytes rather than a
+helper's idea of them, and it is why `Drag::Down`/`Drag::Up` is a parameter of
+that helper now rather than a detail inside it. (#271)
+
+What both halves share is hiding the cursor and homing it before writing a row,
+so that is what arms the settle. The window it opens is narrow by construction:
+only a grow that is owed rows sets `pending_restate`, and the alternate screen
+has no scrollback, so a full-screen program redrawing the same way cannot arm
+it.
+
+**The staleness guard is asymmetric, and honestly so.** A drag emits resizes
+faster than ConPTY answers them, so a repaint laid out for a size the grid has
+already left is routine — and settling on one pays a grow's debt against a
+viewport that has since shrunk, dragging history into rows the next repaint is
+about to blank. Measured at nine rows of scrollback down to one in a twelve-row
+pane. An *announced* repaint names its size and can be told apart; the grid
+records that it is sitting that one out, because the cursor-home three bytes
+later would otherwise re-arm it. An unannounced one cannot be told apart at all,
+because there is nothing in it to compare. What protects that case is not a
+marker but the arithmetic: the settle is bounded by the blank tail at the moment
+it runs, and the unpaid remainder returns to the debt, so an early settle is a
+no-op rather than damage.
 
 **Either direction of DECTCEM closes it.** ConPTY restores the inner program's
 visibility state, so a full-screen program that keeps its cursor hidden ends the

@@ -70,7 +70,20 @@ impl vte::Perform for TermState {
                 let col = self.grid().cursor.col;
                 self.goto(row, col);
             }
-            ('H', _) | ('f', _) => self.goto(arg(0, 1) - 1, arg(1, 1) - 1),
+            ('H', _) | ('f', _) => {
+                self.goto(arg(0, 1) - 1, arg(1, 1) - 1);
+                // Homing the cursor while it is hidden is how ConPTY's repaint
+                // starts, and on a *grow* it is the only marker there is — the
+                // size announcement comes on the shrink and not on the way back
+                // (`corpus/resize-drag.vtrec`). See
+                // `Grid::note_cursor_homed_while_hidden`. (#271)
+                if arg(0, 1) == 1
+                    && arg(1, 1) == 1
+                    && !self.modes.contains(Modes::SHOW_CURSOR)
+                {
+                    self.grid_mut().note_cursor_homed_while_hidden();
+                }
+            }
             ('I', _) => self.tab(arg(0, 1)),
             ('Z', _) => self.back_tab(arg(0, 1)),
 
@@ -488,6 +501,10 @@ impl TermState {
                     // unpaid for exactly those sessions.
                     if self.grid().restating() {
                         self.settle_restate();
+                    } else {
+                        // A repaint that was sat out closes here too, or its
+                        // decision outlives it and silences the next one.
+                        self.grid_mut().end_restatement_window();
                     }
                 }
                 66 => self.modes.set(Modes::APP_KEYPAD, enable),

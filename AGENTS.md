@@ -567,13 +567,33 @@ Each of these cost real time and is documented where it bites:
   ever. The repaint has the last word, so the pull cannot happen *before* it;
   after it the tail of the viewport is blank rows the repaint itself wrote and
   nothing will write again. `Grid::settle_restate` pays the debt there,
-  triggered off the repaint's own DECTCEM bracket around `CSI 8;r;c t` — a
-  byte-stream property, not a timeout, because a wide repaint can exceed the
-  64 KiB parse chunk and settling mid-repaint moves the boundary under rows
-  still being written. **Both directions of DECTCEM close it**: ConPTY restores
-  the inner program's cursor visibility, so a full-screen app that keeps its
-  cursor hidden never sends `?25h` and keying off that alone leaves those
-  sessions unfixed with nothing to see. ADR-013. (#247)
+  triggered off the repaint's own DECTCEM bracket — a byte-stream property, not
+  a timeout, because a wide repaint can exceed the 64 KiB parse chunk and
+  settling mid-repaint moves the boundary under rows still being written.
+  **Both directions of DECTCEM close it**: ConPTY restores the inner program's
+  cursor visibility, so a full-screen app that keeps its cursor hidden never
+  sends `?25h` and keying off that alone leaves those sessions unfixed with
+  nothing to see. ADR-013. (#247)
+
+  **ConPTY announces the new size on the way down and not on the way back, and
+  believing otherwise shipped the fix above in a state where it never ran.**
+  #247 armed the settle on `CSI 8;<rows>;<cols>t`, from #205's one capture —
+  which was a *shrink*. `corpus/resize-drag.vtrec` has both halves of one drag:
+
+  ```text
+  Down:  ESC[?25l  ESC[8;8;100t  ESC[H  <rows, each ESC[K>            ESC[?25h
+  Up:    ESC[?25l                ESC[H  <rows, each ESC[K>  ESC[8;1H  ESC[?25h
+  ```
+
+  The way back is the half the settle exists for. It never fired, every test
+  stayed green — because the *test helper* emitted an announcement ConPTY does
+  not — and the pane looked exactly as it had before the fix. Nothing logs. It
+  was found only by recording a real drag and replaying it, and the thing that
+  hid it was a helper modelling ConPTY more helpfully than ConPTY behaves; the
+  direction is now a parameter of that helper, not a detail inside it. Arming is
+  on what both halves share, hiding the cursor and homing it. **A capture beats
+  a helper, and a helper nobody has checked against a capture is a hypothesis.**
+  (#271)
 
   **And the same trap one layer out, which had been live in every client since
   the mesh existed:** a replica grid — one deltas are applied into — is about
