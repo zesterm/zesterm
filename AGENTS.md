@@ -949,6 +949,27 @@ Each of these cost real time and is documented where it bites:
   arrive as the control code it names (`0x16` for V), which the keymap's own
   rows never see because they only ever match Ctrl+**Shift**, where the letter
   arrives as a letter — so its evidence does not cover the case. (#270.)
+- **A text edit whose only commit is Enter loses work through every other exit,
+  and each exit looks like a different bug.** The profiles editor committed in
+  the `Key::Named(NamedKey::Enter)` arm and nowhere else, so clicking another
+  profile, hitting Duplicate, or closing the tab each dropped the buffer in
+  silence — reported as "I paste the command path and it is never saved", which
+  reads as a *writer* bug and sends you through `parse_input`, `to_toml`,
+  `write_profile_value` and the cascade, all of which are innocent. What gives
+  it away is *which* fields survive: a `Widget::SchemePicker` writes on a single
+  click through `profiles_choice`, so the theme sticks and the text next to it
+  does not, and "some settings save" is not a shape a broken writer can produce.
+  The fix is that **leaving a field is a commit** — only Esc discards — and the
+  decision lives in `profiles_ui::take_pending_edit`, one function every exit
+  routes through, rather than inline in the `Enter` arm where a second exit
+  cannot reach it. Two shapes worth keeping apart: an
+  edit that does not parse must *block* the exit (it stays open and flagged, or
+  looking away destroys it), while a profile that vanishes under the editor must
+  *drop* its buffer — `editing` is keyed by field index alone, so a buffer that
+  outlives its profile writes into whatever the editor fell back to, which is
+  `[profiles.defaults]`, the parent every other profile inherits from. A lost
+  edit is bad; a silently misplaced one is worse. (#272; the Settings tab has
+  the same shape and is not fixed yet.)
 - **The agent shell sets `NO_COLOR=1`**, and a pty child inherits it. PowerShell
   honours it by forcing `$PSStyle.OutputRendering = 'PlainText'`, which strips
   every escape *before* it reaches the pty — so a colour test launched from here

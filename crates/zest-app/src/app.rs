@@ -278,6 +278,13 @@ struct ProfilesUiState {
 }
 
 impl ProfilesUiState {
+    /// Take an open edit so the caller can write it — see
+    /// [`crate::profiles_ui::take_pending_edit`] for why the decision lives
+    /// there and not here (#272).
+    fn take_pending_edit(&mut self) -> crate::profiles_ui::Pending {
+        crate::profiles_ui::take_pending_edit(&mut self.editing, &self.fields)
+    }
+
     /// Composed (IME) text, routed exactly like the Settings tab's: menu
     /// swallows, an open buffer takes it, otherwise the filter.
     fn commit_text(&mut self, text: &str) {
@@ -3269,6 +3276,12 @@ impl App {
     /// Close the Profiles tab — its state lives as long as the tab, exactly
     /// like the Settings tab's (§11's rule, applied to §12).
     fn close_profiles_tab(&mut self) {
+        // Closing the tab is leaving the field, so it commits (#272). Unlike
+        // every other exit this one does NOT refuse on a buffer that will not
+        // parse: there would be nowhere left to show the warn border, and a
+        // ⌘W that silently declines to close is worse than dropping a value
+        // that could never have been written.
+        let _ = self.profiles_commit_edit();
         self.app_tabs.close_profiles();
         self.profiles_ui = None;
         if self.screen == AppScreen::Profiles {
@@ -4063,6 +4076,13 @@ impl App {
                     ui.profile = zest_config::profiles::RESERVED_PROFILE.to_string();
                     ui.selected = 0;
                     ui.scroll = 0.0;
+                    // The buffer was typed for a profile that no longer
+                    // exists, and `editing` is keyed by field index alone —
+                    // left alive, the next Enter would write it into
+                    // `[profiles.defaults]`, the parent every other profile
+                    // inherits from. Losing the keystrokes beats writing them
+                    // somewhere nobody asked for (#272).
+                    ui.editing = None;
                 }
                 let selected_rail = names.iter().position(|n| *n == ui.profile).unwrap_or(0);
                 let is_defaults = selected_rail == 0;
@@ -5753,13 +5773,15 @@ impl App {
                 crate::settings_ui::to_toml(field, &new_value)?,
             ))
         }) else {
+            // Unreachable while every widget `fields()` emits has a `to_toml`
+            // arm — which is exactly why it must not be a bare `return`. The
+            // next widget added without one would otherwise be a control that
+            // silently does nothing (#272).
+            self.profiles_report(format!("this field cannot be written (field {field_idx})"));
             return;
         };
         let Some(target) = Self::config_target() else {
-            if let Some(ui) = self.profiles_ui.as_mut() {
-                ui.error = Some("no config directory on this system".to_string());
-            }
-            self.mark_chrome_dirty();
+            self.profiles_report("no config directory on this system");
             return;
         };
         match zest_config::write_profile_value(&target, &profile, &key, value) {
@@ -5789,7 +5811,10 @@ impl App {
         }) else {
             return;
         };
-        let Some(target) = Self::config_target() else { return };
+        let Some(target) = Self::config_target() else {
+            self.profiles_report("no config directory on this system");
+            return;
+        };
         match zest_config::remove_profile_value(&target, &profile, &key) {
             Ok(()) => {
                 if let Some(ui) = self.profiles_ui.as_mut() {
@@ -5828,6 +5853,11 @@ impl App {
         });
         if let Some(value) = next {
             self.profiles_apply_edit(idx, value);
+        } else {
+            // A row its widget cannot step (HostPicker). Repaint anyway, or
+            // the arrow key is a no-op that does not even move the selection
+            // highlight — indistinguishable from a dead keyboard (#272).
+            self.mark_chrome_dirty();
         }
     }
 
@@ -5953,9 +5983,51 @@ impl App {
         self.profiles_apply_edit(idx, value);
     }
 
+    /// Say why nothing happened.
+    ///
+    /// Every profiles mutation has a bail-out that writes nothing, and one
+    /// that also says nothing is indistinguishable from a save that worked —
+    /// which is how a lost edit reads as a saved one (#272).
+    fn profiles_report(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        tracing::error!(reason = %message, "the profiles editor wrote nothing");
+        if let Some(ui) = self.profiles_ui.as_mut() {
+            ui.error = Some(message);
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// Commit an open profiles edit, if there is one.
+    ///
+    /// `true` means the caller may proceed. `false` means a buffer is open and
+    /// does not parse: it stays on screen with its warn border and the caller
+    /// must NOT move — leaving would destroy it, which is the whole of #272.
+    fn profiles_commit_edit(&mut self) -> bool {
+        let pending = match self.profiles_ui.as_mut() {
+            Some(ui) => ui.take_pending_edit(),
+            None => return true,
+        };
+        match pending {
+            crate::profiles_ui::Pending::None => true,
+            crate::profiles_ui::Pending::Refused => {
+                self.mark_chrome_dirty();
+                false
+            }
+            crate::profiles_ui::Pending::Commit(idx, value) => {
+                self.profiles_apply_edit(idx, value);
+                true
+            }
+        }
+    }
+
     /// Open a typed edit on a profiles field, seeded with the profile's own
     /// value — see `profiles_seed_of` for why not with what the row shows.
     fn profiles_begin_edit(&mut self, idx: usize) {
+        // Moving from one field to another is leaving the first one, so it
+        // commits like any other exit (#272).
+        if !self.profiles_commit_edit() {
+            return;
+        }
         let current = self.profiles_seed_of(idx);
         let seed = match &current {
             // Strings seed verbatim whatever the widget (host, tab_title,
@@ -5981,6 +6053,10 @@ impl App {
 
     /// A direct-choice click (scheme swatch, accent swatch, icon tile).
     fn profiles_choice(&mut self, row: usize, opt: usize) {
+        // Clicking a swatch is leaving whatever field was open (#272).
+        if !self.profiles_commit_edit() {
+            return;
+        }
         if let Some(ui) = self.profiles_ui.as_mut() {
             ui.selected = row;
         }
@@ -6014,13 +6090,18 @@ impl App {
     fn profiles_select_rail(&mut self, i: usize) {
         let names = crate::profiles_ui::rail_names(&self.settings);
         let Some(name) = names.get(i).cloned() else { return };
+        let moving = self.profiles_ui.as_ref().is_some_and(|ui| ui.profile != name);
+        // Commit before moving, and stay put if the buffer cannot be written:
+        // switching profile used to drop it silently (#272).
+        if moving && !self.profiles_commit_edit() {
+            return;
+        }
         if let Some(ui) = self.profiles_ui.as_mut() {
             if ui.profile != name {
                 ui.profile = name;
                 ui.selected = 0;
                 ui.scroll = 0.0;
                 ui.scroll_to_selected = true;
-                ui.editing = None;
                 ui.menu = None;
                 ui.error = None;
             }
@@ -6031,11 +6112,13 @@ impl App {
     /// "＋ New profile": create `[profiles.new-profile-N]` (unique), reload,
     /// select it.
     fn profiles_new(&mut self) {
+        // The new profile is selected below, so this leaves the current one
+        // and commits like any other exit (#272).
+        if !self.profiles_commit_edit() {
+            return;
+        }
         let Some(target) = Self::config_target() else {
-            if let Some(ui) = self.profiles_ui.as_mut() {
-                ui.error = Some("no config directory on this system".to_string());
-            }
-            self.mark_chrome_dirty();
+            self.profiles_report("no config directory on this system");
             return;
         };
         let names = crate::profiles_ui::rail_names(&self.settings);
@@ -6065,8 +6148,17 @@ impl App {
     /// the copy. Renaming rides this plus Delete (§12 offered either shape;
     /// this one keeps the header name read-only).
     fn profiles_duplicate(&mut self) {
+        // Before the copy is taken, or the open buffer would ride into it and
+        // a later Enter would write it to the copy instead of to the profile
+        // it was typed for (#272).
+        if !self.profiles_commit_edit() {
+            return;
+        }
         let Some(from) = self.profiles_ui.as_ref().map(|ui| ui.profile.clone()) else { return };
-        let Some(target) = Self::config_target() else { return };
+        let Some(target) = Self::config_target() else {
+            self.profiles_report("no config directory on this system");
+            return;
+        };
         let names = crate::profiles_ui::rail_names(&self.settings);
         let to = crate::profiles_ui::copy_name(&names, &from);
         // Defaults (or a layer-supplied profile) may have no table in the
@@ -6105,11 +6197,22 @@ impl App {
         if name == zest_config::profiles::RESERVED_PROFILE {
             return;
         }
-        let Some(target) = Self::config_target() else { return };
+        let Some(target) = Self::config_target() else {
+            self.profiles_report("no config directory on this system");
+            return;
+        };
         match zest_config::remove_profile(&target, &name) {
             Ok(()) => {
                 self.reload_config();
                 if let Some(ui) = self.profiles_ui.as_mut() {
+                    // The one exit that discards rather than commits, and the
+                    // only one besides Esc: the table the buffer would be
+                    // written into has just been removed, so committing it is
+                    // a write with nowhere to land — and leaving it open would
+                    // carry it into Defaults on the next Enter, which is the
+                    // misplaced-write half of #272. Only on the success arm:
+                    // every path that deletes nothing must cost nothing.
+                    ui.editing = None;
                     ui.profile = zest_config::profiles::RESERVED_PROFILE.to_string();
                     ui.selected = 0;
                     ui.scroll = 0.0;
@@ -9909,42 +10012,14 @@ impl ApplicationHandler<Wakeup> for App {
                                     ui.editing = None;
                                 }
                             }
+                            // Enter is now one exit among several rather than
+                            // the only one that commits (#272). An emptied
+                            // string is the file's spelling of "unset" — it
+                            // parses, writes, and resolution falls back
+                            // through Defaults for it (profiles.rs's
+                            // contract).
                             Key::Named(NamedKey::Enter) => {
-                                let edit = self.profiles_ui.as_ref().and_then(|ui| {
-                                    let edit = ui.editing.as_ref()?;
-                                    Some((edit.field_idx, edit.buffer.text().to_string()))
-                                });
-                                if let Some((idx, buffer)) = edit {
-                                    let parsed = self
-                                        .profiles_ui
-                                        .as_ref()
-                                        .and_then(|ui| ui.fields.get(idx))
-                                        .and_then(|field| {
-                                            crate::settings_ui::parse_input(field, &buffer)
-                                        });
-                                    match parsed {
-                                        Some(value) => {
-                                            if let Some(ui) = self.profiles_ui.as_mut() {
-                                                ui.editing = None;
-                                            }
-                                            // An emptied string is the file's
-                                            // spelling of "unset" — it parses,
-                                            // writes, and resolution falls
-                                            // back through Defaults for it
-                                            // (profiles.rs's contract).
-                                            self.profiles_apply_edit(idx, value);
-                                        }
-                                        None => {
-                                            if let Some(edit) = self
-                                                .profiles_ui
-                                                .as_mut()
-                                                .and_then(|ui| ui.editing.as_mut())
-                                            {
-                                                edit.error = true;
-                                            }
-                                        }
-                                    }
-                                }
+                                self.profiles_commit_edit();
                             }
                             _ => {}
                         }
@@ -11354,6 +11429,78 @@ mod palette_tests {
             (pane_opacity(1.0, Some(&id)) - 1.0).abs() < f32::EPSILON,
             "a hand-edited value is clamped, not trusted (never-crash rule)"
         );
+    }
+}
+
+#[cfg(test)]
+mod profiles_edit_tests {
+    use super::{ProfilesUiState, TextCommand, TextField};
+
+    fn state() -> ProfilesUiState {
+        ProfilesUiState {
+            profile: "wsl-2".into(),
+            selected: 0,
+            filter: TextField::default(),
+            scroll: 0.0,
+            scroll_to_selected: false,
+            actions: Vec::new(),
+            fields: zest_config::profiles::fields(),
+            editing: None,
+            menu: None,
+            error: None,
+        }
+    }
+
+    fn command_field(ui: &ProfilesUiState) -> usize {
+        ui.fields.iter().position(|f| f.key == "command").expect("command is a field")
+    }
+
+    fn open(ui: &mut ProfilesUiState, field_idx: usize, text: &str) {
+        ui.editing = Some(crate::settings_ui::EditBuffer {
+            field_idx,
+            buffer: TextField::new(text),
+            error: false,
+            append: false,
+        });
+    }
+
+    #[test]
+    fn a_pasted_command_survives_leaving_the_field() {
+        // The reported bug (#272): paste a command path, then click another
+        // profile or close the tab, and the text was gone. Every exit but
+        // Enter cleared `editing` outright, so the value never reached
+        // `profiles_apply_edit` at all — and the buffer that held it was the
+        // only copy.
+        let mut ui = state();
+        let idx = command_field(&ui);
+        open(&mut ui, idx, "/opt/homebrew/bin/fish");
+        assert_eq!(
+            ui.take_pending_edit(),
+            crate::profiles_ui::Pending::Commit(
+                idx,
+                serde_json::Value::String("/opt/homebrew/bin/fish".into()),
+            ),
+            "leaving the field must hand the pasted path back to be written"
+        );
+        assert!(ui.editing.is_none(), "and close the buffer, exactly as Enter does");
+    }
+
+    #[test]
+    fn a_paste_reaches_the_buffer_and_not_the_filter() {
+        // The other half of the same report: the text DID get in, which is
+        // what placed the bug after the keystroke rather than in it. If this
+        // ever fails the symptom is identical and the cause is not.
+        let mut ui = state();
+        let idx = command_field(&ui);
+        open(&mut ui, idx, "");
+        ui.text_key(TextCommand::Paste, Some("/opt/homebrew/bin/fish"));
+        let edit = ui.editing.as_ref().expect("still editing");
+        assert_eq!(
+            edit.buffer.text(),
+            "/opt/homebrew/bin/fish",
+            "the clipboard landed in the open buffer"
+        );
+        assert!(ui.filter.is_empty(), "and nothing leaked into the filter");
     }
 }
 
