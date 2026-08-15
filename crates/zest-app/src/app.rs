@@ -1585,7 +1585,7 @@ impl App {
         }
 
         let socket = zest_daemon::default_socket_path();
-        let attached = match crate::daemon::find_or_spawn(&socket, DAEMON_START_TIMEOUT) {
+        let attached = match zest_daemon::find_or_spawn(&socket, DAEMON_START_TIMEOUT) {
             Ok(a) => a,
             Err(e) => {
                 // Deliberately not "keeping this session in-process": this is
@@ -1636,7 +1636,7 @@ impl App {
             if let Some(halves) = first.lock().expect("dial lock").take() {
                 return Ok(halves);
             }
-            let a = crate::daemon::find_or_spawn(&redial_socket, DAEMON_START_TIMEOUT)
+            let a = zest_daemon::find_or_spawn(&redial_socket, DAEMON_START_TIMEOUT)
                 .map_err(|e| crate::remote::RemoteError::Io(e.to_string()))?;
             Ok((a.read, a.write))
         });
@@ -1680,7 +1680,7 @@ impl App {
                         tracing::warn!(error = %e, "the remembered session is gone; starting fresh");
                         let socket = socket.clone();
                         let fresh: crate::remote::Dialer = Box::new(move || {
-                            let a = crate::daemon::find_or_spawn(&socket, DAEMON_START_TIMEOUT)
+                            let a = zest_daemon::find_or_spawn(&socket, DAEMON_START_TIMEOUT)
                                 .map_err(|e| crate::remote::RemoteError::Io(e.to_string()))?;
                             Ok((a.read, a.write))
                         });

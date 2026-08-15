@@ -1,16 +1,30 @@
 //! Finding this machine's daemon, or starting one.
 //!
-//! ADR-007 makes the app a client of its own daemon over a loopback socket,
+//! ADR-007 makes a client a client of its own daemon over a loopback socket,
 //! using exactly the protocol the phone uses over the network. That only works
 //! if opening a terminal does not require the user to have started a daemon
-//! first, so the app finds one or spawns one.
+//! first, so a client finds one or spawns one.
+//!
+//! # Why this lives beside the server it starts
+//!
+//! It was `zest-app`'s until a second local client needed it (`zest-mcp`,
+//! #274). Copying ~250 lines would have been the smaller diff and the worse
+//! answer: the search order, the detaching, and the "stop the moment it exits"
+//! rule are each a bug somebody already paid for, and two copies means paying
+//! twice. It sits here rather than in a new crate because it is not about the
+//! fleet — it is *"connect to this machine's daemon, starting one if absent"*,
+//! which is the job [`crate::connect`] and [`crate::default_socket_path`]
+//! already do half of.
+//!
+//! Nothing in the daemon binary calls it; this is the client half of the crate,
+//! next to [`crate::client`].
 //!
 //! # Never fatal
 //!
-//! If the daemon cannot be found or will not start, the app falls back to an
-//! in-process pty and says so in the log. Both paths already exist behind
-//! `SessionSource`, so it is one branch — and a terminal that refuses to open
-//! because a helper binary is missing has failed at the only job it has.
+//! If the daemon cannot be found or will not start, the caller falls back —
+//! `zest-app` to an in-process pty, saying so in the log. A terminal that
+//! refuses to open because a helper binary is missing has failed at the only
+//! job it has.
 //!
 //! # Where the cost lands
 //!
@@ -56,7 +70,7 @@ pub fn find_or_spawn(socket: &str, deadline: Duration) -> Result<Attached, Daemo
     let started = Instant::now();
 
     // Probe first. This is the warm path and it is almost always the answer.
-    if let Ok(stream) = zest_daemon::connect(socket) {
+    if let Ok(stream) = crate::connect(socket) {
         return Ok(attached(stream, false, started.elapsed()));
     }
 
@@ -76,7 +90,7 @@ pub fn find_or_spawn(socket: &str, deadline: Duration) -> Result<Attached, Daemo
     // path where both matter.
     let give_up = Instant::now() + deadline;
     while Instant::now() < give_up {
-        if let Ok(stream) = zest_daemon::connect(socket) {
+        if let Ok(stream) = crate::connect(socket) {
             return Ok(attached(stream, true, started.elapsed()));
         }
         // And stop the moment the daemon gives up, rather than polling a socket
@@ -104,7 +118,7 @@ fn attached(
 }
 
 #[cfg(windows)]
-fn attached(stream: zest_daemon::PipeStream, spawned: bool, elapsed: Duration) -> Attached {
+fn attached(stream: crate::PipeStream, spawned: bool, elapsed: Duration) -> Attached {
     let write = stream.try_clone().expect("a connected pipe can be cloned");
     Attached { read: Box::new(stream), write: Box::new(write), spawned, elapsed }
 }
