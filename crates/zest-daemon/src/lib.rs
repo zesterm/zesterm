@@ -43,6 +43,7 @@ pub mod relay;
 pub mod relay_origin;
 pub mod server;
 pub mod session;
+pub mod spawn;
 pub mod ws;
 
 pub use auth::{Auth, Authenticator};
@@ -50,6 +51,9 @@ pub use lan::{Gate, LanListener};
 pub use relay::Relay;
 pub use ws::WsListener;
 pub use local::{connect, default_socket_path, listen};
+// The client half of starting a local daemon, beside the client half of talking
+// to one. `zest-app` and `zest-mcp` both reach for it (#274).
+pub use spawn::{find_or_spawn, resolve_daemon_binary, Attached, DaemonStartError};
 #[cfg(windows)]
 pub use local::PipeStream;
 pub use server::{serve, Connection, Registry};

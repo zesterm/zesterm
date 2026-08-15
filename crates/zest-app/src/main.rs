@@ -13,7 +13,6 @@ mod block_menu;
 mod chrome;
 mod cloud;
 mod console;
-mod daemon;
 mod fair_mutex;
 mod fleet;
 mod keymap;

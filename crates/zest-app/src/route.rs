@@ -112,7 +112,7 @@ impl HostRoute {
             HostRoute::LocalSocket(path) => {
                 let path = path.clone();
                 Box::new(move || {
-                    let a = crate::daemon::find_or_spawn(&path, crate::app::DAEMON_START_TIMEOUT)
+                    let a = zest_daemon::find_or_spawn(&path, crate::app::DAEMON_START_TIMEOUT)
                         .map_err(|e| crate::remote::RemoteError::Io(e.to_string()))?;
                     Ok((a.read, a.write))
                 })

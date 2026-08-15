@@ -32,6 +32,7 @@ paragraph of justification attached.
 | `SecureChannel`, `Sealer`, `Opener`, `EphemeralDh`, `DhPublic` | `zest-mesh/src/secure.rs` | **frozen** at v3 — the browser has a second implementation, pinned to `fixtures/handshake.json` | WS-F, WS-G, WS-H |
 | `ClientHandshake`, `Challenge`, `Transcript`, `auth_transcript` | `zest-mesh/src/pairing.rs` | **frozen** at v3 — the transcript layout is signed bytes; a golden pins it | WS-F, WS-G, WS-H |
 | `DaemonClient` | `zest-daemon/src/client.rs` | draft — moved down from `zest-app` at v3, see below | WS-A, WS-F |
+| `find_or_spawn`, `Attached`, `DaemonStartError`, `resolve_daemon_binary` | `zest-daemon/src/spawn.rs` | draft — moved down from `zest-app` for the same reason `DaemonClient` was, when a second local client needed it (#274) | WS-A, WS-I |
 | `Block`, `BlockIndex`, `BlockState` | `zest-core/src/blocks.rs` | **frozen** — gained `upsert`/`reanchor`, then `started_ms`/`ended_ms` + a caller clock, then `erase_screen`/`authoritative_from`, see below | WS-E, WS-F, WS-G |
 | `BlockPayload`, `BlockState` (wire) | `zest-proto/src/delta.rs` | **frozen** — arrived beside `Delta`; gained additive `started_ms`/`ended_ms`, then `Keyframe.blocks_from`, see below | WS-E, WS-F, WS-G |
 | `ChangeSource`, `Update`, `update_for` | `zest-core/src/subscribe.rs` | **frozen** — `release_before` removed, see below | WS-F |
@@ -387,6 +388,22 @@ all nine now use it. One implementation, exercised by the app *and* by every dia
 
 `fixtures/handshake.json` is new and is the reason a second implementation is possible at all —
 see ADR-008.
+
+**And the same move again, one client later: `find_or_spawn`.** `zest-app/src/daemon.rs` was
+private to the app until `zest-mcp` also needed to reach this machine's daemon (#274). Copying
+~250 lines would have been the smaller diff and the worse answer — the search order, the
+detaching, and *"stop the moment the child exits rather than polling a socket that will never
+appear"* are each a bug already paid for, and two copies means paying twice, exactly as nine
+hand-rolled handshakes did above.
+
+It lands in `zest-daemon` rather than in a new crate because it is not about the fleet: it is
+"connect to *this machine's* daemon, starting one if absent", which is the job `connect` and
+`default_socket_path` already do half of. Nothing in the daemon binary calls it — this is the
+crate's client half, beside `client.rs`. `resolve_daemon_binary`'s sibling-of-the-running-exe
+rule then covers a second binary for free, since both ship together in `target/<profile>/`.
+
+Consumers landed in the same commit: `zest-app` (`app.rs` ×3, `route.rs` ×1, and `mod daemon`
+deleted). The four search-order tests moved with the file and now run under `zest-daemon`.
 
 ### Added once, deliberately: `PtyTransport::hangup`
 
