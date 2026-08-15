@@ -5618,6 +5618,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "zest-mcp"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror 2.0.19",
+ "zest-core",
+ "zest-proto",
+]
+
+[[package]]
 name = "zest-mesh"
 version = "0.1.0"
 dependencies = [

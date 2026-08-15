@@ -81,6 +81,22 @@ const BOUNDARIES: &[Boundary] = &[
         forbidden: &[&["wgpu", "winit", "zest-pty", "zest-app", "zest-render-wgpu"]],
         args: &[],
     },
+    // An agent is a *client* of the daemon (ADR-015, #60), and this states the
+    // half of that which a reader would otherwise have to take on trust. It may
+    // hold `zest-daemon` -- that is the whole point, and `zest-pty` and TLS come
+    // with it -- and it may hold an async runtime, since MCP's own SDK is async
+    // while the protocol client stays blocking.
+    //
+    // What it must never hold is a window or a renderer. The moment this crate
+    // can reach `zest-app` it stops being a client and becomes a second, headless
+    // copy of the app's session handling, which is the shape ADR-007 exists to
+    // prevent. Written as a rule rather than left to absence: a crate in no list
+    // is unconstrained, and this one has an obvious wrong direction to grow in.
+    Boundary {
+        krate: "zest-mcp",
+        forbidden: &[&["wgpu", "winit", "zest-app", "zest-render-wgpu", "zest-font"]],
+        args: &[],
+    },
 ];
 
 /// TLS and HTTP, in the spellings the ecosystem actually offers, forbidden in
@@ -638,8 +654,25 @@ fn check_deps() -> ExitCode {
 mod tests {
     use super::*;
 
+    /// Crates whose boundary may not forbid [`TLS_AND_HTTP`], because they hold
+    /// it by design.
+    ///
+    /// **Two different reasons, and keeping them apart is the point.**
+    /// `zest-cloud` is the *owner*. `zest-mcp` is a *consumer* of the owner: it
+    /// depends on `zest-daemon`, which depends on `zest-cloud` for `--enroll`
+    /// and `--relay`, so rustls reaches it transitively along exactly the path
+    /// `TLS_AND_HTTP`'s own doc comment describes for `zest-app`. Forbidding it
+    /// here would not stop a second TLS stack; it would only stop this crate
+    /// talking to a daemon.
+    ///
+    /// The invariant this list protects is still "one owner", not "one crate
+    /// that links it". A name is added here when it reaches TLS *through*
+    /// `zest-cloud` — never to quiet a check because a direct dependency looked
+    /// convenient.
+    const TLS_BY_DESIGN: &[&str] = &["zest-cloud", "zest-mcp"];
+
     #[test]
-    fn every_boundary_but_the_owner_forbids_tls_and_http() {
+    fn every_boundary_forbids_tls_and_http_unless_it_holds_it_by_design() {
         // `zest-mesh` stands in for the set: it is the crate most likely to
         // grow a "just one small HTTP call" for the relay, and the whole family
         // is one grouped slice, so losing it here means losing it everywhere.
@@ -652,7 +685,7 @@ mod tests {
         // is the same gap the doc comment above `TLS_AND_HTTP` had: a fence
         // that looks present because *a* fence is.
         for boundary in BOUNDARIES {
-            if boundary.krate == "zest-cloud" {
+            if TLS_BY_DESIGN.contains(&boundary.krate) {
                 continue;
             }
             for name in TLS_AND_HTTP {
