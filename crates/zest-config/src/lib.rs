@@ -386,32 +386,42 @@ pub fn rename_profile(path: &Path, from: &str, to: &str) -> std::io::Result<()> 
         .parse()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e}")))?;
 
-    if doc.get("profiles").and_then(|p| p.get(to)).is_some() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!("a profile named `{to}` already exists"),
-        ));
-    }
-    let Some(profiles) = doc.get_mut("profiles").and_then(toml_edit::Item::as_table_mut) else {
+    // `as_table_like_mut`, not `as_table_mut`: `profiles = { work = { … } }`
+    // is a legal hand-written spelling and an *inline* table, which
+    // `as_table_mut` declines — the rename would then report "no profile" for
+    // one that is plainly there. `remove_in` below already takes this shape
+    // seriously, and a writer that only understands half the file is how a
+    // config people hand-edit starts refusing its own contents.
+    let Some(profiles) = doc.get_mut("profiles").and_then(toml_edit::Item::as_table_like_mut)
+    else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!("no profile `{from}` to rename"),
         ));
     };
-    // `remove_entry` rather than `remove`: the old key carries the decor, and
-    // for a profile that decor is the blank line and the `# comment` a person
-    // wrote above `[profiles.<name>]`. Dropping it would rename the profile
-    // and silently delete the note explaining it.
-    let Some((old_key, source)) = profiles.remove_entry(from) else {
+    // Before the removal, or a refused rename has already moved the source.
+    if profiles.contains_key(to) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("a profile named `{to}` already exists"),
+        ));
+    }
+    // The old key carries the decor, and for a profile that decor is the blank
+    // line and the `# comment` a person wrote above `[profiles.<name>]`. Taken
+    // before the removal because `remove` does not hand it back.
+    let old_key = profiles.key(from).cloned();
+    let Some(source) = profiles.remove(from) else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!("no profile `{from}` to rename"),
         ));
     };
     let mut key = toml_edit::Key::new(to);
-    *key.leaf_decor_mut() = old_key.leaf_decor().clone();
-    *key.dotted_decor_mut() = old_key.dotted_decor().clone();
-    profiles.insert_formatted(&key, source);
+    if let Some(old) = old_key {
+        *key.leaf_decor_mut() = old.leaf_decor().clone();
+        *key.dotted_decor_mut() = old.dotted_decor().clone();
+    }
+    profiles.entry_format(&key).or_insert(source);
     std::fs::write(path, doc.to_string())
 }
 
@@ -729,6 +739,51 @@ mod tests {
             "renaming a profile that is not there means the caller is stale; say so"
         );
         rename_profile(&path, "mac", "mac").expect("renaming to the same name is a no-op");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn renaming_reaches_into_an_inline_profiles_table() {
+        // Review finding on #290. `profiles = { work = { … } }` is a legal
+        // hand-written spelling, and `as_table_mut` declines an inline table —
+        // so the rename reported "no profile `work`" for one plainly in the
+        // file. `remove_in` already took this shape seriously; a writer that
+        // understands half the file is worse than one that understands none,
+        // because it fails only for the people who hand-edit.
+        let path = temp("rename-inline");
+        std::fs::write(
+            &path,
+            "profiles = { work = { command = \"zsh\" }, mac = { command = \"bash\" } }\n",
+        )
+        .expect("write");
+
+        rename_profile(&path, "work", "forge").expect("an inline profiles table renames");
+
+        let text = std::fs::read_to_string(&path).expect("read");
+        let table: toml::Table = text.parse().expect("still valid toml");
+        let profiles = table["profiles"].as_table().expect("table");
+        assert_eq!(
+            profiles["forge"]["command"].as_str(),
+            Some("zsh"),
+            "the inline profile did not take the new name: {text}"
+        );
+        assert!(!profiles.contains_key("work"), "the old name survived: {text}");
+        assert_eq!(
+            profiles["mac"]["command"].as_str(),
+            Some("bash"),
+            "a sibling in the same inline table was disturbed: {text}"
+        );
+        assert_eq!(
+            rename_profile(&path, "forge", "mac").unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists,
+            "the collision check must reach inline tables too"
+        );
+        let table: toml::Table =
+            std::fs::read_to_string(&path).expect("read").parse().expect("valid toml");
+        assert!(
+            table["profiles"].as_table().expect("table").contains_key("forge"),
+            "a refused rename removed the source anyway"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
