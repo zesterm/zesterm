@@ -361,16 +361,26 @@ impl TextField {
     }
 }
 
-/// What this key means to a text field, or `None` if it is not text.
+/// Whether this chord means copy/paste/cut/select-all **in a text field**.
 ///
-/// Clipboard chords go through [`zest_input::key::is_clipboard_chord`], so ⌘C
-/// and Ctrl+Shift+C both work in a field exactly as they do in the grid — a
-/// field that took only one of them is a field that appears broken on the
-/// other platform.
+/// Wider than the grid's [`zest_input::key::is_clipboard_chord`], and
+/// deliberately so rather than by oversight. That predicate excludes plain
+/// Ctrl because a terminal must keep Ctrl+C as SIGINT and Ctrl+V as
+/// literal-next — which is the whole reason Ctrl+Shift+C/V exist at all. A
+/// field has no shell to protect, and Ctrl+V is *the* paste chord on Windows
+/// and Linux: the one every person tries first.
+///
+/// #251 reused the grid's predicate here, so a settings field could not be
+/// pasted into on Windows at all while ⌘V worked on macOS — where it was
+/// written, which is why it looked finished. Nothing on the grid path calls
+/// `command_for`, so widening this cannot reach the terminal (#270).
+fn field_clipboard_chord(mods: ModifiersState) -> bool {
+    mods.super_key() || mods.control_key()
+}
+
+/// What this key means to a text field, or `None` if it is not text.
 #[must_use]
 pub fn command_for(key: &Key, mods: ModifiersState) -> Option<TextCommand> {
-    use zest_input::key;
-
     let shift = mods.shift_key();
     // Word-wise motion is ⌥ on macOS and Ctrl elsewhere. Accepting both
     // everywhere costs nothing: neither chord means anything else in a field.
@@ -401,15 +411,24 @@ pub fn command_for(key: &Key, mods: ModifiersState) -> Option<TextCommand> {
             _ => return None,
         }),
         Key::Character(c) => {
-            if key::is_clipboard_chord(mods) {
-                return match c.as_str() {
-                    "c" | "C" => Some(TextCommand::Copy),
-                    "v" | "V" => Some(TextCommand::Paste),
-                    "x" | "X" => Some(TextCommand::Cut),
-                    // ⌘A is select-all only under Super: Ctrl+Shift+A is not a
-                    // convention anywhere, and Ctrl+A is start-of-line in the
-                    // shell, which the grid must keep.
-                    "a" | "A" if mods.super_key() => Some(TextCommand::SelectAll),
+            if field_clipboard_chord(mods) {
+                // Under plain Ctrl the letter may arrive as itself or as the
+                // control code it names, depending on platform and winit
+                // version. Both spellings, so neither is a bet.
+                let letter = match c.as_str() {
+                    "\u{1}" => "a",
+                    "\u{3}" => "c",
+                    "\u{16}" => "v",
+                    "\u{18}" => "x",
+                    other => other,
+                };
+                // Case-folded: under Ctrl+Shift the letter always arrives
+                // uppercase, because Shift is spent on the modifier.
+                return match letter {
+                    _ if letter.eq_ignore_ascii_case("c") => Some(TextCommand::Copy),
+                    _ if letter.eq_ignore_ascii_case("v") => Some(TextCommand::Paste),
+                    _ if letter.eq_ignore_ascii_case("x") => Some(TextCommand::Cut),
+                    _ if letter.eq_ignore_ascii_case("a") => Some(TextCommand::SelectAll),
                     _ => None,
                 };
             }
@@ -446,6 +465,61 @@ mod tests {
         assert_eq!(f.text(), "/usr/local/bin/fish", "the selection was replaced");
         assert_eq!(f.caret(), f.text().len(), "and the caret followed the insert");
         assert_eq!(f.selection(), None, "an insert collapses the selection");
+    }
+
+    #[test]
+    fn every_platform_spelling_of_the_clipboard_chords_works_in_a_field() {
+        // #251 shipped with the *grid's* predicate — Super, or Ctrl+Shift —
+        // so on Windows a settings field could not be pasted into at all
+        // while ⌘V worked on macOS, which is where it was written. A field
+        // has no shell to protect: Ctrl+C is not SIGINT here and Ctrl+V is
+        // not literal-next, so plain Ctrl is the chord, and it is the one
+        // every person on Windows and Linux tries first (#270).
+        const CTRL: ModifiersState = ModifiersState::CONTROL;
+        for (mods, spelling) in [(SUPER, "⌘"), (CTRL, "Ctrl+"), (CTRL_SHIFT, "Ctrl+Shift+")] {
+            for (letter, want) in [
+                ("v", TextCommand::Paste),
+                ("c", TextCommand::Copy),
+                ("x", TextCommand::Cut),
+                ("a", TextCommand::SelectAll),
+            ] {
+                assert_eq!(
+                    command_for(&ch(letter), mods),
+                    Some(want.clone()),
+                    "{spelling}{letter} means {want:?} in a text field"
+                );
+                // Under Ctrl+Shift the letter always arrives uppercase —
+                // Shift is spent on the modifier — so folding is the only way
+                // that spelling is reachable at all.
+                assert_eq!(
+                    command_for(&ch(&letter.to_uppercase()), mods),
+                    Some(want.clone()),
+                    "{spelling}{letter} folds case"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_control_character_spellings_decode_the_same() {
+        // Under plain Ctrl the letter may arrive as `"v"` or as 0x16
+        // depending on platform and winit version. The keymap's own rows
+        // never see this — they only ever match Ctrl+*Shift*, where the
+        // letter arrives as a letter — so its evidence does not cover it.
+        // Handling both removes a guess that cannot be settled from here.
+        const CTRL: ModifiersState = ModifiersState::CONTROL;
+        for (code, want) in [
+            ("\u{16}", TextCommand::Paste),
+            ("\u{3}", TextCommand::Copy),
+            ("\u{18}", TextCommand::Cut),
+            ("\u{1}", TextCommand::SelectAll),
+        ] {
+            assert_eq!(
+                command_for(&ch(code), CTRL),
+                Some(want.clone()),
+                "the control-character form of {want:?} decodes too"
+            );
+        }
     }
 
     #[test]

@@ -642,6 +642,17 @@ entry stay). The resulting work items, measurements in the handoff README — **
       scrolled to the caret rather than the tail — the fix that makes
       arrowing back into a long path mean anything. See "Traps already paid
       for" in `AGENTS.md`.
+- [x] **Ctrl+V pastes into a field, not just ⌘V**
+      ([#270](https://github.com/zesterm/zesterm/issues/270)). The above
+      shipped reusing the *grid's* clipboard predicate — `super || (ctrl &&
+      shift)` — which excludes plain Ctrl because a terminal must keep Ctrl+C
+      as SIGINT. A field has no shell to protect, so on Windows and Linux it
+      could not be pasted into at all while ⌘V worked on macOS: complete from
+      the machine it was written on, dead on the primary platform.
+      `field_clipboard_chord` takes Super *or* Ctrl, the control-character
+      spellings (`0x16` for V) decode too, and the whole matrix is one table
+      test so a chord that works on one platform and not the other cannot
+      pass again.
 - [x] **One dropdown, for schema variants and client rosters alike**
       ([#259](https://github.com/zesterm/zesterm/issues/259)). The Theme pill
       drew a ▾ and opened the **⌘K command palette** — placeholder "type to
