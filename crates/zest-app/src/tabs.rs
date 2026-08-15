@@ -97,6 +97,36 @@ impl ProfileIdentity {
             title: resolved.meta.tab_title,
         }
     }
+
+    /// The identity of a profile *another machine* published (#268).
+    ///
+    /// Built from what came over the wire rather than resolved against this
+    /// machine's config, and that is the whole point: the far host has already
+    /// folded its own `profiles.defaults` in, and re-resolving the name here
+    /// would apply *our* `defaults` to *their* profile — a `nightly` on the
+    /// build box silently inheriting this laptop's command.
+    ///
+    /// Two fields have no wire form and take their local meaning: `opacity`
+    /// and `title` are window-side decisions (§12 keeps window size and
+    /// padding off profiles for the same reason), so a published profile
+    /// follows this window's.
+    #[must_use]
+    pub fn from_published(profile: &zest_proto::HostProfile) -> Self {
+        let scheme = (!profile.color_scheme.is_empty()).then(|| profile.color_scheme.clone());
+        Self {
+            name: profile.name.clone(),
+            selection_bg: scheme.as_deref().and_then(scheme_selection_wash),
+            scheme,
+            tab_color: profile.tab_color,
+            icon: (!profile.icon.is_empty()).then(|| profile.icon.clone()),
+            // Never `Host`: that choice is `profiles.defaults.color_from` on
+            // *this* machine, a preference about how the fleet reads to the
+            // person looking at it, not something the far host gets a vote on.
+            color_from: None,
+            opacity: None,
+            title: TabTitle::default(),
+        }
+    }
 }
 
 /// A colour scheme id resolved to its palette — `None` for a name that does

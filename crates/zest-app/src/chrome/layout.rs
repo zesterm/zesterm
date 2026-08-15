@@ -1481,6 +1481,9 @@ fn launcher_overlay(
 
     let row_h = |row: &LauncherRow| match row {
         LauncherRow::Profile { .. } => LAUNCHER_ROW_H * s,
+        // The sidebar's host-header height, because it is the same header
+        // saying the same thing in the same treatment.
+        LauncherRow::Group { .. } => GROUP_HEADER_H * s,
         LauncherRow::Divider => LAUNCHER_DIVIDER_H * s,
         LauncherRow::RunOnHost | LauncherRow::ManageProfiles { .. } => LAUNCHER_ACTION_H * s,
     };
@@ -1536,6 +1539,52 @@ fn launcher_overlay(
             continue;
         }
 
+        // A group header names the machine the rows under it will run on
+        // (#268). Drawn exactly as the vertical sidebar's host headers are —
+        // dot, uppercase tracked label, mono sub — because it is the same
+        // header saying the same thing, and two treatments for one idea is
+        // how a window stops looking like one program.
+        //
+        // No hit region and no selection: `continue` before either, so the
+        // keyboard skips it (its action is `None`) and a click falls through
+        // to the panel, which swallows it.
+        if let LauncherRow::Group { label, sub, online } = row {
+            let cy = rect[1] + rh / 2.0;
+            let dot_x = rect[0] + 8.0 * s + DOT * s / 2.0;
+            let ink = if *online { colors.text_inactive } else { colors.text_faint };
+            dot(&mut out.rects, dot_x, cy, DOT * s, ink, panel);
+
+            let text = label.to_uppercase();
+            let label_px = UI_STATUS * s;
+            let tracking = 0.09 * label_px;
+            let label_w = measure(&text, label_px, true, tracking);
+            let label_x = dot_x + DOT * s / 2.0 + 7.0 * s;
+            out.texts.push(TextRun {
+                text,
+                pos: [label_x, baseline_in(rect[1], rh, label_px)],
+                max_width: label_w + 2.0,
+                color: ink,
+                clip: panel,
+                px: label_px,
+                bold: true,
+                tracking,
+            });
+            if !sub.is_empty() {
+                let sub_px = UI_CHORD * s;
+                out.texts.push(TextRun {
+                    text: sub.clone(),
+                    pos: [label_x + label_w + 7.0 * s, baseline_in(rect[1], rh, sub_px)],
+                    max_width: (rect[0] + rect[2] - label_x - label_w - 14.0 * s).max(0.0),
+                    color: colors.text_faint,
+                    clip: panel,
+                    px: sub_px,
+                    bold: false,
+                    tracking: 0.0,
+                });
+            }
+            continue;
+        }
+
         let selected = i == launcher.selected;
         let hovered = hover == Some(HitRegion::LauncherRow(i));
         // Selected rows read accentSoft, hovered ones selSoft (§1) — the
@@ -1547,6 +1596,9 @@ fn launcher_overlay(
         }
 
         match row {
+            // Both handled above, before the selection wash and the hit
+            // region — neither is a row you can land on.
+            LauncherRow::Divider | LauncherRow::Group { .. } => {}
             LauncherRow::Profile { name, command, host_label, default, digit, active, accent } => {
                 // Glyph tile: the row's accent on a 12%-alpha wash of it —
                 // the same recipe as the tab chips, so a profile looks like
@@ -1688,9 +1740,11 @@ fn launcher_overlay(
                     tracking: 0.0,
                 });
             }
-            LauncherRow::Divider => unreachable!("handled above"),
         }
 
+        // Only rows that reach here are clickable — the divider and the group
+        // headers `continue` above, so neither takes a hit region and neither
+        // can be landed on.
         if let Some(hit) = intersect(rect, panel) {
             out.hit.push(hit, HitRegion::LauncherRow(i));
         }
@@ -4288,6 +4342,63 @@ mod tests {
                 && (r.rect[0] - nt[0]).abs() < 0.5
                 && (r.rect[1] - nt[1]).abs() < 0.5),
             "open: the button carries the selSoft fill"
+        );
+    }
+
+    #[test]
+    fn a_launcher_group_header_names_its_machine_and_answers_no_clicks() {
+        // #268: the menu spans machines, so it says which. Drawn in the
+        // sidebar's host-header treatment — uppercase, tracked, with a mono
+        // sub — because it is the same header saying the same thing.
+        //
+        // And it is context, not a control: no hit region, so a click on it
+        // falls through to the panel, which swallows it. A header that
+        // selected a row would make the machine name a launch button.
+        use super::super::model::{LauncherAnchor, LauncherModel, LauncherRow};
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut mo = model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+        mo.launcher = Some(LauncherModel {
+            rows: vec![
+                LauncherRow::Group {
+                    label: "forge".into(),
+                    sub: "windows \u{b7} LAN \u{b7} 0.4 ms".into(),
+                    online: true,
+                },
+                LauncherRow::Profile {
+                    name: "ubuntu".into(),
+                    command: "wsl.exe".into(),
+                    host_label: None,
+                    default: true,
+                    digit: Some(1),
+                    active: false,
+                    accent: AccentChoice::Profile(0),
+                },
+            ],
+            selected: 1,
+            anchor: LauncherAnchor::Strip,
+        });
+        let out = layout(&mo, &colors(), &m, &mut measure);
+
+        assert!(
+            out.texts.iter().any(|t| t.text == "FORGE"),
+            "the header names the machine, uppercased like every other group label"
+        );
+        assert!(
+            out.texts.iter().any(|t| t.text.contains("windows")),
+            "and its sub-label says what that machine is and how we reach it"
+        );
+        // The header's own band must answer no clicks. Find it by the row it
+        // is drawn above: the profile row takes a hit region, the header does
+        // not, so probing inside the header's band must not name row 0.
+        // The panel is right-anchored under the `+`, so probe from its own
+        // rect rather than guessing a column.
+        let px = out.new_tab_rect[0] + out.new_tab_rect[2] - LAUNCHER_W / 2.0;
+        let profile_hit = (0..800)
+            .find(|y| out.hit.hit(px, *y as f32) == Some(HitRegion::LauncherRow(1)))
+            .expect("the profile row is clickable");
+        assert!(
+            (0..profile_hit).all(|y| out.hit.hit(px, y as f32) != Some(HitRegion::LauncherRow(0))),
+            "the header takes no hit region anywhere above it — it is context, not a control"
         );
     }
 
