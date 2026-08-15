@@ -6910,16 +6910,24 @@ impl App {
         // The same rule the launcher row used, from the same function: these
         // read differently for one launch until they shared one — the row said
         // `zsh -l` and the tab it opened said "the host's default shell".
-        let far_shell = self
-            .fleet
-            .as_ref()
-            .map(|f| f.snapshot())
-            .unwrap_or_default()
-            .iter()
-            .find(|h| h.label.eq_ignore_ascii_case(&host_label))
-            .and_then(|h| h.offer.as_ref())
-            .map(|o| o.default_shell.clone())
-            .unwrap_or_default();
+        //
+        // By id, never by label: `target` carries the machine this will
+        // actually dial, and two machines may share a display name — the same
+        // reason the launcher's group keys carry a `HostId`. An unroutable
+        // target has no id to match, and no far shell to know either.
+        let far_shell = match &target {
+            crate::launch::HostTarget::Remote { host, .. } => self
+                .fleet
+                .as_ref()
+                .map(|f| f.snapshot())
+                .unwrap_or_default()
+                .iter()
+                .find(|h| h.host == *host)
+                .and_then(|h| h.offer.as_ref())
+                .map(|o| o.default_shell.clone())
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
         let shown = crate::launcher::shown_command(&command, &far_shell);
         let provenance = format!("New session \u{b7} {name} on {host_label} \u{b7} {shown}");
         let pending = crate::tabs::PendingSession::new(

@@ -157,10 +157,33 @@ pub fn build_rows(
         let resolved = profiles::resolve_profile(&root, name);
         let bucket = bucket_for(resolved.meta.ask_host, resolved.meta.host.as_deref(), fleet);
         let identity = ProfileIdentity::resolve(settings, name);
+        // What "no command" resolves to depends on *where the row runs*, and
+        // this is the same trap the provenance line fell into: `launch_command`
+        // sends an empty string for a remote launch, meaning the far host's own
+        // shell — so a row pinned to `forge` with no command of its own must not
+        // advertise this machine's. Only a row that runs here falls back to
+        // `shell.command`, because only that row will actually run it.
+        let command = match resolved.meta.command {
+            Some(command) => command,
+            None => match &bucket {
+                Bucket::Here | Bucket::Any => fallback_command.to_string(),
+                Bucket::Host(id) => {
+                    let shell = fleet
+                        .iter()
+                        .find(|h| h.host == *id)
+                        .and_then(|h| h.offer.as_ref())
+                        .map_or("", |o| o.default_shell.as_str());
+                    shown_command("", shell)
+                }
+                // A machine the fleet has never heard of has told us nothing,
+                // least of all what it runs.
+                Bucket::Unknown(_) => shown_command("", ""),
+            },
+        };
         let group = group_for(&mut groups, &bucket, fleet, local_label);
         group.entries.push((
             name.clone(),
-            resolved.meta.command.unwrap_or_else(|| fallback_command.to_string()),
+            command,
             tab_accent(Some(&identity), 0),
             ProfileRef::Local(name.clone()),
         ));
@@ -805,6 +828,50 @@ mod tests {
                 "{name} must launch on the machine that published it"
             );
         }
+    }
+
+    #[test]
+    fn a_pinned_row_with_no_command_promises_the_far_shell_not_ours() {
+        // The same trap as the provenance line, one layer up: `launch_command`
+        // sends an *empty* command for a remote launch, meaning the far host's
+        // own shell — so a row pinned to forge with no command of its own must
+        // not advertise this machine's `shell.command`. It read `pwsh -NoLogo`
+        // on a Mac laptop pointed at a Linux box.
+        let fleet = [
+            host(1, "studio", true),
+            offering(host(2, "forge", false), "linux", &[]),
+        ];
+        let settings = settings_with(&[("there", "host = \"forge\""), ("here", "")]);
+        let (rows, _) = build_rows(&settings, &fleet, "pwsh -NoLogo", None, String::new());
+
+        let command = |name: &str| {
+            rows.iter()
+                .find_map(|r| match r {
+                    LauncherRow::Profile { name: n, command, .. } if n == name => Some(command),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{name} has a row"))
+        };
+        assert_eq!(command("there"), "zsh -l", "forge told us what it runs; the row says that");
+        assert_eq!(
+            command("here"),
+            "pwsh -NoLogo",
+            "and a row that really does run here still falls through to shell.command"
+        );
+
+        // A machine the fleet has never heard of has told us nothing, least of
+        // all what it runs — so the row says so rather than guessing.
+        let settings = settings_with(&[("ghost", "host = \"nowhere\"")]);
+        let (rows, _) = build_rows(&settings, &fleet, "pwsh -NoLogo", None, String::new());
+        assert_eq!(
+            rows.iter()
+                .find_map(|r| match r {
+                    LauncherRow::Profile { name, command, .. } if name == "ghost" => Some(command),
+                    _ => None,
+                })
+                .expect("a row"),
+            "the host's default shell"
+        );
     }
 
     #[test]
