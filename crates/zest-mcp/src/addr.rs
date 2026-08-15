@@ -115,13 +115,22 @@ impl Resolver {
 
         // An exact label match first, so a person's `--host andy-mac` works and
         // cannot be shadowed by a hex prefix that happens to look like it.
+        //
+        // **Two hosts may share a label**, and nothing prevents it: a label is
+        // whatever the far machine calls itself, so two laptops both named
+        // `mac` is a configuration, not a corruption. Falling through to the
+        // hex branch would then report `UnknownHost` -- a label that plainly
+        // matched two machines reported as matching none -- so the ambiguity is
+        // raised here with both candidates, exactly as a hex prefix would be.
         let by_label: Vec<&(HostId, String)> = self
             .known
             .values()
             .filter(|(_, label)| label.to_ascii_lowercase() == needle)
             .collect();
-        if by_label.len() == 1 {
-            return Ok(by_label[0].0);
+        match by_label.len() {
+            1 => return Ok(by_label[0].0),
+            0 => {}
+            n => return Err(Self::ambiguous(asked, n, &by_label)),
         }
 
         let matches: Vec<&(HostId, String)> =
@@ -133,15 +142,21 @@ impl Resolver {
                 asked: asked.to_string(),
                 known: self.summary(),
             }),
-            n => Err(AddrError::AmbiguousHost {
-                asked: asked.to_string(),
-                count: n,
-                candidates: matches
-                    .iter()
-                    .map(|(h, l)| format!("{} ({l})", h.short()))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            }),
+            n => Err(Self::ambiguous(asked, n, &matches)),
+        }
+    }
+
+    /// One spelling of "say which", so the label and hex branches cannot drift
+    /// into reporting the same situation two different ways.
+    fn ambiguous(asked: &str, count: usize, matches: &[&(HostId, String)]) -> AddrError {
+        AddrError::AmbiguousHost {
+            asked: asked.to_string(),
+            count,
+            candidates: matches
+                .iter()
+                .map(|(h, l)| format!("{} ({l})", h.short()))
+                .collect::<Vec<_>>()
+                .join(", "),
         }
     }
 
@@ -221,6 +236,29 @@ mod tests {
             matches!(err, AddrError::UnknownHost { .. }),
             "expected UnknownHost, got {err:?}"
         );
+    }
+
+    #[test]
+    fn two_hosts_with_one_label_are_ambiguous_rather_than_unknown() {
+        // Nothing stops two machines calling themselves the same thing -- a
+        // label is whatever the far host says. Before this the duplicate fell
+        // through to the hex branch, which no label can match, so a name that
+        // plainly matched two machines was reported as matching none.
+        let mut r = Resolver::new();
+        r.learn(host(0x11), "mac");
+        r.learn(host(0x22), "mac");
+
+        let err = r.host("mac").expect_err("a label two hosts share must not resolve");
+        match err {
+            AddrError::AmbiguousHost { count, ref candidates, .. } => {
+                assert_eq!(count, 2);
+                assert!(
+                    candidates.contains("11111111") && candidates.contains("22222222"),
+                    "both candidates must be named so the caller can pick: {candidates}"
+                );
+            }
+            other => panic!("expected AmbiguousHost, got {other:?}"),
+        }
     }
 
     #[test]

@@ -199,6 +199,48 @@ fn a_finished_block_hands_back_the_rows_it_printed() {
 }
 
 #[test]
+fn a_command_that_printed_nothing_answers_empty_rather_than_echoing_itself() {
+    // The recorded `false` is exactly this case, and the shape is worth knowing:
+    // it comes back with `output_line: 6` and `end_line: 5` -- an empty range,
+    // because `133;C` fires before the shell echoes the newline and `133;D`
+    // after the trailing one, and the parser corrects both. So "printed
+    // nothing" is an inverted range here, not an absent `output_line`.
+    //
+    // Either way the answer must be no rows. Anchoring on `prompt_line` when
+    // there is nothing to show hands back the command line itself, and an agent
+    // reading that sees its own command echoed as the command's output --
+    // indistinguishable from a program that really did print it.
+    let r = replay("blocks-zsh");
+
+    let silent: Vec<_> = r
+        .blocks()
+        .into_iter()
+        .filter(|b| match (b.output_line, b.end_line) {
+            (None, _) => true,
+            (Some(out), Some(end)) => out > end,
+            (Some(_), None) => false,
+        })
+        .collect();
+
+    assert!(
+        !silent.is_empty(),
+        "the recording is expected to contain a command that printed nothing \
+         (`false`); without one this test proves nothing"
+    );
+
+    for b in silent {
+        assert_eq!(
+            r.block_rows(b.id),
+            Some(Vec::new()),
+            "block {} printed nothing, so its command ({:?}) must not come back \
+             as its own output",
+            b.id,
+            b.command
+        );
+    }
+}
+
+#[test]
 fn an_unknown_block_is_none_rather_than_an_empty_answer() {
     // The two have to be distinguishable: `None` is "no such block", an empty
     // vec is "the block exists and its rows have scrolled out of this replica".

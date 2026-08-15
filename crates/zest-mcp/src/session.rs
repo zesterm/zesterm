@@ -189,7 +189,15 @@ impl Replica {
         // Output, not the prompt: an agent asking what a command printed does
         // not want the prompt line, and `Cmd+Shift+O` already copies output
         // alone in the app for the same reason.
-        let from = block.output_line.unwrap_or(block.prompt_line);
+        //
+        // **No `output_line` means no output, not "start at the prompt".** A
+        // block sits that way in two ordinary cases -- a prompt nobody has
+        // submitted yet, and a command that ran and printed nothing -- and
+        // falling back to `prompt_line` answers both with the command line
+        // itself. An agent reading that sees its own command echoed back as
+        // the command's output, which is indistinguishable from a program that
+        // really did print it.
+        let Some(from) = block.output_line else { return Some(Vec::new()) };
         let to = block.end_line;
         let grid = self.term.grid();
 

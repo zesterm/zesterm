@@ -672,7 +672,7 @@ mod tests {
     const TLS_BY_DESIGN: &[&str] = &["zest-cloud", "zest-mcp"];
 
     #[test]
-    fn every_boundary_but_the_owner_forbids_tls_and_http() {
+    fn every_boundary_forbids_tls_and_http_unless_it_holds_it_by_design() {
         // `zest-mesh` stands in for the set: it is the crate most likely to
         // grow a "just one small HTTP call" for the relay, and the whole family
         // is one grouped slice, so losing it here means losing it everywhere.
