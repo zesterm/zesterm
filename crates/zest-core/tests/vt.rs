@@ -1140,9 +1140,14 @@ fn erasing_a_wrapped_row_to_its_end_stops_it_being_wrapped() {
 /// ship broken.** `corpus/resize-drag.vtrec` has both halves of one real drag:
 ///
 /// ```text
-/// Down:  ESC[?25l  ESC[8;<rows>;<cols>t  ESC[H  <rows, each ESC[K>            ESC[?25h
-/// Up:    ESC[?25l                        ESC[H  <rows, each ESC[K>  ESC[r;1H  ESC[?25h
+/// Down:  ESC[?25l  ESC[8;<rows>;<cols>t  ESC[H  <rows, each ESC[K>              ESC[?25h
+/// Up:    ESC[?25l                        ESC[H  <rows, each ESC[K>  ESC[<r>;1H  ESC[?25h
 /// ```
+///
+/// `<r>` is where the shell's cursor really is, which is the *kept* row count
+/// rather than the viewport's: the grow restates what it still had and leaves
+/// the cursor at the end of it. `corpus/resize-drag.vtrec` has `ESC[8;1H` after
+/// seven restated rows and a blank.
 ///
 /// ConPTY announces the new size on the way **down** and not on the way back,
 /// and only the way back positions the cursor at the end. The settle exists for
