@@ -7238,7 +7238,8 @@ impl App {
         let last_line = grid
             .active_line_id_at(term.cursor().row.min(grid.rows().saturating_sub(1)))
             .unwrap_or(0);
-        term.blocks()
+        let mut bands: Vec<zest_render_wgpu::BlockBand> = term
+            .blocks()
             .blocks()
             .iter()
             .filter_map(|b| {
@@ -7275,7 +7276,22 @@ impl App {
                     wash: is_selected.then(|| crate::chrome::layout::washed(c.accent, 0.10)),
                 })
             })
-            .collect()
+            .collect::<Vec<_>>();
+        // The renderer binary-searches these, which is only correct while they
+        // are ascending and disjoint. That holds because `blocks()` is
+        // chronological and a block's rows cannot overlap its neighbour's —
+        // but it is a *precondition* of the search rather than something the
+        // search can check, so a stale wire upsert or a bad re-anchor must not
+        // be able to break it silently. Dropping the offender keeps the rails
+        // honest; the next upsert corrects it.
+        bands.dedup_by(|b, prev| {
+            let bad = b.from < prev.to;
+            if bad {
+                tracing::debug!(from = b.from, prev_to = prev.to, "overlapping block bands");
+            }
+            bad
+        });
+        bands
     }
 
     /// A visual (clicked) row to the line it shows, through the fold view

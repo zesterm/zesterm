@@ -638,9 +638,20 @@ impl Scene {
         let cols = grid.cols();
         for row in 0..grid.rows() {
             let Some(line) = resolved_row(grid, vp, row).map(|r| r.id) else { continue };
-            let Some(band) = vp.blocks.iter().find(|b| line >= b.from && line < b.to) else {
-                continue;
-            };
+            // Binary search, not a scan: this runs per visible row per frame,
+            // and `scrollback` goes to ten million lines — so a linear `find`
+            // multiplies the block count by the row count sixty times a
+            // second. `zest_core::BlockIndex::block_at` deliberately stays
+            // linear for the same shape, and the reason it gives does not
+            // apply here: its list has "an open end" on the last entry, while
+            // a band's `to` is always a concrete line (a running block's is
+            // resolved against the cursor before it ever gets here).
+            //
+            // Sound because the bands are non-overlapping and ascending —
+            // `blocks_are_ascending_and_disjoint` pins that, since it is the
+            // precondition rather than a coincidence of construction.
+            let i = vp.blocks.partition_point(|b| b.to <= line);
+            let Some(band) = vp.blocks.get(i).filter(|b| line >= b.from) else { continue };
             let y = oy + row as f32 * ch;
             if let Some(wash) = band.wash {
                 self.rects.push(RectInstance::filled([ox, y, cols as f32 * cw, ch], wash, clip));
@@ -968,6 +979,29 @@ mod tests {
         let vp = Viewport { blocks: &bands, gutter: 16.0, ..viewport(&grid, &p, 1.0) };
         scene.emit_block_bands(&grid, &vp, vp.rect[0], vp.rect[1], 8.0, 16.0, vp.rect);
         assert_eq!(rails(&scene).len(), 2, "lines 1 and 2, and nothing else");
+    }
+
+    #[test]
+    fn the_band_lookup_finds_the_same_answer_a_scan_would() {
+        // `emit_block_bands` binary-searches, which is only correct while the
+        // bands are ascending and disjoint. Rather than trust that, check the
+        // search against the linear answer for every line in and around the
+        // set — including the gaps between blocks, which is where an
+        // off-by-one in `partition_point` shows up and nowhere else.
+        let bands = [band(0, 3), band(5, 6), band(9, 20)];
+        for line in 0..25u64 {
+            let scan = bands.iter().find(|b| line >= b.from && line < b.to);
+            let i = bands.partition_point(|b| b.to <= line);
+            let found = bands.get(i).filter(|b| line >= b.from);
+            assert_eq!(
+                scan.is_some(),
+                found.is_some(),
+                "line {line}: the search and a scan must agree"
+            );
+            if let (Some(a), Some(b)) = (scan, found) {
+                assert_eq!(a.from, b.from, "line {line}: and agree on which band");
+            }
+        }
     }
 
     #[test]
