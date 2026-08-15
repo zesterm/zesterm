@@ -6177,14 +6177,6 @@ impl App {
     /// Delete the edited profile; the editor falls back to Defaults. The
     /// screen never draws Delete for Defaults, and this guards it anyway.
     fn profiles_delete(&mut self) {
-        // The one exit that discards rather than commits, and the only one
-        // besides Esc: the table the buffer would be written into is about to
-        // be removed, so committing it is a write whose sole effect is to be
-        // deleted a line later. Dropping it also stops it from riding into
-        // whatever the editor falls back to (#272).
-        if let Some(ui) = self.profiles_ui.as_mut() {
-            ui.editing = None;
-        }
         let Some(name) = self.profiles_ui.as_ref().map(|ui| ui.profile.clone()) else { return };
         if name == zest_config::profiles::RESERVED_PROFILE {
             return;
@@ -6197,6 +6189,14 @@ impl App {
             Ok(()) => {
                 self.reload_config();
                 if let Some(ui) = self.profiles_ui.as_mut() {
+                    // The one exit that discards rather than commits, and the
+                    // only one besides Esc: the table the buffer would be
+                    // written into has just been removed, so committing it is
+                    // a write with nowhere to land — and leaving it open would
+                    // carry it into Defaults on the next Enter, which is the
+                    // misplaced-write half of #272. Only on the success arm:
+                    // every path that deletes nothing must cost nothing.
+                    ui.editing = None;
                     ui.profile = zest_config::profiles::RESERVED_PROFILE.to_string();
                     ui.selected = 0;
                     ui.scroll = 0.0;
