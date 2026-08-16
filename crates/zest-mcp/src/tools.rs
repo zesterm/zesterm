@@ -602,11 +602,17 @@ fn opt_u16(args: &Value, field: &'static str) -> Result<Option<u16>, ToolError> 
     match opt_u32(args, field)? {
         None => Ok(None),
         Some(0) => Err(ToolError::BadType { field, want: "at least 1" }),
-        Some(n) if n > MAX_DIMENSION => {
-            Err(ToolError::BadType { field, want: "at most 1000" })
-        }
-        // Cannot fail: `MAX_DIMENSION` is well inside `u16`.
-        Some(n) => Ok(u16::try_from(n).ok()),
+        // One refusal for both ways of being too big, and the conversion's
+        // result is *used* rather than assumed. `u16::try_from(n).ok()` inside
+        // an `Ok` would spell a failed conversion as `Ok(None)` -- "the caller
+        // omitted this" -- which silently falls back to the default size. That
+        // is unreachable while `MAX_DIMENSION` is small, and it is exactly the
+        // shape this whole change exists to stop trusting: a `None` standing
+        // for two different things, one of which nobody meant.
+        Some(n) => match u16::try_from(n) {
+            Ok(n) if u32::from(n) <= MAX_DIMENSION => Ok(Some(n)),
+            _ => Err(ToolError::BadType { field, want: "at most 1000" }),
+        },
     }
 }
 
