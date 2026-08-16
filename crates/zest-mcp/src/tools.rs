@@ -575,19 +575,38 @@ fn opt_usize(args: &Value, field: &'static str) -> Result<Option<usize>, ToolErr
     Ok(opt_u32(args, field)?.map(|n| n as usize))
 }
 
-/// A terminal dimension, refused rather than wrapped.
+/// The largest grid a tool call may ask a host to allocate.
+///
+/// `u16` is the wire's bound, not a sane one: 65535 x 65535 is four billion
+/// cells, allocated eagerly by `Terminal::new` on the *far* machine, so a single
+/// tool call would be a local denial of service on somebody's laptop. The same
+/// reasoning as [`MAX_LINES_CEILING`] and [`MAX_TIMEOUT`] — every bound a model
+/// supplies needs a bound of its own — except that this one is spent on the
+/// host rather than in the response.
+///
+/// Well past any real display: a 4K screen at a tiny font is around 800x300.
+const MAX_DIMENSION: u32 = 1_000;
+
+/// A terminal dimension, refused rather than wrapped or quietly shrunk.
 ///
 /// `as u16` on a `u32` is silent: 100000 becomes 34464, and the caller gets a
 /// session at a size it never asked for with nothing to indicate why. A model
-/// can act on "must be between 1 and 65535"; it cannot act on a grid that is
+/// can act on "must be between 1 and 1000"; it cannot act on a grid that is
 /// quietly the wrong shape.
+///
+/// **Refused rather than clamped**, unlike `max_lines` and `timeout_ms`. Those
+/// bound a *response* and silently giving less is a coherent answer; a grid is
+/// structural, and a command whose output was laid out for a width it never got
+/// is wrong in a way no note in the payload repairs.
 fn opt_u16(args: &Value, field: &'static str) -> Result<Option<u16>, ToolError> {
     match opt_u32(args, field)? {
         None => Ok(None),
         Some(0) => Err(ToolError::BadType { field, want: "at least 1" }),
-        Some(n) => u16::try_from(n)
-            .map(Some)
-            .map_err(|_| ToolError::BadType { field, want: "at most 65535" }),
+        Some(n) if n > MAX_DIMENSION => {
+            Err(ToolError::BadType { field, want: "at most 1000" })
+        }
+        // Cannot fail: `MAX_DIMENSION` is well inside `u16`.
+        Some(n) => Ok(u16::try_from(n).ok()),
     }
 }
 
@@ -703,11 +722,24 @@ mod tests {
         let args = json!({ "cols": 100_000 });
         let err = opt_u16(&args, "cols").expect_err("100000 does not fit in a u16");
         assert!(
-            err.to_string().contains("at most 65535"),
+            err.to_string().contains("at most 1000"),
             "the refusal must say the bound, so a model can correct itself: {err}"
         );
 
+        // The wire's bound is not a sane one. 65535 fits a `u16` perfectly and
+        // is still four billion cells allocated on somebody else's laptop, so
+        // the type is not the limit that matters here.
+        assert!(
+            opt_u16(&json!({ "cols": 65_535 }), "cols").is_err(),
+            "a dimension a model can spend on a *host* needs a bound of its own, not \
+             merely one the wire can carry"
+        );
+
         assert_eq!(opt_u16(&json!({ "cols": 120 }), "cols").expect("fits"), Some(120));
+        assert_eq!(
+            opt_u16(&json!({ "cols": 1_000 }), "cols").expect("the ceiling itself is allowed"),
+            Some(1_000)
+        );
         assert!(
             opt_u16(&json!({ "cols": 0 }), "cols").is_err(),
             "a zero-column terminal is not a size; `clamp_size` would silently              make it 2 on the far side"

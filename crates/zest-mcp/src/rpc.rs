@@ -206,8 +206,8 @@ fn tool_definitions() -> Value {
                         "type": "integer",
                         "description": "Lines to return before truncating. Default 200, capped at 2000."
                     },
-                    "cols": { "type": "integer", "description": "Columns, 1-65535. Default 120." },
-                    "rows": { "type": "integer", "description": "Rows, 1-65535. Default 30." }
+                    "cols": { "type": "integer", "description": "Columns, 1-1000. Default 120." },
+                    "rows": { "type": "integer", "description": "Rows, 1-1000. Default 30." }
                 },
                 "required": ["command"]
             }
@@ -226,8 +226,8 @@ fn tool_definitions() -> Value {
                         "description": "What to run. Empty means the host's default shell."
                     },
                     "cwd": { "type": "string", "description": "Working directory on that host." },
-                    "cols": { "type": "integer", "description": "Columns, 1-65535. Default 120." },
-                    "rows": { "type": "integer", "description": "Rows, 1-65535. Default 30." }
+                    "cols": { "type": "integer", "description": "Columns, 1-1000. Default 120." },
+                    "rows": { "type": "integer", "description": "Rows, 1-1000. Default 30." }
                 }
             }
         },
