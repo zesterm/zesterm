@@ -4749,16 +4749,29 @@ impl App {
                     Some((info.addr, self.best_route(h)))
                 });
                 let Some((addr, route)) = target else { return };
-                self.screen = AppScreen::Terminal;
                 // Already open here: activate that tab rather than opening a
                 // second view of one session — the picker's rule, and the one
                 // that keeps a fleet card from quietly duplicating tabs.
-                if self.tabs.activate_addr(addr) {
+                // `after_activation` steps off a full-pane screen by itself.
+                let acted = if self.tabs.activate_addr(addr) {
                     self.after_activation();
+                    true
                 } else if let Some(route) = route {
+                    self.screen = AppScreen::Terminal;
                     self.spawn_tab_worker(route, Some(addr));
+                    true
+                } else {
+                    false
+                };
+                // Leaving the fleet screen is part of *acting*, never a
+                // consolation. A host can lose its route between the layout
+                // pass that drew this row and the click that lands on it, and
+                // dropping the user back to the terminal with nothing opened
+                // would take away the view they had and give nothing for it —
+                // the card arm above already refuses on the same grounds.
+                if acted {
+                    self.mark_chrome_dirty();
                 }
-                self.mark_chrome_dirty();
             }
             (HitRegion::FleetEnrollLocal, MouseButton::Left) => {
                 self.enroll_local_daemon();
