@@ -1135,6 +1135,41 @@ mod tests {
     }
 
     #[test]
+    fn a_text_row_takes_a_click_to_begin_editing() {
+        // #276 was filed on the belief that the profiles screen pushes no hit
+        // region for a value cell, making `command` keyboard-only. It does —
+        // through the SHARED `ss::draw_control`, which this screen borrows
+        // whole; the earlier survey only enumerated the regions pushed
+        // literally in this file and missed it. Pinned here rather than
+        // closed silently, so the claim cannot be made a third time.
+        let mut m = model(true);
+        m.rows.push(setting_row(
+            "command",
+            SettingsValueCell::Text {
+                text: "wsl.exe -d Ubuntu".into(),
+                placeholder: false,
+            },
+            false,
+        ));
+        m.chips.push(None);
+        let row = m.rows.len() - 1;
+        let l = lay(&m, 1100.0, 720.0);
+        // `any` rather than the neighbouring full scans: those collect several
+        // regions at once and have to see the whole screen, this one asks a
+        // single yes/no and short-circuits on the first hit.
+        let seen = (0..1100).step_by(2).any(|x| {
+            (46..766)
+                .step_by(2)
+                .any(|y| l.hit.hit(x as f32, y as f32) == Some(HitRegion::SettingsSelect(row)))
+        });
+        assert!(
+            seen,
+            "a text row must answer a click; the dispatch routes SettingsSelect \
+             to profiles_activate_selected, which opens the edit"
+        );
+    }
+
+    #[test]
     fn defaults_draws_no_delete_button() {
         // §12: Defaults has no Delete — the parent every profile falls
         // through to must not be one misclick from gone.
