@@ -596,50 +596,6 @@ pub fn rename_error(existing: &[String], from: &str, to: &str) -> Option<&'stati
     None
 }
 
-/// What leaving an open edit should do (#272).
-#[derive(Debug, Clone, PartialEq)]
-pub enum Pending {
-    /// Nothing was open; the caller may leave.
-    None,
-    /// Write this field, then leave.
-    Commit(usize, serde_json::Value),
-    /// The buffer does not parse. It stays open, flagged, and the caller must
-    /// NOT leave — a value that cannot be written must not be lost by looking
-    /// away from it.
-    Refused,
-}
-
-/// Take an open edit so the caller can write it.
-///
-/// Enter used to be the only thing that committed, so every other way out of a
-/// field — clicking the rail, Duplicate, closing the tab — dropped the buffer
-/// on the floor, and a pasted command path simply vanished (#272). Leaving a
-/// field is a commit; only Esc discards, and only Esc should.
-///
-/// Returns the parsed value rather than writing it because writing needs the
-/// config path and a reload, which live on `App` — and `App` has no tests. The
-/// decision belongs here, beside the tests that hold it.
-pub fn take_pending_edit(editing: &mut Option<EditBuffer>, fields: &[UiField]) -> Pending {
-    let Some(edit) = editing.as_mut() else { return Pending::None };
-    let idx = edit.field_idx;
-    // A buffer whose field index no longer names a field cannot be written and
-    // cannot be shown; keeping it open would trap the caller for ever.
-    let Some(field) = fields.get(idx) else {
-        *editing = None;
-        return Pending::None;
-    };
-    match settings_ui::parse_input(field, edit.buffer.text()) {
-        Some(value) => {
-            *editing = None;
-            Pending::Commit(idx, value)
-        }
-        None => {
-            edit.error = true;
-            Pending::Refused
-        }
-    }
-}
-
 /// TOML to JSON, structurally — the row builders speak `serde_json::Value`
 /// (the settings vocabulary), the resolver speaks `toml`.
 fn toml_to_json(value: &toml::Value) -> serde_json::Value {
@@ -661,6 +617,7 @@ fn toml_to_json(value: &toml::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings_ui::{take_pending_edit, Pending};
     use zest_config::profiles::resolve_profile;
 
     fn fields() -> Vec<UiField> {

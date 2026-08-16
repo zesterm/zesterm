@@ -286,10 +286,10 @@ struct ProfilesUiState {
 
 impl ProfilesUiState {
     /// Take an open edit so the caller can write it — see
-    /// [`crate::profiles_ui::take_pending_edit`] for why the decision lives
-    /// there and not here (#272).
-    fn take_pending_edit(&mut self) -> crate::profiles_ui::Pending {
-        crate::profiles_ui::take_pending_edit(&mut self.editing, &self.fields)
+    /// [`crate::settings_ui::take_pending_edit`], which both editors share
+    /// (#272, #275).
+    fn take_pending_edit(&mut self) -> crate::settings_ui::Pending {
+        crate::settings_ui::take_pending_edit(&mut self.editing, &self.fields)
     }
 
     /// Composed (IME) text, routed exactly like the Settings tab's: menu
@@ -4590,6 +4590,33 @@ impl App {
             }
             self.mark_chrome_dirty();
         }
+        // A click anywhere else in either editor is leaving the open field, so
+        // it commits first (#272, #275) — and stays put when the buffer cannot
+        // be written, which is what stops a stray click destroying it.
+        //
+        // One guard here rather than one per arm: the per-arm version is what
+        // let `Enter` become the only exit that wrote in the first place, and
+        // an arm added later inherits this instead of having to remember it.
+        // Menu regions are excluded on purpose — a dropdown is modal and owns
+        // its own keys, so a click inside it is not leaving anything.
+        let in_menu = matches!(
+            region,
+            HitRegion::SettingsMenuRow(_)
+                | HitRegion::SettingsMenuSearch
+                | HitRegion::SettingsMenuPanel
+                | HitRegion::SettingsMenuFooter
+        );
+        if !in_menu {
+            if self.settings_tab_active() && !self.settings_commit_edit() {
+                return;
+            }
+            // The name entry is its own control: clicking it is not leaving
+            // it, and committing here would close what the click is opening.
+            let on_name = region == HitRegion::ProfilesName;
+            if self.profiles_tab_active() && !on_name && !self.profiles_commit_edit() {
+                return;
+            }
+        }
         match (region, button) {
             (HitRegion::ApprovalApprove, MouseButton::Left) => self.decide_approval(true),
             (HitRegion::ApprovalDeny, MouseButton::Left) => self.decide_approval(false),
@@ -5146,6 +5173,12 @@ impl App {
     /// Close the Settings tab — its state lives as long as the tab (§11),
     /// so closing drops it; the keyboard returns to the session underneath.
     fn close_settings_tab(&mut self) {
+        // Closing the tab is leaving the field, so it commits (#275). Unlike
+        // every other exit it does NOT refuse on a buffer that will not parse:
+        // there would be nowhere left to show the warn border, and a ⌘W that
+        // silently declines to close is worse than dropping a value that could
+        // never have been written. The profiles tab settled this the same way.
+        let _ = self.settings_commit_edit();
         self.settings_ui = None;
         self.tabs.close_settings();
         self.after_activation();
@@ -5323,6 +5356,11 @@ impl App {
     /// Enter on the selected row: act on it the way its widget wants.
     fn activate_selected_setting(&mut self) {
         use zest_config::ui::Widget;
+        // Moving from one field to another is leaving the first one, so it
+        // commits like any other exit (#275).
+        if !self.settings_commit_edit() {
+            return;
+        }
         let Some(idx) = self.selected_settings_field() else { return };
         let Some(widget) = self
             .settings_ui
@@ -5470,6 +5508,11 @@ impl App {
             let field = ui.fields.get(field_idx)?;
             Some((field.key.clone(), crate::settings_ui::to_toml(field, &new_value)?))
         }) else {
+            // Unreachable while every widget the walk emits has a `to_toml`
+            // arm — which is exactly why it must not be a bare `return`. The
+            // next widget added without one would be a control that silently
+            // does nothing (#275, the profiles side's #272).
+            self.settings_report(format!("this setting cannot be written (field {field_idx})"));
             return;
         };
         // `config_file()` is None until the file exists — first-ever edit —
@@ -5496,6 +5539,53 @@ impl App {
             }
         }
         self.mark_chrome_dirty();
+    }
+
+    /// Say why nothing happened — the Settings tab's `profiles_report`.
+    fn settings_report(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        tracing::error!(reason = %message, "the settings editor wrote nothing");
+        self.settings_error = Some(message);
+        self.mark_chrome_dirty();
+    }
+
+    /// Commit an open settings edit, if there is one.
+    ///
+    /// `true` means the caller may proceed. `false` means a buffer is open and
+    /// does not parse (or an append was rejected): it stays on screen with its
+    /// warn border and the caller must NOT move — leaving would destroy it,
+    /// which is the whole of #275.
+    fn settings_commit_edit(&mut self) -> bool {
+        let pending = match self.settings_ui.as_mut() {
+            Some(ui) => crate::settings_ui::take_pending_edit(&mut ui.editing, &ui.fields),
+            None => return true,
+        };
+        match pending {
+            crate::settings_ui::Pending::None => true,
+            crate::settings_ui::Pending::Refused => {
+                self.mark_chrome_dirty();
+                false
+            }
+            crate::settings_ui::Pending::Commit(idx, value) => {
+                self.apply_edit(idx, value);
+                true
+            }
+            // The add-chip: `commit_list_append` owns the parse, because
+            // appending needs the list's current value. It leaves the buffer
+            // open, so success and failure are both settled here.
+            crate::settings_ui::Pending::Append(idx, text) => {
+                let took = self.commit_list_append(idx, &text);
+                if let Some(ui) = self.settings_ui.as_mut() {
+                    if took {
+                        ui.editing = None;
+                    } else if let Some(edit) = ui.editing.as_mut() {
+                        edit.error = true;
+                    }
+                }
+                self.mark_chrome_dirty();
+                took
+            }
+        }
     }
 
     /// Where an edit lands: the user's config file, existing or about to.
@@ -5535,13 +5625,18 @@ impl App {
     /// — a category is a fresh page, not a continuation.
     fn select_settings_category(&mut self, i: usize) {
         let Some(label) = self.visible_categories().get(i).cloned() else { return };
+        let moving = self.settings_ui.as_ref().is_some_and(|ui| ui.category != label);
+        // Commit before moving, and stay put if the buffer cannot be written:
+        // changing category used to drop it silently (#275).
+        if moving && !self.settings_commit_edit() {
+            return;
+        }
         if let Some(ui) = self.settings_ui.as_mut() {
             if ui.category != label {
                 ui.category = label;
                 ui.selected = 0;
                 ui.scroll = 0.0;
                 ui.scroll_to_selected = true;
-                ui.editing = None;
                 ui.menu = None;
             }
         }
@@ -5641,6 +5736,9 @@ impl App {
     /// appends.
     fn begin_list_add(&mut self, row: usize) {
         use zest_config::ui::Widget;
+        if !self.settings_commit_edit() {
+            return;
+        }
         let Some(idx) = self.settings_field_of_row(row) else { return };
         let Some(widget) =
             self.settings_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| f.widget)
@@ -6054,14 +6152,22 @@ impl App {
             None => return true,
         };
         match pending {
-            crate::profiles_ui::Pending::None => true,
-            crate::profiles_ui::Pending::Refused => {
+            crate::settings_ui::Pending::None => true,
+            crate::settings_ui::Pending::Refused => {
                 self.mark_chrome_dirty();
                 false
             }
-            crate::profiles_ui::Pending::Commit(idx, value) => {
+            crate::settings_ui::Pending::Commit(idx, value) => {
                 self.profiles_apply_edit(idx, value);
                 true
+            }
+            // Unreachable: the add-chip is a Settings affordance, and nothing
+            // in the profiles editor opens a buffer with `append` set. Said
+            // out loud rather than swallowed, because a §12 list field would
+            // otherwise arrive as an Enter that silently does nothing (#272).
+            crate::settings_ui::Pending::Append(idx, _) => {
+                self.profiles_report(format!("this field cannot be appended to (field {idx})"));
+                false
             }
         }
     }
@@ -9857,63 +9963,10 @@ impl ApplicationHandler<Wakeup> for App {
                                     ui.editing = None;
                                 }
                             }
+                            // Enter is now one exit among several rather
+                            // than the only one that commits (#275).
                             Key::Named(NamedKey::Enter) => {
-                                let edit = self.settings_ui.as_ref().and_then(|ui| {
-                                    let edit = ui.editing.as_ref()?;
-                                    Some((
-                                        edit.field_idx,
-                                        edit.buffer.text().to_string(),
-                                        edit.append,
-                                    ))
-                                });
-                                match edit {
-                                    // The add buffers append to the list;
-                                    // everything else replaces the value.
-                                    Some((idx, buffer, true)) => {
-                                        if self.commit_list_append(idx, &buffer) {
-                                            if let Some(ui) = self.settings_ui.as_mut() {
-                                                ui.editing = None;
-                                            }
-                                        } else if let Some(edit) = self
-                                            .settings_ui
-                                            .as_mut()
-                                            .and_then(|ui| ui.editing.as_mut())
-                                        {
-                                            edit.error = true;
-                                        }
-                                    }
-                                    Some((idx, buffer, false)) => {
-                                        let parsed = self
-                                            .settings_ui
-                                            .as_ref()
-                                            .and_then(|ui| ui.fields.get(idx))
-                                            .and_then(|field| {
-                                                crate::settings_ui::parse_input(field, &buffer)
-                                            });
-                                        match parsed {
-                                            Some(value) => {
-                                                if let Some(ui) = self.settings_ui.as_mut() {
-                                                    ui.editing = None;
-                                                }
-                                                self.apply_edit(idx, value);
-                                            }
-                                            // A failed parse keeps the buffer
-                                            // and marks it: silently dropping
-                                            // typed input reads as a broken
-                                            // Enter key.
-                                            None => {
-                                                if let Some(edit) = self
-                                                    .settings_ui
-                                                    .as_mut()
-                                                    .and_then(|ui| ui.editing.as_mut())
-                                                {
-                                                    edit.error = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    None => {}
-                                }
+                                self.settings_commit_edit();
                             }
                             _ => {}
                         }
@@ -11659,7 +11712,7 @@ mod profiles_edit_tests {
         open(&mut ui, idx, "/opt/homebrew/bin/fish");
         assert_eq!(
             ui.take_pending_edit(),
-            crate::profiles_ui::Pending::Commit(
+            crate::settings_ui::Pending::Commit(
                 idx,
                 serde_json::Value::String("/opt/homebrew/bin/fish".into()),
             ),
