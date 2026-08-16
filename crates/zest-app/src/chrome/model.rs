@@ -306,6 +306,35 @@ pub struct FleetCard {
     /// while the app is signed in, the window's daemon is the real loopback
     /// one, and the account does not yet list this machine.
     pub enroll: Option<FleetEnroll>,
+    /// What is running on this machine, one row each (#287).
+    ///
+    /// The ⌘K picker could attach to a remote session before the screen that
+    /// exists to *show you the fleet* could. Empty for a host that has told us
+    /// nothing — which is not the same as a host with no sessions, and the
+    /// `sessions` count row above is what distinguishes them.
+    pub sessions: Vec<FleetSessionRow>,
+    /// How many sessions the list left out.
+    ///
+    /// A card is a summary, not an inventory: a machine running thirty shells
+    /// would otherwise make every card in the grid thirty rows tall, since the
+    /// grid is uniform-height. The drawn "+N more" row says so out loud and
+    /// points at ⌘K, which does hold them all — a cap nobody is told about is
+    /// a card that quietly lies about what is running.
+    pub sessions_hidden: usize,
+}
+
+/// One session on a fleet card, ready to click.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FleetSessionRow {
+    pub title: String,
+    /// The working directory, home-shortened for this machine only — another
+    /// machine's home is unknowable from here.
+    pub detail: String,
+    /// A client is attached to it somewhere, not necessarily this one.
+    pub attached: bool,
+    /// This window already holds it: clicking activates that tab rather than
+    /// opening a second view of one session.
+    pub here: bool,
 }
 
 /// The enroll button, as drawn: its caption, and whether it answers —

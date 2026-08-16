@@ -9,7 +9,7 @@
 use zest_render_wgpu::{LinearRgba, RectInstance};
 
 use super::hit::HitRegion;
-use super::layout::{ChromeLayout, TextRun};
+use super::layout::{intersect, ChromeLayout, TextRun};
 use super::model::{
     FleetAccountAction, FleetAccountModel, FleetCard, FleetDeviceAction, FleetDevicesModel,
     ScreenModel, SettingsValueCell, ThemeCard,
@@ -430,10 +430,18 @@ fn fleet(
     let avail = area[2] - 2.0 * PAD_X * s;
     let (ncols, card_w) = grid_columns(avail, FLEET_CARD_MIN * s, FLEET_GAP * s);
 
-    // Card height is uniform: enough for a header and four rows. Uneven
-    // heights would need a measure pass nothing else wants yet — and the
-    // devices section below needs to know where the grid ends.
-    let card_h = (46.0 + 4.0 * 18.0 + 14.0) * s;
+    // Card height is uniform, and now sized to the *tallest* card rather than
+    // to a constant four rows (#287): session rows made the old constant clip.
+    // Uniform rather than masonry because the grid is a plain row/column
+    // walk and the devices section below needs to know where it ends — and
+    // because a grid of ragged cards reads worse than a grid of even ones.
+    let tallest = cards
+        .iter()
+        .map(|c| c.rows.len() + c.sessions.len() + usize::from(c.sessions_hidden > 0))
+        .max()
+        .unwrap_or(0)
+        .max(4);
+    let card_h = (46.0 + tallest as f32 * 18.0 + 14.0) * s;
     let card_rows = cards.len().div_ceil(ncols.max(1));
     let cards_end = top + card_rows as f32 * (card_h + FLEET_GAP * s);
     if let Some(devices) = devices {
@@ -591,6 +599,92 @@ fn fleet(
                 tracking: 0.0,
             });
             ry += 18.0 * s;
+        }
+
+        // What is running there (#287). The ⌘K picker could attach to a
+        // remote session before the screen that exists to show you the fleet
+        // could; these rows close that.
+        for (j, session) in card.sessions.iter().enumerate() {
+            let row = [hx, ry, card_w - 2.0 * CARD_PAD * s, 18.0 * s];
+            // No hover wash: this screen draws none on the cards either, and
+            // adding one here alone would make a session row look like the
+            // only live thing on a card that is entirely clickable.
+            //
+            // Same gate as the card itself: no route, no click. A session row
+            // that must fail to dial is the affordance rule inverted.
+            if card.open {
+                if let Some(hit) = intersect(row, area) {
+                    out.hit.push(hit, HitRegion::FleetSession(i, j));
+                }
+            }
+
+            let px = 11.5 * s;
+            // A dot that says whether anyone is looking at it: `here` is this
+            // window, `attached` is somebody. Colour is the *glance*, never the
+            // fact — the title carries "this window" in words, exactly as the
+            // ⌘K picker's session rows do, so the state survives a reader who
+            // cannot tell the accent from the success colour.
+            let dot_d = 5.0 * s;
+            let ink = if session.here {
+                colors.accent
+            } else if session.attached {
+                colors.success
+            } else {
+                colors.text_faint
+            };
+            out.rects.push(RectInstance::rounded(
+                [hx, ry + px / 2.0, dot_d, dot_d],
+                dot_d / 2.0,
+                ink,
+                area,
+            ));
+
+            let tx = hx + dot_d + 7.0 * s;
+            let title = if session.here {
+                format!("{} \u{b7} this window", session.title)
+            } else {
+                session.title.clone()
+            };
+            let tw = measure(&title, px, false, 0.0);
+            out.texts.push(TextRun {
+                text: title,
+                pos: [tx, ry + px],
+                max_width: (card_w * 0.45).min(tw + 2.0),
+                color: if card.online { colors.text_inactive } else { colors.text_faint },
+                clip: area,
+                px,
+                bold: false,
+                tracking: 0.0,
+            });
+            if !session.detail.is_empty() {
+                let dw = measure(&session.detail, px, false, 0.0);
+                out.texts.push(TextRun {
+                    text: session.detail.clone(),
+                    pos: [cx + card_w - CARD_PAD * s - dw, ry + px],
+                    max_width: dw + 2.0,
+                    color: colors.text_faint,
+                    clip: area,
+                    px,
+                    bold: false,
+                    tracking: 0.0,
+                });
+            }
+            ry += 18.0 * s;
+        }
+        if card.sessions_hidden > 0 {
+            // The cap, said out loud, pointing at the surface that holds them
+            // all. A card is a summary; ⌘K is the inventory.
+            let px = 11.0 * s;
+            out.texts.push(TextRun {
+                text: format!("+{} more \u{b7} \u{2318}K", card.sessions_hidden),
+                pos: [hx, ry + px],
+                max_width: card_w - 2.0 * CARD_PAD * s,
+                color: colors.text_faint,
+                clip: area,
+                px,
+                bold: false,
+                tracking: 0.0,
+            });
         }
     }
 }
@@ -796,6 +890,7 @@ fn themes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::model::FleetSessionRow;
     use crate::chrome::model::ThemeCard;
 
     fn colors() -> ChromeColors {
@@ -852,6 +947,178 @@ mod tests {
         assert_eq!(seen.len(), n, "every theme card must answer as itself");
     }
 
+    /// A card carrying `sessions` sessions and hiding `hidden` more.
+    fn card_with(open: bool, sessions: usize, hidden: usize) -> FleetCard {
+        named_card("forge", open, sessions, hidden)
+    }
+
+    fn named_card(name: &str, open: bool, sessions: usize, hidden: usize) -> FleetCard {
+        FleetCard {
+            name: name.into(),
+            local: false,
+            online: true,
+            pill: None,
+            open,
+            rows: vec![
+                ("os".into(), "Linux 6.8.0-31-generic".into(), 0),
+                ("key".into(), "1f2a3b4c".into(), 0),
+            ],
+            enroll: None,
+            sessions: (0..sessions)
+                .map(|i| FleetSessionRow {
+                    title: format!("shell{i}"),
+                    detail: "/src".into(),
+                    attached: i == 0,
+                    here: false,
+                })
+                .collect(),
+            sessions_hidden: hidden,
+        }
+    }
+
+    fn fleet_layout(cards: Vec<FleetCard>) -> ([f32; 4], ChromeLayout) {
+        let area = [0.0, 46.0, 1200.0, 700.0];
+        let mut out = ChromeLayout::default();
+        screen_overlay(
+            &ScreenModel::Fleet {
+                account: FleetAccountModel {
+                    line: "signed in as andy".into(),
+                    action: FleetAccountAction::SignOut,
+                    second: FleetAccountAction::None,
+                    entry: None,
+                    error: None,
+                },
+                cards,
+                devices: None,
+            },
+            area,
+            &colors(),
+            None,
+            1.0,
+            &mut measure,
+            &mut out,
+        );
+        (area, out)
+    }
+
+    #[test]
+    fn a_cards_sessions_are_drawn_and_answer_as_themselves() {
+        // #287: the ⌘K picker could attach to a remote session before the
+        // screen that exists to *show you the fleet* could.
+        let (_, out) = fleet_layout(vec![card_with(true, 3, 0)]);
+
+        for i in 0..3 {
+            assert!(
+                out.texts.iter().any(|t| t.text == format!("shell{i}")),
+                "session {i} is drawn"
+            );
+        }
+        let mut seen = std::collections::HashSet::new();
+        for x in (0..1200).step_by(2) {
+            for y in (46..746).step_by(2) {
+                if let Some(HitRegion::FleetSession(c, j)) = out.hit.hit(x as f32, y as f32) {
+                    assert_eq!(c, 0, "one card");
+                    seen.insert(j);
+                }
+            }
+        }
+        assert_eq!(seen.len(), 3, "each session answers as itself: {seen:?}");
+    }
+
+    #[test]
+    fn a_session_this_window_holds_says_so_in_words() {
+        // The dot is the glance; the words are the fact. Colour alone would
+        // put "is this the tab I already have open" out of reach of a reader
+        // who cannot tell the accent from the success colour — and the ⌘K
+        // picker already spells it out, so two surfaces showing one state must
+        // not disagree about how.
+        let mut card = card_with(true, 2, 0);
+        card.sessions[0].here = true;
+        let (_, out) = fleet_layout(vec![card]);
+        assert!(
+            out.texts.iter().any(|t| t.text == "shell0 · this window"),
+            "the held session names itself in words: {:?}",
+            out.texts.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
+        assert!(
+            out.texts.iter().any(|t| t.text == "shell1"),
+            "and one nobody here holds is just its title"
+        );
+    }
+
+    #[test]
+    fn sessions_on_an_unroutable_card_are_drawn_and_take_no_hit_region() {
+        // The affordance rule the card itself already obeys: no route, no
+        // click. Drawn anyway, because "what is running over there" is worth
+        // knowing even when we cannot reach it right now — it is a fact, not
+        // a button.
+        let (_, out) = fleet_layout(vec![card_with(false, 2, 0)]);
+        assert!(
+            out.texts.iter().any(|t| t.text == "shell0"),
+            "the sessions are still drawn — they are facts about the machine"
+        );
+        for x in (0..1200).step_by(2) {
+            for y in (46..746).step_by(2) {
+                assert!(
+                    !matches!(out.hit.hit(x as f32, y as f32), Some(HitRegion::FleetSession(..))),
+                    "an unroutable card must offer no session to click"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_capped_session_list_says_how_many_it_left_out() {
+        // The grid is uniform-height, so a machine running thirty shells
+        // would make every card thirty rows tall. A cap nobody is told about
+        // is a card that quietly lies about what is running.
+        let (_, out) = fleet_layout(vec![card_with(true, 4, 26)]);
+        assert!(
+            out.texts.iter().any(|t| t.text.starts_with("+26 more")),
+            "the overflow is stated, and points at ⌘K: {:?}",
+            out.texts.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn the_card_grid_grows_to_fit_its_tallest_card() {
+        // Card height was a constant four rows and session rows made it clip.
+        //
+        // **Asserting "more text is drawn lower down" does not catch that**,
+        // which is how the first version of this test passed against the very
+        // constant it was meant to fail: rows clip to the *page*, not to the
+        // card, so a card too short for its contents does not truncate — it
+        // spills over whatever the grid puts underneath it. Everything is
+        // still drawn and still findable.
+        //
+        // So the assertion has to be about the grid: with enough cards to wrap
+        // to a second row, a card on that second row must begin *below* the
+        // last session of the card above it. That is false exactly when the
+        // height is a constant.
+        let mut cards = vec![named_card("tall", true, 6, 0)];
+        for i in 1..6 {
+            cards.push(named_card(&format!("m{i}"), true, 0, 0));
+        }
+        let (area, out) = fleet_layout(cards);
+        let (ncols, _) = grid_columns(area[2] - 2.0 * PAD_X, FLEET_CARD_MIN, FLEET_GAP);
+        assert!(ncols < 6, "precondition: six cards must wrap, got {ncols} columns");
+
+        let y_of = |text: &str| {
+            out.texts
+                .iter()
+                .find(|t| t.text == text)
+                .unwrap_or_else(|| panic!("{text} is drawn"))
+                .pos[1]
+        };
+        let last_session = y_of("shell5");
+        let second_row = y_of(&format!("m{ncols}"));
+        assert!(
+            second_row > last_session,
+            "a second-row card must start below the first row's deepest content — \
+             card at m{ncols} is at {second_row}, the tall card's last session at {last_session}"
+        );
+    }
+
     #[test]
     fn the_enroll_button_answers_only_while_clickable() {
         // Issue #227: the local card offers "Enroll this machine". Clickable,
@@ -878,6 +1145,8 @@ mod tests {
                 label: if clickable { "Enroll this machine" } else { "enrolling…" }.into(),
                 clickable,
             }),
+            sessions: Vec::new(),
+            sessions_hidden: 0,
         };
         let area = [0.0, 46.0, 1200.0, 700.0];
 

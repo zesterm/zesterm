@@ -116,6 +116,11 @@ pub enum HitRegion {
     /// One host card of the fleet view; clicking opens a fresh shell on
     /// that machine. Pushed only for cards with a live route.
     FleetCard(usize),
+    /// One session row on a fleet card — `(card, row)` (#287). Clicking
+    /// attaches to it, or activates the tab already holding it. Pushed only
+    /// for cards with a live route, like the card itself: a row that must
+    /// fail to dial is the affordance rule inverted.
+    FleetSession(usize, usize),
     /// A devices-section row's button, by row index. One region for both
     /// verbs: whether the click approves or vouches is the row's state
     /// (`FleetDeviceAction`), decided where the row was built — the same
@@ -338,6 +343,7 @@ pub fn wheel_target(hit: Option<HitRegion>, pane_focus_right: Option<bool>) -> W
         | R::ScreenPanel
         | R::ThemeCard(_)
         | R::FleetCard(_)
+        | R::FleetSession(_, _)
         | R::FleetApproveDevice(_)
         | R::FleetSignIn
         | R::FleetLinkStart

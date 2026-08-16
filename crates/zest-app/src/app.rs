@@ -45,6 +45,14 @@ const STARTUP_BUDGET_MS: u64 = 100;
 /// is already running and finding it is a `connect` call.
 pub(crate) const DAEMON_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How many sessions one fleet card lists before it says "+N more".
+///
+/// The grid is uniform-height, so one machine running thirty shells would make
+/// every card in it thirty rows tall. Four is enough to recognise what is on a
+/// machine; the count row above it states the real total, and the overflow row
+/// points at ⌘K, which holds them all.
+const FLEET_CARD_SESSIONS: usize = 4;
+
 pub struct Config {
     pub font_families: Vec<String>,
     pub typography: Typography,
@@ -2529,7 +2537,36 @@ impl App {
                         // presence to be `Online` in.
                         let online = h.is_online();
                         let mut rows: Vec<(String, String, u8)> = Vec::new();
-                        // Only what is actually known: an os row we cannot
+                        // The `os` row design §7 asks for, filled at last
+                        // (#287). It was absent because nothing could answer
+                        // it — `Welcome { host, label }` was the whole
+                        // description of a machine — and the rule that kept
+                        // it absent still holds: a host that has told us
+                        // nothing gets no row, rather than a dash pretending
+                        // to be a fact.
+                        //
+                        // `os_version` first, because it carries the kernel's
+                        // *name* as well as its release (`Darwin 24.5.0`) —
+                        // `os` is `std::env::consts::OS`, which says `macos`
+                        // where the design's card says `Darwin`.
+                        //
+                        // Falling back to `os` rather than dropping the row:
+                        // Windows publishes an empty `os_version` today (the
+                        // API is there, the dependency to read it is not), and
+                        // `windows` is a poorer row than `Windows 10.0.22631`
+                        // but a far better one than nothing. Both empty is a
+                        // host that has told us nothing, and gets no row.
+                        if let Some(offer) = h.offer.as_ref() {
+                            let os = if offer.os_version.is_empty() {
+                                offer.os.clone()
+                            } else {
+                                offer.os_version.clone()
+                            };
+                            if !os.is_empty() {
+                                rows.push(("os".into(), os, 0));
+                            }
+                        }
+                        // Only what is actually known: a path row we cannot
                         // fill would be a dash pretending to be a fact.
                         match h.reachability {
                             Some(zest_mesh::Reachability::Loopback) => {
@@ -2598,11 +2635,53 @@ impl App {
                             }
                         }
                         rows.push(("key".into(), h.host.short(), 0));
-                        if let SessionsState::Fresh(sessions) = &h.sessions {
-                            let n = sessions.len();
-                            let label =
-                                if n == 1 { "1 session".into() } else { format!("{n} sessions") };
-                            rows.push(("sessions".into(), label, 0));
+                        // Session rows for every reachable machine, not just
+                        // this one (#265 fetches them, #287 draws them).
+                        let mut session_rows = Vec::new();
+                        let mut hidden = 0;
+                        match &h.sessions {
+                            SessionsState::Fresh(sessions) => {
+                                let n = sessions.len();
+                                let label = if n == 1 {
+                                    "1 session".into()
+                                } else {
+                                    format!("{n} sessions")
+                                };
+                                rows.push(("sessions".into(), label, 0));
+                                hidden = n.saturating_sub(FLEET_CARD_SESSIONS);
+                                session_rows = sessions
+                                    .iter()
+                                    .take(FLEET_CARD_SESSIONS)
+                                    .map(|info| {
+                                        let title = info.title.trim();
+                                        crate::chrome::model::FleetSessionRow {
+                                            title: if title.is_empty() {
+                                                "shell".into()
+                                            } else {
+                                                title.to_string()
+                                            },
+                                            // Home-shortened for this machine
+                                            // only — another machine's home is
+                                            // unknowable from here.
+                                            detail: if h.local {
+                                                crate::status::shorten_home(&info.cwd)
+                                            } else {
+                                                info.cwd.clone()
+                                            },
+                                            attached: info.attached,
+                                            here: self.tabs.iter().any(|t| t.addr == info.addr),
+                                        }
+                                    })
+                                    .collect();
+                            }
+                            // A dial that keeps failing read exactly like a
+                            // machine nobody had asked about. Say which.
+                            SessionsState::Failed(message) => {
+                                rows.push(("sessions".into(), clip_row(message), 2));
+                            }
+                            // Never asked, or asked and still waiting: no row
+                            // at all, because "0 sessions" would be a claim.
+                            SessionsState::Unknown | SessionsState::Fetching => {}
                         }
                         FleetCard {
                             name: h.label.clone(),
@@ -2619,6 +2698,8 @@ impl App {
                             open: self.best_route(h).is_some(),
                             rows,
                             enroll,
+                            sessions: session_rows,
+                            sessions_hidden: hidden,
                         }
                     })
                     .collect();
@@ -4719,6 +4800,46 @@ impl App {
                 // No route: the card drew without a hit region, so this arm
                 // is only reachable by a click racing a snapshot change —
                 // ignoring it is the honest answer.
+            }
+            (HitRegion::FleetSession(i, j), MouseButton::Left) => {
+                // Attach to what is already running there (#287) — the ⌘K
+                // picker's `Attach` arm, reached from the screen that shows
+                // you the fleet. Resolved against the retained snapshot the
+                // card indices were built from, exactly as the card above is.
+                //
+                // The listing is re-read rather than trusted from the drawn
+                // row, because the card is redrawn on every fleet change and
+                // a click can land a frame behind one: an index into a stale
+                // list would attach to a neighbouring session.
+                let target = self.fleet_view.get(i).and_then(|h| {
+                    let crate::fleet::SessionsState::Fresh(sessions) = &h.sessions else { return None };
+                    let info = sessions.get(j)?;
+                    Some((info.addr, self.best_route(h)))
+                });
+                let Some((addr, route)) = target else { return };
+                // Already open here: activate that tab rather than opening a
+                // second view of one session — the picker's rule, and the one
+                // that keeps a fleet card from quietly duplicating tabs.
+                // `after_activation` steps off a full-pane screen by itself.
+                let acted = if self.tabs.activate_addr(addr) {
+                    self.after_activation();
+                    true
+                } else if let Some(route) = route {
+                    self.screen = AppScreen::Terminal;
+                    self.spawn_tab_worker(route, Some(addr));
+                    true
+                } else {
+                    false
+                };
+                // Leaving the fleet screen is part of *acting*, never a
+                // consolation. A host can lose its route between the layout
+                // pass that drew this row and the click that lands on it, and
+                // dropping the user back to the terminal with nothing opened
+                // would take away the view they had and give nothing for it —
+                // the card arm above already refuses on the same grounds.
+                if acted {
+                    self.mark_chrome_dirty();
+                }
             }
             (HitRegion::FleetEnrollLocal, MouseButton::Left) => {
                 self.enroll_local_daemon();
