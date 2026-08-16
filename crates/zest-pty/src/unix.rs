@@ -357,11 +357,22 @@ impl PtyTransport for UnixPty {
     /// probes before it checks the deadline — so this reaps an exited child
     /// without ever blocking on a live one.
     ///
+    /// **`try_lock`, because `lock` would break the non-blocking contract in
+    /// exactly the case this is called in.** `hangup_child` holds this mutex
+    /// across `HANGUP_GRACE` and then `KILL_GRACE` while it escalates, and the
+    /// daemon asks for the exit code from `Connection::poll` — which serves
+    /// *every* session on that connection, so blocking here would stall
+    /// unrelated sessions' updates behind one that is being closed.
+    /// Contention means "no status yet", which the caller already handles: the
+    /// daemon re-sends `Exited` on every pass, so a contended read is deferred
+    /// rather than lost, and `hangup_child` reaps on its way out so the next
+    /// call finds an answer waiting.
+    ///
     /// `std::process::Child` caches the status once it has reaped, so calling
     /// this after `hangup` has already waited still answers rather than
     /// reporting the child as running for ever.
     fn exit_code(&self) -> Option<i32> {
-        let mut child = self.child.lock().ok()?;
+        let mut child = self.child.try_lock().ok()?;
         match wait_locked(&mut child, Some(std::time::Duration::ZERO)) {
             ChildStatus::Exited(code) => Some(code as i32),
             ChildStatus::StillRunning => None,

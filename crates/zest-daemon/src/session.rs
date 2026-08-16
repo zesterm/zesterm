@@ -106,11 +106,11 @@ pub struct Session {
     ever_attached: Arc<AtomicBool>,
     /// The child's status, once anyone has asked for it and it was available.
     ///
-    /// Memoized rather than read afresh, because reading it takes the pty's
-    /// child mutex and `hangup` holds that one for up to its two grace periods
-    /// while it escalates. `Connection::poll` asks on every pass for as long as
-    /// an exited session stays attached, so without this a routine poll could
-    /// wait on a session that is being closed. Once known it is never re-read.
+    /// Memoized because `Connection::poll` asks on every pass for as long as an
+    /// exited session stays attached, and the answer cannot change once it
+    /// exists. The transport is what guarantees the *ask* is cheap — it may not
+    /// block, and answers `None` rather than waiting — so this is about not
+    /// re-doing settled work, not about avoiding a stall.
     exit_code: Arc<Mutex<Option<i32>>>,
     title: Arc<Mutex<String>>,
 }

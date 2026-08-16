@@ -407,6 +407,14 @@ pub trait PtyTransport: Send {
     /// say" and is deliberately not the same as zero — a green `exit 0` on a
     /// command that failed is worse than no answer at all.
     ///
+    /// Non-blocking is a **contract, not an aspiration**: the daemon asks from
+    /// its poll loop, which serves every session on a connection, so an
+    /// implementation that waits on a lock stalls sessions that have nothing to
+    /// do with the one being asked about. An implementation that cannot answer
+    /// without waiting must return `None` and let the caller ask again — which
+    /// is always safe, because `Exited` is re-sent on every pass rather than
+    /// once, so a deferred answer is deferred and not lost.
+    ///
     /// Safe to call repeatedly. Both implementations answer from a status the
     /// OS keeps after the child is reaped rather than by waiting again, so a
     /// second call cannot block and cannot lose the answer the first one got.
