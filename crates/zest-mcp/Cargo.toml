@@ -8,6 +8,10 @@ repository.workspace = true
 authors.workspace = true
 description = "An MCP server that is a client of the zesterm daemon"
 
+[[bin]]
+name = "zest-mcp"
+path = "src/main.rs"
+
 [dependencies]
 # The wire types, and `Applier` -- the client-side state machine that turns
 # keyframes and deltas into a grid.
@@ -27,6 +31,7 @@ zest-mesh.workspace = true
 # mutex; see `conn.rs`.
 crossbeam-channel = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 # The tool surface is JSON in and JSON out; the transport that carries it is one
 # module away and adds nothing to the shapes.
 serde = { workspace = true }
