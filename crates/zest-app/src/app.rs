@@ -94,6 +94,15 @@ pub struct Config {
     /// the view away. It exists because a minority genuinely prefer never
     /// missing live output.
     pub scroll_on_output: bool,
+    /// Jump back to the bottom when a key is pressed.
+    ///
+    /// Typing only. A block re-run and a paste jump regardless: they are things
+    /// the user deliberately did to the *session*, and someone who turned this
+    /// off asked not to be yanked away while typing, not to watch a command
+    /// they started scroll past somewhere off screen.
+    pub scroll_on_keypress: bool,
+    /// Rows the view moves per wheel notch.
+    pub lines_per_notch: usize,
 }
 
 impl From<&zest_config::Settings> for Config {
@@ -148,6 +157,10 @@ impl From<&zest_config::Settings> for Config {
             cursor_blink: s.cursor.blink,
             cursor_blink_interval_ms: s.cursor.blink_interval_ms.clamp(100, 5000) as u32,
             scroll_on_output: s.scrolling.scroll_on_output,
+            scroll_on_keypress: s.scrolling.scroll_on_keypress,
+            // Clamped to the schema's own range: a hand-edited `0` would make
+            // the wheel do nothing at all, which reads as a broken mouse.
+            lines_per_notch: s.scrolling.lines_per_notch.clamp(1, 50),
         }
     }
 }
@@ -3585,7 +3598,12 @@ impl App {
                     // that reads paste-mode treat a composed word as pasted.
                     session.write(text.into_bytes());
                     let mut term = session.terminal().lock();
-                    term.scroll_to_bottom();
+                    // Same gate as a physical keystroke: the comment above says
+                    // this *is* typing, so it has to honour the typing setting
+                    // or an input method is the one way to be yanked back.
+                    if self.config.scroll_on_keypress {
+                        term.scroll_to_bottom();
+                    }
                     term.set_selection(None);
                 }
             }
@@ -10559,9 +10577,14 @@ impl ApplicationHandler<Wakeup> for App {
                     session.write(bytes);
                     let mut term = session.terminal().lock();
                     // Typing scrolls back to the bottom, which is what every
-                    // terminal does and what users expect.
-                    term.scroll_to_bottom();
-                    // ...and clears the selection, which is now stale.
+                    // terminal does and what users expect -- unless they asked
+                    // it not to, which is the whole point of the setting.
+                    if self.config.scroll_on_keypress {
+                        term.scroll_to_bottom();
+                    }
+                    // ...and clears the selection, which is now stale. Not
+                    // gated: a selection made before this keystroke is stale
+                    // wherever the view happens to be sitting.
                     term.set_selection(None);
                 }
             }
@@ -10921,7 +10944,12 @@ impl ApplicationHandler<Wakeup> for App {
                 // and `man` expect the wheel as arrow keys, so scrolling our own
                 // (empty) history would look like the wheel doing nothing.
                 let alt = session.terminal().lock().modes().contains(zest_core::Modes::ALT_SCREEN);
-                let count = whole.abs() as usize * 3;
+                // One source for both branches below. They used to be two
+                // literal `3`s, which is how the alt-screen translation and
+                // the scrollback move could have ended up scrolling at
+                // different speeds the first time either was touched.
+                let rows = wheel_rows(whole, self.config.lines_per_notch);
+                let count = rows.unsigned_abs();
                 let up = whole > 0.0;
 
                 if self.forward_wheel(up, count) {
@@ -10937,7 +10965,7 @@ impl ApplicationHandler<Wakeup> for App {
                     return;
                 }
 
-                session.terminal().lock().scroll_display(whole as isize * 3);
+                session.terminal().lock().scroll_display(rows);
                 session.mark_dirty();
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
@@ -11419,6 +11447,19 @@ fn pane_opacity(window: f32, identity: Option<&crate::tabs::ProfileIdentity>) ->
     identity.and_then(|i| i.opacity).map_or(window, |o| o.clamp(0.0, 1.0))
 }
 
+/// Rows one wheel gesture moves: whole notches times `scrolling.lines_per_notch`.
+///
+/// Signed, because the sign is the direction and both consumers need it — the
+/// scrollback move takes it as-is, and the alternate screen sends that many
+/// arrow keys. Extracted so there is exactly one answer: the two used to be
+/// separate literals, and a wheel that scrolled `less` at a different rate to
+/// history is the kind of thing nobody reports and everybody feels.
+fn wheel_rows(notches: f32, per_notch: usize) -> isize {
+    // Saturating, not wrapping: `notches` comes from a trackpad's accumulated
+    // delta, and a synthetic or absurd event must not scroll the wrong way.
+    (notches as isize).saturating_mul(per_notch.max(1) as isize)
+}
+
 /// `zest-theme` and `zest-core` deliberately do not depend on each other, so the
 /// app owns this conversion.
 fn to_core_palette(r: &zest_theme::ResolvedPalette) -> zest_core::PaletteSnapshot {
@@ -11639,6 +11680,53 @@ mod fleet_device_row_tests {
         let rows = fleet_device_rows(&[device(3, "studio-app", "desktop", true)], None);
         assert_eq!(rows[0].action, FleetDeviceAction::Vouch);
         assert_eq!(rows[0].detail, "desktop · approved");
+    }
+}
+
+#[cfg(test)]
+mod scrolling_tests {
+    use super::{wheel_rows, Config};
+
+    fn config_with(lines_per_notch: usize, scroll_on_keypress: bool) -> Config {
+        let mut s = zest_config::Settings::default();
+        s.scrolling.lines_per_notch = lines_per_notch;
+        s.scrolling.scroll_on_keypress = scroll_on_keypress;
+        Config::from(&s)
+    }
+
+    #[test]
+    fn a_notch_moves_the_configured_number_of_rows() {
+        assert_eq!(wheel_rows(1.0, 1), 1);
+        assert_eq!(wheel_rows(1.0, 3), 3, "the shipped default, unchanged");
+        assert_eq!(wheel_rows(1.0, 10), 10);
+        assert_eq!(wheel_rows(2.0, 10), 20, "two notches in one event still scale");
+    }
+
+    #[test]
+    fn the_sign_is_the_direction_and_survives_scaling() {
+        // Both consumers need it: the scrollback move takes it as-is, and the
+        // alternate screen picks its arrow key from it.
+        assert_eq!(wheel_rows(-1.0, 5), -5);
+        assert_eq!(wheel_rows(-3.0, 3), -9);
+        assert_eq!(wheel_rows(1.0, 5).unsigned_abs(), wheel_rows(-1.0, 5).unsigned_abs());
+    }
+
+    #[test]
+    fn a_zero_step_still_scrolls() {
+        // `Config::from` clamps to the schema's 1..=50, and the helper floors at
+        // 1 again. A hand-edited `0` reaching either would be a wheel that does
+        // nothing at all, which reads as a broken mouse rather than a setting.
+        assert_eq!(config_with(0, true).lines_per_notch, 1);
+        assert_eq!(wheel_rows(1.0, 0), 1);
+        assert_eq!(config_with(9_000, true).lines_per_notch, 50);
+    }
+
+    #[test]
+    fn scroll_on_keypress_reaches_the_config() {
+        // The flag the two typing sites read. Its default is on, because that
+        // is what every terminal does.
+        assert!(Config::default().scroll_on_keypress, "on by default, as everywhere");
+        assert!(!config_with(3, false).scroll_on_keypress);
     }
 }
 

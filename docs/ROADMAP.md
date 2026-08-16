@@ -710,6 +710,21 @@ entry stay). The resulting work items, measurements in the handoff README — **
       and font pills open it too, instead of silently cycling. The theme
       gallery (screen 8) stays, one click away behind a `Browse all themes…`
       footer. `ValuePickerState` and its palette reuse are gone.
+- [x] **The wheel and the keyboard read their own settings**
+      ([#301](https://github.com/zesterm/zesterm/issues/301)). First of the
+      sweep to empty `NOT_YET_WIRED` — 17 keys the schema declares, the
+      settings screen tags "not applied yet", and nothing consumes.
+      `scrolling.lines_per_notch` was two separate literal `3`s, one for the
+      scrollback move and one for the arrow keys the alternate screen gets
+      instead; they are now one `wheel_rows` so the two can never scroll at
+      different speeds. `scrolling.scroll_on_keypress` gates the two
+      `scroll_to_bottom` calls that are *typing* — a keystroke and an IME
+      commit — and deliberately not the three that are a block re-run or a
+      paste: those are things the user did to the session on purpose, and
+      turning off keypress scrolling is not a request to watch a command you
+      started scroll away off screen. Clearing the selection stays
+      unconditional at both, because a selection made before the keystroke is
+      stale wherever the view is sitting.
 - [x] **The typed profiles layer** (design screen 12's config half,
       [docs/design/client-ui/](design/client-ui/README.md) §12; #130).
       `zest_config::profiles` — outside the `fs` feature, like `ui`, so the

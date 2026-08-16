@@ -107,8 +107,6 @@ pub const NOT_YET_WIRED: &[&str] = &[
     "motion.smooth_scroll",
     "motion.spring_damping",
     "motion.spring_response",
-    "scrolling.lines_per_notch",
-    "scrolling.scroll_on_keypress",
     "shell.cwd",
     "shell.env",
     "typography.features",
@@ -996,6 +994,27 @@ mod tests {
                 schema_keys.iter().any(|k| k == key),
                 "NOT_YET_WIRED names '{key}', which is not a schema key"
             );
+        }
+    }
+
+    #[test]
+    fn a_wired_setting_carries_no_not_applied_tag() {
+        // The other direction of the list, which nothing else checks: #301
+        // wired both scrolling keys, so their rows must have lost the faint
+        // "not applied yet" chip. Asserted on the row rather than on the
+        // constant, because `inert` is what the user actually sees — and a
+        // row that keeps claiming a live setting does nothing is exactly the
+        // dishonesty NOT_YET_WIRED exists to prevent.
+        let (rows, _) = build(&values(), &BTreeMap::new(), "");
+        for key in ["scrolling.lines_per_notch", "scrolling.scroll_on_keypress"] {
+            let inert = rows
+                .iter()
+                .find_map(|r| match r {
+                    SettingsRowModel::Setting { key: k, inert, .. } if k == key => Some(*inert),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("'{key}' renders a row"));
+            assert!(!inert, "'{key}' is wired, so its row must not say otherwise");
         }
     }
 
