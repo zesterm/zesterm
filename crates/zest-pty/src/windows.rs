@@ -396,6 +396,26 @@ impl PtyTransport for ConPty {
         self.reader.take().map(|r| Box::new(r) as Box<dyn Read + Send>)
     }
 
+    /// See [`PtyTransport::exit_code`].
+    ///
+    /// A zero timeout makes `WaitForSingleObject` a poll: it answers
+    /// `WAIT_TIMEOUT` immediately for a live child rather than blocking. The
+    /// process handle outlives the child, so `GetExitCodeProcess` keeps
+    /// answering afterwards and this stays callable however late it is asked.
+    ///
+    /// **The cast is deliberate.** A Windows exit code is a `u32` and an
+    /// abnormal one is an `NTSTATUS` above `i32::MAX` — an access violation is
+    /// `0xC0000005`. Wrapping it into `i32` produces `-1073741819`, which is
+    /// the spelling Windows itself prints and the one a person searching for it
+    /// will recognise. Saturating instead would map every distinct crash onto
+    /// `i32::MAX`.
+    fn exit_code(&self) -> Option<i32> {
+        match self.wait_for_child(Some(std::time::Duration::ZERO)) {
+            ChildStatus::Exited(code) => Some(code as i32),
+            ChildStatus::StillRunning => None,
+        }
+    }
+
     fn writer(&self) -> Box<dyn Write + Send> {
         // Duplicating rather than sharing means the writer thread owning its
         // handle cannot close ours, and vice versa.

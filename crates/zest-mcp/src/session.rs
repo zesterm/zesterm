@@ -155,6 +155,75 @@ impl Replica {
         trimmed[..end].join("\n")
     }
 
+    /// Everything the replica holds, as at most `max` lines plus the count it
+    /// dropped: `(shown, total, omitted)`.
+    ///
+    /// What [`screen_text`](Self::screen_text) cannot answer, and the reason
+    /// `run_isolated` needs its own reader: a command with no shell integration
+    /// mints no blocks, so there is no block to ask for its rows — and its
+    /// output is usually taller than the grid, which leaves `screen_text`
+    /// reporting the last thirty lines of a build as though they were all of
+    /// it. Silently, and looking exactly like a command that printed little.
+    ///
+    /// Scrollback first and the viewport second, which is the order they were
+    /// printed in. Unlike [`block_rows`](Self::block_rows) there is no id range
+    /// to filter by, so the two halves must not overlap — `lines_by_id` is
+    /// deliberately scrollback-only for exactly that reason, and taking the
+    /// viewport from `grid.row(i)` keeps it that way.
+    ///
+    /// **Bounded on purpose, rather than collecting and then truncating.** A
+    /// session created by `run_isolated` gets the daemon's full scrollback, so
+    /// a chatty command leaves thousands of rows here and every one of them
+    /// would be a `String` allocated only to be dropped by the very next call.
+    /// Rows are borrowed while the ends are chosen and only the survivors are
+    /// materialized, which makes the cost the size of the *answer* rather than
+    /// the size of the buffer.
+    ///
+    /// Keeps both ends for [`truncate_middle`](crate::tools)'s reason: an error
+    /// is usually at the end and the command that caused it at the beginning.
+    /// Leading and trailing blank rows go; blanks *between* two lines of output
+    /// are real and stay.
+    #[must_use]
+    pub fn text_head_tail(&self, max: usize) -> (Vec<String>, usize, usize) {
+        let grid = self.term.grid();
+        let mut rows: Vec<&zest_core::Row> = grid.lines_by_id(grid.oldest_line_id(), usize::MAX);
+        rows.extend((0..grid.rows()).map(|i| grid.row(i)));
+
+        // `trimmed_len`, not `text().is_empty()`. Deciding blankness by
+        // building the string allocates one per row in the buffer purely to
+        // throw it away, which is the cost this method exists to avoid — the
+        // bound would have applied only to what was *returned*, not to what was
+        // built. This counts cells and allocates nothing.
+        //
+        // It also draws the line a shade differently, in the direction that
+        // loses nothing: a row whose cells are blank but *styled* — a coloured
+        // background with no glyphs — is content here, where a text comparison
+        // would discard it.
+        let blank = |r: &&zest_core::Row| r.trimmed_len() == 0;
+        let end = rows.iter().rposition(|r| !blank(r)).map_or(0, |i| i + 1);
+        rows.truncate(end);
+        let start = rows.iter().position(|r| !blank(r)).unwrap_or(0);
+        let rows = &rows[start..];
+
+        // `Row::text` verbatim, and the absence of a trim here is what makes
+        // the two definitions agree. It already stops at `trimmed_len`, so it
+        // returns the empty string exactly when `blank` says the row is blank —
+        // trimming its trailing spaces on top would break that: a styled row
+        // kept by `blank` came back as `""`, so the output could begin or end
+        // with an empty line after all the work above to ensure it does not.
+        // One allocation per returned line, and one rule rather than two.
+        let text = |r: &zest_core::Row| r.text();
+
+        let total = rows.len();
+        if total <= max {
+            return (rows.iter().map(|r| text(r)).collect(), total, 0);
+        }
+        let head = max / 2;
+        let mut out: Vec<String> = rows[..head].iter().map(|r| text(r)).collect();
+        out.extend(rows[total - (max - head)..].iter().map(|r| text(r)));
+        (out, total, total - max)
+    }
+
     /// Every block the replica holds, oldest first.
     #[must_use]
     pub fn blocks(&self) -> Vec<BlockPayload> {

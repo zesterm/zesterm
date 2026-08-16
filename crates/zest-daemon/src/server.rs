@@ -731,7 +731,18 @@ impl Connection {
             // flag is itself a wakeup, so the next pass polls with `ended`
             // true and sends the final delta and the `Exited` together.
             if ended {
-                out.push(HostMessage::Exited { session: addr, code: None });
+                // `code` was hard-coded `None` from protocol 2 until #299,
+                // which made every client's decoder read a field nothing ever
+                // filled — indistinguishable from a host that genuinely could
+                // not determine a status, and it silently cost `zest-mcp` the
+                // one unforgeable exit code it exists to report.
+                //
+                // Asked here rather than snapshotted with `ended`: the reader
+                // sets that flag on EOF, and seeing EOF is not the same as
+                // having waited on the process. Asking a moment later is what
+                // gives the status time to exist; `Session::exit_code` memoizes
+                // so re-asking on each pass is free.
+                out.push(HostMessage::Exited { session: addr, code: session.exit_code() });
             }
         }
         // After the loop: anything reported `Exited` above is still attached
@@ -2657,6 +2668,19 @@ mod tests {
         if cfg!(windows) { "cmd.exe /c echo probe".into() } else { "/bin/echo probe".into() }
     }
 
+    /// A child that fails, with a status nothing could have guessed.
+    ///
+    /// `3` rather than `1`: a `1` is what a dozen accidents produce, so a test
+    /// asserting it passes for a reader that reports "failed" without ever
+    /// having read a number.
+    fn exit_3_cmd() -> String {
+        if cfg!(windows) {
+            "cmd.exe /c exit 3".into()
+        } else {
+            "/bin/sh -c 'exit 3'".into()
+        }
+    }
+
     /// A child that outlives the test unless something ends it.
     ///
     /// The lifetime is the point: anything about *closing* a session is vacuous
@@ -3396,6 +3420,61 @@ mod tests {
             "the child outlived CloseSession. Removing the registry entry does \
              not end anything: the pty's reader is parked holding the master \
              open, so nothing closes and the shell runs until the daemon does"
+        );
+    }
+
+    /// The exit code the daemon knows has to reach the client.
+    ///
+    /// Asserted from the **client side**, over the wire, because that is where
+    /// the bug was: `HostMessage::Exited` carried `code: None` unconditionally
+    /// from protocol 2 until #299, and `Session::has_exited` was perfectly
+    /// correct the whole time. Every host-side assertion agreed the daemon knew
+    /// the child had gone; nothing checked that it said what it went with. A
+    /// field that exists on the wire, is decoded by every client, and is never
+    /// filled is indistinguishable from a host that cannot determine a status —
+    /// which is exactly how it survived unnoticed.
+    ///
+    /// This is the only unforgeable exit status in the system. A block's comes
+    /// from OSC 133;D, which any program can print.
+    #[test]
+    fn an_exited_child_reports_the_status_it_exited_with() {
+        let (mut c, registry) = conn();
+        let mut peer = authenticate(&mut c);
+        peer.send(
+            &mut c,
+            &ClientMessage::CreateSession {
+                command: exit_3_cmd(),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+            },
+        );
+        let addr = registry.list(config().host)[0].addr;
+        peer.send(
+            &mut c,
+            &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false },
+        );
+
+        let mut seen = None;
+        assert!(
+            wait_for(|| {
+                for m in c.poll() {
+                    if let HostMessage::Exited { code, .. } = m {
+                        seen = Some(code);
+                        return true;
+                    }
+                }
+                false
+            }),
+            "an attached client must be told its child exited"
+        );
+
+        assert_eq!(
+            seen,
+            Some(Some(3)),
+            "the child exited with 3 and the client was told {seen:?}. `Some(None)` is the \
+             regression this test exists for: the daemon reporting the exit while dropping \
+             the status, which reads to a client as a host that could not determine one"
         );
     }
 

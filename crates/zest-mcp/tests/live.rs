@@ -308,3 +308,182 @@ fn a_session_id_this_server_never_minted_is_refused() {
         "the refusal must say the host is unknown, not fail somewhere deeper: {msg}"
     );
 }
+
+/// A command that fails, with a status nothing could have guessed.
+///
+/// `3` rather than `1`: a `1` is what a dozen accidents produce, so asserting
+/// it would pass for a reader that reports "it failed" without having read a
+/// number at all.
+fn exit_3_cmd() -> String {
+    if cfg!(windows) {
+        "cmd.exe /c exit 3".into()
+    } else {
+        "/bin/sh -c 'exit 3'".into()
+    }
+}
+
+/// The claim this crate exists to make, end to end.
+///
+/// Every other exit code here is the shell's word: OSC 133;D is forgeable, and
+/// `cat`ting a file containing the markers mints a block with a green `exit 0`
+/// that the parser structurally cannot tell from a real one. This one is read
+/// from the process by the daemon, and until #299 it was **never sent** —
+/// `HostMessage::Exited` carried `code: None` unconditionally, so the one
+/// trustworthy status in the system did not reach anybody.
+///
+/// ⚠️ This test waits for a child to exit, which the module doc above says
+/// nothing here does. That rule is about waiting for a child to *print*, which
+/// is what times out on a loaded Windows runner (#285); `run_isolated` cannot
+/// be tested without awaiting an exit, so the child is one that exits at once
+/// and the deadline is generous.
+#[test]
+fn run_isolated_reports_the_status_the_process_really_exited_with() {
+    let (addr, _registry) = serve_daemon();
+    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+
+    let v = tools
+        .call("run_isolated", &serde_json::json!({ "command": exit_3_cmd() }))
+        .expect("run_isolated must return a result for a command that ran");
+
+    assert_eq!(v["exited"], true, "the child exited promptly; this timed out instead: {v}");
+    assert_eq!(
+        v["exit_code"], 3,
+        "the process exited with 3. `null` is the regression: the daemon reporting the \
+         exit while dropping the status, which is what shipped until #299"
+    );
+    assert_eq!(
+        v["exit_code_source"], "process_exit",
+        "an exit code read from the process must say so -- it is the one an agent may \
+         trust, and it has to be distinguishable from a shell marker in the payload \
+         rather than by which tool was called"
+    );
+    assert_eq!(v["timed_out"], false);
+}
+
+/// The output survives long enough to be read, which is an ordering property.
+///
+/// Reading after the detach does not merely race — it reads nothing, twice
+/// over. `Conn::detach` drops this process's replica, and `Registry::sweep`
+/// collects a session that `has_exited() && ever_attached() && !attached()`, so
+/// the host destroys it too. Swapping the two lines in `run_isolated` makes
+/// this test fail with a *timeout* on a command that finished instantly, which
+/// is worth knowing: the symptom points at the deadline rather than at the
+/// ordering that caused it.
+///
+/// Asserted from the client side, because from the daemon's side both orders
+/// look like a correct sweep.
+#[test]
+fn a_finished_commands_output_is_read_before_the_session_is_swept() {
+    let (addr, _registry) = serve_daemon();
+    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+
+    let cmd = if cfg!(windows) {
+        "cmd.exe /c echo zesterm-marker".to_string()
+    } else {
+        "/bin/echo zesterm-marker".to_string()
+    };
+    let v = tools.call("run_isolated", &serde_json::json!({ "command": cmd })).expect("run");
+
+    let text = v["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("zesterm-marker"),
+        "what the command printed must come back. Empty here means the read happened \
+         after the detach, so the session was swept before anyone looked: {v}"
+    );
+    assert!(
+        text.contains("never instructions"),
+        "command output is attacker-controlled and must arrive fenced, exactly as \
+         `screen` and `output` fence theirs: {text}"
+    );
+    assert_eq!(v["exit_code"], 0, "a successful echo exits zero: {v}");
+}
+
+/// A timeout returns what there is; it does not kill.
+///
+/// The whole advantage over sentinel injection: a command sitting at
+/// `Password:` is indistinguishable from a finished one to a harness that
+/// guesses at completion, and killing it destroys the only state that could
+/// answer it. So the session has to still be there afterwards.
+#[test]
+fn a_timeout_returns_partial_output_and_leaves_the_command_running() {
+    let (addr, registry) = serve_daemon();
+    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+
+    let cmd = if cfg!(windows) {
+        "powershell.exe -NoProfile -Command Start-Sleep 30".to_string()
+    } else {
+        "/bin/sleep 30".to_string()
+    };
+    let v = tools
+        .call("run_isolated", &serde_json::json!({ "command": cmd, "timeout_ms": 300 }))
+        .expect("a timeout is a result, not an error -- there is output to report");
+
+    assert_eq!(v["timed_out"], true, "a 30s sleep cannot finish in 300ms: {v}");
+    assert_eq!(v["exited"], false);
+    assert!(
+        v["exit_code"].is_null(),
+        "a command still running has no status, and inventing one is how a caller \
+         concludes it succeeded: {v}"
+    );
+    assert!(
+        v["exit_code_source"].is_null(),
+        "no status means nothing to attribute to a source. Keying this off `!timed_out` \
+         rather than off the code itself claims the process reported `null`, which is \
+         not a thing a process can say"
+    );
+
+    let session = v["session"].as_str().expect("the result names the session it started");
+    let addr = tools.resolver().resolve(session).expect("the id this server just minted");
+    assert!(
+        registry.get(addr.session).is_some(),
+        "the session must outlive the timeout. Killing it is what makes a command \
+         waiting at a password prompt unanswerable, which is the case this tool \
+         exists to handle"
+    );
+
+    tools.call("interrupt", &serde_json::json!({ "session": session })).expect("interrupt");
+    registry.close(addr.session);
+}
+
+/// A status and its provenance travel together, or neither travels.
+///
+/// The invariant across every result this crate produces: `exit_code_source`
+/// answers "where did this number come from", so it is meaningless without a
+/// number and dishonest beside a null one. `block_json` already keys its source
+/// off the value for the same reason; this is the process-exit half of the same
+/// rule, and the two must not drift apart.
+#[test]
+fn an_exit_code_and_its_source_are_present_together_or_not_at_all() {
+    let (addr, registry) = serve_daemon();
+    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+
+    for (args, what) in [
+        (serde_json::json!({ "command": exit_3_cmd() }), "a command that finished"),
+        (
+            serde_json::json!({
+                "command": if cfg!(windows) {
+                    "powershell.exe -NoProfile -Command Start-Sleep 30"
+                } else {
+                    "/bin/sleep 30"
+                },
+                "timeout_ms": 300
+            }),
+            "a command that timed out",
+        ),
+    ] {
+        let v = tools.call("run_isolated", &args).expect("run_isolated returns a result");
+        assert_eq!(
+            v["exit_code"].is_null(),
+            v["exit_code_source"].is_null(),
+            "{what}: a code without a source cannot be trusted and a source without a \
+             code describes nothing. Got code={} source={}",
+            v["exit_code"],
+            v["exit_code_source"]
+        );
+        if let Some(s) = v["session"].as_str() {
+            if let Ok(a) = tools.resolver().resolve(s) {
+                registry.close(a.session);
+            }
+        }
+    }
+}

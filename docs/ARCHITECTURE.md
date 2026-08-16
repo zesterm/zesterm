@@ -919,3 +919,94 @@ re-reads, and a generation bump pushes to every subscriber. `OfferSource::set`
 drops a reload that changed nothing — not an optimisation, since a file watcher
 fires several times per save on every platform, and without it each of those
 would put the whole profile list on the wire for every attached client.
+
+---
+
+## ADR-015 — An agent is a client, and only one exit code is unforgeable
+
+**Status:** accepted (#274, #299).
+
+Every AI terminal shipping today is a chat sidebar over a byte stream: the agent
+scrapes a pty with regular expressions, guesses when a command finished, and
+drowns in progress-bar noise. zesterm needs none of that shape, because the
+three things that make it unnecessary already exist for other reasons — a
+headless VT emulator producing typed state (ADR-001), semantic command blocks
+carrying command, cwd, exit code and timestamps, and a multi-client delta
+protocol addressing sessions `(HostId, SessionId)` across machines and sealed
+end to end (ADR-004, ADR-006, ADR-008).
+
+So the decision is that **an agent is a client**. `zest-mcp` holds a device key,
+attaches, receives the deltas the window receives, and writes
+`ClientMessage::Input`. No new data plane, no second VT emulator, no privileged
+in-process surface, and no protocol version bump: everything it does is spelled
+in messages that already existed.
+
+The consequences are worth stating because each is a thing not built. There is
+no agent-facing serialization format, so the grid an agent reads is the
+conformance-tested one rather than a second implementation that drifts. There is
+no privileged path, so an agent cannot see a session a paired device could not.
+And the audit story is the wire's, not a parallel log's.
+
+### The saving is post-VT, and it is a different number from ADR-004's
+
+ADR-004 measures *transport*: ~1 MB of pty bytes against ~3 KB of delta for
+`cat 1MB`. The agent-facing number is *model* efficiency and is measured
+elsewhere in the stack: a build with a progress bar writes the same row hundreds
+of times with `\r`, and the emulator has already collapsed it to one row before
+anything an agent reads looks at it. `blocks` carries no output text at all, so
+fifty commands of history costs less than one screen of a build log.
+
+### Two exit codes, and only one of them means anything
+
+This is the part that is cheap to undo by accident, because the two are the same
+Rust type and read identically in a payload.
+
+**A block's `exit_code` is the shell's word.** It arrives as OSC 133;D, and
+*any program can print those markers* — `cat` a file containing them and the
+parser mints a block with a green `exit 0`, structurally unable to tell. That is
+not a defect in the parser; a pty is a byte stream and there is nowhere else for
+the information to come from.
+
+**`HostMessage::Exited.code` is the process's own status**, read by the daemon
+from the child it spawned. Nothing running *inside* the terminal can produce it.
+
+So every exit code this system reports to an agent carries where it came from —
+`ExitSource::{ShellMarker, ProcessExit}` — rather than a caveat in a tool
+description nobody re-reads at the moment of use. An agent deciding whether a
+deploy succeeded needs to know which of the two it is holding, and the
+distinction has to survive into the payload because that is the only place it
+will still be true.
+
+`run_isolated` exists for this reason as much as for compatibility. It also
+happens to be the answer for shells with no integration — `Shell::detect`
+returns `None` for `/bin/bash`, with a test pinning it, so "no blocks" is most
+Linux hosts rather than an edge case — but its *primary* property is that its
+status cannot be forged by the thing it is running.
+
+### The trap this ADR was written after
+
+`HostMessage::Exited { code: Option<i32> }` existed on the wire from protocol 2
+and its sole producer hard-coded `code: None` until #299. The field was decoded
+by every client and filled by nobody, which is indistinguishable from a host
+that genuinely could not determine a status — so nothing looked wrong, no test
+failed, and the one trustworthy exit code in the system did not exist while the
+roadmap described it as the reason a tool was worth building.
+
+`zest-pty` had `wait_for_child` on both platforms the whole time. The gap was
+never the hard part; it was that nothing joined them, and a wire field's default
+value is not a place anybody looks. **A field nothing fills reads exactly like a
+field nothing can fill.**
+
+### Rejected
+
+**A streaming or polling tool** — "watch this session and react". It is the one
+addition that turns prompt injection from *needs the agent to be steered* into
+*fires on its own*, and its absence is a mitigation rather than an omission.
+
+**An agent loop of our own.** Harnesses exist and improve monthly; a terminal
+shipping an inferior one ages badly. Be the substrate.
+
+**Trusting the caller's bounds.** `max_lines` and `timeout_ms` are clamped,
+because the caller is a model and an argument that can lift a ceiling is not a
+ceiling. Zero means zero for both — reading it as "unbounded" is the reading
+that once let `max_lines: 0` switch truncation off entirely.

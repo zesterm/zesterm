@@ -33,6 +33,7 @@
 
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -40,6 +41,11 @@ use zest_proto::{BlockPayload, BlockState, ClientMessage, SessionAddr};
 
 use crate::addr::{AddrError, Resolver};
 use crate::conn::{Conn, ConnError};
+use crate::session::Replica;
+
+/// `^C`. The byte a terminal sends for Ctrl+C, which the tty layer turns into
+/// `SIGINT` for the foreground process group.
+const ETX: u8 = 0x03;
 
 /// How a caller named something this server does not have.
 #[derive(Debug, thiserror::Error)]
@@ -137,6 +143,8 @@ impl ToolSet {
                 clamp_lines(opt_usize(args, "max_lines")?),
             ),
             "input" => self.input(session_arg(args, &self.resolver)?, args),
+            "interrupt" => self.interrupt(session_arg(args, &self.resolver)?),
+            "run_isolated" => self.run_isolated(args),
             "create_session" => self.create_session(args),
             "close_session" => self.close_session(session_arg(args, &self.resolver)?),
             other => Err(ToolError::NoSuchTool(other.to_string())),
@@ -254,6 +262,163 @@ impl ToolSet {
         Ok(json!({ "session": Resolver::format(addr), "sent": true }))
     }
 
+    /// Send `^C`, as a person would.
+    ///
+    /// Its own tool rather than `input` with a control character, for two
+    /// reasons. A model asked to type an interrupt has to encode U+0003 into a
+    /// JSON string and will sometimes send the four characters `^`, `C` or the
+    /// word "ctrl-c" instead, which the shell prints rather than obeys. And
+    /// `run` promising that a timeout does not kill is only honest if there is
+    /// a way to stop what it started — an agent that can begin a `sleep 30`
+    /// and not end it has been handed a leak, not a primitive.
+    ///
+    /// No attach: `Input` is not a subscriber operation.
+    fn interrupt(&self, addr: SessionAddr) -> Result<Value, ToolError> {
+        self.conn.send(ClientMessage::Input { session: addr, bytes: vec![ETX] });
+        Ok(json!({ "session": Resolver::format(addr), "interrupted": true }))
+    }
+
+    /// Run one command in a session of its own and report the process's status.
+    ///
+    /// The exit code here is the **only unforgeable one in the system**: it
+    /// comes from `HostMessage::Exited`, which the daemon reads from the child,
+    /// rather than from an OSC 133;D marker any program can print. That is what
+    /// makes this the answer for every shell with no integration — `bash` and
+    /// `fish` have none (`Shell::detect` returns `None` for `/bin/bash`, with a
+    /// test pinning it), which is most Linux hosts rather than an edge case.
+    ///
+    /// # The ordering is the whole trick
+    ///
+    /// The attach comes **before** the wait and the read comes **before** the
+    /// detach, and both halves are load-bearing for different reasons — which
+    /// is why one comment cannot cover them.
+    ///
+    /// Detaching first loses the output **twice over**, and the nearer of the
+    /// two is the one that bites: [`Conn::detach`] drops this process's replica,
+    /// so there is nothing local left to read from. Behind it, `Registry::sweep`
+    /// collects a session that `has_exited() && ever_attached() && !attached()`,
+    /// so the host destroys it as well. Measured by swapping the two lines: the
+    /// read comes back empty and `run_isolated` reports a timeout on a command
+    /// that finished instantly.
+    ///
+    /// Two races that resolve safely, said out loud so nobody "fixes" them:
+    /// a child that exits before the attach lands is *not* swept, because the
+    /// predicate needs `ever_attached`; and `Exited` is re-sent on every poll
+    /// rather than once, so attaching after the exit still hears about it.
+    fn run_isolated(&self, args: &Value) -> Result<Value, ToolError> {
+        let command = args.get("command").and_then(Value::as_str).unwrap_or("").trim();
+        if command.is_empty() {
+            return Err(ToolError::Missing { field: "command" });
+        }
+        let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or("");
+        let cols = opt_u16(args, "cols")?.unwrap_or(120);
+        let rows = opt_u16(args, "rows")?.unwrap_or(30);
+        let max_lines = clamp_lines(opt_usize(args, "max_lines")?);
+        let deadline = Instant::now() + clamp_timeout(opt_u32(args, "timeout_ms")?);
+
+        let addr = self.conn.create_session(command, cwd, cols, rows)?;
+
+        // Observing, like every other attach this crate makes. It owns this
+        // session outright, so a vote would harm nobody -- but `observe` is
+        // what the daemon reads to mean "no pane", and a client that abstains
+        // everywhere cannot acquire the habit of not abstaining.
+        if let Err(e) = self.conn.attach(addr, cols, rows, true) {
+            // The session exists and has never been attached, so `sweep` will
+            // not collect it -- its predicate requires `ever_attached`, which
+            // is what keeps a just-created session alive across the gap before
+            // its owner attaches. Returning here without closing therefore
+            // leaks a shell on the host for the life of the daemon, and the
+            // caller has no id to close it with.
+            self.conn.send(ClientMessage::CloseSession { session: addr });
+            return Err(e.into());
+        }
+
+        // Wait for a *concrete status*, not merely for the exit.
+        //
+        // `Session::has_exited` is set by the reader seeing EOF, which is not
+        // the same as the process having been waited on, so the first `Exited`
+        // can legitimately carry `code: None` with a real status arriving on a
+        // later poll. Stopping at the first `Exited` would report
+        // `exit_code: null` for a command that exited perfectly well -- which
+        // is precisely the "the host could not say" spelling this whole change
+        // exists to stop being wrong.
+        let settled = self.conn.wait_until(deadline, |s| match s.replica(addr).and_then(Replica::exited) {
+            Some(Some(code)) => Some(code),
+            // Exited with nothing to report yet, or not exited. Both wait.
+            _ => None,
+        });
+
+        // Still attached. See the doc above: these are the lines that must not
+        // move below the detach.
+        //
+        // `ended` is read here rather than inferred from `settled`, because a
+        // transport that genuinely cannot determine a status never produces a
+        // concrete one -- and reporting that as "still running" would be a
+        // different lie from the one above.
+        // The link's own state comes back with the read, under the same lock,
+        // so a missing replica can say *why* it is missing rather than being
+        // reported as whatever the caller happened to be waiting for.
+        let read = self.conn.with(|s| {
+            (
+                s.replica(addr)
+                    .map(|r| (r.text_head_tail(max_lines), r.alt_screen(), r.exited().is_some())),
+                s.closed,
+                s.error.clone(),
+            )
+        });
+        self.conn.detach(addr);
+
+        // A timeout is a *result*, not a failure: the command may be sitting at
+        // a password prompt, which is exactly the case a sentinel cannot tell
+        // from success. The session is left running so `input` can answer it.
+        // Any other error is a dead link and has nothing to report.
+        // Two independent facts, deliberately not complements of each other.
+        // `timed_out` is "the deadline is why I stopped waiting"; `exited` is
+        // "the session has ended". Deriving one from the other loses the case
+        // between them: a command that finishes just after the deadline, or one
+        // whose transport reports the exit with no status, would be reported as
+        // having finished normally with a null code -- which reads as success
+        // with a detail missing rather than as "I gave up".
+        let timed_out = matches!(settled, Err(ConnError::TimedOut));
+        let code = match settled {
+            Ok(code) => Some(code),
+            Err(ConnError::TimedOut) => None,
+            Err(e) => return Err(ToolError::Conn(e)),
+        };
+
+        // A dead link is not a slow one, and only one of the two is worth
+        // retrying. Reporting a closed connection as "the deadline passed"
+        // sends a model back round the loop against a socket that has gone --
+        // and now that `TimedOut` says so in as many words, it would be saying
+        // something plainly untrue.
+        let (found, closed, error) = read;
+        let ((shown, total, omitted), alt, ended) = found.ok_or(ToolError::Conn(if closed {
+            ConnError::Closed(error)
+        } else {
+            ConnError::TimedOut
+        }))?;
+
+        Ok(json!({
+            "session": Resolver::format(addr),
+            "command": command,
+            "exited": ended,
+            "timed_out": timed_out,
+            "exit_code": code,
+            // Attached to the *code*, never to the exit. Claiming a provenance
+            // for a status we do not have says "the process told us null",
+            // which is not a thing a process can say -- and `block_json` next
+            // door already keys its source off the value for the same reason.
+            "exit_code_source": code.map(|_| ExitSource::ProcessExit),
+            // A full-screen program in a session nobody can see is a command
+            // that will never finish. Worth saying rather than leaving the
+            // agent to infer it from output that looks truncated.
+            "alt_screen": alt,
+            "total_lines": total,
+            "omitted_lines": omitted,
+            "text": untrusted(&shown.join("\n")),
+        }))
+    }
+
     fn create_session(&self, args: &Value) -> Result<Value, ToolError> {
         let command = args.get("command").and_then(Value::as_str).unwrap_or("");
         let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or("");
@@ -323,6 +488,29 @@ fn clamp_lines(asked: Option<usize>) -> usize {
     asked.unwrap_or(DEFAULT_MAX_LINES).min(MAX_LINES_CEILING)
 }
 
+/// How long a command gets before its partial result comes back.
+///
+/// Long enough for an install or a test run, short enough that an agent which
+/// forgot to pass one is not blocked for an hour.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The most any caller may ask to wait.
+///
+/// The same reasoning as [`MAX_LINES_CEILING`], for the other resource a model
+/// can spend: an argument that can be raised without limit is not a bound. Well
+/// above a release build and far below "this tool call never returns".
+const MAX_TIMEOUT: Duration = Duration::from_secs(1_800);
+
+/// What a `timeout_ms` argument actually buys.
+///
+/// **Zero means zero**, matching [`clamp_lines`]: a caller asking not to wait
+/// gets the command started and an immediate `timed_out` answer, which is a
+/// coherent thing to want. Reading `0` as "wait for ever" is the same mistake
+/// that made `max_lines: 0` disable truncation.
+fn clamp_timeout(asked: Option<u32>) -> Duration {
+    asked.map_or(DEFAULT_TIMEOUT, |ms| Duration::from_millis(u64::from(ms)).min(MAX_TIMEOUT))
+}
+
 /// Keep both ends and drop the middle.
 ///
 /// Not the tail: an error is usually at the end, and the command that caused it
@@ -387,19 +575,44 @@ fn opt_usize(args: &Value, field: &'static str) -> Result<Option<usize>, ToolErr
     Ok(opt_u32(args, field)?.map(|n| n as usize))
 }
 
-/// A terminal dimension, refused rather than wrapped.
+/// The largest grid a tool call may ask a host to allocate.
+///
+/// `u16` is the wire's bound, not a sane one: 65535 x 65535 is four billion
+/// cells, allocated eagerly by `Terminal::new` on the *far* machine, so a single
+/// tool call would be a local denial of service on somebody's laptop. The same
+/// reasoning as [`MAX_LINES_CEILING`] and [`MAX_TIMEOUT`] — every bound a model
+/// supplies needs a bound of its own — except that this one is spent on the
+/// host rather than in the response.
+///
+/// Well past any real display: a 4K screen at a tiny font is around 800x300.
+const MAX_DIMENSION: u32 = 1_000;
+
+/// A terminal dimension, refused rather than wrapped or quietly shrunk.
 ///
 /// `as u16` on a `u32` is silent: 100000 becomes 34464, and the caller gets a
 /// session at a size it never asked for with nothing to indicate why. A model
-/// can act on "must be between 1 and 65535"; it cannot act on a grid that is
+/// can act on "must be between 1 and 1000"; it cannot act on a grid that is
 /// quietly the wrong shape.
+///
+/// **Refused rather than clamped**, unlike `max_lines` and `timeout_ms`. Those
+/// bound a *response* and silently giving less is a coherent answer; a grid is
+/// structural, and a command whose output was laid out for a width it never got
+/// is wrong in a way no note in the payload repairs.
 fn opt_u16(args: &Value, field: &'static str) -> Result<Option<u16>, ToolError> {
     match opt_u32(args, field)? {
         None => Ok(None),
         Some(0) => Err(ToolError::BadType { field, want: "at least 1" }),
-        Some(n) => u16::try_from(n)
-            .map(Some)
-            .map_err(|_| ToolError::BadType { field, want: "at most 65535" }),
+        // One refusal for both ways of being too big, and the conversion's
+        // result is *used* rather than assumed. `u16::try_from(n).ok()` inside
+        // an `Ok` would spell a failed conversion as `Ok(None)` -- "the caller
+        // omitted this" -- which silently falls back to the default size. That
+        // is unreachable while `MAX_DIMENSION` is small, and it is exactly the
+        // shape this whole change exists to stop trusting: a `None` standing
+        // for two different things, one of which nobody meant.
+        Some(n) => match u16::try_from(n) {
+            Ok(n) if u32::from(n) <= MAX_DIMENSION => Ok(Some(n)),
+            _ => Err(ToolError::BadType { field, want: "at most 1000" }),
+        },
     }
 }
 
@@ -515,15 +728,58 @@ mod tests {
         let args = json!({ "cols": 100_000 });
         let err = opt_u16(&args, "cols").expect_err("100000 does not fit in a u16");
         assert!(
-            err.to_string().contains("at most 65535"),
+            err.to_string().contains("at most 1000"),
             "the refusal must say the bound, so a model can correct itself: {err}"
         );
 
+        // The wire's bound is not a sane one. 65535 fits a `u16` perfectly and
+        // is still four billion cells allocated on somebody else's laptop, so
+        // the type is not the limit that matters here.
+        assert!(
+            opt_u16(&json!({ "cols": 65_535 }), "cols").is_err(),
+            "a dimension a model can spend on a *host* needs a bound of its own, not \
+             merely one the wire can carry"
+        );
+
         assert_eq!(opt_u16(&json!({ "cols": 120 }), "cols").expect("fits"), Some(120));
+        assert_eq!(
+            opt_u16(&json!({ "cols": 1_000 }), "cols").expect("the ceiling itself is allowed"),
+            Some(1_000)
+        );
         assert!(
             opt_u16(&json!({ "cols": 0 }), "cols").is_err(),
             "a zero-column terminal is not a size; `clamp_size` would silently              make it 2 on the far side"
         );
+    }
+
+    #[test]
+    fn a_huge_timeout_is_capped_and_zero_means_zero() {
+        // The same bound as `max_lines`, for the other resource a model can
+        // spend. And `0` means "do not wait" rather than "wait for ever" --
+        // reading zero as unbounded is exactly the mistake that once made
+        // `max_lines: 0` switch truncation off.
+        assert_eq!(clamp_timeout(Some(u32::MAX)), MAX_TIMEOUT);
+        assert_eq!(clamp_timeout(None), DEFAULT_TIMEOUT);
+        assert_eq!(clamp_timeout(Some(0)), Duration::ZERO, "zero must mean zero");
+        assert_eq!(clamp_timeout(Some(5_000)), Duration::from_secs(5), "a modest ask is exact");
+    }
+
+    #[test]
+    fn interrupt_sends_the_byte_a_terminal_sends_not_the_words_for_it() {
+        // The whole reason this is a tool rather than advice to call `input`:
+        // asked to "type Ctrl+C" a model will sometimes send `^C` or the word,
+        // which the shell prints instead of obeying.
+        assert_eq!(ETX, 0x03, "^C is U+0003; anything else is text the shell will echo");
+    }
+
+    #[test]
+    fn a_command_that_is_only_whitespace_is_refused_by_name() {
+        // `create_session` with an empty command means "the host's default
+        // shell", which is a reasonable thing to want and a terrible thing to
+        // get from `run_isolated`: it would open a shell, wait out the whole
+        // timeout, and report that the command never finished.
+        let err = ToolError::Missing { field: "command" };
+        assert!(err.to_string().contains("command"), "the refusal must name the field: {err}");
     }
 
     #[test]
