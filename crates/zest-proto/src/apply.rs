@@ -88,6 +88,24 @@ impl Applier {
         // ALT_SCREEN decides which of the two grids these rows belong to.
         term.remote().set_modes(k.modes);
 
+        // History this keyframe is about to re-deliver stops being history.
+        //
+        // The inverse of the banking a shrink does: when the host gives back
+        // rows a shrink displaced, its viewport starts earlier than it did and
+        // every row it re-sends is one this replica still holds above the
+        // boundary. Left there the same line exists twice in one grid and every
+        // walk by id shows it twice -- the listing duplicated, a block spanning
+        // both copies drawing on its own. Cheap and a no-op in the common case,
+        // where the keyframe's first line is newer than anything in history.
+        // (#291)
+        // Negatives filtered, not clamped: the encoder pads with `i64::MIN` for
+        // a row it has never seen, and `line_id` turns that into 0 — which as a
+        // floor here would drop the client's entire history on any keyframe
+        // carrying one blank row.
+        if let Some(first) = k.rows_data.iter().map(|r| r.line).filter(|&l| l >= 0).min() {
+            term.remote().drop_history_from(line_id(first));
+        }
+
         let mut max_line = i64::MIN;
         for (i, payload) in k.rows_data.iter().enumerate() {
             self.write_row(term, i, payload);
@@ -369,7 +387,8 @@ mod tests {
             self.host.advance(bytes);
             self.seq += 1;
             let base = self.app.applied();
-            let d = self.enc.delta(self.host.grid(), cursor(), self.host.modes(), "", self.host.blocks());
+            let cur = self.live_cursor();
+            let d = self.enc.delta(self.host.grid(), cur, self.host.modes(), "", self.host.blocks());
             assert_eq!(
                 self.app.apply_delta(&mut self.client, &d, base, self.seq),
                 Applied::Ok,
@@ -386,6 +405,149 @@ mod tests {
                 self.host.screen_text()
             );
         }
+    }
+
+    impl Pair {
+        /// The host's *real* cursor, not the harness's constant.
+        ///
+        /// It matters wherever a resize is involved: `Grid::resize` gives up
+        /// the blank rows below the cursor before taking any over the top, so a
+        /// client told its cursor is on row 0 banks nothing and a fixture built
+        /// on `cursor()` cannot reach the code this is about.
+        fn live_cursor(&self) -> CursorState {
+            let c = self.host.cursor();
+            CursorState {
+                row: c.row as u16,
+                col: c.col as u16,
+                // Read, not assumed. A hard-coded `true` would be this whole
+                // class of bug again: ConPTY's repaint hides the cursor and
+                // shows it again, so a harness that always reports it visible
+                // is a stand-in kinder than the thing it stands for, and a
+                // cursor-visibility regression would pass straight through.
+                visible: self.host.modes().contains(Modes::SHOW_CURSOR),
+                shape: self.host.cursor_style().to_decscusr() as u8,
+            }
+        }
+
+        /// Resize the host and push it a keyframe, as `reconcile_size` does.
+        fn resize(&mut self, cols: usize, rows: usize) {
+            self.host.resize(cols, rows);
+            self.seq += 1;
+            let cur = self.live_cursor();
+            let k = self.enc.keyframe(
+                self.host.grid(),
+                cur,
+                self.host.modes(),
+                "",
+                self.host.blocks(),
+            );
+            self.app.apply_keyframe(&mut self.client, &k, self.seq);
+        }
+
+        /// What ConPTY sends back: hide, home, restate what it kept, show.
+        /// No size announcement, because a *grow* does not carry one (#271).
+        fn conpty_grow_repaint(&mut self, kept: &[&str]) {
+            let rows = self.host.grid().rows();
+            let mut out = String::from("\x1b[?25l\x1b[H");
+            for r in 0..rows {
+                if r > 0 {
+                    out.push_str("\r\n");
+                }
+                out.push_str(kept.get(r).copied().unwrap_or(""));
+                out.push_str("\x1b[K");
+            }
+            out.push_str(&format!("\x1b[{};1H\x1b[?25h", kept.len().max(1)));
+            self.host.advance(out.as_bytes());
+            self.seq += 1;
+            let cur = self.live_cursor();
+            let k = self.enc.keyframe(
+                self.host.grid(),
+                cur,
+                self.host.modes(),
+                "",
+                self.host.blocks(),
+            );
+            self.app.apply_keyframe(&mut self.client, &k, self.seq);
+        }
+
+        fn client_line_ids(&self) -> Vec<u64> {
+            (0..self.client.grid().total_lines())
+                .map(|i| self.client.grid().line(i).unwrap().id)
+                .collect()
+        }
+    }
+
+    #[test]
+    fn a_settled_grow_does_not_leave_the_client_holding_the_listing_twice() {
+        // The whole path, host to client: a Windows host settles a grow, its
+        // keyframe's viewport starts earlier than it did, and every row it
+        // re-sends is one the client already holds as history.
+        //
+        // Reported as "the listing is duplicated and a block renders on its
+        // own" after #281 made the settle fire for the first time. Before that
+        // a grow keyframe carried the same short viewport it had before, so
+        // nothing overlapped and the missing dedupe never showed. (#291)
+        let mut p = Pair::new(20, 8);
+        p.host.set_pty_restates_viewport(true);
+        p.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\n");
+        for i in 0..6 {
+            p.feed(format!("entry {i}\r\n").as_bytes());
+        }
+
+        p.resize(20, 2);
+        p.conpty_grow_repaint(&["entry 5", ""]);
+        assert_eq!(p.client.grid().scrollback_len(), 6, "the client banked nothing, so this proves nothing");
+
+        p.resize(20, 8);
+        p.conpty_grow_repaint(&["entry 5", ""]);
+        assert_eq!(p.host.grid().scrollback_len(), 0, "the host never settled, so this proves nothing");
+
+        let ids = p.client_line_ids();
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len(), "the client holds a line twice: {ids:?}");
+        assert_eq!(
+            p.client.grid().scrollback_len(),
+            p.host.grid().scrollback_len(),
+            "the client and the host disagree about where history ends"
+        );
+        p.assert_same("the client's screen drifted from the host's across a settled drag");
+    }
+
+    #[test]
+    fn cls_after_a_drag_clears_the_client_too() {
+        // The loudest of the three symptoms reported: after one `ls` and a
+        // drag, `cls` looked like it did nothing. Checked here rather than
+        // assumed to be a consequence of the duplication, because "the screen
+        // still shows the listing" is what a client holding two copies of it
+        // looks like *and* what a genuinely unhandled clear looks like, and
+        // those want different fixes. (#291)
+        let mut p = Pair::new(20, 8);
+        p.host.set_pty_restates_viewport(true);
+        p.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\n");
+        for i in 0..6 {
+            p.feed(format!("entry {i}\r\n").as_bytes());
+        }
+        p.resize(20, 2);
+        p.conpty_grow_repaint(&["entry 5", ""]);
+        p.resize(20, 8);
+        p.conpty_grow_repaint(&["entry 5", ""]);
+
+        // `cls`: erase the screen, home the cursor, print a prompt.
+        p.feed(b"\x1b[2J\x1b[H\x1b]133;A\x07$ ");
+
+        p.assert_same("the client's screen still shows what cls erased");
+        let ids = p.client_line_ids();
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len(), "the client holds a line twice after cls: {ids:?}");
+        assert!(
+            !p.client.screen_text().contains("entry 0"),
+            "cls left the listing on the client's screen:\n{}",
+            p.client.screen_text()
+        );
     }
 
     #[test]

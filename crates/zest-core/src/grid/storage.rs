@@ -357,6 +357,40 @@ impl Storage {
         self.rows.truncate(keep.max(1));
     }
 
+    /// Remove `len` rows starting at logical index `start`.
+    ///
+    /// The one op that takes rows out of the *middle*. `resize_rows` drops from
+    /// the top and `truncate_bottom` from the bottom, and neither can express
+    /// "these rows are a duplicate of rows further down", which is what a
+    /// replica has after a keyframe re-delivers lines it already held as
+    /// history. See `Grid::drop_scrollback_from`.
+    ///
+    /// **Never empties the ring.** `physical` divides by `rows.len()` and
+    /// `Grid::oldest_line_id` reads row 0 unconditionally, so a storage with no
+    /// rows is not a degraded state but a panic waiting for the next frame —
+    /// and it would land far from whatever asked for the impossible range.
+    /// `truncate_bottom` keeps its last row for the same reason.
+    ///
+    /// `pub(super)` because only `Grid` may move the boundary this belongs to;
+    /// a caller outside it holding a `Storage` has no way to keep
+    /// `scrollback_len` honest.
+    pub(super) fn remove_range(&mut self, start: usize, len: usize) {
+        if len == 0 || start >= self.rows.len() {
+            return;
+        }
+        self.normalize();
+        let end = (start + len).min(self.rows.len());
+        debug_assert!(
+            end - start < self.rows.len(),
+            "remove_range({start}, {len}) would empty a {}-row storage",
+            self.rows.len()
+        );
+        if end - start >= self.rows.len() {
+            return;
+        }
+        self.rows.drain(start..end);
+    }
+
     pub fn resize_cols(&mut self, cols: usize, template: &Cell) {
         for row in &mut self.rows {
             row.resize(cols, template);
@@ -456,6 +490,28 @@ mod tests {
         let got = ids(&s);
         assert_eq!(&got[..3], &[2, 0, 1], "existing rows keep their logical order");
         assert_eq!(got.len(), 5);
+    }
+
+    #[test]
+    fn removing_a_range_takes_only_that_range() {
+        // The degenerate inputs are no-ops rather than errors, because
+        // `Grid::drop_scrollback_from` computes a count that is legitimately
+        // zero on almost every keyframe.
+        //
+        // Emptying the ring is *not* tested here, deliberately: it cannot be
+        // asked for -- `scrollback_len` is always less than `storage.len()`,
+        // since the viewport is at least one row -- so it is a caller bug, and
+        // the `debug_assert` in `remove_range` is what says so. A test would
+        // have to violate the contract to reach the release-mode guard behind
+        // it, and would then be asserting that a bug degrades quietly.
+        let mut s = Storage::new(4, 4);
+        s.remove_range(1, 0);
+        assert_eq!(s.len(), 4, "a zero-length removal took something");
+        s.remove_range(9, 1);
+        assert_eq!(s.len(), 4, "a removal past the end took something");
+
+        s.remove_range(1, 2);
+        assert_eq!(ids(&s), alloc::vec![0, 3], "the wrong rows were removed");
     }
 
     #[test]

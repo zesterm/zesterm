@@ -357,6 +357,45 @@ impl Grid {
         (index < self.storage.len()).then(|| self.storage.row(index))
     }
 
+    /// Drop scrollback rows from `first` upward, returning how many went.
+    ///
+    /// For a **replica** being handed a keyframe, and the exact inverse of the
+    /// banking a shrink does. When the host gives back rows a shrink displaced
+    /// — the unix grid pulls them out of scrollback, a restating one settles
+    /// once its repaint closes — the keyframe's viewport starts *earlier* than
+    /// it did, and every row it re-delivers is one this grid already holds as
+    /// history. Left there the same line id exists twice in one `Storage`, and
+    /// anything walking the session by id renders it twice: the listing
+    /// duplicated, and a block whose range now spans both copies drawing on its
+    /// own. (#291)
+    ///
+    /// Not a loss of history. These lines are arriving in the viewport in the
+    /// same breath; what goes is the stale copy of them.
+    ///
+    /// The host never needs this — its storage is one ring where the viewport
+    /// *is* the tail of scrollback, so the boundary moving cannot duplicate
+    /// anything. A replica writes the two halves separately and has to be told.
+    pub fn drop_scrollback_from(&mut self, first: LineId) -> usize {
+        let n = (0..self.scrollback_len)
+            .rev()
+            .take_while(|&i| self.storage.row(i).id >= first)
+            .count();
+        if n > 0 {
+            self.storage.remove_range(self.scrollback_len - n, n);
+            self.scrollback_len -= n;
+            // `viewport_base` is measured from the end of storage, which just
+            // lost `n` rows, so leaving the offset alone slides a scrolled-back
+            // reader `n` lines further into the past. Subtracting holds the
+            // *text* still, which is the point: the rows removed here are the
+            // ones the viewport is about to hold, so the same content is at the
+            // same place afterwards, one boundary further down. Same argument
+            // as `settle_restate`, and the same failure without it — the view
+            // jumping while somebody is reading it.
+            self.display_offset = self.display_offset.saturating_sub(n).min(self.scrollback_len);
+        }
+        n
+    }
+
     /// The id of the oldest line still held, scrollback included.
     ///
     /// Read off the row rather than computed as `active_row(0).id -

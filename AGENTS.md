@@ -611,6 +611,30 @@ Each of these cost real time and is documented where it bites:
   construction: that door is what *makes* a terminal a replica, so there is no
   second place to forget. A name that describes one of two callers is how the
   other one goes unnoticed. (#247)
+
+  **A replica also has to give history back, and fixing that in one client and
+  not the other cost a second bug report.** #247 taught the *web* client to
+  un-bank rows a grow takes back and left the Rust one alone; it had the same
+  shape all along. When the host settles, its keyframe's viewport starts
+  earlier than it did and re-delivers lines the replica still holds above the
+  boundary — so the same line id exists twice in one `Storage`, and everything
+  that walks the session by id shows it twice: the listing duplicated, a block
+  spanning both copies drawing on its own, and `cls` looking like it did
+  nothing because the second copy survives it. The host never has this problem
+  — its storage is one ring where the viewport *is* the tail of scrollback —
+  which is why it reads as a client bug and is really a missing inverse:
+  `Grid::drop_scrollback_from`, called by the applier before it writes the
+  rows. **Two reference decoders means every fix on this seam is two fixes**,
+  and `tests/conformance.rs` exists to catch the pair disagreeing. (#291)
+
+  The reason `zest-proto`'s own tests never caught it is worth as much as the
+  fix: the `Pair` harness fed the encoder a **constant cursor** rather than the
+  host's. `Grid::resize` gives up the blank rows below the cursor before taking
+  any over the top, so a client told its cursor is on row 0 banks nothing —
+  every resize test in that crate was exercising a client with no history at
+  all. A fixture that cannot reach the state under test passes for a reason
+  that has nothing to do with the code, so the tests now assert they got there
+  before asserting anything else. (#291)
 - **A row overwritten in place keeps a stale `wrapped`, and the next reflow
   believes it.** `wrapped` is one fact in two places — `Row::wrapped` and
   `CellFlags::WRAPLINE` on the last cell, written together by
