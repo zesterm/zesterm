@@ -709,9 +709,14 @@ fn tab_presence(
 
 /// The host dropdown's row for "no pin at all" (#297).
 ///
-/// Parenthesised so it cannot collide with a real machine's display name — a
-/// label is whatever someone typed into their config, and a machine actually
-/// called `this machine` would otherwise silently mean "unset".
+/// Parenthesised to make a collision *unlikely*, never impossible: a label is
+/// whatever someone typed into their config or advertised over mDNS, so a
+/// machine really called `(this machine)` is legal. The menu carries one string
+/// per option, so the choice comes back as text with no way to tell the two
+/// apart — `profiles_open_host_menu` therefore checks for the collision and
+/// declines to open, rather than risking a pick that clears the pin it meant
+/// to set. Naming it here rather than trusting the parentheses, because the
+/// first version of this comment claimed they were enough.
 const HOST_MENU_LOCAL: &str = "(this machine)";
 
 /// The host dropdown's rows: this machine, then the fleet, then whatever the
@@ -720,25 +725,61 @@ const HOST_MENU_LOCAL: &str = "(this machine)";
 /// Pure, so the two rules that matter are `cargo test`ed rather than argued:
 /// the local machine appears once and by one spelling, and an existing pin is
 /// never dropped from the list that is about to overwrite it.
-fn host_menu_roster(fleet: &[crate::fleet::FleetHost], current: Option<&str>) -> Vec<String> {
-    // "(this machine)" writes an empty `host`, which is what the field's own
-    // description already calls the local machine — one spelling for unset
-    // rather than a second that means the same thing. So the local host is
-    // *not* listed under its own label: two rows doing the same thing is a
-    // choice nobody should have to make.
+/// What the host `▾` should open, or `None` to leave it a text field (#297).
+///
+/// Everything the dropdown decides lives here, pure, because both rules it
+/// enforces were wrong first and a comment is not a test:
+///
+/// - **The local machine appears once**, as [`HOST_MENU_LOCAL`], which writes an
+///   empty `host` — the spelling the field's own description already uses, and
+///   the one `launch::resolve_host` reads as `Local` and `bucket_for` files
+///   under "this machine". Listing it again under its own label would be two
+///   rows doing one thing.
+/// - **An existing pin is never dropped from the list about to overwrite it.** A
+///   profile hand-written for a machine that is off must not become uneditable.
+///   Matched case-insensitively, like every other label comparison
+///   (`resolve_host`, `bucket_for`): a pin spelled `Forge` finds the host
+///   advertising `forge` rather than sitting beside it as a second row.
+///
+/// `None` in two cases, both of which mean *keep typing*:
+///
+/// - **A host really labelled `(this machine)`.** Labels are arbitrary text, so
+///   this is legal, and the menu carries one string per option — the choice
+///   comes back as text with no way to tell the two apart, so picking that host
+///   would silently clear the pin it meant to set. A wrong write is worse than
+///   no dropdown, and a menu whose rows a person could not tell apart either is
+///   not much of a menu.
+/// - **Nothing but this machine.** A one-row dropdown is worse than the text
+///   field it replaced.
+fn host_menu_roster(
+    fleet: &[crate::fleet::FleetHost],
+    current: Option<&str>,
+) -> Option<Vec<String>> {
+    if fleet.iter().any(|h| !h.local && h.label == HOST_MENU_LOCAL) {
+        return None;
+    }
     let mut roster = vec![HOST_MENU_LOCAL.to_string()];
     roster.extend(fleet.iter().filter(|h| !h.local).map(|h| h.label.clone()));
-    // A profile hand-written for a machine that is off must not become
-    // uneditable, and must not lose its pin to whatever the menu happened to
-    // open on. Case-insensitive, like every other label match (`resolve_host`,
-    // `bucket_for`): a pin spelled `Forge` must find the host advertising
-    // `forge` rather than being appended beside it.
     if let Some(current) = current.filter(|c| !c.is_empty()) {
         if !roster.iter().any(|r| r.eq_ignore_ascii_case(current)) {
             roster.push(current.to_string());
         }
     }
-    roster
+    (roster.len() > 1).then_some(roster)
+}
+
+/// Which row the host dropdown opens on, in the roster's *own* spelling.
+///
+/// `MenuState` selects and marks the ✓ by exact string equality, so a pin
+/// written `Forge` against a host advertising `forge` matches nothing: the menu
+/// opens on row 0 and Enter rewrites the pin to "(this machine)". Losing a ✓ is
+/// cosmetic; **a destructive default is not**, which is why this folds rather
+/// than handing the profile's spelling straight through.
+fn host_menu_selection(roster: &[String], current: Option<&str>) -> String {
+    current
+        .filter(|c| !c.is_empty())
+        .and_then(|c| roster.iter().find(|r| r.eq_ignore_ascii_case(c)).cloned())
+        .unwrap_or_else(|| HOST_MENU_LOCAL.to_string())
 }
 
 fn clip_row(text: &str) -> String {
@@ -6082,19 +6123,15 @@ impl App {
             serde_json::Value::String(s) if !s.is_empty() => Some(s),
             _ => None,
         });
-
-        let roster = host_menu_roster(&self.fleet_view, current.as_deref());
-        // Only this machine and nothing else: the fleet has not started, or
-        // there is genuinely nowhere else. A one-row dropdown is worse than the
-        // text field it replaced, so the caller falls back to typing.
-        if roster.len() == 1 {
+        // Every rule about what the dropdown lists, and whether there should be
+        // one at all, lives in `host_menu_roster` — pure, and tested.
+        let Some(roster) = host_menu_roster(&self.fleet_view, current.as_deref()) else {
             return false;
-        }
-
+        };
+        let selected = host_menu_selection(&roster, current.as_deref());
         let row = self.profiles_ui.as_ref().map(|ui| ui.selected).unwrap_or(0);
-        let selected = current.as_deref().unwrap_or(HOST_MENU_LOCAL);
         if let Some(ui) = self.profiles_ui.as_mut() {
-            ui.menu = Some(MenuState::roster(row, roster, Some(selected)));
+            ui.menu = Some(MenuState::roster(row, roster, Some(&selected)));
         }
         self.mark_chrome_dirty();
         true
@@ -12256,33 +12293,92 @@ mod presence_tests {
         TabOrigin::Remote { host_label: label.to_string() }
     }
 
+    fn with_local(rest: Vec<FleetHost>) -> Vec<FleetHost> {
+        let mut local = host(1, "studio", Presence::Online);
+        local.local = true;
+        let mut all = vec![local];
+        all.extend(rest);
+        all
+    }
+
     #[test]
     fn the_host_dropdown_lists_this_machine_once_and_never_drops_a_pin() {
         use super::{host_menu_roster, HOST_MENU_LOCAL};
-        let mut local = host(1, "studio", Presence::Online);
-        local.local = true;
-        let fleet = [local, host(2, "forge", Presence::Online)];
+        let fleet = with_local(vec![host(2, "forge", Presence::Online)]);
 
-        let roster = host_menu_roster(&fleet, None);
         assert_eq!(
-            roster,
-            vec![HOST_MENU_LOCAL.to_string(), "forge".to_string()],
-            "this machine appears once, and by the spelling that writes an empty host — \
+            host_menu_roster(&fleet, None),
+            Some(vec![HOST_MENU_LOCAL.to_string(), "forge".to_string()]),
+            "this machine appears once, by the spelling that writes an empty host — \
              listing it again under `studio` would be two rows doing one thing"
         );
 
         // A pin the fleet has never heard of: a machine that is off, or a
         // typo. Either way the profile must stay editable, and must not lose
         // what it has to whatever the menu happens to open on.
-        let roster = host_menu_roster(&fleet, Some("nowhere"));
+        let roster = host_menu_roster(&fleet, Some("nowhere")).expect("a roster");
         assert!(roster.contains(&"nowhere".to_string()), "{roster:?}");
 
-        // And a pin that differs only by case is the machine already listed —
-        // the same ASCII fold `resolve_host` and `bucket_for` use, because a
-        // profile written `Forge` must find the host advertising `forge`
-        // rather than sit beside it as a second row.
-        let roster = host_menu_roster(&fleet, Some("FORGE"));
+        // And a pin differing only by case is the machine already listed — the
+        // same ASCII fold `resolve_host` and `bucket_for` use.
+        let roster = host_menu_roster(&fleet, Some("FORGE")).expect("a roster");
         assert_eq!(roster.len(), 2, "no duplicate for a case difference: {roster:?}");
+    }
+
+    #[test]
+    fn a_host_labelled_like_the_local_row_keeps_the_field_a_text_edit() {
+        use super::{host_menu_roster, HOST_MENU_LOCAL};
+        // Labels are arbitrary text — mDNS `lbl` is whatever the far machine
+        // advertises — so a host really called "(this machine)" is legal. The
+        // menu carries one string per option, so the choice comes back as text
+        // with no way to tell the two apart: picking that host would silently
+        // *clear* the pin it meant to set.
+        //
+        // The parentheses were supposed to prevent this and cannot; the first
+        // version of that comment claimed they were enough.
+        let fleet = with_local(vec![host(2, HOST_MENU_LOCAL, Presence::Online)]);
+        assert_eq!(
+            host_menu_roster(&fleet, None),
+            None,
+            "a wrong write is worse than no dropdown — and a menu whose rows a \
+             person could not tell apart either is not much of a menu"
+        );
+    }
+
+    #[test]
+    fn nothing_but_this_machine_is_not_worth_a_dropdown() {
+        use super::host_menu_roster;
+        // The fleet has not started, or there is genuinely nowhere else. A
+        // one-row dropdown is worse than the text field it replaced.
+        assert_eq!(host_menu_roster(&with_local(Vec::new()), None), None);
+        assert_eq!(host_menu_roster(&[], None), None, "and before the fleet exists at all");
+    }
+
+    #[test]
+    fn the_dropdown_opens_on_the_pin_it_already_has_however_it_is_spelled() {
+        use super::{host_menu_roster, host_menu_selection, HOST_MENU_LOCAL};
+        // `MenuState` selects and marks the ✓ by *exact* string equality, so a
+        // pin written `Forge` against a host advertising `forge` matches
+        // nothing: the menu opens on row 0 and Enter rewrites the pin to
+        // "(this machine)". Losing a ✓ is cosmetic; a destructive default is
+        // not.
+        let fleet = with_local(vec![host(2, "forge", Presence::Online)]);
+        let roster = host_menu_roster(&fleet, Some("Forge")).expect("a roster");
+        assert_eq!(
+            host_menu_selection(&roster, Some("Forge")),
+            "forge",
+            "folded to the roster's own spelling, which is what exact equality will find"
+        );
+        assert!(
+            roster.iter().any(|r| r == "forge"),
+            "and that spelling really is in the list: {roster:?}"
+        );
+
+        // No pin, and a pin the fleet has never heard of, both land somewhere
+        // real: the local row, and the appended row respectively.
+        assert_eq!(host_menu_selection(&roster, None), HOST_MENU_LOCAL);
+        let roster = host_menu_roster(&fleet, Some("nowhere")).expect("a roster");
+        assert_eq!(host_menu_selection(&roster, Some("nowhere")), "nowhere");
     }
 
     #[test]
