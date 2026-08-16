@@ -223,7 +223,7 @@ below means "do not touch this file".
 | **F** | [`zest-proto` + `zest-daemon`](#ws-f) | `crates/zest-proto/`, `crates/zest-daemon/` | Protocol + daemon ✅ · **applier, app attach, LAN listener next** | [#4](https://github.com/zesterm/zesterm/issues/4) |
 | **G** | [Web client](#ws-g) | `clients/web/`, `zest-proto/fixtures/` | Decoder, renderer, app, deploy, accounts, fleet, tabbed chrome ✅ · **devices screen, local echo next** | [#8](https://github.com/zesterm/zesterm/issues/8) |
 | **H** | [Mesh identity, discovery, transports](#ws-h) | `crates/zest-mesh/`, `crates/zest-cloud/`, `cloud/` | Identity, discovery, pairing, accounts ✅ · the relay Worker and the daemon's `--relay` leg ✅ · **the web client's second data plane next** ([#59](https://github.com/zesterm/zesterm/issues/59)) | [#7](https://github.com/zesterm/zesterm/issues/7) |
-| **I** | [AI is a client of the daemon](#ws-i) | `crates/zest-mcp/`, `zest-proto`, `zest-daemon` | Open — `Attach.observe` ✅, `find_or_spawn` moved ✅, the replica ✅, the connection and the read tools ✅ (#274) · **the MCP transport and `run` next** | [#60](https://github.com/zesterm/zesterm/issues/60) |
+| **I** | [AI is a client of the daemon](#ws-i) | `crates/zest-mcp/`, `zest-proto`, `zest-daemon` | Open — **an agent can read and drive this machine's terminals over MCP** (#274) · **`run` and fleet reach next** | [#60](https://github.com/zesterm/zesterm/issues/60) |
 
 **Ordering that mattered, and is now settled.** B landed before A, so `zest-app`
 is free of input code and A can fill it with chrome. C1 landed before D, so
@@ -1859,7 +1859,18 @@ it replaces M5's one-line `AiActor` bullet. → [#60](https://github.com/zesterm
       daemon. Reads always attach *observing*, so an agent looking at a session
       cannot reshape the window somebody is using — asserted from the client
       side, where dropping `observe` on the way to the wire would not be caught
-      by the daemon's own tests. Still to come: the MCP transport, and `run`.
+      by the daemon's own tests.
+
+      **And the transport, so it is a thing a harness can launch.** MCP over
+      stdio, newline-delimited JSON-RPC 2.0, hand-rolled rather than taking
+      `rmcp` — a tools-only server is four methods, and the SDK is async, so it
+      would have made `tokio` the workspace's first runtime in a crate whose
+      protocol client is blocking by design. The same trade produced the
+      hand-rolled RFC 6455 server in `zest-daemon/src/ws.rs`; the rule it does
+      *not* break is the one that matters, since this speaks somebody else's
+      wire format rather than a second copy of ours. `tests/stdio.rs` drives
+      the built binary as a harness does and asserts every line on stdout is
+      JSON-RPC, which is the one failure no unit test can see.
 - [ ] **`run`, and why it is the primitive.** Agent harnesses cannot tell when a
       command finished in an interactive shell and inject sentinels to fake it.
       We parse OSC 133 `D` host-side and hold the shell's own exit code — in

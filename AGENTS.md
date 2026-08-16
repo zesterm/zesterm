@@ -413,6 +413,12 @@ cargo run -p zest-font --example glyph_probe   # hinting vs coverage; prints a v
 cargo run -p zest-pty  --example pty_dump      # raw VT stream / corpus recorder
 cargo run -p zest-render-wgpu --example alpha_probe   # transparency capability
 
+zest-mcp                                       # terminals as an agent's tools, over MCP
+                                               #   on stdio. A harness launches it:
+                                               #   {"mcpServers":{"zesterm":{"command":"zest-mcp"}}}
+zest-mcp --socket <path>                       # talk to a daemon somewhere other than the default
+zest-mcp --socket-path                         # print that default and exit
+
 zest-daemon --socket-path                      # where this user's daemon listens
 zest-daemon --socket <path>                    # serve this machine's terminals
 zest-daemon --listen-lan                       # serve other machines too (off by default)
