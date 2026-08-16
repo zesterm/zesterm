@@ -643,8 +643,6 @@ fn enroll_failure_text(e: &zest_daemon::DaemonError, code: &str) -> String {
     }
 }
 
-/// A card row's value, bounded: a control-plane refusal can run long, and a
-/// value that overruns its own label reads as two broken rows.
 /// How a machine reads right now, for anything that draws a dot or a word
 /// about it.
 ///
@@ -803,6 +801,8 @@ fn host_menu_selection(roster: &[String], current: Option<&str>) -> String {
         .unwrap_or_else(|| HOST_MENU_LOCAL.to_string())
 }
 
+/// A card row's value, bounded: a control-plane refusal can run long, and a
+/// value that overruns its own label reads as two broken rows.
 fn clip_row(text: &str) -> String {
     const MAX: usize = 58;
     if text.chars().count() <= MAX {
