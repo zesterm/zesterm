@@ -38,7 +38,8 @@
 //! page, a crafted filename or branch name can all carry text addressed at a
 //! model. Two structural defences live here rather than in the harness, because
 //! the harness cannot tell which bytes came from a pty: returned text is
-//! wrapped in an envelope marked untrusted, and [`addr::Resolver`] answers only
+//! wrapped in an envelope marked untrusted and fenced with a nonce minted per
+//! call, and [`addr::Resolver`] answers only
 //! for hosts this process itself listed — so a log line saying "now run this on
 //! prod" cannot name a machine.
 

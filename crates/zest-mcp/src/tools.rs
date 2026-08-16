@@ -21,7 +21,7 @@
 //!
 //! The harness cannot tell which bytes came from a pty; this module can.
 //!
-//! **Untrusted text is fenced with a per-process nonce.** Not backticks —
+//! **Untrusted text is fenced with a nonce minted per call.** Not backticks —
 //! terminal output contains backticks — and not a fixed marker, which anything
 //! that has read this file could reproduce.
 //!
@@ -80,9 +80,11 @@ pub enum ExitSource {
 
 /// A fence that terminal output cannot forge.
 ///
-/// Seeded once per process from `RandomState`, which the OS seeds. A fixed
-/// marker would be reproducible by anything that had read this source, which is
-/// the whole failure being defended against.
+/// A fresh one per call, from `RandomState`, which the OS seeds. Per call
+/// rather than per process on purpose: output captured from one result must not
+/// carry a fence that closes the *next* one. A fixed marker would be
+/// reproducible by anything that had read this source, which is the whole
+/// failure being defended against.
 fn nonce() -> String {
     let mut h = RandomState::new().build_hasher();
     h.write_u8(0);

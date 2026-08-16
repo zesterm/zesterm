@@ -60,7 +60,7 @@ a crafted filename or branch name can all carry text addressed at a model. Two
 structural defences live in this crate rather than in the harness, because the
 harness cannot tell which bytes came from a pty:
 
-- returned text is fenced with a **per-process nonce** — not backticks, which
+- returned text is fenced with a **nonce minted per call** — not backticks, which
   terminal output contains, and not a fixed marker, which anything that had read
   the source could reproduce;
 - **only ids this server minted are accepted**, so a log line arguing "now run

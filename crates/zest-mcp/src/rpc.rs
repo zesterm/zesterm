@@ -270,6 +270,12 @@ impl<T: Tools> Server<T> {
 
         match method {
             "initialize" => {
+                // Only a *request* completes the handshake. `initialize` with
+                // no id is not a legal notification, and flipping `ready` for
+                // one would let a client skip the handshake entirely by
+                // omitting the field -- setting state before the `id?` that
+                // decides whether this is even answerable.
+                let id = id?;
                 self.ready = true;
                 let asked = msg
                     .get("params")
@@ -279,7 +285,7 @@ impl<T: Tools> Server<T> {
                     Some(v) if KNOWN_VERSIONS.contains(&v) => v,
                     _ => PREFERRED_VERSION,
                 };
-                Some(result(id?, json!({
+                Some(result(id, json!({
                     "protocolVersion": version,
                     "capabilities": { "tools": {} },
                     "serverInfo": { "name": "zesterm", "version": env!("CARGO_PKG_VERSION") },
@@ -323,7 +329,7 @@ impl<T: Tools> Server<T> {
         }
         match self.tools.call(name, args) {
             Ok(v) => json!({
-                "content": [{ "type": "text", "text": v.to_string() }],
+                "content": [{ "type": "text", "text": render(&v) }],
                 "structuredContent": v,
                 "isError": false,
             }),
@@ -332,6 +338,37 @@ impl<T: Tools> Server<T> {
             // failure tells it to retry the same call.
             Err(e) => tool_error(&describe(&e)),
         }
+    }
+}
+
+/// What goes in `content`, given what goes in `structuredContent`.
+///
+/// **Not the same JSON twice.** `content` is required by the spec and
+/// `structuredContent` is the newer, optional half, so both have to be present
+/// -- but rendering the payload into `content` verbatim doubles every response,
+/// which is a strange thing for a server whose whole pitch is the size of its
+/// answers. Worse, it JSON-escapes the fence: the delimiter that tells a model
+/// where untrusted output starts arrives full of backslashes.
+///
+/// So a payload carrying bulk text -- `screen`, `output` -- renders as that
+/// text, with the rest of its fields on one line above it. Everything else is
+/// compact JSON, which is already small.
+fn render(v: &Value) -> String {
+    let Some(text) = v.get("text").and_then(Value::as_str) else {
+        return v.to_string();
+    };
+    let Some(obj) = v.as_object() else { return text.to_string() };
+
+    let head: Vec<String> = obj
+        .iter()
+        .filter(|(k, _)| k.as_str() != "text")
+        .map(|(k, val)| format!("{k}={val}"))
+        .collect();
+    if head.is_empty() {
+        text.to_string()
+    } else {
+        format!("{}
+{text}", head.join(" "))
     }
 }
 
@@ -409,6 +446,74 @@ mod tests {
             unknown["result"]["protocolVersion"], PREFERRED_VERSION,
             "an unknown version must be answered with one we actually speak"
         );
+    }
+
+    #[test]
+    fn initialize_without_an_id_does_not_complete_the_handshake() {
+        // `initialize` is a request; sending it without an id is not a legal
+        // notification. Flipping `ready` before checking would let a client
+        // skip the handshake entirely by leaving the field out -- state set
+        // before the check that decides whether the message is even answerable.
+        let mut s = server();
+        assert!(
+            s.handle(&json!({
+                "jsonrpc": "2.0", "method": "initialize",
+                "params": { "protocolVersion": "2025-06-18" }
+            }))
+            .is_none(),
+            "no id, so nothing to answer"
+        );
+
+        let r = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "hosts", "arguments": {} }
+            }))
+            .expect("a request gets a reply");
+        assert_eq!(
+            r["result"]["isError"], true,
+            "an initialize with no id must not have completed the handshake: {r}"
+        );
+    }
+
+    #[test]
+    fn a_bulk_text_result_is_not_carried_twice() {
+        // `content` is required and `structuredContent` is the newer optional
+        // half, so both are present -- but rendering the payload into `content`
+        // verbatim doubles every response, which is a strange thing for a
+        // server whose pitch is the size of its answers. It also JSON-escapes
+        // the fence, so the delimiter telling a model where untrusted output
+        // starts arrives full of backslashes.
+        let text = "line one\nline two";
+        let payload = json!({ "session": "2e2e2e2e:1", "cols": 80, "text": text });
+        let rendered = render(&payload);
+        let as_json = payload.to_string();
+
+        assert!(
+            rendered.contains(text),
+            "the text must arrive verbatim, with real newlines: {rendered:?}"
+        );
+        assert!(
+            as_json.contains("\\n") && !rendered.contains("\\n"),
+            "the JSON form escapes the newlines and the rendering must not -- a fence \
+             full of backslashes is a fence a model has to decode first: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("cols=80") && rendered.contains("session="),
+            "the other fields still have to reach a client that reads only content: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains(&as_json),
+            "the payload must not be carried a second time inside its own rendering"
+        );
+    }
+
+    #[test]
+    fn a_result_with_no_bulk_text_stays_compact_json() {
+        // `hosts` and `sessions` are already small and structured; there is
+        // nothing to unwrap and JSON is the most useful rendering of them.
+        let payload = json!({ "hosts": [{ "id": "2e2e2e2e" }] });
+        assert_eq!(render(&payload), payload.to_string());
     }
 
     #[test]
