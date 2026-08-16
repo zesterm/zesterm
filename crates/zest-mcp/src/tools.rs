@@ -372,6 +372,14 @@ impl ToolSet {
         // a password prompt, which is exactly the case a sentinel cannot tell
         // from success. The session is left running so `input` can answer it.
         // Any other error is a dead link and has nothing to report.
+        // Two independent facts, deliberately not complements of each other.
+        // `timed_out` is "the deadline is why I stopped waiting"; `exited` is
+        // "the session has ended". Deriving one from the other loses the case
+        // between them: a command that finishes just after the deadline, or one
+        // whose transport reports the exit with no status, would be reported as
+        // having finished normally with a null code -- which reads as success
+        // with a detail missing rather than as "I gave up".
+        let timed_out = matches!(settled, Err(ConnError::TimedOut));
         let code = match settled {
             Ok(code) => Some(code),
             Err(ConnError::TimedOut) => None,
@@ -394,7 +402,7 @@ impl ToolSet {
             "session": Resolver::format(addr),
             "command": command,
             "exited": ended,
-            "timed_out": !ended,
+            "timed_out": timed_out,
             "exit_code": code,
             // Attached to the *code*, never to the exit. Claiming a provenance
             // for a status we do not have says "the process told us null",

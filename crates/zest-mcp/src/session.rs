@@ -205,15 +205,14 @@ impl Replica {
         let start = rows.iter().position(|r| !blank(r)).unwrap_or(0);
         let rows = &rows[start..];
 
-        // One allocation per returned line. `Row::text` already stops at
-        // `trimmed_len`, so this only ever removes trailing spaces that were
-        // kept for their background, and truncating in place is what keeps
-        // `.trim_end().to_string()` from allocating the whole line twice.
-        let text = |r: &zest_core::Row| {
-            let mut s = r.text();
-            s.truncate(s.trim_end().len());
-            s
-        };
+        // `Row::text` verbatim, and the absence of a trim here is what makes
+        // the two definitions agree. It already stops at `trimmed_len`, so it
+        // returns the empty string exactly when `blank` says the row is blank —
+        // trimming its trailing spaces on top would break that: a styled row
+        // kept by `blank` came back as `""`, so the output could begin or end
+        // with an empty line after all the work above to ensure it does not.
+        // One allocation per returned line, and one rule rather than two.
+        let text = |r: &zest_core::Row| r.text();
 
         let total = rows.len();
         if total <= max {

@@ -339,19 +339,45 @@ fn the_whole_buffer_is_counted_but_only_the_ends_are_built() {
     );
 }
 
-/// Neither end of the output is a blank row.
+/// Neither end of the output is a blank row, in any recording.
 ///
 /// A grid is mostly empty space, and `run_isolated` returns rows rather than a
 /// screen — twenty blank lines before the first word is pure token cost on
 /// every call, and it makes a short command look like a long one.
+///
+/// **Every fixture, not one.** This first ran against `blocks-zsh` alone and so
+/// did not notice that "blank" was being decided two different ways: rows were
+/// kept or dropped by `Row::trimmed_len`, which counts a styled row with no
+/// glyphs as content, while the text they turned into was trimmed of trailing
+/// spaces and could come back `""`. A row of coloured background at either end
+/// would have reappeared as the empty line this test exists to forbid, and one
+/// recording is not enough grid to find that.
 #[test]
-fn the_output_does_not_begin_or_end_with_blank_rows() {
-    let (shown, _, _) = replay("blocks-zsh").text_head_tail(usize::MAX);
-    assert!(!shown.is_empty(), "the recording printed something");
-    assert!(!shown[0].is_empty(), "leading blanks must be trimmed: {:?}", &shown[..2.min(shown.len())]);
-    assert!(
-        !shown[shown.len() - 1].is_empty(),
-        "and trailing ones, which is most of a grid: {:?}",
-        &shown[shown.len().saturating_sub(2)..]
-    );
+fn no_recording_begins_or_ends_with_a_blank_row() {
+    for name in ["basic-echo", "dir-colors", "git-log", "unicode-wide", "blocks-zsh", "vim-macos"] {
+        let (shown, total, _) = replay(name).text_head_tail(usize::MAX);
+        assert_eq!(shown.len(), total, "{name}: an unbounded read returns what it counted");
+
+        // `vim-macos` opens vim and quits, which restores a primary screen with
+        // nothing on it -- so a session holding no text at all is a legitimate
+        // state, not a broken replica. `run_isolated` reports it as
+        // `total_lines: 0`, the same answer a command that printed nothing
+        // gets. There is no head or tail to check, and inventing one would be
+        // asserting that every terminal has content in it.
+        if shown.is_empty() {
+            continue;
+        }
+
+        assert!(
+            !shown[0].is_empty(),
+            "{name}: leading blanks must be trimmed, and a kept row must not render \
+             empty -- the trim rule and the text rule have to agree: {:?}",
+            &shown[..2.min(shown.len())]
+        );
+        assert!(
+            !shown[shown.len() - 1].is_empty(),
+            "{name}: and trailing ones, which is most of a grid: {:?}",
+            &shown[shown.len().saturating_sub(2)..]
+        );
+    }
 }
