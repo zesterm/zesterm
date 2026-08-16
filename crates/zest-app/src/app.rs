@@ -2523,11 +2523,17 @@ impl App {
                         // nothing gets no row, rather than a dash pretending
                         // to be a fact.
                         //
-                        // `os_version` and not `os`, because it carries the
-                        // kernel's *name* as well as its release
-                        // (`Darwin 24.5.0`) — `os` is `std::env::consts::OS`,
-                        // which says `macos` where the design's card says
-                        // `Darwin`.
+                        // `os_version` first, because it carries the kernel's
+                        // *name* as well as its release (`Darwin 24.5.0`) —
+                        // `os` is `std::env::consts::OS`, which says `macos`
+                        // where the design's card says `Darwin`.
+                        //
+                        // Falling back to `os` rather than dropping the row:
+                        // Windows publishes an empty `os_version` today (the
+                        // API is there, the dependency to read it is not), and
+                        // `windows` is a poorer row than `Windows 10.0.22631`
+                        // but a far better one than nothing. Both empty is a
+                        // host that has told us nothing, and gets no row.
                         if let Some(offer) = h.offer.as_ref() {
                             let os = if offer.os_version.is_empty() {
                                 offer.os.clone()
