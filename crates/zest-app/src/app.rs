@@ -10950,7 +10950,11 @@ impl ApplicationHandler<Wakeup> for App {
                 // different speeds the first time either was touched.
                 let rows = wheel_rows(whole, self.config.lines_per_notch);
                 let count = rows.unsigned_abs();
-                let up = whole > 0.0;
+                // Direction off the same value as the magnitude, not off
+                // `whole`: one source means the arrow keys the alternate
+                // screen gets and the scrollback move cannot disagree about
+                // which way a gesture went, whatever the clamp did to it.
+                let up = rows > 0;
 
                 if self.forward_wheel(up, count) {
                     return;
@@ -11447,6 +11451,17 @@ fn pane_opacity(window: f32, identity: Option<&crate::tabs::ProfileIdentity>) ->
     identity.and_then(|i| i.opacity).map_or(window, |o| o.clamp(0.0, 1.0))
 }
 
+/// The most rows one wheel event may move, in either direction.
+///
+/// Two orders of magnitude above the fastest real gesture — a violent trackpad
+/// flick is tens of rows, and the largest configurable step is 50 — so nothing
+/// a hand can do reaches it. It exists for what a hand cannot do: the row count
+/// bounds a loop *and* a `Vec::with_capacity`, and a float-to-int cast in Rust
+/// saturates rather than wrapping, so one synthetic `PixelDelta` carrying a
+/// huge or infinite value arrives as `isize::MAX` rows and the allocation
+/// aborts the process.
+const MAX_WHEEL_ROWS: isize = 10_000;
+
 /// Rows one wheel gesture moves: whole notches times `scrolling.lines_per_notch`.
 ///
 /// Signed, because the sign is the direction and both consumers need it — the
@@ -11455,9 +11470,11 @@ fn pane_opacity(window: f32, identity: Option<&crate::tabs::ProfileIdentity>) ->
 /// separate literals, and a wheel that scrolled `less` at a different rate to
 /// history is the kind of thing nobody reports and everybody feels.
 fn wheel_rows(notches: f32, per_notch: usize) -> isize {
-    // Saturating, not wrapping: `notches` comes from a trackpad's accumulated
-    // delta, and a synthetic or absurd event must not scroll the wrong way.
-    (notches as isize).saturating_mul(per_notch.max(1) as isize)
+    // Saturating, then clamped: `notches` is an accumulated trackpad delta, so
+    // neither bound is reachable by scrolling — see `MAX_WHEEL_ROWS` for what
+    // they are actually for. NaN casts to 0, which is the right answer: a
+    // gesture that moves nothing must not become a full-clamp jump.
+    (notches as isize).saturating_mul(per_notch.max(1) as isize).clamp(-MAX_WHEEL_ROWS, MAX_WHEEL_ROWS)
 }
 
 /// `zest-theme` and `zest-core` deliberately do not depend on each other, so the
@@ -11709,6 +11726,31 @@ mod scrolling_tests {
         assert_eq!(wheel_rows(-1.0, 5), -5);
         assert_eq!(wheel_rows(-3.0, 3), -9);
         assert_eq!(wheel_rows(1.0, 5).unsigned_abs(), wheel_rows(-1.0, 5).unsigned_abs());
+    }
+
+    #[test]
+    fn an_absurd_delta_cannot_allocate_the_process_to_death() {
+        // `count` bounds a loop *and* a `Vec::with_capacity`, and a float ->
+        // int cast saturates in Rust rather than wrapping, so one synthetic
+        // `PixelDelta` reaches `isize::MAX` rows and the allocation aborts the
+        // process. Raising `lines_per_notch` to its ceiling of 50 multiplies
+        // the reachable size by ~17 over the literal 3 this replaced, which is
+        // what makes an old latent hazard worth closing now.
+        assert_eq!(wheel_rows(f32::MAX, 50), super::MAX_WHEEL_ROWS);
+        assert_eq!(wheel_rows(f32::MIN, 50), -super::MAX_WHEEL_ROWS);
+        assert_eq!(wheel_rows(f32::INFINITY, 1), super::MAX_WHEEL_ROWS);
+        assert_eq!(wheel_rows(f32::NEG_INFINITY, 1), -super::MAX_WHEEL_ROWS);
+        // NaN casts to 0, and a gesture that moves nothing must stay nothing
+        // rather than becoming a full-clamp jump in some arbitrary direction.
+        assert_eq!(wheel_rows(f32::NAN, 3), 0);
+    }
+
+    #[test]
+    fn the_clamp_is_far_above_any_real_gesture() {
+        // The bound has to be unreachable in use or it is a scroll bug wearing
+        // a safety hat: the fastest trackpad flick is tens of rows, and the
+        // largest configurable step is 50.
+        assert_eq!(wheel_rows(100.0, 50), 5_000, "a violent flick at the max step is untouched");
     }
 
     #[test]
