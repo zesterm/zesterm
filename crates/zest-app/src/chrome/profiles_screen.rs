@@ -1154,14 +1154,14 @@ mod tests {
         m.chips.push(None);
         let row = m.rows.len() - 1;
         let l = lay(&m, 1100.0, 720.0);
-        let mut seen = false;
-        for x in (0..1100).step_by(2) {
-            for y in (46..766).step_by(2) {
-                if l.hit.hit(x as f32, y as f32) == Some(HitRegion::SettingsSelect(row)) {
-                    seen = true;
-                }
-            }
-        }
+        // `any` rather than the neighbouring full scans: those collect several
+        // regions at once and have to see the whole screen, this one asks a
+        // single yes/no and short-circuits on the first hit.
+        let seen = (0..1100).step_by(2).any(|x| {
+            (46..766)
+                .step_by(2)
+                .any(|y| l.hit.hit(x as f32, y as f32) == Some(HitRegion::SettingsSelect(row)))
+        });
         assert!(
             seen,
             "a text row must answer a click; the dispatch routes SettingsSelect \
