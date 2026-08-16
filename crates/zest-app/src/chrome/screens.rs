@@ -620,8 +620,10 @@ fn fleet(
 
             let px = 11.5 * s;
             // A dot that says whether anyone is looking at it: `here` is this
-            // window, `attached` is somebody. Colour alone never carries it —
-            // the row's own text is the fact, this is the glance.
+            // window, `attached` is somebody. Colour is the *glance*, never the
+            // fact — the title carries "this window" in words, exactly as the
+            // ⌘K picker's session rows do, so the state survives a reader who
+            // cannot tell the accent from the success colour.
             let dot_d = 5.0 * s;
             let ink = if session.here {
                 colors.accent
@@ -638,9 +640,14 @@ fn fleet(
             ));
 
             let tx = hx + dot_d + 7.0 * s;
-            let tw = measure(&session.title, px, false, 0.0);
+            let title = if session.here {
+                format!("{} \u{b7} this window", session.title)
+            } else {
+                session.title.clone()
+            };
+            let tw = measure(&title, px, false, 0.0);
             out.texts.push(TextRun {
-                text: session.title.clone(),
+                text: title,
                 pos: [tx, ry + px],
                 max_width: (card_w * 0.45).min(tw + 2.0),
                 color: if card.online { colors.text_inactive } else { colors.text_faint },
@@ -1016,6 +1023,27 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 3, "each session answers as itself: {seen:?}");
+    }
+
+    #[test]
+    fn a_session_this_window_holds_says_so_in_words() {
+        // The dot is the glance; the words are the fact. Colour alone would
+        // put "is this the tab I already have open" out of reach of a reader
+        // who cannot tell the accent from the success colour — and the ⌘K
+        // picker already spells it out, so two surfaces showing one state must
+        // not disagree about how.
+        let mut card = card_with(true, 2, 0);
+        card.sessions[0].here = true;
+        let (_, out) = fleet_layout(vec![card]);
+        assert!(
+            out.texts.iter().any(|t| t.text == "shell0 · this window"),
+            "the held session names itself in words: {:?}",
+            out.texts.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
+        assert!(
+            out.texts.iter().any(|t| t.text == "shell1"),
+            "and one nobody here holds is just its title"
+        );
     }
 
     #[test]
