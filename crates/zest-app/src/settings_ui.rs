@@ -38,6 +38,59 @@ pub struct EditBuffer {
     pub append: bool,
 }
 
+/// What leaving an open edit should do (#272, #275).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pending {
+    /// Nothing was open; the caller may leave.
+    None,
+    /// Write this parsed value into the field, then leave.
+    Commit(usize, serde_json::Value),
+    /// Append this raw text to the field's list — the add-chip's mode. Not
+    /// parsed here: appending needs the list's *current* value, which lives
+    /// with the writer. The buffer is deliberately left open, because only
+    /// the caller can tell whether the append took.
+    Append(usize, String),
+    /// The buffer does not parse. It stays open, flagged, and the caller must
+    /// NOT leave — a value that cannot be written must not be lost by looking
+    /// away from it.
+    Refused,
+}
+
+/// Take an open edit so the caller can write it.
+///
+/// Enter used to be the only thing that committed, so every other way out of a
+/// field — clicking another row, changing category, closing the tab — dropped
+/// the buffer on the floor and a typed value simply vanished (#272 on the
+/// profiles editor, #275 on this one). Leaving a field is a commit; only Esc
+/// discards, and only Esc should.
+///
+/// Returns the value rather than writing it because writing needs the config
+/// path and a reload, which live on `App`. Keeping the decision here is what
+/// lets it be tested without a window.
+pub fn take_pending_edit(editing: &mut Option<EditBuffer>, fields: &[UiField]) -> Pending {
+    let Some(edit) = editing.as_mut() else { return Pending::None };
+    let idx = edit.field_idx;
+    // A buffer whose field index no longer names a field cannot be written and
+    // cannot be shown; keeping it open would trap the caller for ever.
+    let Some(field) = fields.get(idx) else {
+        *editing = None;
+        return Pending::None;
+    };
+    if edit.append {
+        return Pending::Append(idx, edit.buffer.text().to_string());
+    }
+    match parse_input(field, edit.buffer.text()) {
+        Some(value) => {
+            *editing = None;
+            Pending::Commit(idx, value)
+        }
+        None => {
+            edit.error = true;
+            Pending::Refused
+        }
+    }
+}
+
 /// Settings the schema declares but the app does not consume yet.
 ///
 /// Honesty over polish: a control that visibly does nothing reads as broken,
@@ -824,6 +877,73 @@ mod tests {
 
     fn values() -> serde_json::Value {
         serde_json::to_value(zest_config::Settings::default()).expect("serializes")
+    }
+
+    fn field_index(key: &str) -> usize {
+        fields().iter().position(|f| f.key == key).unwrap_or_else(|| panic!("{key} is a field"))
+    }
+
+    fn open(field_idx: usize, text: &str, append: bool) -> Option<EditBuffer> {
+        Some(EditBuffer {
+            field_idx,
+            buffer: crate::text_field::TextField::new(text),
+            error: false,
+            append,
+        })
+    }
+
+    #[test]
+    fn leaving_a_settings_field_hands_the_edit_back() {
+        // #275, the Settings tab's half of #272: Enter was the only exit that
+        // wrote, so changing category or closing the tab dropped the buffer.
+        let fields = fields();
+        let idx = field_index("typography.size_pt");
+        let mut editing = open(idx, "18", false);
+        assert_eq!(
+            take_pending_edit(&mut editing, &fields),
+            Pending::Commit(idx, serde_json::json!(18.0)),
+            "leaving the field must hand the value back to be written"
+        );
+        assert!(editing.is_none(), "a committed buffer closes");
+    }
+
+    #[test]
+    fn a_settings_buffer_that_cannot_be_written_refuses_to_be_left() {
+        let fields = fields();
+        let idx = field_index("typography.size_pt");
+        let mut editing = open(idx, "not a number", false);
+        assert_eq!(take_pending_edit(&mut editing, &fields), Pending::Refused);
+        let edit = editing.as_ref().expect("the buffer stays open");
+        assert!(edit.error, "and says so");
+        assert_eq!(edit.buffer.text(), "not a number", "with the text intact");
+    }
+
+    #[test]
+    fn an_add_chip_buffer_comes_back_unparsed_and_still_open() {
+        // The add-chip appends to a list, and appending needs the list's
+        // CURRENT value — which lives with the writer, not here. So this arm
+        // hands back the raw text and deliberately leaves the buffer open:
+        // only the caller can tell whether the append took, and closing it
+        // first would destroy the text on the failing half.
+        let fields = fields();
+        let idx = field_index("typography.families");
+        let mut editing = open(idx, "Cascadia Mono", true);
+        assert_eq!(
+            take_pending_edit(&mut editing, &fields),
+            Pending::Append(idx, "Cascadia Mono".to_string()),
+            "an append is handed back as typed"
+        );
+        assert!(
+            editing.is_some(),
+            "and the buffer stays open until the caller says the append landed"
+        );
+    }
+
+    #[test]
+    fn a_buffer_naming_a_field_that_is_gone_is_dropped_not_stuck() {
+        let mut editing = open(9999, "orphan", false);
+        assert_eq!(take_pending_edit(&mut editing, &fields()), Pending::None);
+        assert!(editing.is_none(), "an unwritable orphan is dropped, not held");
     }
 
     fn setting_keys(rows: &[SettingsRowModel]) -> Vec<String> {
