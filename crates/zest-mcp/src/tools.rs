@@ -355,9 +355,16 @@ impl ToolSet {
         // transport that genuinely cannot determine a status never produces a
         // concrete one -- and reporting that as "still running" would be a
         // different lie from the one above.
+        // The link's own state comes back with the read, under the same lock,
+        // so a missing replica can say *why* it is missing rather than being
+        // reported as whatever the caller happened to be waiting for.
         let read = self.conn.with(|s| {
-            s.replica(addr)
-                .map(|r| (r.text_head_tail(max_lines), r.alt_screen(), r.exited().is_some()))
+            (
+                s.replica(addr)
+                    .map(|r| (r.text_head_tail(max_lines), r.alt_screen(), r.exited().is_some())),
+                s.closed,
+                s.error.clone(),
+            )
         });
         self.conn.detach(addr);
 
@@ -371,8 +378,17 @@ impl ToolSet {
             Err(e) => return Err(ToolError::Conn(e)),
         };
 
-        let ((shown, total, omitted), alt, ended) =
-            read.ok_or(ToolError::Conn(ConnError::TimedOut))?;
+        // A dead link is not a slow one, and only one of the two is worth
+        // retrying. Reporting a closed connection as "the deadline passed"
+        // sends a model back round the loop against a socket that has gone --
+        // and now that `TimedOut` says so in as many words, it would be saying
+        // something plainly untrue.
+        let (found, closed, error) = read;
+        let ((shown, total, omitted), alt, ended) = found.ok_or(ToolError::Conn(if closed {
+            ConnError::Closed(error)
+        } else {
+            ConnError::TimedOut
+        }))?;
 
         Ok(json!({
             "session": Resolver::format(addr),
