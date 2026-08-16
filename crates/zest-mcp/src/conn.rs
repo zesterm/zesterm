@@ -321,7 +321,18 @@ fn spawn_writer(
 /// thread. A sealing failure is different in kind -- the counter has run past
 /// what the epoch can carry -- so it is logged rather than swallowed.
 fn seal(sealer: &mut Option<Sealer>, msg: &ClientMessage) -> Option<Vec<u8>> {
-    let body = frame::encode_body(msg).ok()?;
+    let body = match frame::encode_body(msg) {
+        Ok(b) => b,
+        Err(e) => {
+            // Logged rather than swallowed. There is nowhere to *report* it
+            // from a writer thread, but a message that vanishes with no trace
+            // is a tool call that appears to have been sent and never was --
+            // and the symptom of that is a wait that times out somewhere else
+            // entirely.
+            tracing::error!(error = %e, "could not encode a message; dropping it");
+            return None;
+        }
+    };
     let body = match sealer.as_mut() {
         Some(s) => match s.seal(&body) {
             Ok(sealed) => sealed,
@@ -332,7 +343,13 @@ fn seal(sealer: &mut Option<Sealer>, msg: &ClientMessage) -> Option<Vec<u8>> {
         },
         None => body,
     };
-    frame::frame_bytes(&body).ok()
+    match frame::frame_bytes(&body) {
+        Ok(framed) => Some(framed),
+        Err(e) => {
+            tracing::error!(error = %e, "could not frame a message; dropping it");
+            None
+        }
+    }
 }
 
 fn spawn_reader(

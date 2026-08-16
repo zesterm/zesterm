@@ -132,7 +132,7 @@ impl ToolSet {
             "output" => self.output(
                 session_arg(args, &self.resolver)?,
                 req_u32(args, "block_id")?,
-                opt_usize(args, "max_lines")?.unwrap_or(DEFAULT_MAX_LINES),
+                clamp_lines(opt_usize(args, "max_lines")?),
             ),
             "input" => self.input(session_arg(args, &self.resolver)?, args),
             "create_session" => self.create_session(args),
@@ -255,8 +255,8 @@ impl ToolSet {
     fn create_session(&self, args: &Value) -> Result<Value, ToolError> {
         let command = args.get("command").and_then(Value::as_str).unwrap_or("");
         let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or("");
-        let cols = opt_u32(args, "cols")?.unwrap_or(120) as u16;
-        let rows = opt_u32(args, "rows")?.unwrap_or(30) as u16;
+        let cols = opt_u16(args, "cols")?.unwrap_or(120);
+        let rows = opt_u16(args, "rows")?.unwrap_or(30);
         let addr = self.conn.create_session(command, cwd, cols, rows)?;
         Ok(json!({ "session": Resolver::format(addr), "cols": cols, "rows": rows }))
     }
@@ -303,13 +303,31 @@ impl ToolSet {
 /// How many lines `output` returns before truncating.
 const DEFAULT_MAX_LINES: usize = 200;
 
+/// The most `output` will return however large a `max_lines` is asked for.
+///
+/// A ceiling rather than trust, because the caller is a model: "shapes sized
+/// for tokens" is not a guarantee if one argument can switch it off. Well above
+/// any reasonable read of a single command's output, and far below the size at
+/// which a response stops being usable.
+const MAX_LINES_CEILING: usize = 2_000;
+
+/// What `output` will actually use.
+///
+/// Absent means the default. **Zero means zero**, not "everything": a caller
+/// that asks for no lines gets the metadata and a count of what it declined,
+/// and the one reading that made `0` disable truncation was the argument that
+/// undid the whole bound.
+fn clamp_lines(asked: Option<usize>) -> usize {
+    asked.unwrap_or(DEFAULT_MAX_LINES).min(MAX_LINES_CEILING)
+}
+
 /// Keep both ends and drop the middle.
 ///
 /// Not the tail: an error is usually at the end, and the command that caused it
 /// at the beginning. Cutting either one is how a truncation loses the two lines
 /// that mattered.
 fn truncate_middle(rows: &[String], max: usize) -> (Vec<&str>, usize) {
-    if rows.len() <= max || max == 0 {
+    if rows.len() <= max {
         return (rows.iter().map(String::as_str).collect(), 0);
     }
     let head = max / 2;
@@ -365,6 +383,22 @@ fn opt_u32(args: &Value, field: &'static str) -> Result<Option<u32>, ToolError> 
 
 fn opt_usize(args: &Value, field: &'static str) -> Result<Option<usize>, ToolError> {
     Ok(opt_u32(args, field)?.map(|n| n as usize))
+}
+
+/// A terminal dimension, refused rather than wrapped.
+///
+/// `as u16` on a `u32` is silent: 100000 becomes 34464, and the caller gets a
+/// session at a size it never asked for with nothing to indicate why. A model
+/// can act on "must be between 1 and 65535"; it cannot act on a grid that is
+/// quietly the wrong shape.
+fn opt_u16(args: &Value, field: &'static str) -> Result<Option<u16>, ToolError> {
+    match opt_u32(args, field)? {
+        None => Ok(None),
+        Some(0) => Err(ToolError::BadType { field, want: "at least 1" }),
+        Some(n) => u16::try_from(n)
+            .map(Some)
+            .map_err(|_| ToolError::BadType { field, want: "at most 65535" }),
+    }
 }
 
 #[cfg(test)]
@@ -450,6 +484,43 @@ mod tests {
         assert!(
             v["exit_code_source"].is_null(),
             "a command still running has no status to attribute to anything"
+        );
+    }
+
+    #[test]
+    fn asking_for_no_lines_returns_none_rather_than_everything() {
+        // `max == 0` used to short-circuit to "return it all", so the one
+        // argument meant to bound the response could switch the bound off.
+        let rows: Vec<String> = (0..50).map(|i| format!("line {i}")).collect();
+        let (shown, omitted) = truncate_middle(&rows, 0);
+        assert!(shown.is_empty(), "zero lines must mean zero: {shown:?}");
+        assert_eq!(omitted, 50, "and the caller must be told what it declined");
+    }
+
+    #[test]
+    fn a_huge_max_lines_is_capped_rather_than_honoured() {
+        // The caller is a model, so "shapes sized for tokens" is not a
+        // guarantee if an argument can lift the ceiling.
+        assert_eq!(clamp_lines(Some(1_000_000)), MAX_LINES_CEILING);
+        assert_eq!(clamp_lines(None), DEFAULT_MAX_LINES);
+        assert_eq!(clamp_lines(Some(10)), 10, "a modest ask is honoured exactly");
+    }
+
+    #[test]
+    fn a_dimension_that_would_not_fit_is_refused_rather_than_wrapped() {
+        // `as u16` turns 100000 into 34464 silently, and the caller gets a
+        // session at a size it never asked for with nothing to explain it.
+        let args = json!({ "cols": 100_000 });
+        let err = opt_u16(&args, "cols").expect_err("100000 does not fit in a u16");
+        assert!(
+            err.to_string().contains("at most 65535"),
+            "the refusal must say the bound, so a model can correct itself: {err}"
+        );
+
+        assert_eq!(opt_u16(&json!({ "cols": 120 }), "cols").expect("fits"), Some(120));
+        assert!(
+            opt_u16(&json!({ "cols": 0 }), "cols").is_err(),
+            "a zero-column terminal is not a size; `clamp_size` would silently              make it 2 on the far side"
         );
     }
 
