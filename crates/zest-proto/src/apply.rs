@@ -419,8 +419,13 @@ mod tests {
             CursorState {
                 row: c.row as u16,
                 col: c.col as u16,
-                visible: true,
-                shape: 0,
+                // Read, not assumed. A hard-coded `true` would be this whole
+                // class of bug again: ConPTY's repaint hides the cursor and
+                // shows it again, so a harness that always reports it visible
+                // is a stand-in kinder than the thing it stands for, and a
+                // cursor-visibility regression would pass straight through.
+                visible: self.host.modes().contains(Modes::SHOW_CURSOR),
+                shape: self.host.cursor_style().to_decscusr() as u8,
             }
         }
 
