@@ -303,3 +303,55 @@ fn a_vim_session_reports_entering_and_leaving_the_alternate_screen() {
         "the recording quits vim, so the replica must come back off the alternate screen"
     );
 }
+
+/// `text_head_tail` bounds what it builds, not just what it returns.
+///
+/// `run_isolated` reads a session that gets the daemon's full scrollback, so a
+/// chatty command leaves thousands of rows in the replica. Collecting them all
+/// and truncating afterwards allocates a `String` per row only to drop it on
+/// the next line; the cost has to be the size of the answer rather than the
+/// size of the buffer. Asserted through the contract that makes that possible —
+/// `total` counts everything while `shown` is bounded — because the allocation
+/// itself is not observable from a test.
+#[test]
+fn the_whole_buffer_is_counted_but_only_the_ends_are_built() {
+    let r = replay("blocks-zsh");
+
+    let (all, total, omitted) = r.text_head_tail(usize::MAX);
+    assert!(total > 0, "the recording has output; something is wrong upstream of this");
+    assert_eq!(omitted, 0, "nothing is dropped when everything fits");
+    assert_eq!(all.len(), total, "an unbounded read returns every line it counted");
+
+    let (shown, total_again, omitted) = r.text_head_tail(4);
+    assert_eq!(total_again, total, "the total is the buffer, not what was returned");
+    assert!(shown.len() <= 4, "the bound is a bound: {} lines came back", shown.len());
+    assert_eq!(
+        shown.len() + omitted,
+        total,
+        "every line is either shown or counted as omitted -- a caller that adds them \
+         up must get the whole output back"
+    );
+    assert_eq!(shown[0], all[0], "the beginning must survive: the command that failed is there");
+    assert_eq!(
+        shown[shown.len() - 1],
+        all[total - 1],
+        "and the end, where the error is. A tail-only truncation loses one of the two"
+    );
+}
+
+/// Neither end of the output is a blank row.
+///
+/// A grid is mostly empty space, and `run_isolated` returns rows rather than a
+/// screen — twenty blank lines before the first word is pure token cost on
+/// every call, and it makes a short command look like a long one.
+#[test]
+fn the_output_does_not_begin_or_end_with_blank_rows() {
+    let (shown, _, _) = replay("blocks-zsh").text_head_tail(usize::MAX);
+    assert!(!shown.is_empty(), "the recording printed something");
+    assert!(!shown[0].is_empty(), "leading blanks must be trimmed: {:?}", &shown[..2.min(shown.len())]);
+    assert!(
+        !shown[shown.len() - 1].is_empty(),
+        "and trailing ones, which is most of a grid: {:?}",
+        &shown[shown.len().saturating_sub(2)..]
+    );
+}

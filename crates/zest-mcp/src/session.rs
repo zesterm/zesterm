@@ -155,7 +155,8 @@ impl Replica {
         trimmed[..end].join("\n")
     }
 
-    /// Everything the replica holds, scrollback then viewport, one row per line.
+    /// Everything the replica holds, as at most `max` lines plus the count it
+    /// dropped: `(shown, total, omitted)`.
     ///
     /// What [`screen_text`](Self::screen_text) cannot answer, and the reason
     /// `run_isolated` needs its own reader: a command with no shell integration
@@ -170,25 +171,39 @@ impl Replica {
     /// deliberately scrollback-only for exactly that reason, and taking the
     /// viewport from `grid.row(i)` keeps it that way.
     ///
+    /// **Bounded on purpose, rather than collecting and then truncating.** A
+    /// session created by `run_isolated` gets the daemon's full scrollback, so
+    /// a chatty command leaves thousands of rows here and every one of them
+    /// would be a `String` allocated only to be dropped by the very next call.
+    /// Rows are borrowed while the ends are chosen and only the survivors are
+    /// materialized, which makes the cost the size of the *answer* rather than
+    /// the size of the buffer.
+    ///
+    /// Keeps both ends for [`truncate_middle`](crate::tools)'s reason: an error
+    /// is usually at the end and the command that caused it at the beginning.
     /// Leading and trailing blank rows go; blanks *between* two lines of output
     /// are real and stay.
     #[must_use]
-    pub fn all_text(&self) -> Vec<String> {
+    pub fn text_head_tail(&self, max: usize) -> (Vec<String>, usize, usize) {
         let grid = self.term.grid();
-        let mut out: Vec<String> = grid
-            .lines_by_id(grid.oldest_line_id(), usize::MAX)
-            .into_iter()
-            .map(|r| r.text().trim_end().to_string())
-            .collect();
-        for i in 0..grid.rows() {
-            out.push(grid.row(i).text().trim_end().to_string());
-        }
+        let mut rows: Vec<&zest_core::Row> = grid.lines_by_id(grid.oldest_line_id(), usize::MAX);
+        rows.extend((0..grid.rows()).map(|i| grid.row(i)));
 
-        let end = out.iter().rposition(|l| !l.is_empty()).map_or(0, |i| i + 1);
-        out.truncate(end);
-        let start = out.iter().position(|l| !l.is_empty()).unwrap_or(0);
-        out.drain(..start);
-        out
+        let blank = |r: &&zest_core::Row| r.text().trim_end().is_empty();
+        let end = rows.iter().rposition(|r| !blank(r)).map_or(0, |i| i + 1);
+        rows.truncate(end);
+        let start = rows.iter().position(|r| !blank(r)).unwrap_or(0);
+        let rows = &rows[start..];
+
+        let total = rows.len();
+        let text = |r: &zest_core::Row| r.text().trim_end().to_string();
+        if total <= max {
+            return (rows.iter().map(|r| text(r)).collect(), total, 0);
+        }
+        let head = max / 2;
+        let mut out: Vec<String> = rows[..head].iter().map(|r| text(r)).collect();
+        out.extend(rows[total - (max - head)..].iter().map(|r| text(r)));
+        (out, total, total - max)
     }
 
     /// Every block the replica holds, oldest first.

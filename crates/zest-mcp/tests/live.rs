@@ -427,7 +427,9 @@ fn a_timeout_returns_partial_output_and_leaves_the_command_running() {
     );
     assert!(
         v["exit_code_source"].is_null(),
-        "no status means nothing to attribute to a source"
+        "no status means nothing to attribute to a source. Keying this off `!timed_out` \
+         rather than off the code itself claims the process reported `null`, which is \
+         not a thing a process can say"
     );
 
     let session = v["session"].as_str().expect("the result names the session it started");
@@ -441,4 +443,47 @@ fn a_timeout_returns_partial_output_and_leaves_the_command_running() {
 
     tools.call("interrupt", &serde_json::json!({ "session": session })).expect("interrupt");
     registry.close(addr.session);
+}
+
+/// A status and its provenance travel together, or neither travels.
+///
+/// The invariant across every result this crate produces: `exit_code_source`
+/// answers "where did this number come from", so it is meaningless without a
+/// number and dishonest beside a null one. `block_json` already keys its source
+/// off the value for the same reason; this is the process-exit half of the same
+/// rule, and the two must not drift apart.
+#[test]
+fn an_exit_code_and_its_source_are_present_together_or_not_at_all() {
+    let (addr, registry) = serve_daemon();
+    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+
+    for (args, what) in [
+        (serde_json::json!({ "command": exit_3_cmd() }), "a command that finished"),
+        (
+            serde_json::json!({
+                "command": if cfg!(windows) {
+                    "powershell.exe -NoProfile -Command Start-Sleep 30"
+                } else {
+                    "/bin/sleep 30"
+                },
+                "timeout_ms": 300
+            }),
+            "a command that timed out",
+        ),
+    ] {
+        let v = tools.call("run_isolated", &args).expect("run_isolated returns a result");
+        assert_eq!(
+            v["exit_code"].is_null(),
+            v["exit_code_source"].is_null(),
+            "{what}: a code without a source cannot be trusted and a source without a \
+             code describes nothing. Got code={} source={}",
+            v["exit_code"],
+            v["exit_code_source"]
+        );
+        if let Some(s) = v["session"].as_str() {
+            if let Ok(a) = tools.resolver().resolve(s) {
+                registry.close(a.session);
+            }
+        }
+    }
 }

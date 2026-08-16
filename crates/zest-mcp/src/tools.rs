@@ -322,14 +322,42 @@ impl ToolSet {
         // session outright, so a vote would harm nobody -- but `observe` is
         // what the daemon reads to mean "no pane", and a client that abstains
         // everywhere cannot acquire the habit of not abstaining.
-        self.conn.attach(addr, cols, rows, true)?;
+        if let Err(e) = self.conn.attach(addr, cols, rows, true) {
+            // The session exists and has never been attached, so `sweep` will
+            // not collect it -- its predicate requires `ever_attached`, which
+            // is what keeps a just-created session alive across the gap before
+            // its owner attaches. Returning here without closing therefore
+            // leaks a shell on the host for the life of the daemon, and the
+            // caller has no id to close it with.
+            self.conn.send(ClientMessage::CloseSession { session: addr });
+            return Err(e.into());
+        }
 
-        let exited = self.conn.wait_until(deadline, |s| s.replica(addr).and_then(Replica::exited));
+        // Wait for a *concrete status*, not merely for the exit.
+        //
+        // `Session::has_exited` is set by the reader seeing EOF, which is not
+        // the same as the process having been waited on, so the first `Exited`
+        // can legitimately carry `code: None` with a real status arriving on a
+        // later poll. Stopping at the first `Exited` would report
+        // `exit_code: null` for a command that exited perfectly well -- which
+        // is precisely the "the host could not say" spelling this whole change
+        // exists to stop being wrong.
+        let settled = self.conn.wait_until(deadline, |s| match s.replica(addr).and_then(Replica::exited) {
+            Some(Some(code)) => Some(code),
+            // Exited with nothing to report yet, or not exited. Both wait.
+            _ => None,
+        });
 
-        // Still attached. See the doc above: this is the line that must not
+        // Still attached. See the doc above: these are the lines that must not
         // move below the detach.
+        //
+        // `ended` is read here rather than inferred from `settled`, because a
+        // transport that genuinely cannot determine a status never produces a
+        // concrete one -- and reporting that as "still running" would be a
+        // different lie from the one above.
         let read = self.conn.with(|s| {
-            s.replica(addr).map(|r| (r.all_text(), r.alt_screen()))
+            s.replica(addr)
+                .map(|r| (r.text_head_tail(max_lines), r.alt_screen(), r.exited().is_some()))
         });
         self.conn.detach(addr);
 
@@ -337,24 +365,26 @@ impl ToolSet {
         // a password prompt, which is exactly the case a sentinel cannot tell
         // from success. The session is left running so `input` can answer it.
         // Any other error is a dead link and has nothing to report.
-        let (timed_out, code) = match exited {
-            Ok(code) => (false, code),
-            Err(ConnError::TimedOut) => (true, None),
+        let code = match settled {
+            Ok(code) => Some(code),
+            Err(ConnError::TimedOut) => None,
             Err(e) => return Err(ToolError::Conn(e)),
         };
 
-        let (rows_text, alt) = read.ok_or(ToolError::Conn(ConnError::TimedOut))?;
-        let total = rows_text.len();
-        let (shown, omitted) = truncate_middle(&rows_text, max_lines);
+        let ((shown, total, omitted), alt, ended) =
+            read.ok_or(ToolError::Conn(ConnError::TimedOut))?;
 
         Ok(json!({
             "session": Resolver::format(addr),
             "command": command,
-            "exited": !timed_out,
-            "timed_out": timed_out,
+            "exited": ended,
+            "timed_out": !ended,
             "exit_code": code,
-            // Only ever this variant here, and it is the point of the tool.
-            "exit_code_source": (!timed_out).then_some(ExitSource::ProcessExit),
+            // Attached to the *code*, never to the exit. Claiming a provenance
+            // for a status we do not have says "the process told us null",
+            // which is not a thing a process can say -- and `block_json` next
+            // door already keys its source off the value for the same reason.
+            "exit_code_source": code.map(|_| ExitSource::ProcessExit),
             // A full-screen program in a session nobody can see is a command
             // that will never finish. Worth saying rather than leaving the
             // agent to infer it from output that looks truncated.
