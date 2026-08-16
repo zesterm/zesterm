@@ -743,19 +743,26 @@ const HOST_MENU_LOCAL: &str = "(this machine)";
 ///
 /// `None` in two cases, both of which mean *keep typing*:
 ///
-/// - **A host really labelled `(this machine)`.** Labels are arbitrary text, so
-///   this is legal, and the menu carries one string per option — the choice
-///   comes back as text with no way to tell the two apart, so picking that host
-///   would silently clear the pin it meant to set. A wrong write is worse than
-///   no dropdown, and a menu whose rows a person could not tell apart either is
-///   not much of a menu.
+/// - **Anything already spelled `(this machine)`.** Labels are arbitrary text,
+///   so a machine really called that is legal, and the menu carries one string
+///   per option — the choice comes back as text with no way to tell the two
+///   apart. It bites from **both directions**, which is the part worth
+///   remembering: a *fleet host* with that label would clear the pin when
+///   picked, and a *profile pinned to* that name — a machine that is simply
+///   offline and absent from the snapshot — folds onto the local row, so Enter
+///   silently rewrites a real pin to empty. One guard, both sides. A wrong
+///   write is worse than no dropdown, and a menu whose rows a person could not
+///   tell apart either is not much of a menu.
 /// - **Nothing but this machine.** A one-row dropdown is worse than the text
 ///   field it replaced.
 fn host_menu_roster(
     fleet: &[crate::fleet::FleetHost],
     current: Option<&str>,
 ) -> Option<Vec<String>> {
-    if fleet.iter().any(|h| !h.local && h.label == HOST_MENU_LOCAL) {
+    let collides = |label: &str| label.eq_ignore_ascii_case(HOST_MENU_LOCAL);
+    if fleet.iter().any(|h| !h.local && collides(&h.label))
+        || current.is_some_and(collides)
+    {
         return None;
     }
     let mut roster = vec![HOST_MENU_LOCAL.to_string()];
@@ -12342,6 +12349,19 @@ mod presence_tests {
             None,
             "a wrong write is worse than no dropdown — and a menu whose rows a \
              person could not tell apart either is not much of a menu"
+        );
+
+        // And from the other direction, which is the half the first guard
+        // missed: a profile *pinned to* that name, for a machine that is
+        // simply offline and absent from the snapshot. It folds onto the local
+        // row, so opening the menu and pressing Enter — the gesture that is
+        // supposed to be a no-op — would rewrite a real pin to empty.
+        let fleet = with_local(vec![host(2, "forge", Presence::Online)]);
+        assert_eq!(host_menu_roster(&fleet, Some(HOST_MENU_LOCAL)), None);
+        assert_eq!(
+            host_menu_roster(&fleet, Some("(THIS MACHINE)")),
+            None,
+            "case-insensitively, like every other label comparison here"
         );
     }
 
