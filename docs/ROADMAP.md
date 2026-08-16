@@ -103,6 +103,12 @@ and its number (48ms) is reported rather than gated.
   had. Either way blocks appear against the prompt the user already has, and no
   file of theirs is touched. VS Code's OSC 633 is understood too, for anyone who
   has its integration.
+- **A fleet card says what the machine is and what is running on it.** The `os`
+  row design §7 asks for, filled from what the host published; a session count
+  and a list for every reachable machine rather than only this one; and each of
+  those rows attaches, which the ⌘K picker could do before the screen that
+  exists to show you the fleet could. A dial that keeps failing says so instead
+  of reading like a machine nobody asked about. → #287.
 - **The `+` menu spans the fleet.** Launch targets are grouped by the machine
   that will run them — not by where the profile is defined, so a profile in this
   laptop's config pinned to `forge` sits beside the ones `forge` publishes

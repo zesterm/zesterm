@@ -1751,7 +1751,7 @@ fn launcher_overlay(
     }
 }
 
-fn intersect(r: [f32; 4], c: [f32; 4]) -> Option<[f32; 4]> {
+pub(super) fn intersect(r: [f32; 4], c: [f32; 4]) -> Option<[f32; 4]> {
     let x0 = r[0].max(c[0]);
     let y0 = r[1].max(c[1]);
     let x1 = (r[0] + r[2]).min(c[0] + c[2]);
