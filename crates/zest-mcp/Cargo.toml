@@ -17,12 +17,28 @@ zest-proto.workspace = true
 # the reason the crate is Rust.
 zest-core.workspace = true
 thiserror = { workspace = true }
+# The blessed client, not a tenth hand-rolled handshake -- `client.rs`'s own doc
+# is the argument: a peer that gets the seal switch wrong authenticates fine and
+# then cannot be read. Brings `find_or_spawn` for the local daemon too.
+zest-daemon.workspace = true
+# The agent's own device key, and the sealer/opener the split connection needs.
+zest-mesh.workspace = true
+# The writer thread is fed by a channel rather than sharing the sealer behind a
+# mutex; see `conn.rs`.
+crossbeam-channel = { workspace = true }
+tracing = { workspace = true }
+# The tool surface is JSON in and JSON out; the transport that carries it is one
+# module away and adds nothing to the shapes.
+serde = { workspace = true }
+serde_json = { workspace = true }
 
-# Deliberately not here yet: `zest-daemon` (the connection), `zest-mesh` (the
-# agent's device key), and the MCP/async stack. Each arrives with the code that
-# uses it, so `cargo tree` keeps describing what this crate actually does.
+# Deliberately not here yet: the MCP/async stack. It arrives with the transport
+# that uses it, so `cargo tree` keeps describing what this crate actually does.
 
 [dev-dependencies]
 # The recorded fixtures are JSON carrying hex wire bytes; the replay test reads
 # them the way any second implementation would.
 serde_json = { workspace = true }
+# `tests/live.rs` drives `serve()` in-process, so there is no binary to find and
+# no socket path to collide on.
+zest-daemon = { workspace = true }
