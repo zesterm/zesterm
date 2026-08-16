@@ -189,14 +189,33 @@ impl Replica {
         let mut rows: Vec<&zest_core::Row> = grid.lines_by_id(grid.oldest_line_id(), usize::MAX);
         rows.extend((0..grid.rows()).map(|i| grid.row(i)));
 
-        let blank = |r: &&zest_core::Row| r.text().trim_end().is_empty();
+        // `trimmed_len`, not `text().is_empty()`. Deciding blankness by
+        // building the string allocates one per row in the buffer purely to
+        // throw it away, which is the cost this method exists to avoid — the
+        // bound would have applied only to what was *returned*, not to what was
+        // built. This counts cells and allocates nothing.
+        //
+        // It also draws the line a shade differently, in the direction that
+        // loses nothing: a row whose cells are blank but *styled* — a coloured
+        // background with no glyphs — is content here, where a text comparison
+        // would discard it.
+        let blank = |r: &&zest_core::Row| r.trimmed_len() == 0;
         let end = rows.iter().rposition(|r| !blank(r)).map_or(0, |i| i + 1);
         rows.truncate(end);
         let start = rows.iter().position(|r| !blank(r)).unwrap_or(0);
         let rows = &rows[start..];
 
+        // One allocation per returned line. `Row::text` already stops at
+        // `trimmed_len`, so this only ever removes trailing spaces that were
+        // kept for their background, and truncating in place is what keeps
+        // `.trim_end().to_string()` from allocating the whole line twice.
+        let text = |r: &zest_core::Row| {
+            let mut s = r.text();
+            s.truncate(s.trim_end().len());
+            s
+        };
+
         let total = rows.len();
-        let text = |r: &zest_core::Row| r.text().trim_end().to_string();
         if total <= max {
             return (rows.iter().map(|r| text(r)).collect(), total, 0);
         }
