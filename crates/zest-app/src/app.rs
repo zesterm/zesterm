@@ -691,7 +691,12 @@ fn fleet_host_of<'a>(
 ) -> Option<&'a crate::fleet::FleetHost> {
     let TabOrigin::Remote { host_label } = origin else { return None };
     if crate::tabs::is_placeholder(addr) {
-        fleet.iter().find(|h| h.label.eq_ignore_ascii_case(host_label))
+        // `!h.local` is not belt-and-braces: the origin is already `Remote`, so
+        // a local match is definitionally wrong — and it is the *worst* wrong
+        // answer available, since the local row is loopback and `Online`. A
+        // connecting tab to a machine that happens to share this one's display
+        // name would read as reaching the desk it is sitting on.
+        fleet.iter().find(|h| !h.local && h.label.eq_ignore_ascii_case(host_label))
     } else {
         fleet.iter().find(|h| h.host == addr.host)
     }
@@ -12490,6 +12495,24 @@ mod presence_tests {
             tab_presence(placeholder, &remote("forge"), &fleet),
             TabPresence::Unreachable,
             "matched by label, since there is no id to match by"
+        );
+
+        // And never onto the *local* row. The origin is already `Remote`, so a
+        // local match is definitionally wrong — and the worst wrong answer
+        // available, since the local row is loopback and `Online`: a tab
+        // connecting to a machine that happens to share this one's display name
+        // would read as reaching the desk it is sitting on.
+        let mut local = host(1, "twin", Presence::Online);
+        local.local = true;
+        let fleet = [local, host(2, "twin", Presence::Unreachable)];
+        assert_eq!(
+            super::fleet_host_of(placeholder, &remote("twin"), &fleet).map(|h| h.host),
+            Some(HostId::from_bytes([2; 32])),
+            "the remote twin, not the one under our hands"
+        );
+        assert_eq!(
+            tab_presence(placeholder, &remote("twin"), &fleet),
+            TabPresence::Unreachable
         );
     }
 
