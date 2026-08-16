@@ -482,6 +482,36 @@ mod tests {
     }
 
     #[test]
+    fn dropping_history_holds_a_scrolled_back_reader_still() {
+        // The rows dropped here are the ones the viewport is about to hold, so
+        // the same content is in the same place afterwards — one boundary
+        // further down. `viewport_base` is measured from the end of storage,
+        // which just got shorter, so leaving the offset alone slides the reader
+        // into the past while they are reading. (#291)
+        let mut t = Terminal::new(10, 4, 100);
+        for r in 0..4 {
+            t.remote().write_row(r, r as LineId, &row_of("live"), false);
+        }
+        // Eight lines of history, oldest first, so there is somewhere to scroll.
+        let hist: Vec<(LineId, Vec<Cell>, bool)> = (0..8)
+            .map(|i| (100 + i as LineId, row_of(&format!("old{i}")), false))
+            .collect();
+        t.remote().prepend_history(&hist);
+        t.scroll_display(5);
+        let reading = t.grid().row(0).text().trim_end().to_string();
+        assert!(reading.starts_with("old"), "the fixture is not scrolled back: {reading:?}");
+
+        // A keyframe re-delivers the newest two history lines as viewport rows.
+        t.remote().drop_history_from(106);
+
+        assert_eq!(
+            t.grid().row(0).text().trim_end(),
+            reading,
+            "the text under the reader moved when history was de-duplicated"
+        );
+    }
+
+    #[test]
     fn dropping_history_leaves_what_the_viewport_does_not_name() {
         // The common case is a no-op, and it has to be: an ordinary keyframe's
         // viewport is newer than everything in history, and a floor that swept

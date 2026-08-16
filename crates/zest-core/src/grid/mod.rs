@@ -383,7 +383,15 @@ impl Grid {
         if n > 0 {
             self.storage.remove_range(self.scrollback_len - n, n);
             self.scrollback_len -= n;
-            self.display_offset = self.display_offset.min(self.scrollback_len);
+            // `viewport_base` is measured from the end of storage, which just
+            // lost `n` rows, so leaving the offset alone slides a scrolled-back
+            // reader `n` lines further into the past. Subtracting holds the
+            // *text* still, which is the point: the rows removed here are the
+            // ones the viewport is about to hold, so the same content is at the
+            // same place afterwards, one boundary further down. Same argument
+            // as `settle_restate`, and the same failure without it — the view
+            // jumping while somebody is reading it.
+            self.display_offset = self.display_offset.saturating_sub(n).min(self.scrollback_len);
         }
         n
     }
