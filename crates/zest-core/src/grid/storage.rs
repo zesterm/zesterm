@@ -357,6 +357,22 @@ impl Storage {
         self.rows.truncate(keep.max(1));
     }
 
+    /// Remove `len` rows starting at logical index `start`.
+    ///
+    /// The one op that takes rows out of the *middle*. `resize_rows` drops from
+    /// the top and `truncate_bottom` from the bottom, and neither can express
+    /// "these rows are a duplicate of rows further down", which is what a
+    /// replica has after a keyframe re-delivers lines it already held as
+    /// history. See `Grid::drop_scrollback_from`.
+    pub fn remove_range(&mut self, start: usize, len: usize) {
+        if len == 0 || start >= self.rows.len() {
+            return;
+        }
+        self.normalize();
+        let end = (start + len).min(self.rows.len());
+        self.rows.drain(start..end);
+    }
+
     pub fn resize_cols(&mut self, cols: usize, template: &Cell) {
         for row in &mut self.rows {
             row.resize(cols, template);

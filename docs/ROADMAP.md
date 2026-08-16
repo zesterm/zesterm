@@ -2385,6 +2385,33 @@ three facts about Cloudflare that changed after #59 was written.
       `TermEvent::ViewportRebased` and every subscriber is owed a keyframe.
       ADR-013 records who owns the viewport when the restater holds less of the
       session than we do — the height axis; #224 is still the width one.
+- [x] **A settled grow stops leaving the client holding the listing twice**
+      (#291). Reported straight after #271: one `ls`, drag up and back down,
+      and the listing renders twice, a block draws on its own and `cls` looks
+      like it does nothing.
+
+      One cause for all three, and a miss rather than a new mistake. #247
+      taught the *web* client to un-bank rows a grow takes back and left the
+      Rust replica alone — the same shape, in the Mac and Windows apps. It
+      stayed invisible because the host's settle never ran until #271 made it;
+      before that a grow keyframe carried the same short viewport it had
+      before, so nothing overlapped. Now its viewport starts earlier and
+      re-delivers lines the replica still holds as history, and the same id
+      exists twice in one `Storage`: `[0,1,2,3,4,5, 0,1,2,3,4,5,6,7]`.
+      `Grid::drop_scrollback_from` is the missing inverse of the banking a
+      shrink does, called by the applier before it writes the rows. The `cls`
+      half was checked rather than assumed — "the screen still shows the
+      listing" looks identical whether it is two copies or an unhandled clear,
+      and those want different fixes.
+
+      **Why the crate's own tests could not have caught it**, which is the part
+      worth keeping: the `Pair` harness fed the encoder a constant cursor
+      rather than the host's, and `Grid::resize` gives up the blank rows below
+      the cursor before taking any over the top — so every resize test in
+      `zest-proto` was driving a client that banked nothing. The fixture could
+      not reach the state under test, and passed for a reason unrelated to the
+      code. The new tests assert they got there first.
+
 - [x] **A recorded drag, and the fix it caught** (#271).
       #247 shipped and the gesture was confirmed working from a Mac against a
       Windows host — and the settle it is named for had never run once.

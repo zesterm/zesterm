@@ -154,6 +154,18 @@ impl RemoteWriter<'_> {
         self.state.touch_full();
     }
 
+    /// Drop history this keyframe is about to re-deliver as viewport rows.
+    ///
+    /// Call with the first line id the keyframe carries, before writing its
+    /// rows. See [`crate::grid::Grid::drop_scrollback_from`] — without it a
+    /// settled grow leaves the same line in both halves of this grid and
+    /// everything that walks the session by id shows it twice. (#291)
+    pub fn drop_history_from(&mut self, first: LineId) {
+        if self.state.grid_mut().drop_scrollback_from(first) > 0 {
+            self.state.touch_full();
+        }
+    }
+
     /// Keep the client's line-id counter level with the host's.
     ///
     /// Rows exposed by a scroll are stamped from the *client's* counter, which
@@ -431,5 +443,60 @@ mod tests {
         let mut t = Terminal::new(10, 3, 100);
         t.remote().write_row(99, 99, &row_of("nope"), false);
         assert_eq!(t.grid().rows(), 3);
+    }
+
+    #[test]
+    fn a_keyframe_that_gives_history_back_does_not_leave_two_copies_of_it() {
+        // The host settles a grow and its keyframe's viewport starts earlier
+        // than it did, so every row it re-sends is one this replica already
+        // holds above the boundary. Left there the same line exists twice in
+        // one `Storage`, and everything that walks the session by id shows it
+        // twice: the listing duplicated, and a block whose range spans both
+        // copies drawing on its own.
+        //
+        // #247 fixed this shape in the web client and missed the Rust one. It
+        // stayed invisible until #281 made the host's settle actually fire,
+        // which is what a grow keyframe re-delivering anything depends on.
+        let mut t = Terminal::new(10, 6, 100);
+        for r in 0..6 {
+            t.remote().write_row(r, r as LineId, &row_of("line"), false);
+        }
+        t.remote().set_cursor(5, 0);
+
+        // Shrunk: four rows go over the top and become this replica's history.
+        t.remote().resize(10, 2);
+        assert_eq!(t.grid().scrollback_len(), 4, "the shrink banked nothing");
+
+        // Grown, and the host settled -- so the keyframe carries lines 0..5
+        // again, four of which are sitting in scrollback right now.
+        t.remote().resize(10, 6);
+        t.remote().drop_history_from(0);
+        for r in 0..6 {
+            t.remote().write_row(r, r as LineId, &row_of("line"), false);
+        }
+
+        let ids: Vec<LineId> =
+            (0..t.grid().total_lines()).map(|i| t.grid().line(i).unwrap().id).collect();
+        assert_eq!(ids, vec![0, 1, 2, 3, 4, 5], "a line is held twice: {ids:?}");
+        assert_eq!(t.grid().scrollback_len(), 0, "history the viewport now holds is not history");
+    }
+
+    #[test]
+    fn dropping_history_leaves_what_the_viewport_does_not_name() {
+        // The common case is a no-op, and it has to be: an ordinary keyframe's
+        // viewport is newer than everything in history, and a floor that swept
+        // more than it should would quietly delete a client's scrollback on
+        // every frame.
+        let mut t = Terminal::new(10, 3, 100);
+        for r in 0..3 {
+            t.remote().write_row(r, r as LineId, &row_of("line"), false);
+        }
+        t.remote().scroll(0, 2, 3);
+        let before = t.grid().scrollback_len();
+        assert!(before >= 3, "the fixture built no history");
+
+        t.remote().drop_history_from(90);
+
+        assert_eq!(t.grid().scrollback_len(), before, "history the keyframe never named was dropped");
     }
 }
