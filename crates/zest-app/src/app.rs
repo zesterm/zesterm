@@ -671,16 +671,35 @@ fn presence_of(host: &crate::fleet::FleetHost) -> TabPresence {
     }
 }
 
-/// A tab's machine, as the fleet sees it.
+/// The fleet row a tab's shell actually runs on.
 ///
-/// **By id, not by label**: `TabOrigin::Remote` carries only a display name and
+/// **By id, not by display label.** `TabOrigin::Remote` carries only a name and
 /// two machines may share one — the keying bug #268 fixed in the launcher's
 /// group map and again in its provenance lookup. A tab knows its `SessionAddr`,
-/// so it knows the host id it is actually attached to.
+/// so it knows the host id it is attached to.
+///
+/// One lookup, because there were two and they disagreed: `presence` was
+/// resolved by id here while `LinkKind` a few lines away still matched on the
+/// label, so with duplicate labels a tab could report host A's presence beside
+/// host B's route — contradictory chrome about one machine, which is worse than
+/// either fact being missing.
 ///
 /// A placeholder address (a launch still connecting) has no real id and falls
-/// back to the label; those tabs draw faint under `connecting` anyway, so the
-/// worst case is a dot that catches up when the dial settles.
+/// back to the label, case-insensitively like every other label match here.
+fn fleet_host_of<'a>(
+    addr: zest_proto::SessionAddr,
+    origin: &TabOrigin,
+    fleet: &'a [crate::fleet::FleetHost],
+) -> Option<&'a crate::fleet::FleetHost> {
+    let TabOrigin::Remote { host_label } = origin else { return None };
+    if crate::tabs::is_placeholder(addr) {
+        fleet.iter().find(|h| h.label.eq_ignore_ascii_case(host_label))
+    } else {
+        fleet.iter().find(|h| h.host == addr.host)
+    }
+}
+
+/// A tab's machine, as the fleet sees it.
 ///
 /// **Presence is about the machine; `LinkKind` is about our connection to it.**
 /// A daemon that is up while our socket is down is `Online` and
@@ -691,20 +710,15 @@ fn tab_presence(
     origin: &TabOrigin,
     fleet: &[crate::fleet::FleetHost],
 ) -> TabPresence {
-    let TabOrigin::Remote { host_label } = origin else {
+    if matches!(origin, TabOrigin::Local) {
         // The window's own machine: we are talking to it, and a broken socket
         // to it is a link fact, not a presence one.
         return TabPresence::Online;
-    };
-    let found = if crate::tabs::is_placeholder(addr) {
-        fleet.iter().find(|h| h.label.eq_ignore_ascii_case(host_label))
-    } else {
-        fleet.iter().find(|h| h.host == addr.host)
-    };
+    }
     // A host the fleet has nothing to say about — no discovery record, no
     // account row — is `Unseen` rather than `Online`: we are attached to it, so
     // it was reachable, but nothing here can vouch that it still is.
-    found.map_or(TabPresence::Unseen, presence_of)
+    fleet_host_of(addr, origin, fleet).map_or(TabPresence::Unseen, presence_of)
 }
 
 /// The host dropdown's row for "no pin at all" (#297).
@@ -4299,6 +4313,19 @@ impl App {
                         }
                         other => other.as_str(),
                     };
+                    // The ✓ is matched against the *drawn* option, and the host
+                    // field's on-disk spelling is not one: "no pin" is an empty
+                    // string where the menu shows "(this machine)", and a pin
+                    // written `Forge` is the row spelled `forge`. Without this
+                    // fold the row every profile lands on is the one row that
+                    // never shows a tick.
+                    let folded;
+                    let current = if field.widget == zest_config::ui::Widget::HostPicker {
+                        folded = host_menu_selection(&menu.roster, current);
+                        Some(folded.as_str())
+                    } else {
+                        current
+                    };
                     let footer = (field.widget == zest_config::ui::Widget::ThemePicker)
                         .then(|| BROWSE_THEMES.to_string());
                     menu_model(menu, &ui.actions, &ui.fields, current, footer)
@@ -4479,21 +4506,21 @@ impl App {
                 // normally takes.
                 let link = if self.link_down {
                     crate::chrome::model::LinkKind::Reconnecting
+                } else if matches!(origin, TabOrigin::Local) {
+                    crate::chrome::model::LinkKind::Loopback
                 } else {
-                    match &origin {
-                        TabOrigin::Remote { host_label } => {
-                            let fleet = fleet_hosts.iter().find(|h| &h.label == host_label);
-                            match fleet.and_then(|h| h.reachability) {
-                                Some(zest_mesh::Reachability::Cloud) => {
-                                    crate::chrome::model::LinkKind::Tunnel
-                                }
-                                Some(zest_mesh::Reachability::Loopback) => {
-                                    crate::chrome::model::LinkKind::Loopback
-                                }
-                                _ => crate::chrome::model::LinkKind::Lan,
-                            }
+                    // The same lookup `presence` uses. These were two, matching
+                    // differently, so with duplicate labels a tab could report
+                    // one machine's presence beside another's route (#297).
+                    let host = fleet_host_of(tab.addr, &origin, &fleet_hosts);
+                    match host.and_then(|h| h.reachability) {
+                        Some(zest_mesh::Reachability::Cloud) => {
+                            crate::chrome::model::LinkKind::Tunnel
                         }
-                        TabOrigin::Local => crate::chrome::model::LinkKind::Loopback,
+                        Some(zest_mesh::Reachability::Loopback) => {
+                            crate::chrome::model::LinkKind::Loopback
+                        }
+                        _ => crate::chrome::model::LinkKind::Lan,
                     }
                 };
                 TabModel {
@@ -12397,6 +12424,10 @@ mod presence_tests {
         // No pin, and a pin the fleet has never heard of, both land somewhere
         // real: the local row, and the appended row respectively.
         assert_eq!(host_menu_selection(&roster, None), HOST_MENU_LOCAL);
+        // And the on-disk spelling of "no pin" is an *empty string*, not the
+        // menu's label — so the same fold has to carry the ✓, or the row every
+        // unpinned profile lands on is the one row that never shows a tick.
+        assert_eq!(host_menu_selection(&roster, Some("")), HOST_MENU_LOCAL);
         let roster = host_menu_roster(&fleet, Some("nowhere")).expect("a roster");
         assert_eq!(host_menu_selection(&roster, Some("nowhere")), "nowhere");
     }
@@ -12460,6 +12491,33 @@ mod presence_tests {
             TabPresence::Unreachable,
             "matched by label, since there is no id to match by"
         );
+    }
+
+    #[test]
+    fn presence_and_link_resolve_the_same_machine() {
+        use super::fleet_host_of;
+        // These were two lookups matching differently: `presence` by id,
+        // `LinkKind` by exact label. With duplicate labels a tab could report
+        // host A's presence beside host B's route — contradictory chrome about
+        // one machine, which is worse than either fact being missing.
+        let mut lan = host(2, "mac", Presence::Online);
+        lan.reachability = Some(zest_mesh::Reachability::Lan);
+        let mut tunnelled = host(3, "mac", Presence::Unreachable);
+        tunnelled.reachability = Some(zest_mesh::Reachability::Cloud);
+        let fleet = [lan, tunnelled];
+
+        let found = fleet_host_of(addr(3), &remote("mac"), &fleet).expect("the second mac");
+        assert_eq!(found.host, HostId::from_bytes([3; 32]), "by id, not by name");
+        assert_eq!(
+            found.reachability,
+            Some(zest_mesh::Reachability::Cloud),
+            "so the route and the presence describe one machine"
+        );
+        assert_eq!(tab_presence(addr(3), &remote("mac"), &fleet), TabPresence::Unreachable);
+
+        // A local tab has no fleet row to resolve: its link is loopback by
+        // construction and its presence is Online.
+        assert!(fleet_host_of(addr(1), &TabOrigin::Local, &fleet).is_none());
     }
 
     #[test]
