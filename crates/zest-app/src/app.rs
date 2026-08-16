@@ -651,6 +651,169 @@ fn enroll_failure_text(e: &zest_daemon::DaemonError, code: &str) -> String {
     }
 }
 
+/// How a machine reads right now, for anything that draws a dot or a word
+/// about it.
+///
+/// **Reachability first, discovery's word second.** `is_online` is the rule
+/// #237 established and the fleet cards, the sidebar counts and the ⌘K picker
+/// all read — a machine reachable only through the relay has no discovery
+/// presence to be `Online` in, and calling it *unseen* while clicking it opens
+/// a shell is what that issue was reported for.
+///
+/// Shared with the tab strip since #297, where `presence` had been
+/// hard-coded `Online` since the type was written: three of its four variants
+/// had never been produced for a tab, so a session on a machine whose port had
+/// stopped answering looked exactly like one on a healthy machine until you
+/// typed into it.
+fn presence_of(host: &crate::fleet::FleetHost) -> TabPresence {
+    if host.is_online() {
+        return TabPresence::Online;
+    }
+    match host.presence {
+        zest_mesh::discovery::Presence::Online => TabPresence::Online,
+        zest_mesh::discovery::Presence::Away => TabPresence::Away,
+        zest_mesh::discovery::Presence::Unseen => TabPresence::Unseen,
+        zest_mesh::discovery::Presence::Unreachable => TabPresence::Unreachable,
+    }
+}
+
+/// The fleet row a tab's shell actually runs on.
+///
+/// **By id, not by display label.** `TabOrigin::Remote` carries only a name and
+/// two machines may share one — the keying bug #268 fixed in the launcher's
+/// group map and again in its provenance lookup. A tab knows its `SessionAddr`,
+/// so it knows the host id it is attached to.
+///
+/// One lookup, because there were two and they disagreed: `presence` was
+/// resolved by id here while `LinkKind` a few lines away still matched on the
+/// label, so with duplicate labels a tab could report host A's presence beside
+/// host B's route — contradictory chrome about one machine, which is worse than
+/// either fact being missing.
+///
+/// A placeholder address (a launch still connecting) has no real id and falls
+/// back to the label, case-insensitively like every other label match here.
+fn fleet_host_of<'a>(
+    addr: zest_proto::SessionAddr,
+    origin: &TabOrigin,
+    fleet: &'a [crate::fleet::FleetHost],
+) -> Option<&'a crate::fleet::FleetHost> {
+    let TabOrigin::Remote { host_label } = origin else { return None };
+    if crate::tabs::is_placeholder(addr) {
+        // `!h.local` is not belt-and-braces: the origin is already `Remote`, so
+        // a local match is definitionally wrong — and it is the *worst* wrong
+        // answer available, since the local row is loopback and `Online`. A
+        // connecting tab to a machine that happens to share this one's display
+        // name would read as reaching the desk it is sitting on.
+        fleet.iter().find(|h| !h.local && h.label.eq_ignore_ascii_case(host_label))
+    } else {
+        fleet.iter().find(|h| h.host == addr.host)
+    }
+}
+
+/// A tab's machine, as the fleet sees it.
+///
+/// **Presence is about the machine; `LinkKind` is about our connection to it.**
+/// A daemon that is up while our socket is down is `Online` and
+/// `Reconnecting`, and saying both is the point — collapsing them would lose
+/// exactly the distinction that tells you whether to wait or to go and look.
+fn tab_presence(
+    addr: zest_proto::SessionAddr,
+    origin: &TabOrigin,
+    fleet: &[crate::fleet::FleetHost],
+) -> TabPresence {
+    if matches!(origin, TabOrigin::Local) {
+        // The window's own machine: we are talking to it, and a broken socket
+        // to it is a link fact, not a presence one.
+        return TabPresence::Online;
+    }
+    // A host the fleet has nothing to say about — no discovery record, no
+    // account row — is `Unseen` rather than `Online`: we are attached to it, so
+    // it was reachable, but nothing here can vouch that it still is.
+    fleet_host_of(addr, origin, fleet).map_or(TabPresence::Unseen, presence_of)
+}
+
+/// The host dropdown's row for "no pin at all" (#297).
+///
+/// Parenthesised to make a collision *unlikely*, never impossible: a label is
+/// whatever someone typed into their config or advertised over mDNS, so a
+/// machine really called `(this machine)` is legal. The menu carries one string
+/// per option, so the choice comes back as text with no way to tell the two
+/// apart — `profiles_open_host_menu` therefore checks for the collision and
+/// declines to open, rather than risking a pick that clears the pin it meant
+/// to set. Naming it here rather than trusting the parentheses, because the
+/// first version of this comment claimed they were enough.
+const HOST_MENU_LOCAL: &str = "(this machine)";
+
+/// The host dropdown's rows: this machine, then the fleet, then whatever the
+/// profile already pins if that is neither (#297).
+///
+/// Pure, so the two rules that matter are `cargo test`ed rather than argued:
+/// the local machine appears once and by one spelling, and an existing pin is
+/// never dropped from the list that is about to overwrite it.
+/// What the host `▾` should open, or `None` to leave it a text field (#297).
+///
+/// Everything the dropdown decides lives here, pure, because both rules it
+/// enforces were wrong first and a comment is not a test:
+///
+/// - **The local machine appears once**, as [`HOST_MENU_LOCAL`], which writes an
+///   empty `host` — the spelling the field's own description already uses, and
+///   the one `launch::resolve_host` reads as `Local` and `bucket_for` files
+///   under "this machine". Listing it again under its own label would be two
+///   rows doing one thing.
+/// - **An existing pin is never dropped from the list about to overwrite it.** A
+///   profile hand-written for a machine that is off must not become uneditable.
+///   Matched case-insensitively, like every other label comparison
+///   (`resolve_host`, `bucket_for`): a pin spelled `Forge` finds the host
+///   advertising `forge` rather than sitting beside it as a second row.
+///
+/// `None` in two cases, both of which mean *keep typing*:
+///
+/// - **Anything already spelled `(this machine)`.** Labels are arbitrary text,
+///   so a machine really called that is legal, and the menu carries one string
+///   per option — the choice comes back as text with no way to tell the two
+///   apart. It bites from **both directions**, which is the part worth
+///   remembering: a *fleet host* with that label would clear the pin when
+///   picked, and a *profile pinned to* that name — a machine that is simply
+///   offline and absent from the snapshot — folds onto the local row, so Enter
+///   silently rewrites a real pin to empty. One guard, both sides. A wrong
+///   write is worse than no dropdown, and a menu whose rows a person could not
+///   tell apart either is not much of a menu.
+/// - **Nothing but this machine.** A one-row dropdown is worse than the text
+///   field it replaced.
+fn host_menu_roster(
+    fleet: &[crate::fleet::FleetHost],
+    current: Option<&str>,
+) -> Option<Vec<String>> {
+    let collides = |label: &str| label.eq_ignore_ascii_case(HOST_MENU_LOCAL);
+    if fleet.iter().any(|h| !h.local && collides(&h.label))
+        || current.is_some_and(collides)
+    {
+        return None;
+    }
+    let mut roster = vec![HOST_MENU_LOCAL.to_string()];
+    roster.extend(fleet.iter().filter(|h| !h.local).map(|h| h.label.clone()));
+    if let Some(current) = current.filter(|c| !c.is_empty()) {
+        if !roster.iter().any(|r| r.eq_ignore_ascii_case(current)) {
+            roster.push(current.to_string());
+        }
+    }
+    (roster.len() > 1).then_some(roster)
+}
+
+/// Which row the host dropdown opens on, in the roster's *own* spelling.
+///
+/// `MenuState` selects and marks the ✓ by exact string equality, so a pin
+/// written `Forge` against a host advertising `forge` matches nothing: the menu
+/// opens on row 0 and Enter rewrites the pin to "(this machine)". Losing a ✓ is
+/// cosmetic; **a destructive default is not**, which is why this folds rather
+/// than handing the profile's spelling straight through.
+fn host_menu_selection(roster: &[String], current: Option<&str>) -> String {
+    current
+        .filter(|c| !c.is_empty())
+        .and_then(|c| roster.iter().find(|r| r.eq_ignore_ascii_case(c)).cloned())
+        .unwrap_or_else(|| HOST_MENU_LOCAL.to_string())
+}
+
 /// A card row's value, bounded: a control-plane refusal can run long, and a
 /// value that overruns its own label reads as two broken rows.
 fn clip_row(text: &str) -> String {
@@ -4236,6 +4399,19 @@ impl App {
                         }
                         other => other.as_str(),
                     };
+                    // The ✓ is matched against the *drawn* option, and the host
+                    // field's on-disk spelling is not one: "no pin" is an empty
+                    // string where the menu shows "(this machine)", and a pin
+                    // written `Forge` is the row spelled `forge`. Without this
+                    // fold the row every profile lands on is the one row that
+                    // never shows a tick.
+                    let folded;
+                    let current = if field.widget == zest_config::ui::Widget::HostPicker {
+                        folded = host_menu_selection(&menu.roster, current);
+                        Some(folded.as_str())
+                    } else {
+                        current
+                    };
                     let footer = (field.widget == zest_config::ui::Widget::ThemePicker)
                         .then(|| BROWSE_THEMES.to_string());
                     menu_model(menu, &ui.actions, &ui.fields, current, footer)
@@ -4416,21 +4592,21 @@ impl App {
                 // normally takes.
                 let link = if self.link_down {
                     crate::chrome::model::LinkKind::Reconnecting
+                } else if matches!(origin, TabOrigin::Local) {
+                    crate::chrome::model::LinkKind::Loopback
                 } else {
-                    match &origin {
-                        TabOrigin::Remote { host_label } => {
-                            let fleet = fleet_hosts.iter().find(|h| &h.label == host_label);
-                            match fleet.and_then(|h| h.reachability) {
-                                Some(zest_mesh::Reachability::Cloud) => {
-                                    crate::chrome::model::LinkKind::Tunnel
-                                }
-                                Some(zest_mesh::Reachability::Loopback) => {
-                                    crate::chrome::model::LinkKind::Loopback
-                                }
-                                _ => crate::chrome::model::LinkKind::Lan,
-                            }
+                    // The same lookup `presence` uses. These were two, matching
+                    // differently, so with duplicate labels a tab could report
+                    // one machine's presence beside another's route (#297).
+                    let host = fleet_host_of(tab.addr, &origin, &fleet_hosts);
+                    match host.and_then(|h| h.reachability) {
+                        Some(zest_mesh::Reachability::Cloud) => {
+                            crate::chrome::model::LinkKind::Tunnel
                         }
-                        TabOrigin::Local => crate::chrome::model::LinkKind::Loopback,
+                        Some(zest_mesh::Reachability::Loopback) => {
+                            crate::chrome::model::LinkKind::Loopback
+                        }
+                        _ => crate::chrome::model::LinkKind::Lan,
                     }
                 };
                 TabModel {
@@ -4439,10 +4615,14 @@ impl App {
                     title: if tab.dead { format!("{title} · ended") } else { title },
                     host: host_label,
                     cwd,
+                    // The fleet's word about this tab's machine (#297). Three
+                    // of `TabPresence`'s four variants had never been produced
+                    // for a tab, so a session on a machine whose port had
+                    // stopped answering read exactly like one on a healthy
+                    // machine — the chip's "· unreachable" was drawn by code
+                    // nothing could reach.
+                    presence: tab_presence(tab.addr, &origin, &fleet_hosts),
                     origin,
-                    // Presence joins in with the fleet model; until then a
-                    // reachable tab is simply online.
-                    presence: TabPresence::Online,
                     accent,
                     tab_accent: crate::chrome::model::tab_accent(tab.identity.as_ref(), accent),
                     running,
@@ -6142,10 +6322,17 @@ impl App {
                     ui.menu = Some(MenuState::variants(row));
                 }
             }
-            // The fleet-picker-as-chooser belongs to the cross-host launch
-            // item (a picker row *launches* today, which is not choosing);
-            // until then the host is typed — the same write path, honestly.
-            Widget::HostPicker => self.profiles_begin_edit(idx),
+            // The ▾ opens the fleet (#297). It promised a dropdown and gave a
+            // text field, which is also how a `host` key the fleet has never
+            // heard of gets written — the pin #268 has to render as its own
+            // "not in the fleet" group. Falling back to typing when there is
+            // no roster keeps the field editable on a machine that has not
+            // discovered anything yet.
+            Widget::HostPicker => {
+                if !self.profiles_open_host_menu() {
+                    self.profiles_begin_edit(idx);
+                }
+            }
             Widget::Number | Widget::Slider | Widget::Text | Widget::Path => {
                 self.profiles_begin_edit(idx);
             }
@@ -6170,6 +6357,44 @@ impl App {
     }
 
     /// The Settings tab's [`Self::open_roster_menu`], on §12's surface.
+    /// The host `▾`'s dropdown: this machine, then the fleet (#297).
+    ///
+    /// **`ask_host` is deliberately not in here.** §12 gives it its own *"Ask
+    /// which host at launch"* toggle, which the editor already renders, and a
+    /// menu of machines that silently flipped a different row would be the
+    /// surprising thing — "any machine" is not a machine.
+    ///
+    /// The roster is the fleet snapshot, which is discovery ∪ the account. So
+    /// a machine that is genuinely yours is listed whether or not this network
+    /// can see it right now, and a label in neither is one #268 already draws
+    /// as "not in the fleet".
+    ///
+    /// **The current value is always in the list**, even when the fleet has
+    /// never heard of it. A profile hand-written for a machine that is off must
+    /// not become uneditable, and must not lose its pin to whatever the menu
+    /// happened to open on.
+    fn profiles_open_host_menu(&mut self) -> bool {
+        let Some(idx) = self.profiles_selected_field() else { return false };
+        // The profile's *own* value, not the resolved one — `profiles_seed_of`'s
+        // rule: the ✓ marks what this profile sets, never what it inherits.
+        let current = self.profiles_seed_of(idx).and_then(|v| match v {
+            serde_json::Value::String(s) if !s.is_empty() => Some(s),
+            _ => None,
+        });
+        // Every rule about what the dropdown lists, and whether there should be
+        // one at all, lives in `host_menu_roster` — pure, and tested.
+        let Some(roster) = host_menu_roster(&self.fleet_view, current.as_deref()) else {
+            return false;
+        };
+        let selected = host_menu_selection(&roster, current.as_deref());
+        let row = self.profiles_ui.as_ref().map(|ui| ui.selected).unwrap_or(0);
+        if let Some(ui) = self.profiles_ui.as_mut() {
+            ui.menu = Some(MenuState::roster(row, roster, Some(&selected)));
+        }
+        self.mark_chrome_dirty();
+        true
+    }
+
     fn profiles_open_roster_menu(&mut self) -> bool {
         let Some(idx) = self.profiles_selected_field() else { return false };
         let Some(field) = self.profiles_ui.as_ref().and_then(|ui| ui.fields.get(idx)) else {
@@ -6232,10 +6457,19 @@ impl App {
         else {
             return;
         };
-        let value = if widget == zest_config::ui::Widget::FontList {
-            serde_json::Value::Array(vec![serde_json::Value::String(chosen)])
-        } else {
-            serde_json::Value::String(chosen)
+        let value = match widget {
+            zest_config::ui::Widget::FontList => {
+                serde_json::Value::Array(vec![serde_json::Value::String(chosen)])
+            }
+            // "(this machine)" is the menu's spelling of unset, and the file's
+            // is an empty string — the same one `launch::resolve_host` reads as
+            // Local and `bucket_for` files under "this machine". Writing the
+            // label back would put a display name in the config where a
+            // machine-independent "no pin" belongs.
+            zest_config::ui::Widget::HostPicker if chosen == HOST_MENU_LOCAL => {
+                serde_json::Value::String(String::new())
+            }
+            _ => serde_json::Value::String(chosen),
         };
         self.profiles_apply_edit(idx, value);
     }
@@ -6691,21 +6925,9 @@ impl App {
         let mut session_rows = Vec::new();
         let mut host_rows = Vec::new();
         for host in &fleet_hosts {
-            // Reachability first, discovery's word second. The picker prints
-            // this as a word beside a dot — "unseen" for a machine that opens
-            // a shell on the next keystroke is #237 wearing the palette's
-            // clothes — and `is_online` is the same rule the card and the
-            // sidebar counts read.
-            let presence = if host.is_online() {
-                TabPresence::Online
-            } else {
-                match host.presence {
-                    zest_mesh::discovery::Presence::Online => TabPresence::Online,
-                    zest_mesh::discovery::Presence::Away => TabPresence::Away,
-                    zest_mesh::discovery::Presence::Unseen => TabPresence::Unseen,
-                    zest_mesh::discovery::Presence::Unreachable => TabPresence::Unreachable,
-                }
-            };
+            // The picker prints this as a word beside a dot; `presence_of`
+            // is the rule, shared with the tab strip since #297.
+            let presence = presence_of(host);
             // How this host is dialled — the same rule the fleet cards read.
             // This was `host.address.map(HostRoute::Tcp)` until #250, which is
             // why an enrolled machine off this LAN had a card that opened a
@@ -12250,6 +12472,267 @@ mod enroll_tests {
             enroll_failure_text(&e, "X").contains("only a local client"),
             "a real refusal must not be rewritten"
         );
+    }
+}
+
+#[cfg(test)]
+mod presence_tests {
+    use super::{presence_of, tab_presence, TabOrigin, TabPresence};
+    use crate::fleet::{FleetHost, SessionsState};
+    use zest_mesh::discovery::Presence;
+    use zest_proto::{HostId, SessionAddr, SessionId};
+
+    fn host(id: u8, label: &str, presence: Presence) -> FleetHost {
+        FleetHost {
+            host: HostId::from_bytes([id; 32]),
+            label: label.into(),
+            presence,
+            local: false,
+            address: Some("10.0.0.7:7717".into()),
+            reachability: Some(zest_mesh::Reachability::Lan),
+            rtt_ms: Some(0.4),
+            sessions: SessionsState::Unknown,
+            offer: None,
+            enrolled: false,
+            relay_online: false,
+        }
+    }
+
+    fn addr(id: u8) -> SessionAddr {
+        SessionAddr::new(HostId::from_bytes([id; 32]), SessionId(1))
+    }
+
+    fn remote(label: &str) -> TabOrigin {
+        TabOrigin::Remote { host_label: label.to_string() }
+    }
+
+    fn with_local(rest: Vec<FleetHost>) -> Vec<FleetHost> {
+        let mut local = host(1, "studio", Presence::Online);
+        local.local = true;
+        let mut all = vec![local];
+        all.extend(rest);
+        all
+    }
+
+    #[test]
+    fn the_host_dropdown_lists_this_machine_once_and_never_drops_a_pin() {
+        use super::{host_menu_roster, HOST_MENU_LOCAL};
+        let fleet = with_local(vec![host(2, "forge", Presence::Online)]);
+
+        assert_eq!(
+            host_menu_roster(&fleet, None),
+            Some(vec![HOST_MENU_LOCAL.to_string(), "forge".to_string()]),
+            "this machine appears once, by the spelling that writes an empty host — \
+             listing it again under `studio` would be two rows doing one thing"
+        );
+
+        // A pin the fleet has never heard of: a machine that is off, or a
+        // typo. Either way the profile must stay editable, and must not lose
+        // what it has to whatever the menu happens to open on.
+        let roster = host_menu_roster(&fleet, Some("nowhere")).expect("a roster");
+        assert!(roster.contains(&"nowhere".to_string()), "{roster:?}");
+
+        // And a pin differing only by case is the machine already listed — the
+        // same ASCII fold `resolve_host` and `bucket_for` use.
+        let roster = host_menu_roster(&fleet, Some("FORGE")).expect("a roster");
+        assert_eq!(roster.len(), 2, "no duplicate for a case difference: {roster:?}");
+    }
+
+    #[test]
+    fn a_host_labelled_like_the_local_row_keeps_the_field_a_text_edit() {
+        use super::{host_menu_roster, HOST_MENU_LOCAL};
+        // Labels are arbitrary text — mDNS `lbl` is whatever the far machine
+        // advertises — so a host really called "(this machine)" is legal. The
+        // menu carries one string per option, so the choice comes back as text
+        // with no way to tell the two apart: picking that host would silently
+        // *clear* the pin it meant to set.
+        //
+        // The parentheses were supposed to prevent this and cannot; the first
+        // version of that comment claimed they were enough.
+        let fleet = with_local(vec![host(2, HOST_MENU_LOCAL, Presence::Online)]);
+        assert_eq!(
+            host_menu_roster(&fleet, None),
+            None,
+            "a wrong write is worse than no dropdown — and a menu whose rows a \
+             person could not tell apart either is not much of a menu"
+        );
+
+        // And from the other direction, which is the half the first guard
+        // missed: a profile *pinned to* that name, for a machine that is
+        // simply offline and absent from the snapshot. It folds onto the local
+        // row, so opening the menu and pressing Enter — the gesture that is
+        // supposed to be a no-op — would rewrite a real pin to empty.
+        let fleet = with_local(vec![host(2, "forge", Presence::Online)]);
+        assert_eq!(host_menu_roster(&fleet, Some(HOST_MENU_LOCAL)), None);
+        assert_eq!(
+            host_menu_roster(&fleet, Some("(THIS MACHINE)")),
+            None,
+            "case-insensitively, like every other label comparison here"
+        );
+    }
+
+    #[test]
+    fn nothing_but_this_machine_is_not_worth_a_dropdown() {
+        use super::host_menu_roster;
+        // The fleet has not started, or there is genuinely nowhere else. A
+        // one-row dropdown is worse than the text field it replaced.
+        assert_eq!(host_menu_roster(&with_local(Vec::new()), None), None);
+        assert_eq!(host_menu_roster(&[], None), None, "and before the fleet exists at all");
+    }
+
+    #[test]
+    fn the_dropdown_opens_on_the_pin_it_already_has_however_it_is_spelled() {
+        use super::{host_menu_roster, host_menu_selection, HOST_MENU_LOCAL};
+        // `MenuState` selects and marks the ✓ by *exact* string equality, so a
+        // pin written `Forge` against a host advertising `forge` matches
+        // nothing: the menu opens on row 0 and Enter rewrites the pin to
+        // "(this machine)". Losing a ✓ is cosmetic; a destructive default is
+        // not.
+        let fleet = with_local(vec![host(2, "forge", Presence::Online)]);
+        let roster = host_menu_roster(&fleet, Some("Forge")).expect("a roster");
+        assert_eq!(
+            host_menu_selection(&roster, Some("Forge")),
+            "forge",
+            "folded to the roster's own spelling, which is what exact equality will find"
+        );
+        assert!(
+            roster.iter().any(|r| r == "forge"),
+            "and that spelling really is in the list: {roster:?}"
+        );
+
+        // No pin, and a pin the fleet has never heard of, both land somewhere
+        // real: the local row, and the appended row respectively.
+        assert_eq!(host_menu_selection(&roster, None), HOST_MENU_LOCAL);
+        // And the on-disk spelling of "no pin" is an *empty string*, not the
+        // menu's label — so the same fold has to carry the ✓, or the row every
+        // unpinned profile lands on is the one row that never shows a tick.
+        assert_eq!(host_menu_selection(&roster, Some("")), HOST_MENU_LOCAL);
+        let roster = host_menu_roster(&fleet, Some("nowhere")).expect("a roster");
+        assert_eq!(host_menu_selection(&roster, Some("nowhere")), "nowhere");
+    }
+
+    #[test]
+    fn a_machine_that_stopped_answering_makes_its_tabs_say_so() {
+        // Three of `TabPresence`'s four variants had never been produced for a
+        // tab: `presence` was hard-coded `Online`, so the chip's
+        // "· unreachable" was drawn by code nothing could reach. A session on
+        // a machine whose port had stopped answering (#22's dead daemon behind
+        // a live mDNS record) read exactly like one on a healthy machine until
+        // you typed into it.
+        let fleet = [host(2, "forge", Presence::Unreachable)];
+        assert_eq!(tab_presence(addr(2), &remote("forge"), &fleet), TabPresence::Unreachable);
+
+        let fleet = [host(2, "forge", Presence::Away)];
+        assert_eq!(tab_presence(addr(2), &remote("forge"), &fleet), TabPresence::Away);
+    }
+
+    #[test]
+    fn reachability_outranks_discoverys_word() {
+        // #237's rule, and the reason `presence_of` exists rather than a match
+        // at each call site: a machine reachable only through the relay has no
+        // discovery presence to be `Online` in, and calling it *unseen* while
+        // clicking it opens a shell is what that issue was reported for.
+        let mut relayed = host(2, "pi", Presence::Unseen);
+        relayed.address = None;
+        relayed.relay_online = true;
+        assert_eq!(presence_of(&relayed), TabPresence::Online);
+        assert_eq!(tab_presence(addr(2), &remote("pi"), &[relayed]), TabPresence::Online);
+    }
+
+    #[test]
+    fn a_tab_resolves_its_machine_by_id_not_by_display_name() {
+        // Two machines may share a label — the keying bug #268 fixed twice, in
+        // the launcher's group map and again in its provenance lookup. A tab
+        // knows its `SessionAddr`, so it knows which machine it is actually
+        // attached to.
+        let fleet = [
+            host(2, "mac", Presence::Online),
+            host(3, "mac", Presence::Unreachable),
+        ];
+        assert_eq!(
+            tab_presence(addr(3), &remote("mac"), &fleet),
+            TabPresence::Unreachable,
+            "the tab on the refusing machine says so, whatever the other one called itself"
+        );
+        assert_eq!(tab_presence(addr(2), &remote("mac"), &fleet), TabPresence::Online);
+    }
+
+    #[test]
+    fn a_connecting_tab_falls_back_to_its_label() {
+        // A placeholder address has no real host id yet. Those tabs draw faint
+        // under `connecting` anyway, so the worst case is a dot that catches up
+        // when the dial settles — but reading the *wrong* machine's presence
+        // would be worse than reading none.
+        let placeholder = crate::tabs::placeholder_addr(1);
+        let fleet = [host(2, "forge", Presence::Unreachable)];
+        assert_eq!(
+            tab_presence(placeholder, &remote("forge"), &fleet),
+            TabPresence::Unreachable,
+            "matched by label, since there is no id to match by"
+        );
+
+        // And never onto the *local* row. The origin is already `Remote`, so a
+        // local match is definitionally wrong — and the worst wrong answer
+        // available, since the local row is loopback and `Online`: a tab
+        // connecting to a machine that happens to share this one's display name
+        // would read as reaching the desk it is sitting on.
+        let mut local = host(1, "twin", Presence::Online);
+        local.local = true;
+        let fleet = [local, host(2, "twin", Presence::Unreachable)];
+        assert_eq!(
+            super::fleet_host_of(placeholder, &remote("twin"), &fleet).map(|h| h.host),
+            Some(HostId::from_bytes([2; 32])),
+            "the remote twin, not the one under our hands"
+        );
+        assert_eq!(
+            tab_presence(placeholder, &remote("twin"), &fleet),
+            TabPresence::Unreachable
+        );
+    }
+
+    #[test]
+    fn presence_and_link_resolve_the_same_machine() {
+        use super::fleet_host_of;
+        // These were two lookups matching differently: `presence` by id,
+        // `LinkKind` by exact label. With duplicate labels a tab could report
+        // host A's presence beside host B's route — contradictory chrome about
+        // one machine, which is worse than either fact being missing.
+        let mut lan = host(2, "mac", Presence::Online);
+        lan.reachability = Some(zest_mesh::Reachability::Lan);
+        let mut tunnelled = host(3, "mac", Presence::Unreachable);
+        tunnelled.reachability = Some(zest_mesh::Reachability::Cloud);
+        let fleet = [lan, tunnelled];
+
+        let found = fleet_host_of(addr(3), &remote("mac"), &fleet).expect("the second mac");
+        assert_eq!(found.host, HostId::from_bytes([3; 32]), "by id, not by name");
+        assert_eq!(
+            found.reachability,
+            Some(zest_mesh::Reachability::Cloud),
+            "so the route and the presence describe one machine"
+        );
+        assert_eq!(tab_presence(addr(3), &remote("mac"), &fleet), TabPresence::Unreachable);
+
+        // A local tab has no fleet row to resolve: its link is loopback by
+        // construction and its presence is Online.
+        assert!(fleet_host_of(addr(1), &TabOrigin::Local, &fleet).is_none());
+    }
+
+    #[test]
+    fn the_local_tab_is_online_and_a_broken_socket_does_not_change_that() {
+        // Presence is about the machine; `LinkKind` is about our connection to
+        // it. A daemon that is up while our socket is down is `Online` and
+        // `Reconnecting`, and saying both is the point — collapsing them would
+        // lose exactly the distinction that tells you whether to wait or to go
+        // and look.
+        assert_eq!(tab_presence(addr(1), &TabOrigin::Local, &[]), TabPresence::Online);
+    }
+
+    #[test]
+    fn a_host_nothing_can_vouch_for_is_unseen_rather_than_online() {
+        // We are attached to it, so it was reachable once — but no discovery
+        // record and no account row means nothing here can say it still is,
+        // and `Online` would be a claim rather than an observation.
+        assert_eq!(tab_presence(addr(9), &remote("ghost"), &[]), TabPresence::Unseen);
     }
 }
 
