@@ -397,6 +397,27 @@ pub trait PtyTransport: Send {
     fn watch_exit(&self, on_exit: Box<dyn FnOnce() + Send>) {
         drop(on_exit);
     }
+
+    /// The child's exit status, if it has exited and this transport can say.
+    ///
+    /// **Non-blocking**, so it is safe to call from a poll: `None` means the
+    /// child is still running, or that this transport cannot determine a
+    /// status. Both of those spellings reach the wire as
+    /// `HostMessage::Exited { code: None }`, which means "the host could not
+    /// say" and is deliberately not the same as zero — a green `exit 0` on a
+    /// command that failed is worse than no answer at all.
+    ///
+    /// Safe to call repeatedly. Both implementations answer from a status the
+    /// OS keeps after the child is reaped rather than by waiting again, so a
+    /// second call cannot block and cannot lose the answer the first one got.
+    ///
+    /// This is the **only unforgeable exit status in the system**. A block's
+    /// `exit_code` comes from OSC 133;D, which any program can print — `cat` a
+    /// file containing the markers and the parser structurally cannot tell.
+    /// This one is read from the process itself.
+    fn exit_code(&self) -> Option<i32> {
+        None
+    }
 }
 
 #[cfg(test)]

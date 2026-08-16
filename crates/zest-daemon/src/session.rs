@@ -104,6 +104,14 @@ pub struct Session {
     /// forgotten -- it gets "no session" for a shell it asked for and that ran
     /// perfectly.
     ever_attached: Arc<AtomicBool>,
+    /// The child's status, once anyone has asked for it and it was available.
+    ///
+    /// Memoized rather than read afresh, because reading it takes the pty's
+    /// child mutex and `hangup` holds that one for up to its two grace periods
+    /// while it escalates. `Connection::poll` asks on every pass for as long as
+    /// an exited session stays attached, so without this a routine poll could
+    /// wait on a session that is being closed. Once known it is never re-read.
+    exit_code: Arc<Mutex<Option<i32>>>,
     title: Arc<Mutex<String>>,
 }
 
@@ -236,6 +244,7 @@ impl Session {
             next_subscriber: Mutex::new(0),
             exited,
             ever_attached: Arc::new(AtomicBool::new(false)),
+            exit_code: Arc::new(Mutex::new(None)),
             title,
         })
     }
@@ -579,6 +588,38 @@ impl Session {
         self.exited.load(Ordering::Acquire)
     }
 
+    /// What the child exited with, if it has and the platform could say.
+    ///
+    /// `None` is "no status to report" — still running, or a transport that
+    /// cannot determine one — and is deliberately not zero. That distinction
+    /// survives all the way to the wire, because a green `exit 0` on a command
+    /// that actually failed is worse than admitting ignorance.
+    ///
+    /// **This is the one exit status in the system nobody can forge.** A
+    /// block's `exit_code` comes from OSC 133;D, which any program can print;
+    /// this is read from the process. Anything reporting the two to an agent
+    /// has to say which it is holding.
+    ///
+    /// Distinct from [`has_exited`](Self::has_exited), which the reader sets on
+    /// EOF: seeing EOF is not the same as having waited on the process, and
+    /// there is a brief window where the first is true and this still answers
+    /// `None`.
+    #[must_use]
+    pub fn exit_code(&self) -> Option<i32> {
+        if let Ok(cached) = self.exit_code.lock() {
+            if cached.is_some() {
+                return *cached;
+            }
+        }
+        let code = self.pty.exit_code();
+        if code.is_some() {
+            if let Ok(mut slot) = self.exit_code.lock() {
+                *slot = code;
+            }
+        }
+        code
+    }
+
     #[must_use]
     pub fn title(&self) -> String {
         self.title.lock().map(|t| t.clone()).unwrap_or_default()
@@ -769,6 +810,7 @@ mod tests {
             next_subscriber: Mutex::new(0),
             exited: Arc::new(AtomicBool::new(false)),
             ever_attached: Arc::new(AtomicBool::new(false)),
+            exit_code: Arc::new(Mutex::new(None)),
             title: Arc::new(Mutex::new(String::new())),
         };
 

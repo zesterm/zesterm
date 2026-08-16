@@ -155,6 +155,42 @@ impl Replica {
         trimmed[..end].join("\n")
     }
 
+    /// Everything the replica holds, scrollback then viewport, one row per line.
+    ///
+    /// What [`screen_text`](Self::screen_text) cannot answer, and the reason
+    /// `run_isolated` needs its own reader: a command with no shell integration
+    /// mints no blocks, so there is no block to ask for its rows — and its
+    /// output is usually taller than the grid, which leaves `screen_text`
+    /// reporting the last thirty lines of a build as though they were all of
+    /// it. Silently, and looking exactly like a command that printed little.
+    ///
+    /// Scrollback first and the viewport second, which is the order they were
+    /// printed in. Unlike [`block_rows`](Self::block_rows) there is no id range
+    /// to filter by, so the two halves must not overlap — `lines_by_id` is
+    /// deliberately scrollback-only for exactly that reason, and taking the
+    /// viewport from `grid.row(i)` keeps it that way.
+    ///
+    /// Leading and trailing blank rows go; blanks *between* two lines of output
+    /// are real and stay.
+    #[must_use]
+    pub fn all_text(&self) -> Vec<String> {
+        let grid = self.term.grid();
+        let mut out: Vec<String> = grid
+            .lines_by_id(grid.oldest_line_id(), usize::MAX)
+            .into_iter()
+            .map(|r| r.text().trim_end().to_string())
+            .collect();
+        for i in 0..grid.rows() {
+            out.push(grid.row(i).text().trim_end().to_string());
+        }
+
+        let end = out.iter().rposition(|l| !l.is_empty()).map_or(0, |i| i + 1);
+        out.truncate(end);
+        let start = out.iter().position(|l| !l.is_empty()).unwrap_or(0);
+        out.drain(..start);
+        out
+    }
+
     /// Every block the replica holds, oldest first.
     #[must_use]
     pub fn blocks(&self) -> Vec<BlockPayload> {

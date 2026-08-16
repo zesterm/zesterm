@@ -200,10 +200,25 @@ impl Conn {
     /// waiting out the deadline against a connection that has gone -- a tool
     /// that hangs for twenty seconds on a dead socket is indistinguishable from
     /// a slow one, and only one of those is worth retrying.
-    pub fn wait_for<T>(&self, mut f: impl FnMut(&Shared) -> Option<T>) -> Result<T, ConnError> {
+    pub fn wait_for<T>(&self, f: impl FnMut(&Shared) -> Option<T>) -> Result<T, ConnError> {
+        self.wait_until(Instant::now() + REPLY_DEADLINE, f)
+    }
+
+    /// Wait until `f` answers, or `give_up` passes.
+    ///
+    /// [`wait_for`](Self::wait_for) is this with the request deadline, which is
+    /// the right bound for anything the daemon answers by return. A *command*
+    /// is not that: `cargo build` outlives twenty seconds routinely, and a
+    /// deadline the caller cannot raise would make `run` unable to report the
+    /// builds it exists to run. The caller supplies the bound; this only
+    /// enforces it.
+    pub fn wait_until<T>(
+        &self,
+        give_up: Instant,
+        mut f: impl FnMut(&Shared) -> Option<T>,
+    ) -> Result<T, ConnError> {
         let (lock, cv) = &*self.state;
         let mut guard = lock.lock().expect("state");
-        let give_up = Instant::now() + REPLY_DEADLINE;
         loop {
             if let Some(v) = f(&guard) {
                 return Ok(v);
@@ -283,7 +298,10 @@ impl Conn {
 pub enum ConnError {
     #[error("the connection closed{}", .0.as_ref().map(|e| format!(": {e}")).unwrap_or_default())]
     Closed(Option<String>),
-    #[error("the daemon did not answer within {REPLY_DEADLINE:?}")]
+    /// The deadline passed. Whose deadline depends on the caller: a request
+    /// uses [`REPLY_DEADLINE`], while `run` supplies its own, so the message
+    /// cannot name a duration without being wrong for one of them.
+    #[error("the deadline passed before the daemon answered (requests allow {REPLY_DEADLINE:?})")]
     TimedOut,
 }
 

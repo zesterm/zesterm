@@ -760,6 +760,28 @@ Each of these cost real time and is documented where it bites:
   parks its drain thread in `read` before it forks the child, which removes the
   deadline rather than shortening it. (`zest-pty/src/unix.rs`, sharp edge 6;
   issue #54.)
+- **A wire field nothing fills reads exactly like a field nothing *can* fill.**
+  `HostMessage::Exited { code: Option<i32> }` shipped in protocol 2 and its sole
+  producer hard-coded `code: None` until #299, so every client decoded a field
+  nobody ever wrote. Nothing looked wrong at any layer: the daemon knew
+  the child had exited and said so correctly, `Session::has_exited` was right,
+  every host-side test agreed, and `None` is a *legal* value meaning "no status
+  to report", so a client receiving it concluded the host could not determine
+  one. The absence has no symptom, because the honest answer and the missing
+  answer are the same bytes.
+  `zest-pty` had `wait_for_child` on **both** platforms the whole time; nothing
+  ever called it. The cost was silent and specific: `zest-mcp`'s reason to
+  exist is that a block's `exit_code` comes from OSC 133, which any program can
+  forge by printing the markers, while this one is read from the process — so
+  the single trustworthy exit code in the system did not exist while the
+  roadmap described it as the point of a tool. `ExitSource::ProcessExit` had
+  never been constructed.
+  The general shape is worth more than the fix: **an `Option` on the wire hides
+  a missing producer, because the type makes "not implemented" indistinguishable
+  from "not applicable".** Test a field's *value* from the client side, over the
+  wire, not the event that carries it — `an_exited_child_reports_the_status_it_exited_with`
+  asserts `Some(Some(3))` and would have failed from the day the field was added.
+  (`zest-daemon/src/server.rs`, `zest-pty/src/lib.rs`; ADR-015.)
 - **A buffered frame reader is state, and a handoff that drops it drops
   messages.** `DaemonClient::recv` reads up to 64 KiB and returns the *first*
   whole frame; the daemon batches its replies and flushes once, so anything

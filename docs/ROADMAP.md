@@ -68,7 +68,7 @@ and its number (48ms) is reported rather than gated.
 | `zest-proto` | ✅ protocol 2, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, cell-for-cell conformance, chaos-resync, command blocks |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store, sealed channel |
 | `zest-cloud` | ✅ the fence held in both directions: rustls (ring) landed here and `check-deps` stayed green with no list edited, and `zest-daemon`'s `--enroll` is now a real consumer — `TlsDuplex`, one connection as two independently owned halves, a one-request HTTP POST over it, `Endpoint` — and `zest-daemon`'s `--relay` is the second, dialling `TlsDuplex` per pipe under ADR-009's dial-back |
-| `zest-daemon` | ✅ session ownership *and* lifecycle, protocol loop, loopback *and* LAN transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing, **and it publishes its own profiles** (#262) |
+| `zest-daemon` | ✅ session ownership *and* lifecycle, protocol loop, loopback *and* LAN transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing, **it publishes its own profiles** (#262) **and it reports what a child exited with** (#299) |
 
 ### What works end to end today
 
@@ -135,6 +135,15 @@ and its number (48ms) is reported rather than gated.
 - **Acting on a block.** `Cmd`/`Ctrl+Shift` + `O` copies what the last command
   printed — its output alone, not the prompt and not the command — and `R` runs
   it again. The same chord plus a click does it for any block in scrollback.
+- **An agent can run a command and be told what it really returned.**
+  `zest-mcp`'s `run_isolated` starts a command in a terminal of its own, waits,
+  and reports the status the *process* exited with — the one exit code in this
+  system that nothing running inside the terminal can forge, and the one that
+  had never actually been sent (#299). It works on every shell, including the
+  ones that emit no OSC 133 at all, which is most Linux hosts. A timeout returns
+  the output so far and leaves the command running, so a `sudo` sitting at
+  `Password:` can be answered with `input` or stopped with `interrupt` — the
+  case a sentinel-injecting harness cannot tell from success. → ADR-015.
 
 ### Reflow
 
@@ -223,7 +232,7 @@ below means "do not touch this file".
 | **F** | [`zest-proto` + `zest-daemon`](#ws-f) | `crates/zest-proto/`, `crates/zest-daemon/` | Protocol + daemon ✅ · **applier, app attach, LAN listener next** | [#4](https://github.com/zesterm/zesterm/issues/4) |
 | **G** | [Web client](#ws-g) | `clients/web/`, `zest-proto/fixtures/` | Decoder, renderer, app, deploy, accounts, fleet, tabbed chrome ✅ · **devices screen, local echo next** | [#8](https://github.com/zesterm/zesterm/issues/8) |
 | **H** | [Mesh identity, discovery, transports](#ws-h) | `crates/zest-mesh/`, `crates/zest-cloud/`, `cloud/` | Identity, discovery, pairing, accounts ✅ · the relay Worker and the daemon's `--relay` leg ✅ · **the web client's second data plane next** ([#59](https://github.com/zesterm/zesterm/issues/59)) | [#7](https://github.com/zesterm/zesterm/issues/7) |
-| **I** | [AI is a client of the daemon](#ws-i) | `crates/zest-mcp/`, `zest-proto`, `zest-daemon` | Open — **an agent can read and drive this machine's terminals over MCP** (#274) · **`run` and fleet reach next** | [#60](https://github.com/zesterm/zesterm/issues/60) |
+| **I** | [AI is a client of the daemon](#ws-i) | `crates/zest-mcp/`, `zest-proto`, `zest-daemon` | Open — **an agent can read, drive and *run* on this machine's terminals over MCP** (#274) · `run_isolated` + the unforgeable exit code ✅ (#299) · **`run` into the interactive shell, and fleet reach, next** | [#60](https://github.com/zesterm/zesterm/issues/60) |
 
 **Ordering that mattered, and is now settled.** B landed before A, so `zest-app`
 is free of input code and A can fill it with chrome. C1 landed before D, so
@@ -1882,6 +1891,26 @@ it replaces M5's one-line `AiActor` bullet. → [#60](https://github.com/zesterm
       unwritten, cmd.exe is a permanent no) and is the only **unforgeable**
       exit code in the system, because it comes from `HostMessage::Exited`
       rather than from a marker any program can print.
+
+      **`run_isolated` and `interrupt` have landed, and the unforgeable exit
+      code turned out not to exist yet.** `HostMessage::Exited { code }` was on
+      the wire from protocol 2 and its sole producer hard-coded `None` — a field
+      every client decoded and nobody filled, which reads exactly like a host
+      that cannot determine a status, so nothing looked wrong and no test
+      failed. `zest-pty` had `wait_for_child` on both platforms the whole time;
+      nothing joined them. The daemon now carries the child's status and
+      `ExitSource::ProcessExit` has its first construction. A timeout returns
+      the partial output and leaves the command running, so a shell sitting at
+      `Password:` can be answered — proven by a test that asserts the session
+      outlives the deadline. → ADR-015, #299.
+
+      **Still open: `run` itself**, into the user's interactive shell. One
+      correction to #274's plan, from `blocks.rs`: correlating on a block
+      `id > high_water` never fires. OSC 133 `C` makes `begin_output` mutate
+      `blocks.last_mut()`, so the command lands in the *existing* trailing
+      prompt block at an id **≤** high_water, and only the following prompt
+      pushes a new one. The anchor is the tail block's identity before the
+      write, not the next id after it.
 - [ ] **Tokens per build, measured.** Byte stream vs delta vs block output for
       `cargo build`, `npm install`, `pytest`. ADR-004 claims ~1 MB of bytes
       against ~3 KB of delta for `cat 1MB`; the agent-facing number belongs

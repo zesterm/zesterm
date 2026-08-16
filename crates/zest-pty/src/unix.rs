@@ -351,6 +351,23 @@ impl PtyTransport for UnixPty {
         self.reader.take().map(|r| Box::new(r) as Box<dyn Read + Send>)
     }
 
+    /// See [`PtyTransport::exit_code`].
+    ///
+    /// A zero timeout runs exactly one `try_wait` and returns — `wait_locked`
+    /// probes before it checks the deadline — so this reaps an exited child
+    /// without ever blocking on a live one.
+    ///
+    /// `std::process::Child` caches the status once it has reaped, so calling
+    /// this after `hangup` has already waited still answers rather than
+    /// reporting the child as running for ever.
+    fn exit_code(&self) -> Option<i32> {
+        let mut child = self.child.lock().ok()?;
+        match wait_locked(&mut child, Some(std::time::Duration::ZERO)) {
+            ChildStatus::Exited(code) => Some(code as i32),
+            ChildStatus::StillRunning => None,
+        }
+    }
+
     fn writer(&self) -> Box<dyn Write + Send> {
         // Duplicated rather than shared so the writer thread closing its half
         // cannot pull the fd out from under the reader.
