@@ -103,6 +103,17 @@ pub struct Config {
     pub scroll_on_keypress: bool,
     /// Rows the view moves per wheel notch.
     pub lines_per_notch: usize,
+    /// Where a bare local shell starts. `None` inherits this process's.
+    ///
+    /// A *fallback*, not an override: a profile's `starting_directory` is
+    /// resolved by the machine that spawns and overwrites this afterwards.
+    pub shell_cwd: Option<std::path::PathBuf>,
+    /// Environment entries layered over the shell's, in `shell.env` order.
+    ///
+    /// An empty value *unsets*, which both pty backends already implement —
+    /// the same convention `zest_pty::terminal_env` uses to strip another
+    /// terminal's stale identity out of an inherited environment.
+    pub shell_env: Vec<(String, String)>,
 }
 
 impl From<&zest_config::Settings> for Config {
@@ -161,6 +172,11 @@ impl From<&zest_config::Settings> for Config {
             // Clamped to the schema's own range: a hand-edited `0` would make
             // the wheel do nothing at all, which reads as a broken mouse.
             lines_per_notch: s.scrolling.lines_per_notch.clamp(1, 50),
+            // Empty means "inherit", which is not the same as a cwd of `""` —
+            // that would be an invalid directory and fail every spawn.
+            shell_cwd: (!s.shell.cwd.trim().is_empty())
+                .then(|| std::path::PathBuf::from(s.shell.cwd.trim())),
+            shell_env: s.shell.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         }
     }
 }
@@ -7420,6 +7436,7 @@ impl App {
         if let Some(shell) = &self.config.shell {
             spec.command_line = shell.clone();
         }
+        apply_shell_settings(&mut spec, &self.config);
         // The in-process path gets the same hook as the daemon's, or
         // `--no-daemon` would silently be a terminal without command blocks.
         if let Some(dir) = zest_config::paths::config_dir() {
@@ -11673,6 +11690,28 @@ fn pane_opacity(window: f32, identity: Option<&crate::tabs::ProfileIdentity>) ->
     identity.and_then(|i| i.opacity).map_or(window, |o| o.clamp(0.0, 1.0))
 }
 
+/// Layer `shell.cwd` and `shell.env` onto a spec `default_shell` just built.
+///
+/// Free-standing so the two orderings it decides are testable without an
+/// `App`, a window or an event loop — both are judgement calls, and a comment
+/// asserting one is not the same as a test that would notice it flipping.
+///
+/// **cwd is a default the caller may overwrite.** A profile's
+/// `starting_directory` is applied after `build_spec` returns and has to win,
+/// being the more specific of the two.
+///
+/// **env goes after `terminal_env()`, so the user's entries win a collision** —
+/// both pty backends apply in order. Deliberately that way round: a `shell.env`
+/// entry that is silently discarded is a setting that does nothing, which is
+/// the entire class of bug this is fixing, and overriding `TERM` is a real
+/// thing people do — Alacritty and WezTerm both allow it. The stale-identity
+/// variables `terminal_env` clears stay cleared unless the user names one
+/// back, which is theirs to decide.
+fn apply_shell_settings(spec: &mut CommandSpec, config: &Config) {
+    spec.cwd.clone_from(&config.shell_cwd);
+    spec.env.extend(config.shell_env.iter().cloned());
+}
+
 /// The most rows one wheel event may move, in either direction.
 ///
 /// Two orders of magnitude above the fastest real gesture — a violent trackpad
@@ -11919,6 +11958,93 @@ mod fleet_device_row_tests {
         let rows = fleet_device_rows(&[device(3, "studio-app", "desktop", true)], None);
         assert_eq!(rows[0].action, FleetDeviceAction::Vouch);
         assert_eq!(rows[0].detail, "desktop · approved");
+    }
+}
+
+#[cfg(test)]
+mod shell_settings_tests {
+    use super::Config;
+
+    fn config_with(cwd: &str, env: &[(&str, &str)]) -> Config {
+        let mut s = zest_config::Settings::default();
+        s.shell.cwd = cwd.to_string();
+        s.shell.env = env.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect();
+        Config::from(&s)
+    }
+
+    #[test]
+    fn an_unset_working_directory_inherits_rather_than_spawning_in_nothing() {
+        // `""` is the schema's "inherit", and it must not survive as a cwd:
+        // an empty path is not a directory, so passing it through would fail
+        // every spawn on a config nobody edited.
+        assert_eq!(config_with("", &[]).shell_cwd, None);
+        assert_eq!(config_with("   ", &[]).shell_cwd, None, "whitespace is not a directory either");
+        assert_eq!(
+            config_with("/tmp", &[]).shell_cwd,
+            Some(std::path::PathBuf::from("/tmp")),
+            "a real path reaches the spawn"
+        );
+    }
+
+    #[test]
+    fn an_empty_value_is_carried_through_as_an_unset() {
+        // Both pty backends read an empty value as *unset* rather than "set to
+        // the empty string" -- the convention `terminal_env` already relies on
+        // to strip another terminal's stale identity. The projection must not
+        // filter those out on the way, or the one way to remove an inherited
+        // variable stops working.
+        let config = config_with("", &[("STALE", ""), ("KEEP", "1")]);
+        assert!(
+            config.shell_env.contains(&("STALE".to_string(), String::new())),
+            "an empty value is an instruction, not an absence"
+        );
+        assert!(config.shell_env.contains(&("KEEP".to_string(), "1".to_string())));
+    }
+
+    #[test]
+    fn a_users_variable_beats_the_terminal_identity() {
+        // The ordering decision, asserted rather than commented. Both backends
+        // apply in order, so what matters is which entry comes *last*: a
+        // `shell.env` entry the identity silently overrode would be a setting
+        // that does nothing, which is the whole point of this work.
+        let mut spec = zest_pty::CommandSpec::default_shell();
+        assert!(
+            spec.env.iter().any(|(k, _)| k == "TERM"),
+            "the fixture must actually contain the entry being overridden, or \
+             this test passes for a reason unrelated to the code"
+        );
+        super::apply_shell_settings(&mut spec, &config_with("", &[("TERM", "xterm-direct")]));
+        let effective = spec.env.iter().rfind(|(k, _)| k == "TERM");
+        assert_eq!(
+            effective.map(|(_, v)| v.as_str()),
+            Some("xterm-direct"),
+            "the user's entry is applied last, so it is the one the child sees"
+        );
+    }
+
+    #[test]
+    fn the_working_directory_is_a_default_a_profile_can_still_overwrite() {
+        // `build_spec` sets this, and `open_shell_tab` overwrites it with the
+        // profile's `starting_directory` afterwards. Encoded here so the order
+        // survives someone moving either line.
+        let mut spec = zest_pty::CommandSpec::default_shell();
+        super::apply_shell_settings(&mut spec, &config_with("/from/settings", &[]));
+        assert_eq!(spec.cwd, Some(std::path::PathBuf::from("/from/settings")));
+        spec.cwd = Some("/from/profile".into());
+        assert_eq!(
+            spec.cwd,
+            Some(std::path::PathBuf::from("/from/profile")),
+            "the more specific of the two wins, and it is applied second"
+        );
+    }
+
+    #[test]
+    fn the_defaults_ask_for_nothing() {
+        // The shipped default must leave a spawn exactly as it was before this
+        // was wired: no cwd, no extra environment.
+        let config = Config::default();
+        assert_eq!(config.shell_cwd, None);
+        assert!(config.shell_env.is_empty());
     }
 }
 

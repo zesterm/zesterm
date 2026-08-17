@@ -725,6 +725,31 @@ entry stay). The resulting work items, measurements in the handoff README — **
       started scroll away off screen. Clearing the selection stays
       unconditional at both, because a selection made before the keystroke is
       stale wherever the view is sitting.
+- [x] **A shell starts where and how the settings say**
+      ([#303](https://github.com/zesterm/zesterm/issues/303)). `shell.cwd` and
+      `shell.env` off `NOT_YET_WIRED`. The plumbing was already there and
+      simply never fed — `CommandSpec` has carried `cwd` and `env` since the
+      pty landed — so this is `apply_shell_settings` on the way out of
+      `build_spec`, and the two orderings it decides are a free function with
+      tests rather than a comment. cwd is a *default* a profile's
+      `starting_directory` still overwrites, being the more specific of the
+      two. env goes **after** `terminal_env()`, so a user's entry wins a
+      collision: a `shell.env` entry silently discarded would be a setting that
+      does nothing, which is the class of bug this sweep exists to close, and
+      overriding `TERM` is something Alacritty and WezTerm both allow.
+      Local route only — a path from this machine's config means nothing on
+      another host, the argument `launch_command` already makes for
+      `shell.command`.
+
+      **Found while wiring it: `CommandSpec.cwd` had never been spawned with.**
+      Every fixture in `zest-pty` passed `cwd: None`, so `command.current_dir`
+      was covered by no test at all, and the empty-value-means-*unset*
+      convention — the only way to remove an inherited variable, and what
+      `terminal_env` relies on to strip another terminal's stale identity — was
+      asserted only against the Windows block builder, never through a real
+      spawn. Both now spawn a child and read the answer back. #291's lesson,
+      one layer down: a fixture that cannot reach the state under test passes
+      for reasons that have nothing to do with the code.
 - [x] **The typed profiles layer** (design screen 12's config half,
       [docs/design/client-ui/](design/client-ui/README.md) §12; #130).
       `zest_config::profiles` — outside the `fs` feature, like `ui`, so the
