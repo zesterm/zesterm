@@ -166,6 +166,28 @@ One capture, both traps: the 24-row repaint overflows (#315), the 20-row one is
 stale-smaller and refused by coverage (#312), and the 30-row one settles. The
 replay uses the same fixture-derived golden as the stepped test.
 
+### `resize-drag-thirdleg.vtrec` — down, up, and up again
+
+The reported gesture's third leg (#335): shrink to 8, grow to 30 with time for
+the settle to land, then shrink again — twice, partially — with ConPTY
+answering each move. After a settle this grid's viewport permanently holds more
+than ConPTY's buffer, so every later repaint restates a lesser truth; the
+re-bank must survive the shrink that precedes it. Slow steps on purpose
+(`--resize-settle-ms 1500`): this is the deliberate up–down–up a hand makes,
+not a storm.
+
+```powershell
+cargo run -p zest-pty --example pty_dump -- `
+  --record crates\zest-core\tests\corpus\resize-drag-thirdleg.vtrec `
+  --cmd "pwsh -NoLogo -c `"ls; Start-Sleep 10`"" `
+  --size 100x30 --resize-after-ms 2000 --resize-settle-ms 1500 --resize 100x8 `
+  --resize-after-ms 0 --resize 100x30 --resize 100x28 --resize-settle-ms 2000 --resize 100x26
+```
+
+Its replay compares the multiset of non-blank line texts against a drag-free
+replay of the same fixture: the layout may differ (some of the listing
+legitimately lives in scrollback at 26 rows), the content may not.
+
 Worth adding as they become relevant: `vim`, `htop`/`btm`, `tmux`, a `cargo build`,
 and the `@sigx/terminal` showcase example — the last being a useful check that
 zesterm can host the user's own TUI framework correctly.

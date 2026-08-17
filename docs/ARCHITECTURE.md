@@ -979,11 +979,24 @@ blanks minted below (new ids; gaps are fine), the share owed again for that
 repaint's own settle to pay out over what *it* wrote. Conservation both ways,
 so a gesture of any length pays out exactly once, at its true end. The settle
 becomes final when the debt would be cancelled anyway — a scroll, a screen
-erase, a width change or a shrink — because the content has moved on and the
-inverse would eat rows something real wrote. The residual: output that neither
-scrolls nor erases, landing between a settle and a following repaint, would be
-re-banked with the rows it overwrote — accepted, because mid-gesture the shell
-is not speaking, and a shell that does speak almost always scrolls or erases.
+erase, or a width change (reflow renumbers, and the re-bank arithmetic dies
+with the ids) — because the content has moved on and the inverse would eat
+rows something real wrote. **A shrink is not on that list, and putting it
+there shipped the drag's third leg broken** (#335): after a settle this
+viewport holds more of the session than the restater's buffer, *permanently*,
+so drag down–up–up and the second shrink's repaint restates the lesser truth
+over the fuller screen — and a partial shrink banks nothing itself (the blank
+rows below the cursor absorb it), so zeroing the pull there left the re-bank
+with nothing to take back and the repaint blanked the pulled rows in place.
+The shrink instead *decrements* the pull by exactly what it banks over the
+top: those rows are back in scrollback and out of the repaint's reach, the
+remainder stays provisional for the incoming bracket, and the two counts
+consume each other one for one because a shrink banks from the top of the
+viewport, which is exactly where the pull sits. The residual: output that
+neither scrolls nor erases, landing between a settle and a following repaint,
+would be re-banked with the rows it overwrote — accepted, because mid-gesture
+the shell is not speaking, and a shell that does speak almost always scrolls
+or erases.
 
 **Either direction of DECTCEM closes it.** ConPTY restores the inner program's
 visibility state, so a full-screen program that keeps its cursor hidden ends the

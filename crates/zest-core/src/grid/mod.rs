@@ -729,12 +729,17 @@ impl Grid {
             self.restating = false;
             self.sitting_out = true;
         }
-        // A width change renumbers and a shrink re-banks displaced rows on its
-        // own terms; either way the last settle's pull stops being something
-        // an inverse could still cleanly take back. A grow leaves it alone —
-        // the pulled rows stay where they are and the next repaint's re-bank
-        // arithmetic still holds.
-        if cols != self.cols || rows < self.rows {
+        // A width change renumbers, and the last settle's pull dies with the
+        // ids the re-bank arithmetic was written in. A *shrink* must not
+        // forget it wholesale — that shipped the third leg of the reported
+        // drag broken: after a settle this viewport holds more than ConPTY's
+        // buffer, permanently, and the next shrink's repaint restates the
+        // lesser truth over it. The re-bank is what protects that moment, and
+        // a partial shrink (blank rows below the cursor absorb it, nothing
+        // goes over the top) banks nothing itself. The shrink branch below
+        // decrements the pull by exactly what it does bank; the remainder
+        // stays provisional for the incoming repaint's bracket. (#335)
+        if cols != self.cols {
             self.settled_pull = 0;
         }
 
@@ -799,6 +804,15 @@ impl Grid {
                     if self.viewport_restated_elsewhere {
                         self.restate_debt += self.scrollback_len - banked;
                     }
+                    // The rows this shrink banked are back in scrollback, so
+                    // they no longer need the provisional settle's re-bank —
+                    // and the pulled rows still *inside* the new viewport
+                    // still do, which is why this is a decrement and not the
+                    // zeroing that shipped #335. The pull sits at the top of
+                    // the viewport, which is exactly where a shrink banks
+                    // from, so the two counts consume each other one for one.
+                    self.settled_pull =
+                        self.settled_pull.saturating_sub(self.scrollback_len - banked);
                 }
             } else if self.viewport_restated_elsewhere {
                 // Nothing comes back out of scrollback *yet*, because the pty is
