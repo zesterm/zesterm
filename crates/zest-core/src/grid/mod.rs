@@ -535,12 +535,12 @@ impl Grid {
         // brackets every repaint in DECTCEM (measured, all captures), and on
         // a grid nobody restates this branch is unreachable. (#315)
         if self.viewport_restated_elsewhere && self.restatement_open && full_screen {
-            for _ in 0..n {
-                // Mint the blank first, so the ring can never be emptied.
-                let len = self.storage.len();
-                self.storage.resize_rows(len + 1, self.cols, template);
-                self.storage.remove_range(self.scrollback_len, 1);
-            }
+            // Net effect: append `n` blanks, drop the `n` rows at the top of
+            // the viewport. Bulk, and blanks first, so the ring can never be
+            // emptied and a tall overflow costs two moves rather than 2n.
+            let len = self.storage.len();
+            self.storage.resize_rows(len + n, self.cols, template);
+            self.storage.remove_range(self.scrollback_len, n);
             return;
         }
 

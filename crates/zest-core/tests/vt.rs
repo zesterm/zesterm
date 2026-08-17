@@ -2395,20 +2395,26 @@ fn a_recorded_overflowing_storm_is_reversible_and_leaves_no_duplicates() {
         plain.grid().scrollback_len(),
         "the storm left a different amount of history than the undisturbed replay"
     );
-    // No row's text may exist twice across history and screen — the overflow
-    // used to bank the repaint's restatement of rows the grid already held.
-    let mut texts: Vec<String> = (0..t.grid().total_lines())
-        .filter_map(|i| t.grid().line(i))
-        .map(|r| r.text().trim_end().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    let total = texts.len();
-    texts.sort();
-    texts.dedup();
+    // The same rows, the same number of times — the overflow used to bank the
+    // repaint's restatement of rows the grid already held, so the storm's
+    // history carried extra copies the undisturbed replay does not. Compared
+    // as multisets against the plain replay rather than asserting global
+    // uniqueness, because legitimate output may repeat a line and that is not
+    // this bug.
+    let texts = |t: &Terminal| -> Vec<String> {
+        let mut v: Vec<String> = (0..t.grid().total_lines())
+            .filter_map(|i| t.grid().line(i))
+            .map(|r| r.text().trim_end().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        v.sort();
+        v
+    };
     assert_eq!(
-        texts.len(),
-        total,
-        "the overflow banked duplicate rows into history"
+        texts(&t),
+        texts(&plain),
+        "the storm's history holds different rows (or extra copies) than the \
+         undisturbed replay's"
     );
 }
 
