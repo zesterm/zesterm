@@ -42,9 +42,10 @@ fn main() {
     let mut raw = false;
     let mut idle_exit = None::<Duration>;
     let mut spawn_size = PtySize::new(120, 30);
-    // Each `--resize` with the delay in force when it was parsed, in order.
-    let mut resizes: Vec<(PtySize, Duration)> = Vec::new();
+    // Each `--resize` with the delays in force when it was parsed, in order.
+    let mut resizes: Vec<(PtySize, Duration, Duration)> = Vec::new();
     let mut resize_after = Duration::from_millis(1500);
+    let mut resize_settle = Duration::from_millis(800);
 
     let mut i = 0;
     while i < args.len() {
@@ -97,7 +98,7 @@ fn main() {
                     eprintln!("--resize wants <cols>x<rows>, e.g. 40x30");
                     std::process::exit(2);
                 };
-                resizes.push((size, resize_after));
+                resizes.push((size, resize_after, resize_settle));
                 i += 2;
             }
             // Applies to every `--resize` *after* it on the command line, so a
@@ -109,6 +110,22 @@ fn main() {
                     std::process::exit(2);
                 };
                 resize_after = Duration::from_millis(ms);
+                i += 2;
+            }
+            // How long to let each resize's repaint run before the next resize
+            // is asked for; order-sensitive like `--resize-after-ms`. The 800ms
+            // default keeps every repaint whole, which is what a capture meant
+            // for reading wants. A *drag* is the opposite: winit fires resizes
+            // faster than ConPTY answers them, so its repaints arrive laid out
+            // for sizes the grid has already left -- and recording that storm
+            // is the only way to test it from bytes rather than from a helper's
+            // idea of them. Set this low (or 0) to let the steps overlap. (#312)
+            "--resize-settle-ms" => {
+                let Some(ms) = args.get(i + 1).and_then(|s| s.parse().ok()) else {
+                    eprintln!("--resize-settle-ms wants milliseconds");
+                    std::process::exit(2);
+                };
+                resize_settle = Duration::from_millis(ms);
                 i += 2;
             }
             other => {
@@ -203,18 +220,18 @@ fn main() {
     // The resize, once the shell has had time to print a prompt and whatever
     // `--cmd` produced. Marked in the stream so the repaint that follows is
     // unambiguous -- everything after this line is the shell's answer to it.
-    for (size, after) in &resizes {
+    for (size, after, settle) in &resizes {
         std::thread::sleep(*after);
         eprintln!("\n[pty_dump] --- resize to {}x{} ---", size.cols, size.rows);
         match pty.resize(*size) {
             Ok(()) => {}
             Err(e) => eprintln!("[pty_dump] resize failed: {e}"),
         }
-        // Let this repaint finish before the next resize is asked for. Two
-        // overlapping repaints are a capture nobody can reason about, and the
-        // recording would be of the tool rather than of ConPTY.
-        std::thread::sleep(Duration::from_millis(800));
-        eprintln!("\n[pty_dump] --- end of the resize repaint ---");
+        // Let this repaint finish before the next resize is asked for -- by
+        // default. Overlap is a capture nobody can *read*, but it is exactly
+        // what a real drag is, so `--resize-settle-ms` makes it recordable.
+        std::thread::sleep(*settle);
+        eprintln!("\n[pty_dump] --- end of the resize settle window ---");
     }
 
     // Wait for the child, then keep draining until the stream goes quiet --

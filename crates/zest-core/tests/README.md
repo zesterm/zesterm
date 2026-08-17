@@ -97,7 +97,31 @@ hard-codes it beside the filename.
 The neutrality rule above applies as much here as anywhere — `ls` in a directory
 whose name is nobody's, with the default prompt.
 
-### Recording more
+### `resize-drag-storm.vtrec` — the same drag as a mouse makes it
+
+The recording above lets each repaint finish before the next resize; a real drag
+does not. winit fires resizes throughout the gesture, ConPTY coalesces its
+answers, and the repaints that do arrive are laid out for sizes the grid has
+already left — which is where #312 lived: an unannounced stale repaint's settle
+destroyed the history it thought it was giving back. Recorded at **100x30**,
+shrunk to 100x8, then four grows issued back-to-back:
+
+```powershell
+cargo run -p zest-pty --example pty_dump -- `
+  --record crates\zest-core\tests\corpus\resize-drag-storm.vtrec `
+  --cmd "pwsh -NoLogo -c `"ls; Start-Sleep 8`"" `
+  --size 100x30 --resize-after-ms 1500 --resize-settle-ms 400 --resize 100x8 `
+  --resize-after-ms 0 --resize-settle-ms 0 `
+  --resize 100x14 --resize 100x20 --resize 100x26 --resize-settle-ms 2000 --resize 100x30
+```
+
+`--resize-settle-ms 0` is what makes it a storm: with no settle window the four
+grows land within ~100µs of each other, faster than ConPTY's first answer
+(~300µs on the box that recorded this). ConPTY then answers with *two* repaints
+— one for an intermediate size it had already been resized past, one for the
+final size — and only the very first repaint of the whole gesture announces
+itself with `CSI 8 t`. The replay test asserts that shape and says to re-record
+if a new capture loses it.
 
 Worth adding as they become relevant: `vim`, `htop`/`btm`, `tmux`, a `cargo build`,
 and the `@sigx/terminal` showcase example — the last being a useful check that

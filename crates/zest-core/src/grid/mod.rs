@@ -153,6 +153,16 @@ pub struct Grid {
     /// Whether the repaint in hand announced a size this grid has already left,
     /// and is therefore one to sit out. Cleared when it closes.
     sitting_out: bool,
+    /// The deepest row (as `row + 1`) the restater has erased since the
+    /// current restatement window opened.
+    ///
+    /// A repaint restates the whole of *its* viewport, every row terminated
+    /// with `ESC[K` (measured, both halves of `corpus/resize-drag.vtrec`), so
+    /// a repaint the grid has outrun tells on itself by where its erases stop.
+    /// This is what lets an **unannounced** stale repaint be refused: there is
+    /// no size in its bytes to compare, but there is one in its behaviour.
+    /// See [`Self::settle_restate`]. (#312)
+    restate_rows_seen: usize,
     pub cursor: Cursor,
     pub region: ScrollRegion,
 }
@@ -189,6 +199,7 @@ impl Grid {
             pending_restate: 0,
             restating: false,
             sitting_out: false,
+            restate_rows_seen: 0,
             cursor: Cursor::default(),
             region: ScrollRegion::full(rows),
         }
@@ -570,6 +581,22 @@ impl Grid {
             return Reindex::default();
         }
 
+        // A repaint that was armed when this resize landed was laid out for a
+        // viewport that no longer exists -- stale by construction. Reachable
+        // because `Session::resize` must release the terminal lock before
+        // telling the pty (the `ClosePseudoConsole` deadlock), so a resize can
+        // land between a repaint's first byte and its last. Demoted to sat-out
+        // rather than merely disarmed, or the cursor-home the repaint has
+        // already sent would not stop its DECTCEM close from settling -- and
+        // narrowly, never unconditionally: setting `sitting_out` on every
+        // resize would sit out the legitimate repaint that answers each grow.
+        // Coverage alone cannot catch the corner where the drag lands on the
+        // stale repaint's own size, which then covers every visible row. (#312)
+        if self.restating {
+            self.restating = false;
+            self.sitting_out = true;
+        }
+
         let mut reindex = Reindex::default();
         if cols != self.cols {
             if self.scrollback_limit == 0 {
@@ -718,7 +745,12 @@ impl Grid {
             return;
         }
         if (cols, rows) == (self.cols, self.rows) {
-            self.restating = true;
+            if !self.restating {
+                self.restating = true;
+                // Measure this repaint from its own first row, not from
+                // whatever erased things before it.
+                self.restate_rows_seen = 0;
+            }
         } else {
             // A repaint for a size this grid has already left. Sitting it out
             // has to be *recorded* rather than merely not-armed, because the
@@ -756,12 +788,21 @@ impl Grid {
     /// **This is a weaker guard than the announced case and the asymmetry is
     /// real.** A repaint that names its size can be told apart from one the
     /// grid has outrun; a grow's cannot, because there is nothing in it to
-    /// compare. What is left is the bound in [`Self::settle_restate`] — the
-    /// blank tail at the moment it runs — plus the unpaid remainder going back
-    /// to the debt, so an early settle is a no-op rather than damage.
+    /// compare. What was believed to make that safe — the blank-tail bound in
+    /// [`Self::settle_restate`], so an early settle would be a no-op — is
+    /// false during a drag up: the blank tail is grow-minted and real, so a
+    /// stale repaint's settle pulls real history into rows the *next* repaint
+    /// blanks. What refuses the stale one instead is its own behaviour: it
+    /// restates a shorter viewport, so its erases stop short of our bottom
+    /// row, and the settle requires full coverage. (#312)
     pub(crate) fn note_cursor_homed_while_hidden(&mut self) {
-        if self.pending_restate > 0 && !self.sitting_out {
+        if self.pending_restate > 0 && !self.sitting_out && !self.restating {
             self.restating = true;
+            // From this repaint's first row. Guarded on the transition: the
+            // grow half *ends* with a home too (`ESC[<kept>;1H`, which is
+            // `1;1` whenever ConPTY kept a single row), and re-zeroing there
+            // would discard the very coverage the repaint just demonstrated.
+            self.restate_rows_seen = 0;
         }
     }
 
@@ -773,6 +814,7 @@ impl Grid {
     pub(crate) fn end_restatement_window(&mut self) {
         self.restating = false;
         self.sitting_out = false;
+        self.restate_rows_seen = 0;
     }
 
     /// Whether a restatement is in progress and has not yet been settled.
@@ -799,7 +841,19 @@ impl Grid {
     /// much of the viewport the repaint had nothing for, so a full screen
     /// settles to nothing; and `scrollback_len` is what there is to give.
     pub(crate) fn settle_restate(&mut self) -> bool {
+        // A repaint that never touched our bottom row was a restatement of a
+        // viewport this grid has already left, not of this one. Announced
+        // repaints say so in their `CSI 8 t` and are sat out up front; a
+        // grow's is unannounced (#271), so this is the only place a stale one
+        // can be refused -- by what it did rather than what it said. The
+        // pending share stays armed for the repaint that does cover us, which
+        // is the same conservation the `k == 0` path below practises through
+        // the debt. (#312)
+        let covered = self.restate_rows_seen >= self.rows;
         self.end_restatement_window();
+        if !covered {
+            return false;
+        }
         let owed = core::mem::take(&mut self.pending_restate);
         let below_cursor = self.rows - 1 - self.cursor.row.min(self.rows - 1);
         let k = owed.min(self.blank_tail()).min(below_cursor).min(self.scrollback_len);
@@ -1034,6 +1088,13 @@ impl Grid {
 
     /// Erase a span of the current row, inclusive of both ends.
     pub fn erase_in_row(&mut self, row: usize, from: usize, to: usize, template: &Cell) {
+        // How deep the restater's repaint has reached; see the field. Gated on
+        // the standing predicate rather than on `restating` so the settle's
+        // direct callers in unit tests measure the same thing the parser does,
+        // and so the cost is one branch per row op, never per cell.
+        if self.viewport_restated_elsewhere {
+            self.restate_rows_seen = self.restate_rows_seen.max(row + 1);
+        }
         let cols = self.cols;
         let blank = Cell::blank_with(template);
         let r = self.row_mut(row);
@@ -1662,6 +1723,58 @@ mod tests {
 
         assert_eq!(g.scrollback_len(), 0, "the debt was forfeited by a settle that did nothing");
         assert_eq!(g.cursor.row, 9, "the prompt did not come back to the bottom row");
+    }
+
+    #[test]
+    fn a_repaint_that_covered_only_part_of_the_viewport_settles_nothing() {
+        // A grow's repaint is unannounced (#271), so a stale one -- laid out
+        // for a size in the middle of a drag -- cannot be told apart by
+        // anything it says. What gives it away is what it does: a repaint
+        // restates the whole of *its* viewport, every row ending in `ESC[K`,
+        // so one the grid has outrun stops short of the bottom row. Settling
+        // on it pays the debt into blank rows the next repaint blanks again,
+        // with the pulled rows no longer in scrollback: #200's destruction,
+        // reached through #247's fix. (#312)
+        let mut g = Grid::new(30, 10, 500);
+        g.set_viewport_restated_elsewhere(true);
+        for row in 0..10 {
+            write_text(&mut g, row, &format!("line {row}"));
+        }
+        g.cursor.row = 9;
+
+        g.resize(30, 4, &Cell::default());
+        g.resize(30, 10, &Cell::default());
+        assert_eq!(g.scrollback_len(), 6, "six rows went over the top and became history");
+
+        // The stale repaint, laid out for 6 rows: arm, restate the four kept
+        // rows, blank the rest of *its* viewport -- and stop there.
+        let texts: Vec<String> =
+            (0..4).map(|r| g.active_row(r).text().trim_end().to_string()).collect();
+        g.note_cursor_homed_while_hidden();
+        for row in 0..6 {
+            let cols = g.cols();
+            g.erase_in_row(row, 0, cols - 1, &Cell::default());
+        }
+        for (row, text) in texts.iter().enumerate() {
+            write_text(&mut g, row, text);
+        }
+        g.cursor.row = 3;
+
+        assert!(
+            !g.settle_restate(),
+            "a repaint that never touched the bottom four rows was taken as a \
+             restatement of this viewport"
+        );
+        assert_eq!(g.scrollback_len(), 6, "...and the debt was paid early");
+
+        // The pending share survives for the repaint that does cover us, and
+        // pays out in full there.
+        conpty_grow_repaint(&mut g, 4);
+        assert_eq!(g.scrollback_len(), 0, "the stale repaint forfeited the debt");
+        assert_eq!(g.cursor.row, 9, "the prompt did not come back to the bottom row");
+        for row in 0..10 {
+            assert_eq!(g.row(row).text().trim_end(), format!("line {row}"));
+        }
     }
 
     #[test]

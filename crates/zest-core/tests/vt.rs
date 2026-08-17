@@ -1309,6 +1309,154 @@ fn a_repaint_for_a_size_the_grid_has_left_is_sat_out() {
 }
 
 #[test]
+fn a_stale_unannounced_repaint_does_not_pay_the_debt_early() {
+    // The test above can exist because a shrink's repaint names its size. A
+    // grow's does not (#271), so during a drag *up* the stale repaint cannot be
+    // told apart by anything it says -- only by what it does. It restates the
+    // whole of the viewport it was laid out for, every row terminated with
+    // `ESC[K`, so a repaint the grid has outrun stops short of the bottom row.
+    // Settling on one pays the debt against blank rows a *later* repaint is
+    // about to rewrite: the pulled history lands exactly where the next
+    // repaint's `ESC[K`s fall, and it is no longer in scrollback either. That
+    // is #200's destruction, reached through the fix for #247 -- and it is what
+    // "I dragged the height down and back and the text is gone, the block is
+    // still there" was. (#312)
+    let mut t = Terminal::new(40, 12, 500);
+    t.set_pty_restates_viewport(true);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\n");
+    for i in 0..9 {
+        t.advance(format!("entry {i}\r\n").as_bytes());
+    }
+    t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    let out = t.blocks().blocks()[0].output_line.expect("the command produced output");
+
+    // Down to 4 rows; ConPTY keeps the last four and answers with a repaint
+    // that names its size.
+    t.resize(40, 4);
+    let kept = ["entry 6", "entry 7", "entry 8", "$ "];
+    t.advance(&conpty_repaint_after_a_squeeze(40, 4, &kept, Drag::Down));
+    let banked = t.grid().scrollback_len();
+
+    // The drag continues up. The repaint for an intermediate 6-row viewport
+    // arrives after the grid has already grown to 8 -- unannounced, so there
+    // is no size in it to sit out.
+    t.resize(40, 8);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 6, &kept, Drag::Up));
+    assert_eq!(
+        t.grid().scrollback_len(),
+        banked,
+        "a stale unannounced repaint settled the debt, handing history to the next \
+         repaint to blank"
+    );
+
+    // The repaint the grow was actually waiting for. After it, every line of
+    // the listing must still exist -- on screen or as history.
+    t.advance(&conpty_repaint_after_a_squeeze(40, 8, &kept, Drag::Up));
+    for (n, line) in (out..out + 9).enumerate() {
+        let found = t
+            .grid()
+            .row_of_line(line)
+            .map(|row| t.grid().row(row).text())
+            .or_else(|| t.grid().lines_by_id(line, 1).first().map(|r| r.text()))
+            .unwrap_or_default();
+        assert_eq!(
+            found.trim_end(),
+            format!("entry {n}"),
+            "line {line} of the listing was destroyed by the drag"
+        );
+    }
+}
+
+#[test]
+fn a_multi_step_drag_with_lagging_repaints_comes_back_whole() {
+    // A real drag is what `ResizeObserver` and the window server make of one
+    // gesture: a stream of resizes, with ConPTY's repaints arriving late and
+    // laid out for sizes the grid has already left. The corpus recording and
+    // the tests above drive one shrink and one grow; this is the storm, and
+    // the storm is where #312 lives -- every intermediate repaint is a chance
+    // to pay the debt early into rows the next one blanks.
+    let mut t = Terminal::new(40, 12, 500);
+    t.set_pty_restates_viewport(true);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\n");
+    for i in 0..9 {
+        t.advance(format!("entry {i}\r\n").as_bytes());
+    }
+    t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    let before = t.screen_text();
+    let cursor_before = t.cursor();
+    let _ = t.take_events();
+
+    let kept = ["entry 6", "entry 7", "entry 8", "$ "];
+    t.resize(40, 4);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 4, &kept, Drag::Down));
+    // Two more resizes land before the next repaint does, so the repaint that
+    // arrives is for a size in the middle of the gesture.
+    t.resize(40, 6);
+    t.resize(40, 8);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 6, &kept, Drag::Up));
+    t.resize(40, 10);
+    t.resize(40, 12);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 8, &kept, Drag::Up));
+    // The repaint that answers where the mouse stopped.
+    t.advance(&conpty_repaint_after_a_squeeze(40, 12, &kept, Drag::Up));
+
+    let rebased = t
+        .take_events()
+        .iter()
+        .filter(|e| matches!(e, TermEvent::ViewportRebased))
+        .count();
+    assert_eq!(
+        rebased, 1,
+        "only the repaint that covers the final viewport may move the boundary; \
+         {rebased} settles ran"
+    );
+    assert_eq!(t.screen_text(), before, "the drag was not reversible");
+    assert_eq!(t.cursor().row, cursor_before.row, "the prompt did not come back down");
+    assert_eq!(t.grid().scrollback_len(), 0, "rows are still parked in history");
+}
+
+#[test]
+fn a_resize_landing_mid_repaint_sits_that_repaint_out() {
+    // `Session::resize` releases the terminal lock before it tells the pty
+    // (the `ClosePseudoConsole` deadlock, `AGENTS.md`), so a resize can land
+    // between a repaint's first byte and its last. A repaint that was armed
+    // when the grid moved was laid out for a viewport that no longer exists --
+    // stale by construction, whatever its shape. The corner that makes this
+    // its own guard rather than a job for coverage: the drag keeps moving and
+    // lands *on the repaint's own size*, so the stale repaint covers every
+    // visible row and reads as current. Settling there pays the debt onto a
+    // screen the next (announced, matching) repaint restates in place --
+    // pulled history overwritten, no longer in scrollback. (#312)
+    let mut t = Terminal::new(40, 12, 500);
+    t.set_pty_restates_viewport(true);
+    for i in 0..12 {
+        t.advance(format!("line {i}\r\n").as_bytes());
+    }
+
+    t.resize(40, 4);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 4, &["line 11"], Drag::Down));
+    t.resize(40, 8);
+    let banked = t.grid().scrollback_len();
+
+    // The stale repaint for a 6-row viewport begins against the 8-row grid --
+    // it arms at its `ESC[H` -- and the drag's next shrink lands mid-repaint,
+    // putting the grid at exactly the 6 rows the repaint describes.
+    let repaint = conpty_repaint_after_a_squeeze(40, 6, &["line 11"], Drag::Up);
+    let armed_at = b"\x1b[?25l\x1b[H".len();
+    let (first, rest) = repaint.split_at(armed_at);
+    t.advance(first);
+    t.resize(40, 6);
+    t.advance(rest);
+
+    assert_eq!(
+        t.grid().scrollback_len(),
+        banked,
+        "a repaint interrupted by a resize settled the debt against a viewport it \
+         never described"
+    );
+}
+
+#[test]
 fn dragging_the_height_to_nothing_and_back_does_not_blank_every_block() {
     // The reported gesture, and the one the width-change story never covered:
     // drag the window's height down to nothing and back, and every block comes
@@ -1848,6 +1996,126 @@ fn a_recorded_conpty_drag_comes_back_as_it_was() {
         .expect("a blank screen");
     assert!(
         last_ink >= 23,
+        "the content is bunched at the top: last non-blank row is {last_ink} of 30"
+    );
+}
+
+#[test]
+fn a_recorded_drag_storm_survives_its_stale_repaints() {
+    // The recording above is one shrink and one grow, with each repaint
+    // arriving at the size it was laid out for. A drag is not that: winit
+    // fires resizes throughout the gesture, ConPTY coalesces its answers, and
+    // the repaints that do arrive are laid out for sizes the grid has already
+    // left. `corpus/resize-drag-storm.vtrec` is that gesture recorded for real
+    // (`pty_dump --resize-settle-ms 0`, #312): shrink 30 -> 8, then four grows
+    // issued back-to-back -- 14, 20, 26, 30, within ~100us of each other --
+    // and ConPTY answered with exactly two repaints:
+    //
+    // ```text
+    // 1500.9ms  ESC[?25l ESC[8;8;100t ESC[H <8 rows>              ESC[?25h
+    // 1901.3ms  ESC[?25l              ESC[H <20 rows>  ESC[8;1H   ESC[?25h
+    // 1915.1ms  ESC[?25l              ESC[H <30 rows>  ESC[8;1H   ESC[?25h
+    // ```
+    //
+    // The middle one is the trap this test exists for: a repaint for a 20-row
+    // viewport, unannounced, parsing into a 30-row grid. Settling on it pays
+    // the whole debt into blank rows the 30-row repaint blanks again three
+    // bytes of wall clock later, with the pulled rows no longer in scrollback
+    // -- the reported "text is gone, the block is still there". What refuses
+    // it is its own coverage: its erases stop at row 20 of 30.
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/corpus/resize-drag-storm.vtrec"
+    ))
+    .expect("the recording exists");
+
+    let mut t = Terminal::new(100, 30, 500);
+    t.set_pty_restates_viewport(true);
+
+    // As with the test above, geometry and timing are the fixture's, not the
+    // file's. The four grows are injected at one threshold because that is how
+    // they were issued: back-to-back, faster than ConPTY's first answer.
+    const SHRINK_AT_US: u128 = 1_450_000;
+    const GROWS_AT_US: u128 = 1_901_000;
+
+    let chunks = parse_vtrec_timed(&bytes);
+    let (mut shrunk, mut grown) = (None, None);
+    for (i, (us, chunk)) in chunks.iter().enumerate() {
+        if shrunk.is_none() && *us >= SHRINK_AT_US {
+            t.resize(100, 8);
+            shrunk = Some(i);
+        }
+        if grown.is_none() && *us >= GROWS_AT_US {
+            t.resize(100, 14);
+            t.resize(100, 20);
+            t.resize(100, 26);
+            t.resize(100, 30);
+            grown = Some(i);
+        }
+        t.advance(chunk);
+    }
+
+    // What keeps a re-recording honest. The shrink's repaint announces; the
+    // first repaint after the grows must be *stale* -- unannounced and laid
+    // out for fewer rows than the grid holds -- or this replay is no longer
+    // about staleness at all; and the one after it must cover the final size,
+    // or the debt legitimately stays unpaid.
+    let rows_of = |chunk: &[u8]| chunk.windows(2).filter(|w| w == b"\r\n").count() + 1;
+    // `ESC[8;` alone is not it: the grow half *ends* with `ESC[8;1H`, ConPTY
+    // putting the cursor back on row 8. An announcement is the same prefix
+    // terminated with `t`.
+    let announces = |chunk: &[u8]| {
+        chunk.windows(4).enumerate().any(|(i, w)| {
+            w == b"\x1b[8;"
+                && chunk[i + 4..].iter().find(|b| !(b.is_ascii_digit() || **b == b';'))
+                    == Some(&b't')
+        })
+    };
+    let shrink_repaint = &chunks[shrunk.expect("the recording never reached the shrink")].1;
+    assert!(
+        announces(shrink_repaint),
+        "the shrink resize did not land just before the repaint that announces it"
+    );
+    let stale = &chunks[grown.expect("the recording never reached the grows")].1;
+    assert!(
+        stale.windows(6).any(|w| w == b"\x1b[?25l") && !announces(stale),
+        "the repaint after the grows is not the unannounced kind this test needs"
+    );
+    assert!(
+        rows_of(stale) < 30,
+        "the repaint after the grows covers the whole grid, so nothing here is stale -- \
+         re-record with the grows back-to-back"
+    );
+    let closing = &chunks[grown.unwrap() + 1].1;
+    assert_eq!(
+        rows_of(closing),
+        30,
+        "the last repaint does not cover the final viewport, so the debt is honestly unpaid"
+    );
+
+    assert_eq!(
+        t.grid().scrollback_len(),
+        0,
+        "the storm never gave back what the shrink took: {} rows still in history",
+        t.grid().scrollback_len()
+    );
+    let screen = t.screen_text();
+    for name in ["AGENTS.md", "Cargo.lock", "README.md", "rust-toolchain.toml"] {
+        assert!(
+            screen.contains(name),
+            "{name} is not on screen after the storm -- the stale repaint's settle handed \
+             it to the closing repaint to blank"
+        );
+    }
+    let last_ink = screen
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .map(|(i, _)| i)
+        .max()
+        .expect("a blank screen");
+    assert!(
+        last_ink >= 20,
         "the content is bunched at the top: last non-blank row is {last_ink} of 30"
     );
 }
