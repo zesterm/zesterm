@@ -97,10 +97,33 @@ impl GridView {
         if self.cols == k.cols && !cleared {
             if let Some(first) = k.rows_data.iter().map(|r| r.line).find(|&l| l != i64::MIN) {
                 let last_held = self.scrollback.last().map(|r| r.line);
-                let displaced = self.rows.iter().filter(|r| {
-                    r.line != i64::MIN && r.line < first && last_held.is_none_or(|l| r.line > l)
-                });
-                self.scrollback.extend(displaced.cloned());
+                let displaced: Vec<RowPayload> = self
+                    .rows
+                    .iter()
+                    .filter(|r| {
+                        r.line != i64::MIN
+                            && r.line < first
+                            && last_held.is_none_or(|l| r.line > l)
+                    })
+                    .cloned()
+                    .collect();
+                // What the viewport is losing off the top becomes history…
+                if !displaced.is_empty() {
+                    self.scrollback.extend(displaced);
+                }
+                // …and what it is taking back stops being history. Exactly the
+                // lines the keyframe *names* — `grid-view.ts` wrote the
+                // argument down first, and this decoder shipped without the
+                // take-back half at all (the gap #291 called two fixes was
+                // three). The two branches are mutually exclusive by
+                // construction: a nonempty displaced set forces
+                // `last_held < first`, and the take-back requires the
+                // opposite. (#313)
+                else if last_held.is_some_and(|l| l >= first) {
+                    let on_screen: std::collections::HashSet<i64> =
+                        k.rows_data.iter().map(|r| r.line).collect();
+                    self.scrollback.retain(|r| !on_screen.contains(&r.line));
+                }
             }
         }
         self.cols = k.cols;
@@ -302,6 +325,35 @@ mod tests {
 
         let held: Vec<i64> = view.scrollback.iter().map(|r| r.line).collect();
         assert_eq!(held, vec![0, 1, 2], "the displaced rows were dropped, not kept");
+    }
+
+    #[test]
+    fn a_keyframe_that_gives_history_back_does_not_leave_the_view_holding_it_twice() {
+        // The third of the three readers, and the one #291 never fixed: this
+        // decoder had the displaced-append half and no take-back at all, so a
+        // settled grow's keyframe left every re-delivered line in both halves
+        // of `scrollback ++ rows` — which is the walk `sliceBlocks` premises
+        // on "the session in order with nothing repeated". Ported from
+        // `grid-view.ts`, which wrote the named-lines rule down first. (#313)
+        let mut view = GridView::new();
+        view.apply_keyframe(&keyframe(20, &[(0, "line 0"), (1, "line 1"), (2, "line 2")]));
+        // A shrink banks lines 0..=1 into the view's scrollback.
+        view.apply_keyframe(&keyframe(20, &[(2, "line 2")]));
+        assert_eq!(
+            view.scrollback.iter().map(|r| r.line).collect::<Vec<_>>(),
+            vec![0, 1],
+            "the shrink banked nothing, so this proves nothing"
+        );
+
+        // The settled grow re-delivers them as viewport rows.
+        view.apply_keyframe(&keyframe(20, &[(0, "line 0"), (1, "line 1"), (2, "line 2")]));
+        let all: Vec<i64> = view
+            .scrollback
+            .iter()
+            .chain(view.rows.iter())
+            .map(|r| r.line)
+            .collect();
+        assert_eq!(all, vec![0, 1, 2], "the view holds a line twice: {all:?}");
     }
 
     #[test]
