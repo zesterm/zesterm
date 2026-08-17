@@ -153,6 +153,19 @@ pub struct Grid {
     /// Whether the repaint in hand announced a size this grid has already left,
     /// and is therefore one to sit out. Cleared when it closes.
     sitting_out: bool,
+    /// Whether a restatement bracket is open: the restater hid the cursor and
+    /// homed (or announced with `CSI 8 t`) and its closing DECTCEM has not
+    /// arrived.
+    ///
+    /// Wider than `restating` on purpose: that flag means "armed to settle",
+    /// which needs a debt, while this one means "the bytes arriving are a
+    /// restatement of content this grid already holds" — true for sat-out and
+    /// unarmed repaints too, shrink-phase ones included. What it gates is the
+    /// overflow of a repaint laid out *taller* than the grid: those scrolls
+    /// are the restater's artifact, not content moving on, so they neither
+    /// cancel the debt nor bank their rows — banking them put the same
+    /// content in history twice. (#315)
+    restatement_open: bool,
     /// How many rows the last settle pulled down, while that settle is still
     /// provisional.
     ///
@@ -215,6 +228,7 @@ impl Grid {
             pending_restate: 0,
             restating: false,
             sitting_out: false,
+            restatement_open: false,
             settled_pull: 0,
             restate_rows_seen: 0,
             history_clears: 0,
@@ -506,11 +520,34 @@ impl Grid {
         let region_height = self.region.bottom - self.region.top + 1;
         let n = n.min(region_height);
 
+        let full_screen = self.region.top == 0 && self.region.bottom == self.rows - 1;
+
+        // A scroll inside a restatement bracket is not content moving on — it
+        // is a repaint laid out *taller* than the grid overflowing the bottom,
+        // which ConPTY's coalescing makes routine in the shrink half of a
+        // drag. Everything in the bracket is the restater re-stating content
+        // this grid already holds above the viewport, so the overflowing rows
+        // are dropped rather than banked (banking put the same content in
+        // history twice), and the debt stays owed — cancelling it here is
+        // what stranded the drag. The residual this accepts: a program that
+        // hides the cursor, homes, and then streams past the bottom without
+        // ever touching DECTCEM would lose those rows from history; ConPTY
+        // brackets every repaint in DECTCEM (measured, all captures), and on
+        // a grid nobody restates this branch is unreachable. (#315)
+        if self.viewport_restated_elsewhere && self.restatement_open && full_screen {
+            for _ in 0..n {
+                // Mint the blank first, so the ring can never be emptied.
+                let len = self.storage.len();
+                self.storage.resize_rows(len + 1, self.cols, template);
+                self.storage.remove_range(self.scrollback_len, 1);
+            }
+            return;
+        }
+
         // The content has moved on, so the rows a shrink displaced are no longer
         // the ones above the viewport and are not owed back. See the field.
         self.cancel_restate_debt();
 
-        let full_screen = self.region.top == 0 && self.region.bottom == self.rows - 1;
         if full_screen {
             self.scroll_screen_up(n, template);
         } else {
@@ -833,6 +870,10 @@ impl Grid {
     }
 
     pub(crate) fn note_restatement_began(&mut self, cols: usize, rows: usize, template: &Cell) {
+        // A bracket is open whatever else this decides -- sat-out and unarmed
+        // repaints still write rows, and their overflow must not read as
+        // content moving on. See the field, and `scroll_up`. (#315)
+        self.restatement_open = true;
         // Before anything else, even the pending check: a repaint that is
         // about to be sat out still writes every one of its rows, and a
         // provisional pull left in the viewport would be overwritten where it
@@ -895,6 +936,9 @@ impl Grid {
     /// restates a shorter viewport, so its erases stop short of our bottom
     /// row, and the settle requires full coverage. (#312)
     pub(crate) fn note_cursor_homed_while_hidden(&mut self, template: &Cell) {
+        // The bracket opens (or stays open -- the grow half ends with a home
+        // too) regardless of what the arming below decides. (#315)
+        self.restatement_open = true;
         // See `note_restatement_began` — but only when this home is *opening*
         // a window, not the grow half's trailing `ESC[<kept>;1H` re-entering
         // its own bracket.
@@ -919,6 +963,7 @@ impl Grid {
     pub(crate) fn end_restatement_window(&mut self) {
         self.restating = false;
         self.sitting_out = false;
+        self.restatement_open = false;
         self.restate_rows_seen = 0;
     }
 

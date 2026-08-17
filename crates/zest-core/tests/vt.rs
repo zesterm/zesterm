@@ -1550,6 +1550,76 @@ fn an_intermediate_settle_is_taken_back_before_the_next_repaint_writes() {
 }
 
 #[test]
+fn a_stale_repaint_taller_than_the_grid_neither_cancels_the_debt_nor_duplicates_history() {
+    // The shrink half of a storm. ConPTY coalesces, so the one repaint it does
+    // send can be laid out for a size several resizes back -- *taller* than
+    // the grid is now. Its writes overflow the bottom, and each overflow
+    // scroll did two bad things at once: `scroll_up` cancelled the restate
+    // debt (that guard exists for real content moving on, not for a stale
+    // repaint's overflow), stranding the drag; and the scrolled-off rows --
+    // the repaint's own restatement of content this grid already holds above
+    // the viewport -- were banked into scrollback, so the host's history held
+    // the same rows twice and scrolling up after the drag showed them twice.
+    // (#315; the mechanism was measured on `resize-drag-storm2`, this box.)
+    //
+    // Everything inside a restatement bracket comes from ConPTY restating
+    // content we hold, so its overflow is dropped rather than banked and the
+    // debt stays owed -- which is what lets the drag's final repaint settle
+    // and put the screen back.
+    let mut t = Terminal::new(40, 12, 500);
+    t.set_pty_restates_viewport(true);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\n");
+    for i in 0..9 {
+        t.advance(format!("entry {i}\r\n").as_bytes());
+    }
+    t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    let before = t.screen_text();
+    let out = t.blocks().blocks()[0].output_line.expect("the command produced output");
+
+    // Two shrinks land before ConPTY's first repaint does -- so the repaint
+    // that arrives is for 8 rows on a 4-row grid, and it is the *first* of
+    // the storm, which is the one that announces. Its four overflow rows
+    // scroll.
+    t.resize(40, 8);
+    t.resize(40, 4);
+    let banked = t.grid().scrollback_len();
+    let kept8 = ["entry 2", "entry 3", "entry 4", "entry 5", "entry 6", "entry 7", "entry 8", "$ "];
+    t.advance(&conpty_repaint_after_a_squeeze(40, 8, &kept8, Drag::Down));
+    assert_eq!(
+        t.grid().scrollback_len(),
+        banked,
+        "the stale repaint's overflow was banked into history (as duplicates)"
+    );
+
+    // The drag comes back up, and ConPTY answers where the mouse stopped.
+    t.resize(40, 12);
+    t.advance(&conpty_repaint_after_a_squeeze(
+        40,
+        12,
+        &["entry 6", "entry 7", "entry 8", "$ "],
+        Drag::Up,
+    ));
+
+    assert_eq!(
+        t.screen_text(),
+        before,
+        "the overflow's scrolls cancelled the debt, so the drag never came back"
+    );
+    // Once each, anywhere: a line id that resolves must hold its own text and
+    // no other copy of it may exist in history.
+    for (n, line) in (out..out + 9).enumerate() {
+        let copies = (0..t.grid().total_lines())
+            .filter_map(|i| t.grid().line(i))
+            .filter(|r| r.text().trim_end() == format!("entry {n}"))
+            .count();
+        assert_eq!(
+            copies, 1,
+            "entry {n} (line {line}) exists {copies} times across history and screen"
+        );
+    }
+}
+
+#[test]
 fn a_resize_landing_mid_repaint_sits_that_repaint_out() {
     // `Session::resize` releases the terminal lock before it tells the pty
     // (the `ClosePseudoConsole` deadlock, `AGENTS.md`), so a resize can land
@@ -2251,6 +2321,94 @@ fn a_recorded_drag_storm_survives_its_stale_repaints() {
     assert!(
         last_ink >= 20,
         "the content is bunched at the top: last non-blank row is {last_ink} of 30"
+    );
+}
+
+#[test]
+fn a_recorded_overflowing_storm_is_reversible_and_leaves_no_duplicates() {
+    // `corpus/resize-drag-overflow.vtrec`: three shrinks issued back-to-back
+    // (30 -> 24 -> 16 -> 8 within ~100us), a 300ms turnaround, four grows
+    // back-to-back, all against a real ConPTY. What it answered with:
+    //
+    // ```text
+    // 2001.1ms  ESC[?25l ESC[8;24;100t ESC[H <24 rows>            ESC[?25h
+    // 2016.3ms  ESC[?25l               ESC[H <8 rows>             ESC[?25h
+    // 2301.7ms  ESC[?25l               ESC[H <20 rows> ESC[8;1H   ESC[?25h
+    // 2310.7ms  ESC[?25l               ESC[H <30 rows> ESC[8;1H   ESC[?25h
+    // ```
+    //
+    // The first repaint is the trap this test exists for: laid out for 24
+    // rows, parsing into a grid already at 8 — sixteen rows of overflow, each
+    // scroll of which used to cancel the restate debt (stranding the drag)
+    // and bank the restated row into history (duplicating it). The 20-row
+    // repaint is #312's stale-smaller case, refused by coverage; the 30-row
+    // one settles. Between them this is a whole drag storm, both directions,
+    // from recorded bytes. (#315)
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/corpus/resize-drag-overflow.vtrec"
+    ))
+    .expect("the recording exists");
+    let chunks = parse_vtrec_timed(&bytes);
+
+    // As in the stepped test below: the expected end state is the session as
+    // if the drag never happened — every chunk except the drag window's.
+    const DRAG_WINDOW_US: core::ops::Range<u128> = 2_000_000..3_000_000;
+    let mut plain = Terminal::new(100, 30, 500);
+    plain.set_pty_restates_viewport(true);
+    for (us, chunk) in &chunks {
+        if !DRAG_WINDOW_US.contains(us) {
+            plain.advance(chunk);
+        }
+    }
+
+    let mut t = Terminal::new(100, 30, 500);
+    t.set_pty_restates_viewport(true);
+    const SHRINKS_AT_US: u128 = 2_000_000;
+    const GROWS_AT_US: u128 = 2_300_000;
+    let (mut shrunk, mut grown) = (false, false);
+    for (us, chunk) in &chunks {
+        if !shrunk && *us >= SHRINKS_AT_US {
+            t.resize(100, 24);
+            t.resize(100, 16);
+            t.resize(100, 8);
+            shrunk = true;
+        }
+        if !grown && *us >= GROWS_AT_US {
+            t.resize(100, 14);
+            t.resize(100, 20);
+            t.resize(100, 26);
+            t.resize(100, 30);
+            grown = true;
+        }
+        t.advance(chunk);
+    }
+    assert!(shrunk && grown, "the recording ended before the drag did -- re-record");
+
+    assert_eq!(
+        t.screen_text(),
+        plain.screen_text(),
+        "the storm did not come back to the screen an undisturbed replay shows"
+    );
+    assert_eq!(
+        t.grid().scrollback_len(),
+        plain.grid().scrollback_len(),
+        "the storm left a different amount of history than the undisturbed replay"
+    );
+    // No row's text may exist twice across history and screen — the overflow
+    // used to bank the repaint's restatement of rows the grid already held.
+    let mut texts: Vec<String> = (0..t.grid().total_lines())
+        .filter_map(|i| t.grid().line(i))
+        .map(|r| r.text().trim_end().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let total = texts.len();
+    texts.sort();
+    texts.dedup();
+    assert_eq!(
+        texts.len(),
+        total,
+        "the overflow banked duplicate rows into history"
     );
 }
 

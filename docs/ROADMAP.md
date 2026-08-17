@@ -2643,6 +2643,23 @@ three facts about Cloudflare that changed after #59 was written.
       settle structurally could not record a storm;
       `corpus/resize-drag-storm.vtrec` replays the real one. ADR-013 revised.
 
+- [x] **A stale repaint taller than the grid stops scrolling junk into
+      history** (#315). The shrink half of the same storm: ConPTY coalesces,
+      so its one answer can be laid out taller than the grid is by the time it
+      parses, and its overflow scrolls did two bad things at once — cancelled
+      the restate debt (#312 explicitly reasoned the overflow "saves itself"
+      through that cancel, which was the bug: the cancel exists for content
+      moving on) and banked each scrolled-off row, a duplicate of content the
+      grid already held, so scrolling up after a drag showed the same rows
+      twice. The grid now keeps a restatement *bracket* flag, wider than the
+      armed state — opened by either marker whatever the arming decides,
+      closed by the DECTCEM that closes every repaint — and a full-screen
+      scroll inside it drops the overflowing row and leaves the debt alone.
+      `corpus/resize-drag-overflow.vtrec` exercises the overflow, the coverage
+      refusal and the final settle in one recorded gesture; the accepted
+      residual (a program streaming past the bottom inside a never-closed
+      bracket) is stated in ADR-013.
+
       And the second half, found because the daemon still failed the gesture
       with the guard in place: **at the daemon's cadence nothing is ever stale
       and rows were still destroyed** — every step's repaint matches its size,
