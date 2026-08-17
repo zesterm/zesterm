@@ -314,8 +314,8 @@ fn snapshots(name: &str) -> Vec<Snapshot> {
 
 /// Take an anchor at the first frame where a `run` could have written.
 fn anchor_at(snaps: &[Snapshot], from: usize) -> Option<(usize, Anchor)> {
-    snaps.iter().enumerate().skip(from).find_map(|(i, (b, f, alt))| {
-        run::anchor(b, *f, *alt).ok().map(|a| (i, a))
+    snaps.iter().enumerate().skip(from).find_map(|(i, (b, _, alt))| {
+        run::anchor(b, *alt).ok().map(|a| (i, a))
     })
 }
 
@@ -444,9 +444,9 @@ fn a_run_is_refused_for_every_frame_a_recording_spends_in_an_editor() {
     let alt: Vec<&Snapshot> = snaps.iter().filter(|(_, _, alt)| *alt).collect();
     assert!(!alt.is_empty(), "the recording opens vim; something is wrong upstream of this");
 
-    for (b, f, a) in alt {
+    for (b, _, a) in alt {
         assert_eq!(
-            run::anchor(b, *f, *a).expect_err("the alternate screen is never runnable"),
+            run::anchor(b, *a).expect_err("the alternate screen is never runnable"),
             run::Refusal::AltScreen,
             "an alt-screen frame must be refused by name, not fall through to `NoBlocks`"
         );

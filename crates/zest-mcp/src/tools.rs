@@ -372,7 +372,7 @@ impl ToolSet {
         let grace = deadline.min(Instant::now() + PROMPT_GRACE);
         let waited = self.conn.wait_until(grace, |s| {
             let r = s.replica(addr)?;
-            match run::anchor(&r.blocks(), r.blocks_from(), r.alt_screen()) {
+            match run::anchor(&r.blocks(), r.alt_screen()) {
                 Err(Refusal::NoBlocks | Refusal::NoPrompt) => None,
                 decided => Some(decided),
             }
@@ -385,7 +385,7 @@ impl ToolSet {
             Err(ConnError::TimedOut) => self
                 .conn
                 .with(|s| {
-                    s.replica(addr).map(|r| run::anchor(&r.blocks(), r.blocks_from(), r.alt_screen()))
+                    s.replica(addr).map(|r| run::anchor(&r.blocks(), r.alt_screen()))
                 })
                 .unwrap_or(Err(Refusal::NoBlocks))
                 .map_err(Into::into),
@@ -423,16 +423,21 @@ impl ToolSet {
         // The id must be one this session really has, or the wait is against a
         // block that can never settle and the answer would be a timeout -- which
         // reads as "still running" for something that never existed.
-        let known = self.conn.with(|s| {
-            s.replica(addr).map(|r| (r.blocks().iter().any(|b| b.id == id), r.blocks_from()))
-        });
-        let (found, blocks_from) = known.ok_or(ToolError::Conn(ConnError::TimedOut))?;
+        //
+        // `wait_for` rather than reading once: `hold` has waited for the keyframe
+        // that proves the replica is here, so this answers immediately -- but a
+        // replica that is briefly absent must not be spelled `TimedOut` without
+        // any deadline having passed, because that is the one word this crate
+        // uses to mean a command is still going.
+        let found = self.conn.wait_for(|s| {
+            s.replica(addr).map(|r| r.blocks().iter().any(|b| b.id == id))
+        })?;
         if !found {
             return Err(ToolError::NoSuchBlock(id));
         }
         // No warnings: the caller already holds this id, so "another command has
         // started since" is not news, and there is no submitted text to compare.
-        self.settle(addr, &Anchor { id, blocks_from }, None, deadline, max_lines)
+        self.settle(addr, &Anchor { id }, None, deadline, max_lines)
     }
 
     /// Wait for the block to close, then report it — the half `run` and `wait` share.

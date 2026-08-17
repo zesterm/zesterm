@@ -38,14 +38,6 @@ pub struct Anchor {
     /// The trailing block's id. The command is expected to land *in* this block,
     /// not above it. See the module doc.
     pub id: u32,
-    /// The index's floor when the anchor was taken, so a later fall can be seen.
-    ///
-    /// `BlockIndex::authoritative_from` rises past evicted blocks (not our
-    /// business) and *falls* to the lowest id a screen clear destroyed (very much
-    /// our business). Carrying it is what lets [`progress`] answer
-    /// [`Progress::Lost`] instead of waiting out a deadline for a block that no
-    /// longer exists.
-    pub blocks_from: u32,
 }
 
 /// How far a submitted command has got.
@@ -122,7 +114,7 @@ pub enum Refusal {
 /// so text plus a carriage return lands in its stdin rather than the shell's.
 /// Getting this wrong does not fail — it silently answers a `Password:` prompt
 /// with a `cargo build`.
-pub fn anchor(blocks: &[BlockPayload], blocks_from: u32, alt: bool) -> Result<Anchor, Refusal> {
+pub fn anchor(blocks: &[BlockPayload], alt: bool) -> Result<Anchor, Refusal> {
     if alt {
         return Err(Refusal::AltScreen);
     }
@@ -141,26 +133,40 @@ pub fn anchor(blocks: &[BlockPayload], blocks_from: u32, alt: bool) -> Result<An
         BlockState::Finished { .. } => Err(Refusal::NoPrompt),
         BlockState::Running => Err(Refusal::Busy),
         BlockState::Prompt if tail.output_line.is_some() => Err(Refusal::Busy),
-        BlockState::Prompt => Ok(Anchor { id: tail.id, blocks_from }),
+        BlockState::Prompt => Ok(Anchor { id: tail.id }),
     }
 }
 
 /// Where the run has got to now.
+///
+/// # The anchor block still being there is the thing to check
+///
+/// Not the index's floor, which looks as though it should answer this and
+/// cannot. `BlockIndex::authoritative_from` rises past *evicted* blocks and
+/// falls for *destroyed* ones — but it falls with `min(lowest_gone)`, and the
+/// floor of a young session is already 0, so a screen clear that erases the
+/// anchor outright moves it by nothing at all.
+///
+/// The presence of the block is exact instead, because a new prompt **pushes**
+/// rather than replacing: `begin_prompt` appends, and re-anchors the trailing
+/// block only when that block is the one it would have replaced. So the anchor
+/// is always still in the list unless something destroyed it — `ESC[2J`, which
+/// drops every block not entirely above the cleared region and therefore always
+/// takes an open prompt block with it, or `RIS`, which replaces the index and
+/// restarts the ids at 0.
+///
+/// Reading the floor instead answered `NotStarted` for a `run clear`, which then
+/// waited out the caller's whole deadline on a block that had been gone since the
+/// first millisecond.
 pub fn progress(blocks: &[BlockPayload], blocks_from: u32, a: &Anchor) -> Progress {
-    // The floor fell to or below the anchor, so a screen clear destroyed the rows
-    // it described. `evict_before` only ever raises the floor, so a fall is
-    // destruction rather than history ageing out, and the two must not be
-    // conflated: one is recoverable by asking the host, the other is not.
-    if blocks_from > a.id {
+    if !blocks.iter().any(|b| b.id == a.id) {
         return Progress::Lost;
     }
-    // `RIS` replaces the whole index, so `next_id` restarts at 0 and every id
-    // below the anchor is a *different* block wearing an old number. An empty
-    // list is the same event one step earlier.
-    match blocks.last() {
-        None => return Progress::Lost,
-        Some(tail) if tail.id < a.id => return Progress::Lost,
-        Some(_) => {}
+    // And the floor having risen past it: the block is present but its lines
+    // have aged out of scrollback, so the index no longer claims to be complete
+    // there and nothing it says about the block can be relied on.
+    if blocks_from > a.id {
+        return Progress::Lost;
     }
 
     let Some(b) = ours(blocks, a) else {
@@ -285,7 +291,7 @@ mod tests {
         // waits for ever, on a command that finished instantly, and reports a
         // timeout with nothing anywhere saying why.
         let before = vec![block(0, BlockState::Finished { exit_code: Some(0) }, Some(1), "ls"), prompt(1)];
-        let a = anchor(&before, 0, false).expect("a live prompt is runnable");
+        let a = anchor(&before, false).expect("a live prompt is runnable");
         assert_eq!(a.id, 1, "the anchor is the trailing prompt, not the next id");
 
         let running = vec![before[0].clone(), block(1, BlockState::Running, Some(11), "cargo test")];
@@ -310,7 +316,7 @@ mod tests {
         // Enter, so its next prompt genuinely pushes a fresh one. Both shells are
         // supported, so an `==` here would work on macOS and fail on Windows --
         // the asymmetry that makes this whole class invisible if tested on one.
-        let a = Anchor { id: 4, blocks_from: 0 };
+        let a = Anchor { id: 4 };
         let blocks = vec![
             prompt(4),
             block(5, BlockState::Finished { exit_code: Some(0) }, Some(51), "echo hi"),
@@ -325,7 +331,7 @@ mod tests {
     fn a_session_showing_a_full_screen_program_is_refused_by_name() {
         // No markers are recorded on the alternate screen at all, so a `run` into
         // vim could never settle -- and the bytes would reach the editor.
-        let err = anchor(&[prompt(0)], 0, true).expect_err("alt screen is not runnable");
+        let err = anchor(&[prompt(0)], true).expect_err("alt screen is not runnable");
         assert_eq!(err, Refusal::AltScreen);
         assert!(err.to_string().contains("screen"), "the refusal must name the way out: {err}");
     }
@@ -334,7 +340,7 @@ mod tests {
     fn a_session_with_no_blocks_at_all_names_run_isolated() {
         // bash, fish and cmd.exe emit nothing -- most Linux hosts, not an edge
         // case -- and the answer is a different tool rather than a retry.
-        let err = anchor(&[], 0, false).expect_err("no blocks means no correlation");
+        let err = anchor(&[], false).expect_err("no blocks means no correlation");
         assert_eq!(err, Refusal::NoBlocks);
         assert!(
             err.to_string().contains("run_isolated"),
@@ -348,12 +354,12 @@ mod tests {
         // into the running command's stdin, so a `cargo build` becomes the answer
         // to somebody's `Password:` prompt.
         let running = vec![block(0, BlockState::Running, Some(1), "sleep 30")];
-        assert_eq!(anchor(&running, 0, false).expect_err("busy"), Refusal::Busy);
+        assert_eq!(anchor(&running, false).expect_err("busy"), Refusal::Busy);
 
         // A `Prompt` block that already has output is the same hazard wearing the
         // other field, which is why both are checked.
         let odd = vec![block(0, BlockState::Prompt, Some(1), "")];
-        assert_eq!(anchor(&odd, 0, false).expect_err("output means submitted"), Refusal::Busy);
+        assert_eq!(anchor(&odd, false).expect_err("output means submitted"), Refusal::Busy);
     }
 
     #[test]
@@ -368,11 +374,11 @@ mod tests {
         // running command may not end for an hour.
         let settling = vec![block(0, BlockState::Finished { exit_code: Some(0) }, Some(1), "ls")];
         assert_eq!(
-            anchor(&settling, 0, false).expect_err("no prompt is showing yet"),
+            anchor(&settling, false).expect_err("no prompt is showing yet"),
             Refusal::NoPrompt
         );
         let busy = vec![block(0, BlockState::Running, Some(1), "sleep 30")];
-        assert_eq!(anchor(&busy, 0, false).expect_err("a command is in flight"), Refusal::Busy);
+        assert_eq!(anchor(&busy, false).expect_err("a command is in flight"), Refusal::Busy);
     }
 
     #[test]
@@ -395,21 +401,43 @@ mod tests {
 
     #[test]
     fn a_screen_clear_under_a_running_command_is_lost_rather_than_a_timeout() {
-        // `authoritative_from` *falls* when a clear destroys blocks and *rises*
-        // when history is merely evicted. Only the fall is our business, and
-        // reporting it as a timeout would send a model back round the loop
-        // against a block that no longer exists.
-        let a = Anchor { id: 7, blocks_from: 0 };
-        assert_eq!(progress(&[prompt(9)], 8, &a), Progress::Lost, "the floor rose past the anchor");
+        // What `run clear` does, and the case reading the *floor* got wrong.
+        // `erase_screen` drops every block not entirely above the cleared region
+        // -- which always includes an open prompt block -- and lowers the floor
+        // with `min(lowest_gone)`. A young session's floor is already 0, so it
+        // moves by nothing at all, and the next prompt then pushes an id *above*
+        // the anchor. Keyed off the floor this read as `NotStarted` and waited out
+        // the caller's whole deadline; keyed off the anchor still being in the
+        // list it is `Lost` at once.
+        let a = Anchor { id: 5 };
+        let cleared = vec![
+            block(0, BlockState::Finished { exit_code: Some(0) }, Some(1), "ls"),
+            // Minted by the prompt drawn after the clear. Not ours, however
+            // plausible its id looks.
+            block(6, BlockState::Running, Some(61), "whoami"),
+        ];
+        assert_eq!(
+            progress(&cleared, 0, &a),
+            Progress::Lost,
+            "the anchor block was erased, so nothing here is the command that was sent"
+        );
+
         assert_eq!(progress(&[], 0, &a), Progress::Lost, "an emptied index cannot be correlated");
         assert_eq!(
             progress(&[prompt(0)], 0, &a),
             Progress::Lost,
             "`RIS` restarts the ids at 0, so a lower tail is a different session's numbering"
         );
+        assert_eq!(
+            progress(&[prompt(5)], 6, &a),
+            Progress::Lost,
+            "and a floor above the anchor: the block is here but the index no longer \
+             claims to be complete where it sits"
+        );
+
         // And the case that must *not* be lost: the anchor is still there and the
         // shell simply has not started anything.
-        assert_eq!(progress(&[prompt(7)], 0, &a), Progress::NotStarted);
+        assert_eq!(progress(&[prompt(5)], 0, &a), Progress::NotStarted);
     }
 
     #[test]
@@ -418,7 +446,7 @@ mod tests {
         // ran `rm -rf /tmls`. Only ever detectable afterwards -- nothing can see a
         // half-typed line before it is submitted -- and throwing the result away
         // to report the suspicion would lose the only evidence of what happened.
-        let a = Anchor { id: 1, blocks_from: 0 };
+        let a = Anchor { id: 1 };
         let got = block(1, BlockState::Finished { exit_code: Some(0) }, Some(11), "rm -rf /tmls");
         let w = warnings(std::slice::from_ref(&got), &a, "ls", &got);
         assert_eq!(w.len(), 1, "one warning, and it must quote what really ran: {w:?}");
@@ -435,7 +463,7 @@ mod tests {
         // The forged-OSC-133 case is detectable precisely here, and so is a human
         // typing while the agent waits. The result stays the *first* block rather
         // than the newest, because that is the one the caller asked about.
-        let a = Anchor { id: 1, blocks_from: 0 };
+        let a = Anchor { id: 1 };
         let blocks = vec![
             block(1, BlockState::Finished { exit_code: Some(0) }, Some(11), "ls"),
             block(2, BlockState::Running, Some(21), "whoami"),

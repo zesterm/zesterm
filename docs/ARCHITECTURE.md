@@ -1006,8 +1006,18 @@ bare `A` and the id is reused, while pwsh brackets even an empty line and its
 next prompt genuinely pushes a fresh id. A rule written and tested on one of
 them is wrong on the other, in the direction that fails silently.
 
-Two consequences that only a live shell showed, both found by driving the built
-binary by hand rather than by any test:
+**And what says the anchor is gone is the block's presence, not the index's
+floor.** `authoritative_from` looks like the field for this and is not:
+`erase_screen` lowers it with `min(lowest_gone)`, and a young session's floor is
+already 0, so a screen clear that erases the anchor outright moves it by nothing
+at all. The block itself is exact, because a new prompt *pushes* rather than
+replacing — so an absent anchor never means "the session moved on", only that
+something destroyed the rows it described. Read off the floor, `run clear` was
+reported as a command that never started and then spent the caller's entire
+deadline waiting for it.
+
+Two more consequences that only a live shell showed, both found by driving the
+built binary by hand rather than by any test:
 
 **The gap between `D` and the next `A` is a state callers land in.** `run`
 returns the instant `D` closes its block; the next prompt arrives a moment

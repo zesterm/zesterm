@@ -775,6 +775,16 @@ Each of these cost real time and is documented where it bites:
   written on either shell alone is silently wrong on the other.
   (`zest-mcp/src/run.rs`, ADR-015; #274.)
 
+  **And what says the anchor is gone is the block's presence, never
+  `authoritative_from`.** That field looks like the one for it: `erase_screen`
+  *lowers* the floor where `evict_before` raises it. But it lowers it with
+  `min(lowest_gone)`, and a young session's floor is already 0 — so a clear that
+  erases the anchor outright moves it by nothing, while the next prompt pushes an
+  id *above* the anchor and the correlation happily adopts somebody else's block.
+  Read that way, `run clear` reported a command that never started and then spent
+  the caller's whole deadline on it. The block's own presence is exact, because
+  `begin_prompt` pushes rather than replacing.
+
   **Two more that only a live shell showed, and no test in the crate would have
   produced.** Between `D` and the next `A` there is a real state a caller lands
   in — `run` returns the instant `D` closes its block, and zsh emits the next

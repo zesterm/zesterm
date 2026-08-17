@@ -607,6 +607,30 @@ fn a_run_against_a_real_shell_returns_the_shells_own_exit_code() {
         "output from somebody's live shell is attacker-controlled like any other: {text}"
     );
 
+    // A command that destroys the block it is running in. `erase_screen` drops
+    // every block not entirely above the cleared region, and an open one never
+    // is -- so after `clear` there is nothing left to correlate, and the answer
+    // has to come back at once rather than at the deadline. Reading the index's
+    // *floor* instead of the block's own presence reported this as a command
+    // that never started and then waited out the caller's whole timeout, because
+    // `erase_screen` lowers the floor with `min(lowest_gone)` and a young
+    // session's floor is already 0.
+    //
+    // The state is not pinned: what matters is that it does not hang, and the
+    // two shells reach it differently -- pwsh emits its `D` from the prompt
+    // function, which runs *after* `Clear-Host`.
+    let cleared = tools
+        .call(
+            "run",
+            &serde_json::json!({ "session": session, "command": "clear", "timeout_ms": 15_000 }),
+        )
+        .expect("clearing the screen is a result, not an error");
+    assert_eq!(
+        cleared["timed_out"], false,
+        "a command whose block was destroyed must be answered at once; 15s here is the \
+         whole deadline spent on a block that went in the first millisecond: {cleared}"
+    );
+
     // And a command that takes the shell with it. `exit` emits no `D`, because
     // there is no `precmd` left to run, so the block it started can never close:
     // waiting on it would burn the whole deadline reporting a command as
