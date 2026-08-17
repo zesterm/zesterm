@@ -93,13 +93,17 @@ pub fn take_pending_edit(editing: &mut Option<EditBuffer>, fields: &[UiField]) -
 
 /// Settings the schema declares but the app does not consume yet.
 ///
+/// **Empty, and a test keeps it that way.** It held seventeen keys — two fifths
+/// of the settings tree — each written to `config.toml`, reloaded, and then
+/// ignored. A new entry here is not a way to ship a setting; it is a way to
+/// ship a control that does nothing, which is what the row's faint tag exists
+/// to confess. Wire the key instead.
+///
 /// Honesty over polish: a control that visibly does nothing reads as broken,
 /// so these rows carry a faint "not applied yet" tag instead of pretending.
-/// Wiring one up includes deleting its entry here — the test below only
-/// keeps this list from naming keys that do not exist at all.
+/// Two tests hold it: one asserts the list is *empty*, and one — kept for the
+/// day someone adds an entry anyway — checks it names only real schema keys.
 pub const NOT_YET_WIRED: &[&str] = &[
-    "typography.features",
-    "typography.ligatures",
 ];
 
 /// Display order of the groups. The schema's alphabetical property order is
@@ -971,6 +975,20 @@ mod tests {
     }
 
     #[test]
+    fn nothing_is_declared_and_unconsumed() {
+        // The sweep that emptied this list: #301, #303, #306, #308, #310,
+        // #317, #323, #333. Adding an entry back means shipping a control that
+        // does nothing -- the tag is honest about it, but honesty about a
+        // setting that does not work is a worse outcome than the setting
+        // working. If a key genuinely cannot be wired yet, that is a reason to
+        // leave it out of the schema, not to leave it inert in the UI.
+        assert!(
+            NOT_YET_WIRED.is_empty(),
+            "every setting is consumed; wire the new one rather than tagging it: {NOT_YET_WIRED:?}"
+        );
+    }
+
+    #[test]
     fn not_yet_wired_names_only_real_settings() {
         // An honesty list that lies is worse than none. This cannot catch a
         // key that *became* wired — deleting the entry is part of wiring it —
@@ -1000,6 +1018,8 @@ mod tests {
             "shell.env",
             "cursor.shape",
             "cursor.trail",
+            "typography.features",
+            "typography.ligatures",
             "motion.enabled",
             "motion.smooth_scroll",
         ] {
