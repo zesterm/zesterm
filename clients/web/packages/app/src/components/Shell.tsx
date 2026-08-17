@@ -28,12 +28,13 @@ import {
   tabIdOf,
   type HostChoice,
 } from '../chrome-model.ts';
+import type { Dial } from '@zesterm/client';
 import { createSessionOverDataPlane } from '../create-session.ts';
 import type { DirectoryView } from '@zesterm/control';
-import { dataPlaneUrl } from '../data-plane-url.ts';
-import { wsDial } from '../ws-dial.ts';
+import { dialFor } from '../dial-for.ts';
 import type { DeviceKey } from '../device-key.ts';
 import { actorDirectorySource } from '../directory-source.ts';
+import { localHostSource, type HostSource } from '../host-source.ts';
 import {
   activate,
   closeTab,
@@ -88,6 +89,14 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
   // id to an entry, and neither may borrow a reader whose lifetime belongs to
   // the list (see directory-source.ts on why sources are per-component).
   const directory = actorDirectorySource();
+  // What this shell can launch on, and how to reach each (#332). Built here,
+  // in setup, because it closes over `directory` — a live actor read whose
+  // subscription belongs to this instance (see `directory-source.ts`).
+  //
+  // Loopback answers with the directory's own machine, which is exactly what
+  // the three inlined lookups below used to do. The hosted path answers with
+  // the account's machines, and `Shell` does not have to know which it got.
+  const hostSource: HostSource = localHostSource(directory);
 
   const store = signal<{
     tabs: TabsState;
@@ -167,29 +176,17 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
     void navigate(url ?? '/hosts');
   };
 
-  // Local mode has exactly one launchable host: the directory's own. The
-  // hosted path (fetchRegistry hosts) plugs in here when the hosted shell
-  // exists — `launcherRows` is already pure over any host list.
-  const hostChoices = (): readonly HostChoice[] => {
-    const dir = directory();
-    if (dir.kind === 'ready' && dir.view.host !== null) {
-      return [{ id: dir.view.host.id, label: dir.view.host.label }];
-    }
-    return [];
-  };
+  // All three read the seam now, so the shell is host-plural by construction
+  // rather than by a list that happens to hold one (#332). `launcherRows` was
+  // already pure over any host list; this is what finally hands it one.
+  const hostChoices = (): readonly HostChoice[] => hostSource.hosts();
 
-  const defaultHostId = (): string | null => {
-    const dir = directory();
-    return dir.kind === 'ready' && dir.view.host !== null ? dir.view.host.id : null;
-  };
+  // The first, which on loopback is the only one. A hosted shell will want a
+  // remembered choice here rather than positional luck — its own item.
+  const defaultHostId = (): string | null => hostChoices()[0]?.id ?? null;
 
-  const hostLabelsOf = (): Readonly<Record<string, string>> => {
-    const dir = directory();
-    if (dir.kind === 'ready' && dir.view.host !== null) {
-      return { [dir.view.host.id]: dir.view.host.label };
-    }
-    return {};
-  };
+  const hostLabelsOf = (): Readonly<Record<string, string>> =>
+    Object.fromEntries(hostChoices().map((h) => [h.id, h.label]));
 
   // The existing create path, unchanged underneath: a one-shot data-plane
   // connection creates the session, then the new tab opens on the address the
@@ -197,14 +194,14 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
   // Returns the chain so `SessionList` can hold its button for the whole round
   // trip rather than for the synchronous call — a create is asynchronous in
   // both worlds, so a guard that clears on return guards nothing.
-  const createAt = (url: string): Promise<void> => {
+  const createAt = (dial: Dial): Promise<void> => {
     store.launcherOpen = false;
-    return createSessionOverDataPlane({ url, signer: device.signer, cols: 120, rows: 32 })
+    return createSessionOverDataPlane({ dial, signer: device.signer, cols: 120, rows: 32 })
       .then((addr) => {
         store.error = null;
         openTarget(
           {
-            dial: wsDial(url),
+            dial,
             entry: {
               host: addr.host,
               session: addr.session.toString(),
@@ -225,14 +222,12 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
   };
 
   const createOn = (hostId: string): void => {
-    const dir = directory();
-    if (dir.kind !== 'ready' || dir.view.host === null || dir.view.host.id !== hostId) return;
-    const url = dataPlaneUrl(dir.view.dataPlane);
-    if (url === null) {
-      store.error = 'the daemon is not dialable from here';
+    const dial = hostSource.dialFor(hostId);
+    if (dial === null) {
+      store.error = 'that machine is not dialable from here';
       return;
     }
-    createAt(url);
+    void createAt(dial);
   };
 
   /**
@@ -295,8 +290,11 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
         const entry = dir.view.sessions.find(
           (e) => e.host === target.hostId && e.session === target.sessionId,
         );
-        const url = dataPlaneUrl(dir.view.dataPlane);
-        if (entry !== undefined && url !== null) openTarget({ entry, dial: wsDial(url) }, true);
+        // Dialled by the *entry's* host, not by "the directory's plane" —
+        // the same question `createOn` asks, and on a shell that holds
+        // several machines they are different answers (#332).
+        const dial = hostSource.dialFor(target.hostId);
+        if (entry !== undefined && dial !== null) openTarget({ entry, dial }, true);
         break;
       }
       case 'create-session':
@@ -330,9 +328,11 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
     const dir = directory();
     if (dir.kind !== 'ready') return;
     const entry = dir.view.sessions.find((e) => e.host === h && e.session === s);
-    const url = dataPlaneUrl(dir.view.dataPlane);
-    if (entry === undefined || url === null) return;
-    openTarget({ entry, dial: wsDial(url) }, false);
+    // By the host the URL names, for `open-session`'s reason: a shell holding
+    // several machines cannot dial "the" plane.
+    const dial = hostSource.dialFor(h);
+    if (entry === undefined || dial === null) return;
+    openTarget({ entry, dial }, false);
   };
 
   const routeWatch = watch(
@@ -439,8 +439,8 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
           // hosted path has no URL to hand: it creates on the connection it is
           // already holding. Loopback answers it the way it always has.
           onCreate={(view: DirectoryView) => {
-            const url = dataPlaneUrl(view.dataPlane);
-            return url === null ? undefined : createAt(url);
+            const dial = dialFor(view.dataPlane, null);
+            return dial === null ? undefined : createAt(dial);
           }}
         />
       );

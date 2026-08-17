@@ -10,18 +10,26 @@
  */
 
 import type { ClientSigner } from '@zesterm/auth';
-import { ConnectionClient } from '@zesterm/client';
+import { ConnectionClient, type Dial } from '@zesterm/client';
 import type { SessionAddr } from '@zesterm/proto';
 
-import { wsDial } from './ws-dial.ts';
-
+/**
+ * A `Dial`, not a `ws://` URL.
+ *
+ * It took a URL and called `wsDial` itself, which meant it could **only** ever
+ * create over `ws` — and the hosted client cannot use the LAN at all (mixed
+ * content), so every create in the cloud world goes through the relay,
+ * including one to the machine the browser is sitting on. `dialFor` already
+ * answers "what dials this plane" for both kinds; this path predates it and
+ * never learned. (#332)
+ */
 export function createSessionOverDataPlane(args: {
-  url: string;
+  dial: Dial;
   signer: ClientSigner;
   cols: number;
   rows: number;
 }): Promise<SessionAddr> {
-  const { url, signer, cols, rows } = args;
+  const { dial, signer, cols, rows } = args;
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       client.close();
@@ -29,7 +37,7 @@ export function createSessionOverDataPlane(args: {
     }, 15_000);
 
     const client: ConnectionClient = new ConnectionClient({
-      dial: wsDial(url),
+      dial,
       signer,
       label: 'zesterm-web',
       events: {
