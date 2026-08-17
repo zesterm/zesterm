@@ -733,10 +733,16 @@ entry stay). The resulting work items, measurements in the handoff README — **
       `build_spec`, and the two orderings it decides are a free function with
       tests rather than a comment. cwd is a *default* a profile's
       `starting_directory` still overwrites, being the more specific of the
-      two. env goes **after** `terminal_env()`, so a user's entry wins a
-      collision: a `shell.env` entry silently discarded would be a setting that
-      does nothing, which is the class of bug this sweep exists to close, and
-      overriding `TERM` is something Alacritty and WezTerm both allow.
+      two. env goes **last of all**, so a user's entry wins a collision: a
+      `shell.env` entry silently discarded would be a setting that does
+      nothing, which is the class of bug this sweep exists to close, and
+      overriding `TERM` is something Alacritty and WezTerm both allow. "Last"
+      includes after `enable_shell_integration`, which appends environment of
+      its own — zsh is hooked entirely through `ZDOTDIR` — so the first
+      ordering was one the doc comment claimed and the code did not do. That
+      one collision is warned about rather than merely won: a user who sets
+      `ZDOTDIR` gets what they asked for and loses every command block, which
+      reads as the blocks feature being broken unless something says otherwise.
       Local route only — a path from this machine's config means nothing on
       another host, the argument `launch_command` already makes for
       `shell.command`.

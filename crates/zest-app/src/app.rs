@@ -7436,12 +7436,21 @@ impl App {
         if let Some(shell) = &self.config.shell {
             spec.command_line = shell.clone();
         }
-        apply_shell_settings(&mut spec, &self.config);
         // The in-process path gets the same hook as the daemon's, or
         // `--no-daemon` would silently be a terminal without command blocks.
+        //
+        // Before the settings, because this appends environment of its own --
+        // zsh is hooked entirely through `ZDOTDIR` -- and the user's entries
+        // have to be applied last to actually win. Whatever it added is the
+        // tail, which is how `apply_shell_settings` knows which collisions are
+        // worth warning about.
+        let injected_from = spec.env.len();
         if let Some(dir) = zest_config::paths::config_dir() {
             spec.enable_shell_integration(&dir.join("shell-integration"));
         }
+        let injected: Vec<String> =
+            spec.env[injected_from..].iter().map(|(k, _)| k.clone()).collect();
+        apply_shell_settings(&mut spec, &self.config, &injected);
         spec
     }
 
@@ -11700,16 +11709,33 @@ fn pane_opacity(window: f32, identity: Option<&crate::tabs::ProfileIdentity>) ->
 /// `starting_directory` is applied after `build_spec` returns and has to win,
 /// being the more specific of the two.
 ///
-/// **env goes after `terminal_env()`, so the user's entries win a collision** —
-/// both pty backends apply in order. Deliberately that way round: a `shell.env`
-/// entry that is silently discarded is a setting that does nothing, which is
-/// the entire class of bug this is fixing, and overriding `TERM` is a real
-/// thing people do — Alacritty and WezTerm both allow it. The stale-identity
-/// variables `terminal_env` clears stay cleared unless the user names one
-/// back, which is theirs to decide.
-fn apply_shell_settings(spec: &mut CommandSpec, config: &Config) {
+/// **env goes last, so the user's entries win a collision** — both pty backends
+/// apply in order. Deliberately that way round: a `shell.env` entry that is
+/// silently discarded is a setting that does nothing, which is the entire class
+/// of bug this is fixing, and overriding `TERM` is a real thing people do —
+/// Alacritty and WezTerm both allow it. The stale-identity variables
+/// `terminal_env` clears stay cleared unless the user names one back, which is
+/// theirs to decide.
+///
+/// `injected` names what `enable_shell_integration` just added, and exists so
+/// that one collision is *loud*. zsh is hooked entirely through `ZDOTDIR`, so a
+/// user who sets that in `shell.env` wins — and silently loses every command
+/// block, which reads as the blocks feature being broken rather than as their
+/// own setting doing exactly what they asked. Winning is still right: the
+/// alternative is their entry doing nothing, which is the bug this is fixing.
+/// Saying so is what makes it a trade rather than a trap.
+fn apply_shell_settings(spec: &mut CommandSpec, config: &Config, injected: &[String]) {
     spec.cwd.clone_from(&config.shell_cwd);
-    spec.env.extend(config.shell_env.iter().cloned());
+    for (key, value) in &config.shell_env {
+        if injected.iter().any(|k| k == key) {
+            tracing::warn!(
+                key = %key,
+                "shell.env overrides a variable shell integration needs; \
+                 this session will have no command blocks"
+            );
+        }
+        spec.env.push((key.clone(), value.clone()));
+    }
 }
 
 /// The most rows one wheel event may move, in either direction.
@@ -12013,7 +12039,7 @@ mod shell_settings_tests {
             "the fixture must actually contain the entry being overridden, or \
              this test passes for a reason unrelated to the code"
         );
-        super::apply_shell_settings(&mut spec, &config_with("", &[("TERM", "xterm-direct")]));
+        super::apply_shell_settings(&mut spec, &config_with("", &[("TERM", "xterm-direct")]), &[]);
         let effective = spec.env.iter().rfind(|(k, _)| k == "TERM");
         assert_eq!(
             effective.map(|(_, v)| v.as_str()),
@@ -12023,12 +12049,34 @@ mod shell_settings_tests {
     }
 
     #[test]
+    fn a_users_variable_beats_shell_integrations_too() {
+        // Copilot's catch on #305: `enable_shell_integration` appends
+        // environment of its own -- zsh is hooked entirely through `ZDOTDIR` --
+        // so applying the settings before it left the injection winning and the
+        // documented precedence untrue. The integration now runs first and the
+        // user's entries go last, which is the order `build_spec` uses.
+        let mut spec = zest_pty::CommandSpec::default_shell();
+        spec.env.push(("ZDOTDIR".into(), "/from/integration".into()));
+        let injected = vec!["ZDOTDIR".to_string()];
+        super::apply_shell_settings(
+            &mut spec,
+            &config_with("", &[("ZDOTDIR", "/from/user")]),
+            &injected,
+        );
+        assert_eq!(
+            spec.env.iter().rfind(|(k, _)| k == "ZDOTDIR").map(|(_, v)| v.as_str()),
+            Some("/from/user"),
+            "the user's entry is applied last, whatever put the first one there"
+        );
+    }
+
+    #[test]
     fn the_working_directory_is_a_default_a_profile_can_still_overwrite() {
         // `build_spec` sets this, and `open_shell_tab` overwrites it with the
         // profile's `starting_directory` afterwards. Encoded here so the order
         // survives someone moving either line.
         let mut spec = zest_pty::CommandSpec::default_shell();
-        super::apply_shell_settings(&mut spec, &config_with("/from/settings", &[]));
+        super::apply_shell_settings(&mut spec, &config_with("/from/settings", &[]), &[]);
         assert_eq!(spec.cwd, Some(std::path::PathBuf::from("/from/settings")));
         spec.cwd = Some("/from/profile".into());
         assert_eq!(

@@ -662,9 +662,11 @@ mod tests {
         // that have nothing to do with the code (#291).
         //
         // `/` rather than a temp dir, because it is the one directory that
-        // exists unchanged on every unix and needs no cleanup -- and it is
-        // never the directory the test harness already runs in, so a spec that
-        // silently ignored `cwd` would still fail this.
+        // exists unchanged on every unix and needs no cleanup. Asserted as an
+        // *equality* rather than "looks like a path": the checkout this runs
+        // from is also an absolute path, so a weaker check would pass against a
+        // spec that ignored `cwd` entirely -- which is exactly the state this
+        // test exists to rule out.
         let spec = CommandSpec {
             command_line: "/bin/pwd".into(),
             cwd: Some(std::path::PathBuf::from("/")),
@@ -672,8 +674,11 @@ mod tests {
         };
         let mut pty = UnixPty::spawn(&spec, PtySize::new(80, 24)).expect("spawn /bin/pwd");
         let text = drain(&mut pty);
-        assert!(
-            text.contains('/') && !text.contains("zest"),
+        // A pty is a terminal, so the line ends CR LF whatever the program
+        // wrote; trim both rather than comparing to a platform's guess.
+        assert_eq!(
+            text.trim_end_matches(['\r', '\n']),
+            "/",
             "the child must run in the requested directory, not the parent's: {text:?}"
         );
     }
@@ -685,6 +690,17 @@ mod tests {
         // another terminal's stale identity, and `shell.env` now promises it in
         // the settings schema -- but until now it was asserted only on the
         // Windows block builder, never through a real spawn on unix.
+        // Restored on the way out however this test leaves -- a panic between
+        // here and the end would otherwise leak a process-wide variable into
+        // whatever runs next, and cross-test flakiness that comes and goes with
+        // an unrelated failure is the worst kind to chase.
+        struct RestoreVar(&'static str);
+        impl Drop for RestoreVar {
+            fn drop(&mut self) {
+                std::env::remove_var(self.0);
+            }
+        }
+        let _restore = RestoreVar("ZESTERM_TEST_INHERITED");
         std::env::set_var("ZESTERM_TEST_INHERITED", "from-parent");
         let mut env = crate::terminal_env();
         env.push(("ZESTERM_TEST_SET".into(), "from-spec".into()));
@@ -697,7 +713,6 @@ mod tests {
         };
         let mut pty = UnixPty::spawn(&spec, PtySize::new(80, 24)).expect("spawn /bin/sh");
         let text = drain(&mut pty);
-        std::env::remove_var("ZESTERM_TEST_INHERITED");
         assert!(text.contains("set=[from-spec]"), "a spec entry must reach the child: {text:?}");
         assert!(
             text.contains("inherited=[]"),
