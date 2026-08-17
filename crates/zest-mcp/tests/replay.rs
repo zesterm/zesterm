@@ -13,6 +13,7 @@
 //! pre-parsed structures, so a mistake in how this crate reads the wire fails
 //! here rather than only against a live daemon.
 
+use zest_mcp::tools::{block_anchor, finished_since};
 use zest_mcp::Replica;
 use zest_proto::{frame, FrameReader, HostMessage, SessionAddr, SessionId, HostId};
 
@@ -383,3 +384,134 @@ fn no_recording_begins_or_ends_with_a_blank_row() {
         );
     }
 }
+
+/// The property `screen(after_seq:)` rests on, held against real host bytes.
+///
+/// A wait says "answer when the sequence moves past N". It is sound exactly
+/// while nothing an agent would want to see can change without the sequence
+/// moving — so that is what is asserted, against what a host really sent:
+///
+/// - **A sequence never goes backwards**, or a wait fires on a frame that undid
+///   what it was waiting for.
+/// - **A frame at an *unchanged* sequence changes no row, attribute or block.**
+///   This is the one that matters, and it is not what reasoning first said. A
+///   repeat happens: `blocks-zsh` carries two of them. `seq` is the terminal's
+///   own version counter, bumped by `TermState::touch` on every observable
+///   mutation, so a frame that does not advance it is restating state the
+///   replica already holds — and a wait that sleeps through one has therefore
+///   missed nothing.
+///
+/// **These frames come from `Encoder` directly** (`fixture_dump` drives it per
+/// parse chunk), not from `Session::poll`, which additionally drops an update
+/// whose delta turned out to carry nothing. So this is the *weaker* stream —
+/// a daemon sends a subset of it — which is the right direction for a test:
+/// pass here and the wire cannot be worse.
+///
+/// Written after this test first asserted "every frame advances the sequence"
+/// and failed on `blocks-zsh` at 153.
+#[test]
+fn a_recorded_frame_that_repeats_a_sequence_restates_rather_than_changes() {
+    for name in ["basic-echo", "dir-colors", "git-log", "unicode-wide", "blocks-zsh", "vim-macos"] {
+        let fx = load(name);
+        let mut reader = FrameReader::new();
+        let mut previous: Option<u64> = None;
+        let mut repeats = 0usize;
+
+        for raw in &fx.frames {
+            reader.feed(raw);
+            while let Some(body) = reader.next_frame().expect("the fixture frames are well formed")
+            {
+                // `(seq, what it changed)`. A keyframe changes everything by
+                // definition, so it is only ever checked for going backwards.
+                let (seq, changes) =
+                    match frame::decode::<HostMessage>(&body).expect("a fixture frame decodes") {
+                        HostMessage::Keyframe { seq, .. } => (seq.0, true),
+                        HostMessage::Update { seq, delta, .. } => (
+                            seq.0,
+                            !delta.ops.is_empty()
+                                || !delta.attrs.is_empty()
+                                || !delta.blocks.is_empty(),
+                        ),
+                        other => panic!("{name}: unexpected frame {other:?}"),
+                    };
+
+                if let Some(prev) = previous {
+                    assert!(
+                        seq >= prev,
+                        "{name}: the sequence went backwards, {prev} then {seq} -- an \
+                         `after_seq` wait would fire on a frame that undid what it waited for"
+                    );
+                    if seq == prev {
+                        assert!(
+                            !changes,
+                            "{name}: a frame changed rows, attributes or blocks without \
+                             advancing sequence {seq}. `after_seq` would sleep through a \
+                             real change, which is the one way a long-poll can be silently \
+                             wrong -- it answers late rather than answering incorrectly"
+                        );
+                        repeats += 1;
+                    }
+                }
+                previous = Some(seq);
+            }
+        }
+
+        assert!(previous.is_some(), "{name}: the recording produced no frames to check");
+        // Printed rather than asserted: a corpus that stopped containing
+        // repeats would make the arm above vacuous, and the next person should
+        // be able to see that from a test run instead of inferring it.
+        println!("{name}: {repeats} frame(s) at an unchanged sequence");
+    }
+}
+
+/// The block wait fires exactly at the transition, on a real zsh recording.
+///
+/// This is the assertion that could not be reasoned to. `tools::finished_since`
+/// anchors on the *tail* block rather than on the highest id already seen,
+/// because OSC 133;C mutates `blocks.last_mut()` — and whether that is really
+/// what a shell does is a question about zsh, not about this crate. So it is
+/// asked of a capture, and the naive predicate is measured beside it rather
+/// than merely described as wrong.
+#[test]
+fn a_block_wait_fires_when_the_recorded_command_ends_and_a_newer_id_would_not() {
+    let frames = replay_watching("blocks-zsh", |r| r.block_states().collect::<Vec<_>>());
+
+    // A moment an agent could have started a wait: the tail block is open, so
+    // something is at the prompt or running in it.
+    let start = frames
+        .iter()
+        .position(|f| block_anchor(f.iter().copied()).is_some_and(|(_, done)| !done))
+        .expect("the recording has a moment with an unfinished command");
+    let (anchor, was_finished) =
+        block_anchor(frames[start].iter().copied()).expect("just checked it is Some");
+
+    let fired = (start..frames.len())
+        .find(|&i| finished_since(frames[i].iter().copied(), anchor, was_finished).is_some())
+        .expect("the recorded command does finish");
+    let id = finished_since(frames[fired].iter().copied(), anchor, was_finished)
+        .expect("the frame that fired names a block");
+
+    assert!(fired > start, "a wait must not answer with the state it began in");
+    assert!(
+        !frames[fired - 1].iter().any(|&(i, done)| i == id && done),
+        "block {id} was already finished one frame earlier, so the wait fired late"
+    );
+    assert!(
+        frames[fired].iter().any(|&(i, done)| i == id && done),
+        "the frame that fired must be the one where block {id} finished"
+    );
+
+    // The trap, measured. A wait keyed on `id > anchor` -- the obvious reading
+    // of `since_id`, and the one #274's plan had -- is looking for a block the
+    // *next prompt* mints, which does not exist until after the command it is
+    // waiting for has already ended.
+    let naive = (start..frames.len())
+        .find(|&i| frames[i].iter().any(|&(bid, done)| done && bid > anchor));
+    assert!(
+        naive.is_none_or(|n| n > fired),
+        "the naive predicate fired at frame {naive:?}, no later than the correct one at \
+         {fired} -- this recording no longer exercises the trap, so the assertion above \
+         is no longer evidence of anything"
+    );
+}
+

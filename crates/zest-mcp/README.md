@@ -98,10 +98,42 @@ way to the wire would leave the daemon's own tests green.
 ## Deliberately not built
 
 No chat sidebar. No agent loop of our own — harnesses exist, improve monthly,
-and a terminal shipping an inferior one ages badly; be the substrate. **No
-streaming or polling tool**: a "watch this session and react" primitive is what
-turns prompt injection from *needs the agent to be steered* into *fires on its
-own*, and its absence is the mitigation rather than an omission.
+and a terminal shipping an inferior one ages badly; be the substrate. **Nothing
+that delivers output with no call outstanding**: a "watch this session and
+react" primitive is what turns prompt injection from *needs the agent to be
+steered* into *fires on its own*, and its absence is the mitigation rather than
+an omission.
+
+The line is at the call, not at the waiting. `screen` and `blocks` both block
+until something happens (below), because a wait cannot manufacture a turn — the
+agent asked, the answer is that call's result, and nothing runs afterwards
+unless the harness grants another one. What stays unbuilt is anything that
+speaks when nothing asked. ADR-015, amended in #319.
+
+## Waiting instead of polling
+
+`screen` answers immediately unless it is given `after_seq`, and then it returns
+the moment the screen moves past that sequence — pass back the `seq` from the
+previous read. Add `idle_ms` and it goes further: after the screen moves, it
+keeps waiting until the output has *stopped*, which is the difference between
+"tell me when the build starts printing" and "tell me when it has finished".
+`blocks` takes `wait: true` and returns when a command ends.
+
+Both are bounded by `timeout_ms` under the same ceiling as everything else a
+model can spend, and **a deadline passing is a result, not an error**: the
+screen (or the block list) comes back with `timed_out: true`, the way
+`run_isolated` returns partial output rather than failing. A wait also ends when
+the session's child does, so watching a shell that has died costs nothing rather
+than the whole deadline.
+
+The one part that is not obvious: `blocks(wait:)` reports `finished_block`, and
+it is routinely a block the caller has **already seen**. OSC 133;C makes the
+shell reuse its trailing prompt block for the command typed at it, so the thing
+that just finished usually has an id at or below the highest one already
+listed — which is why the wait anchors on the tail block rather than on
+`since_id`, and why `finished_block` is named separately instead of the caller
+being told to look for something new. `tests/replay.rs` holds that against a
+real zsh recording, and measures the naive predicate beside it.
 
 ## Tests
 
