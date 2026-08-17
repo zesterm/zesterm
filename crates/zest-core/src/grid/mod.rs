@@ -773,13 +773,13 @@ impl Grid {
     /// settle pays it out over what *it* wrote. Conserved in both directions:
     /// a repaint that turns out to cover the same ground settles the same
     /// rows straight back, a stale or sat-out one leaves them safely banked.
-    fn rebank_settled(&mut self) {
+    fn rebank_settled(&mut self, template: &Cell) {
         let k = core::mem::take(&mut self.settled_pull);
         if k == 0 {
             return;
         }
         self.scrollback_len += k;
-        self.storage.resize_rows(self.scrollback_len + self.rows, self.cols, &Cell::default());
+        self.storage.resize_rows(self.scrollback_len + self.rows, self.cols, template);
         self.cursor.row = self.cursor.row.saturating_sub(k);
         self.pending_restate += k;
         // Storage regained `k` rows at the bottom, so holding a scrolled-back
@@ -788,14 +788,14 @@ impl Grid {
         self.display_offset = (self.display_offset + k).min(self.scrollback_len);
     }
 
-    pub(crate) fn note_restatement_began(&mut self, cols: usize, rows: usize) {
+    pub(crate) fn note_restatement_began(&mut self, cols: usize, rows: usize, template: &Cell) {
         // Before anything else, even the pending check: a repaint that is
         // about to be sat out still writes every one of its rows, and a
         // provisional pull left in the viewport would be overwritten where it
         // stands. Re-banking re-arms `pending_restate`, which is also what
         // lets a repaint arriving after a *final* settle arm, restate its own
         // truth, and pay the same rows straight back out.
-        self.rebank_settled();
+        self.rebank_settled(template);
         if self.pending_restate == 0 {
             return;
         }
@@ -850,12 +850,12 @@ impl Grid {
     /// blanks. What refuses the stale one instead is its own behaviour: it
     /// restates a shorter viewport, so its erases stop short of our bottom
     /// row, and the settle requires full coverage. (#312)
-    pub(crate) fn note_cursor_homed_while_hidden(&mut self) {
+    pub(crate) fn note_cursor_homed_while_hidden(&mut self, template: &Cell) {
         // See `note_restatement_began` — but only when this home is *opening*
         // a window, not the grow half's trailing `ESC[<kept>;1H` re-entering
         // its own bracket.
         if !self.sitting_out && !self.restating {
-            self.rebank_settled();
+            self.rebank_settled(template);
         }
         if self.pending_restate > 0 && !self.sitting_out && !self.restating {
             self.restating = true;
@@ -1817,7 +1817,7 @@ mod tests {
         // rows, blank the rest of *its* viewport -- and stop there.
         let texts: Vec<String> =
             (0..4).map(|r| g.active_row(r).text().trim_end().to_string()).collect();
-        g.note_cursor_homed_while_hidden();
+        g.note_cursor_homed_while_hidden(&Cell::default());
         for row in 0..6 {
             let cols = g.cols();
             g.erase_in_row(row, 0, cols - 1, &Cell::default());
@@ -1883,7 +1883,7 @@ mod tests {
 
         g.resize(30, 4, &Cell::default());
         g.resize(30, 10, &Cell::default());
-        g.note_restatement_began(30, 10);
+        g.note_restatement_began(30, 10, &Cell::default());
 
         assert!(!g.restating(), "a grid with no history armed the settle latch");
         assert!(!g.settle_restate(), "and it thought it had something to give back");
