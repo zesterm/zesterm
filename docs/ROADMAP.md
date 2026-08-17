@@ -2588,6 +2588,23 @@ three facts about Cloudflare that changed after #59 was written.
       not reach the state under test, and passed for a reason unrelated to the
       code. The new tests assert they got there first.
 
+- [x] **`cls` forgets, everywhere** (#314). After `cls`, scrolling up showed
+      everything — pwsh's `Clear-Host` under ConPTY emits `2J 3J` (measured)
+      and zesterm treated ED 3 as a repeat of ED 2, never trimming scrollback
+      anywhere. ED 3 now destroys the primary grid's scrollback
+      (`Grid::clear_history`; the ids become one more gap), takes every block
+      with it (`authoritative_from` → 0), and announces itself twice over:
+      `TermEvent::HistoryCleared` → `keyframe_everyone`, and a monotonic
+      `Keyframe.history_clears` (the `blocks_from` precedent) that replicas
+      shadow — level-triggered, so a client that missed the moment learns on
+      its next keyframe, and one deliberately keeping more history than the
+      host still drops it. All three keyframe appliers (`Applier`, `GridView`,
+      web `grid-view.ts`) also suppress the displaced-row carry-over on the
+      clearing keyframe, or the pre-cls viewport rows would be filed straight
+      back into the history the ED 3 destroyed — caught red by the new tests.
+      Eviction stays silent; only announced destruction reaches across
+      (`docs/CONTRACTS.md`).
+
 - [x] **A recorded drag, and the fix it caught** (#271).
       #247 shipped and the gesture was confirmed working from a Mac against a
       Windows host — and the settle it is named for had never run once.

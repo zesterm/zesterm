@@ -200,6 +200,14 @@ impl Session {
                                 TermEvent::ViewportRebased => {
                                     keyframe_everyone(&subscribers);
                                 }
+                                // ED 3 destroyed scrollback. Same argument one
+                                // notch further: the rows are not damaged, they
+                                // are gone, and the keyframe also carries
+                                // `history_clears` so a client that misses this
+                                // one still learns on its next. (#314)
+                                TermEvent::HistoryCleared => {
+                                    keyframe_everyone(&subscribers);
+                                }
                                 _ => {}
                             }
                         }

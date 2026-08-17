@@ -52,6 +52,9 @@ pub struct GridView {
     /// avoid, and it would disagree with the desktop about where a command
     /// started.
     pub blocks: Vec<BlockPayload>,
+    /// Shadow of [`Keyframe::history_clears`]; only ever raised. See the
+    /// applier's field of the same name. (#314)
+    pub history_clears: u32,
 }
 
 impl Default for CursorState {
@@ -68,6 +71,17 @@ impl GridView {
 
     /// Replace everything with a complete state.
     pub fn apply_keyframe(&mut self, k: &Keyframe) {
+        // ED 3 destroyed the session's scrollback since this client last
+        // honoured one — ours goes too. Never lowered: an alt-screen keyframe
+        // carries that grid's 0. The displaced-row carry-over below is
+        // suppressed for the same keyframe: the rows this view holds are from
+        // *before* the destruction, and filing them into scrollback would keep
+        // client-side exactly what the ED 3 destroyed. (#314)
+        let cleared = k.history_clears > self.history_clears;
+        if cleared {
+            self.scrollback.clear();
+            self.history_clears = k.history_clears;
+        }
         // A *height* change scrolls rows out of the viewport and into the
         // host's history, and at an unchanged width their ids still mean what
         // they meant. Replacing `rows` wholesale would throw away rows this
@@ -80,7 +94,7 @@ impl GridView {
         // numbering the keyframe has just replaced. The *stale-scrollback* half
         // of that rule is still missing here and is tracked as #139; this adds
         // only the case where there is nothing to renumber.
-        if self.cols == k.cols {
+        if self.cols == k.cols && !cleared {
             if let Some(first) = k.rows_data.iter().map(|r| r.line).find(|&l| l != i64::MIN) {
                 let last_held = self.scrollback.last().map(|r| r.line);
                 let displaced = self.rows.iter().filter(|r| {
@@ -270,6 +284,7 @@ mod tests {
             blocks: Vec::new(),
             blocks_from: 0,
             title: String::new(),
+            history_clears: 0,
         }
     }
 
@@ -287,6 +302,43 @@ mod tests {
 
         let held: Vec<i64> = view.scrollback.iter().map(|r| r.line).collect();
         assert_eq!(held, vec![0, 1, 2], "the displaced rows were dropped, not kept");
+    }
+
+    #[test]
+    fn a_keyframe_that_says_history_was_cleared_empties_the_views_scrollback() {
+        // The `history_clears` counter is what carries an ED 3 to a client
+        // that applies keyframes: the rows are not damaged, they are gone,
+        // and nothing else in a keyframe can say so. Advanced counter drops
+        // the view's history; unmoved counter leaves it — eviction stays
+        // silent and a client's longer history stays its own. (#314)
+        let mut view = GridView::new();
+        view.apply_keyframe(&keyframe(20, &[(0, "line 0"), (1, "line 1"), (2, "line 2")]));
+        view.apply_keyframe(&keyframe(20, &[(3, "line 3"), (4, "line 4"), (5, "line 5")]));
+        assert!(!view.scrollback.is_empty(), "the view holds no history, so this proves nothing");
+
+        let mut cleared = keyframe(20, &[(6, "$")]);
+        cleared.rows = 3;
+        cleared.rows_data =
+            vec![row(6, "$"), row(i64::MIN, ""), row(i64::MIN, "")];
+        cleared.history_clears = 1;
+        view.apply_keyframe(&cleared);
+        assert!(
+            view.scrollback.is_empty(),
+            "a keyframe carrying an advanced counter left the view's history: {:?}",
+            view.scrollback.iter().map(|r| r.line).collect::<Vec<_>>()
+        );
+
+        // Same counter again: nothing more is destroyed.
+        view.apply_keyframe(&keyframe(20, &[(0, "old 0"), (7, "line 7")]));
+        view.apply_keyframe(&{
+            let mut k = keyframe(20, &[(8, "line 8"), (9, "line 9")]);
+            k.history_clears = 1;
+            k
+        });
+        assert!(
+            !view.scrollback.is_empty(),
+            "an unmoved counter re-cleared history it had no right to"
+        );
     }
 
     #[test]

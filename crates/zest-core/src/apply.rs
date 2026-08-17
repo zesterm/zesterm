@@ -166,6 +166,19 @@ impl RemoteWriter<'_> {
         }
     }
 
+    /// Destroy this replica's scrollback, because the host's keyframe says an
+    /// ED 3 destroyed the session's.
+    ///
+    /// The *primary* grid's, like the host's own [`Grid::clear_history`] —
+    /// scrollback lives there whichever screen is active. Reaches history the
+    /// host never held too: a client deliberately keeping more than the host
+    /// still drops it on a `cls`, which is what separates announced
+    /// destruction from silent eviction. (#314)
+    pub fn clear_history(&mut self) {
+        self.state.grid.clear_history();
+        self.state.touch_full();
+    }
+
     /// Keep the client's line-id counter level with the host's.
     ///
     /// Rows exposed by a scroll are stamped from the *client's* counter, which

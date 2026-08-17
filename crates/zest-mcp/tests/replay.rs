@@ -94,6 +94,7 @@ fn replay_inner<T>(name: &str, sample: impl Fn(&Replica) -> T) -> (Replica, Vec<
                     blocks,
                     blocks_from,
                     title,
+                    history_clears,
                     ..
                 } => {
                     let k = zest_proto::Keyframe {
@@ -106,6 +107,7 @@ fn replay_inner<T>(name: &str, sample: impl Fn(&Replica) -> T) -> (Replica, Vec<
                         blocks,
                         blocks_from,
                         title: title.clone(),
+                        history_clears,
                     };
                     match replica.as_mut() {
                         Some(r) => r.reset(&k, seq.0),

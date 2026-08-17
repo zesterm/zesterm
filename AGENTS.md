@@ -779,6 +779,15 @@ Each of these cost real time and is documented where it bites:
   parks its drain thread in `read` before it forks the child, which removes the
   deadline rather than shortening it. (`zest-pty/src/unix.rs`, sharp edge 6;
   issue #54.)
+- **ED 2 and ED 3 differ only in scrollback, pwsh's `cls` emits both, and the
+  corpus contains no `3J` at all.** `Clear-Host` under ConPTY is
+  `… ESC[?25l ESC[3J ESC[K …` (measured; the startup clear in every recording
+  is 2J-only), and zesterm read the 3 as a repeat of the 2 — so `cls` kept all
+  history and scrolling up showed everything the user had just asked to be rid
+  of. `Grid::clear_history` + `Keyframe.history_clears` are the fix, and the
+  tests are hand-built on purpose: no recording can currently drive this, and
+  a corpus capture of a real `Clear-Host` is still worth adding
+  (`tests/README.md`). (#314)
 - **A wire field nothing fills reads exactly like a field nothing *can* fill.**
   `HostMessage::Exited { code: Option<i32> }` shipped in protocol 2 and its sole
   producer hard-coded `code: None` until #299, so every client decoded a field

@@ -344,6 +344,7 @@ fn replay(
             blocks: k.blocks.clone(),
             blocks_from: k.blocks_from,
             title: k.title.clone(),
+            history_clears: k.history_clears,
         })
         .expect("a keyframe frames")),
         expect: expect(&term),

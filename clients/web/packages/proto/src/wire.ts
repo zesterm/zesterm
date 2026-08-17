@@ -357,6 +357,14 @@ export interface Keyframe {
   readonly blocks_from: number;
   /** The session's title at this instant; `''` from a host that predates it. */
   readonly title: string;
+  /**
+   * How many times ED 3 has destroyed the host's scrollback. Monotonic; a
+   * replica shadows it and drops its own history when it advances, so a `cls`
+   * reaches a client that missed the moment. `0` from a host that predates
+   * it, which never advances the shadow — such a host simply never announces
+   * a clear. (#314)
+   */
+  readonly history_clears: number;
 }
 
 export interface Update {
@@ -590,6 +598,10 @@ export function parseHostMessage(v: unknown): HostMessage {
         blocks_from:
           o['blocks_from'] === undefined ? 0 : num(o['blocks_from'], 'keyframe.blocks_from'),
         title: o['title'] === undefined ? '' : str(o['title'], 'keyframe.title'),
+        history_clears:
+          o['history_clears'] === undefined
+            ? 0
+            : num(o['history_clears'], 'keyframe.history_clears'),
       };
     case 'update':
       return {

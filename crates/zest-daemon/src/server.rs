@@ -717,6 +717,7 @@ impl Connection {
                     blocks_from: k.blocks_from,
                     blocks: k.blocks,
                     title: k.title,
+                    history_clears: k.history_clears,
                 }),
                 None => {}
             }
@@ -1158,6 +1159,7 @@ impl Connection {
                     blocks_from: keyframe.blocks_from,
                     blocks: keyframe.blocks,
                     title: keyframe.title,
+                    history_clears: keyframe.history_clears,
                 }]
             }
 
@@ -1194,6 +1196,7 @@ impl Connection {
                         blocks_from: k.blocks_from,
                         blocks: k.blocks,
                         title: k.title,
+                        history_clears: k.history_clears,
                     }],
                     None => vec![HostMessage::Error {
                         session: Some(session),

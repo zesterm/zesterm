@@ -296,6 +296,24 @@ the right price, since the whole screen just changed. Default 0 means an older
 host replaces wholesale, which is what the browser's `GridView` already did.
 Landed with `zest-proto`, the daemon, the app and `clients/web` in one commit.
 
+**The same distinction for the rows themselves: `Keyframe.history_clears`**
+(#314). ED 3 destroys scrollback — pwsh's `Clear-Host` emits `2J 3J`, and
+zesterm read the 3 as a repeat of the 2 — and destruction of rows needed a wire
+carrier for the same reason destruction of blocks did: eviction stays silent
+(the paragraph above), so nothing existing could tell a replica to forget.
+`Keyframe` gained `history_clears: u32`, `#[serde(default)]`, filled from
+`Grid::history_clears` — a monotonic count of ED 3s, bumped even when the
+host's scrollback was already empty, because a client deliberately keeping
+*more* history than the host must still drop it on a `cls`. Replicas shadow it
+and clear when it advances, never when it regresses (an alt-screen keyframe
+carries that grid's zero); level-triggered on the keyframe rather than
+edge-triggered on `TermEvent::HistoryCleared`, so a client that missed the
+moment learns on its next keyframe, whenever that is. The event exists too, and
+the daemon answers it with `keyframe_everyone` — the `ViewportRebased`
+precedent: the rows are not damaged, they are gone, and no delta can say so.
+Landed across `zest-core`, `zest-proto`, the daemon, the app, `zest-mcp` and
+`clients/web` in one commit.
+
 **Additive once more, for the block headers (design screen 3): timestamps.**
 `Block` and `BlockPayload` gained `started_ms`/`ended_ms` — wall-clock
 milliseconds since the Unix epoch, `#[serde(default)]` on the wire, so an old
