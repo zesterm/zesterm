@@ -1306,6 +1306,12 @@ struct Gpu {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     renderer: Renderer,
+    /// The transparency intent this surface was last configured for.
+    ///
+    /// Remembered so `apply_transparency` can tell a real change from a
+    /// reload that happened to share its invalidation class with
+    /// `window.backdrop`, without consulting a list of key names.
+    transparent: bool,
     /// What this surface can do about alpha, kept from the capability query.
     ///
     /// Asked once and remembered because the answer is a property of the
@@ -9165,13 +9171,26 @@ impl App {
     ///    the atlas has to be rebuilt when that flips.
     ///
     /// The caller re-configures the surface afterwards; this only decides.
+    ///
+    /// Returns immediately when the *intent* has not moved. `SurfaceRebuild` is
+    /// shared with `window.backdrop`, so this runs on backdrop-only reloads
+    /// too, and everything below is either a no-op or a log — which would make
+    /// changing the backdrop on an adapter that cannot do alpha reprint the
+    /// fallback warning every time. Gated on the remembered intent rather than
+    /// on which keys changed: a key list here would be a second table to keep
+    /// in sync with `invalidate::KEYS`, and this cannot fall out of step
+    /// because it compares the thing it actually acts on.
     fn apply_transparency(&mut self) {
         let want = self.config.opacity < 1.0;
         let Some(w) = self.window.as_ref() else { return };
+        if self.gpu.as_ref().is_some_and(|g| g.transparent == want) {
+            return;
+        }
 
-        // Cheap and idempotent, so it is not worth tracking whether it changed
-        // -- but it is worth saying where it cannot work, because a setting
-        // that silently does nothing is the bug this whole sweep is closing.
+        // Said only when it changes, and only where it cannot work: a setting
+        // that silently does nothing is the bug this whole sweep is closing,
+        // but a line repeated on every unrelated reload is how a log stops
+        // being read at all.
         if cfg!(all(unix, not(target_os = "macos"))) {
             tracing::info!(
                 "window transparency is fixed at creation on X11; \
@@ -9181,6 +9200,7 @@ impl App {
         w.set_transparent(want);
 
         let Some(gpu) = self.gpu.as_mut() else { return };
+        gpu.transparent = want;
         let alpha_mode = alpha_mode_for(want, &gpu.alpha_modes);
         if gpu.config.alpha_mode == alpha_mode {
             return;
@@ -11851,7 +11871,15 @@ async fn init_gpu(
         pipeline_cache::save(cache, &info, previous_len);
     }
 
-    Gpu { surface, device, queue, config, renderer, alpha_modes: caps.alpha_modes.clone() }
+    Gpu {
+        surface,
+        device,
+        queue,
+        config,
+        renderer,
+        transparent: want_transparency,
+        alpha_modes: caps.alpha_modes.clone(),
+    }
 }
 
 /// Paint the surface a solid colour. Needs no pipeline, only a clear.
