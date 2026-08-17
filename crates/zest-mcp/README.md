@@ -28,7 +28,6 @@ prints the default.
 | `blocks` | the commands that have run — no output text, so history is cheap |
 | `output` | what one command printed, by block id |
 | `run` | run a command in an existing shell and wait for the shell to say it ended |
-| `wait` | wait for a command `run` left running, by its block id |
 | `run_isolated` | run a command in a terminal of its own, for the **unforgeable** exit code |
 | `input` / `interrupt` | type into a session, or send it Ctrl+C |
 | `create_session` / `close_session` | start a terminal, or end one |
@@ -48,20 +47,19 @@ exit code — in the user's *interactive* shell, so a virtualenv, an ssh-agent a
 a kubectl context are all where they were. **A timeout does not kill**: the block
 comes back `running` with its partial output and the session is left alone, so
 the `Password:` case can be answered with `input`, stopped with `interrupt`, or
-waited on again with `wait`.
+followed with `blocks` and `wait: true`.
 
 `run_isolated` is the other half. It needs no shell integration — bash, fish and
 cmd.exe emit no markers, which is most Linux hosts rather than an edge case — and
 its status comes from the process rather than from a marker, so it is the one
 exit code here that nothing running inside the terminal can forge.
 
-**The anchor is the tail block, not the next id.** OSC 133 `C` mutates
-`blocks.last_mut()`, so a submitted command lands in the trailing *prompt* block
-and mints no new id — and an abandoned prompt is re-anchored rather than pushed
-(#193), so the id can stay put for a whole session. Correlating on `id >
-high_water` never fires: every `run` reports a timeout, on a command that
-finished instantly, with nothing anywhere saying why. `src/run.rs` holds the rule
-and the tests, and `tests/replay.rs` holds it against a real recorded zsh.
+**The anchor is the tail block, not the next id** — the same rule `blocks(wait:)`
+uses, and `run` calls `block_anchor`/`finished_since` rather than keeping a second
+copy of it. `src/run.rs` adds only what *writing* needs on top: the states a wait
+does not care about (a command the shell never started, a block a screen clear
+destroyed), and the refusals a wait does not need (an alt screen, a shell with no
+markers, a command already running, and the gap between `D` and the next prompt).
 
 ## What makes the shapes small
 
@@ -129,10 +127,42 @@ way to the wire would leave the daemon's own tests green.
 ## Deliberately not built
 
 No chat sidebar. No agent loop of our own — harnesses exist, improve monthly,
-and a terminal shipping an inferior one ages badly; be the substrate. **No
-streaming or polling tool**: a "watch this session and react" primitive is what
-turns prompt injection from *needs the agent to be steered* into *fires on its
-own*, and its absence is the mitigation rather than an omission.
+and a terminal shipping an inferior one ages badly; be the substrate. **Nothing
+that delivers output with no call outstanding**: a "watch this session and
+react" primitive is what turns prompt injection from *needs the agent to be
+steered* into *fires on its own*, and its absence is the mitigation rather than
+an omission.
+
+The line is at the call, not at the waiting. `screen` and `blocks` both block
+until something happens (below), because a wait cannot manufacture a turn — the
+agent asked, the answer is that call's result, and nothing runs afterwards
+unless the harness grants another one. What stays unbuilt is anything that
+speaks when nothing asked. ADR-015, amended in #319.
+
+## Waiting instead of polling
+
+`screen` answers immediately unless it is given `after_seq`, and then it returns
+the moment the screen moves past that sequence — pass back the `seq` from the
+previous read. Add `idle_ms` and it goes further: after the screen moves, it
+keeps waiting until the output has *stopped*, which is the difference between
+"tell me when the build starts printing" and "tell me when it has finished".
+`blocks` takes `wait: true` and returns when a command ends.
+
+Both are bounded by `timeout_ms` under the same ceiling as everything else a
+model can spend, and **a deadline passing is a result, not an error**: the
+screen (or the block list) comes back with `timed_out: true`, the way
+`run_isolated` returns partial output rather than failing. A wait also ends when
+the session's child does, so watching a shell that has died costs nothing rather
+than the whole deadline.
+
+The one part that is not obvious: `blocks(wait:)` reports `finished_block`, and
+it is routinely a block the caller has **already seen**. OSC 133;C makes the
+shell reuse its trailing prompt block for the command typed at it, so the thing
+that just finished usually has an id at or below the highest one already
+listed — which is why the wait anchors on the tail block rather than on
+`since_id`, and why `finished_block` is named separately instead of the caller
+being told to look for something new. `tests/replay.rs` holds that against a
+real zsh recording, and measures the naive predicate beside it.
 
 ## Tests
 

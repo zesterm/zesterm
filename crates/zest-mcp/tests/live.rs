@@ -42,6 +42,21 @@ fn quiet_cmd() -> String {
     }
 }
 
+/// A command that stays alive without printing.
+///
+/// [`quiet_cmd`] is the wrong shape for a wait: it exits at once, so every wait
+/// against it ends on the exit arm and no test could ever reach a *timeout*.
+/// This one never finishes and never prints — so a wait on it is bounded by its
+/// deadline and by nothing else, which is what makes a timeout test
+/// deterministic rather than a race with a shell.
+fn long_lived_cmd() -> String {
+    if cfg!(windows) {
+        "powershell.exe -NoProfile -Command Start-Sleep 30".into()
+    } else {
+        "/bin/sleep 30".into()
+    }
+}
+
 /// A daemon serving connections on a loopback port, for the life of the test.
 fn serve_daemon() -> (String, Arc<Registry>) {
     serve_daemon_with(false)
@@ -701,30 +716,6 @@ fn a_run_in_a_shell_that_emits_no_markers_names_run_isolated() {
     registry.close(addr.session);
 }
 
-/// `wait` refuses an id the session does not have, rather than timing out on it.
-///
-/// A wait against a block that never existed can only end at the deadline, and a
-/// deadline reads as "still running" -- which is the one answer that sends a
-/// model round the loop for ever.
-#[test]
-fn a_wait_for_a_block_this_session_never_had_says_so() {
-    let (addr, registry) = serve_daemon();
-    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
-
-    let created = tools
-        .call("create_session", &serde_json::json!({ "command": quiet_cmd() }))
-        .expect("create_session");
-    let session = created["session"].as_str().expect("a session id").to_string();
-
-    let err = tools
-        .call("wait", &serde_json::json!({ "session": session, "block_id": 99 }))
-        .expect_err("block 99 does not exist in a session with no blocks");
-    assert!(err.to_string().contains("99"), "the refusal must echo the id asked for: {err}");
-
-    let addr = tools.resolver().resolve(&session).expect("resolve");
-    registry.close(addr.session);
-}
-
 /// A status and its provenance travel together, or neither travels.
 ///
 /// The invariant across every result this crate produces: `exit_code_source`
@@ -766,4 +757,207 @@ fn an_exit_code_and_its_source_are_present_together_or_not_at_all() {
             }
         }
     }
+}
+
+/// A wait that cannot be satisfied gives up on time and still answers.
+///
+/// Deliberately waiting for something that *cannot* arrive: a sequence no
+/// session will ever reach, in a child that neither prints nor exits. That is
+/// what makes this the one wait test with no timing to lose — it races nothing
+/// and takes its deadline every run on every platform. What it pins is the
+/// shape the tools promise: a timeout is a **result**, so the screen comes back
+/// anyway, exactly as `run_isolated` returns partial output rather than an
+/// error.
+///
+/// The child has to be [`long_lived_cmd`] and not [`quiet_cmd`]: written with
+/// the latter this failed, because the shell had already exited and the wait
+/// correctly ended on that instead. Which is the exit arm doing its job — but
+/// it means a session that ends is no place to test a deadline from.
+#[test]
+fn a_wait_that_times_out_still_answers_with_the_screen() {
+    let (addr, registry) = serve_daemon();
+    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+
+    let created = tools
+        .call("create_session", &serde_json::json!({ "command": long_lived_cmd(), "cols": COLS, "rows": ROWS }))
+        .expect("create_session");
+    let session = created["session"].as_str().expect("a session id").to_string();
+
+    let started = std::time::Instant::now();
+    let v = tools
+        .call(
+            "screen",
+            &serde_json::json!({ "session": session, "after_seq": u64::MAX, "timeout_ms": 300 }),
+        )
+        .expect("a deadline passing is an answer, not a transport failure");
+
+    assert_eq!(v["waited"], true, "asking for `after_seq` must actually wait: {v}");
+    assert_eq!(v["timed_out"], true, "nothing can pass u64::MAX, so this must be a timeout: {v}");
+    assert_eq!(v["changed"], false);
+    assert!(
+        v["text"].as_str().is_some_and(|t| t.contains("UNTRUSTED-TERMINAL-OUTPUT")),
+        "a timed-out wait still returns the screen, fenced like every other read: {v}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "the caller's 300ms deadline governs, not the connection's 20s reply deadline"
+    );
+
+    let a = tools.resolver().resolve(&session).expect("the id this server minted");
+    registry.close(a.session);
+}
+
+/// A sequence already behind answers at once, without waiting at all.
+///
+/// The cheap half of the long-poll, and the one an agent hits constantly: it
+/// passes the `seq` from its last read, the session has moved on since, and the
+/// answer is already there. Waiting even once here would make every catch-up
+/// read pay a round of latency for nothing.
+///
+/// `after_seq: 0` is the safe spelling of "has anything happened at all". A
+/// live session has parsed something, so its sequence is past zero.
+#[test]
+fn a_wait_for_a_sequence_already_passed_answers_immediately() {
+    let (addr, registry) = serve_daemon();
+    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+
+    let created = tools
+        .call("create_session", &serde_json::json!({ "command": quiet_cmd(), "cols": COLS, "rows": ROWS }))
+        .expect("create_session");
+    let session = created["session"].as_str().expect("a session id").to_string();
+
+    let started = std::time::Instant::now();
+    let v = tools
+        .call(
+            "screen",
+            &serde_json::json!({ "session": session, "after_seq": 0, "timeout_ms": 30_000 }),
+        )
+        .expect("screen");
+
+    assert_eq!(v["changed"], true, "the session is past sequence 0 the moment it attaches: {v}");
+    assert_eq!(v["timed_out"], false);
+    assert!(
+        v["seq"].as_u64().is_some_and(|s| s > 0),
+        "and the sequence it reports is the one to pass back next time: {v}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "a condition that already holds must not wait out any part of the 30s asked for"
+    );
+
+    let a = tools.resolver().resolve(&session).expect("the id this server minted");
+    registry.close(a.session);
+}
+
+/// A wait on a session whose child has gone ends, rather than sitting out.
+///
+/// The anti-hang property, and the reason `Replica::exited` is an arm of every
+/// predicate here. Without it a wait against a dead shell costs its whole
+/// deadline — up to the 30-minute ceiling — and a silent hang of that length
+/// inside an agent loop is poison (#319). Asserted as elapsed time, because the
+/// returned value alone cannot tell a fast answer from a slow one.
+///
+/// ⚠️ Waits for a child to *exit*, on the same exemption as
+/// `run_isolated_reports_the_status_the_process_really_exited_with`. The module
+/// rule is about waiting for a child to **print**, which is what flakes on a
+/// loaded Windows runner (#285); the child here exits at once and every
+/// deadline is generous.
+#[test]
+fn a_wait_ends_when_the_session_does_rather_than_running_out_its_deadline() {
+    let (addr, registry) = serve_daemon();
+    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+
+    // A session of our own, never attached, whose child exits at once. Not
+    // `run_isolated`'s: that one detaches on the way out, and `Registry::sweep`
+    // then collects a session that `has_exited() && ever_attached() &&
+    // !attached()` -- so the *attach* inside `screen` waits out the 20s reply
+    // deadline against a session the host has already destroyed. Measured, at
+    // 20.02s, which is issue #319's "ghost session" complaint rather than
+    // anything this test is about.
+    //
+    // A just-created session is safe from that sweep for as long as it takes to
+    // get here: the predicate needs `ever_attached`, which is exactly what
+    // keeps a new session alive until its owner attaches.
+    let created = tools
+        .call("create_session", &serde_json::json!({ "command": quiet_cmd(), "cols": COLS, "rows": ROWS }))
+        .expect("create_session");
+    let session = created["session"].as_str().expect("a session id").to_string();
+
+    // A minute is far beyond anything this can legitimately take, and far below
+    // the ceiling a hang would sit out -- so the assertion distinguishes the
+    // two without being tight enough to flake on a loaded runner.
+    let started = std::time::Instant::now();
+    let v = tools
+        .call(
+            "screen",
+            &serde_json::json!({ "session": session, "after_seq": u64::MAX, "timeout_ms": 60_000 }),
+        )
+        .expect("screen");
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "a wait against a session whose child has exited must end on the exit, not on \
+         its deadline. This took {:?} of the 60s asked for",
+        started.elapsed()
+    );
+    assert_eq!(
+        v["exited"], true,
+        "and it must say *why* it stopped: `timed_out` would send an agent back round \
+         the loop against a shell that is never going to answer: {v}"
+    );
+    assert_eq!(v["timed_out"], false, "the deadline is not what ended this wait: {v}");
+
+    if let Ok(a) = tools.resolver().resolve(&session) {
+        registry.close(a.session);
+    }
+}
+
+/// A `blocks` wait gives up on time, and a flag that is not one is refused.
+///
+/// The child runs with no shell integration, so it mints no blocks and nothing
+/// can ever finish — the `blocks` counterpart of the screen timeout above, and
+/// deterministic for the same reason.
+///
+/// **Not covered here: the alternate-screen refusal.** `blocks` checks for it
+/// *before* waiting as well as on the read, because blocks are not emitted
+/// there at all and a wait would otherwise answer with a full deadline of
+/// silence. Reaching that state live means starting a child and waiting for it
+/// to print an escape sequence, which is the shape the module doc above
+/// forbids; the detection itself is held against the `vim-macos` recording in
+/// `tests/replay.rs`, and both refusal sites share one `ALT_SCREEN` constant so
+/// they cannot drift into disagreeing.
+#[test]
+fn a_block_wait_gives_up_on_time_and_refuses_a_flag_that_is_not_one() {
+    let (addr, registry) = serve_daemon();
+    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+
+    let created = tools
+        .call("create_session", &serde_json::json!({ "command": long_lived_cmd(), "cols": COLS, "rows": ROWS }))
+        .expect("create_session");
+    let session = created["session"].as_str().expect("a session id").to_string();
+
+    let started = std::time::Instant::now();
+    let v = tools
+        .call(
+            "blocks",
+            &serde_json::json!({ "session": session, "wait": true, "timeout_ms": 300 }),
+        )
+        .expect("a deadline passing is an answer");
+    assert_eq!(v["waited"], true);
+    assert_eq!(v["timed_out"], true, "nothing finishes in a shell with no OSC 133: {v}");
+    assert!(v["finished_block"].is_null(), "and nothing is named as having finished: {v}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+
+    // The argument guard, which needs no session at all.
+    let err = tools
+        .call("blocks", &serde_json::json!({ "session": session, "wait": "yes" }))
+        .expect_err("a string is not a flag");
+    assert!(
+        err.to_string().contains("true or false"),
+        "reading a bad flag as absent would turn a long-poll into a plain read, which \
+         looks like a session that never changes: {err}"
+    );
+
+    let a = tools.resolver().resolve(&session).expect("the id this server minted");
+    registry.close(a.session);
 }

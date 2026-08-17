@@ -20,9 +20,17 @@
 //! No agent loop of our own — harnesses exist, improve monthly, and a terminal
 //! shipping an inferior one ages badly. Be the substrate.
 //!
-//! No streaming or polling tool. A "watch this session and react" primitive is
-//! what turns prompt injection from *needs the agent to be steered* into *fires
-//! on its own*, and its absence is the mitigation rather than an omission.
+//! **Nothing that delivers output with no call outstanding.** A "watch this
+//! session and react" primitive is what turns prompt injection from *needs the
+//! agent to be steered* into *fires on its own*, and its absence is the
+//! mitigation rather than an omission.
+//!
+//! The line is drawn at the call, not at the waiting — `screen` and `blocks`
+//! will both block until something happens, which is what makes supervising a
+//! build one cheap call instead of a sleep-and-re-read loop. A wait cannot
+//! manufacture a turn: the agent asked, the answer is that call's result, and
+//! nothing runs afterwards unless the harness grants another turn. What stays
+//! unbuilt is anything that speaks when nothing asked. → ADR-015, #319.
 //!
 //! # Two things the tool results have to keep saying
 //!

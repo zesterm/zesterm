@@ -230,6 +230,23 @@ impl Replica {
         self.term.blocks().blocks().iter().map(BlockPayload::from_block).collect()
     }
 
+    /// Each block as `(id, has finished)`, oldest first, borrowed.
+    ///
+    /// What [`blocks`](Self::blocks) is for an *answer*, this is for a
+    /// *condition*. A wait re-evaluates its predicate on every message the
+    /// connection decodes, and `blocks` materializes a `BlockPayload` per block
+    /// — two `String` clones each — so a chatty build would allocate the whole
+    /// history once per delta purely to look at two fields of it. Same
+    /// reasoning as [`text_head_tail`](Self::text_head_tail)'s: the cost should
+    /// be the size of the answer, not the size of the buffer.
+    pub fn block_states(&self) -> impl Iterator<Item = (u32, bool)> + '_ {
+        self.term
+            .blocks()
+            .blocks()
+            .iter()
+            .map(|b| (b.id.0, matches!(b.state, zest_core::BlockState::Finished { .. })))
+    }
+
     /// The id below which this replica's block list is not authoritative.
     #[must_use]
     pub fn blocks_from(&self) -> u32 {

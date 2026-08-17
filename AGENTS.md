@@ -629,8 +629,10 @@ you need before you trip on it.
   for `id > high_water` and every `run` reports a timeout on a command that
   finished instantly. Anchor on the tail block's identity, wait on its *state*,
   and compare `>=`: zsh reuses the id, pwsh mints a fresh one, so a rule written
-  on either shell alone is silently wrong on the other. (`zest-mcp/src/run.rs`,
-  ADR-015; #274)
+  on either shell alone is silently wrong on the other. One copy of the rule —
+  `tools::block_anchor` and `tools::finished_since`, which both `blocks(wait:)`
+  and `run` call — because two would drift and only one of them is replayed
+  against a capture. (`zest-mcp/src/run.rs`, ADR-015; #274, #331)
 - **What says the anchor is gone is the block's presence, never
   `authoritative_from`.** That field *lowers* on a screen clear where eviction
   raises it — but with `min(lowest_gone)`, and a young session's floor is

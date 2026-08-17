@@ -169,16 +169,29 @@ pub fn progress(blocks: &[BlockPayload], blocks_from: u32, a: &Anchor) -> Progre
         return Progress::Lost;
     }
 
+    // The *finished* decision is `blocks(wait:)`'s, not a second copy of it.
+    // `finished_since` is public for exactly this reason, and `run` anchors on a
+    // block that is by construction still open — `anchor` refuses every other
+    // tail — so `anchor_was_finished` is false here and the rule reduces to
+    // "the first finished block at or after the anchor".
+    if let Some(id) = crate::tools::finished_since(states(blocks), a.id, false) {
+        if let Some(b) = blocks.iter().find(|b| b.id == id) {
+            return Progress::Finished(b.clone());
+        }
+    }
+
     let Some(b) = ours(blocks, a) else {
         // The anchor block still exists and has no output: the shell has not
         // marked anything as started. Distinguished from `Lost` by the checks
         // above, which is the whole reason they come first.
         return Progress::NotStarted;
     };
-    match b.state {
-        BlockState::Finished { .. } => Progress::Finished(b.clone()),
-        BlockState::Prompt | BlockState::Running => Progress::Running(b.clone()),
-    }
+    Progress::Running(b.clone())
+}
+
+/// Blocks in the shape [`crate::tools::finished_since`] reads them.
+fn states(blocks: &[BlockPayload]) -> impl Iterator<Item = (u32, bool)> + '_ {
+    blocks.iter().map(|b| (b.id, matches!(b.state, BlockState::Finished { .. })))
 }
 
 /// The block this run's command landed in, if the shell has started one.

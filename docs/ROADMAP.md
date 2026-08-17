@@ -27,7 +27,7 @@ is reported rather than gated.
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store, sealed channel |
 | `zest-cloud` | ✅ `TlsDuplex`, one connection as two independently owned halves, a one-request HTTP POST over it, `Endpoint` — consumed by `--enroll` and by `--relay`'s per-pipe dial-back |
 | `zest-daemon` | ✅ session ownership *and* lifecycle, protocol loop, loopback / LAN / WebSocket / relay transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing, publishes its own profiles, reports what a child exited with |
-| `zest-mcp` | ✅ reads, drives and runs terminals over MCP on stdio; `run`/`wait` correlate a command in the user's own shell, `run_isolated` carries the unforgeable exit code — ⬜ fleet reach |
+| `zest-mcp` | ✅ reads, drives and runs terminals over MCP on stdio; `run` correlates a command in the user's own shell and `run_isolated` carries the unforgeable exit code; `screen` and `blocks` wait instead of the caller sleeping — ⬜ fleet reach |
 
 ### What works end to end today
 
@@ -45,9 +45,8 @@ and give an agent `blocks` instead of a build log. The fleet is visible and
 launchable from one window: every reachable machine's sessions and published
 launch profiles in the ⌘K picker, the fleet cards and the `+` menu. The hosted
 web client attaches to a local daemon over WebSocket, and `zest-mcp` gives any
-agent harness the same terminals as tools — `run` typing a command into the
-user's own shell and reading the block the shell closed, and `run_isolated`'s
-exit code that nothing inside the terminal can forge.
+agent harness the same terminals as tools, including `run_isolated`'s exit code
+that nothing inside the terminal can forge.
 
 ## Open work
 
@@ -165,17 +164,19 @@ the history behind them is in closed issues and PRs.
 
 - [x] **`run`, into the user's interactive shell** — with their venv, ssh-agent
       and kubectl context. OSC 133 `D` parsed host-side carries the shell's own
-      exit code; a timeout does not kill — the block stays `Running` and
+      exit code; a timeout does not kill — the block stays `running` and
       partial output comes back, so a command sitting at `Password:` can be
       answered, the case a sentinel-injecting harness cannot tell from success,
-      and `wait` picks it back up by block id. The anchor is the tail block's
-      identity before the write, not the next id after it: OSC 133 `C` mutates
-      the *existing* trailing prompt block, so correlating on `id > high_water`
-      never fires. Refused rather than guessed at on an alt screen, a shell that
-      emits no markers, or a command already running; `warnings` say when the
-      block records a different command than the one sent, or none at all. Held
-      against `blocks-zsh`'s recorded frames on every platform and against a
-      real zsh once. → ADR-015.
+      and `blocks(wait:)` follows it from there. The correlation is
+      `block_anchor`/`finished_since`, not a second copy: OSC 133 `C` mutates
+      the *existing* trailing prompt block, so the anchor is the tail block's
+      identity before the write. Writing adds the states a wait does not need —
+      a command the shell never started, a block a screen clear destroyed — and
+      the refusals it does: an alt screen, a shell emitting no markers, a
+      command already running, and the gap between `D` and the next prompt,
+      which two `run`s back to back land in almost every time. `warnings` say
+      when the block records a different command than the one sent, or none at
+      all. → ADR-015.
 - [ ] Fleet reach for `zest-mcp`, gated on a host advertising the observer
       attach.
 - [ ] **Tokens per build, measured.** Byte stream vs delta vs block output for
@@ -196,9 +197,17 @@ the history behind them is in closed issues and PRs.
 
 **Deliberately not built:** no chat sidebar; no agent loop of our own
 (harnesses improve monthly and a terminal shipping an inferior one ages badly —
-be the substrate); no streaming "watch and react" tool, whose absence is what
-keeps prompt injection needing the agent to be steered rather than firing on
-its own; no scrollback in the cloud by default.
+be the substrate); nothing that delivers output to the agent with **no call
+outstanding**, whose absence is what keeps prompt injection needing the agent
+to be steered rather than firing on its own; no scrollback in the cloud by
+default.
+
+The line is at the call, not at the waiting: `screen(after_seq:)` and
+`blocks(wait:)` block until something happens, because a read the agent asked
+for cannot manufacture a turn. ADR-015 carries the argument, amended once
+already — it read "no streaming *or polling* tool", which forced
+sleep-and-re-read and so pushed *more* attacker-controlled output through the
+model per unit of progress watched.
 
 ### Phone
 

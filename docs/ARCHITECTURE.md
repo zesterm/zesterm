@@ -1254,6 +1254,30 @@ field nothing can fill.**
 addition that turns prompt injection from *needs the agent to be steered* into
 *fires on its own*, and its absence is a mitigation rather than an omission.
 
+**Amended (#319): the line is "no call outstanding", not "no waiting".** As
+first written this rejected *polling* as well, which reads as forbidding
+`screen(after_seq:)` — a read that blocks until the screen moves past a
+sequence the caller names. That is the wrong place for the line, and drawing it
+there had a cost: an agent supervising a build slept and re-read a whole screen,
+mostly unchanged, which is worse on every axis *including this one*. More
+attacker-controlled output crosses into the model per unit of progress watched,
+and every re-read is another chance for something in it to be obeyed.
+
+What makes "watch and react" dangerous is not that the agent waits. It is that
+output arrives with **no call outstanding**, so the delivery itself manufactures
+a turn — and a turn nobody asked for is one that injected text can steer. A
+blocking read cannot do that. The agent called it, the answer is that call's
+result, and nothing runs afterwards unless the harness grants another turn. It
+is `screen` with a deadline, not a subscription: no callback is registered,
+nothing is pushed to a process that is not already blocked on a reply, and the
+wait is bounded by the same ceiling rule as `max_lines` and `timeout_ms` — the
+caller supplies a deadline and `MAX_TIMEOUT` decides what it is worth.
+
+So the rejection stands, restated as the property rather than as the mechanism:
+**nothing delivers output to the agent without a call outstanding.** A tool that
+returns when something happens is allowed; a tool that speaks when nothing asked
+is not, however it is spelled.
+
 **An agent loop of our own.** Harnesses exist and improve monthly; a terminal
 shipping an inferior one ages badly. Be the substrate.
 
