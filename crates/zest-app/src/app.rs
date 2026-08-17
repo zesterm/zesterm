@@ -7295,8 +7295,19 @@ impl App {
         // Anything pending rides exactly one picker choice: a host or session
         // row carries it, anything else abandons it (and dismissing the picker
         // abandons it structurally — it lives on the picker's own state).
+        // Before the take, deliberately. A group header is `None`, and
+        // clicking one is not choosing anything — consuming the pending there
+        // would cancel a "choose a machine" flow with no row picked and no
+        // feedback, leaving the user to press ⇧⏎ again without knowing why.
+        // (Pre-existing: `pending_profile` was dropped the same way.)
+        if matches!(action, PickerAction::None) {
+            return;
+        }
         let pending = self.picker.as_mut().and_then(|p| p.pending.take());
         match action {
+            // Unreachable — the guard above returned — and kept for
+            // exhaustiveness rather than swept under a `_`, which would stop
+            // the compiler naming a future variant nobody handled.
             PickerAction::None => return,
             // ⇧⏎ on a block re-opens the picker to choose a machine (§6's
             // footer: `⇧⏎ run on host…`). It used to re-run the command
