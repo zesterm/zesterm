@@ -95,6 +95,16 @@ pub struct Config {
     /// The tab strip's knobs, taken whole — the chrome reads all of them.
     pub tabs: zest_config::settings::Tabs,
     pub shell: Option<String>,
+    /// Shape the cursor takes unless a program sets one with DECSCUSR.
+    pub cursor_shape: zest_core::CursorShape,
+    /// Whether the cursor springs toward its new cell instead of jumping.
+    ///
+    /// `smear` is not a third behaviour here: the tapered Neovide trail needs a
+    /// quad whose corners lag by velocity, and this renderer's rect pipeline
+    /// draws axis-aligned rectangles. It springs like `smooth` and says so once
+    /// — the same degrade-and-warn the Windows backdrop materials get on macOS,
+    /// rather than a control that silently does nothing. -> #329.
+    pub cursor_trail: bool,
     /// Blink the cursor (and the palette caret), on the shared clock.
     pub cursor_blink: bool,
     /// Half-cycle of the blink, milliseconds.
@@ -191,6 +201,21 @@ impl From<&zest_config::Settings> for Config {
             rows: s.window.rows,
             tabs: s.tabs.clone(),
             shell: (!s.shell.command.is_empty()).then(|| s.shell.command.clone()),
+            cursor_trail: match s.cursor.trail {
+                zest_config::settings::CursorTrail::None => false,
+                zest_config::settings::CursorTrail::Smooth => true,
+                zest_config::settings::CursorTrail::Smear => {
+                    tracing::warn!(
+                        "cursor.trail = \"smear\" is not implemented yet; using \"smooth\""
+                    );
+                    true
+                }
+            },
+            cursor_shape: match s.cursor.shape {
+                zest_config::settings::CursorShape::Block => zest_core::CursorShape::Block,
+                zest_config::settings::CursorShape::Underline => zest_core::CursorShape::Underline,
+                zest_config::settings::CursorShape::Bar => zest_core::CursorShape::Bar,
+            },
             cursor_blink: s.cursor.blink,
             cursor_blink_interval_ms: s.cursor.blink_interval_ms.clamp(100, 5000) as u32,
             scroll_on_output: s.scrolling.scroll_on_output,
@@ -1370,6 +1395,17 @@ pub struct App {
     anim_spin: bool,
     /// A pulsing session dot is on screen — set by the chrome rebuild.
     anim_pulse: bool,
+    /// Where the cursor is *drawn*, in cells, when `cursor.trail` is on.
+    ///
+    /// Two springs because a cursor moves in two axes and they settle
+    /// independently — a caret returning to column 0 on a new line travels
+    /// much further horizontally than vertically, and one spring would make
+    /// the shorter axis wait for the longer.
+    ///
+    /// Carries the *visual* position only. The grid's cursor is wherever the
+    /// program put it, so input, IME placement and hit testing are unaffected
+    /// by an animation still in flight.
+    cursor_trail: Option<(crate::motion::Spring, crate::motion::Spring)>,
     /// The visual residue of a scroll, in fractional rows.
     ///
     /// The grid's own `display_offset` still moves in whole rows the moment
@@ -1709,6 +1745,7 @@ impl App {
             anim_epoch: std::time::Instant::now(),
             anim_spin: false,
             anim_pulse: false,
+            cursor_trail: None,
             scroll_spring: crate::motion::Spring::at(0.0),
             last_anim: None,
             link_down: false,
@@ -2591,7 +2628,7 @@ impl App {
                 match session {
                     Ok(session) => {
                         *cell.lock() = session.addr();
-                        session.terminal().lock().set_palette(seed);
+                        self.seed_terminal(&mut session.terminal().lock(), seed);
                         let local = route.is_local();
                         crate::tabs::SplitPane::daemon(session, local, (cols, rows))
                     }
@@ -2612,7 +2649,7 @@ impl App {
                     wake_for(&self.proxy, cell, Arc::clone(&self.activity)),
                 ) {
                     Ok(session) => {
-                        session.terminal().lock().set_palette(seed);
+                        self.seed_terminal(&mut session.terminal().lock(), seed);
                         crate::tabs::SplitPane::in_process(session, addr, (cols, rows))
                     }
                     Err(e) => {
@@ -3151,12 +3188,20 @@ impl App {
         // can go false, or the OS can be asked to reduce motion, *while*
         // something is in flight -- and an animation that carried on after the
         // user switched it off would be one more setting that does not apply.
-        if !self.motion_allowed() || !self.config.smooth_scroll {
+        if !self.motion_allowed() {
             self.scroll_spring.snap_to(0.0);
+            self.cursor_trail = None;
             self.last_anim = None;
             return false;
         }
-        if !self.scroll_spring.moving() {
+        if !self.config.smooth_scroll {
+            self.scroll_spring.snap_to(0.0);
+        }
+        if !self.config.cursor_trail {
+            self.cursor_trail = None;
+        }
+        let trail_moving = self.cursor_trail.is_some_and(|(x, y)| x.moving() || y.moving());
+        if !self.scroll_spring.moving() && !trail_moving {
             // Nothing in flight: drop the clock so the next animation starts
             // from a fresh `dt` rather than integrating however long the
             // terminal happened to sit idle.
@@ -3166,11 +3211,16 @@ impl App {
         let now = std::time::Instant::now();
         let dt = self.last_anim.map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f32());
         self.last_anim = Some(now);
-        let moving = self.scroll_spring.step(
-            dt,
-            self.config.spring_response,
-            self.config.spring_damping,
-        );
+        let (response, damping) = (self.config.spring_response, self.config.spring_damping);
+        let mut moving = self.scroll_spring.step(dt, response, damping);
+        if let Some((x, y)) = self.cursor_trail.as_mut() {
+            // Both stepped, not short-circuited: `||` would skip the second
+            // axis whenever the first was still moving, and a spring that is
+            // not stepped never settles.
+            let mx = x.step(dt, response, damping);
+            let my = y.step(dt, response, damping);
+            moving |= mx || my;
+        }
         if !moving {
             self.last_anim = None;
         }
@@ -8003,7 +8053,7 @@ impl App {
                 match session {
                     Ok(session) => {
                         *cell.lock() = session.addr();
-                        session.terminal().lock().set_palette(seed);
+                        self.seed_terminal(&mut session.terminal().lock(), seed);
                         let local = route.is_local();
                         // A create should never collide, but the daemon owns
                         // session ids — adopt guards every path the same way
@@ -8044,7 +8094,7 @@ impl App {
                     wake_for(&self.proxy, cell, Arc::clone(&self.activity)),
                 ) {
                     Ok(session) => {
-                        session.terminal().lock().set_palette(seed);
+                        self.seed_terminal(&mut session.terminal().lock(), seed);
                         self.tabs
                             .push(Tab::in_process(session, addr, (cols, rows)).with_identity(identity));
                     }
@@ -8577,6 +8627,43 @@ impl App {
         // Copied out for the same reason as `backdrop`: the block bands are
         // built inside the borrows below, and `ChromeColors` is `Copy`.
         let band_colors = self.chrome_colors;
+        // Where the cursor should be drawn, in cells. The grid's cursor is
+        // where the *program* put it; this is only where the caret has caught
+        // up to, and it exists at all only while `cursor.trail` is on.
+        let cursor_at = self
+            .tabs
+            .active_source()
+            .map(|s| {
+                let c = s.terminal().lock().grid().cursor;
+                (c.col as f32, c.row as f32)
+            })
+            .unwrap_or((0.0, 0.0));
+        let cursor_offset = if self.config.cursor_trail && self.motion_allowed() {
+            match self.cursor_trail.as_mut() {
+                // Retarget rather than rebuild, so a cursor that moves again
+                // mid-flight bends toward the new cell with the velocity it
+                // already had -- the whole reason this is a spring.
+                Some((x, y)) => {
+                    x.retarget(cursor_at.0);
+                    y.retarget(cursor_at.1);
+                    (x.value() - cursor_at.0, y.value() - cursor_at.1)
+                }
+                // First frame with a trail: start *on* the cursor, or the caret
+                // would fly in from wherever the origin happened to be.
+                None => {
+                    let mut x = crate::motion::Spring::at(cursor_at.0);
+                    let mut y = crate::motion::Spring::at(cursor_at.1);
+                    x.retarget(cursor_at.0);
+                    y.retarget(cursor_at.1);
+                    self.cursor_trail = Some((x, y));
+                    (0.0, 0.0)
+                }
+            }
+        } else {
+            self.cursor_trail = None;
+            (0.0, 0.0)
+        };
+
         let selected_blocks = self.selected_block.clone();
         let (Some(gpu), Some(fonts), Some(session), Some(window)) = (
             self.gpu.as_mut(),
@@ -8588,6 +8675,9 @@ impl App {
         };
 
         let metrics = fonts.cell_metrics();
+        let cursor_offset_px =
+            [cursor_offset.0 * metrics.cell_w as f32, cursor_offset.1 * metrics.cell_h as f32];
+
         // The smooth-scroll spring, in pixels. `Viewport::scroll_px` and the
         // `grid_origin` uniform behind it were built for exactly this and had
         // been fed a constant 0.0 since; chrome text opts out per instance with
@@ -8808,6 +8898,8 @@ impl App {
                             selection_bg: pane_selection_bg(self.selection_bg, left_identity),
                             preedit: if left_focused { preedit } else { None },
                             cursor_on: caret_on,
+                            cursor_shape: term_l.cursor_style().shape,
+                            cursor_offset: if left_focused { cursor_offset_px } else { [0.0, 0.0] },
                             row_map: if left_focused { fold_map.as_deref() } else { None },
                         },
                         Viewport {
@@ -8823,6 +8915,8 @@ impl App {
                             selection_bg: pane_selection_bg(self.selection_bg, right_identity),
                             preedit: if focus_right { preedit } else { None },
                             cursor_on: caret_on,
+                            cursor_shape: term_r.cursor_style().shape,
+                            cursor_offset: if focus_right { cursor_offset_px } else { [0.0, 0.0] },
                             row_map: if focus_right { fold_map.as_deref() } else { None },
                         },
                     ];
@@ -8886,6 +8980,8 @@ impl App {
                                 zest_render_wgpu::Preedit { text: &p.text, cursor: p.cursor }
                             }),
                             cursor_on: caret_on,
+                            cursor_shape: term.cursor_style().shape,
+                            cursor_offset: cursor_offset_px,
                             row_map: fold_map.as_deref(),
                         }],
                         &chrome,
@@ -9098,6 +9194,23 @@ impl App {
         theme_id(&self.config, self.system_light)
     }
 
+    /// Everything a terminal must be told about this window before it draws.
+    ///
+    /// One function rather than a line per spawn site, because there are four
+    /// of them and a fifth is one feature away — the same shape as the
+    /// `Terminal::remote` trap in `AGENTS.md`, where a thing that had to happen
+    /// at two doors was done at one and the other went unnoticed for months.
+    fn seed_terminal(&self, term: &mut zest_core::Terminal, seed: zest_core::PaletteSnapshot) {
+        term.set_palette(seed);
+        // The shape a *replica* draws is this window's, not the host's, exactly
+        // as `pane_opacity` decides for opacity: the far machine owns the
+        // session, this one owns how it looks here.
+        term.set_default_cursor_style(zest_core::CursorStyle {
+            shape: self.config.cursor_shape,
+            ..zest_core::CursorStyle::default()
+        });
+    }
+
     /// Re-resolve the theme into the live palette.
     fn apply_theme(&mut self) {
         let theme = zest_theme::builtin::get(self.effective_theme())
@@ -9127,9 +9240,9 @@ impl App {
             // its unknown-scheme warn) for the same answer.
             let seed = seed_palette(&self.palette, tab.identity.as_ref());
             if let Some(split) = &tab.split {
-                split.source().terminal().lock().set_palette(seed.clone());
+                self.seed_terminal(&mut split.source().terminal().lock(), seed.clone());
             }
-            tab.source().terminal().lock().set_palette(seed);
+            self.seed_terminal(&mut tab.source().terminal().lock(), seed);
         }
         if let Some(w) = self.window.as_ref() {
             let bg = resolved.background;

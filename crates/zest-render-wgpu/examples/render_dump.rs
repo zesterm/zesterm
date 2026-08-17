@@ -171,6 +171,8 @@ async fn run() {
             LinearRgba::from_srgb(bg.r, bg.g, bg.b, 1.0)
         },
         &[Viewport {
+            cursor_shape: zest_core::CursorShape::Block,
+            cursor_offset: [0.0, 0.0],
             rect: [
                 padding as f32,
                 padding as f32,

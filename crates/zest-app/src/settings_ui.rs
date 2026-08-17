@@ -98,8 +98,6 @@ pub fn take_pending_edit(editing: &mut Option<EditBuffer>, fields: &[UiField]) -
 /// Wiring one up includes deleting its entry here — the test below only
 /// keeps this list from naming keys that do not exist at all.
 pub const NOT_YET_WIRED: &[&str] = &[
-    "cursor.shape",
-    "cursor.trail",
     "typography.features",
     "typography.ligatures",
 ];
@@ -1000,6 +998,10 @@ mod tests {
             "scrolling.scroll_on_keypress",
             "shell.cwd",
             "shell.env",
+            "cursor.shape",
+            "cursor.trail",
+            "motion.enabled",
+            "motion.smooth_scroll",
         ] {
             let inert = rows
                 .iter()

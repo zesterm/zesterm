@@ -5,7 +5,7 @@
 //! restructuring of the render loop. → ADR-003 / ROADMAP sequencing.
 
 use zest_core::grid::Row;
-use zest_core::{Cell, CellFlags, Color, Grid, PaletteSnapshot};
+use zest_core::{Cell, CellFlags, Color, CursorShape, Grid, PaletteSnapshot};
 use zest_font::{CellMetrics, Fonts, GlyphKey, Style};
 
 use crate::atlas::{Atlas, Cached};
@@ -100,6 +100,19 @@ pub struct Viewport<'a> {
     /// the cycle). The hollow unfocused cursor never blinks — it marks where
     /// focus would land, and a vanishing landmark is worse than none.
     pub cursor_on: bool,
+    /// How far the drawn caret lags its real cell, in physical pixels.
+    ///
+    /// `cursor.trail`. Visual only: the grid's cursor is wherever the program
+    /// put it, so input, IME placement and hit testing are unaffected by an
+    /// animation still in flight — which is what keeps a trail a decoration
+    /// rather than a source of truth.
+    pub cursor_offset: [f32; 2],
+    /// The shape a focused cursor draws.
+    ///
+    /// Already resolved by the caller: `cursor.shape` is the default and
+    /// DECSCUSR overrides it, and deciding that here would put the policy in
+    /// the renderer where the config cannot reach it.
+    pub cursor_shape: CursorShape,
     /// Folded-view row map: for each visual row, the *absolute* storage index
     /// of the grid row to draw there ([`Grid::line`]'s argument), or
     /// `usize::MAX` for a blank filler when history ran out. `None` draws the
@@ -731,13 +744,20 @@ impl Scene {
         // fold hid it — which folds of *finished* output never do — nowhere).
         let Some(visual_row) = cursor_visual_row(grid, vp) else { return };
         let (cw, ch) = (metrics.cell_w as f32, metrics.cell_h as f32);
-        let x = ox + c.col as f32 * cw;
-        let y = oy + visual_row as f32 * ch;
+        // The trail offset applies to the *focused* caret only. The unfocused
+        // hollow box marks where focus would land, and a landmark that drifts
+        // is worse than one that does not move at all.
+        let x = ox + c.col as f32 * cw + if vp.focused { vp.cursor_offset[0] } else { 0.0 };
+        let y = oy + visual_row as f32 * ch + if vp.focused { vp.cursor_offset[1] } else { 0.0 };
         let color = LinearRgba::opaque(vp.palette.cursor.r, vp.palette.cursor.g, vp.palette.cursor.b);
 
         if vp.focused {
             if vp.cursor_on {
-                self.rects.push(RectInstance::filled([x, y, cw, ch], color, clip));
+                self.rects.push(RectInstance::filled(
+                    cursor_rect(vp.cursor_shape, [x, y, cw, ch], metrics),
+                    color,
+                    clip,
+                ));
             }
         } else {
             // Unfocused: a hollow box, drawn as four thin rects.
@@ -751,6 +771,31 @@ impl Scene {
                 self.rects.push(RectInstance::filled(r, color, clip));
             }
         }
+    }
+}
+
+/// The rectangle a focused cursor of this shape occupies inside its cell.
+///
+/// Free-standing so the geometry is asserted rather than eyeballed: a bar drawn
+/// on the wrong edge or an underline a pixel off the baseline is the kind of
+/// thing that looks *nearly* right in a screenshot and wrong in use.
+///
+/// The thickness for the thin shapes is the font's underline thickness, so the
+/// cursor matches the weight of an actual underline at that size rather than
+/// being a constant that is fat at 9pt and hairline on a Retina display. At
+/// least one physical pixel, or a bar cursor vanishes entirely at small sizes.
+fn cursor_rect(shape: CursorShape, cell: [f32; 4], metrics: CellMetrics) -> [f32; 4] {
+    let [x, y, cw, ch] = cell;
+    let t = 1.0f32.max(metrics.underline_thickness as f32);
+    match shape {
+        CursorShape::Block => cell,
+        // Sits on the bottom edge of the cell rather than on `underline_y`:
+        // the cursor marks the *cell*, and an underline cursor floating above
+        // the cell boundary reads as a misplaced rule rather than a caret.
+        CursorShape::Underline => [x, y + ch - t, cw, t],
+        // The leading edge, which for the writing directions this terminal
+        // supports is the left one.
+        CursorShape::Bar => [x, y, t, ch],
     }
 }
 
@@ -903,6 +948,8 @@ mod tests {
             grid,
             palette,
             scroll_px: 0.0,
+            cursor_shape: zest_core::CursorShape::Block,
+            cursor_offset: [0.0, 0.0],
             focused: true,
             opacity,
             blocks: &[],
@@ -1111,6 +1158,56 @@ mod tests {
         assert_eq!(scene.rects.len(), 1, "a background the backdrop does not supply must be drawn");
         assert_eq!(scene.rects[0].rect, vp.rect, "and it covers the viewport, not the window");
         assert_eq!(scene.rects[0].fill, window_bg(&other, 1.0));
+    }
+
+    #[test]
+    fn each_cursor_shape_draws_where_it_should() {
+        // The renderer drew a filled block for every cursor, whatever the
+        // style said -- so `cursor.shape` did nothing *and* DECSCUSR was
+        // ignored, on every platform and every transport. Geometry asserted
+        // rather than eyeballed: a bar on the wrong edge or an underline a
+        // pixel off the cell boundary looks nearly right in a screenshot and
+        // wrong in use.
+        let m = CellMetrics {
+            cell_w: 10,
+            cell_h: 20,
+            baseline: 16,
+            underline_y: 18,
+            underline_thickness: 2,
+            strikeout_y: 10,
+        };
+        let cell = [100.0, 200.0, 10.0, 20.0];
+
+        assert_eq!(cursor_rect(CursorShape::Block, cell, m), cell, "a block fills its cell");
+        assert_eq!(
+            cursor_rect(CursorShape::Underline, cell, m),
+            [100.0, 218.0, 10.0, 2.0],
+            "an underline sits on the cell's bottom edge, full width"
+        );
+        assert_eq!(
+            cursor_rect(CursorShape::Bar, cell, m),
+            [100.0, 200.0, 2.0, 20.0],
+            "a bar sits on the leading edge, full height"
+        );
+    }
+
+    #[test]
+    fn a_thin_cursor_never_vanishes() {
+        // The thickness follows the font's underline so the caret matches the
+        // weight of a real underline at that size -- but a face reporting 0 at
+        // a small size would otherwise produce a zero-width bar, which is a
+        // cursor that is simply not there.
+        let m = CellMetrics {
+            cell_w: 6,
+            cell_h: 12,
+            baseline: 9,
+            underline_y: 11,
+            underline_thickness: 0,
+            strikeout_y: 6,
+        };
+        let cell = [0.0, 0.0, 6.0, 12.0];
+        assert_eq!(cursor_rect(CursorShape::Bar, cell, m)[2], 1.0, "at least one physical pixel");
+        assert_eq!(cursor_rect(CursorShape::Underline, cell, m)[3], 1.0);
     }
 
     #[test]

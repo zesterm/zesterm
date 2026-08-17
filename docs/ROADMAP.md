@@ -734,6 +734,37 @@ entry stay). The resulting work items, measurements in the handoff README — **
       started scroll away off screen. Clearing the selection stays
       unconditional at both, because a selection made before the keystroke is
       stale wherever the view is sitting.
+- [x] **The cursor has a shape again — and DECSCUSR works for the first time**
+      ([#323](https://github.com/zesterm/zesterm/issues/323)). `cursor.shape`
+      and `cursor.trail` off `NOT_YET_WIRED`, but the setting was the smaller
+      half: **`Scene::emit_cursor` drew a filled block for every cursor**,
+      never consulting `cursor_style()`. `zest-core` tracked the style
+      correctly, the wire carried it, the daemon and `zest-mcp` both reported
+      it — and nothing drew it, so a `vim` asking for a bar got a block on
+      every platform and every transport. Teaching the renderer shapes fixed
+      the setting and DECSCUSR together.
+
+      **`DECSCUSR 0` is reset, and reset now means the user's shape.**
+      `from_decscusr` folds 0 and 1 into a blinking block because the wire has
+      no third state to carry, so a program that set a bar and reset on exit
+      left every terminal on a block whatever the settings said. Handled in the
+      DECSCUSR arm instead, which leaves the encoding and the conformance
+      fixtures untouched. Setting the default does not steal a shape a running
+      program is using — that program is still running and still means it.
+
+      One `seed_terminal` is what every fresh terminal goes through, rather than
+      a line per spawn site: there are four of them and a fifth is one feature
+      away, which is the `Terminal::remote` trap in `AGENTS.md` waiting to
+      happen again. The shape a *replica* draws is this window's, not the
+      host's, exactly as `pane_opacity` decides for opacity.
+
+      `cursor.trail` springs the caret toward its cell off #317's spring, and
+      is visual only: the grid's cursor is where the program put it, so input,
+      IME placement and hit testing are untouched by an animation in flight.
+      **`smear` is not implemented** — the Neovide taper needs a quad whose
+      corners lag by velocity and this is an axis-aligned rect pipeline — so it
+      springs like `smooth` and says so once, the same degrade-and-warn the
+      Windows backdrop materials get on macOS. → #329.
 - [x] **Motion: springs, and the rule that they stop**
       ([#317](https://github.com/zesterm/zesterm/issues/317)). The five
       `motion.*` keys off `NOT_YET_WIRED`. Implements #5's spec rather than a

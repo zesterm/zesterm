@@ -153,7 +153,17 @@ impl vte::Perform for TermState {
             // DECSCUSR is `CSI Ps SP q` -- distinguished only by the space
             // intermediate, which is why intermediates are matched on.
             ('q', Some(b' ')) => {
-                let style = CursorStyle::from_decscusr(arg(0, 0) as u16);
+                let param = arg(0, 0) as u16;
+                // 0 is *reset*, not "blinking block" -- DEC's own distinction,
+                // and `from_decscusr` folds the two together because the wire
+                // encoding has no third state to carry. Honoured here so a
+                // program that sets a bar and resets on exit hands the terminal
+                // back to `cursor.shape` rather than to a hardcoded block.
+                let style = if param == 0 {
+                    self.default_cursor_style
+                } else {
+                    CursorStyle::from_decscusr(param)
+                };
                 self.cursor_style = style;
                 self.events.push(TermEvent::CursorStyle(style));
                 self.touch();

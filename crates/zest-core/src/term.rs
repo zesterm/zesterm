@@ -128,6 +128,14 @@ pub struct TermState {
     pub(crate) seq: u64,
     pub(crate) title: String,
     pub(crate) cursor_style: CursorStyle,
+    /// What `DECSCUSR 0` resets to.
+    ///
+    /// `cursor.shape` in the settings tree, which the schema documents as the
+    /// shape used *"unless the program sets one with DECSCUSR"*. Reset is what
+    /// makes that true rather than merely initial: a program that sets a bar
+    /// and then resets on exit must hand the terminal back to the user's
+    /// choice, not to whatever this file happened to hardcode.
+    pub(crate) default_cursor_style: CursorStyle,
     /// The active selection, if any.
     ///
     /// Lives on the terminal rather than the app because text extraction needs
@@ -234,6 +242,22 @@ impl Terminal {
     #[must_use]
     pub fn cursor_style(&self) -> CursorStyle {
         self.state.cursor_style
+    }
+
+    /// Set the shape `DECSCUSR 0` resets to, and adopt it now if no program
+    /// has asked for something else yet.
+    ///
+    /// Adopting immediately is what makes the setting apply to a session that
+    /// is already open; a terminal that only honoured it on the next launch
+    /// would be one more setting that does not apply. A session where a
+    /// program *has* set a style keeps it — that program is still running and
+    /// still means it.
+    pub fn set_default_cursor_style(&mut self, style: CursorStyle) {
+        let untouched = self.state.cursor_style == self.state.default_cursor_style;
+        self.state.default_cursor_style = style;
+        if untouched {
+            self.state.cursor_style = style;
+        }
     }
 
     #[must_use]
@@ -406,6 +430,7 @@ impl TermState {
             seq: 0,
             title: String::new(),
             cursor_style: CursorStyle::default(),
+            default_cursor_style: CursorStyle::default(),
             selection: None,
             current_hyperlink: None,
             next_hyperlink_id: 0,
