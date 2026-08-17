@@ -88,6 +88,10 @@ pub struct Config {
     pub custom_chrome: bool,
     /// What the compositor puts behind the window (Mica and friends).
     pub backdrop: zest_config::settings::Backdrop,
+    /// Initial window size in cells. Read once, at window creation.
+    pub columns: u16,
+    /// Initial window size in cells. Read once, at window creation.
+    pub rows: u16,
     /// The tab strip's knobs, taken whole — the chrome reads all of them.
     pub tabs: zest_config::settings::Tabs,
     pub shell: Option<String>,
@@ -173,6 +177,8 @@ impl From<&zest_config::Settings> for Config {
                 zest_config::settings::CustomChrome::Auto => cfg!(windows),
             },
             backdrop: s.window.backdrop,
+            columns: s.window.columns,
+            rows: s.window.rows,
             tabs: s.tabs.clone(),
             shell: (!s.shell.command.is_empty()).then(|| s.shell.command.clone()),
             cursor_blink: s.cursor.blink,
@@ -1282,12 +1288,37 @@ fn spawn_pairing_clock(
 }
 
 /// The live GPU state, created once the window exists.
+/// A window size computed from `window.columns` / `window.rows`, and the font
+/// stack it was measured with so the caller need not build one twice.
+struct SizedFromCells {
+    width: u32,
+    height: u32,
+    /// The scale the metrics were taken at — the *primary monitor's*, since
+    /// there is no window to ask yet. Kept so the caller can tell whether the
+    /// window opened somewhere else and the fonts have to be rebuilt.
+    scale: f32,
+    fonts: Box<Fonts>,
+}
+
 struct Gpu {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     renderer: Renderer,
+    /// The transparency intent this surface was last configured for.
+    ///
+    /// Remembered so `apply_transparency` can tell a real change from a
+    /// reload that happened to share its invalidation class with
+    /// `window.backdrop`, without consulting a list of key names.
+    transparent: bool,
+    /// What this surface can do about alpha, kept from the capability query.
+    ///
+    /// Asked once and remembered because the answer is a property of the
+    /// adapter and cannot change, while the *question* is asked again every
+    /// time `window.opacity` moves. Dropping it is what made opacity a
+    /// restart-only setting that claimed otherwise.
+    alpha_modes: Vec<wgpu::CompositeAlphaMode>,
 }
 
 pub struct App {
@@ -8920,13 +8951,15 @@ impl App {
             }
             zest_config::Invalidation::SurfaceRebuild => {
                 self.apply_theme();
-                if let (Some(gpu), Some(w)) = (self.gpu.as_ref(), self.window.as_ref()) {
-                    let size = w.inner_size();
-                    let _ = gpu;
+                self.apply_transparency();
+                if let Some(w) = self.window.as_ref() {
                     // The backdrop is a window attribute, not a surface one,
                     // but it shares this class because both change what is
-                    // behind the pixels.
+                    // behind the pixels -- and a backdrop is only ever visible
+                    // through pixels the surface above left transparent, which
+                    // is why `apply_transparency` runs first.
                     platform::set_backdrop(w, self.config.backdrop);
+                    let size = w.inner_size();
                     self.resize_surface(size.width, size.height);
                 }
             }
@@ -9089,6 +9122,98 @@ impl App {
         zest_font::TextAntialias::Subpixel
     }
 
+    /// The physical window size that holds `window.columns` × `window.rows`
+    /// cells, plus the font stack it was measured with.
+    ///
+    /// Returns `None` when no monitor can be asked or the font stack will not
+    /// build — both of which the ordinary path handles perfectly well a moment
+    /// later, so this degrades to the default size rather than failing a
+    /// launch over a preference.
+    ///
+    /// The scale factor comes from the primary monitor, because there is no
+    /// window yet to ask. If the window then opens on a differently-scaled
+    /// display the metrics are wrong, which is why the fonts are handed back:
+    /// the caller compares scales and keeps these only when they match.
+    fn window_size_in_cells(&self, el: &ActiveEventLoop) -> Option<SizedFromCells> {
+        let scale = el.primary_monitor()?.scale_factor() as f32;
+        let typo = Typography { scale_factor: scale, ..self.config.typography };
+        let fonts = Fonts::new(&self.config.font_families, typo).ok()?;
+        let metrics = fonts.cell_metrics();
+        let (w, h) =
+            self.insets_at(scale).window_size(metrics, self.config.columns, self.config.rows);
+        tracing::debug!(
+            cols = self.config.columns,
+            rows = self.config.rows,
+            w,
+            h,
+            scale,
+            "sizing the window from window.columns/rows"
+        );
+        Some(SizedFromCells { width: w, height: h, scale, fonts: Box::new(fonts) })
+    }
+
+    /// Make the window and its swapchain agree with `window.opacity`.
+    ///
+    /// Three things decide whether a translucent window is actually
+    /// translucent, and all three were settled once at startup and never asked
+    /// again — which is why `window.opacity` was classed `SurfaceRebuild`,
+    /// carried no "applies on next launch" tag, and did nothing at all until a
+    /// relaunch:
+    ///
+    /// 1. The window's own `transparent` attribute. winit can change this after
+    ///    creation on macOS and Windows; **X11 can only take it at build time**,
+    ///    so there it is logged rather than pretended.
+    /// 2. The surface's `alpha_mode`. It is an ordinary field on the
+    ///    configuration the app already owns, and the capability to decide it
+    ///    with is now kept on [`Gpu`] rather than dropped inside `init_gpu`.
+    /// 3. Antialiasing: subpixel coverage against a translucent destination is
+    ///    undefined, so [`App::antialias_for`] forces grayscale below 1.0 and
+    ///    the atlas has to be rebuilt when that flips.
+    ///
+    /// The caller re-configures the surface afterwards; this only decides.
+    ///
+    /// Returns immediately when the *intent* has not moved. `SurfaceRebuild` is
+    /// shared with `window.backdrop`, so this runs on backdrop-only reloads
+    /// too, and everything below is either a no-op or a log — which would make
+    /// changing the backdrop on an adapter that cannot do alpha reprint the
+    /// fallback warning every time. Gated on the remembered intent rather than
+    /// on which keys changed: a key list here would be a second table to keep
+    /// in sync with `invalidate::KEYS`, and this cannot fall out of step
+    /// because it compares the thing it actually acts on.
+    fn apply_transparency(&mut self) {
+        let want = self.config.opacity < 1.0;
+        let Some(w) = self.window.as_ref() else { return };
+        if self.gpu.as_ref().is_some_and(|g| g.transparent == want) {
+            return;
+        }
+
+        // Said only when it changes, and only where it cannot work: a setting
+        // that silently does nothing is the bug this whole sweep is closing,
+        // but a line repeated on every unrelated reload is how a log stops
+        // being read at all.
+        if cfg!(all(unix, not(target_os = "macos"))) {
+            tracing::info!(
+                "window transparency is fixed at creation on X11; \
+                 window.opacity applies on the next launch here"
+            );
+        }
+        w.set_transparent(want);
+
+        let Some(gpu) = self.gpu.as_mut() else { return };
+        gpu.transparent = want;
+        let alpha_mode = alpha_mode_for(want, &gpu.alpha_modes);
+        if gpu.config.alpha_mode == alpha_mode {
+            return;
+        }
+        gpu.config.alpha_mode = alpha_mode;
+        // The atlas holds glyphs rasterized for the *old* answer: grayscale and
+        // subpixel masks are different widths per texel, so keeping them would
+        // be three columns of garbage rather than merely stale text.
+        // `rebuild_fonts` owns that whole sequence and re-configures the
+        // surface at the end, which is also what this change needs.
+        self.rebuild_fonts();
+    }
+
     fn resize_surface(&mut self, width: u32, height: u32) {
         let insets = self.insets();
         let Some(gpu) = self.gpu.as_mut() else { return };
@@ -9163,12 +9288,40 @@ impl ApplicationHandler<Wakeup> for App {
         // compilation, font resolution, then spawning a shell. Painting nothing
         // into a visible window is what produces the white flash; the fix is to
         // not be visible until there is something to show.
-        let (win_w, win_h) = self.screenshot.as_ref().map_or((960.0, 600.0), |s| s.size);
-        let attrs = Window::default_attributes()
+        // `window.columns` / `window.rows`, when the user actually set them.
+        //
+        // Sizing from cells needs cell metrics, which need the font stack, and
+        // resolving fonts costs ~30ms here — real work *before the first
+        // paint*, which is precisely what `STARTUP_BUDGET_MS` exists to catch.
+        // So it is paid only by configs that ask for it: provenance knows
+        // whether a layer wrote the key, which `Config` alone cannot, since a
+        // value equal to the default is indistinguishable from an absent one.
+        //
+        // An unset config therefore keeps the historical 960×600 rather than
+        // becoming exactly 100×30. Those are not the same — the insets take
+        // their share, so the default window is nearer 98×27 — and that gap is
+        // pre-existing rather than introduced here, but it is a gap: see #308.
+        let sized_from_cells = ["window.columns", "window.rows"]
+            .iter()
+            .any(|k| self.provenance.contains_key(*k));
+        let early = (sized_from_cells && self.screenshot.is_none())
+            .then(|| self.window_size_in_cells(el))
+            .flatten();
+
+        let mut attrs = Window::default_attributes()
             .with_title("zesterm")
             .with_transparent(self.config.opacity < 1.0)
-            .with_visible(false)
-            .with_inner_size(winit::dpi::LogicalSize::new(win_w, win_h));
+            .with_visible(false);
+        attrs = match (self.screenshot.as_ref(), early.as_ref()) {
+            // `--screenshot-size` is an explicit instruction from this
+            // invocation and outranks a stored preference.
+            (Some(shot), _) => attrs
+                .with_inner_size(winit::dpi::LogicalSize::new(shot.size.0, shot.size.1)),
+            (None, Some(sized)) => {
+                attrs.with_inner_size(winit::dpi::PhysicalSize::new(sized.width, sized.height))
+            }
+            (None, None) => attrs.with_inner_size(winit::dpi::LogicalSize::new(960.0, 600.0)),
+        };
         // Not borderless (ROADMAP, WS-C2: borderless costs traffic lights,
         // native fullscreen, Sequoia tiling and accessibility). A transparent
         // full-size titlebar keeps all of that, and the tab strip is what
@@ -9277,7 +9430,14 @@ impl ApplicationHandler<Wakeup> for App {
 
         let scale = window.scale_factor() as f32;
         let typo = Typography { scale_factor: scale, ..self.config.typography };
-        let mut fonts = Fonts::new(&self.config.font_families, typo).expect("no usable font");
+        // Reuse the stack the sizing pass already built, when it was measured
+        // at this window's scale. It usually was — the window opens on the
+        // primary monitor — and when it was not, the metrics behind the size
+        // are wrong anyway, so rebuilding is the correction rather than a cost.
+        let mut fonts = match early {
+            Some(sized) if (scale - sized.scale).abs() < f32::EPSILON => *sized.fonts,
+            _ => Fonts::new(&self.config.font_families, typo).expect("no usable font"),
+        };
         fonts.set_builtin_box_drawing(self.config.builtin_box_drawing);
         fonts.set_text_antialias(self.effective_antialias());
         fonts.set_hinting(self.config.text_hinting);
@@ -11484,6 +11644,59 @@ fn capture_frame(gpu: &mut Gpu, scene: &zest_render_wgpu::Scene, path: &std::pat
     }
 }
 
+/// How the compositor should treat this surface's alpha.
+///
+/// Transparency is adapter-dependent on Windows: DX12 reports `Opaque` on every
+/// adapter, and Vulkan only on some (ADR-003). Never silently ignore the
+/// setting — a window that stays opaque because the hardware cannot do better
+/// is a fact worth logging, and one that stays opaque because nobody asked the
+/// question again is a bug.
+///
+/// Free-standing because this decision is now made twice: once at startup, and
+/// again whenever `window.opacity` changes on a live window. Two copies of it
+/// would be two chances to disagree about what the adapter can do.
+fn alpha_mode_for(
+    want_transparency: bool,
+    supported: &[wgpu::CompositeAlphaMode],
+) -> wgpu::CompositeAlphaMode {
+    if !want_transparency {
+        return wgpu::CompositeAlphaMode::Opaque;
+    }
+    if supported.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+        return wgpu::CompositeAlphaMode::PreMultiplied;
+    }
+    // **On macOS `PostMultiplied` is the only transparent mode there is, and it
+    // does not mean what it says.** wgpu's Metal backend advertises exactly
+    // `[Opaque, PostMultiplied]` and implements the second as
+    // `CAMetalLayer::setOpaque(false)` and nothing else
+    // (`wgpu-hal/src/metal/surface.rs`); CoreAnimation then composites the
+    // layer's contents as *premultiplied*, because that is what CA has always
+    // done. So it is the mode this renderer's premultiplied output wants, under
+    // a name that describes another API's behaviour.
+    //
+    // Requiring `PreMultiplied` therefore made `window.opacity` fall back to
+    // `Opaque` on every Mac, with the "this adapter cannot composite per-pixel
+    // alpha" warning naming the hardware for a decision that was ours — and it
+    // takes `window.backdrop`'s vibrancy down with it, since a backdrop is only
+    // visible through pixels the surface leaves transparent.
+    //
+    // Not accepted anywhere else, deliberately. On Vulkan
+    // `VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR` means what it says — the
+    // compositor multiplies by alpha itself — so handing it premultiplied
+    // colour double-darkens every translucent pixel. Same word, opposite
+    // requirement, which is why this is a `cfg!` and not a second `contains`.
+    if cfg!(target_os = "macos")
+        && supported.contains(&wgpu::CompositeAlphaMode::PostMultiplied)
+    {
+        return wgpu::CompositeAlphaMode::PostMultiplied;
+    }
+    tracing::warn!(
+        available = ?supported,
+        "this adapter cannot composite per-pixel alpha; window opacity ignored"
+    );
+    wgpu::CompositeAlphaMode::Opaque
+}
+
 async fn init_gpu(
     window: &Arc<Window>,
     want_transparency: bool,
@@ -11608,21 +11821,7 @@ async fn init_gpu(
             caps.formats[0]
         });
 
-    // Transparency is adapter-dependent on Windows: DX12 reports Opaque on every
-    // adapter, and Vulkan only on some. Never silently ignore the setting.
-    let alpha_mode = if want_transparency
-        && caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied)
-    {
-        wgpu::CompositeAlphaMode::PreMultiplied
-    } else {
-        if want_transparency {
-            tracing::warn!(
-                available = ?caps.alpha_modes,
-                "this adapter cannot composite per-pixel alpha; window opacity ignored"
-            );
-        }
-        wgpu::CompositeAlphaMode::Opaque
-    };
+    let alpha_mode = alpha_mode_for(want_transparency, &caps.alpha_modes);
 
     let size = window.inner_size();
     let config = wgpu::SurfaceConfiguration {
@@ -11672,7 +11871,15 @@ async fn init_gpu(
         pipeline_cache::save(cache, &info, previous_len);
     }
 
-    Gpu { surface, device, queue, config, renderer }
+    Gpu {
+        surface,
+        device,
+        queue,
+        config,
+        renderer,
+        transparent: want_transparency,
+        alpha_modes: caps.alpha_modes.clone(),
+    }
 }
 
 /// Paint the surface a solid colour. Needs no pipeline, only a clear.
@@ -12068,6 +12275,86 @@ mod fleet_device_row_tests {
         let rows = fleet_device_rows(&[device(3, "studio-app", "desktop", true)], None);
         assert_eq!(rows[0].action, FleetDeviceAction::Vouch);
         assert_eq!(rows[0].detail, "desktop · approved");
+    }
+}
+
+#[cfg(test)]
+mod transparency_tests {
+    use super::alpha_mode_for;
+    use wgpu::CompositeAlphaMode::{Auto, Opaque, PostMultiplied, PreMultiplied};
+
+    #[test]
+    fn an_opaque_window_never_asks_for_per_pixel_alpha() {
+        assert_eq!(alpha_mode_for(false, &[PreMultiplied, Opaque]), Opaque);
+        assert_eq!(alpha_mode_for(false, &[Opaque]), Opaque);
+    }
+
+    #[test]
+    fn a_translucent_window_takes_premultiplied_where_it_exists() {
+        assert_eq!(alpha_mode_for(true, &[Opaque, PreMultiplied]), PreMultiplied);
+    }
+
+    #[test]
+    fn an_adapter_without_it_falls_back_rather_than_failing() {
+        // ADR-003: DX12 reports `Opaque` on every adapter, so this is the
+        // ordinary Windows case, not an exotic one. It must start normally --
+        // and it warns, because a window that stays opaque is a fact the user
+        // needs in order to understand why their setting did nothing.
+        assert_eq!(alpha_mode_for(true, &[Opaque]), Opaque);
+        assert_eq!(alpha_mode_for(true, &[Auto, Opaque]), Opaque);
+        assert_eq!(alpha_mode_for(true, &[]), Opaque, "an empty capability set is not a panic");
+    }
+
+    #[test]
+    fn macos_takes_post_multiplied_and_no_one_else_does() {
+        // Measured, not assumed: wgpu's Metal backend advertises exactly
+        // `[Opaque, PostMultiplied]` on an Apple M4, so requiring
+        // `PreMultiplied` made every Mac fall back to opaque -- window.opacity
+        // did nothing here, and said the adapter was at fault.
+        //
+        // `PostMultiplied` on Metal is `CAMetalLayer::setOpaque(false)` and
+        // nothing else, and CoreAnimation composites premultiplied, so it is
+        // the mode this renderer wants. On Vulkan the same name means the
+        // compositor multiplies by alpha itself, which would double-darken
+        // premultiplied colour -- hence the platform split rather than simply
+        // widening the accepted set.
+        let metal = [Opaque, PostMultiplied];
+        if cfg!(target_os = "macos") {
+            assert_eq!(alpha_mode_for(true, &metal), PostMultiplied);
+        } else {
+            assert_eq!(
+                alpha_mode_for(true, &metal),
+                Opaque,
+                "post-multiplied means straight alpha off macOS; taking it would double-darken"
+            );
+        }
+        assert_eq!(alpha_mode_for(false, &metal), Opaque, "an opaque window is opaque everywhere");
+        assert_eq!(
+            alpha_mode_for(true, &[Opaque, PreMultiplied, PostMultiplied]),
+            PreMultiplied,
+            "where both exist the unambiguous one wins, on every platform"
+        );
+    }
+
+    #[test]
+    fn startup_and_reload_cannot_disagree() {
+        // The whole reason this is a function rather than two copies of an
+        // `if`. `init_gpu` decided it once and dropped the capability, so the
+        // reload path had nothing to re-decide with -- which is what made
+        // `window.opacity` restart-only while claiming to be `SurfaceRebuild`.
+        let supported = [Opaque, PreMultiplied];
+        for want in [true, false] {
+            assert_eq!(
+                alpha_mode_for(want, &supported),
+                alpha_mode_for(want, &supported),
+                "the same question must have one answer, whenever it is asked"
+            );
+        }
+        assert_ne!(
+            alpha_mode_for(true, &supported),
+            alpha_mode_for(false, &supported),
+            "and opacity must actually change it, or the reload is a no-op again"
+        );
     }
 }
 
