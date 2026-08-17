@@ -7330,9 +7330,20 @@ impl App {
                 }
                 // Already open here, so there is nothing to wait for: the
                 // session exists and this window holds it.
+                //
+                // By address, not by `active_source()`. `activate_addr` can
+                // fail — a picker row a frame behind a close — and the active
+                // tab is then some *other* session, which would take the
+                // command. That is the rule this whole change is built on:
+                // the write is keyed to the session the user chose.
                 if let Some(Pending::Command(command)) = &pending {
-                    if let Some(session) = self.tabs.active_source() {
-                        session.write(with_return(command));
+                    let bytes = with_return(command);
+                    match self.tabs.find_mut(addr) {
+                        Some(tab) => tab.source().write(bytes),
+                        None => tracing::warn!(
+                            %addr,
+                            "the session closed before its command could run"
+                        ),
                     }
                 }
             }
