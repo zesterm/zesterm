@@ -13,8 +13,9 @@
 //! pre-parsed structures, so a mistake in how this crate reads the wire fails
 //! here rather than only against a live daemon.
 
+use zest_mcp::run::{self, Anchor, Progress};
 use zest_mcp::Replica;
-use zest_proto::{frame, FrameReader, HostMessage, SessionAddr, SessionId, HostId};
+use zest_proto::{frame, BlockPayload, BlockState, FrameReader, HostMessage, SessionAddr, SessionId, HostId};
 
 /// One recorded session, as the host sent it.
 struct Fixture {
@@ -302,6 +303,154 @@ fn a_vim_session_reports_entering_and_leaving_the_alternate_screen() {
         Some(&false),
         "the recording quits vim, so the replica must come back off the alternate screen"
     );
+}
+
+/// One frame's worth of everything the correlation looks at.
+type Snapshot = (Vec<BlockPayload>, u32, bool);
+
+fn snapshots(name: &str) -> Vec<Snapshot> {
+    replay_watching(name, |r| (r.blocks(), r.blocks_from(), r.alt_screen()))
+}
+
+/// Take an anchor at the first frame where a `run` could have written.
+fn anchor_at(snaps: &[Snapshot], from: usize) -> Option<(usize, Anchor)> {
+    snaps.iter().enumerate().skip(from).find_map(|(i, (b, f, alt))| {
+        run::anchor(b, *f, *alt).ok().map(|a| (i, a))
+    })
+}
+
+/// Walk forward until the anchored command closes, and say where.
+fn settle_at(snaps: &[Snapshot], from: usize, a: &Anchor) -> Option<(usize, BlockPayload)> {
+    snaps.iter().enumerate().skip(from).find_map(|(i, (b, f, _))| match run::progress(b, *f, a) {
+        Progress::Finished(blk) => Some((i, blk)),
+        Progress::NotStarted | Progress::Running(_) | Progress::Lost => None,
+    })
+}
+
+/// The correlation, against a genuine interactive zsh recorded off a real pty.
+///
+/// The property that makes `run` work at all, and the one #274's plan had
+/// backwards. `begin_output` mutates `blocks.last_mut()`, so the command lands in
+/// the trailing prompt block and **the id does not move** — this recording
+/// anchors at block 0 and settles at block 0. A correlation waiting for an id
+/// above the high-water mark would walk this whole recording and find nothing,
+/// which is a `run` that always reports a timeout on a command that finished
+/// instantly, with nothing anywhere saying why.
+///
+/// Replayed rather than run: no pty, no shell, no OSC 133 to arrange, and it
+/// asserts identically on Windows, macOS and Linux.
+#[test]
+fn a_command_settles_in_the_block_that_was_already_there() {
+    let snaps = snapshots("blocks-zsh");
+
+    let (start, anchor) =
+        anchor_at(&snaps, 0).expect("the recording reaches a live zsh prompt a `run` could use");
+    assert_eq!(
+        anchor.id, 0,
+        "the anchor is the trailing prompt block itself, not the id after it"
+    );
+
+    let (at, blk) = settle_at(&snaps, start, &anchor)
+        .expect("`echo hello` finishes in this recording, so the correlation must fire");
+
+    assert_eq!(
+        blk.id, anchor.id,
+        "the command landed in the anchor's own block. An `id > high_water` test never \
+         fires here, and that is the whole reason this module exists"
+    );
+    assert_eq!(blk.command, "echo hello");
+    assert_eq!(
+        blk.state,
+        BlockState::Finished { exit_code: Some(0) },
+        "the shell reported 0 and it must survive the wire as 0, not as unknown"
+    );
+
+    // It was seen running first: a correlation that only ever observes the final
+    // state would pass this test while being unable to report a partial result
+    // on a timeout, which is the case `run` exists to handle.
+    assert!(
+        snaps[start..at]
+            .iter()
+            .any(|(b, f, _)| matches!(run::progress(b, *f, &anchor), Progress::Running(_))),
+        "the block must be seen `running` before it is seen `finished`"
+    );
+    assert!(
+        matches!(run::progress(&snaps[start].0, snaps[start].1, &anchor), Progress::NotStarted),
+        "and before that, not started at all -- the three states are distinguishable"
+    );
+
+    // The command the shell recorded is the one that was sent, so nothing is
+    // flagged. `command_mismatch` firing on a clean recording would make the
+    // warning worthless in the case it exists for.
+    assert!(
+        run::warnings(&snaps[at].0, &anchor, "echo hello", &blk).is_empty(),
+        "a command that ran exactly as sent must carry no warnings"
+    );
+}
+
+/// The second command in the same session, and the printed-nothing shape.
+///
+/// Its block is minted by the prompt that followed the first, so this is the case
+/// where the id *does* move — the same code path has to accept both, which is why
+/// [`run::progress`] matches `>=` and not `==`.
+///
+/// `false` also prints nothing, which the parser records as an *inverted* range
+/// (`output_line: 6`, `end_line: 5`) rather than an absent `output_line`, so the
+/// correlation must not mistake it for a command that never started.
+#[test]
+fn the_next_command_is_correlated_to_the_block_the_next_prompt_minted() {
+    let snaps = snapshots("blocks-zsh");
+    let (first_start, first) = anchor_at(&snaps, 0).expect("the first prompt");
+    let (first_done, _) = settle_at(&snaps, first_start, &first).expect("`echo hello` finishes");
+
+    let (start, anchor) = anchor_at(&snaps, first_done)
+        .expect("zsh draws a fresh prompt after a command, and it is runnable again");
+    assert_eq!(anchor.id, 1, "the prompt after a finished command is a new block");
+
+    let (_, blk) = settle_at(&snaps, start, &anchor).expect("`false` finishes in this recording");
+    assert_eq!(blk.command, "false");
+    assert_eq!(
+        blk.state,
+        BlockState::Finished { exit_code: Some(1) },
+        "a non-zero status must arrive as the number, not as `finished` with nothing"
+    );
+    assert!(
+        blk.output_line > blk.end_line,
+        "`false` printed nothing, which is an inverted range rather than an absent \
+         `output_line` -- and it must still settle: {blk:?}"
+    );
+
+    // And it settles as *finished*, not as never-started, even though it owns no
+    // output rows. Keying "did it start" off the row count rather than off
+    // `output_line` is the mistake this pins.
+    let r = replay("blocks-zsh");
+    assert_eq!(
+        r.block_rows(blk.id).expect("the block is known"),
+        Vec::<String>::new(),
+        "a command that printed nothing owns no rows, and that is not the same as \
+         a command that never ran"
+    );
+}
+
+/// A `run` into an editor is refused, at the moment it would have been written.
+///
+/// No OSC 133 marker is recorded on the alternate screen at all, so a command
+/// submitted there could never settle — and the bytes would reach vim. Asserted
+/// against the recording rather than a hand-built list, because the flag being
+/// right frame by frame is what the refusal rests on.
+#[test]
+fn a_run_is_refused_for_every_frame_a_recording_spends_in_an_editor() {
+    let snaps = snapshots("vim-macos");
+    let alt: Vec<&Snapshot> = snaps.iter().filter(|(_, _, alt)| *alt).collect();
+    assert!(!alt.is_empty(), "the recording opens vim; something is wrong upstream of this");
+
+    for (b, f, a) in alt {
+        assert_eq!(
+            run::anchor(b, *f, *a).expect_err("the alternate screen is never runnable"),
+            run::Refusal::AltScreen,
+            "an alt-screen frame must be refused by name, not fall through to `NoBlocks`"
+        );
+    }
 }
 
 /// `text_head_tail` bounds what it builds, not just what it returns.

@@ -760,6 +760,33 @@ Each of these cost real time and is documented where it bites:
   parks its drain thread in `read` before it forks the child, which removes the
   deadline rather than shortening it. (`zest-pty/src/unix.rs`, sharp edge 6;
   issue #54.)
+- **A submitted command mints no block id, so correlating on a new one never
+  fires.** OSC 133 `C` reaches `BlockIndex::begin_output`, which mutates
+  `blocks.last_mut()` in place — `output_line`, `command`, `state`, and no id.
+  The command therefore lands in the *existing* trailing prompt block, at an id
+  **at or below** the high-water mark, and only the prompt after it pushes a new
+  one; `begin_prompt` then re-anchors that block rather than pushing whenever it
+  ran nothing (#193), so the id can stay put for a whole session. A `run` that
+  waits for `id > high_water` waits for ever, on a command that finished
+  instantly, and reports it as a timeout with nothing anywhere naming the cause.
+  The anchor is the tail block's *identity* before the write and the wait is on
+  its *state*; the comparison is `>=`, because zsh reuses the id and pwsh —
+  which brackets even an empty Enter with `C`/`D` — mints a fresh one, so a rule
+  written on either shell alone is silently wrong on the other.
+  (`zest-mcp/src/run.rs`, ADR-015; #274.)
+
+  **Two more that only a live shell showed, and no test in the crate would have
+  produced.** Between `D` and the next `A` there is a real state a caller lands
+  in — `run` returns the instant `D` closes its block, and zsh emits the next
+  prompt from `precmd` a moment later, so two `run`s back to back hit it almost
+  every time. It has to be a *different* refusal from "a command is running",
+  since only one of the two is worth waiting out. And an exit can reach a client
+  **before** the output that preceded it: the daemon snapshots `has_exited`
+  before it diffs the grid so the last screenful is not reordered past the exit,
+  but the reader sets that flag on EOF while bytes may still be queued for the
+  parser. `exit` in a real zsh arrives as `Exited` first and the `C` that opened
+  its block a beat later, about one run in eight. Nothing on the wire says "that
+  was the last delta", so stopping on the exit needs a bounded drain after it.
 - **A wire field nothing fills reads exactly like a field nothing *can* fill.**
   `HostMessage::Exited { code: Option<i32> }` shipped in protocol 2 and its sole
   producer hard-coded `code: None` until #299, so every client decoded a field

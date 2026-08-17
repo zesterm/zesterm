@@ -136,14 +136,20 @@ and its number (48ms) is reported rather than gated.
   printed — its output alone, not the prompt and not the command — and `R` runs
   it again. The same chord plus a click does it for any block in scrollback.
 - **An agent can run a command and be told what it really returned.**
-  `zest-mcp`'s `run_isolated` starts a command in a terminal of its own, waits,
-  and reports the status the *process* exited with — the one exit code in this
-  system that nothing running inside the terminal can forge, and the one that
-  had never actually been sent (#299). It works on every shell, including the
-  ones that emit no OSC 133 at all, which is most Linux hosts. A timeout returns
-  the output so far and leaves the command running, so a `sudo` sitting at
-  `Password:` can be answered with `input` or stopped with `interrupt` — the
-  case a sentinel-injecting harness cannot tell from success. → ADR-015.
+  `zest-mcp`'s `run` types a command into a shell the agent already has and
+  waits for the shell's own OSC 133 `D` — so it is the user's *interactive*
+  shell, with their virtualenv, ssh-agent and kubectl context, and the answer is
+  a block with its command, its output and its exit code rather than a byte
+  stream to guess at. `wait` picks a command back up by its block id.
+  `run_isolated` starts a command in a terminal of its own instead, and reports
+  the status the *process* exited with — the one exit code in this system that
+  nothing running inside the terminal can forge, and the one that had never
+  actually been sent (#299). It works on every shell, including the ones that
+  emit no OSC 133 at all, which is most Linux hosts. Neither kills on a timeout:
+  the output so far comes back and the command is left running, so a `sudo`
+  sitting at `Password:` can be answered with `input` or stopped with
+  `interrupt` — the case a sentinel-injecting harness cannot tell from success.
+  → ADR-015.
 
 ### Reflow
 
@@ -232,7 +238,7 @@ below means "do not touch this file".
 | **F** | [`zest-proto` + `zest-daemon`](#ws-f) | `crates/zest-proto/`, `crates/zest-daemon/` | Protocol + daemon ✅ · **applier, app attach, LAN listener next** | [#4](https://github.com/zesterm/zesterm/issues/4) |
 | **G** | [Web client](#ws-g) | `clients/web/`, `zest-proto/fixtures/` | Decoder, renderer, app, deploy, accounts, fleet, tabbed chrome ✅ · **devices screen, local echo next** | [#8](https://github.com/zesterm/zesterm/issues/8) |
 | **H** | [Mesh identity, discovery, transports](#ws-h) | `crates/zest-mesh/`, `crates/zest-cloud/`, `cloud/` | Identity, discovery, pairing, accounts ✅ · the relay Worker and the daemon's `--relay` leg ✅ · **the web client's second data plane next** ([#59](https://github.com/zesterm/zesterm/issues/59)) | [#7](https://github.com/zesterm/zesterm/issues/7) |
-| **I** | [AI is a client of the daemon](#ws-i) | `crates/zest-mcp/`, `zest-proto`, `zest-daemon` | Open — **an agent can read, drive and *run* on this machine's terminals over MCP** (#274) · `run_isolated` + the unforgeable exit code ✅ (#299) · **`run` into the interactive shell, and fleet reach, next** | [#60](https://github.com/zesterm/zesterm/issues/60) |
+| **I** | [AI is a client of the daemon](#ws-i) | `crates/zest-mcp/`, `zest-proto`, `zest-daemon` | Open — **an agent can read, drive and *run* on this machine's terminals over MCP** (#274) · `run_isolated` + the unforgeable exit code ✅ (#299) · `run`/`wait` into the interactive shell ✅ (#274) · **fleet reach, and the token numbers, next** | [#60](https://github.com/zesterm/zesterm/issues/60) |
 
 **Ordering that mattered, and is now settled.** B landed before A, so `zest-app`
 is free of input code and A can fill it with chrome. C1 landed before D, so
@@ -1968,8 +1974,9 @@ it replaces M5's one-line `AiActor` bullet. → [#60](https://github.com/zesterm
       impossible rather than a documented lock ordering — and a reader that
       drains the carried frames before its first blocking read (#54, both
       halves). `hosts`, `sessions`, `screen`, `blocks`, `output`, `input`,
-      `create_session`, `close_session`, proven against a real in-process
-      daemon. Reads always attach *observing*, so an agent looking at a session
+      `interrupt`, `run`, `wait`, `run_isolated`, `create_session`,
+      `close_session`, proven against a real in-process daemon. Only
+      `changed_since` is still missing from the list above. Reads always attach *observing*, so an agent looking at a session
       cannot reshape the window somebody is using — asserted from the client
       side, where dropping `observe` on the way to the wire would not be caught
       by the daemon's own tests.
@@ -1984,7 +1991,7 @@ it replaces M5's one-line `AiActor` bullet. → [#60](https://github.com/zesterm
       wire format rather than a second copy of ours. `tests/stdio.rs` drives
       the built binary as a harness does and asserts every line on stdout is
       JSON-RPC, which is the one failure no unit test can see.
-- [ ] **`run`, and why it is the primitive.** Agent harnesses cannot tell when a
+- [x] **`run`, and why it is the primitive.** Agent harnesses cannot tell when a
       command finished in an interactive shell and inject sentinels to fake it.
       We parse OSC 133 `D` host-side and hold the shell's own exit code — in
       the user's *interactive* shell, with their venv, ssh-agent and kubectl
@@ -2008,13 +2015,38 @@ it replaces M5's one-line `AiActor` bullet. → [#60](https://github.com/zesterm
       `Password:` can be answered — proven by a test that asserts the session
       outlives the deadline. → ADR-015, #299.
 
-      **Still open: `run` itself**, into the user's interactive shell. One
-      correction to #274's plan, from `blocks.rs`: correlating on a block
+      **And `run` itself**, into the user's interactive shell, with `wait` to
+      pick a command back up by the block id a timeout returned. One correction
+      to #274's plan, from `blocks.rs`: correlating on a block
       `id > high_water` never fires. OSC 133 `C` makes `begin_output` mutate
       `blocks.last_mut()`, so the command lands in the *existing* trailing
       prompt block at an id **≤** high_water, and only the following prompt
-      pushes a new one. The anchor is the tail block's identity before the
-      write, not the next id after it.
+      pushes a new one — and `begin_prompt` re-anchors an abandoned prompt
+      rather than pushing (#193), so the id can stay put for a whole session.
+      The anchor is the tail block's identity before the write, not the next id
+      after it, and the transition to wait for is that block's *state*. A `>`
+      where the rule needs `>=` is a `run` that always reports a timeout, on a
+      command that finished instantly, with nothing anywhere saying why. Held
+      against `blocks-zsh`'s recorded frames on every platform, and against a
+      real zsh once.
+
+      **Two things only a live shell showed.** The gap between OSC 133 `D` and
+      the `A` that follows it is a real state a caller lands in: `run` returns
+      the instant `D` closes its block, and zsh emits the next prompt from
+      `precmd` a moment later, so two `run`s back to back hit it almost every
+      time. It is a *different* refusal from "a command is running" because only
+      one of the two is worth waiting out — the other may not end for an hour.
+      And an exit can reach a client **before** the output that preceded it: the
+      daemon snapshots `has_exited` before it diffs the grid precisely so the
+      last screenful is not reordered past the exit, but the reader sets that
+      flag on EOF, which it can notice while bytes are still queued for the
+      parser. `exit` typed into a real zsh then arrives as `Exited` first and the
+      `C` that opened its block a beat later — about one run in eight, reported
+      as a command that never started with the block visibly there a moment
+      afterwards. Nothing on the wire says "that was the last delta", so a
+      bounded drain is the honest answer. Both were found by driving the built
+      binary by hand; no test in the crate would have produced either.
+      → ADR-015, #274.
 - [ ] **Tokens per build, measured.** Byte stream vs delta vs block output for
       `cargo build`, `npm install`, `pytest`. ADR-004 claims ~1 MB of bytes
       against ~3 KB of delta for `cat 1MB`; the agent-facing number belongs

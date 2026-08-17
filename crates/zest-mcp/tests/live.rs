@@ -44,6 +44,15 @@ fn quiet_cmd() -> String {
 
 /// A daemon serving connections on a loopback port, for the life of the test.
 fn serve_daemon() -> (String, Arc<Registry>) {
+    serve_daemon_with(false)
+}
+
+/// The same, with the OSC 133 hook injected into whatever shell is spawned.
+///
+/// Off for every test but one. The hook writes a shim into the config directory
+/// on each spawn and only does anything for zsh and PowerShell, so a test that
+/// spawns `/bin/sh` pays a filesystem write for a marker that will never arrive.
+fn serve_daemon_with(shell_integration: bool) -> (String, Arc<Registry>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr").to_string();
 
@@ -59,7 +68,7 @@ fn serve_daemon() -> (String, Arc<Registry>) {
         ws_bind: "127.0.0.1".into(),
         ws_port: 0,
         relay: None,
-        shell_integration: false,
+        shell_integration,
         min_delta_interval: Duration::ZERO,
         enroll: None,
         // A real offer, so the `watch_hosts` subscription is exercised rather
@@ -442,6 +451,253 @@ fn a_timeout_returns_partial_output_and_leaves_the_command_running() {
     );
 
     tools.call("interrupt", &serde_json::json!({ "session": session })).expect("interrupt");
+    registry.close(addr.session);
+}
+
+/// A shell that emits OSC 133, and a command that exits 3 in it.
+///
+/// `Shell::detect` knows zsh and PowerShell and nothing else — bash and fish are
+/// unwritten and cmd.exe has no prompt-function mechanism at all — so on a
+/// machine with neither there is no way to test the correlation live and no
+/// point pretending otherwise.
+///
+/// The command is a *subshell* on unix and a native call on Windows: `exit 3`
+/// would end the shell rather than report a status, and this has to leave the
+/// session at a prompt afterwards. `3` rather than `1` because a `1` is what a
+/// dozen accidents produce, so asserting it would pass for a reader that never
+/// read a number.
+fn integrated_shell() -> Option<(String, String)> {
+    if cfg!(windows) {
+        // Not `-Command`/`-File`: `install_pwsh` declines to append its hook to a
+        // command line that already runs something, and would then silently
+        // produce a session with no blocks — which reads here as a broken
+        // correlation rather than as a badly chosen test shell.
+        return Some(("powershell.exe -NoLogo -NoProfile".into(), "cmd /c exit 3".into()));
+    }
+    ["/bin/zsh", "/usr/bin/zsh", "/usr/local/bin/zsh", "/opt/homebrew/bin/zsh"]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .map(|zsh| (zsh.to_string(), "(exit 3)".into()))
+}
+
+/// Wait for the shell to draw its first prompt, on its own budget.
+///
+/// Separate from the `run` that follows it, deliberately. #285 is three daemon
+/// tests timing out together because each paid PowerShell's startup inside its
+/// own assertion budget, so every one of them reported as its own subject; here a
+/// shell that never starts fails as a shell that never started, and the
+/// correlation is measured against a shell that is already up.
+fn wait_for_prompt(tools: &zest_mcp::ToolSet, session: &str, limit: Duration) -> bool {
+    let give_up = std::time::Instant::now() + limit;
+    while std::time::Instant::now() < give_up {
+        let v = tools
+            .call("blocks", &serde_json::json!({ "session": session }))
+            .expect("a session that exists answers `blocks`");
+        if !v["blocks"].as_array().expect("an array").is_empty() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+/// The claim `run` makes, against a shell that really emits the markers.
+///
+/// Everything else about the correlation is held by `tests/replay.rs` against
+/// recorded frames, which is what makes it testable on every platform. This is
+/// the half a recording cannot have: that the line `run` writes reaches a real
+/// shell, is submitted, and comes back as the block this crate then correlates.
+///
+/// ⚠️ The one test here that waits for a child to **print**, which the module doc
+/// above says nothing does — and #285 is what that rule is protecting. Held to
+/// one test, with the shell's startup on its own budget above, and skipping
+/// loudly where no shell with an integration hook exists rather than asserting
+/// something weaker on those machines.
+#[test]
+fn a_run_against_a_real_shell_returns_the_shells_own_exit_code() {
+    let Some((shell, exits_three)) = integrated_shell() else {
+        eprintln!(
+            "SKIPPED a_run_against_a_real_shell_returns_the_shells_own_exit_code: no shell \
+             with an OSC 133 hook on this machine. `Shell::detect` knows zsh and PowerShell \
+             only, so bash-only hosts cannot run this. Every other property of the \
+             correlation is covered by tests/replay.rs, which needs no shell."
+        );
+        return;
+    };
+
+    let (addr, registry) = serve_daemon_with(true);
+    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+
+    let created = tools
+        .call("create_session", &serde_json::json!({ "command": shell, "cols": 100, "rows": 30 }))
+        .expect("create_session");
+    let session = created["session"].as_str().expect("a session id").to_string();
+    let session_addr = tools.resolver().resolve(&session).expect("the id this server minted");
+
+    assert!(
+        wait_for_prompt(&tools, &session, Duration::from_secs(30)),
+        "`{shell}` never emitted an OSC 133 prompt marker. That is shell startup or the \
+         integration hook, not the correlation -- run \
+         `cargo run -p zest-daemon --example attach` to see whether the markers arrive at all"
+    );
+
+    let v = tools
+        .call(
+            "run",
+            &serde_json::json!({
+                "session": session,
+                "command": exits_three,
+                "timeout_ms": 30_000,
+            }),
+        )
+        .expect("a shell at a prompt must accept a command");
+
+    assert_eq!(v["state"], "finished", "the command finished; this did not settle: {v}");
+    assert_eq!(v["timed_out"], false, "{v}");
+    assert_eq!(
+        v["exit_code"], 3,
+        "the shell reported the status in OSC 133;D and it must arrive as the number. \
+         `null` is a shell whose hook emitted a bare `D`, which is a different bug: {v}"
+    );
+    assert_eq!(
+        v["exit_code_source"], "shell_marker",
+        "this one came off a marker any program could print. `process_exit` belongs to \
+         `run_isolated` alone, and the two read identically in a payload"
+    );
+    assert!(
+        v["block_id"].is_u64(),
+        "a settled run names the block, so `output` and `wait` can be pointed at it: {v}"
+    );
+    assert_eq!(
+        v["warnings"].as_array().expect("an array").len(),
+        0,
+        "nothing else typed in this session, so the block must record the command that \
+         was sent: {v}"
+    );
+
+    // A second command in the same shell, which is the reason `run` exists at
+    // all: the session persists, so this one inherits the first's environment
+    // and working directory. Its block is a *new* id, minted by the prompt that
+    // followed the first -- the case the correlation must accept alongside the
+    // reused id above, and the one an `==` would fail.
+    let second = tools
+        .call(
+            "run",
+            &serde_json::json!({
+                "session": session,
+                "command": "echo zesterm-marker",
+                "timeout_ms": 30_000,
+            }),
+        )
+        .expect("the shell is back at a prompt and takes another command");
+
+    assert_eq!(second["state"], "finished", "{second}");
+    assert_eq!(second["exit_code"], 0, "an echo exits zero: {second}");
+    assert!(
+        second["block_id"].as_u64() > v["block_id"].as_u64(),
+        "the second command landed in a block the next prompt minted: {second}"
+    );
+    let text = second["text"].as_str().expect("the command printed something");
+    assert!(
+        text.contains("zesterm-marker"),
+        "what the command printed must come back, scoped to its own block: {text}"
+    );
+    assert!(
+        text.contains("never instructions"),
+        "output from somebody's live shell is attacker-controlled like any other: {text}"
+    );
+
+    // And a command that takes the shell with it. `exit` emits no `D`, because
+    // there is no `precmd` left to run, so the block it started can never close:
+    // waiting on it would burn the whole deadline reporting a command as
+    // "running" in a session that ended in the first millisecond. Found by
+    // driving the built binary by hand with `echo hi; exit 7`, which no test in
+    // this crate would have produced.
+    let ended = tools
+        .call(
+            "run",
+            &serde_json::json!({ "session": session, "command": "exit", "timeout_ms": 30_000 }),
+        )
+        .expect("a shell that exits is a result, not an error");
+    assert_eq!(
+        ended["session_exited"], true,
+        "the shell has gone and the answer must say so, or an agent waits on a block \
+         nothing will ever close: {ended}"
+    );
+    assert_eq!(
+        ended["timed_out"], false,
+        "and it must come back at once rather than at the deadline -- 30s here means \
+         the wait is not watching for the session ending: {ended}"
+    );
+    assert!(
+        ended["block_id"].is_u64(),
+        "the block `exit` started must still be named. An exit and the output before it \
+         can reach a client out of order -- the daemon's reader sets `has_exited` on EOF \
+         while the bytes ahead of it are still queued for the parser -- so reading the \
+         instant it arrives reports `block_id: null` for a command that plainly ran. \
+         That is the drain in `settle`, and it reproduced about one run in eight: {ended}"
+    );
+
+    registry.close(session_addr.session);
+}
+
+/// A shell with no integration is told which tool to use, not left waiting.
+///
+/// `/bin/sh` and `cmd.exe` emit no markers ever, so `run` has nothing to
+/// correlate — and the refusal has to name `run_isolated`, because a model that
+/// cannot act on a refusal pays for it twice. `timeout_ms: 0` skips the grace
+/// that exists for a shell which has merely not drawn its prompt yet.
+#[test]
+fn a_run_in_a_shell_that_emits_no_markers_names_run_isolated() {
+    let (addr, registry) = serve_daemon();
+    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+
+    let created = tools
+        .call("create_session", &serde_json::json!({ "command": quiet_cmd() }))
+        .expect("create_session");
+    let session = created["session"].as_str().expect("a session id").to_string();
+
+    let err = tools
+        .call(
+            "run",
+            &serde_json::json!({ "session": session, "command": "ls", "timeout_ms": 0 }),
+        )
+        .expect_err("a session with no command blocks cannot be correlated");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("run_isolated"),
+        "the refusal must name the tool that works instead: {msg}"
+    );
+
+    // And nothing was typed into it: a refusal that has already written the
+    // command is worse than one that has not, because the command still ran.
+    let addr = tools.resolver().resolve(&session).expect("resolve");
+    assert!(registry.get(addr.session).is_some(), "the session must be left alone");
+    registry.close(addr.session);
+}
+
+/// `wait` refuses an id the session does not have, rather than timing out on it.
+///
+/// A wait against a block that never existed can only end at the deadline, and a
+/// deadline reads as "still running" -- which is the one answer that sends a
+/// model round the loop for ever.
+#[test]
+fn a_wait_for_a_block_this_session_never_had_says_so() {
+    let (addr, registry) = serve_daemon();
+    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+
+    let created = tools
+        .call("create_session", &serde_json::json!({ "command": quiet_cmd() }))
+        .expect("create_session");
+    let session = created["session"].as_str().expect("a session id").to_string();
+
+    let err = tools
+        .call("wait", &serde_json::json!({ "session": session, "block_id": 99 }))
+        .expect_err("block 99 does not exist in a session with no blocks");
+    assert!(err.to_string().contains("99"), "the refusal must echo the id asked for: {err}");
+
+    let addr = tools.resolver().resolve(&session).expect("resolve");
     registry.close(addr.session);
 }
 

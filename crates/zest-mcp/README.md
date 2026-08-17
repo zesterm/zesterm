@@ -27,10 +27,41 @@ prints the default.
 | `screen` | what a session shows now, as text |
 | `blocks` | the commands that have run — no output text, so history is cheap |
 | `output` | what one command printed, by block id |
-| `input` | type into a session, optionally pressing Enter |
+| `run` | run a command in an existing shell and wait for the shell to say it ended |
+| `wait` | wait for a command `run` left running, by its block id |
+| `run_isolated` | run a command in a terminal of its own, for the **unforgeable** exit code |
+| `input` / `interrupt` | type into a session, or send it Ctrl+C |
 | `create_session` / `close_session` | start a terminal, or end one |
 
 Sessions are named `<host>:<session>`, e.g. `540d2d00:7`.
+
+## `run`, and why it is the primitive
+
+Agent harnesses cannot tell when a command finished in an interactive shell, so
+they inject a sentinel — `echo __done_$?` — and read it back. That cannot
+distinguish a command that ended from one sitting at `Password:`, and it does not
+survive the user's own shell being a real one.
+
+The shell already says. `run` writes the line, then waits for the OSC 133 `D` the
+shell emits when the command ends, parsed host-side into a block with its own
+exit code — in the user's *interactive* shell, so a virtualenv, an ssh-agent and
+a kubectl context are all where they were. **A timeout does not kill**: the block
+comes back `running` with its partial output and the session is left alone, so
+the `Password:` case can be answered with `input`, stopped with `interrupt`, or
+waited on again with `wait`.
+
+`run_isolated` is the other half. It needs no shell integration — bash, fish and
+cmd.exe emit no markers, which is most Linux hosts rather than an edge case — and
+its status comes from the process rather than from a marker, so it is the one
+exit code here that nothing running inside the terminal can forge.
+
+**The anchor is the tail block, not the next id.** OSC 133 `C` mutates
+`blocks.last_mut()`, so a submitted command lands in the trailing *prompt* block
+and mints no new id — and an abandoned prompt is re-anchored rather than pushed
+(#193), so the id can stay put for a whole session. Correlating on `id >
+high_water` never fires: every `run` reports a timeout, on a command that
+finished instantly, with nothing anywhere saying why. `src/run.rs` holds the rule
+and the tests, and `tests/replay.rs` holds it against a real recorded zsh.
 
 ## What makes the shapes small
 
@@ -105,14 +136,24 @@ own*, and its absence is the mitigation rather than an omission.
 
 ## Tests
 
+- `src/run.rs` — the correlation as a pure function: every refusal, every id
+  case, nothing spawned.
 - `tests/replay.rs` — the replica against real recorded sessions (`blocks-zsh`,
   `vim-macos`, and three more) replayed through `FrameReader`. No pty, no shell.
+  `run`'s correlation is held here too, against a genuine zsh session recorded
+  off a real pty, which is what makes the shell-shaped half of this crate
+  testable on every CI platform.
 - `tests/live.rs` — the connection and tools against a real in-process daemon.
 - `tests/stdio.rs` — the built binary, driven over stdin/stdout as a harness
   drives it, asserting that every line on stdout is JSON-RPC.
 
-Nothing in these waits for a child to print: every assertion is about the
-connection, which is why they do not inherit the flake [#285] tracks.
+Almost nothing here waits for a child to print: every other assertion is about
+the connection, which is why they do not inherit the flake [#285] tracks. The one
+exception is `a_run_against_a_real_shell_returns_the_shells_own_exit_code`, which
+cannot exist without a shell that emits the markers — it puts the shell's startup
+on its own budget so a slow runner fails as a slow runner, and where neither zsh
+nor PowerShell is installed it says so on stderr and returns rather than
+asserting something weaker.
 
 [#60]: https://github.com/zesterm/zesterm/issues/60
 [#274]: https://github.com/zesterm/zesterm/issues/274
