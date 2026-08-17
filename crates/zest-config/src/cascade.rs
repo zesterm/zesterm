@@ -325,22 +325,63 @@ mod tests {
     }
 
     #[test]
-    fn the_user_file_is_the_weakest_thing_that_can_name_a_theme() {
+    fn nothing_beneath_the_users_file_names_a_theme() {
         // There used to be an OS-appearance layer between `Default` and `User`
-        // that forced `appearance.theme = "paper"`, and being a layer at all
-        // was the bug: it sat *below* the user's file, so an explicit `theme =`
-        // beat it -- which is everyone who cared enough to choose one -- and it
+        // forcing `appearance.theme = "paper"`, and being a layer at all was
+        // the bug: it sat *below* the user's file, so an explicit `theme =`
+        // beat it -- everyone who cared enough to choose one -- and it
         // hardcoded one theme rather than reading `appearance.light_theme`.
         // Following the OS is a property of the live window, resolved by the
-        // app per repaint, so nothing weaker than `User` may name a theme
-        // again.
-        let r = resolve(&[layer(Source::User, "[appearance]\ntheme = \"nord\"\n")]);
-        assert_eq!(r.settings.appearance.theme, "nord");
+        // app per repaint (`theme_id`), so nothing weaker than `User` may name
+        // a theme again.
+        //
+        // Asserted as "the theme has no provenance at all when no layer sets
+        // it", which is the mechanically checkable half: a layer that named it
+        // would have to record itself here. The first version of this test
+        // resolved a `User` layer and checked provenance came back `User`,
+        // which passed identically before the fix -- `resolve` takes the layers
+        // it is given and the deleted layer was added by `load`. A test that
+        // cannot fail for the reason it names is worth less than no test.
+        let r = resolve(&[]);
         assert_eq!(
-            r.provenance.get("appearance.theme"),
-            Some(&Source::User),
-            "the user's file owns the theme; no layer beneath it may claim the key"
+            r.settings.appearance.theme,
+            Settings::default().appearance.theme,
+            "with no layers the theme is the compiled default"
         );
+        assert!(
+            !r.provenance.contains_key("appearance.theme"),
+            "the default comes from serde, not from a layer claiming the key: {:?}",
+            r.provenance.get("appearance.theme")
+        );
+    }
+
+    #[test]
+    fn no_source_sits_between_the_defaults_and_the_users_file() {
+        // The other half, and the one that actually blocks a reintroduction:
+        // `Source` is ordered weakest to strongest, so a new pre-user layer
+        // needs a new variant between `Default` and `User`. This match is
+        // exhaustive on purpose -- adding one stops the crate compiling and
+        // sends whoever added it to the comment above.
+        fn name(s: &Source) -> &'static str {
+            match s {
+                Source::Default => "default",
+                Source::User => "config file",
+                Source::Profile(_) => "profile",
+                Source::Workspace => "workspace config",
+                Source::CommandLine => "command line",
+            }
+        }
+        let order = [
+            Source::Default,
+            Source::User,
+            Source::Profile("p".into()),
+            Source::Workspace,
+            Source::CommandLine,
+        ];
+        for pair in order.windows(2) {
+            assert!(pair[0] < pair[1], "{} must be weaker than {}", name(&pair[0]), name(&pair[1]));
+        }
+        assert_eq!(name(&Source::Default), "default");
     }
 
     #[test]
