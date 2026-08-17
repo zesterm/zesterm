@@ -7283,7 +7283,14 @@ impl App {
         (rows, actions)
     }
 
-    /// Act on a picker row. Every action closes the picker: the user chose.
+    /// Act on a picker row.
+    ///
+    /// **Every action closes the picker, with one deliberate exception.** The
+    /// rule is "the user chose, so get out of the way" — and ⇧⏎ on a block is
+    /// the one gesture where choosing the row is only *half* the answer: it
+    /// says what to run and leaves open where. That arm re-opens the picker
+    /// holding the command (see [`Pending`]), so the second half is the next
+    /// row picked rather than a second overlay.
     fn run_picker_action(&mut self, action: PickerAction, el: &ActiveEventLoop, shift: bool) {
         // Anything pending rides exactly one picker choice: a host or session
         // row carries it, anything else abandons it (and dismissing the picker
