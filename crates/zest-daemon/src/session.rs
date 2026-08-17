@@ -13,7 +13,7 @@
 //! [`Session::detach`] does not touch the child.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -160,7 +160,9 @@ impl Session {
                 .spawn(move || {
                     let mut buf = vec![0u8; PARSE_CHUNK];
                     loop {
-                        let n = match reader.read(&mut buf) {
+                        // `Err(_) => break` here treated a signal as the end of the
+                        // stream, which closes a healthy peer or ends a live shell.
+                        let n = match crate::read_retrying(&mut reader, &mut buf) {
                             Ok(0) | Err(_) => break,
                             Ok(n) => n,
                         };
@@ -715,6 +717,9 @@ fn cursor_of(term: &Terminal) -> CursorState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The reader trait is only named by the fakes below; `read_retrying` is
+    // what the module itself reads through.
+    use std::io::Read;
     use std::time::{Duration, Instant};
 
     /// A command that prints `text` and exits, on either platform.

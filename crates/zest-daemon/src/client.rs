@@ -612,7 +612,11 @@ impl DaemonClient {
                 return frame::decode::<HostMessage>(&body)
                     .map_err(|e| DaemonError::Transport(e.to_string()));
             }
-            let n = self.read.read(&mut buf).map_err(|e| DaemonError::Transport(e.to_string()))?;
+            // A signal is not a dropped connection: see `read_retrying`. Here
+            // it reported `Transport("Interrupted system call")` from the
+            // handshake, which reads as the daemon refusing a key it accepted.
+            let n = crate::read_retrying(&mut self.read, &mut buf)
+                .map_err(|e| DaemonError::Transport(e.to_string()))?;
             if n == 0 {
                 return Err(DaemonError::Closed);
             }

@@ -610,6 +610,21 @@ you need before you trip on it.
   this** (it is BMP), so the corpus refuses to generate without something past
   U+FFFF in it.
 
+### Signals
+
+- **`EINTR` is not the end of a stream, and every read loop in `zest-daemon`
+  treated it as one.** A blocking `read` returns it when a signal lands while it
+  is parked, and a process that reaps children gets `SIGCHLD` — so a daemon
+  serving sessions, or a client that has started one, can have an unrelated read
+  interrupted by a shell exiting elsewhere. `Err(_) => break` then closes a
+  healthy peer, ends a live shell, or reports
+  `Transport("Interrupted system call (os error 4)")` from a *handshake*, which
+  reads as the daemon refusing a key it had accepted. Rare enough to look like a
+  flake and not one: it first appeared on `test (ubuntu-latest)` when a change
+  added enough child processes to make `SIGCHLD` common. One
+  `read_retrying`, because three call sites that each have to remember is how
+  two of them forget. (`zest-daemon/src/lib.rs`; #274)
+
 ### Blocks and shell integration
 
 - **A prompt redraw re-emits `OSC 133;A`, and a block with no end claims every
