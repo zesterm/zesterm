@@ -107,6 +107,11 @@ pub struct Viewport<'a> {
     /// animation still in flight — which is what keeps a trail a decoration
     /// rather than a source of truth.
     pub cursor_offset: [f32; 2],
+    /// OpenType features to shape the grid with, and whether ligatures may
+    /// form. Empty and `false` is the shipped default, and is what keeps the
+    /// per-character fast path -- see [`Scene::emit_row_glyphs`].
+    pub features: &'a [zest_font::Feature],
+    pub ligatures: bool,
     /// The shape a focused cursor draws.
     ///
     /// Already resolved by the caller: `cursor.shape` is the default and
@@ -500,6 +505,17 @@ impl Scene {
         let baseline = y + metrics.baseline as f32;
         let Some(r) = resolved_row(grid, vp, row) else { return };
 
+        // Shaping is opt-in, and the branch is the point rather than an
+        // optimization. `glyph_for` is a charmap lookup with no GSUB, so
+        // `typography.features` and `typography.ligatures` cannot work without
+        // it -- and the default config asks for neither, so the overwhelming
+        // majority of sessions keep the per-character path they have always
+        // had, byte for byte, and the throughput targets with it.
+        let shaping = !vp.features.is_empty() || vp.ligatures;
+        if shaping {
+            self.emit_row_runs(device, queue, atlas, fonts, r, grid, vp, ox, baseline, cw, clip);
+        }
+
         for col in 0..grid.cols() {
             let cell = r.get(col).copied().unwrap_or_default();
 
@@ -518,7 +534,7 @@ impl Scene {
                 cell.flags.contains(CellFlags::ITALIC),
             );
 
-            if !is_blank(&cell) {
+            if !is_blank(&cell) && !shaping {
                 if let Some(inst) =
                     self.glyph_instance(device, queue, atlas, fonts, cell.ch, style, pen_x, baseline, fg, clip)
                 {
@@ -543,6 +559,103 @@ impl Scene {
         }
     }
 
+    /// Emit a row's base glyphs as *shaped runs*, honouring `features` and
+    /// `ligatures`.
+    ///
+    /// The trick is `shape_run`'s own: honour the shaper for glyph
+    /// **selection** and ignore it for **positioning**. Each cluster is placed
+    /// at the starting cell of the text it came from, so a ligature draws once,
+    /// at the first of the cells it spans, and every other cell keeps its
+    /// column. The grid stays a grid.
+    ///
+    /// A run breaks wherever the grid's model stops being a plain sequence of
+    /// characters, because the shaper knows nothing about any of it:
+    ///
+    /// * a **style change**, since bold and italic are different faces;
+    /// * a **blank**, which ends a word for shaping just as it does for reading;
+    /// * a **wide cell** and its spacer, whose second column is not a character;
+    /// * a cell carrying **combining marks**, which live in the row's side
+    ///   table and are drawn separately;
+    /// * a **hidden** cell.
+    ///
+    /// Selection is deliberately *not* a break: it colours backgrounds, and a
+    /// ligature spanning the edge of a highlight still reads correctly. The
+    /// cursor is not a break either — it is drawn over the text rather than in
+    /// place of it, so a caret inside a ligature is a caret on a wide glyph,
+    /// which is the same thing a caret on a CJK character already is.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_row_runs(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        atlas: &mut Atlas,
+        fonts: &mut Fonts,
+        r: &Row,
+        grid: &Grid,
+        vp: &Viewport<'_>,
+        ox: f32,
+        baseline: f32,
+        cw: f32,
+        clip: [f32; 4],
+    ) {
+        for run in segment_row(r, grid.cols(), vp.palette) {
+            self.flush_run(
+                device, queue, atlas, fonts, &run.text, &run.starts, run.style, run.fg, ox,
+                baseline, cw, clip, vp,
+            );
+        }
+    }
+
+    /// Shape one accumulated run and place its glyphs at their starting cells.
+    #[allow(clippy::too_many_arguments)]
+    fn flush_run(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        atlas: &mut Atlas,
+        fonts: &mut Fonts,
+        text: &str,
+        starts: &[(usize, usize)],
+        style: Style,
+        fg: LinearRgba,
+        ox: f32,
+        baseline: f32,
+        cw: f32,
+        clip: [f32; 4],
+        vp: &Viewport<'_>,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        // `can_use_fast_path` asks only about ligatures, because that is the
+        // question it was written for. Features have to be asked about too: an
+        // ASCII run with `ss01` set would otherwise take the charmap path and
+        // the feature would silently do nothing -- which is the exact bug this
+        // whole sweep is closing, reintroduced one layer down.
+        let shaped = if Fonts::can_use_fast_path(text, vp.ligatures) && vp.features.is_empty() {
+            fonts.map_ascii(text, style)
+        } else {
+            fonts.shape_run(text, style, vp.features)
+        };
+
+        for g in shaped {
+            // The cluster is a byte offset into `text`; the column it started
+            // at is what the grid cares about. `rev` + `find` because a cluster
+            // may begin mid-character for a combining sequence the shaper kept
+            // together.
+            let Some(&(_, col)) = starts.iter().rev().find(|(byte, _)| *byte <= g.cluster as usize)
+            else {
+                continue;
+            };
+            let pen_x = ox + col as f32 * cw;
+            if let Some(inst) =
+                self.glyph_at(device, queue, atlas, fonts, g.font, g.glyph, pen_x, baseline, fg, clip)
+            {
+                self.glyphs.push(inst);
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn glyph_instance(
         &mut self,
@@ -558,6 +671,25 @@ impl Scene {
         clip: [f32; 4],
     ) -> Option<GlyphInstance> {
         let (font, glyph) = fonts.glyph_for(ch, style)?;
+        self.glyph_at(device, queue, atlas, fonts, font, glyph, pen_x, baseline, color, clip)
+    }
+
+    /// [`Self::glyph_instance`] for a glyph the caller has already resolved —
+    /// which is what shaping produces, and the reason the two are split.
+    #[allow(clippy::too_many_arguments)]
+    fn glyph_at(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        atlas: &mut Atlas,
+        fonts: &mut Fonts,
+        font: zest_font::FontId,
+        glyph: u16,
+        pen_x: f32,
+        baseline: f32,
+        color: LinearRgba,
+        clip: [f32; 4],
+    ) -> Option<GlyphInstance> {
         let key: GlyphKey = fonts.key(font, glyph);
 
         let cached = match atlas.get(&key) {
@@ -799,6 +931,80 @@ fn cursor_rect(shape: CursorShape, cell: [f32; 4], metrics: CellMetrics) -> [f32
     }
 }
 
+/// One shapeable stretch of a row: same face, same colour, no grid oddities.
+#[derive(Debug, Default, PartialEq)]
+struct Run {
+    text: String,
+    /// `(byte offset into `text`, the column that character started at)`.
+    ///
+    /// A shaped cluster reports a byte offset, and the grid needs a column;
+    /// this is the only thing that maps between them, which is what places a
+    /// ligature at the first of the cells it spans instead of at a byte index.
+    starts: Vec<(usize, usize)>,
+    style: Style,
+    fg: LinearRgba,
+}
+
+/// Split a row into runs a shaper can be handed.
+///
+/// A run breaks wherever the grid stops being a plain sequence of characters,
+/// because the shaper knows about none of it:
+///
+/// * a **style or colour change**, since one shaped run is one face and one
+///   instance colour;
+/// * a **blank**, which ends a word for shaping as it does for reading;
+/// * a **wide cell** and its spacer, whose second column holds no character;
+/// * a cell carrying **combining marks**, which live in the row's side table
+///   and are drawn separately;
+/// * a **hidden** cell.
+///
+/// Selection is deliberately not a break: it colours backgrounds, and a
+/// ligature spanning the edge of a highlight still reads correctly. Nor is the
+/// cursor, which is drawn *over* the text rather than in place of it — a caret
+/// inside a ligature is a caret on a wide glyph, which is what a caret on a CJK
+/// character already is.
+///
+/// Pure, and separate from the emitting, because this is the part that can be
+/// wrong in ways a screenshot will not show: a run that swallows a wide cell
+/// puts every glyph after it one column left.
+fn segment_row(r: &Row, cols: usize, palette: &PaletteSnapshot) -> Vec<Run> {
+    let mut runs: Vec<Run> = Vec::new();
+    let mut cur = Run::default();
+    for col in 0..cols {
+        let cell = r.get(col).copied().unwrap_or_default();
+        let breaks = is_blank(&cell)
+            || cell
+                .flags
+                .intersects(CellFlags::WIDE_SPACER | CellFlags::HIDDEN | CellFlags::WIDE)
+            || r.extra(&cell).is_some_and(|e| !e.zerowidth.is_empty());
+        let style = Style::new(
+            cell.flags.contains(CellFlags::BOLD),
+            cell.flags.contains(CellFlags::ITALIC),
+        );
+        let fg = cell_fg(&cell, palette);
+        let changed = !cur.text.is_empty() && (style != cur.style || fg != cur.fg);
+        if breaks || changed {
+            if !cur.text.is_empty() {
+                runs.push(std::mem::take(&mut cur));
+            }
+            cur = Run::default();
+        }
+        if breaks {
+            continue;
+        }
+        if cur.text.is_empty() {
+            cur.style = style;
+            cur.fg = fg;
+        }
+        cur.starts.push((cur.text.len(), col));
+        cur.text.push(cell.ch);
+    }
+    if !cur.text.is_empty() {
+        runs.push(cur);
+    }
+    runs
+}
+
 fn is_blank(cell: &Cell) -> bool {
     cell.ch == ' ' || cell.ch == '\0'
 }
@@ -944,6 +1150,8 @@ mod tests {
 
     fn viewport<'a>(grid: &'a Grid, palette: &'a PaletteSnapshot, opacity: f32) -> Viewport<'a> {
         Viewport {
+            features: &[],
+            ligatures: false,
             rect: [8.0, 8.0, 200.0, 100.0],
             grid,
             palette,
@@ -1158,6 +1366,77 @@ mod tests {
         assert_eq!(scene.rects.len(), 1, "a background the backdrop does not supply must be drawn");
         assert_eq!(scene.rects[0].rect, vp.rect, "and it covers the viewport, not the window");
         assert_eq!(scene.rects[0].fill, window_bg(&other, 1.0));
+    }
+
+    /// A row from text, with an optional style applied to one span.
+    fn row_of(text: &str) -> Grid {
+        let mut g = Grid::new(text.chars().count().max(1), 1, 0);
+        for (i, ch) in text.chars().enumerate() {
+            g.row_mut(0).get_mut(i).unwrap().ch = ch;
+        }
+        g
+    }
+
+    #[test]
+    fn a_run_is_one_face_one_colour_and_no_grid_oddities() {
+        let pal = palette();
+        let g = row_of("ab cd");
+        let runs = segment_row(g.row(0), 5, &pal);
+        assert_eq!(runs.len(), 2, "a blank ends a run: {runs:?}");
+        assert_eq!(runs[0].text, "ab");
+        assert_eq!(runs[1].text, "cd");
+        assert_eq!(
+            runs[1].starts,
+            vec![(0, 3), (1, 4)],
+            "the second run remembers the columns it came from, not byte indices"
+        );
+    }
+
+    #[test]
+    fn a_style_change_ends_a_run() {
+        // One shaped run is one face. Bold and regular are different faces, so
+        // a ligature must not form across the boundary between them.
+        let pal = palette();
+        let mut g = row_of("abcd");
+        for i in 2..4 {
+            g.row_mut(0).get_mut(i).unwrap().flags.insert(CellFlags::BOLD);
+        }
+        let runs = segment_row(g.row(0), 4, &pal);
+        assert_eq!(runs.len(), 2, "bold starts a new run: {runs:?}");
+        assert_eq!(runs[0].text, "ab");
+        assert_eq!(runs[1].text, "cd");
+    }
+
+    #[test]
+    fn a_wide_cell_and_its_spacer_are_never_inside_a_run() {
+        // The failure this rules out is silent and total: a run that swallowed
+        // the spacer would place every glyph after it one column to the left,
+        // and the row would look plausible while being wrong from the CJK
+        // character onward.
+        let pal = palette();
+        // Four columns, not three: a wide character *occupies two*, which is
+        // the whole point. Writing it into three silently overwrote the tail
+        // and the first version of this test passed for the wrong reason.
+        let mut g = row_of("a漢xb");
+        g.row_mut(0).get_mut(1).unwrap().flags.insert(CellFlags::WIDE);
+        {
+            let c = g.row_mut(0).get_mut(2).unwrap();
+            c.ch = ' ';
+            c.flags.insert(CellFlags::WIDE_SPACER);
+        }
+        g.row_mut(0).get_mut(3).unwrap().ch = 'b';
+        let runs = segment_row(g.row(0), 4, &pal);
+        assert_eq!(runs.len(), 2, "the wide cell splits the row: {runs:?}");
+        assert_eq!(runs[0].text, "a");
+        assert_eq!(runs[1].text, "b");
+        assert_eq!(runs[1].starts, vec![(0, 3)], "and the tail keeps its real column");
+    }
+
+    #[test]
+    fn an_empty_row_shapes_nothing() {
+        let pal = palette();
+        let g = Grid::new(8, 1, 0);
+        assert!(segment_row(g.row(0), 8, &pal).is_empty(), "blanks alone are not a run");
     }
 
     #[test]

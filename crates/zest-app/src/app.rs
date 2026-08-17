@@ -56,6 +56,17 @@ const FLEET_CARD_SESSIONS: usize = 4;
 pub struct Config {
     pub font_families: Vec<String>,
     pub typography: Typography,
+    /// OpenType features to shape the grid with, `liga`-style.
+    ///
+    /// Parsed once here rather than per frame: the grid path consults this for
+    /// every run of every row.
+    pub features: Vec<zest_font::Feature>,
+    /// Let ligatures form on the grid.
+    ///
+    /// Together with `features`, this is what turns run shaping on at all —
+    /// `glyph_for` is a charmap lookup with no GSUB, so neither setting can
+    /// work without it, and neither costs anything when both are off.
+    pub ligatures: bool,
     /// Generate U+2500–U+259F at cell size rather than taking the font's.
     ///
     /// Not part of [`Typography`] because it changes what a glyph *is*, not how
@@ -167,6 +178,22 @@ impl From<&zest_config::Settings> for Config {
                 letter_spacing: s.typography.letter_spacing.clamp(-5.0, 20.0),
                 ..Default::default()
             },
+            features: s
+                .typography
+                .features
+                .iter()
+                .filter_map(|f| {
+                    let parsed = zest_font::Feature::parse(f);
+                    if parsed.is_none() {
+                        // Dropped, not fatal: a typo in one tag must not cost
+                        // the user their whole config, and the schema calls
+                        // this a list of tags rather than a grammar.
+                        tracing::warn!(tag = %f, "not an OpenType feature tag; ignoring");
+                    }
+                    parsed
+                })
+                .collect(),
+            ligatures: s.typography.ligatures,
             builtin_box_drawing: s.typography.builtin_box_drawing,
             // Carried, not clamped: `resolve_text_tuning` owns the range, so
             // there is one place that decides what an out-of-range gamma means.
@@ -9018,6 +9045,8 @@ impl App {
                             selection_bg: pane_selection_bg(self.selection_bg, left_identity),
                             preedit: if left_focused { preedit } else { None },
                             cursor_on: caret_on,
+                            features: &self.config.features,
+                            ligatures: self.config.ligatures,
                             cursor_shape: term_l.cursor_style().shape,
                             cursor_offset: if left_focused { cursor_offset_px } else { [0.0, 0.0] },
                             row_map: if left_focused { fold_map.as_deref() } else { None },
@@ -9035,6 +9064,8 @@ impl App {
                             selection_bg: pane_selection_bg(self.selection_bg, right_identity),
                             preedit: if focus_right { preedit } else { None },
                             cursor_on: caret_on,
+                            features: &self.config.features,
+                            ligatures: self.config.ligatures,
                             cursor_shape: term_r.cursor_style().shape,
                             cursor_offset: if focus_right { cursor_offset_px } else { [0.0, 0.0] },
                             row_map: if focus_right { fold_map.as_deref() } else { None },
@@ -9100,6 +9131,8 @@ impl App {
                                 zest_render_wgpu::Preedit { text: &p.text, cursor: p.cursor }
                             }),
                             cursor_on: caret_on,
+                            features: &self.config.features,
+                            ligatures: self.config.ligatures,
                             cursor_shape: term.cursor_style().shape,
                             cursor_offset: cursor_offset_px,
                             row_map: fold_map.as_deref(),
@@ -12674,6 +12707,50 @@ mod fleet_device_row_tests {
         let rows = fleet_device_rows(&[device(3, "studio-app", "desktop", true)], None);
         assert_eq!(rows[0].action, FleetDeviceAction::Vouch);
         assert_eq!(rows[0].detail, "desktop · approved");
+    }
+}
+
+#[cfg(test)]
+mod typography_tests {
+    use super::Config;
+
+    fn config_with(features: &[&str], ligatures: bool) -> Config {
+        let mut s = zest_config::Settings::default();
+        s.typography.features = features.iter().map(|f| (*f).to_string()).collect();
+        s.typography.ligatures = ligatures;
+        Config::from(&s)
+    }
+
+    #[test]
+    fn the_documented_spellings_all_parse() {
+        // The schema says "`liga`-style. Prefix with `-` to disable", and the
+        // parser takes the Alacritty/Ghostty/Kitty forms so an existing config
+        // pastes straight in.
+        let c = config_with(&["calt", "-liga", "+ss01", "cv02=2"], false);
+        assert_eq!(c.features.len(), 4, "every documented spelling survives");
+        assert_eq!(c.features[1].value, 0, "a `-` prefix disables");
+        assert_eq!(c.features[2].value, 1, "a `+` prefix enables");
+        assert_eq!(c.features[3].value, 2, "`=n` carries the value");
+    }
+
+    #[test]
+    fn a_bad_tag_is_dropped_and_the_rest_survive() {
+        // A typo in one tag must not cost the user their whole config: the
+        // schema calls this a list of tags, not a grammar.
+        let c = config_with(&["calt", "nonsense-tag", "ss01"], false);
+        assert_eq!(c.features.len(), 2, "the two real tags still apply");
+    }
+
+    #[test]
+    fn the_default_config_asks_for_no_shaping_at_all() {
+        // The risk control for the whole group. `glyph_for` is a charmap lookup
+        // with no GSUB, so shaping is what makes these settings possible -- and
+        // it runs only when one of them is set. A default session keeps the
+        // per-character path it has always had, and the throughput targets
+        // with it.
+        let c = Config::default();
+        assert!(c.features.is_empty());
+        assert!(!c.ligatures);
     }
 }
 
