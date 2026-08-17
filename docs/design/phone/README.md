@@ -1,6 +1,6 @@
 # The phone client — design
 
-The Lynx app for M5, designed against what now exists: the daemon's WebSocket
+The Lynx app, designed against what now exists: the daemon's WebSocket
 transport, the sidecar's `SessionDirectory` actor, and the platform-blind
 TypeScript packages the web client just proved end to end. This is a design
 document, not a build; where it commits the codebase to something, it says so.
@@ -85,13 +85,13 @@ covered per-frame by `expect.blocks` in the conformance fixtures.
   client can switch representations structurally.
 
 Rendering the grid on Lynx is the one genuinely open piece: Lynx (0.26) has no
-canvas package. Three options, in preference order, decided when M5 starts:
+canvas package. Three options, in preference order, decided when the build starts:
 
 1. **Native text rows** — a `lynx-list` of styled text runs built from
    `expandRow`. Terminal-correct monospace metrics are the risk.
 2. **A webview** (`lynx-webview`) hosting `@zesterm/render`'s painter — reuses
    the proven renderer at the cost of a webview boundary for input.
-3. A Lynx canvas API, if one lands before M5.
+3. A Lynx canvas API, if one lands first.
 
 Blocks-first makes this genuinely deferrable: the alt-screen grid is the
 *exception* view on a phone, not the product.
@@ -124,10 +124,11 @@ for, and it makes the phone the first client with a real device identity.
 - The transcript and preimage are already phone-compatible **by design**:
   `identity.rs` chose prefix-then-plain-Ed25519 over Ed25519ctx explicitly so
   `@noble/ed25519` — which `@zesterm/auth` runs — can verify everywhere.
-- M4's enrollment and 30-second single-use attach tickets slot in behind the
+- Enrollment and 30-second single-use attach tickets slot in behind the
   same `Purpose` domains (`enrollment`, `attach-ticket`), reserved in the wire
-  today. E2E encryption (Noise IK) is M5's follow-on, on the roadmap where it
-  belongs.
+  today. E2E encryption has since shipped (protocol 3, signed ephemeral
+  X25519 — see ADR-008), so the phone gets it for free through
+  `@zesterm/auth`.
 
 ## What this doc deliberately does not decide
 

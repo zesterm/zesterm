@@ -615,3 +615,132 @@ fn the_corpus_contains_real_terminal_output() {
 fn a_real_vim_session() {
     replay("vim-macos", 80, 24);
 }
+
+/// A recorded ConPTY height drag, with all three participants along for it.
+///
+/// Not in `CORPUS`, deliberately: its repaints are laid out for the specific
+/// sizes of the recorded gesture, so the generic replays would feed them into
+/// wrong-sized grids. Driven here the way the daemon drives it — the host
+/// resized at the recorded moments, a keyframe pushed to every client on each
+/// resize (`reconcile_size`) and on every `ViewportRebased`/`HistoryCleared`
+/// (`keyframe_everyone`) — because until now the conformance suite never saw a
+/// resize at all, which is how three different un-bank rules shipped in three
+/// readers. (#313)
+#[test]
+fn a_recorded_conpty_drag_keeps_all_three_participants_agreeing() {
+    use zest_core::TermEvent;
+
+    let path = corpus_path("resize-drag");
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    assert!(bytes.starts_with(b"VTREC1\n"), "not a .vtrec");
+    let mut timed = Vec::new();
+    let mut i = 7;
+    while i + 12 <= bytes.len() {
+        let us = u64::from_le_bytes(bytes[i..i + 8].try_into().unwrap());
+        let len = u32::from_le_bytes(bytes[i + 8..i + 12].try_into().unwrap()) as usize;
+        // A truncated recording, or a length field misread as a huge number,
+        // fails here by name rather than as an out-of-bounds slice.
+        assert!(
+            i + 12 + len <= bytes.len(),
+            "{}: chunk at byte {i} claims {len} bytes past the end -- the recording \
+             is truncated or the framing is being misread",
+            path.display()
+        );
+        timed.push((us, bytes[i + 12..i + 12 + len].to_vec()));
+        i += 12 + len;
+    }
+
+    // The geometry and resize timing are the fixture's, not the file's — the
+    // same constants as the replay in `zest-core/tests/vt.rs`.
+    let mut term = Terminal::new(100, 30, 500);
+    term.set_pty_restates_viewport(true);
+    let mut enc = Encoder::new();
+    let mut view = GridView::new();
+    let mut client = Terminal::new(100, 30, 500);
+    let mut applier = Applier::new();
+    let mut seq = 0u64;
+
+    let keyframe_everyone =
+        |term: &mut Terminal,
+         enc: &mut Encoder,
+         view: &mut GridView,
+         client: &mut Terminal,
+         applier: &mut Applier,
+         seq: &mut u64| {
+            *seq += 1;
+            let k = enc.keyframe(term.grid(), cursor(term), term.modes(), "", term.blocks());
+            view.apply_keyframe(&k);
+            applier.apply_keyframe(client, &k, *seq);
+        };
+
+    const SHRINK_AT_US: u64 = 1_400_000;
+    const GROW_AT_US: u64 = 3_600_000;
+    let (mut shrunk, mut grown) = (false, false);
+    for (step, (us, chunk)) in timed.iter().enumerate() {
+        if !shrunk && *us >= SHRINK_AT_US {
+            term.resize(100, 8);
+            keyframe_everyone(&mut term, &mut enc, &mut view, &mut client, &mut applier, &mut seq);
+            shrunk = true;
+        }
+        if !grown && *us >= GROW_AT_US {
+            term.resize(100, 30);
+            keyframe_everyone(&mut term, &mut enc, &mut view, &mut client, &mut applier, &mut seq);
+            grown = true;
+        }
+        term.advance(chunk);
+        if term
+            .take_events()
+            .iter()
+            .any(|e| matches!(e, TermEvent::ViewportRebased | TermEvent::HistoryCleared))
+        {
+            keyframe_everyone(&mut term, &mut enc, &mut view, &mut client, &mut applier, &mut seq);
+        } else {
+            seq += 1;
+            let d = enc.delta(term.grid(), cursor(&term), term.modes(), "", term.blocks());
+            view.apply_delta(&d);
+            let base = applier.applied();
+            let applied = applier.apply_delta(&mut client, &d, base, seq);
+            assert_eq!(applied, Applied::Ok, "step {step}: a delta did not apply");
+        }
+
+        // Text truth, both clients, every frame.
+        assert_eq!(
+            view_text(&view),
+            terminal_text(&term),
+            "step {step}: the view diverged from the host"
+        );
+        assert_eq!(
+            terminal_text(&client),
+            terminal_text(&term),
+            "step {step}: the client terminal diverged from the host"
+        );
+
+        // No line held twice, in either client. This is the assertion three
+        // divergent un-bank rules were all failing in different ways.
+        let mut ids: Vec<u64> =
+            (0..client.grid().total_lines()).map(|i| client.grid().line(i).unwrap().id).collect();
+        let total = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), total, "step {step}: the client terminal holds a line twice");
+        let mut lines: Vec<i64> = view
+            .scrollback
+            .iter()
+            .chain(view.rows().iter())
+            .map(|r| r.line)
+            .filter(|&l| l != i64::MIN)
+            .collect();
+        let total = lines.len();
+        lines.sort_unstable();
+        lines.dedup();
+        assert_eq!(lines.len(), total, "step {step}: the view holds a line twice");
+    }
+    assert!(shrunk && grown, "the recording ended before the drag did");
+
+    assert_eq!(term.grid().scrollback_len(), 0, "the host did not settle -- see vt.rs");
+    assert_eq!(
+        client.grid().scrollback_len(),
+        term.grid().scrollback_len(),
+        "the client and the host disagree about where history ends"
+    );
+}

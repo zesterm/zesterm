@@ -98,6 +98,29 @@ test('a keyframe merges attributes rather than replacing them', () => {
   assert.ok(v.attrs.has(2));
 });
 
+test('displacing and taking back cannot both apply to one keyframe', () => {
+  // The pin for the `else if` in applyKeyframe's carry-over: a nonempty
+  // displaced set requires a viewport row between `lastHeld` and `firstNew`,
+  // which forces `lastHeld < firstNew`; the take-back requires the opposite.
+  // Each branch fires alone, in the states that reach it. (#313)
+  const cursor = { row: 0, col: 0, visible: true, shape: 0 } as const;
+  const v = new GridView();
+  // Shrink: rows 0..1 are displaced into scrollback (nothing was held).
+  v.applyKeyframe({ cols: 20, rows_data: [row(0, 'a'), row(1, 'b'), row(2, 'c')], attrs: [], cursor, modes: 0 });
+  v.applyKeyframe({ cols: 20, rows_data: [row(2, 'c')], attrs: [], cursor, modes: 0 });
+  assert.deepEqual(v.scrollback.map((r) => r.line), [0n, 1n], 'the shrink displaced nothing');
+
+  // Grow: the keyframe re-names 0..2, so the take-back fires and the
+  // displaced set is necessarily empty.
+  v.applyKeyframe({ cols: 20, rows_data: [row(0, 'a'), row(1, 'b'), row(2, 'c')], attrs: [], cursor, modes: 0 });
+  assert.deepEqual(
+    v.scrollback.map((r) => r.line),
+    [],
+    'the take-back left a re-delivered line in history',
+  );
+  assert.deepEqual(v.rows.map((r) => r.line), [0n, 1n, 2n]);
+});
+
 test('a keyframe that says history was cleared empties scrollback', () => {
   // `history_clears` is what carries an ED 3 to a client that applies
   // keyframes: the rows are not damaged, they are gone, and nothing else in a

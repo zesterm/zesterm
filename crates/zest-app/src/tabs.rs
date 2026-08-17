@@ -180,6 +180,19 @@ pub struct PendingSession {
 }
 
 impl PendingSession {
+    /// An empty placeholder, for tests about a tab's fields rather than its
+    /// pane.
+    #[cfg(test)]
+    pub(crate) fn blank() -> Self {
+        Self {
+            terminal: std::sync::Arc::new(crate::fair_mutex::FairMutex::new(
+                zest_core::Terminal::new(80, 24, 0),
+            )),
+            dirty: std::sync::atomic::AtomicBool::new(false),
+            origin: crate::source::Origin::InProcess,
+        }
+    }
+
     /// Build the placeholder pane: profile palette seeded first (the grid
     /// must never flash the window's scheme under a profile's), the profile
     /// name as the title, and the provenance line in the scheme's dim colour
@@ -289,6 +302,9 @@ pub struct Tab {
     /// The profile this tab was launched from, when it was launched from one.
     /// `None` is every plain tab: it follows the window's palette and accent.
     pub identity: Option<ProfileIdentity>,
+    /// Bytes waiting for this tab's session to exist (#324) — see
+    /// [`Tab::with_pending_input`].
+    pending_input: Option<Vec<u8>>,
 }
 
 /// The right-hand pane of a split tab: a session with the little state a
@@ -345,6 +361,7 @@ impl Tab {
             connecting: false,
             sized,
             dial_hint: None,
+            pending_input: None,
             identity: None,
         }
     }
@@ -366,6 +383,7 @@ impl Tab {
             connecting: true,
             sized,
             dial_hint: None,
+            pending_input: None,
             identity: None,
         }
     }
@@ -396,6 +414,44 @@ impl Tab {
         self
     }
 
+    /// Bytes to write the moment this tab joins the strip (#324).
+    ///
+    /// "Run this command on that machine" cannot happen at click time: the
+    /// session does not exist yet and the dial is on a worker. So the command
+    /// rides the tab the worker builds and is written when the event loop
+    /// adopts it — keyed to *this* tab, never to whatever happens to be active
+    /// when the dial lands.
+    #[must_use]
+    pub fn with_pending_input(mut self, input: Option<Vec<u8>>) -> Self {
+        self.pending_input = input;
+        self
+    }
+
+    /// Take the armed bytes, if any. Taking is the point: a command runs once.
+    pub fn take_pending_input(&mut self) -> Option<Vec<u8>> {
+        self.pending_input.take()
+    }
+
+    /// A tab with no session behind it, for tests that only exercise the
+    /// fields — `connecting` needs a `PendingSession`, which needs a palette
+    /// snapshot and a rendered pane nothing here is about.
+    #[cfg(test)]
+    pub(crate) fn pending_for_test(addr: SessionAddr) -> Self {
+        Self {
+            addr,
+            session: TabSession::Pending(PendingSession::blank()),
+            split: None,
+            focus_right: false,
+            local: false,
+            dead: false,
+            connecting: true,
+            sized: (80, 24),
+            dial_hint: None,
+            identity: None,
+            pending_input: None,
+        }
+    }
+
     #[must_use]
     pub fn with_identity(mut self, identity: Option<ProfileIdentity>) -> Self {
         self.identity = identity;
@@ -413,6 +469,7 @@ impl Tab {
             connecting: false,
             sized,
             dial_hint: None,
+            pending_input: None,
             identity: None,
         }
     }

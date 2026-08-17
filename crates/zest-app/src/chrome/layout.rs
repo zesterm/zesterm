@@ -1176,7 +1176,10 @@ fn picker_overlay(
         for (cap, label) in [
             ("\u{2191}\u{2193}", " navigate"),
             ("\u{23ce}", " run here"),
-            ("\u{21e7}\u{23ce}", " run in its session"),
+            // §6's own wording, and now its own behaviour: ⇧⏎ re-opens the
+            // picker to choose a machine. It read "run in its session" while
+            // that was the honest stand-in (#324).
+            ("\u{21e7}\u{23ce}", " run on host\u{2026}"),
         ] {
             let cw = measure(cap, px, false, 0.0);
             out.texts.push(TextRun {

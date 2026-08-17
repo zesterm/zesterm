@@ -113,13 +113,18 @@ impl Applier {
         // both copies drawing on its own. Cheap and a no-op in the common case,
         // where the keyframe's first line is newer than anything in history.
         // (#291)
+        // Exactly the lines the keyframe *names* -- the rule all three readers
+        // share now, stated first in `grid-view.ts`: ids have gaps, so "at or
+        // above the first" is a strictly larger set, and the difference is the
+        // client's only copy of rows the host destroyed. (#313)
         // Negatives filtered, not clamped: the encoder pads with `i64::MIN` for
-        // a row it has never seen, and `line_id` turns that into 0 — which as a
-        // floor here would drop the client's entire history on any keyframe
+        // a row it has never seen, and `line_id` turns that into 0 — which
+        // named here would drop a history line that never existed, and as a
+        // floor would have dropped the client's entire history on any keyframe
         // carrying one blank row.
-        if let Some(first) = k.rows_data.iter().map(|r| r.line).filter(|&l| l >= 0).min() {
-            term.remote().drop_history_from(line_id(first));
-        }
+        let named: Vec<zest_core::LineId> =
+            k.rows_data.iter().map(|r| r.line).filter(|&l| l >= 0).map(line_id).collect();
+        term.remote().drop_history(&named);
 
         let mut max_line = i64::MIN;
         for (i, payload) in k.rows_data.iter().enumerate() {
@@ -577,6 +582,63 @@ mod tests {
             !p.client.screen_text().contains("entry 0"),
             "cls left the listing on the client's screen:\n{}",
             p.client.screen_text()
+        );
+    }
+
+    #[test]
+    fn a_keyframe_naming_little_does_not_cost_the_client_the_history_it_kept() {
+        // Hand-built rather than through `Pair`, deliberately: the Pair
+        // encoder can only produce healthy keyframes, whose named lines and
+        // "everything at or above the first" are the same set. The rules
+        // diverge across id gaps — `truncate_bottom` destroys ids without
+        // rewinding the counter — and a degenerate keyframe is precisely the
+        // state a host-side bug hands a client, which is when deleting on an
+        // id comparison costs the only surviving copy. (#313)
+        let row_payload = |line: i64, text: &str| RowPayload {
+            line,
+            runs: vec![Run {
+                attr: AttrId(0),
+                cells: text.chars().count() as u16,
+                text: text.into(),
+                marks: Vec::new(),
+            }],
+            wrapped: false,
+        };
+        let mut client = Terminal::new(10, 4, 100);
+        for r in 0..4 {
+            client.remote().write_row(r, 108 + r as u64, &[Cell::default(); 10], false);
+        }
+        let hist: Vec<(zest_core::LineId, Vec<Cell>, bool)> = (0..8)
+            .map(|i| (100 + i as u64, vec![Cell::default(); 10], false))
+            .collect();
+        client.remote().prepend_history(&hist);
+
+        let k = Keyframe {
+            cols: 10,
+            rows: 4,
+            rows_data: vec![
+                row_payload(104, "back"),
+                row_payload(110, "live"),
+                row_payload(111, "live"),
+                row_payload(112, "live"),
+            ],
+            attrs: Vec::new(),
+            cursor: cursor(),
+            modes: Modes::empty(),
+            blocks: Vec::new(),
+            blocks_from: 0,
+            title: String::new(),
+            history_clears: 0,
+        };
+        Applier::new().apply_keyframe(&mut client, &k, 1);
+
+        let held: Vec<u64> = (0..client.grid().scrollback_len())
+            .map(|i| client.grid().line(i).unwrap().id)
+            .collect();
+        assert_eq!(
+            held,
+            vec![100, 101, 102, 103, 105, 106, 107],
+            "history the keyframe never named was dropped on an id comparison"
         );
     }
 
