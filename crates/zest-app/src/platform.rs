@@ -249,6 +249,55 @@ pub fn set_background_color(_window: &winit::window::Window, _r: u8, _g: u8, _b:
 /// `None` as "no cluster to avoid" — which is also the fullscreen answer,
 /// where the buttons auto-hide (the caller checks fullscreen; here `None`
 /// just means the question could not be answered).
+/// Whether the OS has been asked to reduce motion.
+///
+/// An accessibility setting, not a preference we own: vestibular disorders make
+/// animated scrolling genuinely unpleasant, and `motion.respect_system_reduce_motion`
+/// defaults to on for that reason. Read live on every consultation rather than
+/// cached at startup — it is a cheap property read, and caching it would mean
+/// toggling the switch in System Settings did nothing until the app was
+/// restarted, which is the class of bug this whole sweep is closing.
+///
+/// `false` where the platform has no such notion, which is the honest answer:
+/// it means "nothing has asked us to reduce motion", not "motion is wanted".
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn reduce_motion() -> bool {
+    use objc2_app_kit::NSWorkspace;
+    NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+}
+
+#[cfg(windows)]
+#[must_use]
+pub fn reduce_motion() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SystemParametersInfoW, SPI_GETCLIENTAREAANIMATION,
+    };
+    let mut animations_on: i32 = 1;
+    // SAFETY: a documented read of a BOOL-sized out parameter we own.
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            std::ptr::addr_of_mut!(animations_on).cast(),
+            0,
+        )
+    };
+    // A failed query means "we do not know", and guessing *reduce* would turn
+    // motion off for everyone on a machine where the call is unavailable.
+    ok != 0 && animations_on == 0
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+#[must_use]
+pub fn reduce_motion() -> bool {
+    // GNOME has `org.gnome.desktop.interface enable-animations` and KDE has its
+    // own, but reading either means a settings-daemon dependency or shelling
+    // out per query. Until one is worth it, nothing has asked us to reduce
+    // motion — and `motion.enabled` is still there to turn it off by hand.
+    false
+}
+
 #[cfg(target_os = "macos")]
 pub fn native_control_inset(window: &winit::window::Window) -> Option<(f64, f64)> {
     use objc2_app_kit::{NSView, NSWindow, NSWindowButton};

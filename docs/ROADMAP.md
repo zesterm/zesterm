@@ -22,7 +22,7 @@ is reported rather than gated.
 | `zest-render-wgpu` | ✅ pipelines, atlas, offscreen resolve, selection |
 | `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema |
 | `zest-input` | ✅ keys + SGR mouse + selection + IME + Kitty CSI u (flags 1, 2, 8), Rust and TypeScript — ⬜ Kitty flags 4/16, keypad |
-| `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), restore-on-launch — runs on Windows *and* macOS (Metal, transparent titlebar) — ⬜ Snap Layouts, motion, polish |
+| `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), restore-on-launch — runs on Windows *and* macOS (Metal, transparent titlebar), springs + smooth scroll + reduce_motion — ⬜ Snap Layouts, polish |
 | `zest-proto` | ✅ protocol 3, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, sealing, cell-for-cell conformance, chaos-resync, command blocks |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store, sealed channel |
 | `zest-cloud` | ✅ `TlsDuplex`, one connection as two independently owned halves, a one-request HTTP POST over it, `Endpoint` — consumed by `--enroll` and by `--relay`'s per-pipe dial-back |
@@ -60,13 +60,6 @@ the history behind them is in closed issues and PRs.
       is *sent*, not posted, so winit's `with_msg_hook` cannot see it. It also
       suppresses ordinary mouse messages over that rect, so hover must come
       from `WM_NCMOUSEMOVE`.
-- [ ] Animation clock, the *spring* half. Springs `(response, damping)`, not
-      easing curves — terminal motion is interruption-dominated and a spring
-      absorbs a changed target with continuous velocity for free. Substep the
-      integrator (`h = dt/ceil(dt·240)`) or a spring tuned at 60Hz behaves
-      differently at 144Hz. Springs arrive with tab/window motion.
-- [ ] Smooth scroll as a fractional row offset, **suppressed in the alt screen**.
-- [ ] `reduce_motion`, honouring `SPI_GETCLIENTAREAANIMATION`.
 - [ ] Polish: OSC 0/2 title, DECSCUSR cursor styles, font zoom, DPI changes.
 - [ ] Perf validation: vtebench, >500 MB/s, <2ms CPU frame, <10ms keypress→pixel.
 

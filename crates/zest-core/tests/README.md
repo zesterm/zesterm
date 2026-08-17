@@ -144,6 +144,28 @@ cargo run -p zest-pty --example pty_dump -- `
 Its replay test builds the expected screen from the fixture itself — every
 chunk except the drag window's — so a re-recording carries its own golden.
 
+### `resize-drag-overflow.vtrec` — the shrink half arrives late and too tall
+
+Three shrinks issued back-to-back (`--resize-settle-ms 0`), a 300ms turnaround,
+four grows back-to-back. ConPTY's first answer is then laid out for 24 rows and
+parses into a grid already at 8 — sixteen rows of overflow, which is the #315
+mechanism: each overflow scroll used to cancel the restate debt and bank a
+duplicate of a row the grid already held. At **100x30**:
+
+```powershell
+cargo run -p zest-pty --example pty_dump -- `
+  --record crates\zest-core\tests\corpus\resize-drag-overflow.vtrec `
+  --cmd "pwsh -NoLogo -c `"ls; Start-Sleep 8`"" `
+  --size 100x30 --resize-after-ms 2000 --resize-settle-ms 0 --resize 100x24 `
+  --resize-after-ms 0 --resize 100x16 --resize 100x8 `
+  --resize-after-ms 300 --resize 100x14 --resize-after-ms 0 --resize 100x20 `
+  --resize 100x26 --resize-settle-ms 2000 --resize 100x30
+```
+
+One capture, both traps: the 24-row repaint overflows (#315), the 20-row one is
+stale-smaller and refused by coverage (#312), and the 30-row one settles. The
+replay uses the same fixture-derived golden as the stepped test.
+
 Worth adding as they become relevant: `vim`, `htop`/`btm`, `tmux`, a `cargo build`,
 and the `@sigx/terminal` showcase example — the last being a useful check that
 zesterm can host the user's own TUI framework correctly.

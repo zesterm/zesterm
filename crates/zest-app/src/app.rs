@@ -115,6 +115,16 @@ pub struct Config {
     pub scroll_on_keypress: bool,
     /// Rows the view moves per wheel notch.
     pub lines_per_notch: usize,
+    /// Animate at all.
+    pub motion_enabled: bool,
+    /// Honour the OS "reduce motion" accessibility setting.
+    pub respect_reduce_motion: bool,
+    /// Ease scrolling as a fractional row offset.
+    pub smooth_scroll: bool,
+    /// Spring response in seconds — roughly, time to reach the target.
+    pub spring_response: f32,
+    /// Spring damping ratio. 1.0 is critically damped; below that overshoots.
+    pub spring_damping: f32,
     /// Where a bare local shell starts. `None` inherits this process's.
     ///
     /// A *fallback*, not an override: a profile's `starting_directory` is
@@ -188,6 +198,24 @@ impl From<&zest_config::Settings> for Config {
             // Clamped to the schema's own range: a hand-edited `0` would make
             // the wheel do nothing at all, which reads as a broken mouse.
             lines_per_notch: s.scrolling.lines_per_notch.clamp(1, 50),
+            motion_enabled: s.motion.enabled,
+            respect_reduce_motion: s.motion.respect_system_reduce_motion,
+            smooth_scroll: s.motion.smooth_scroll,
+            // Sanitized, then clamped to the schema's own ranges: these reach
+            // an integrator, a zero or negative response is a division by zero
+            // wearing a preference's clothes -- and `f32::clamp` *preserves*
+            // NaN, while TOML accepts `nan` as a float literal. A config typo
+            // must not be able to make a spring that never settles.
+            spring_response: finite_or(
+                s.motion.spring_response,
+                zest_config::settings::Motion::default().spring_response,
+            )
+            .clamp(0.01, 2.0),
+            spring_damping: finite_or(
+                s.motion.spring_damping,
+                zest_config::settings::Motion::default().spring_damping,
+            )
+            .clamp(0.1, 2.0),
             // Empty means "inherit", which is not the same as a cwd of `""` —
             // that would be an invalid directory and fail every spawn.
             shell_cwd: (!s.shell.cwd.trim().is_empty())
@@ -1342,6 +1370,19 @@ pub struct App {
     anim_spin: bool,
     /// A pulsing session dot is on screen — set by the chrome rebuild.
     anim_pulse: bool,
+    /// The visual residue of a scroll, in fractional rows.
+    ///
+    /// The grid's own `display_offset` still moves in whole rows the moment
+    /// the wheel turns — the session, the selection and every hit test stay
+    /// integral — and this carries only how far behind the *drawing* is. It
+    /// runs from a non-zero offset back to zero, so at rest it contributes
+    /// nothing and costs nothing.
+    scroll_spring: crate::motion::Spring,
+    /// When the last animation frame was integrated, for `dt`.
+    ///
+    /// One clock: per-animator `Instant::now()` desynchronizes motion, which
+    /// is the same argument `anim_epoch` already makes for the blink phase.
+    last_anim: Option<std::time::Instant>,
     /// The daemon link is down (`Wakeup::Detached` .. `Reattached`): the
     /// status bar says "reconnecting" in danger until it heals.
     link_down: bool,
@@ -1668,6 +1709,8 @@ impl App {
             anim_epoch: std::time::Instant::now(),
             anim_spin: false,
             anim_pulse: false,
+            scroll_spring: crate::motion::Spring::at(0.0),
+            last_anim: None,
             link_down: false,
             block_hits: crate::chrome::hit::ChromeHitMap::default(),
             folded_blocks: std::collections::HashMap::new(),
@@ -3086,9 +3129,64 @@ impl App {
     /// The soonest the clock needs to wake the loop, or `None` when nothing
     /// on screen is animating — which is what keeps 0%-idle true: a resting
     /// window schedules nothing and draws nothing.
+    /// Whether anything may animate right now.
+    ///
+    /// One function every animator asks, so `motion.enabled` and the OS
+    /// accessibility setting cannot end up meaning different things in
+    /// different places. The OS is queried rather than cached at startup, so
+    /// toggling "reduce motion" in System Settings takes effect at the next
+    /// reload rather than the next launch.
+    fn motion_allowed(&self) -> bool {
+        self.config.motion_enabled
+            && !(self.config.respect_reduce_motion && platform::reduce_motion())
+    }
+
+    /// Advance every spring, and say whether any of them still needs frames.
+    ///
+    /// The single place `dt` is computed, because two animators reading their
+    /// own `Instant::now()` drift apart within a second and the drift is
+    /// visible where they meet.
+    fn step_motion(&mut self) -> bool {
+        // Asked every frame, not only when the wheel turns: `motion.enabled`
+        // can go false, or the OS can be asked to reduce motion, *while*
+        // something is in flight -- and an animation that carried on after the
+        // user switched it off would be one more setting that does not apply.
+        if !self.motion_allowed() || !self.config.smooth_scroll {
+            self.scroll_spring.snap_to(0.0);
+            self.last_anim = None;
+            return false;
+        }
+        if !self.scroll_spring.moving() {
+            // Nothing in flight: drop the clock so the next animation starts
+            // from a fresh `dt` rather than integrating however long the
+            // terminal happened to sit idle.
+            self.last_anim = None;
+            return false;
+        }
+        let now = std::time::Instant::now();
+        let dt = self.last_anim.map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f32());
+        self.last_anim = Some(now);
+        let moving = self.scroll_spring.step(
+            dt,
+            self.config.spring_response,
+            self.config.spring_damping,
+        );
+        if !moving {
+            self.last_anim = None;
+        }
+        moving
+    }
+
     fn anim_deadline(&self) -> Option<std::time::Duration> {
         let mut next: Option<u64> = None;
         let mut consider = |ms: u64| next = Some(next.map_or(ms, |n: u64| n.min(ms)));
+        // A spring in flight wants the next frame; a spring at rest must add
+        // nothing at all, which is what keeps the 0%-idle guarantee true. It
+        // reports its own rest rather than being asked about a threshold here,
+        // so there is one definition of "settled" and not two.
+        if self.scroll_spring.moving() {
+            consider(8);
+        }
         if self.anim_spin {
             consider(80);
         }
@@ -8490,6 +8588,11 @@ impl App {
         };
 
         let metrics = fonts.cell_metrics();
+        // The smooth-scroll spring, in pixels. `Viewport::scroll_px` and the
+        // `grid_origin` uniform behind it were built for exactly this and had
+        // been fed a constant 0.0 since; chrome text opts out per instance with
+        // FLAG_FIXED, so a tab title does not ride the grid.
+        let scroll_px = self.scroll_spring.value() * metrics.cell_h as f32;
 
         // Chrome instances: rectangles come finished from the layout pass;
         // text runs resolve against the atlas here, where the GPU lives.
@@ -8696,7 +8799,7 @@ impl App {
                             rect: lb,
                             grid: term_l.grid(),
                             palette: term_l.palette(),
-                            scroll_px: 0.0,
+                            scroll_px,
                             focused: self.focused && left_focused,
                             opacity: pane_opacity(self.config.opacity, left_identity),
                             blocks: &bands_l,
@@ -8711,7 +8814,7 @@ impl App {
                             rect: rb,
                             grid: term_r.grid(),
                             palette: term_r.palette(),
-                            scroll_px: 0.0,
+                            scroll_px,
                             focused: self.focused && focus_right,
                             opacity: pane_opacity(self.config.opacity, right_identity),
                             blocks: &bands_r,
@@ -8772,7 +8875,7 @@ impl App {
                             rect,
                             grid: term.grid(),
                             palette: term.palette(),
-                            scroll_px: 0.0,
+                            scroll_px,
                             focused: self.focused,
                             opacity: pane_opacity(self.config.opacity, identity),
                             blocks: &bands,
@@ -11442,6 +11545,24 @@ impl ApplicationHandler<Wakeup> for App {
                 }
 
                 session.terminal().lock().scroll_display(rows);
+                // The grid has already moved. The spring carries only the
+                // *visual* debt -- start it that many rows behind and let it
+                // run back to zero -- so the session, the selection and every
+                // hit test stay integral while the drawing catches up.
+                //
+                // Not in the alternate screen: `vim` and `less` scroll by
+                // design and easing that fights the program, which is what the
+                // setting's own doc comment says. `alt` was computed above for
+                // the arrow-key translation and means the same thing here.
+                if self.config.smooth_scroll && !alt && self.motion_allowed() {
+                    // `nudge` rather than a fresh spring: a second notch
+                    // mid-glide has to keep the velocity it already had, or
+                    // scrolling fast reads as a series of restarts.
+                    self.scroll_spring.nudge(rows as f32);
+                    self.scroll_spring.retarget(0.0);
+                } else {
+                    self.scroll_spring.snap_to(0.0);
+                }
                 session.mark_dirty();
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
@@ -11472,7 +11593,11 @@ impl ApplicationHandler<Wakeup> for App {
                         self.chrome_layout = None;
                     }
                 }
-                if grid_dirty || self.chrome_dirty {
+                // Integrated once per frame, before the damage test decides
+                // anything: a spring in flight *is* damage, and asking it after
+                // the test would need a second reason to draw.
+                let animating = self.step_motion();
+                if grid_dirty || self.chrome_dirty || animating {
                     // Applied here rather than in the parser thread: the policy
                     // is about what the user is looking at, and the parser has
                     // no business knowing that. It also means a flood costs one
@@ -11970,6 +12095,22 @@ fn pane_opacity(window: f32, identity: Option<&crate::tabs::ProfileIdentity>) ->
     identity.and_then(|i| i.opacity).map_or(window, |o| o.clamp(0.0, 1.0))
 }
 
+/// `value` when it is a real number, `fallback` when it is not.
+///
+/// `f32::clamp` preserves NaN, so clamping a hand-edited `nan` out of a config
+/// file does nothing at all — and a NaN reaching the spring integrator makes an
+/// animation that can never report rest, which is the event loop never sleeping
+/// again. The fallback is the schema's own default, so a nonsense value behaves
+/// as though the key had been left out.
+fn finite_or(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value
+    } else {
+        tracing::warn!(?value, "a motion setting is not a real number; using the default");
+        fallback
+    }
+}
+
 /// The theme this window should actually be wearing.
 ///
 /// Resolved here rather than in the cascade, which is where it used to live and
@@ -12275,6 +12416,109 @@ mod fleet_device_row_tests {
         let rows = fleet_device_rows(&[device(3, "studio-app", "desktop", true)], None);
         assert_eq!(rows[0].action, FleetDeviceAction::Vouch);
         assert_eq!(rows[0].detail, "desktop · approved");
+    }
+}
+
+#[cfg(test)]
+mod motion_settings_tests {
+    use super::Config;
+    use crate::motion::Spring;
+
+    fn config_with(enabled: bool, respect: bool) -> Config {
+        let mut s = zest_config::Settings::default();
+        s.motion.enabled = enabled;
+        s.motion.respect_system_reduce_motion = respect;
+        Config::from(&s)
+    }
+
+    /// `App::motion_allowed` without an `App` — the same expression, so the
+    /// truth table is pinned even though the OS half cannot be faked here.
+    fn allowed(config: &Config, os_reduces: bool) -> bool {
+        config.motion_enabled && !(config.respect_reduce_motion && os_reduces)
+    }
+
+    #[test]
+    fn reduce_motion_overrides_a_user_who_asked_for_animation() {
+        // The accessibility setting wins when it is being respected: someone
+        // with a vestibular disorder has said, at the OS level, that motion
+        // makes the machine unpleasant to use, and a per-app default is not the
+        // place to argue.
+        let on = config_with(true, true);
+        assert!(allowed(&on, false));
+        assert!(!allowed(&on, true), "the OS asked for less motion and is being respected");
+
+        // ...and stops winning when it is not.
+        let ignoring = config_with(true, false);
+        assert!(allowed(&ignoring, true), "opting out of the OS setting must actually opt out");
+
+        // `enabled = false` is absolute either way round.
+        for respect in [true, false] {
+            for os in [true, false] {
+                assert!(!allowed(&config_with(false, respect), os), "motion.enabled = false wins");
+            }
+        }
+    }
+
+    #[test]
+    fn the_shipped_defaults_animate_and_defer_to_the_os() {
+        let d = Config::default();
+        assert!(d.motion_enabled);
+        assert!(d.respect_reduce_motion);
+        assert!(d.smooth_scroll);
+    }
+
+    #[test]
+    fn the_spring_parameters_are_clamped_before_they_reach_the_integrator() {
+        // A hand-edited `spring_response = 0` is a division by zero wearing a
+        // preference's clothes -- the angular frequency is TAU/response.
+        let mut s = zest_config::Settings::default();
+        s.motion.spring_response = 0.0;
+        s.motion.spring_damping = 0.0;
+        let c = Config::from(&s);
+        assert!(c.spring_response >= 0.01 && c.spring_damping >= 0.1);
+
+        let mut s = zest_config::Settings::default();
+        s.motion.spring_response = 99.0;
+        s.motion.spring_damping = 99.0;
+        let c = Config::from(&s);
+        assert!(c.spring_response <= 2.0 && c.spring_damping <= 2.0);
+    }
+
+    #[test]
+    fn a_nonsense_spring_setting_falls_back_to_the_default() {
+        // TOML accepts `nan` and `inf` as float literals, and `f32::clamp`
+        // preserves NaN -- so without sanitizing, one character in a config
+        // file produces a spring that never settles and an event loop that
+        // never sleeps.
+        let default = zest_config::Settings::default().motion;
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut s = zest_config::Settings::default();
+            s.motion.spring_response = bad;
+            s.motion.spring_damping = bad;
+            let c = Config::from(&s);
+            assert_eq!(c.spring_response, default.spring_response, "{bad} -> the schema default");
+            assert_eq!(c.spring_damping, default.spring_damping);
+        }
+    }
+
+    #[test]
+    fn a_settled_scroll_spring_asks_for_no_frames() {
+        // The 0%-idle guarantee, at the seam this group adds to it: a spring
+        // that has arrived must report `false` from `moving()`, because that is
+        // exactly the condition `anim_deadline` consults before scheduling a
+        // wake. A spring that only ever approached its target would keep the
+        // event loop awake for ever at a fraction of a pixel per frame.
+        let mut spring = Spring::at(0.0);
+        spring.nudge(30.0);
+        spring.retarget(0.0);
+        assert!(spring.moving(), "the fixture must actually be in motion");
+        for _ in 0..600 {
+            if !spring.step(1.0 / 60.0, 0.16, 1.0) {
+                break;
+            }
+        }
+        assert!(!spring.moving(), "a settled spring must stop asking for frames");
+        assert_eq!(spring.value(), 0.0, "and land exactly home, so scroll_px is exactly zero");
     }
 }
 
