@@ -400,7 +400,7 @@ impl Grid {
         (index < self.storage.len()).then(|| self.storage.row(index))
     }
 
-    /// Drop scrollback rows from `first` upward, returning how many went.
+    /// Drop the scrollback rows a keyframe names, returning how many went.
     ///
     /// For a **replica** being handed a keyframe, and the exact inverse of the
     /// banking a shrink does. When the host gives back rows a shrink displaced
@@ -418,25 +418,62 @@ impl Grid {
     /// The host never needs this — its storage is one ring where the viewport
     /// *is* the tail of scrollback, so the boundary moving cannot duplicate
     /// anything. A replica writes the two halves separately and has to be told.
-    pub fn drop_scrollback_from(&mut self, first: LineId) -> usize {
-        let n = (0..self.scrollback_len)
-            .rev()
-            .take_while(|&i| self.storage.row(i).id >= first)
-            .count();
-        if n > 0 {
-            self.storage.remove_range(self.scrollback_len - n, n);
-            self.scrollback_len -= n;
-            // `viewport_base` is measured from the end of storage, which just
-            // lost `n` rows, so leaving the offset alone slides a scrolled-back
-            // reader `n` lines further into the past. Subtracting holds the
-            // *text* still, which is the point: the rows removed here are the
-            // ones the viewport is about to hold, so the same content is at the
-            // same place afterwards, one boundary further down. Same argument
-            // as `settle_restate`, and the same failure without it — the view
-            // jumping while somebody is reading it.
-            self.display_offset = self.display_offset.saturating_sub(n).min(self.scrollback_len);
+    pub fn drop_scrollback_rows(&mut self, named: &[LineId]) -> usize {
+        // Exactly the named lines, never an id comparison. Ids have gaps —
+        // `truncate_bottom` destroys rows without rewinding the counter — so
+        // "at or above the keyframe's first" is a strictly larger set than
+        // "named by the keyframe", and the difference is rows this replica
+        // holds that the host has destroyed: its only copies, which an id
+        // sweep deleted unrecoverably. The web client wrote the argument down
+        // first (`grid-view.ts`); this is the same rule in the second of the
+        // three readers, and `decode.rs` is the third. (#313)
+        if named.is_empty() {
+            return 0;
         }
-        n
+        // Sorted once for `binary_search` membership — `no_std`, so no hash
+        // set, and the list is viewport-sized anyway.
+        let mut named: Vec<LineId> = named.to_vec();
+        named.sort_unstable();
+        let floor = named[0];
+        let mut removed = 0;
+        let mut end: Option<usize> = None;
+        let mut i = self.scrollback_len;
+        // Newest to oldest, stopping below the floor: an ordinary keyframe's
+        // rows are newer than everything in history, so this stays cheap on
+        // every frame that is not a settle.
+        loop {
+            let id = (i > 0).then(|| self.storage.row(i - 1).id).filter(|&id| id >= floor);
+            match id {
+                Some(id) if named.binary_search(&id).is_ok() => {
+                    end.get_or_insert(i);
+                    i -= 1;
+                }
+                other => {
+                    if let Some(e) = end.take() {
+                        self.storage.remove_range(i, e - i);
+                        removed += e - i;
+                    }
+                    if other.is_none() {
+                        break;
+                    }
+                    i -= 1;
+                }
+            }
+        }
+        if removed > 0 {
+            self.scrollback_len -= removed;
+            // `viewport_base` is measured from the end of storage, which just
+            // lost `removed` rows, so leaving the offset alone slides a
+            // scrolled-back reader that much further into the past.
+            // Subtracting holds the *text* still, which is the point: the rows
+            // removed here are the ones the viewport is about to hold, so the
+            // same content is at the same place afterwards, one boundary
+            // further down. Same argument as `settle_restate`, and the same
+            // failure without it — the view jumping while somebody reads it.
+            self.display_offset =
+                self.display_offset.saturating_sub(removed).min(self.scrollback_len);
+        }
+        removed
     }
 
     /// Destroy all scrollback, because ED 3 said to.

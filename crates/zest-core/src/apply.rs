@@ -156,12 +156,14 @@ impl RemoteWriter<'_> {
 
     /// Drop history this keyframe is about to re-deliver as viewport rows.
     ///
-    /// Call with the first line id the keyframe carries, before writing its
-    /// rows. See [`crate::grid::Grid::drop_scrollback_from`] — without it a
-    /// settled grow leaves the same line in both halves of this grid and
-    /// everything that walks the session by id shows it twice. (#291)
-    pub fn drop_history_from(&mut self, first: LineId) {
-        if self.state.grid_mut().drop_scrollback_from(first) > 0 {
+    /// Call with the line ids the keyframe carries, before writing its rows.
+    /// See [`crate::grid::Grid::drop_scrollback_rows`] — without it a settled
+    /// grow leaves the same line in both halves of this grid and everything
+    /// that walks the session by id shows it twice (#291); and exactly the
+    /// *named* lines, never an id sweep, or a client's only copy of rows the
+    /// host destroyed goes with them (#313).
+    pub fn drop_history(&mut self, named: &[LineId]) {
+        if self.state.grid_mut().drop_scrollback_rows(named) > 0 {
             self.state.touch_full();
         }
     }
@@ -483,7 +485,7 @@ mod tests {
         // Grown, and the host settled -- so the keyframe carries lines 0..5
         // again, four of which are sitting in scrollback right now.
         t.remote().resize(10, 6);
-        t.remote().drop_history_from(0);
+        t.remote().drop_history(&[0, 1, 2, 3, 4, 5]);
         for r in 0..6 {
             t.remote().write_row(r, r as LineId, &row_of("line"), false);
         }
@@ -515,12 +517,46 @@ mod tests {
         assert!(reading.starts_with("old"), "the fixture is not scrolled back: {reading:?}");
 
         // A keyframe re-delivers the newest two history lines as viewport rows.
-        t.remote().drop_history_from(106);
+        t.remote().drop_history(&[106, 107]);
 
         assert_eq!(
             t.grid().row(0).text().trim_end(),
             reading,
             "the text under the reader moved when history was de-duplicated"
+        );
+    }
+
+    #[test]
+    fn history_the_keyframe_never_names_is_not_dropped_on_an_id_comparison() {
+        // Line ids have gaps -- `truncate_bottom` destroys the newest ids
+        // without rewinding the counter -- so "id at or above the keyframe's
+        // first" is not the same set as "id the keyframe names", and the
+        // difference is exactly the rows a client holds that the host has
+        // destroyed. Sweeping them on an id comparison deletes the client's
+        // only copy, unrecoverably; keeping them at worst keeps a row the
+        // host blanked. The web client wrote this argument down
+        // (`grid-view.ts`) and the Rust replica shipped the opposite rule;
+        // two reference decoders, two semantics, and this is the half that
+        // turned a host-side bug into "text gone" in the window. (#313)
+        let mut t = Terminal::new(10, 4, 100);
+        for r in 0..4 {
+            t.remote().write_row(r, 108 + r as LineId, &row_of("live"), false);
+        }
+        let hist: Vec<(LineId, Vec<Cell>, bool)> = (0..8)
+            .map(|i| (100 + i as LineId, row_of(&format!("old{i}")), false))
+            .collect();
+        t.remote().prepend_history(&hist);
+
+        // The keyframe re-delivers line 104 in its viewport; 105..=107 fell
+        // into a gap. Only the named line may go.
+        t.remote().drop_history(&[104, 108, 109, 110]);
+
+        let held: Vec<LineId> =
+            (0..t.grid().scrollback_len()).map(|i| t.grid().line(i).unwrap().id).collect();
+        assert_eq!(
+            held,
+            vec![100, 101, 102, 103, 105, 106, 107],
+            "history the keyframe never named was dropped on an id comparison"
         );
     }
 
@@ -538,7 +574,7 @@ mod tests {
         let before = t.grid().scrollback_len();
         assert!(before >= 3, "the fixture built no history");
 
-        t.remote().drop_history_from(90);
+        t.remote().drop_history(&[90, 91, 92]);
 
         assert_eq!(t.grid().scrollback_len(), before, "history the keyframe never named was dropped");
     }

@@ -363,7 +363,7 @@ impl Storage {
     /// the top and `truncate_bottom` from the bottom, and neither can express
     /// "these rows are a duplicate of rows further down", which is what a
     /// replica has after a keyframe re-delivers lines it already held as
-    /// history. See `Grid::drop_scrollback_from`.
+    /// history. See `Grid::drop_scrollback_rows`.
     ///
     /// **Never empties the ring.** `physical` divides by `rows.len()` and
     /// `Grid::oldest_line_id` reads row 0 unconditionally, so a storage with no
@@ -495,7 +495,7 @@ mod tests {
     #[test]
     fn removing_a_range_takes_only_that_range() {
         // The degenerate inputs are no-ops rather than errors, because
-        // `Grid::drop_scrollback_from` computes a count that is legitimately
+        // `Grid::drop_scrollback_rows` computes a count that is legitimately
         // zero on almost every keyframe.
         //
         // Emptying the ring is *not* tested here, deliberately: it cannot be

@@ -488,16 +488,23 @@ you need before you trip on it.
   is set at the *door* that makes a terminal a replica (`Terminal::remote`),
   because a name that describes one of two callers is how the other goes
   unnoticed.
-- **A replica has to give history back too, in both reference decoders.** When
-  the host settles, its keyframe re-delivers lines the replica still holds, so
-  the same line id exists twice and the session lists everything twice —
-  `Grid::drop_scrollback_from` is the missing inverse, and it was fixed in the
-  web client and missed in the Rust one because **two reference decoders means
-  every fix on this seam is two fixes**; `tests/conformance.rs` exists to catch
-  the pair disagreeing. The reason `zest-proto`'s own tests never caught it: the
-  harness fed the encoder a constant cursor, so every resize test exercised a
-  client with no history — a fixture must assert it *reached* the state under
-  test before asserting anything else. (#291)
+- **A replica has to give history back too, and the seam has *three* readers,
+  not two.** When the host settles, its keyframe re-delivers lines the replica
+  still holds, so the same line id exists twice and the session lists
+  everything twice — `Grid::drop_scrollback_rows` is the inverse, fixed first
+  in the web client and missed in the Rust one (#291), and then found to exist
+  **three times with three semantics**: the Rust applier swept on an id
+  comparison, the web client dropped only the ids the keyframe names, and
+  `decode.rs` — the reference conformance checks — had no take-back at all.
+  Ids have gaps, so "unnamed" ≠ "nonexistent on host", and the sweep deleted a
+  client's only copy of destroyed rows. The shared rule: **a keyframe un-banks
+  exactly the lines it names** (#313). What let the rules diverge: the
+  conformance corpus contained no resize, so
+  `a_recorded_conpty_drag_keeps_all_three_participants_agreeing` now replays
+  the recorded drag through all three. And the reason `zest-proto`'s own tests
+  never caught #291: the harness fed the encoder a constant cursor, so every
+  resize test exercised a client with no history — a fixture must assert it
+  *reached* the state under test before asserting anything else.
 - **A row overwritten in place keeps a stale `wrapped`, and the next reflow
   believes it.** `wrapped` is one fact in two places — `Row::wrapped` and
   `CellFlags::WRAPLINE` — cleared only by `Row::reset`, which a scroll runs and

@@ -157,7 +157,14 @@ export class GridView {
         // `firstNew`, which is the same set for any state a session can really
         // be in and drops strictly less otherwise: a row this client holds that
         // the viewport does not name is not something to throw away on the
-        // strength of an id comparison.
+        // strength of an id comparison. This is the rule all three readers
+        // share now (#313) — it was stated here first, while `decode.rs` had
+        // no take-back at all and the Rust applier swept on the comparison.
+        // The `else if` is not a missed case: a nonempty `displaced` set
+        // requires some row with `lastHeld < r.line < firstNew`, which forces
+        // `lastHeld < firstNew`, and this branch requires the opposite — the
+        // two are mutually exclusive by construction, in every state
+        // including degenerate ones.
         else if (lastHeld !== undefined && lastHeld >= firstNew) {
           const onScreen = new Set(k.rows_data.map((r) => r.line));
           this.scrollback = this.scrollback.filter((r) => !onScreen.has(r.line));
