@@ -1,8 +1,142 @@
-# Architecture decisions
+# Architecture
 
-Decisions here were expensive to reach and are cheap to accidentally undo. Each records
-what was chosen, what was rejected, and *why* — so a future "simplification" has to argue
-with the reasoning rather than rediscover it.
+The first half of this file says what the system **is** — the goal, the layers, the wire
+path, the map of the repo. The second half records the decisions that were expensive to
+reach and are cheap to accidentally undo: each ADR says what was chosen, what was
+rejected, and *why*, so a future "simplification" has to argue with the reasoning rather
+than rediscover it.
+
+## The system
+
+### The goal
+
+A terminal in the Warp performance class — GPU-rendered, low input latency, deeply
+themable — on Windows, macOS and Linux. And then the part that makes it worth building:
+**every machine reachable from every device.** Not one machine exposed to the internet.
+A fleet. The Mac's shell in a window on the Windows box. A Linux build watched from a
+phone on a train. Sessions that outlive the window they were started in, picked up
+wherever you are.
+
+That goal dictates everything. A terminal built as a monolithic GUI app cannot grow a
+remote head without a rewrite, because its state lives inside the renderer. So
+`zest-core` is headless and knows nothing about pixels; the daemon owns sessions on
+every machine; and the native app is a client of its own daemon exactly as the phone is
+a client over the network.
+
+```
+        ┌── phone (Lynx)          ┐
+        ├── browser (SignalX)     │  clients
+        ├── zesterm.exe (Windows) ┘
+        │
+        │   LAN direct (~0.3ms) where possible,
+        │   the Cloudflare relay (~60ms) when away
+        │
+   ┌────┴──────────┬──────────────┬───────────────┐
+   │ zest-daemon   │ zest-daemon  │ zest-daemon   │  hosts
+   │ (Windows)     │ (Mac)        │ (Linux)       │
+   │  PTYs, grid, scrollback, command blocks      │
+   └──────────────────────────────────────────────┘
+
+   Cloudflare holds a *directory*: which hosts are yours, and are they up.
+   Not how to reach them — under dial-back there is no address to hold, and
+   the LAN finds its own over mDNS. No grid, no scrollback, no session
+   state — ever.
+
+   On the away path it also carries the bytes, and carries them blind: the
+   relay is a pipe both ends dial out to, and everything after the Challenge
+   is sealed end to end before it arrives. → ADR-008, ADR-009.
+```
+
+### The layers
+
+- **`zest-core` is headless** (ADR-001): VT parsing, the grid, scrollback and command
+  blocks, with no dependency on `wgpu`, `winit`, `windows` or `tokio`, building for
+  `wasm32-unknown-unknown`. One terminal implementation shared by every client instead
+  of three that quietly diverge.
+- **Every machine runs `zest-daemon`, and the daemon owns sessions** (ADR-007). A
+  session outlives the window that started it; close the lid on the laptop, reattach
+  from the phone — that only works because nothing about a session was ever the
+  window's.
+- **Everything else is a client** — the native app over the loopback socket, the
+  browser over WebSocket, the phone, and the MCP agent (ADR-015). All speak the same
+  protocol; the app gets no privileged in-process path.
+
+### The wire path
+
+PTY bytes are parsed by `zest-core` into the grid, scrollback and blocks on the host.
+`zest-proto` encodes **grid deltas**, never raw VT bytes (ADR-004): protocol 3,
+`Seq`/`Ack`, resync by keyframe, and everything after the handshake's `Challenge`
+sealed end to end (ADR-008). The transports — loopback (named pipe / unix socket),
+LAN TCP discovered over mDNS, WebSocket for browsers, and the relay both ends dial
+out to (ADR-009) — carry identical messages. Clients apply deltas through `Applier` into a real `Terminal`
+(Rust) or through `GridView` (TypeScript); `zest-core`'s conformance suite holds the
+two reference decoders cell-for-cell equal against recorded sessions.
+
+### The map
+
+| Piece | Responsibility |
+|---|---|
+| `crates/zest-core` | VT parsing, grid, scrollback, command blocks. **No UI, no GPU, no process APIs; builds for wasm** |
+| `crates/zest-pty` | ConPTY / `openpt` spawning, byte I/O, resize, hangup, `.vtrec` recording |
+| `crates/zest-font` | Font discovery, shaping, CPU rasterization, fallback, colour glyphs, PUA |
+| `crates/zest-theme` | Token schema, OKLCH colour math, built-in themes, scheme importers |
+| `crates/zest-render-wgpu` | Glyph atlas, render pipelines, offscreen resolve |
+| `crates/zest-input` | Key/mouse events to terminal byte sequences (Kitty CSI u, SGR mouse), mirrored in TS |
+| `crates/zest-config` | Settings cascade, provenance, profiles, migrations, hot reload, JSON Schema |
+| `crates/zest-app` | The `zesterm` binary: window, chrome, tabs, wiring — a client of its own daemon |
+| `crates/zest-proto` | The delta protocol: encoder, `Applier`, framing, sealing, conformance fixtures |
+| `crates/zest-daemon` | Session ownership and lifecycle; loopback, LAN, WebSocket and relay transports |
+| `crates/zest-mesh` | Ed25519 identity, keystore, mDNS discovery, pairing, trust store |
+| `crates/zest-cloud` | The one crate that owns rustls and HTTP: `TlsDuplex`, enrolment, relay dialling |
+| `crates/zest-mcp` | Terminals as an agent's tools, over MCP on stdio (ADR-015) |
+| `xtask/` | The gates: `check-deps` plus schema / bindings / fixtures / web-export generation and checks |
+| `schemas/` | The generated settings JSON Schema |
+| `scripts/` | `worktree.mjs`, `apply-branch-protection.mjs`, `zesterm-dev` |
+| `clients/web/` | The browser client — a pnpm workspace of ten packages; proto/theme/input are hand-written with no runtime deps, sigx appears only in control/sidecar/app |
+| `cloud/` | A second, separate pnpm workspace: the Cloudflare Workers — hosted web client, relay Worker + Durable Object, directory/account service |
+
+### Where web and cloud sit
+
+The browser client consumes generated TypeScript bindings and applies deltas with
+`GridView`; the settings schema, walked UI fields and built-in themes are exported into
+it by `cargo xtask export-web`, so a Rust-only change to `zest-config` or `zest-theme`
+can leave it stale — that is what `check-export-web` gates. `cloud/` is deliberately
+dumb: the directory holds host ids, labels and last-seen and never session state
+(ADR-006), and the relay routes sealed bytes it cannot read (ADR-008, ADR-009).
+`cloud/README.md` covers why it is two Workers and a workspace of its own.
+
+### Reflow
+
+Resizing the width rewraps, rather than truncating and losing the text. A
+*logical line* — rows joined by `wrapped`, which is what the program actually
+printed — is rejoined and re-broken at the new width, so narrowing a window and
+widening it again restores the screen exactly.
+
+Rules that are not obvious and are load-bearing:
+
+- **The alternate screen is never reflowed.** A full-screen program repaints on
+  `SIGWINCH` and its frame is a picture, not a paragraph.
+- **Line ids are renumbered**, because rewrapping changes how many rows a
+  logical line occupies and no one-to-one mapping exists. They stay monotonic
+  top to bottom, which is what scroll detection and `lines_by_id` depend on.
+  Anything anchored to an id must re-anchor, and `Grid::resize` returns a
+  `Reindex` saying where each one went. The selection is *cleared* rather than
+  mapped — it names a column as well as a line, and rewrapping moves both —
+  while command blocks are re-anchored, because losing the block for a build
+  because the window was widened while it ran is the case blocks exist for.
+- **The grid is resized before the pty**, because on Windows a pty resize is
+  answered by a full-viewport repaint and the reader parses it under the same
+  lock. Told first, the pty sends back a screen laid out for the new size and it
+  lands on a grid still at the old one — after which a perfectly correct reflow
+  and a perfectly correct re-anchor still leave every block naming somebody
+  else's text. The lock is released before the call rather than held across it;
+  holding it is the `ClosePseudoConsole` deadlock again. (#200)
+
+The height axis has its own ownership rules — see ADR-013.
+
+---
+
+# The decisions
 
 ---
 
@@ -79,8 +213,9 @@ integrated GPU on battery. Choosing the backend based on a *settings* value woul
 recreating the device when the user changes opacity, which is not acceptable.
 
 **Consequence, deferred but decided:** the universal Windows transparency path is a manually
-managed DirectComposition presenter. It is isolated behind a `Presenter` trait in
-`zest-app/src/platform/windows/present.rs` so the renderer never knows which path is live.
+managed DirectComposition presenter. It will live behind a `Presenter` trait in
+`zest-app`'s platform layer (today a single `platform.rs`) so the renderer never knows
+which path is live.
 Until it exists, `window.opacity` is honored where the surface reports `PreMultiplied` and
 otherwise forced to 1.0 with `Capabilities { transparency: Unsupported(..) }` reported to the
 settings layer — **never silently ignored.**
@@ -94,7 +229,7 @@ be. Also: opacity never applies to glyphs. Translucent text is unreadable.
 
 ## ADR-004 — The remote protocol ships grid deltas, not raw PTY bytes
 
-**Status:** accepted (design; implementation is M3)
+**Status:** accepted (implemented; protocol 3)
 
 The obvious alternative — stream raw PTY bytes and let the client run its own VT emulator, as
 ttyd, wetty, and GoTTY do — is proven and much simpler. It was rejected on four counts:
@@ -116,7 +251,7 @@ This is mosh's State Synchronization Protocol plus a semantic block layer.
 
 ## ADR-005 — Session actors run locally, never at the edge
 
-**Status:** accepted (design; implementation is M4)
+**Status:** accepted (implemented)
 
 `@sigx/actors` models terminal sessions, and it runs **on the user's machine** as a sidecar,
 with Cloudflare acting purely as transport (Tunnel + Access). Actors are the **control plane**
@@ -144,7 +279,7 @@ Do not "simplify" toward edge actors.
 
 ## ADR-006 — zesterm is a fleet of hosts, not one machine exposed to the internet
 
-**Status:** accepted (design; implementation is M3–M4)
+**Status:** accepted (implemented)
 
 The original framing was *"reach **this** machine's shells from the internet"*: one host, many
 clients. That is not what the tool is for. Its author works across a Mac, a Windows box and
@@ -194,7 +329,7 @@ and it already exists.
 
 ## ADR-007 — The daemon owns sessions; the GUI app is a client of its own daemon
 
-**Status:** accepted (design; implementation is M3)
+**Status:** accepted (implemented)
 
 Every machine's terminals are owned by `zest-daemon`. The desktop app attaches to its own local
 daemon over a loopback socket — a named pipe on Windows, a unix socket elsewhere — using exactly
@@ -255,7 +390,7 @@ limit. It never terminates the protocol.
 
 ### Signed ephemeral X25519, not Noise
 
-**Rejected: Noise IK**, which the roadmap named at M5. Two independent implementations of a
+**Rejected: Noise IK**, which an earlier plan named. Two independent implementations of a
 *framework* is far more surface than two of one specified handshake; `snow` has no browser twin,
 so the browser would get a hand-written Noise anyway; and what Noise buys here — identity hiding
 and 0-RTT — is not wanted. The host proving itself first is a *feature* (a client that dialled an
@@ -330,21 +465,22 @@ moment a disagreement is undetectable.
 ### What this supersedes
 
 - `zest-mesh/src/pairing.rs` said the handshake was "entity authentication, not a secure channel"
-  and that "M5's Noise IK closes it". Both were true and are not any more; the module doc now
+  and that a future Noise IK closes it. Both were true and are not any more; the module doc now
   describes the channel.
 - `zest-daemon/src/ws.rs` deferred TLS on the grounds that the internet path would be a Cloudflare
   Tunnel terminating TLS at the edge. That path is now a relay that is not trusted to terminate
   anything, and LAN `ws://` is no longer unencrypted at the protocol layer.
 
 **TLS is still not here, and is still wanted.** E2E hides the payload; it does not hide that a
-connection exists, to whom, or how large its frames are. The relay needs `wss://` for the browser
-regardless, and the daemon will need a TLS client to dial it — see the roadmap's M5/M6 rows.
+connection exists, to whom, or how large its frames are. The relay speaks `wss://` and the
+daemon dials it over `zest-cloud`'s `TlsDuplex`.
 
 ---
 
 ## ADR-009 — The relay is a dial-back pipe, one Durable Object per host
 
-**Status:** accepted (design; implementation is M6)
+**Status:** accepted (implemented — the relay Worker, dial-back and the desktop attach
+leg are live; the remaining hardening items are in ROADMAP.md's open work)
 
 ADR-008 settled *what* the relay is allowed to know: nothing. This settles *how* it is built.
 
@@ -719,14 +855,8 @@ repaints the little it kept and blanks the rest. **Our grid holds more of the
 session than the restater does**, which is the fact everything here follows
 from.
 
-#200 asked who owns the viewport and had two candidates, both of which its own
-measurements ruled out: "the restater owns it" discards real history for a
-lossy copy, and "detect divergence and drop the blocks" evicts text we still
-hold. It settled on a third — leave the boundary alone on a grow — and
-concluded the reversible drag was a *unix* property, unreachable here because
-the repaint always has the last word.
-
-**The repaint does have the last word. That bounds *when*, not *whether*.**
+The repaint always has the last word. That bounds *when* the displaced rows can
+be given back, not *whether*.
 
 ### The rule
 
@@ -750,47 +880,35 @@ how a read split the stream, which a quiescence heuristic is not: a 200-column
 repaint with colour can exceed the 64 KiB parse chunk, and settling mid-repaint
 would move the boundary under rows still being written.
 
-**The two halves of a drag are not the same bytes, and assuming they were
-shipped this broken.** #247 armed on `CSI 8;<rows>;<cols>t` — XTWINOPS "resize
-the text area", which no ordinary program sends inbound, so an unambiguous
-marker — on the strength of #205's single capture. #205 captured a *shrink*.
-`corpus/resize-drag.vtrec` has both halves of one real drag:
+**The two halves of a drag are not the same bytes.** `corpus/resize-drag.vtrec`
+has both halves of one real drag:
 
 ```text
 Down:  ESC[?25l  ESC[8;8;100t  ESC[H  <rows, each ESC[K>              ESC[?25h
 Up:    ESC[?25l                ESC[H  <rows, each ESC[K>  ESC[8;1H    ESC[?25h
 ```
 
-ConPTY announces the size on the way down and **not on the way back** — and the
-way back is the half the settle exists for, so it never ran. Every synthetic
-test passed throughout, because the test helper emitted an announcement ConPTY
-does not. Nothing logged, nothing failed, and the pane looked exactly as it had
-before the fix. This is the argument for replaying recorded bytes rather than a
-helper's idea of them, and it is why `Drag::Down`/`Drag::Up` is a parameter of
-that helper now rather than a detail inside it. (#271)
-
-What both halves share is hiding the cursor and homing it before writing a row,
-so that is what arms the settle. The window it opens is narrow by construction:
-only a grow that is owed rows sets `pending_restate`, and the alternate screen
-has no scrollback, so a full-screen program redrawing the same way cannot arm
-it.
+ConPTY announces the size (`CSI 8;<rows>;<cols>t`) on the way down and **not on
+the way back** — and the way back is the half the settle exists for, so arming
+on the announcement shipped a settle that never ran, green throughout because
+the test helper emitted an announcement ConPTY does not; `Drag::Down`/`Drag::Up`
+is a parameter of that helper now rather than a detail inside it (#271). Arming
+is therefore on what both halves share: the cursor hidden and homed before the
+first row. The window it opens is narrow by construction — only a grow that is
+owed rows sets `pending_restate`, and the alternate screen has no scrollback,
+so a full-screen program redrawing the same way cannot arm it.
 
 **A stale repaint is refused by what it did, not by what it said.** A drag
 emits resizes faster than ConPTY answers them, so a repaint laid out for a size
 the grid has already left is routine — and settling on one pays a grow's debt
-against a viewport that has since moved, dragging history into rows the next
-repaint is about to blank. An *announced* repaint names its stale size and is
-recorded as sat out up front (recorded, not merely not-armed, because the
-cursor-home three bytes later would otherwise re-arm it). An unannounced one
-has nothing in its bytes to compare — and this ADR originally claimed that was
-safe, because the settle is bounded by the blank tail at the moment it runs, so
-an early settle would be a no-op. **That claim was false during a drag up, and
-it shipped the reported bug** (#312): the blank tail at that moment is
-grow-minted and real, so a stale repaint's settle pays real history into blank
-rows the *closing* repaint blanks again, with the pulled rows no longer in
-scrollback. `corpus/resize-drag-storm.vtrec` is the gesture recorded for real,
-and `probe:resize` measured the damage at the daemon layer: block content
-halved, the live prompt anchored thirteen rows below where it rendered.
+against a viewport that has since moved: the blank tail at that moment is
+grow-minted and real, so the settle pulls real history into blank rows the
+*closing* repaint blanks again, with the pulled rows no longer in scrollback
+(#312; `corpus/resize-drag-storm.vtrec` is the gesture recorded for real). An
+*announced* repaint names its stale size and is recorded as sat out up front
+(recorded, not merely not-armed, because the cursor-home three bytes later
+would otherwise re-arm it). An unannounced one has nothing in its bytes to
+compare.
 
 What tells a stale repaint apart is its own coverage. A repaint restates the
 whole of *its* viewport, every row terminated with `ESC[K`, so one the grid has

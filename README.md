@@ -5,11 +5,13 @@ A GPU-accelerated, themable terminal — built to be driven from anywhere.
 Native on Windows, macOS, and Linux via `wgpu` (DX12 / Metal / Vulkan) and `winit`.
 The end goal is to reach your machine's shells from a browser or a phone, so the
 architecture separates a headless terminal core from any particular frontend from
-the very first commit.
+the very first commit. What the system is — the fleet, the layers, the crate map —
+is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)'s "The system" overview; current
+state and open work are in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Status
 
-**It runs.** Build once, then run the binary:
+**It runs, daily.** Build once, then run the binary:
 
 ```
 cargo build --release
@@ -24,34 +26,18 @@ cargo run --profile fast -p zest-app
 ```
 
 A window with a real shell in it — GPU-rendered, themed, with working input,
-scrollback, and selection.
+scrollback, selection, and command blocks, attached to this machine's daemon so
+the shell outlives the window.
 
 Mouse: drag to select, double-click a word (paths and identifiers stay whole),
 triple-click a line, Alt-drag for a rectangle. Ctrl+Shift+C / Ctrl+Shift+V copy
 and paste; right-click copies when there is a selection and pastes otherwise;
 middle-click pastes.
 
-The window appears in **~50ms** and the shell prompt is on the first frame.
-
-> Run the **binary**, not `cargo run`. Cargo re-resolves the workspace and
-> freshness-checks every source file before it execs anything, which costs
-> ~500ms on this workspace even when there is nothing to rebuild — comparable to
-> zesterm's entire startup. Measured: `cargo run --release -p zest-app` ~560ms
-> versus ~22ms direct, for a command that does nothing but print and exit.
-
-Milestone 1 (good enough to replace Windows Terminal daily) is in progress; see
-[docs/ROADMAP.md](docs/ROADMAP.md).
-
-| Piece | State |
-|---|---|
-| `zest-pty` — ConPTY, resize, shutdown, `.vtrec` recording | working |
-| `zest-core` — grid, scrollback, VT parsing, modes, OSC | working, 77 tests |
-| `zest-font` — metrics, shaping, rasterization, fallback | working, 22 tests |
-| `zest-theme` — tokens, OKLCH colour math, built-ins, importers | working, 44 tests |
-| Transparency capability probe | done — see ADR-003 |
-| `zest-render-wgpu` — atlas, 3 pipelines, offscreen resolve | renders offscreen, 14 tests |
-| `zest-app` — window, threads, input, selection | working, 24 tests |
-| `zest-config` | not started |
+The window appears in **~35ms** on Windows (48ms on macOS) and the shell prompt
+is on the first frame. Measure with the built binary, not `cargo run` — cargo's
+workspace resolution costs ~500ms before the process starts (see `AGENTS.md`
+§ Commands).
 
 The font layer renders a sample sheet to a PNG with no GPU involved, which is
 where font bugs are cheapest to find:
@@ -77,22 +63,14 @@ zesterm --screenshot shot.png [--screenshot-size 1200x800] [--screenshot-delay 4
 
 ## Layout
 
-| Crate | Responsibility |
-|---|---|
-| `zest-core` | VT parsing, grid, scrollback. **No UI, no GPU, no process APIs.** |
-| `zest-pty` | ConPTY / forkpty spawning and byte I/O |
-| `zest-theme` | Token schema, perceptual color math, scheme importers |
-| `zest-font` | Font discovery, shaping, CPU rasterization |
-| `zest-render-wgpu` | Glyph atlas and the SDF / glyph / decoration pipelines |
-| `zest-input` | Key and mouse events to terminal byte sequences |
-| `zest-config` | Settings cascade, profiles, hot reload |
-| `zest-app` | The `zesterm` binary: window, chrome, motion, wiring |
+A Rust workspace under `crates/` (13 crates), plus `xtask/` for the repo's gates,
+`clients/web/` for the browser client and `cloud/` for the Cloudflare Workers
+that host it. The full crate map, one line each, is in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) § The map.
 
-`zest-core` is the load-bearing boundary — it must never depend on `wgpu`, `winit`,
-`windows`, or `tokio`, and must build for `wasm32-unknown-unknown`. This is what lets
-the native app, the remote daemon, and the browser/mobile clients share one terminal
-implementation instead of three that quietly diverge. Run `cargo xtask check-deps` to
-verify; CI does the same.
+`zest-core` is the load-bearing boundary: no `wgpu`/`winit`/`windows`/`tokio`,
+builds for wasm — see `AGENTS.md` § The one invariant, and ADR-001 for why.
+`cargo xtask check-deps` verifies it; CI does the same.
 
 ## Building
 
@@ -127,7 +105,7 @@ cargo xtask check-deps
 
 Theme `ui.*` tokens are [`@sigx/terminal-zero`](https://sigx.dev/terminal/docs/theming)'s
 contract verbatim, so one theme file styles zesterm's chrome *and* any `@sigx/terminal-ui`
-TUI running inside it. Importers are planned for iTerm2 `.itermcolors`, Windows Terminal
+TUI running inside it. Importers exist for iTerm2 `.itermcolors`, Windows Terminal
 schemes, base16/base24, and Alacritty/Ghostty TOML.
 
 ## License

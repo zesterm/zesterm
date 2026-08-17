@@ -9,7 +9,7 @@ editor (as a tab, generated from the config schema), the profiles editor (launch
 targets pinned to hosts, each with its own appearance), and the blocks-first mobile
 client.
 
-It exists to give WS-A (chrome), WS-E (command blocks) and WS-G (web client) a
+It exists to give the chrome, command-blocks and web-client work a
 single visual target so the desktop window, the browser tab and the phone do not
 each invent their own vocabulary.
 
@@ -667,7 +667,6 @@ Ship the user's configured terminal font for mono and the platform UI face for s
 - `Zesterm.dc.html` — the prototype source (needs `support.js` + `image-slot.js` beside it). Edit this, not the bundle.
 - `screenshots/` — one PNG per screen (924px wide), for visual comparison. Numbers come from this file, not from the pixels.
 - `image-slot.js` — the drop-target component used by the profile background-image field. Design-time only; do not ship it.
-- `github.md` (project root, not bundled) — records the repo association and which repo files each screen was derived from.
 
 Repo files the design was read from and must stay consistent with:
 
@@ -677,41 +676,9 @@ Repo files the design was read from and must stay consistent with:
 | Block model and states | `crates/zest-core/src/blocks.rs`, `crates/zest-proto/src/delta.rs` |
 | Chrome atlas / rect pipeline constraints | `docs/CONTRACTS.md` |
 | Fleet model, LAN vs tunnel, sessions outliving windows | `docs/ARCHITECTURE.md` ADR-004…007 |
-| Chrome and tab-strip work item | `docs/ROADMAP.md` WS-A; blocks WS-E; web client WS-G |
+| Chrome, blocks and web-client work items | `docs/ROADMAP.md` § Open work |
 | Settings tree, widgets, provenance | `crates/zest-config/src/{settings,ui,cascade,invalidate}.rs`, `crates/zest-app/src/settings_ui.rs`, `clients/web/packages/settings/` |
 | Profiles as launch targets | `crates/zest-config/src/settings.rs` (`Settings::profiles`), `src/cascade.rs` (`profile_layer`, `Source::Profile`) |
 
-## Suggested check-in
-
-Land the design reference and this handoff under `docs/design/` so the mock is
-reviewable next to the ADRs it follows:
-
-```
-docs/design/client-ui/AGENTS.md         # agent entry point: rules + invariants
-docs/design/client-ui/README.md         # this file: tokens and per-screen spec
-docs/design/client-ui/zesterm-demo.html # runnable single-file demo
-docs/design/client-ui/Zesterm.dc.html   # prototype source
-docs/design/client-ui/support.js        # prototype runtime
-docs/design/client-ui/image-slot.js     # design-time only; do not ship
-docs/design/client-ui/screenshots/*.png # rendered reference, one per screen
-```
-
-Suggested commit message:
-
-```
-docs(design): client UI reference — tabbed shell, profiles, settings, fleet
-
-Adds the design source of truth for the client shell: window chrome and tab
-strip (horizontal + vertical), command blocks, split panes, command palette,
-profiles as launch targets, the settings tab generated from the zest-config
-schema, fleet, themes, and mobile. AGENTS.md carries the invariant checklist
-and verification protocol; screenshots/ carries a rendered reference per screen.
-```
-
-Then implement per work stream — WS-A takes screens 1–3 and 5, WS-E takes 3 and 6,
-WS-G takes the web client rendering of 1–4, and M4 takes 9–10. Screen 12 (Profiles) is the
-one that needs a work item of its own — per-host profile discovery and per-tab theming both
-cut across WS-A and the control plane. Screen 11 (Settings)
-replaces the current overlay: it is a tab, and it renders from the generated field list
-rather than a hand-written form, in both `zest-app` and `clients/web`. Reference this file
-from the relevant ROADMAP checkboxes rather than restating measurements there.
+Reference this file from the relevant ROADMAP items rather than restating
+measurements there.
