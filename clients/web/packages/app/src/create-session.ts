@@ -31,40 +31,56 @@ export function createSessionOverDataPlane(args: {
 }): Promise<SessionAddr> {
   const { dial, signer, cols, rows } = args;
   return new Promise((resolve, reject) => {
+    // `let`, and never dereferenced without a check. The timer is armed
+    // before the client exists, so a constructor that throws leaves this
+    // closure holding a binding in its temporal dead zone — the throw rejects
+    // the promise *and* leaves the timer running, and fifteen seconds later a
+    // `ReferenceError` surfaces from a timer callback with nothing to catch
+    // it. Rare, and very hard to read: the failure arrives long after its
+    // cause, on a promise that settled ages ago.
+    let client: ConnectionClient | null = null;
     const timeout = setTimeout(() => {
-      client.close();
+      client?.close();
       reject(new Error('the daemon did not answer the create in time'));
     }, 15_000);
+    const settle = (): void => {
+      clearTimeout(timeout);
+      client?.close();
+    };
 
-    const client: ConnectionClient = new ConnectionClient({
-      dial,
-      signer,
-      label: 'zesterm-web',
-      events: {
-        onConnection: (state) => {
-          if (state.phase === 'connected') {
-            client.createSession({ command: '', cwd: '', cols, rows });
-          } else if (state.phase === 'failed') {
-            clearTimeout(timeout);
-            client.close();
-            reject(new Error(state.message));
-          }
+    try {
+      client = new ConnectionClient({
+        dial,
+        signer,
+        label: 'zesterm-web',
+        events: {
+          onConnection: (state) => {
+            if (state.phase === 'connected') {
+              client?.createSession({ command: '', cwd: '', cols, rows });
+            } else if (state.phase === 'failed') {
+              settle();
+              reject(new Error(state.message));
+            }
+          },
+          onSessions: (sessions, created) => {
+            if (created === null) return;
+            const mine = sessions.find((s) => s.addr.session === created);
+            settle();
+            if (mine) resolve(mine.addr);
+            else reject(new Error('the created session was not in the listing'));
+          },
+          onError: (message) => {
+            settle();
+            reject(new Error(message));
+          },
         },
-        onSessions: (sessions, created) => {
-          if (created === null) return;
-          const mine = sessions.find((s) => s.addr.session === created);
-          clearTimeout(timeout);
-          client.close();
-          if (mine) resolve(mine.addr);
-          else reject(new Error('the created session was not in the listing'));
-        },
-        onError: (message) => {
-          clearTimeout(timeout);
-          client.close();
-          reject(new Error(message));
-        },
-      },
-    });
+      });
+    } catch (e: unknown) {
+      // Disarm before rejecting, or the timer fires into a settled promise.
+      clearTimeout(timeout);
+      reject(e instanceof Error ? e : new Error(String(e)));
+      return;
+    }
     client.connect();
   });
 }

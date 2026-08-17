@@ -21,6 +21,8 @@ import { component, onMounted, onUnmounted, signal, watch } from 'sigx';
 import { useNavigate, useRoute } from '@sigx/router';
 import type { Theme } from '@zesterm/theme';
 import { modsOf, shellChord, type ShellAction } from '@zesterm/input';
+import type { Dial } from '@zesterm/client';
+import type { DirectoryView } from '@zesterm/control';
 
 import {
   launcherRows,
@@ -28,9 +30,7 @@ import {
   tabIdOf,
   type HostChoice,
 } from '../chrome-model.ts';
-import type { Dial } from '@zesterm/client';
 import { createSessionOverDataPlane } from '../create-session.ts';
-import type { DirectoryView } from '@zesterm/control';
 import { dialFor } from '../dial-for.ts';
 import type { DeviceKey } from '../device-key.ts';
 import { actorDirectorySource } from '../directory-source.ts';
