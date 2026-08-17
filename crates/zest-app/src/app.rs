@@ -68,6 +68,14 @@ pub struct Config {
     pub text_antialias: zest_font::TextAntialias,
     pub text_hinting: zest_font::Hinting,
     pub theme: String,
+    /// Theme to use when the OS reports a light appearance.
+    ///
+    /// Empty means "follow `theme` regardless", which is what someone who has
+    /// deliberately chosen a dark theme expects — so it is not a fallback that
+    /// needs filling in, it is an answer.
+    pub light_theme: String,
+    /// Whether the OS light/dark setting is consulted at all.
+    pub follow_system_theme: bool,
     pub scrollback: usize,
     pub opacity: f32,
     /// Space between the window edge and the grid, in logical pixels.
@@ -149,6 +157,8 @@ impl From<&zest_config::Settings> for Config {
                 zest_config::TextHinting::Full => zest_font::Hinting::Full,
             },
             theme: s.appearance.theme.clone(),
+            light_theme: s.appearance.light_theme.clone(),
+            follow_system_theme: s.appearance.follow_system_theme,
             scrollback: s.scrolling.scrollback,
             opacity: s.window.opacity.clamp(0.0, 1.0),
             padding: s.window.padding.min(64),
@@ -1468,6 +1478,14 @@ pub struct App {
     scene: Scene,
     modifiers: ModifiersState,
     focused: bool,
+    /// Whether the OS currently reports a light appearance.
+    ///
+    /// Seeded from the window once there is one and updated on
+    /// `WindowEvent::ThemeChanged`. Only ever *read* through [`theme_id`],
+    /// which decides whether it matters — a window that is not following the
+    /// system tracks this anyway, so turning the setting on takes effect
+    /// without waiting for the next appearance change.
+    system_light: bool,
     mouse: MouseState,
     /// Pointer position in cells, updated on every move.
     pointer_cell: (usize, usize),
@@ -1593,7 +1611,10 @@ impl App {
         // unknown-keys category from the keys the cascade kept.
         let zest_config::Resolved { settings, provenance, unknown_keys } = resolved;
         let config = Config::from(&settings);
-        let theme = zest_theme::builtin::get(&config.theme)
+        // `false` because there is no window yet to ask, and guessing light on
+        // a dark desktop would flash the wrong theme. `resumed` seeds the real
+        // answer and `apply_theme` corrects this the moment it can.
+        let theme = zest_theme::builtin::get(theme_id(&config, false))
             .unwrap_or_else(zest_theme::builtin::obsidian);
         let resolved = zest_theme::resolve(&theme);
         let palette = to_core_palette(&resolved);
@@ -1669,6 +1690,9 @@ impl App {
             scene: Scene::default(),
             modifiers: ModifiersState::empty(),
             focused: true,
+            // There is no window yet to ask, and guessing light would flash a
+            // light theme on a dark desktop. `resumed` seeds it for real.
+            system_light: false,
             mouse: MouseState::default(),
             pointer_cell: (0, 0),
             // Created once: constructing a Clipboard opens an OS connection, and
@@ -2910,8 +2934,8 @@ impl App {
                 Some(ScreenModel::Fleet { account, cards, devices })
             }
             AppScreen::Themes => {
-                let active = if zest_theme::builtin::get(&self.config.theme).is_some() {
-                    self.config.theme.clone()
+                let active = if zest_theme::builtin::get(self.effective_theme()).is_some() {
+                    self.effective_theme().to_string()
                 } else {
                     zest_theme::builtin::DEFAULT_DARK.to_string()
                 };
@@ -4364,7 +4388,7 @@ impl App {
                 self.shell_fallback(),
                 local_host,
                 hosts.into_iter().map(|(label, online, _)| (label, online)).collect::<Vec<_>>(),
-                self.config.theme.clone(),
+                self.effective_theme().to_string(),
             )
         });
         let profiles_model = self.profiles_ui.as_mut().zip(profiles_inputs).map(
@@ -6223,7 +6247,7 @@ impl App {
         // `None`) and seed through `edit_seed_value`, which ignores it.
         let ctx = pui::ProfileRowContext {
             window_values: &window_values,
-            window_theme: &self.config.theme,
+            window_theme: theme_id(&self.config, self.system_light),
             fallback_command: &fallback,
             local_host: "this machine",
             hosts: &[],
@@ -8840,7 +8864,6 @@ impl App {
             profile: self.profile.clone(),
             workspace_dir: std::env::current_dir().ok(),
             cli: Some(self.cli_layer.clone()),
-            system_light: false,
         });
 
         if !load.errors.is_empty() {
@@ -8930,9 +8953,18 @@ impl App {
         seed_palette(&self.palette, identity)
     }
 
+    /// The theme id this window is wearing, OS appearance taken into account.
+    ///
+    /// Every read goes through here rather than reaching for `config.theme`
+    /// directly, or the gallery highlights a row the window is not using and
+    /// the profiles editor previews against the wrong palette.
+    fn effective_theme(&self) -> &str {
+        theme_id(&self.config, self.system_light)
+    }
+
     /// Re-resolve the theme into the live palette.
     fn apply_theme(&mut self) {
-        let theme = zest_theme::builtin::get(&self.config.theme)
+        let theme = zest_theme::builtin::get(self.effective_theme())
             .unwrap_or_else(zest_theme::builtin::obsidian);
         let resolved = zest_theme::resolve(&theme);
         self.chrome_colors = ChromeColors::new(&theme.ui, &theme.effects, self.config.chrome_opacity);
@@ -9173,6 +9205,16 @@ impl ApplicationHandler<Wakeup> for App {
             attrs
         };
         let window = Arc::new(el.create_window(attrs).expect("create window"));
+
+        // The OS appearance, before the first paint. `apply_theme` below reads
+        // it through `theme_id`, so a light desktop opens light rather than
+        // opening dark and correcting itself a frame later. `None` means the
+        // platform will not say, which is not the same as "dark" but is the
+        // only safe reading of it: every shipped default theme is dark.
+        self.system_light = window.theme() == Some(winit::window::Theme::Light);
+        if self.config.follow_system_theme {
+            self.apply_theme();
+        }
 
         // Show it NOW, painted by the OS in the theme colour.
         //
@@ -9775,6 +9817,28 @@ impl ApplicationHandler<Wakeup> for App {
                 if let Some(w) = self.window.as_ref() {
                     let size = w.inner_size();
                     self.resize_surface(size.width, size.height);
+                }
+            }
+
+            WindowEvent::ThemeChanged(theme) => {
+                let light = theme == winit::window::Theme::Light;
+                if self.system_light == light {
+                    return;
+                }
+                self.system_light = light;
+                // Tracked even when not following, so turning the setting on
+                // later is correct immediately. Only *repainting* is
+                // conditional — re-resolving the theme on a window that is not
+                // following would be work with no visible result, on an event
+                // that arrives for every window on the desktop at once.
+                if self.config.follow_system_theme {
+                    self.apply_theme();
+                    if let Some(session) = self.tabs.active_source() {
+                        session.mark_dirty();
+                    }
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
                 }
             }
 
@@ -11699,6 +11763,26 @@ fn pane_opacity(window: f32, identity: Option<&crate::tabs::ProfileIdentity>) ->
     identity.and_then(|i| i.opacity).map_or(window, |o| o.clamp(0.0, 1.0))
 }
 
+/// The theme this window should actually be wearing.
+///
+/// Resolved here rather than in the cascade, which is where it used to live and
+/// where it could not work: the OS-appearance layer sat *below* the user's
+/// file, so an explicit `theme =` beat it — that being everyone who cared
+/// enough to choose one — and it hardcoded `paper` rather than reading
+/// `light_theme` at all. Following the OS is a question about the live window,
+/// which changes without any file changing, so it belongs on the repaint path.
+///
+/// An empty `light_theme` means "follow `theme` regardless", exactly as the
+/// schema promises: someone who has deliberately picked a dark theme and turned
+/// following on has not asked to be given a light one nobody chose.
+fn theme_id(config: &Config, system_light: bool) -> &str {
+    if config.follow_system_theme && system_light && !config.light_theme.is_empty() {
+        &config.light_theme
+    } else {
+        &config.theme
+    }
+}
+
 /// Layer `shell.cwd` and `shell.env` onto a spec `default_shell` just built.
 ///
 /// Free-standing so the two orderings it decides are testable without an
@@ -11984,6 +12068,60 @@ mod fleet_device_row_tests {
         let rows = fleet_device_rows(&[device(3, "studio-app", "desktop", true)], None);
         assert_eq!(rows[0].action, FleetDeviceAction::Vouch);
         assert_eq!(rows[0].detail, "desktop · approved");
+    }
+}
+
+#[cfg(test)]
+mod theme_following_tests {
+    use super::{theme_id, Config};
+
+    fn config_with(theme: &str, light: &str, follow: bool) -> Config {
+        let mut s = zest_config::Settings::default();
+        s.appearance.theme = theme.to_string();
+        s.appearance.light_theme = light.to_string();
+        s.appearance.follow_system_theme = follow;
+        Config::from(&s)
+    }
+
+    #[test]
+    fn following_off_ignores_the_os_entirely() {
+        // Including when a light theme is named: configuring one is not the
+        // same as asking for it to be used.
+        let config = config_with("obsidian", "paper", false);
+        assert_eq!(theme_id(&config, true), "obsidian");
+        assert_eq!(theme_id(&config, false), "obsidian");
+    }
+
+    #[test]
+    fn following_on_swaps_only_on_a_light_desktop() {
+        let config = config_with("obsidian", "paper", true);
+        assert_eq!(theme_id(&config, true), "paper");
+        assert_eq!(theme_id(&config, false), "obsidian", "dark is still `theme`");
+    }
+
+    #[test]
+    fn an_empty_light_theme_follows_theme_regardless() {
+        // The schema's exact promise, and the reason this is not a fallback
+        // waiting to be filled in: someone who deliberately chose a dark theme
+        // and turned following on has not asked to be handed a light one
+        // nobody picked. It is the shipped default, so getting it wrong would
+        // give every new user a theme they never chose.
+        let config = config_with("obsidian", "", true);
+        assert_eq!(theme_id(&config, true), "obsidian");
+        assert_eq!(theme_id(&config, false), "obsidian");
+        assert!(
+            zest_config::Settings::default().appearance.light_theme.is_empty(),
+            "this is the default, so it is the path almost everyone takes"
+        );
+    }
+
+    #[test]
+    fn the_dark_theme_is_never_replaced_by_the_light_one() {
+        // The inverse mistake: a dark desktop must never reach `light_theme`,
+        // however it is configured.
+        for follow in [true, false] {
+            assert_eq!(theme_id(&config_with("nord", "paper", follow), false), "nord");
+        }
     }
 }
 
