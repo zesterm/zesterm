@@ -638,6 +638,14 @@ fn a_recorded_conpty_drag_keeps_all_three_participants_agreeing() {
     while i + 12 <= bytes.len() {
         let us = u64::from_le_bytes(bytes[i..i + 8].try_into().unwrap());
         let len = u32::from_le_bytes(bytes[i + 8..i + 12].try_into().unwrap()) as usize;
+        // A truncated recording, or a length field misread as a huge number,
+        // fails here by name rather than as an out-of-bounds slice.
+        assert!(
+            i + 12 + len <= bytes.len(),
+            "{}: chunk at byte {i} claims {len} bytes past the end -- the recording \
+             is truncated or the framing is being misread",
+            path.display()
+        );
         timed.push((us, bytes[i + 12..i + 12 + len].to_vec()));
         i += 12 + len;
     }

@@ -427,7 +427,14 @@ impl Grid {
         // sweep deleted unrecoverably. The web client wrote the argument down
         // first (`grid-view.ts`); this is the same rule in the second of the
         // three readers, and `decode.rs` is the third. (#313)
-        let Some(&floor) = named.iter().min() else { return 0 };
+        if named.is_empty() {
+            return 0;
+        }
+        // Sorted once for `binary_search` membership — `no_std`, so no hash
+        // set, and the list is viewport-sized anyway.
+        let mut named: Vec<LineId> = named.to_vec();
+        named.sort_unstable();
+        let floor = named[0];
         let mut removed = 0;
         let mut end: Option<usize> = None;
         let mut i = self.scrollback_len;
@@ -435,22 +442,23 @@ impl Grid {
         // rows are newer than everything in history, so this stays cheap on
         // every frame that is not a settle.
         loop {
-            let in_range = i > 0 && self.storage.row(i - 1).id >= floor;
-            if in_range && named.contains(&self.storage.row(i - 1).id) {
-                if end.is_none() {
-                    end = Some(i);
+            let id = (i > 0).then(|| self.storage.row(i - 1).id).filter(|&id| id >= floor);
+            match id {
+                Some(id) if named.binary_search(&id).is_ok() => {
+                    end.get_or_insert(i);
+                    i -= 1;
                 }
-                i -= 1;
-                continue;
+                other => {
+                    if let Some(e) = end.take() {
+                        self.storage.remove_range(i, e - i);
+                        removed += e - i;
+                    }
+                    if other.is_none() {
+                        break;
+                    }
+                    i -= 1;
+                }
             }
-            if let Some(e) = end.take() {
-                self.storage.remove_range(i, e - i);
-                removed += e - i;
-            }
-            if !in_range {
-                break;
-            }
-            i -= 1;
         }
         if removed > 0 {
             self.scrollback_len -= removed;
