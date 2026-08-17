@@ -1501,6 +1501,58 @@ fn a_multi_step_drag_with_lagging_repaints_comes_back_whole() {
 }
 
 #[test]
+fn a_shrink_after_a_settle_does_not_forget_the_pull_the_repaint_needs_taken_back() {
+    // The reported gesture's third leg, and the one every earlier test
+    // stopped short of: drag up, drag down -- the settle restores the screen
+    // -- and drag up *again*. After the settle this grid's viewport holds
+    // more of the session than ConPTY's buffer does, permanently, so the new
+    // shrink's repaint restates a lesser truth over a fuller screen. The
+    // re-bank exists for exactly that moment -- but the shrink resize arrives
+    // first (grid before pty, always), and it zeroed `settled_pull` on the
+    // reasoning that a shrink re-banks displaced rows on its own terms. It
+    // banks only what leaves over the *top*; a partial shrink with blank rows
+    // below the cursor banks nothing, the pull was forgotten anyway, and the
+    // repaint blanked the pulled rows in place -- no longer in scrollback
+    // either. "It snaps and disappears." (#335)
+    let mut t = Terminal::new(40, 12, 500);
+    t.set_pty_restates_viewport(true);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\n");
+    for i in 0..9 {
+        t.advance(format!("entry {i}\r\n").as_bytes());
+    }
+    t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    let out = t.blocks().blocks()[0].output_line.expect("the command produced output");
+
+    // Down, and back up: the round trip the earlier tests cover.
+    let kept = ["entry 6", "entry 7", "entry 8", "$ "];
+    t.resize(40, 4);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 4, &kept, Drag::Down));
+    t.resize(40, 12);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 12, &kept, Drag::Up));
+    assert_eq!(t.grid().scrollback_len(), 0, "the round trip did not settle, so this proves nothing");
+
+    // And up again -- partially, so the blank rows below the cursor absorb
+    // most of it and almost nothing is banked over the top. ConPTY answers
+    // with a repaint of the little *it* still holds.
+    t.resize(40, 10);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 10, &kept, Drag::Down));
+
+    for (n, line) in (out..out + 9).enumerate() {
+        let found = t
+            .grid()
+            .row_of_line(line)
+            .map(|row| t.grid().row(row).text())
+            .or_else(|| t.grid().lines_by_id(line, 1).first().map(|r| r.text()))
+            .unwrap_or_default();
+        assert_eq!(
+            found.trim_end(),
+            format!("entry {n}"),
+            "line {line} of the listing was destroyed by the second shrink's repaint"
+        );
+    }
+}
+
+#[test]
 fn an_intermediate_settle_is_taken_back_before_the_next_repaint_writes() {
     // The storm tests above are about repaints the grid outran. This is the
     // opposite and it is what the daemon actually produces at a slower drag:
@@ -2415,6 +2467,65 @@ fn a_recorded_overflowing_storm_is_reversible_and_leaves_no_duplicates() {
         texts(&plain),
         "the storm's history holds different rows (or extra copies) than the \
          undisturbed replay's"
+    );
+}
+
+#[test]
+fn a_recorded_third_leg_destroys_nothing() {
+    // `corpus/resize-drag-thirdleg.vtrec`: shrink to 8, grow to 30 (the
+    // settle restores the screen), then shrink again — twice, partially —
+    // with ConPTY answering each move. The third leg is the reported "it
+    // snaps and disappears": after the settle this grid holds more than
+    // ConPTY's buffer, and each later repaint restates the lesser truth, so
+    // the pulled rows must be re-banked before it writes. The recording's
+    // stamps: 2000ms → 8, 3500ms → 30, 5000ms → 28, 6500ms → 26. (#335)
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/corpus/resize-drag-thirdleg.vtrec"
+    ))
+    .expect("the recording exists");
+    let chunks = parse_vtrec_timed(&bytes);
+
+    // The expected *content* is the session with no drag at all. The final
+    // layout legitimately differs — at 26 rows some of the listing lives in
+    // scrollback — so the comparison is the multiset of non-blank line texts
+    // across scrollback and viewport: nothing destroyed, nothing duplicated.
+    const DRAG_WINDOW_US: core::ops::Range<u128> = 2_000_000..7_000_000;
+    let mut plain = Terminal::new(100, 30, 500);
+    plain.set_pty_restates_viewport(true);
+    for (us, chunk) in &chunks {
+        if !DRAG_WINDOW_US.contains(us) {
+            plain.advance(chunk);
+        }
+    }
+
+    let mut t = Terminal::new(100, 30, 500);
+    t.set_pty_restates_viewport(true);
+    let moves: [(u128, usize); 4] =
+        [(2_000_000, 8), (3_500_000, 30), (5_000_000, 28), (6_500_000, 26)];
+    let mut next = 0;
+    for (us, chunk) in &chunks {
+        while next < moves.len() && *us >= moves[next].0 {
+            t.resize(100, moves[next].1);
+            next += 1;
+        }
+        t.advance(chunk);
+    }
+    assert_eq!(next, moves.len(), "the recording ended before the drag did -- re-record");
+
+    let texts = |t: &Terminal| -> Vec<String> {
+        let mut v: Vec<String> = (0..t.grid().total_lines())
+            .filter_map(|i| t.grid().line(i))
+            .map(|r| r.text().trim_end().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(
+        texts(&t),
+        texts(&plain),
+        "the second shrink's repaint destroyed (or duplicated) rows the settle had pulled"
     );
 }
 
