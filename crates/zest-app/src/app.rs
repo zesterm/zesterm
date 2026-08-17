@@ -7367,7 +7367,16 @@ impl App {
                     Some(Pending::Command(c)) => Some(c.clone()),
                     _ => None,
                 };
-                self.spawn_tab_worker_pinned(route, Some(addr), None, true, run);
+                // `spawn_tab_worker`'s pin, computed here because this arm no
+                // longer goes through it. **Not optional**: the address came
+                // from an advertisement or an account listing, which are
+                // claims, and `expect_host` is what checks the machine that
+                // answered is the one claimed — the reason the host signs
+                // first, so a client can hang up before revealing anything.
+                // Dropping it would let a stale or poisoned route attach a
+                // session to the wrong machine.
+                let expect = (!route.is_local()).then_some(addr.host);
+                self.spawn_tab_worker_pinned(route, Some(addr), expect, true, run);
             }
             PickerAction::Create { host, route } => {
                 self.picker = None;
@@ -13615,6 +13624,49 @@ mod run_on_host_tests {
         assert_eq!(tab.take_pending_input(), None);
         let mut tab = Tab::pending_for_test(placeholder_addr(2)).with_pending_input(None);
         assert_eq!(tab.take_pending_input(), None);
+    }
+
+    #[test]
+    fn a_remote_attach_pins_the_host_it_dials_and_a_local_one_does_not() {
+        // `expect_host` is what checks the machine that answered is the one
+        // the roster claimed — the reason the host signs first, so a client
+        // can hang up before revealing anything. A remote attach without it
+        // lets a stale or poisoned route attach a session to the wrong
+        // machine, which is what routing this arm through
+        // `spawn_tab_worker_pinned` briefly did (it passed `None`).
+        //
+        // The rule, as both call sites compute it: pin every remote, never
+        // the loopback one — our own socket's permissions are the answer
+        // there, and `AttachOptions::expect_host` is documented `None` on
+        // loopback for exactly that reason.
+        let pin = |route: &crate::route::HostRoute, addr: zest_proto::SessionAddr| {
+            (!route.is_local()).then_some(addr.host)
+        };
+        let far = zest_proto::SessionAddr::new(
+            zest_proto::HostId::from_bytes([7; 32]),
+            zest_proto::SessionId(1),
+        );
+        assert_eq!(
+            pin(&crate::route::HostRoute::Tcp("10.0.0.7:7717".into()), far),
+            Some(zest_proto::HostId::from_bytes([7; 32])),
+            "a LAN attach names the machine it expects"
+        );
+        assert_eq!(
+            pin(
+                &crate::route::HostRoute::Relay {
+                    host: zest_proto::HostId::from_bytes([7; 32]),
+                    relay_origin: "wss://relay.example".into(),
+                },
+                far,
+            ),
+            Some(zest_proto::HostId::from_bytes([7; 32])),
+            "and so does a tunnelled one — the pipe is not the peer"
+        );
+        assert_eq!(
+            pin(&crate::route::HostRoute::LocalSocket("/tmp/s".into()), far),
+            None,
+            "loopback pins nothing: reaching the socket is the authorization"
+        );
     }
 
     #[test]
