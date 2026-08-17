@@ -153,6 +153,20 @@ pub struct Grid {
     /// Whether the repaint in hand announced a size this grid has already left,
     /// and is therefore one to sit out. Cleared when it closes.
     sitting_out: bool,
+    /// How many rows the last settle pulled down, while that settle is still
+    /// provisional.
+    ///
+    /// An intermediate settle is legitimate by everything it can see and still
+    /// wrong, because the restater's buffer never got the pulled rows back: the
+    /// *next* repaint restates that buffer from home, overwriting the pull and
+    /// blanking the tail — rows destroyed one step at a time with nothing stale
+    /// anywhere, which is what a stepped drag does at the daemon's cadence.
+    /// So a settle only becomes final when something other than a repaint
+    /// speaks: the moment the next restatement opens, [`Self::rebank_settled`]
+    /// takes the pull back and that repaint's own settle pays it out again.
+    /// Anything that cancels the debt finalizes the settle the same way — the
+    /// content has moved on and the inverse would eat real rows. (#312)
+    settled_pull: usize,
     /// The deepest row (as `row + 1`) the restater has erased since the
     /// current restatement window opened.
     ///
@@ -199,6 +213,7 @@ impl Grid {
             pending_restate: 0,
             restating: false,
             sitting_out: false,
+            settled_pull: 0,
             restate_rows_seen: 0,
             cursor: Cursor::default(),
             region: ScrollRegion::full(rows),
@@ -596,6 +611,14 @@ impl Grid {
             self.restating = false;
             self.sitting_out = true;
         }
+        // A width change renumbers and a shrink re-banks displaced rows on its
+        // own terms; either way the last settle's pull stops being something
+        // an inverse could still cleanly take back. A grow leaves it alone —
+        // the pulled rows stay where they are and the next repaint's re-bank
+        // arithmetic still holds.
+        if cols != self.cols || rows < self.rows {
+            self.settled_pull = 0;
+        }
 
         let mut reindex = Reindex::default();
         if cols != self.cols {
@@ -740,7 +763,39 @@ impl Grid {
     /// viewport that has since been shrunk, dragging history down into rows the
     /// *next* repaint is about to blank — which is #200 again, arrived at from
     /// the other side.
+    /// Take back a provisional settle, before the repaint that is opening
+    /// overwrites the rows it pulled.
+    ///
+    /// The exact inverse of the pull in [`Self::settle_restate`]: the boundary
+    /// moves back up over the pulled rows, fresh blanks are minted at the
+    /// bottom for the repaint to write into (new line ids — one more gap, and
+    /// gaps are fine), and the share is owed again, so the repaint's own
+    /// settle pays it out over what *it* wrote. Conserved in both directions:
+    /// a repaint that turns out to cover the same ground settles the same
+    /// rows straight back, a stale or sat-out one leaves them safely banked.
+    fn rebank_settled(&mut self) {
+        let k = core::mem::take(&mut self.settled_pull);
+        if k == 0 {
+            return;
+        }
+        self.scrollback_len += k;
+        self.storage.resize_rows(self.scrollback_len + self.rows, self.cols, &Cell::default());
+        self.cursor.row = self.cursor.row.saturating_sub(k);
+        self.pending_restate += k;
+        // Storage regained `k` rows at the bottom, so holding a scrolled-back
+        // reader on the same text means moving the offset by the same `k` —
+        // the mirror of the settle's adjustment.
+        self.display_offset = (self.display_offset + k).min(self.scrollback_len);
+    }
+
     pub(crate) fn note_restatement_began(&mut self, cols: usize, rows: usize) {
+        // Before anything else, even the pending check: a repaint that is
+        // about to be sat out still writes every one of its rows, and a
+        // provisional pull left in the viewport would be overwritten where it
+        // stands. Re-banking re-arms `pending_restate`, which is also what
+        // lets a repaint arriving after a *final* settle arm, restate its own
+        // truth, and pay the same rows straight back out.
+        self.rebank_settled();
         if self.pending_restate == 0 {
             return;
         }
@@ -796,6 +851,12 @@ impl Grid {
     /// restates a shorter viewport, so its erases stop short of our bottom
     /// row, and the settle requires full coverage. (#312)
     pub(crate) fn note_cursor_homed_while_hidden(&mut self) {
+        // See `note_restatement_began` — but only when this home is *opening*
+        // a window, not the grow half's trailing `ESC[<kept>;1H` re-entering
+        // its own bracket.
+        if !self.sitting_out && !self.restating {
+            self.rebank_settled();
+        }
         if self.pending_restate > 0 && !self.sitting_out && !self.restating {
             self.restating = true;
             // From this repaint's first row. Guarded on the transition: the
@@ -890,6 +951,9 @@ impl Grid {
         // Storage lost `k` rows off the end, so holding a scrolled-back reader
         // on the same text means giving back the same `k`.
         self.display_offset = self.display_offset.saturating_sub(k).min(self.scrollback_len);
+        // Provisional until something other than a repaint speaks — see the
+        // field, and `rebank_settled`.
+        self.settled_pull = k;
         true
     }
 
@@ -911,6 +975,9 @@ impl Grid {
     pub(crate) fn cancel_restate_debt(&mut self) {
         self.restate_debt = 0;
         self.pending_restate = 0;
+        // The content has moved on, so the last settle stops being provisional
+        // too: taking its pull back now would eat rows something real wrote.
+        self.settled_pull = 0;
         self.end_restatement_window();
     }
 

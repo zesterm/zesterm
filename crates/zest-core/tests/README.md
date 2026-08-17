@@ -123,6 +123,27 @@ final size — and only the very first repaint of the whole gesture announces
 itself with `CSI 8 t`. The replay test asserts that shape and says to re-record
 if a new capture loses it.
 
+### `resize-drag-stepped.vtrec` — the same drag at the daemon's cadence
+
+The other failure mode needs the *opposite* timing: a resize every 120ms, each
+answered by a matching repaint before the next lands. Nothing stale anywhere —
+and each intermediate settle still lost rows, because the next repaint restates
+ConPTY's buffer, which never got the pulled rows back (#312's second half; the
+provisional settle is the fix). Two `ls`es so the session has real history, at
+**80x24**, stepped 20, 14, 8, 14, 20, 24:
+
+```powershell
+cargo run -p zest-pty --example pty_dump -- `
+  --record crates\zest-core\tests\corpus\resize-drag-stepped.vtrec `
+  --cmd "pwsh -NoLogo -c `"ls; ls; Start-Sleep 8`"" `
+  --size 80x24 --resize-after-ms 2000 --resize-settle-ms 120 --resize 80x20 `
+  --resize-after-ms 0 --resize 80x14 --resize 80x8 --resize 80x14 --resize 80x20 `
+  --resize-settle-ms 2000 --resize 80x24
+```
+
+Its replay test builds the expected screen from the fixture itself — every
+chunk except the drag window's — so a re-recording carries its own golden.
+
 Worth adding as they become relevant: `vim`, `htop`/`btm`, `tmux`, a `cargo build`,
 and the `@sigx/terminal` showcase example — the last being a useful check that
 zesterm can host the user's own TUI framework correctly.

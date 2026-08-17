@@ -1416,6 +1416,55 @@ fn a_multi_step_drag_with_lagging_repaints_comes_back_whole() {
 }
 
 #[test]
+fn an_intermediate_settle_is_taken_back_before_the_next_repaint_writes() {
+    // The storm tests above are about repaints the grid outran. This is the
+    // opposite and it is what the daemon actually produces at a slower drag:
+    // every repaint *matches* its size, one per step. Each grow's settle is
+    // then legitimate by every local test -- and still wrong, because ConPTY's
+    // buffer never got the pulled rows back: the next step's repaint restates
+    // that buffer from home, overwriting the rows the settle just pulled and
+    // blanking the tail. Rows destroyed, one step at a time, with nothing
+    // stale anywhere. Measured live with `probe:resize` (23 -> 12 non-blank
+    // rows across one height-only drag) before it was understood. (#312)
+    //
+    // A settle is therefore *provisional*: when the next repaint opens, the
+    // grid takes the pull back -- boundary up, rows re-banked, the share owed
+    // again -- and that repaint's own settle pays it out over what *it* wrote.
+    let mut t = Terminal::new(40, 12, 500);
+    t.set_pty_restates_viewport(true);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\n");
+    for i in 0..9 {
+        t.advance(format!("entry {i}\r\n").as_bytes());
+    }
+    t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    let before = t.screen_text();
+    let out = t.blocks().blocks()[0].output_line.expect("the command produced output");
+
+    let kept = ["entry 6", "entry 7", "entry 8", "$ "];
+    t.resize(40, 4);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 4, &kept, Drag::Down));
+    // Each step's repaint arrives before the next resize, at its own size --
+    // the daemon's cadence, not the recorder's.
+    t.resize(40, 8);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 8, &kept, Drag::Up));
+    t.resize(40, 12);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 12, &kept, Drag::Up));
+
+    assert_eq!(t.screen_text(), before, "the stepped drag was not reversible");
+    assert_eq!(t.grid().scrollback_len(), 0, "rows are still parked in history");
+    for (n, line) in (out..out + 9).enumerate() {
+        let row = t.grid().row_of_line(line).unwrap_or_else(|| {
+            panic!("line {line} of the listing is not on screen after the stepped drag")
+        });
+        assert_eq!(
+            t.grid().row(row).text().trim_end(),
+            format!("entry {n}"),
+            "the intermediate settle's rows were overwritten by the next repaint"
+        );
+    }
+}
+
+#[test]
 fn a_resize_landing_mid_repaint_sits_that_repaint_out() {
     // `Session::resize` releases the terminal lock before it tells the pty
     // (the `ClosePseudoConsole` deadlock, `AGENTS.md`), so a resize can land
@@ -2117,5 +2166,67 @@ fn a_recorded_drag_storm_survives_its_stale_repaints() {
     assert!(
         last_ink >= 20,
         "the content is bunched at the top: last non-blank row is {last_ink} of 30"
+    );
+}
+
+#[test]
+fn a_recorded_stepped_drag_is_reversible() {
+    // The storm above is repaints the grid outran. This is the other cadence,
+    // and the daemon's usual one: a resize every ~120ms, each answered by a
+    // matching repaint before the next lands. Nothing is ever stale — and the
+    // gesture still destroyed rows, because each intermediate settle pulled
+    // history that the *next* repaint (restating ConPTY's buffer, which never
+    // got those rows back) overwrote in place. The provisional settle is what
+    // fixes it: each repaint takes the previous pull back before writing, and
+    // pays it out again over what it wrote. (#312)
+    //
+    // `corpus/resize-drag-stepped.vtrec`: two `ls`es at 80x24, then
+    // 20, 14, 8, 14, 20, 24 — one resize every 120ms starting at 2000ms
+    // (`pty_dump --resize-after-ms 2000 --resize-settle-ms 120 …`, re-recording
+    // recipe in `tests/README.md`).
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/corpus/resize-drag-stepped.vtrec"
+    ))
+    .expect("the recording exists");
+    let chunks = parse_vtrec_timed(&bytes);
+
+    // The expected end state is the session as if the drag never happened:
+    // every chunk except ConPTY's answers to it, which all land inside the
+    // gesture's window (the drag runs 2000..2720ms and the last repaint is
+    // back within ~15ms of its resize; everything after is the shell). A
+    // reversible drag must come back to exactly this screen. A golden built
+    // from the fixture itself, so a re-recording carries its own expectation.
+    const DRAG_WINDOW_US: core::ops::Range<u128> = 2_000_000..3_000_000;
+    let mut plain = Terminal::new(80, 24, 500);
+    plain.set_pty_restates_viewport(true);
+    for (us, chunk) in &chunks {
+        if !DRAG_WINDOW_US.contains(us) {
+            plain.advance(chunk);
+        }
+    }
+
+    let mut t = Terminal::new(80, 24, 500);
+    t.set_pty_restates_viewport(true);
+    let sizes = [20usize, 14, 8, 14, 20, 24];
+    let mut next = 0usize;
+    for (us, chunk) in &chunks {
+        while next < sizes.len() && *us >= 2_000_000 + (next as u128) * 120_000 {
+            t.resize(80, sizes[next]);
+            next += 1;
+        }
+        t.advance(chunk);
+    }
+    assert_eq!(next, sizes.len(), "the recording ended before the drag did — re-record");
+
+    assert_eq!(
+        t.screen_text(),
+        plain.screen_text(),
+        "the stepped drag did not come back to the screen an undisturbed replay shows"
+    );
+    assert_eq!(
+        t.grid().scrollback_len(),
+        plain.grid().scrollback_len(),
+        "the drag left a different amount of history than the undisturbed replay"
     );
 }

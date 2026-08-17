@@ -2611,6 +2611,22 @@ three facts about Cloudflare that changed after #59 was written.
       settle structurally could not record a storm;
       `corpus/resize-drag-storm.vtrec` replays the real one. ADR-013 revised.
 
+      And the second half, found because the daemon still failed the gesture
+      with the guard in place: **at the daemon's cadence nothing is ever stale
+      and rows were still destroyed** — every step's repaint matches its size,
+      each intermediate settle is locally legitimate, and the next repaint
+      restates ConPTY's buffer, which never got the pulled rows back. No local
+      fact distinguishes an intermediate repaint from the final one, so the
+      settle stops trying to know the future: it is **provisional**
+      (`settled_pull`), taken back the moment the next restatement opens and
+      paid out again over what that repaint wrote, becoming final when a
+      scroll, erase, width change or shrink says the content moved on.
+      `corpus/resize-drag-stepped.vtrec` replays the cadence against a golden
+      built from the fixture itself. Measured before/after at the daemon with
+      a height-only `probe:resize`: block content 23 → 12 non-blank rows
+      before, byte-identical before/after with the fix. The width axis is
+      still #224; the overflow of a stale *taller* repaint is #315.
+
       Arming is now on what both halves share — the cursor hidden and homed —
       and `Drag::Down`/`Drag::Up` is a parameter of the helper rather than a
       detail inside it. The staleness guard is asymmetric as a result and

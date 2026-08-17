@@ -826,6 +826,29 @@ coverage requirement is what makes those bounds sufficient again. Decaying it
 on shrink as well would double-count and under-pay a gesture that shrinks
 mid-grow and grows again.
 
+**A settle is provisional until something other than a repaint speaks.** The
+guards above refuse repaints the grid outran — and at the daemon's actual
+cadence (~120ms a step) nothing is ever stale: every step's repaint arrives at
+its own size, its settle is legitimate by everything it can see, and rows are
+still destroyed, one step at a time. The restater's buffer never got the pulled
+rows back, so the *next* step's repaint restates that buffer from home,
+overwriting the pull and blanking the tail (`corpus/resize-drag-stepped.vtrec`;
+measured live as 23 → 12 non-blank rows across one height-only drag). No local
+fact distinguishes an intermediate repaint from the final one — the difference
+is whether another resize is coming, which is the future. So the settle does
+not try to know it: the pull is recorded (`settled_pull`), and the moment the
+next restatement opens — armed, sat out, or arriving after everything was paid
+— the grid takes the pull back first: boundary up over the same rows, fresh
+blanks minted below (new ids; gaps are fine), the share owed again for that
+repaint's own settle to pay out over what *it* wrote. Conservation both ways,
+so a gesture of any length pays out exactly once, at its true end. The settle
+becomes final when the debt would be cancelled anyway — a scroll, a screen
+erase, a width change or a shrink — because the content has moved on and the
+inverse would eat rows something real wrote. The residual: output that neither
+scrolls nor erases, landing between a settle and a following repaint, would be
+re-banked with the rows it overwrote — accepted, because mid-gesture the shell
+is not speaking, and a shell that does speak almost always scrolls or erases.
+
 **Either direction of DECTCEM closes it.** ConPTY restores the inner program's
 visibility state, so a full-screen program that keeps its cursor hidden ends the
 repaint with `?25l` and never sends `?25h`. Keying off `?25h` alone would leave
