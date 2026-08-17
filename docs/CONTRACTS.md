@@ -23,24 +23,24 @@ describes only the current shape.
 
 | Contract | Where | Status | Consumed by |
 |---|---|---|---|
-| `PtyTransport` | `zest-pty/src/lib.rs` | **frozen** — includes explicit `hangup` and `restates_on_resize` | `zest-daemon`, both platform ptys |
-| `HostId`, `ClientId`, `SessionId`, `SessionAddr` | `zest-proto/src/ids.rs` | **frozen** | `zest-daemon`, `zest-mesh`, `zest-app`, `zest-mcp`, `clients/web` |
-| `ClientMessage`, `HostMessage`, `SessionInfo`, `HostOffer`, `HostProfile` | `zest-proto/src/lib.rs` | **frozen** at v3, additively extended (`watch_pairings`, `watch_hosts`, `Sessions.offer`, `Attach.observe`, the loopback-scoped `Enroll`/`EnrollResult` pair) | `zest-daemon`, `zest-app`, `zest-mcp`, `clients/web` |
-| `Delta`, `DeltaOp`, `Run`, `RowPayload`, `AttrDef` | `zest-proto/src/delta.rs` | **frozen** at v3 — the frame carrying it is ciphertext | `zest-daemon`, `zest-app`, `zest-mcp`, `clients/web` |
-| `Nonce32`, `Sig64`, `Pub32`, `AuthFailure` | `zest-proto/src/auth.rs` | **frozen** | `zest-daemon`, `zest-mesh`, `clients/web` |
-| `SecureChannel`, `Sealer`, `Opener`, `EphemeralDh`, `DhPublic` | `zest-mesh/src/secure.rs` | **frozen** at v3 — the browser has a second implementation, pinned to `fixtures/handshake.json` | `zest-daemon`, `clients/web` |
-| `ClientHandshake`, `Challenge`, `Transcript`, `auth_transcript` | `zest-mesh/src/pairing.rs` | **frozen** at v3 — the transcript layout is signed bytes; a golden pins it | `zest-daemon`, `zest-app`, `clients/web`, `cloud/` |
-| `DaemonClient` | `zest-daemon/src/client.rs` | **frozen** — a second local client (`zest-mcp`) built on it | `zest-app`, `zest-mcp` |
-| `find_or_spawn`, `Attached`, `DaemonStartError`, `resolve_daemon_binary` | `zest-daemon/src/spawn.rs` | **frozen** — same second consumer | `zest-app`, `zest-mcp` |
-| `Block`, `BlockIndex`, `BlockState` | `zest-core/src/blocks.rs` | **frozen** | `zest-app`, `zest-daemon`, `clients/web` |
-| `BlockPayload`, `BlockState` (wire) | `zest-proto/src/delta.rs` | **frozen** | `zest-daemon`, `zest-mcp`, `clients/web` |
-| `ChangeSource`, `Update`, `update_for` | `zest-core/src/subscribe.rs` | **frozen** | `zest-daemon` |
-| `SessionSource`, `Origin` | `zest-app/src/source.rs` | **frozen** — the seam between the app's chrome/input half and its session half | `zest-app` |
-| `Peer`, `Endpoint`, `Reachability`, `Discovery` | `zest-mesh/` | **frozen** | `zest-daemon`, `zest-app` |
-| `HostIdentity`, `ClientIdentity`, `Signature`, `Nonce`, `Purpose` | `zest-mesh/src/identity.rs` | draft — `zest-mesh` may change it freely | `zest-mesh`, `zest-daemon` |
-| `Attestation`, `attestation_message`, `sign_attestation`, `verify_attestation`, `decode_attestation` | `zest-mesh/src/attest.rs` | **frozen** — the `zesterm-attest-v1` layout and its `base64url(message).base64url(sig)` framing; the TS port (`cloud/packages/shared/src/attestation.ts`) and `zest-daemon/src/attest_sync.rs` are both pinned to `fixtures/attest.json` | `zest-daemon`, `cloud/` |
-| `KeyStore`, `SecretStore`, `CredentialStore` | `zest-mesh/src/keystore.rs` | draft — `zest-mesh` may change it freely | `zest-mesh`, `zest-daemon` |
-| `DaemonConfig`, `SessionHandle`, `SessionState` | `zest-daemon/src/lib.rs` | draft — daemon-internal, may change freely | `zest-daemon` |
+| `PtyTransport` | `crates/zest-pty/src/lib.rs` | **frozen** — includes explicit `hangup` and `restates_on_resize` | `zest-daemon`, both platform ptys |
+| `HostId`, `ClientId`, `SessionId`, `SessionAddr` | `crates/zest-proto/src/ids.rs` | **frozen** | `zest-daemon`, `zest-mesh`, `zest-app`, `zest-mcp`, `clients/web` |
+| `ClientMessage`, `HostMessage`, `SessionInfo`, `HostOffer`, `HostProfile` | `crates/zest-proto/src/lib.rs` | **frozen** at v3, additively extended (`watch_pairings`, `watch_hosts`, `Sessions.offer`, `Attach.observe`, the loopback-scoped `Enroll`/`EnrollResult` pair) | `zest-daemon`, `zest-app`, `zest-mcp`, `clients/web` |
+| `Delta`, `DeltaOp`, `Run`, `RowPayload`, `AttrDef` | `crates/zest-proto/src/delta.rs` | **frozen** at v3 — the frame carrying it is ciphertext | `zest-daemon`, `zest-app`, `zest-mcp`, `clients/web` |
+| `Nonce32`, `Sig64`, `Pub32`, `AuthFailure` | `crates/zest-proto/src/auth.rs` | **frozen** | `zest-daemon`, `zest-mesh`, `zest-app`, `clients/web` |
+| `SecureChannel`, `Sealer`, `Opener`, `EphemeralDh`, `DhPublic` | `crates/zest-mesh/src/secure.rs` | **frozen** at v3 — the browser has a second implementation, pinned to `fixtures/handshake.json` | `zest-daemon`, `clients/web` |
+| `ClientHandshake`, `Challenge`, `Transcript`, `auth_transcript` | `crates/zest-mesh/src/pairing.rs` | **frozen** at v3 — the transcript layout is signed bytes; a golden pins it | `zest-daemon`, `zest-app`, `clients/web`, `cloud/` |
+| `DaemonClient` | `crates/zest-daemon/src/client.rs` | **frozen** — a second local client (`zest-mcp`) built on it | `zest-app`, `zest-mcp` |
+| `find_or_spawn`, `Attached`, `DaemonStartError`, `resolve_daemon_binary` | `crates/zest-daemon/src/spawn.rs` | **frozen** — same second consumer | `zest-app`, `zest-mcp` |
+| `Block`, `BlockIndex`, `BlockState` | `crates/zest-core/src/blocks.rs` | **frozen** | `zest-app`, `zest-daemon`, `zest-mcp`, `clients/web` |
+| `BlockPayload`, `BlockState` (wire) | `crates/zest-proto/src/delta.rs` | **frozen** | `zest-daemon`, `zest-app`, `zest-mcp`, `clients/web` |
+| `ChangeSource`, `Update`, `update_for` | `crates/zest-core/src/subscribe.rs` | **frozen** | `zest-daemon` |
+| `SessionSource`, `Origin` | `crates/zest-app/src/source.rs` | **frozen** — the seam between the app's chrome/input half and its session half | `zest-app` |
+| `Peer`, `Endpoint`, `Reachability`, `Discovery` | `crates/zest-mesh/` | **frozen** | `zest-daemon`, `zest-app` |
+| `HostIdentity`, `ClientIdentity`, `Signature`, `Nonce`, `Purpose` | `crates/zest-mesh/src/identity.rs` | draft — `zest-mesh` may change it freely | `zest-mesh`, `zest-daemon` |
+| `Attestation`, `attestation_message`, `sign_attestation`, `verify_attestation`, `decode_attestation` | `crates/zest-mesh/src/attest.rs` | **frozen** — the `zesterm-attest-v1` layout and its `base64url(message).base64url(sig)` framing; the TS port (`cloud/packages/shared/src/attestation.ts`) and `crates/zest-daemon/src/attest_sync.rs` are both pinned to `fixtures/attest.json` | `zest-daemon`, `cloud/` |
+| `KeyStore`, `SecretStore`, `CredentialStore` | `crates/zest-mesh/src/keystore.rs` | draft — `zest-mesh` may change it freely | `zest-mesh`, `zest-daemon` |
+| `DaemonConfig`, `SessionHandle`, `SessionState` | `crates/zest-daemon/src/lib.rs` | draft — daemon-internal, may change freely | `zest-daemon` |
 | TypeScript bindings | `crates/zest-proto/bindings/` | **generated** — `cargo xtask check-bindings` | `clients/web`, `cloud/` |
 | Conformance fixtures | `crates/zest-proto/fixtures/` | **generated** — `cargo xtask check-fixtures` | `clients/web` |
 | Settings schema + walked UI fields | `clients/web/packages/settings/generated/` | **generated** — `cargo xtask check-export-web` | `clients/web` |

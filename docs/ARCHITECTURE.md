@@ -66,9 +66,9 @@ a client over the network.
 PTY bytes are parsed by `zest-core` into the grid, scrollback and blocks on the host.
 `zest-proto` encodes **grid deltas**, never raw VT bytes (ADR-004): protocol 3,
 `Seq`/`Ack`, resync by keyframe, and everything after the handshake's `Challenge`
-sealed end to end (ADR-008). Three transports — loopback (named pipe / unix socket),
-LAN TCP discovered over mDNS, and the relay both ends dial out to (ADR-009) — carry
-identical messages. Clients apply deltas through `Applier` into a real `Terminal`
+sealed end to end (ADR-008). The transports — loopback (named pipe / unix socket),
+LAN TCP discovered over mDNS, WebSocket for browsers, and the relay both ends dial
+out to (ADR-009) — carry identical messages. Clients apply deltas through `Applier` into a real `Terminal`
 (Rust) or through `GridView` (TypeScript); `zest-core`'s conformance suite holds the
 two reference decoders cell-for-cell equal against recorded sessions.
 
