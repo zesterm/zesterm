@@ -244,12 +244,27 @@ struct PickerState {
     /// Bring the selection into view on the next layout — keyboard only.
     scroll_to_selected: bool,
     actions: Vec<PickerAction>,
-    /// A profile waiting for this picker to choose its host (`ask_host`,
-    /// design §12): picking a host row launches the profile there instead
-    /// of a bare shell. On the picker's state, not the app's, so it dies
-    /// with the picker — a stale pending launch surviving a dismissal would
-    /// hijack the next ⌘K's host row.
-    pending_profile: Option<String>,
+    /// Something waiting for this picker to choose a machine.
+    ///
+    /// On the picker's state, not the app's, so it dies with the picker — a
+    /// stale pending launch surviving a dismissal would hijack the next ⌘K's
+    /// host row.
+    pending: Option<Pending>,
+}
+
+/// What the next host or session row will carry (design §12's `ask_host`, and
+/// §6's `⇧⏎ run on host…`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Pending {
+    /// A host-agnostic profile: picking a machine launches it there instead of
+    /// a bare shell.
+    Profile(String),
+    /// A command from a block: picking a machine runs it there.
+    ///
+    /// The command cannot be written until a session exists, and opening one
+    /// is a worker dial — so this is armed on the tab and written when it
+    /// settles, never at click time.
+    Command(String),
 }
 
 /// The command palette's transient state while it is open, and the action
@@ -887,6 +902,14 @@ fn host_menu_selection(roster: &[String], current: Option<&str>) -> String {
         .unwrap_or_else(|| HOST_MENU_LOCAL.to_string())
 }
 
+/// A command as a shell would receive it from a person: the bytes, then the
+/// Return that runs them.
+fn with_return(command: &str) -> Vec<u8> {
+    let mut bytes = command.as_bytes().to_vec();
+    bytes.push(b'\r');
+    bytes
+}
+
 /// A card row's value, bounded: a control-plane refusal can run long, and a
 /// value that overruns its own label reads as two broken rows.
 fn clip_row(text: &str) -> String {
@@ -908,10 +931,17 @@ enum PickerAction {
     Attach { addr: zest_proto::SessionAddr, route: HostRoute },
     /// Create a fresh session on the host.
     Create { host: zest_proto::HostId, route: HostRoute },
-    /// Re-run a command from the fleet's history. Enter types it into the
-    /// *current* session ("run here"); ⇧⏎ into the session it came from —
-    /// the closest honest reading of "run on host…" until a chooser exists.
-    RunBlock { origin: zest_proto::SessionAddr, command: String },
+    /// Re-run a command from the fleet's history — §6's two gestures, and
+    /// only those two: `⏎` types it into the *current* session ("run here"),
+    /// `⇧⏎` re-opens the picker to choose a machine ("run on host…").
+    ///
+    /// **No `origin`.** ⇧⏎ used to activate the session the command came from
+    /// and run it there, which was a useful thing and was not what the footer
+    /// promised — the point of the gesture is to take something you already
+    /// ran and run it *somewhere else*. The origin host is in the chooser's
+    /// list like any other, so "run it back where it came from" is still one
+    /// keystroke further rather than gone.
+    RunBlock { command: String },
     /// A keymap command, dispatched through the same `perform` its chord is.
     Perform(keymap::Action),
     /// Open a full-pane screen (fleet, themes).
@@ -3815,14 +3845,14 @@ impl App {
                 // ⇧⏎ dropped it and opened a plain shell, which made the
                 // menu's second action look like it did nothing much.
                 //
-                // Only a local one: `pending_profile` names a profile in this
+                // Only a local one: `Pending::Profile` names a profile in this
                 // machine's config, and a published one is already pinned to
                 // the machine that published it — "run forge's `nightly` on
                 // pi" would mean sending forge's command line somewhere that
                 // never described it.
                 if let Some(crate::launcher::ProfileRef::Local(name)) = target {
                     if let Some(p) = self.picker.as_mut() {
-                        p.pending_profile = Some(name);
+                        p.pending = Some(Pending::Profile(name));
                     }
                 }
             }
@@ -5161,7 +5191,7 @@ impl App {
                 if let Some((host, Some(route))) = target {
                     let expect = (!route.is_local()).then_some(host);
                     self.screen = AppScreen::Terminal;
-                    self.spawn_tab_worker_pinned(route, None, expect, true);
+                    self.spawn_tab_worker_pinned(route, None, expect, true, None);
                     self.mark_chrome_dirty();
                 }
                 // No route: the card drew without a hit region, so this arm
@@ -5585,7 +5615,7 @@ impl App {
                     scroll: 0.0,
                     scroll_to_selected: false,
                     actions: Vec::new(),
-                    pending_profile: None,
+                    pending: None,
                 })
             }
         };
@@ -7092,7 +7122,7 @@ impl App {
                         provenance,
                         ok: !b.failed(),
                     },
-                    PickerAction::RunBlock { origin: tab.addr, command: command.to_string() },
+                    PickerAction::RunBlock { command: command.to_string() },
                 ));
             }
         }
@@ -7255,25 +7285,25 @@ impl App {
 
     /// Act on a picker row. Every action closes the picker: the user chose.
     fn run_picker_action(&mut self, action: PickerAction, el: &ActiveEventLoop, shift: bool) {
-        // A pending ask_host launch rides exactly one picker choice: a host
-        // row launches the profile there, anything else abandons it (and
-        // dismissing the picker abandons it structurally — it lives on the
-        // picker's own state).
-        let pending_profile = self.picker.as_mut().and_then(|p| p.pending_profile.take());
+        // Anything pending rides exactly one picker choice: a host or session
+        // row carries it, anything else abandons it (and dismissing the picker
+        // abandons it structurally — it lives on the picker's own state).
+        let pending = self.picker.as_mut().and_then(|p| p.pending.take());
         match action {
             PickerAction::None => return,
-            PickerAction::RunBlock { origin, command } => {
+            // ⇧⏎ on a block re-opens the picker to choose a machine (§6's
+            // footer: `⇧⏎ run on host…`). It used to re-run the command
+            // *where it came from*, which is useful and is not what the
+            // footer promises — the point of the gesture is to take
+            // something you already ran and run it somewhere else.
+            PickerAction::RunBlock { command } if shift => {
+                self.arm_pending(Pending::Command(command));
+            }
+            PickerAction::RunBlock { command } => {
                 self.picker = None;
                 self.screen = AppScreen::Terminal;
-                // ⏎ runs here; ⇧⏎ runs where the command came from — the
-                // honest half of "run on host…" until a chooser exists.
-                if shift && self.tabs.activate_addr(origin) {
-                    self.after_activation();
-                }
                 if let Some(session) = self.tabs.active_source() {
-                    let mut bytes = command.into_bytes();
-                    bytes.push(b'\r');
-                    session.write(bytes);
+                    session.write(with_return(&command));
                 }
             }
             PickerAction::Perform(action) => {
@@ -7291,18 +7321,32 @@ impl App {
                 if self.tabs.activate_addr(addr) {
                     self.after_activation();
                 }
+                // Already open here, so there is nothing to wait for: the
+                // session exists and this window holds it.
+                if let Some(Pending::Command(command)) = &pending {
+                    if let Some(session) = self.tabs.active_source() {
+                        session.write(with_return(command));
+                    }
+                }
             }
             PickerAction::Attach { addr, route } => {
                 self.picker = None;
                 self.screen = AppScreen::Terminal;
-                self.spawn_tab_worker(route, Some(addr));
+                // A session that already exists on the chosen machine is the
+                // cheaper half of "run on host…": attach, then write.
+                let run = match &pending {
+                    Some(Pending::Command(c)) => Some(c.clone()),
+                    _ => None,
+                };
+                self.spawn_tab_worker_pinned(route, Some(addr), None, true, run);
             }
             PickerAction::Create { host, route } => {
                 self.picker = None;
                 self.screen = AppScreen::Terminal;
                 // The ask_host flow (design §12): the picker was opened to
                 // choose this profile's host, and this row is the choice.
-                if let Some(name) = pending_profile {
+                if let Some(Pending::Profile(name)) = &pending {
+                    let name = name.clone();
                     let meta = crate::launcher::profile_meta(&self.settings, &name);
                     let fleet = self.fleet.as_ref().map(|f| f.snapshot()).unwrap_or_default();
                     // The picked host's display name, for the provenance line
@@ -7325,8 +7369,30 @@ impl App {
                 // Pin remote creates to the host the roster named: the
                 // address came from an advertisement, which is a claim.
                 let expect = (!route.is_local()).then_some(host);
-                self.spawn_tab_worker_pinned(route, None, expect, true);
+                // A command from a block, if one is riding this choice (§6):
+                // armed on the tab the worker builds, because the session it
+                // needs does not exist yet.
+                let run = match &pending {
+                    Some(Pending::Command(c)) => Some(c.clone()),
+                    _ => None,
+                };
+                self.spawn_tab_worker_pinned(route, None, expect, true, run);
             }
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// Re-open the picker holding something for the next machine to carry.
+    ///
+    /// Toggling rather than assuming: ⇧⏎ arrives while the picker is *open*,
+    /// and `toggle_picker` would close it. The state is rebuilt so the filter
+    /// starts clean — you have chosen the command, and what is left to say is
+    /// which machine.
+    fn arm_pending(&mut self, pending: Pending) {
+        self.picker = None;
+        self.toggle_picker();
+        if let Some(p) = self.picker.as_mut() {
+            p.pending = Some(pending);
         }
         self.mark_chrome_dirty();
     }
@@ -7396,7 +7462,7 @@ impl App {
 
     fn spawn_tab_worker(&mut self, route: HostRoute, attach: Option<zest_proto::SessionAddr>) {
         let expect = attach.and_then(|a| (!route.is_local()).then_some(a.host));
-        self.spawn_tab_worker_pinned(route, attach, expect, true);
+        self.spawn_tab_worker_pinned(route, attach, expect, true, None);
     }
 
     /// The `AttachOptions::on_pending` callback for an attach headed at
@@ -7489,6 +7555,11 @@ impl App {
         attach: Option<zest_proto::SessionAddr>,
         expect_host: Option<zest_proto::HostId>,
         focus: bool,
+        // `run`: a command to execute once the session exists (§6's
+        // `⇧⏎ run on host…`). Armed on the tab rather than written here,
+        // because here there is no session yet — the dial is on a worker and
+        // this call returns long before it lands.
+        run: Option<String>,
     ) {
         let identity = if route.is_local() {
             self.client_identity.clone()
@@ -7568,9 +7639,12 @@ impl App {
                     // no address for one, and rebuilding its route from the
                     // account is later work.
                     let hint = route.dial_hint();
-                    pending
-                        .lock()
-                        .push((Tab::daemon(session, local, (cols, rows)).with_dial_hint(hint), focus));
+                    pending.lock().push((
+                        Tab::daemon(session, local, (cols, rows))
+                            .with_dial_hint(hint)
+                            .with_pending_input(run.as_deref().map(with_return)),
+                        focus,
+                    ));
                     let _ = proxy.send_event(Wakeup::TabsChanged);
                 }
                 // The picker is already closed; a failure is a log line for
@@ -7732,7 +7806,7 @@ impl App {
                 self.toggle_picker();
             }
             if let Some(p) = self.picker.as_mut() {
-                p.pending_profile = Some(name.to_string());
+                p.pending = Some(Pending::Profile(name.to_string()));
             }
             return;
         }
@@ -9685,7 +9759,7 @@ impl ApplicationHandler<Wakeup> for App {
                 }
             };
             let expect = (!saved.local).then_some(saved.addr.host);
-            self.spawn_tab_worker_pinned(route, Some(saved.addr), expect, false);
+            self.spawn_tab_worker_pinned(route, Some(saved.addr), expect, false, None);
         }
         self.window = Some(window);
 
@@ -9863,7 +9937,15 @@ impl ApplicationHandler<Wakeup> for App {
                 let tabs: Vec<(Tab, bool)> = fresh.drain(..).collect();
                 drop(fresh);
                 let pushed = !tabs.is_empty();
-                for (tab, focus) in tabs {
+                for (mut tab, focus) in tabs {
+                    // A command riding this tab (§6's `⇧⏎ run on host…`): the
+                    // session it needed now exists. Taken *before* `adopt`,
+                    // because a refused duplicate is dropped and would take
+                    // the command with it — and keyed to this address, so it
+                    // reaches the session the user chose rather than whatever
+                    // is active when a background dial happens to land.
+                    let run = tab.take_pending_input();
+                    let addr = tab.addr;
                     // Refused duplicates (#188) detach on drop — the shell
                     // stays on its host; the strip already activated the
                     // tab that holds it. This is also what heals a
@@ -9874,6 +9956,23 @@ impl ApplicationHandler<Wakeup> for App {
                         // duplicate is refused without touching the keyboard.
                         tracing::info!(addr = %dup.addr, focus, "session already open; refusing the duplicate");
                         drop(dup);
+                    }
+                    // The duplicate case still runs it: the strip holds that
+                    // session under another tab, and "run this there" was
+                    // about the machine and the session, never about which
+                    // tab object won.
+                    if let Some(run) = run {
+                        match self.tabs.find_mut(addr) {
+                            Some(tab) => tab.source().write(run),
+                            // Closed between the dial landing and now. Say so
+                            // rather than dropping it silently — a command
+                            // that goes nowhere quietly is worse than one that
+                            // fails loudly.
+                            None => tracing::warn!(
+                                %addr,
+                                "the tab closed before its command could run"
+                            ),
+                        }
                     }
                 }
                 // Profile launches settling (issue #175): the connecting tab
@@ -13444,6 +13543,61 @@ mod enroll_tests {
         assert!(
             enroll_failure_text(&e, "X").contains("only a local client"),
             "a real refusal must not be rewritten"
+        );
+    }
+}
+
+#[cfg(test)]
+mod run_on_host_tests {
+    use super::{with_return, Pending};
+    use crate::tabs::{placeholder_addr, Tab};
+
+    #[test]
+    fn a_command_reaches_the_shell_the_way_a_person_would_send_it() {
+        // A shell runs a line when it sees the Return, not when it sees the
+        // bytes — the same thing the ⏎-here path has always written.
+        assert_eq!(with_return("ls -la"), b"ls -la\r".to_vec());
+        // No trailing newline of its own, and no interpretation: whatever the
+        // block recorded is what runs. A command with an embedded quote or a
+        // trailing backslash is the far shell's problem, exactly as it was
+        // when it ran the first time.
+        assert_eq!(with_return("echo \"a b\""), b"echo \"a b\"\r".to_vec());
+        assert_eq!(with_return(""), b"\r".to_vec(), "an empty command is a bare Return");
+    }
+
+    #[test]
+    fn an_armed_command_is_taken_once_and_only_once() {
+        // "Taking is the point": a command runs once. If it survived being
+        // read, a tab that got adopted twice — a refused duplicate healing a
+        // persisted tabs.json, say — would run it again, and re-running a
+        // `rm` because a strip reconciled is the failure worth designing out.
+        let mut tab = Tab::pending_for_test(placeholder_addr(1))
+            .with_pending_input(Some(with_return("make ship")));
+        assert_eq!(tab.take_pending_input(), Some(b"make ship\r".to_vec()));
+        assert_eq!(tab.take_pending_input(), None, "a command runs once");
+    }
+
+    #[test]
+    fn a_tab_with_nothing_armed_stays_empty() {
+        // Every ordinary tab: ⌘T, a restore, a picker attach with nothing
+        // pending. Arming is the exception, and an unarmed tab must not write
+        // a stray Return into somebody's shell.
+        let mut tab = Tab::pending_for_test(placeholder_addr(1));
+        assert_eq!(tab.take_pending_input(), None);
+        let mut tab = Tab::pending_for_test(placeholder_addr(2)).with_pending_input(None);
+        assert_eq!(tab.take_pending_input(), None);
+    }
+
+    #[test]
+    fn the_two_pending_kinds_are_distinct() {
+        // One slot, two riders (§12's ask_host profile and §6's block
+        // command), and a host row has to tell them apart: one launches a
+        // profile, the other opens a shell and types. Conflating them would
+        // make ⇧⏎ on a block launch a profile named after the command.
+        assert_ne!(
+            Pending::Profile("nightly".into()),
+            Pending::Command("nightly".into()),
+            "same string, different intent"
         );
     }
 }
