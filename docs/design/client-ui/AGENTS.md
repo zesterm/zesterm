@@ -99,11 +99,9 @@ When you have an implementation to compare:
 4. Report differences as either *implementation drift* (fix the code) or *stale design*
    (the mock disagrees with the crates — flag it, do not silently follow the mock).
 
-## Work-stream mapping
+## Screen notes
 
-WS-A: screens 1–3, 5. WS-E: 3, 6. WS-G: web-client rendering of 1–4. M4: 9–10. Screen 11
-(Settings) replaces the current overlay. Screen 12 (Profiles) needs its own work item —
-per-host profile discovery and per-tab theming cut across WS-A and the control plane.
-
-Per-screen repo sources are in `README.md` §Files; the project-root `github.md` carries the
-screen → repo file map used for syncing.
+Screen 11 (Settings) replaces the old overlay: it is a tab, rendered from the generated
+field list rather than a hand-written form, in both `zest-app` and `clients/web`.
+Screen 12 (Profiles) cuts across the chrome and the control plane — per-host profile
+discovery and per-tab theming. Per-screen repo sources are in `README.md` §Files.

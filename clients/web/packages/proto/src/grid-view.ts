@@ -42,6 +42,12 @@ export interface KeyframeState {
    * replaces wholesale.
    */
   readonly blocks_from?: number;
+  /**
+   * How many times ED 3 has destroyed the host's scrollback. Absent means
+   * `0`, which never advances the shadow — a host that predates it simply
+   * never announces a clear. (#314)
+   */
+  readonly history_clears?: number;
 }
 
 export class GridView {
@@ -84,8 +90,24 @@ export class GridView {
    */
   blocks: BlockPayload[] = [];
 
+  /**
+   * Shadow of the keyframe's `history_clears`; only ever raised — an
+   * alt-screen keyframe carries that grid's 0 and must not re-arm. (#314)
+   */
+  historyClears = 0;
+
   /** Replace everything with a complete state. */
   applyKeyframe(k: KeyframeState): void {
+    // ED 3 destroyed the session's scrollback since this client last honoured
+    // one — ours goes too. The displaced-row carry-over below is suppressed
+    // for the same keyframe: the rows this view holds are from *before* the
+    // destruction, and filing them into scrollback would keep client-side
+    // exactly what the ED 3 destroyed. (#314)
+    const cleared = (k.history_clears ?? 0) > this.historyClears;
+    if (cleared) {
+      this.scrollback = [];
+      this.historyClears = k.history_clears ?? 0;
+    }
     // A width change reflowed the host's grid, and reflow *renumbers* line ids
     // (`zest_core` grid/mod.rs: rewrapping changes how many rows a logical
     // line occupies, so old ids cannot survive). The keyframe's rows and
@@ -121,7 +143,7 @@ export class GridView {
     // Dropping the overlap is the exact inverse of the append above, and the
     // rule both halves come from: `scrollback` is what is strictly *older* than
     // the viewport, which a shrink adds to and a grow takes back.
-    if (!renumbered) {
+    if (!renumbered && !cleared) {
       const firstNew = k.rows_data.find((r) => r.line !== NO_LINE)?.line;
       const lastHeld = this.scrollback.at(-1)?.line;
       if (firstNew !== undefined) {

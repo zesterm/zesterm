@@ -2,7 +2,7 @@
 
 A browser tab is a client of a host's daemon exactly as the desktop window is,
 speaking the same `zest-proto` messages. → [ADR-004](../../docs/ARCHITECTURE.md),
-[WS-G](../../docs/ROADMAP.md#ws-g--web-client).
+[docs/ROADMAP.md](../../docs/ROADMAP.md).
 
 ## What is here
 
@@ -173,7 +173,7 @@ Two gates, catching different things:
 ## Not here yet
 
 - **Local echo prediction** (mosh's other trick) — the largest perceived-latency
-  win still on the table; see WS-G.
+  win still on the table; see the roadmap's open work.
 - **A Worker for the decoder.** Decode + apply runs on the main thread, and
   measurement says that is fine: the whole 82k-cell corpus replays in well under
   a second, and `fillText` — which must be on the main thread anyway — is where

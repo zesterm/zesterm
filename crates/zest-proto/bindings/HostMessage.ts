@@ -97,7 +97,17 @@ blocks_from: number,
  * host next happened to retitle. Empty means untitled and travels as
  * absent.
  */
-title: string, } | { "t": "update", session: SessionAddr, base: Seq, seq: Seq, delta: Delta, } | { "t": "scrollback", session: SessionAddr, from_line: bigint, rows_data: Array<RowPayload>, 
+title: string, 
+/**
+ * How many times ED 3 has destroyed the host's scrollback; see
+ * [`Keyframe::history_clears`](crate::Keyframe::history_clears).
+ *
+ * Additive (`blocks_from`'s precedent), so an older peer still
+ * decodes; its default of 0 never advances a replica's shadow, so a
+ * host that predates this simply never announces a clear — which is
+ * what every host did before it existed.
+ */
+history_clears: number, } | { "t": "update", session: SessionAddr, base: Seq, seq: Seq, delta: Delta, } | { "t": "scrollback", session: SessionAddr, from_line: bigint, rows_data: Array<RowPayload>, 
 /**
  * Every attribute these rows name.
  *

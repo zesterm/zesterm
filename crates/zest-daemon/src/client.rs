@@ -475,6 +475,7 @@ impl DaemonClient {
                     blocks,
                     blocks_from,
                     title,
+                    history_clears,
                     ..
                 } => {
                     return Ok((
@@ -489,6 +490,7 @@ impl DaemonClient {
                             blocks,
                             blocks_from,
                             title,
+                            history_clears,
                         },
                     ));
                 }

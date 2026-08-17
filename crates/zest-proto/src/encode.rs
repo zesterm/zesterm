@@ -202,6 +202,7 @@ impl Encoder {
             blocks_from: blocks.authoritative_from(),
             blocks: self.seen_blocks.clone(),
             title: title.to_string(),
+            history_clears: grid.history_clears(),
         }
     }
 
@@ -432,6 +433,17 @@ pub struct Keyframe {
     /// *below* it are the client's own longer history, which it keeps
     /// deliberately — see `diff_blocks`.
     pub blocks_from: u32,
+    /// How many times ED 3 has destroyed the host's scrollback
+    /// ([`zest_core::Grid::history_clears`]).
+    ///
+    /// Monotonic and level-triggered: a replica shadows it and drops its own
+    /// scrollback when it advances, so a client that missed the
+    /// `HistoryCleared` event — a reconnect, a phone that slept — still
+    /// learns on its next keyframe. Deliberately a counter and not a flag,
+    /// and bumped even when the host's scrollback was already empty: a client
+    /// keeping *more* history than the host must still drop it on a `cls`.
+    /// Announced destruction is not silent eviction (`docs/CONTRACTS.md`). (#314)
+    pub history_clears: u32,
     /// The title at this instant. The encoder always knew it (its shadow
     /// tracked it for `DeltaOp::Title`) and simply never put it in the
     /// keyframe — which left a freshly attached tab unlabeled until the host

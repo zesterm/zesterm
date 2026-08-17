@@ -81,7 +81,8 @@ impl vte::Perform for TermState {
                     && arg(1, 1) == 1
                     && !self.modes.contains(Modes::SHOW_CURSOR)
                 {
-                    self.grid_mut().note_cursor_homed_while_hidden();
+                    let t = self.template;
+                    self.grid_mut().note_cursor_homed_while_hidden(&t);
                 }
             }
             ('I', _) => self.tab(arg(0, 1)),
@@ -137,7 +138,8 @@ impl vte::Perform for TermState {
             // restatement starts here". That is all it is taken as. (#247)
             ('t', _) if !private && arg(0, 0) == 8 => {
                 let (rows, cols) = (arg(1, 0), arg(2, 0));
-                self.grid_mut().note_restatement_began(cols, rows);
+                let t = self.template;
+                self.grid_mut().note_restatement_began(cols, rows, &t);
             }
 
             // --- modes ---
@@ -383,8 +385,8 @@ impl TermState {
                 }
                 self.grid_mut().erase_in_row(row, 0, col, &t);
             }
-            // 2 clears the screen; 3 also clears scrollback. Treated alike here
-            // because scrollback trimming is a separate concern from painting.
+            // 2 clears the screen; 3 clears scrollback too, below. The
+            // painting half is shared.
             2 | 3 => {
                 self.grid_mut().erase_rows(0, rows - 1, &t);
                 // The blocks that described those rows describe nothing now.
@@ -407,6 +409,24 @@ impl TermState {
                 // reason above: mode 0 is the line editor repainting, and
                 // ConPTY's own repaint can arrive either side of it. (#247)
                 self.grid_mut().cancel_restate_debt();
+
+                if mode == 3 {
+                    // ED 3 also destroys scrollback — xterm's and Windows
+                    // Terminal's reading, and what pwsh's `Clear-Host` asks
+                    // for with its `2J 3J` pair. The *primary* grid's,
+                    // directly: scrollback lives there and the alt grid has
+                    // none. (An ED 3 issued while the alt screen is active is
+                    // honoured the same way; shells do not run on the alt
+                    // screen, and the counter travels when the primary
+                    // returns.) With the rows gone, every block dies too —
+                    // the ones the screen erase above spared were exactly the
+                    // ones living in scrollback — and `authoritative_from`
+                    // falls to zero, so the next keyframe replaces the
+                    // client's list wholesale. (#314)
+                    self.grid.clear_history();
+                    self.blocks.erase_screen(0);
+                    self.events.push(TermEvent::HistoryCleared);
+                }
             }
             _ => {}
         }

@@ -103,10 +103,132 @@ pub fn set_backdrop(window: &winit::window::Window, backdrop: zest_config::setti
     }
 }
 
-#[cfg(not(windows))]
+/// The `NSVisualEffectMaterial` a backdrop asks for on macOS, if any.
+///
+/// `None` means "this window has no macOS backdrop", which covers both
+/// [`Backdrop::None`] and the three Windows materials — a config shared between
+/// two machines names `mica` on both, and the honest answer here is no backdrop
+/// rather than a guess at what Mica would have looked like.
+///
+/// Pure so the whole table is testable; the AppKit half below is what cannot be.
+#[cfg(target_os = "macos")]
+fn material_for(
+    backdrop: zest_config::settings::Backdrop,
+) -> Option<objc2_app_kit::NSVisualEffectMaterial> {
+    use objc2_app_kit::NSVisualEffectMaterial;
+    use zest_config::settings::Backdrop;
+    match backdrop {
+        Backdrop::None => None,
+        // `UnderWindowBackground` is the material AppKit documents for content
+        // sitting over the desktop, which is exactly a terminal with a
+        // translucent grid. Chosen by eye against the shipped themes over
+        // `HUDWindow` (too dark under `paper`) and `Sidebar` (too light under
+        // `obsidian`); it is a look, not a correctness question, so the reason
+        // it can be revisited is written here rather than argued from the
+        // header. Deliberately not `AppearanceBased`, which is deprecated and
+        // whose own header says to use a semantic value.
+        Backdrop::Vibrancy => Some(NSVisualEffectMaterial::UnderWindowBackground),
+        Backdrop::Mica | Backdrop::MicaAlt | Backdrop::Acrylic => None,
+    }
+}
+
+/// Put an `NSVisualEffectView` behind the window, or take one away.
+///
+/// **Only ever visible through pixels the surface above leaves transparent**,
+/// which on a Mac means `window.opacity < 1.0` *and* a swapchain that took a
+/// transparent composite mode. Until #309 that second half never happened —
+/// wgpu's Metal backend offers `PostMultiplied` and this app demanded
+/// `PreMultiplied` — so vibrancy would have been invisible however correct this
+/// function was. Setting a backdrop on an opaque window is legal and invisible,
+/// and that is not this function's business to refuse.
+///
+/// The effect view is a sibling *behind* winit's view rather than a child of
+/// it: winit's view hosts the `CAMetalLayer` the renderer draws into, so a
+/// subview of it would composite on top of the terminal rather than under it.
+#[cfg(target_os = "macos")]
+pub fn set_backdrop(window: &winit::window::Window, backdrop: zest_config::settings::Backdrop) {
+    use objc2::{ClassType, MainThreadMarker};
+    use objc2_app_kit::{
+        NSAutoresizingMaskOptions, NSView, NSVisualEffectBlendingMode, NSVisualEffectState,
+        NSVisualEffectView, NSWindowOrderingMode,
+    };
+    use objc2_foundation::NSObjectProtocol;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let material = material_for(backdrop);
+    if material.is_none() && backdrop != zest_config::settings::Backdrop::None {
+        tracing::warn!(?backdrop, "that backdrop is a Windows material; macOS has none of it");
+    }
+
+    // Every caller is a window-event handler, which AppKit delivers on the main
+    // thread — but this asks rather than asserting, because the cost of being
+    // wrong is UB and the cost of being careful is one branch.
+    let Some(mtm) = MainThreadMarker::new() else {
+        tracing::warn!("window.backdrop needs the main thread; ignoring");
+        return;
+    };
+    let Ok(handle) = window.window_handle() else { return };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else { return };
+
+    // SAFETY: winit hands out the NSView it owns and we are on the main thread,
+    // as the marker above establishes.
+    let view = unsafe { appkit.ns_view.cast::<NSView>().as_ref() };
+    // SAFETY: the superview is read once, synchronously, on the main thread;
+    // nothing deallocates it while its window is alive and being asked about.
+    let Some(container) = (unsafe { view.superview() }) else {
+        tracing::warn!("no superview to put a backdrop behind; ignoring window.backdrop");
+        return;
+    };
+
+    // Remove any effect view we added before, rather than tracking one in app
+    // state. A `vibrancy` -> `none` change *must* take the old one away, and
+    // rediscovering it here means there is no second place for that state to
+    // get out of step -- and no way to leave a blur behind for ever.
+    for sub in &container.subviews() {
+        if sub.isKindOfClass(NSVisualEffectView::class()) {
+            sub.removeFromSuperview();
+        }
+    }
+    let Some(material) = material else { return };
+
+    let effect = NSVisualEffectView::new(mtm);
+    effect.setMaterial(material);
+    // `BehindWindow` is the whole point: `WithinWindow` blurs what is already
+    // drawn in this window, which for a terminal is its own text.
+    effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+    // Not `FollowsWindowActiveState`, the default: a backdrop that greys out
+    // the moment the window loses focus reads as a rendering bug, and a
+    // terminal spends much of its life unfocused while something runs in it.
+    effect.setState(NSVisualEffectState::Active);
+    effect.setFrame(container.bounds());
+    // Tracks the window through a drag with no per-resize call of our own.
+    effect.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+    );
+    // `Below` with no sibling puts this at the back of the container, behind
+    // the view the renderer draws into.
+    container.addSubview_positioned_relativeTo(&effect, NSWindowOrderingMode::Below, None);
+
+    // What it actually attached to, at debug level. Whether a backdrop is
+    // *visible* cannot be asserted from inside the process — it is the
+    // compositor's answer, and a screenshot of our own texture cannot show it —
+    // so "why is my backdrop invisible" is otherwise unanswerable without a
+    // debugger. The container's class is the fact that distinguishes "attached
+    // behind the renderer's view" from "attached somewhere that will never
+    // show".
+    tracing::debug!(
+        container = %container.class().name().to_string_lossy(),
+        siblings = container.subviews().len(),
+        "vibrancy attached"
+    );
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn set_backdrop(_window: &winit::window::Window, backdrop: zest_config::settings::Backdrop) {
-    // macOS vibrancy is WS-C2 and Linux is WS-D; saying so beats doing
-    // nothing quietly.
+    // Linux is WS-D, and `AGENTS.md` records why it may stay that way: blur has
+    // no portable path -- X11/KWin has `_KDE_NET_WM_BLUR_BEHIND_REGION`, picom
+    // needs user rules, Wayland has no protocol at all. Degrade honestly rather
+    // than pretending in the settings UI.
     if backdrop != zest_config::settings::Backdrop::None {
         tracing::warn!(?backdrop, "window.backdrop is not implemented on this platform yet");
     }
@@ -127,6 +249,55 @@ pub fn set_background_color(_window: &winit::window::Window, _r: u8, _g: u8, _b:
 /// `None` as "no cluster to avoid" — which is also the fullscreen answer,
 /// where the buttons auto-hide (the caller checks fullscreen; here `None`
 /// just means the question could not be answered).
+/// Whether the OS has been asked to reduce motion.
+///
+/// An accessibility setting, not a preference we own: vestibular disorders make
+/// animated scrolling genuinely unpleasant, and `motion.respect_system_reduce_motion`
+/// defaults to on for that reason. Read live on every consultation rather than
+/// cached at startup — it is a cheap property read, and caching it would mean
+/// toggling the switch in System Settings did nothing until the app was
+/// restarted, which is the class of bug this whole sweep is closing.
+///
+/// `false` where the platform has no such notion, which is the honest answer:
+/// it means "nothing has asked us to reduce motion", not "motion is wanted".
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn reduce_motion() -> bool {
+    use objc2_app_kit::NSWorkspace;
+    NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+}
+
+#[cfg(windows)]
+#[must_use]
+pub fn reduce_motion() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SystemParametersInfoW, SPI_GETCLIENTAREAANIMATION,
+    };
+    let mut animations_on: i32 = 1;
+    // SAFETY: a documented read of a BOOL-sized out parameter we own.
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            std::ptr::addr_of_mut!(animations_on).cast(),
+            0,
+        )
+    };
+    // A failed query means "we do not know", and guessing *reduce* would turn
+    // motion off for everyone on a machine where the call is unavailable.
+    ok != 0 && animations_on == 0
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+#[must_use]
+pub fn reduce_motion() -> bool {
+    // GNOME has `org.gnome.desktop.interface enable-animations` and KDE has its
+    // own, but reading either means a settings-daemon dependency or shelling
+    // out per query. Until one is worth it, nothing has asked us to reduce
+    // motion — and `motion.enabled` is still there to turn it off by hand.
+    false
+}
+
 #[cfg(target_os = "macos")]
 pub fn native_control_inset(window: &winit::window::Window) -> Option<(f64, f64)> {
     use objc2_app_kit::{NSView, NSWindow, NSWindowButton};
@@ -264,6 +435,41 @@ mod tests {
             "",
         ] {
             assert!(!url_is_shell_safe(bad), "{bad:?} must not reach a launcher");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn every_backdrop_maps_to_exactly_one_macos_outcome() {
+        use objc2_app_kit::NSVisualEffectMaterial;
+        use zest_config::settings::Backdrop;
+
+        // The half that can be asserted without a compositor. The rest of
+        // `set_backdrop` is AppKit calls whose effect is a look on a screen,
+        // and claiming a test covers that would be worse than admitting it
+        // does not.
+        assert_eq!(
+            super::material_for(Backdrop::Vibrancy),
+            Some(NSVisualEffectMaterial::UnderWindowBackground)
+        );
+
+        // `None` maps to "no material", and the caller reads that as *remove
+        // the effect view* rather than "leave whatever is there". A live
+        // change from vibrancy to none that only stopped adding one would
+        // leave the blur behind for ever, which is the bug this pairing
+        // exists to prevent.
+        assert_eq!(super::material_for(Backdrop::None), None);
+
+        // Windows materials on a Mac: no backdrop, not a guess at what Mica
+        // would have looked like. A config shared between two machines names
+        // `mica` on both, and inventing a local equivalent would make the two
+        // windows disagree about what the setting means.
+        for windows_only in [Backdrop::Mica, Backdrop::MicaAlt, Backdrop::Acrylic] {
+            assert_eq!(
+                super::material_for(windows_only),
+                None,
+                "{windows_only:?} is a Windows material; macOS has none of it"
+            );
         }
     }
 }

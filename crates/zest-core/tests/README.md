@@ -97,7 +97,74 @@ hard-codes it beside the filename.
 The neutrality rule above applies as much here as anywhere — `ls` in a directory
 whose name is nobody's, with the default prompt.
 
-### Recording more
+### `resize-drag-storm.vtrec` — the same drag as a mouse makes it
+
+The recording above lets each repaint finish before the next resize; a real drag
+does not. winit fires resizes throughout the gesture, ConPTY coalesces its
+answers, and the repaints that do arrive are laid out for sizes the grid has
+already left — which is where #312 lived: an unannounced stale repaint's settle
+destroyed the history it thought it was giving back. Recorded at **100x30**,
+shrunk to 100x8, then four grows issued back-to-back:
+
+```powershell
+cargo run -p zest-pty --example pty_dump -- `
+  --record crates\zest-core\tests\corpus\resize-drag-storm.vtrec `
+  --cmd "pwsh -NoLogo -c `"ls; Start-Sleep 8`"" `
+  --size 100x30 --resize-after-ms 1500 --resize-settle-ms 400 --resize 100x8 `
+  --resize-after-ms 0 --resize-settle-ms 0 `
+  --resize 100x14 --resize 100x20 --resize 100x26 --resize-settle-ms 2000 --resize 100x30
+```
+
+`--resize-settle-ms 0` is what makes it a storm: with no settle window the four
+grows land within ~100µs of each other, faster than ConPTY's first answer
+(~300µs on the box that recorded this). ConPTY then answers with *two* repaints
+— one for an intermediate size it had already been resized past, one for the
+final size — and only the very first repaint of the whole gesture announces
+itself with `CSI 8 t`. The replay test asserts that shape and says to re-record
+if a new capture loses it.
+
+### `resize-drag-stepped.vtrec` — the same drag at the daemon's cadence
+
+The other failure mode needs the *opposite* timing: a resize every 120ms, each
+answered by a matching repaint before the next lands. Nothing stale anywhere —
+and each intermediate settle still lost rows, because the next repaint restates
+ConPTY's buffer, which never got the pulled rows back (#312's second half; the
+provisional settle is the fix). Two `ls`es so the session has real history, at
+**80x24**, stepped 20, 14, 8, 14, 20, 24:
+
+```powershell
+cargo run -p zest-pty --example pty_dump -- `
+  --record crates\zest-core\tests\corpus\resize-drag-stepped.vtrec `
+  --cmd "pwsh -NoLogo -c `"ls; ls; Start-Sleep 8`"" `
+  --size 80x24 --resize-after-ms 2000 --resize-settle-ms 120 --resize 80x20 `
+  --resize-after-ms 0 --resize 80x14 --resize 80x8 --resize 80x14 --resize 80x20 `
+  --resize-settle-ms 2000 --resize 80x24
+```
+
+Its replay test builds the expected screen from the fixture itself — every
+chunk except the drag window's — so a re-recording carries its own golden.
+
+### `resize-drag-overflow.vtrec` — the shrink half arrives late and too tall
+
+Three shrinks issued back-to-back (`--resize-settle-ms 0`), a 300ms turnaround,
+four grows back-to-back. ConPTY's first answer is then laid out for 24 rows and
+parses into a grid already at 8 — sixteen rows of overflow, which is the #315
+mechanism: each overflow scroll used to cancel the restate debt and bank a
+duplicate of a row the grid already held. At **100x30**:
+
+```powershell
+cargo run -p zest-pty --example pty_dump -- `
+  --record crates\zest-core\tests\corpus\resize-drag-overflow.vtrec `
+  --cmd "pwsh -NoLogo -c `"ls; Start-Sleep 8`"" `
+  --size 100x30 --resize-after-ms 2000 --resize-settle-ms 0 --resize 100x24 `
+  --resize-after-ms 0 --resize 100x16 --resize 100x8 `
+  --resize-after-ms 300 --resize 100x14 --resize-after-ms 0 --resize 100x20 `
+  --resize 100x26 --resize-settle-ms 2000 --resize 100x30
+```
+
+One capture, both traps: the 24-row repaint overflows (#315), the 20-row one is
+stale-smaller and refused by coverage (#312), and the 30-row one settles. The
+replay uses the same fixture-derived golden as the stepped test.
 
 Worth adding as they become relevant: `vim`, `htop`/`btm`, `tmux`, a `cargo build`,
 and the `@sigx/terminal` showcase example — the last being a useful check that
