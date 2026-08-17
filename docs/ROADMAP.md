@@ -27,7 +27,7 @@ is reported rather than gated.
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store, sealed channel |
 | `zest-cloud` | ✅ `TlsDuplex`, one connection as two independently owned halves, a one-request HTTP POST over it, `Endpoint` — consumed by `--enroll` and by `--relay`'s per-pipe dial-back |
 | `zest-daemon` | ✅ session ownership *and* lifecycle, protocol loop, loopback / LAN / WebSocket / relay transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing, publishes its own profiles, reports what a child exited with |
-| `zest-mcp` | ✅ reads, drives and runs terminals over MCP on stdio; `run_isolated` carries the unforgeable exit code; `screen` and `blocks` wait instead of the caller sleeping — ⬜ `run` into the interactive shell, fleet reach |
+| `zest-mcp` | ✅ reads, drives and runs terminals over MCP on stdio; `run` correlates a command in the user's own shell and `run_isolated` carries the unforgeable exit code; `screen` and `blocks` wait instead of the caller sleeping — ⬜ fleet reach |
 
 ### What works end to end today
 
@@ -162,17 +162,21 @@ the history behind them is in closed issues and PRs.
 
 ### Agents
 
-- [ ] **`run`, into the user's interactive shell** — with their venv, ssh-agent
+- [x] **`run`, into the user's interactive shell** — with their venv, ssh-agent
       and kubectl context. OSC 133 `D` parsed host-side carries the shell's own
-      exit code; a timeout does not kill — the block stays `Running` and
+      exit code; a timeout does not kill — the block stays `running` and
       partial output comes back, so a command sitting at `Password:` can be
-      answered, the case a sentinel-injecting harness cannot tell from success.
-      One correction from `blocks.rs`: correlating on a block
-      `id > high_water` never fires — OSC 133 `C` mutates the *existing*
-      trailing prompt block, so the anchor is the tail block's identity before
-      the write, not the next id after it. `blocks(wait:)` already anchors that
-      way, and `tests/replay.rs` measures the naive predicate against a real
-      zsh recording rather than taking the correction on trust.
+      answered, the case a sentinel-injecting harness cannot tell from success,
+      and `blocks(wait:)` follows it from there. The correlation is
+      `block_anchor`/`finished_since`, not a second copy: OSC 133 `C` mutates
+      the *existing* trailing prompt block, so the anchor is the tail block's
+      identity before the write. Writing adds the states a wait does not need —
+      a command the shell never started, a block a screen clear destroyed — and
+      the refusals it does: an alt screen, a shell emitting no markers, a
+      command already running, and the gap between `D` and the next prompt,
+      which two `run`s back to back land in almost every time. `warnings` say
+      when the block records a different command than the one sent, or none at
+      all. → ADR-015.
 - [ ] Fleet reach for `zest-mcp`, gated on a host advertising the observer
       attach.
 - [ ] **Tokens per build, measured.** Byte stream vs delta vs block output for

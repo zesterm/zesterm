@@ -1180,6 +1180,60 @@ returns `None` for `/bin/bash`, with a test pinning it, so "no blocks" is most
 Linux hosts rather than an edge case — but its *primary* property is that its
 status cannot be forged by the thing it is running.
 
+### The anchor is the tail block, not the next id
+
+`run` writes a command into a shell somebody is already using and then has to
+say which block it produced. The obvious rule — record `max(block.id)` before
+writing, wait for something above it — **never fires**, and it is worth writing
+down here because the code that makes it wrong is three lines in another crate.
+
+OSC 133 `C` reaches `BlockIndex::begin_output`, which mutates `blocks.last_mut()`
+in place: it sets `output_line`, `command` and `state`, and mints no id at all.
+So the command lands in the *existing* trailing prompt block, at an id at or
+below the high-water mark, and only the prompt that follows pushes a new one.
+`begin_prompt` then re-anchors that trailing block rather than pushing whenever
+it ran nothing (#193), so the id can legitimately never move for a whole
+session.
+
+The anchor is therefore the tail block's **identity** before the write, and the
+thing to wait for is that block's **state** advancing. The comparison is `>=`
+rather than `==` because the two supported shells disagree: zsh emits `C` from
+`preexec` and `D` only from `precmd`-when-something-ran, so an empty Enter is a
+bare `A` and the id is reused, while pwsh brackets even an empty line and its
+next prompt genuinely pushes a fresh id. A rule written and tested on one of
+them is wrong on the other, in the direction that fails silently.
+
+**And what says the anchor is gone is the block's presence, not the index's
+floor.** `authoritative_from` looks like the field for this and is not:
+`erase_screen` lowers it with `min(lowest_gone)`, and a young session's floor is
+already 0, so a screen clear that erases the anchor outright moves it by nothing
+at all. The block itself is exact, because a new prompt *pushes* rather than
+replacing — so an absent anchor never means "the session moved on", only that
+something destroyed the rows it described. Read off the floor, `run clear` was
+reported as a command that never started and then spent the caller's entire
+deadline waiting for it.
+
+Two more consequences that only a live shell showed, both found by driving the
+built binary by hand rather than by any test:
+
+**The gap between `D` and the next `A` is a state callers land in.** `run`
+returns the instant `D` closes its block; the next prompt arrives a moment
+later. Two `run`s back to back therefore hit a session whose tail block has
+finished and whose prompt has not been drawn — which must be a *different*
+refusal from "a command is already running", because only one of the two is
+worth waiting out. The other may not end for an hour, and typing into it puts
+the text in that command's stdin.
+
+**An exit can reach a client before the output that preceded it.** The daemon
+snapshots `has_exited` before it diffs the grid, precisely so the last screenful
+is never reordered past the exit — but the reader thread sets that flag on EOF,
+which it can notice while the bytes ahead of it are still queued for the parser.
+`exit` typed into a real zsh then arrives as `Exited` first and the `C` that
+opened its block a beat later, roughly one run in eight. Nothing on the wire says
+"that was the last delta", so a client that stops waiting on the exit needs a
+bounded drain afterwards; the alternative is reporting a command that plainly ran
+as never having started.
+
 ### The trap this ADR was written after
 
 `HostMessage::Exited { code: Option<i32> }` existed on the wire from protocol 2

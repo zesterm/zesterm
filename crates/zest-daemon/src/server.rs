@@ -1540,7 +1540,9 @@ where
             .spawn(move || {
                 let mut buf = vec![0u8; 64 * 1024];
                 loop {
-                    let n = match reader.read(&mut buf) {
+                    // `Err(_) => break` here treated a signal as the end of the
+                    // stream, which closes a healthy peer or ends a live shell.
+                    let n = match crate::read_retrying(&mut reader, &mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => n,
                     };

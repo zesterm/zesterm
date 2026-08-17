@@ -264,3 +264,85 @@ mod tests {
         assert_eq!(addr.session, SessionId(4));
     }
 }
+
+/// One `read`, retrying the one error that is not a failure.
+///
+/// **A signal is not a dropped connection.** A blocking `read` returns `EINTR`
+/// when a signal lands while it is parked, and on unix a process that reaps
+/// children gets `SIGCHLD` — so a daemon serving sessions, or a client that has
+/// started one, can have an unrelated read interrupted by a shell exiting
+/// somewhere else entirely. Every call site here treated that as the end of the
+/// stream: the connection reader closed a healthy client, the session reader
+/// ended a live shell, and `DaemonClient`'s handshake reported
+/// `Transport("Interrupted system call (os error 4)")` — which reads as the
+/// daemon refusing a key it had in fact accepted.
+///
+/// It is rare enough to look like a flake and is not one, which is why this is
+/// one function rather than three call sites that each remember: it first showed
+/// up on `test (ubuntu-latest)` when a change added enough child processes to
+/// make `SIGCHLD` common, on a connection nothing was wrong with.
+pub(crate) fn read_retrying(r: &mut impl std::io::Read, buf: &mut [u8]) -> std::io::Result<usize> {
+    loop {
+        match r.read(buf) {
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            other => return other,
+        }
+    }
+}
+
+#[cfg(test)]
+mod read_retrying_tests {
+    use super::read_retrying;
+    use std::io::{Error, ErrorKind, Read, Result};
+
+    /// A reader that is interrupted before it says anything.
+    struct Interrupts {
+        left: usize,
+        then: &'static [u8],
+    }
+
+    impl Read for Interrupts {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+            if self.left > 0 {
+                self.left -= 1;
+                return Err(Error::new(ErrorKind::Interrupted, "signal"));
+            }
+            let n = self.then.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.then[..n]);
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn a_signal_is_retried_and_the_bytes_behind_it_still_arrive() {
+        // The failure this prevents has no symptom of its own: the caller sees a
+        // clean end of stream, or a transport error naming a system call, on a
+        // connection that was fine.
+        let mut r = Interrupts { left: 3, then: b"hello" };
+        let mut buf = [0u8; 8];
+        let n = read_retrying(&mut r, &mut buf).expect("a signal is not a failure");
+        assert_eq!(&buf[..n], b"hello", "the read must resume, not report the signal");
+    }
+
+    #[test]
+    fn every_other_error_is_still_an_error() {
+        // Retrying anything else would spin for ever on a broken socket, which
+        // is a worse failure than the one being fixed.
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> Result<usize> {
+                Err(Error::new(ErrorKind::ConnectionReset, "gone"))
+            }
+        }
+        let mut buf = [0u8; 8];
+        let e = read_retrying(&mut Broken, &mut buf).expect_err("a reset is a real failure");
+        assert_eq!(e.kind(), ErrorKind::ConnectionReset);
+    }
+
+    #[test]
+    fn end_of_stream_is_still_end_of_stream() {
+        let mut r = Interrupts { left: 1, then: b"" };
+        let mut buf = [0u8; 8];
+        assert_eq!(read_retrying(&mut r, &mut buf).expect("eof is not an error"), 0);
+    }
+}

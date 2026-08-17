@@ -13,9 +13,10 @@
 //! pre-parsed structures, so a mistake in how this crate reads the wire fails
 //! here rather than only against a live daemon.
 
+use zest_mcp::run::{self, Progress};
 use zest_mcp::tools::{block_anchor, finished_since};
 use zest_mcp::Replica;
-use zest_proto::{frame, FrameReader, HostMessage, SessionAddr, SessionId, HostId};
+use zest_proto::{frame, BlockState, FrameReader, HostMessage, SessionAddr, SessionId, HostId};
 
 /// One recorded session, as the host sent it.
 struct Fixture {
@@ -515,3 +516,79 @@ fn a_block_wait_fires_when_the_recorded_command_ends_and_a_newer_id_would_not() 
     );
 }
 
+
+/// `run`'s own states, walked over the same recording.
+///
+/// The layer above [`finished_since`]: a wait only has to know when something
+/// ended, where `run` has just *written* and must also say whether the shell
+/// started the command at all, and refuse the states a write would be swallowed
+/// by. Held against the capture for the same reason — whether a submitted
+/// command reuses the trailing prompt block's id is a question about zsh, and
+/// the answer here is that it does: this anchors at block 0 and settles at
+/// block 0.
+#[test]
+fn a_run_walks_not_started_then_running_then_finished_without_the_id_moving() {
+    let frames = replay_watching("blocks-zsh", |r| (r.blocks(), r.blocks_from(), r.alt_screen()));
+
+    let (start, anchor) = frames
+        .iter()
+        .enumerate()
+        .find_map(|(i, (b, _, alt))| run::anchor(b, *alt).ok().map(|a| (i, a)))
+        .expect("the recording reaches a live zsh prompt a `run` could write at");
+    assert_eq!(anchor.id, 0, "the anchor is the trailing prompt block, not the id after it");
+
+    let progress_at = |i: usize| {
+        let (b, from, _) = &frames[i];
+        run::progress(b, *from, &anchor)
+    };
+
+    assert!(
+        matches!(progress_at(start), Progress::NotStarted),
+        "nothing has been submitted yet, and that is distinguishable from running"
+    );
+
+    let (fired, blk) = (start..frames.len())
+        .find_map(|i| match progress_at(i) {
+            Progress::Finished(b) => Some((i, b)),
+            _ => None,
+        })
+        .expect("`echo hello` finishes in this recording");
+
+    assert_eq!(
+        blk.id, anchor.id,
+        "the command landed in the anchor's own block. An `id > high_water` test never \
+         fires here, which is the whole reason the anchor is the tail block"
+    );
+    assert_eq!(blk.command, "echo hello");
+    assert_eq!(blk.state, BlockState::Finished { exit_code: Some(0) });
+    assert!(
+        (start..fired).any(|i| matches!(progress_at(i), Progress::Running(_))),
+        "the block must be seen `running` before it is seen `finished` -- a correlation \
+         that only ever observes the end state cannot report a partial result on a timeout"
+    );
+    assert!(
+        run::warnings(&frames[fired].0, &anchor, "echo hello", &blk).is_empty(),
+        "a command that ran exactly as sent must carry no warnings"
+    );
+}
+
+/// A `run` into an editor is refused, at the moment it would have written.
+///
+/// No OSC 133 marker is recorded on the alternate screen at all, so a command
+/// submitted there could never settle — and the bytes would reach vim. Asserted
+/// frame by frame against the recording rather than a hand-built list, because
+/// the flag being right at every frame is what the refusal rests on.
+#[test]
+fn a_run_is_refused_for_every_frame_a_recording_spends_in_an_editor() {
+    let frames = replay_watching("vim-macos", |r| (r.blocks(), r.alt_screen()));
+    let alt: Vec<_> = frames.iter().filter(|(_, alt)| *alt).collect();
+    assert!(!alt.is_empty(), "the recording opens vim; something is wrong upstream of this");
+
+    for (b, a) in alt {
+        assert_eq!(
+            run::anchor(b, *a).expect_err("the alternate screen is never runnable"),
+            run::Refusal::AltScreen,
+            "an alt-screen frame must be refused by name, not fall through to `NoBlocks`"
+        );
+    }
+}

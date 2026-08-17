@@ -617,6 +617,21 @@ you need before you trip on it.
   this** (it is BMP), so the corpus refuses to generate without something past
   U+FFFF in it.
 
+### Signals
+
+- **`EINTR` is not the end of a stream, and every read loop in `zest-daemon`
+  treated it as one.** A blocking `read` returns it when a signal lands while it
+  is parked, and a process that reaps children gets `SIGCHLD` — so a daemon
+  serving sessions, or a client that has started one, can have an unrelated read
+  interrupted by a shell exiting elsewhere. `Err(_) => break` then closes a
+  healthy peer, ends a live shell, or reports
+  `Transport("Interrupted system call (os error 4)")` from a *handshake*, which
+  reads as the daemon refusing a key it had accepted. Rare enough to look like a
+  flake and not one: it first appeared on `test (ubuntu-latest)` when a change
+  added enough child processes to make `SIGCHLD` common. One
+  `read_retrying`, because three call sites that each have to remember is how
+  two of them forget. (`zest-daemon/src/lib.rs`; #274)
+
 ### Blocks and shell integration
 
 - **A prompt redraw re-emits `OSC 133;A`, and a block with no end claims every
@@ -628,6 +643,33 @@ you need before you trip on it.
   class is invisible unless you test on macOS. `begin_prompt` reuses a trailing
   block that ran nothing; `sliceBlocks` bounds an open block at the next
   block's `prompt_line`. (#193)
+- **A submitted command mints no block id, so correlating on a new one never
+  fires.** OSC 133 `C` makes `begin_output` mutate `blocks.last_mut()` in place,
+  so the command lands in the *existing* trailing prompt block at an id **at or
+  below** the high-water mark — and `begin_prompt` re-anchors an abandoned
+  prompt rather than pushing, so the id can stay put for a whole session. Wait
+  for `id > high_water` and every `run` reports a timeout on a command that
+  finished instantly. Anchor on the tail block's identity, wait on its *state*,
+  and compare `>=`: zsh reuses the id, pwsh mints a fresh one, so a rule written
+  on either shell alone is silently wrong on the other. One copy of the rule —
+  `tools::block_anchor` and `tools::finished_since`, which both `blocks(wait:)`
+  and `run` call — because two would drift and only one of them is replayed
+  against a capture. (`zest-mcp/src/run.rs`, ADR-015; #274, #331)
+- **What says the anchor is gone is the block's presence, never
+  `authoritative_from`.** That field *lowers* on a screen clear where eviction
+  raises it — but with `min(lowest_gone)`, and a young session's floor is
+  already 0, so a clear that erases the anchor moves it by nothing while the
+  next prompt pushes an id *above* it. Read that way, `run clear` reported a
+  command that never started and burned the whole deadline. (#274)
+- **Between `D` and the next `A` a shell has no prompt, and an exit can arrive
+  before the output before it.** Two `run`s back to back land in the first gap
+  almost every time, so it must be a different refusal from "a command is
+  running" — only one is worth waiting out. And the daemon's reader sets
+  `has_exited` on EOF while bytes may still be queued for the parser, so `exit`
+  in a real zsh arrives as `Exited` first and the `C` that opened its block a
+  beat later, about one run in eight. Nothing on the wire says "that was the
+  last delta", so stopping on the exit needs a bounded drain after it. Both were
+  found by driving the built binary by hand. (#274)
 
 ### Rendering and fonts
 

@@ -41,6 +41,7 @@ use zest_proto::{BlockPayload, BlockState, ClientMessage, SessionAddr};
 
 use crate::addr::{AddrError, Resolver};
 use crate::conn::{Conn, ConnError};
+use crate::run::{self, Anchor, Progress, Refusal};
 use crate::session::Replica;
 
 /// `^C`. The byte a terminal sends for Ctrl+C, which the tty layer turns into
@@ -64,6 +65,11 @@ pub enum ToolError {
     AltScreen(&'static str),
     #[error("no block {0} in this session")]
     NoSuchBlock(u32),
+    /// A session or a command `run` cannot work with. Its own variant rather
+    /// than folding into the ones above, because every arm of it names the tool
+    /// to reach for instead and that text is the whole value.
+    #[error("{0}")]
+    Run(#[from] Refusal),
 }
 
 /// Where an exit code came from, carried on every one this server reports.
@@ -144,6 +150,7 @@ impl ToolSet {
             ),
             "input" => self.input(session_arg(args, &self.resolver)?, args),
             "interrupt" => self.interrupt(session_arg(args, &self.resolver)?),
+            "run" => self.run(session_arg(args, &self.resolver)?, args),
             "run_isolated" => self.run_isolated(args),
             "create_session" => self.create_session(args),
             "close_session" => self.close_session(session_arg(args, &self.resolver)?),
@@ -482,6 +489,66 @@ impl ToolSet {
         Ok(json!({ "session": Resolver::format(addr), "closed": true }))
     }
 
+    /// Run one command in the shell somebody is already using, and correlate it.
+    ///
+    /// The thing agent harnesses cannot do. They inject a sentinel — `echo
+    /// __done_$?` — because there is no other way to tell from a byte stream
+    /// when an interactive command finished, and a sentinel cannot distinguish a
+    /// command that ended from one sitting at `Password:`. The shell already
+    /// says, in OSC 133;D, parsed host-side into a block with its own exit code.
+    ///
+    /// The correlation is [`blocks(wait:)`](Self::blocks)'s — [`block_anchor`]
+    /// and [`finished_since`], not a second copy — because a command submitted
+    /// now lands in the *existing* trailing prompt block and mints no id.
+    /// [`crate::run`] adds only what writing needs on top: the states a wait
+    /// does not have to care about, and the refusals it does.
+    ///
+    /// Ordering is [`Self::run_isolated`]'s, and [`Self::attached_with`] holds
+    /// it: the attach comes before the write, because a client that writes first
+    /// can miss the transition it is waiting for, and the read comes before the
+    /// detach, because [`Conn::detach`] drops this process's replica.
+    ///
+    /// The session is **not** created, closed or killed here. A timeout returns
+    /// the block still `running` with its partial output, so the `Password:`
+    /// case can be answered with `input`, stopped with `interrupt`, or followed
+    /// with `blocks(wait:)`; and this is somebody's shell, so ending it is never
+    /// this tool's business.
+    fn run(&self, addr: SessionAddr, args: &Value) -> Result<Value, ToolError> {
+        let command = run::check_command(args.get("command").and_then(Value::as_str).unwrap_or(""))?;
+        if command.is_empty() {
+            return Err(ToolError::Missing { field: "command" });
+        }
+        let max_lines = clamp_lines(opt_usize(args, "max_lines")?);
+        let deadline = Instant::now() + clamp_timeout(opt_u32(args, "timeout_ms")?);
+
+        self.attached_with(
+            addr,
+            |conn| submit_and_wait(conn, addr, command, deadline),
+            |r, (anchor, timed_out)| {
+                let blocks = r.blocks();
+                let progress = run::progress(&blocks, r.blocks_from(), &anchor);
+                let (rows, warnings) = match &progress {
+                    Progress::Running(b) | Progress::Finished(b) => {
+                        (r.block_rows(b.id), run::warnings(&blocks, &anchor, command, b))
+                    }
+                    Progress::NotStarted | Progress::Lost => (None, Vec::new()),
+                };
+                Ok(run_json(
+                    &Outcome {
+                        addr,
+                        command,
+                        progress,
+                        rows,
+                        warnings,
+                        session_exited: r.exited().is_some(),
+                        timed_out,
+                    },
+                    max_lines,
+                ))
+            },
+        )
+    }
+
     /// Attach if not already, run `f` against the replica, and leave.
     ///
     /// Always observing, so reading a session cannot change the shape of a
@@ -517,7 +584,7 @@ impl ToolSet {
             let (cols, rows) = self
                 .conn
                 .with(|s| s.sessions.iter().find(|i| i.addr == addr).map(|i| (i.cols, i.rows)))
-                .unwrap_or((80, 24));
+                .unwrap_or(DEFAULT_SIZE);
             self.conn.attach(addr, cols, rows, true)?;
         }
         let out = match wait(&self.conn) {
@@ -691,6 +758,235 @@ fn wait_for_block(
         Err(e) => Err(e.into()),
     }
 }
+
+/// Take the anchor, write the line, and wait for the block to close.
+///
+/// Everything between the attach and the read, so `run` reads as the four steps
+/// it is. Answers the anchor it used — the payload is described relative to it —
+/// and whether the caller's deadline is why the wait stopped.
+fn submit_and_wait(
+    conn: &Conn,
+    addr: SessionAddr,
+    command: &str,
+    deadline: Instant,
+) -> Result<(Anchor, bool), ToolError> {
+    let anchor = anchor_when_ready(conn, addr, deadline)?;
+
+    // `\r`, not `\n`. It is a terminal on the other end and a line feed is not
+    // what Enter sends -- the same rule `input` states next door.
+    let mut bytes = command.as_bytes().to_vec();
+    bytes.push(b'\r');
+    conn.send(ClientMessage::Input { session: addr, bytes });
+
+    let settled = |r: &Replica| {
+        matches!(
+            run::progress(&r.blocks(), r.blocks_from(), &anchor),
+            // `Lost` ends the wait as surely as `Finished` does: the block was
+            // destroyed, so no amount of waiting brings it back, and reporting
+            // that as a timeout sends a model round the loop against nothing.
+            Progress::Finished(_) | Progress::Lost
+        )
+    };
+
+    let waited = conn.wait_until(deadline, |s| {
+        let r = s.replica(addr)?;
+        // A shell that has gone will never emit the `D` that closes this block.
+        // Waiting for it anyway reports a command as "still running" for as long
+        // as the caller asked -- two minutes by default, on a shell that ended in
+        // the first second -- and `exit 7` typed into an interactive shell is
+        // exactly that, which is how this was found.
+        (settled(r) || r.exited().is_some()).then_some(())
+    });
+    // A timeout is a *result*: the command may be at a password prompt, which is
+    // exactly the case a sentinel cannot tell from success. Any other error is a
+    // dead link and has nothing to report.
+    let timed_out = match waited {
+        Ok(()) => false,
+        Err(ConnError::TimedOut) => true,
+        Err(e) => return Err(ToolError::Conn(e)),
+    };
+
+    // An exit and the output that came before it can reach a client out of
+    // order, so reading the instant it arrives reports a command that plainly
+    // started as never having started at all.
+    //
+    // The daemon snapshots `has_exited` before it diffs the grid, precisely so
+    // the last screenful is never reordered past the exit -- but the reader
+    // thread sets that flag on EOF, which it can notice while the bytes ahead of
+    // it are still queued for the parser. `exit` typed into a real zsh then
+    // lands as `Exited` first and the OSC 133;C that opened its block a beat
+    // later: reproduced about one run in eight, reported as
+    // `state: "prompt", block_id: null` with the block visibly there a moment
+    // afterwards.
+    //
+    // Nothing on the wire says "that was the last delta", so a bounded drain is
+    // the honest approximation. Capped by the caller's deadline, so
+    // `timeout_ms: 0` still returns at once, and never reached at all unless the
+    // session really has ended.
+    let draining =
+        conn.with(|s| s.replica(addr).is_some_and(|r| r.exited().is_some() && !settled(r)));
+    if draining {
+        let until = deadline.min(Instant::now() + EXIT_DRAIN);
+        // Its timeout is not the caller's and must not be reported as one.
+        let _ = conn.wait_until(until, |s| s.replica(addr).filter(|r| settled(r)).map(|_| ()));
+    }
+
+    Ok((anchor, timed_out))
+}
+
+/// Wait for the prompt, then take the anchor — refusing what waiting cannot fix.
+///
+/// Two of [`Refusal`]'s arms are momentary and the rest are facts, and only the
+/// first kind is worth waiting out.
+///
+/// A session with no blocks at all is ambiguous: a shell with no integration
+/// looks exactly like one that has not drawn its first prompt yet, and a freshly
+/// created session is usually the second. And a session whose tail block has just
+/// *finished* is in the gap between OSC 133 `D` and the `A` that follows it,
+/// which is where two `run`s back to back land almost every time — the first
+/// returns the instant `D` closes its block, and zsh emits the next prompt from
+/// `precmd` a moment afterwards.
+///
+/// An alt screen or a command genuinely running are answered at once, because
+/// neither is a thing another second changes.
+///
+/// Bounded separately from the command's own deadline for #285's reason: a
+/// startup budget inside an assertion budget reports a slow shell as whatever the
+/// caller was really asking about.
+fn anchor_when_ready(
+    conn: &Conn,
+    addr: SessionAddr,
+    deadline: Instant,
+) -> Result<Anchor, ToolError> {
+    let grace = deadline.min(Instant::now() + PROMPT_GRACE);
+    let waited = conn.wait_until(grace, |s| {
+        let r = s.replica(addr)?;
+        match run::anchor(&r.blocks(), r.alt_screen()) {
+            Err(Refusal::NoBlocks | Refusal::NoPrompt) => None,
+            decided => Some(decided),
+        }
+    });
+    match waited {
+        Ok(decided) => Ok(decided?),
+        // Re-read rather than assuming which of the two transient refusals it
+        // was: they say different things, and the prompt may have arrived in the
+        // gap between the deadline firing and this line.
+        Err(ConnError::TimedOut) => conn
+            .with(|s| s.replica(addr).map(|r| run::anchor(&r.blocks(), r.alt_screen())))
+            .unwrap_or(Err(Refusal::NoBlocks))
+            .map_err(Into::into),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Everything one `run` answer is built from.
+///
+/// A struct rather than seven arguments, and it is also the list of facts the
+/// answer has to carry.
+struct Outcome<'a> {
+    addr: SessionAddr,
+    command: &'a str,
+    progress: Progress,
+    /// The block's own rows, or `None` when there is no block to have any.
+    rows: Option<Vec<String>>,
+    warnings: Vec<String>,
+    /// The *session* ended — the shell itself, not the command. A separate fact
+    /// from every other one here: a command can be `finished` in a session that
+    /// has since gone, and one that never finished in a session that took it
+    /// with it.
+    session_exited: bool,
+    timed_out: bool,
+}
+
+/// The answer `run` gives, built in exactly one place.
+fn run_json(o: &Outcome, max_lines: usize) -> Value {
+    let block = match &o.progress {
+        Progress::Running(b) | Progress::Finished(b) => Some(b),
+        Progress::NotStarted | Progress::Lost => None,
+    };
+    // Only a *closed* block has a status, and only the value carries the source.
+    // `Running` deliberately produces neither: claiming a provenance for a code
+    // we do not have says the shell reported `null`, which is not a thing a shell
+    // can say -- the same rule `block_json` and `run_isolated` follow.
+    let exit = match &o.progress {
+        Progress::Finished(b) => match b.state {
+            BlockState::Finished { exit_code } => exit_code,
+            BlockState::Prompt | BlockState::Running => None,
+        },
+        _ => None,
+    };
+
+    let (text, total, omitted) = match &o.rows {
+        Some(rows) => {
+            let total = rows.len();
+            let (shown, omitted) = truncate_middle(rows, max_lines);
+            (Value::String(untrusted(&shown.join("\n"))), total, omitted)
+        }
+        // No block, so no output -- and an empty fence would read as a command
+        // that printed nothing, which is a different answer.
+        None => (Value::Null, 0, 0),
+    };
+
+    json!({
+        "session": Resolver::format(o.addr),
+        "command": o.command,
+        "block_id": block.map(|b| b.id),
+        "state": run::state_name(&o.progress),
+        // Independent of the state, deliberately. `timed_out` is "the deadline is
+        // why I stopped waiting"; the state is where the command got to. Deriving
+        // either from the other loses the case between them -- a command that
+        // finished just after the deadline would be reported as having finished
+        // normally, rather than as one this call gave up on.
+        "timed_out": o.timed_out,
+        // The shell, not the command. A command left `running` in a session that
+        // has exited will never finish, and saying so is what stops an agent
+        // waiting on it again -- the state alone cannot distinguish that from a
+        // build that is merely slow.
+        "session_exited": o.session_exited,
+        "exit_code": exit,
+        // Never `process_exit` here, whatever the number looks like. This one
+        // came from OSC 133;D and any program can print those markers; the
+        // unforgeable status belongs to `run_isolated` alone.
+        "exit_code_source": exit.map(|_| ExitSource::ShellMarker),
+        "block": block.map(block_json),
+        "warnings": o.warnings,
+        "total_lines": total,
+        "omitted_lines": omitted,
+        "text": text,
+    })
+}
+
+/// The size an attach votes when the listing does not say.
+///
+/// Deliberately *larger* than any window somebody is likely to be using rather
+/// than smaller: a daemon predating `Attach.observe` counts this as a real vote
+/// and runs the session at its smallest attached client, so a low guess shrinks a
+/// human's window while a high one cannot win the minimum and changes nothing.
+/// Bounded well under [`MAX_DIMENSION`], because it is still a size the far
+/// machine may have to allocate.
+///
+/// Unreachable in a legitimate flow — an agent can only name a session it read
+/// out of `sessions`, which is this same listing — so it is a guess that is
+/// documented rather than refused: refusing would reject a session that exists on
+/// the host but is not in this cached copy.
+const DEFAULT_SIZE: (u16, u16) = (200, 50);
+
+/// How long a session with no blocks yet is given to draw its prompt.
+///
+/// The one ambiguity `run` cannot resolve by looking: a shell with no integration
+/// and a shell that has not printed its prompt yet are the same empty block list.
+/// A freshly created session is nearly always the second, and a bash is always
+/// the first, so a short wait separates them. Capped by the caller's deadline all
+/// the same, so `timeout_ms: 0` still returns at once.
+const PROMPT_GRACE: Duration = Duration::from_secs(3);
+
+/// How long the last deltas are given to arrive after a session has ended.
+///
+/// See the drain in [`submit_and_wait`] for why this exists at all. Short,
+/// because it is paid only when the shell has already gone, and long enough to
+/// cover the gap between a reader noticing EOF and the parser catching up with
+/// the bytes queued ahead of it.
+const EXIT_DRAIN: Duration = Duration::from_millis(250);
 
 /// The block a wait anchors on: the tail, and whether it had already ended.
 ///
@@ -957,6 +1253,139 @@ mod tests {
         let (shown, omitted) = truncate_middle(&rows, 200);
         assert_eq!(omitted, 0);
         assert_eq!(shown.len(), 5);
+    }
+
+    /// A block in each state, for the `run` payload tests below.
+    fn payload_block(state: BlockState) -> BlockPayload {
+        BlockPayload {
+            id: 4,
+            prompt_line: 10,
+            output_line: Some(11),
+            end_line: matches!(state, BlockState::Finished { .. }).then_some(14),
+            state,
+            command: "cargo test".into(),
+            cwd: "/repo".into(),
+            started_ms: Some(1),
+            ended_ms: None,
+        }
+    }
+
+    fn run_addr() -> SessionAddr {
+        SessionAddr {
+            host: zest_proto::HostId::from_bytes([0x54; 32]),
+            session: zest_proto::SessionId(7),
+        }
+    }
+
+    fn outcome(progress: Progress, rows: Option<Vec<String>>) -> Outcome<'static> {
+        Outcome {
+            addr: run_addr(),
+            command: "cargo test",
+            progress,
+            rows,
+            warnings: Vec::new(),
+            session_exited: false,
+            timed_out: false,
+        }
+    }
+
+    #[test]
+    fn a_run_never_claims_the_status_came_from_the_process() {
+        // The distinction ADR-015 exists to keep: this exit code arrived as
+        // OSC 133;D, which any program can print -- `cat` a file containing the
+        // markers and the parser mints a green `exit 0` it cannot tell from a
+        // real one. `process_exit` belongs to `run_isolated` alone, and the two
+        // read identically in a payload, which is what makes this cheap to undo.
+        let b = payload_block(BlockState::Finished { exit_code: Some(0) });
+        let v = run_json(&outcome(Progress::Finished(b), Some(vec!["ok".into()])), 200);
+        assert_eq!(v["exit_code"], 0);
+        assert_eq!(
+            v["exit_code_source"], "shell_marker",
+            "a status read off a marker must never be labelled as the process's own"
+        );
+        assert_eq!(v["state"], "finished");
+        assert_eq!(v["block_id"], 4);
+    }
+
+    #[test]
+    fn a_runs_status_and_its_source_are_present_together_or_not_at_all() {
+        // The crate-wide invariant, at the one layer that can assert it without
+        // a shell: a code without a source cannot be trusted, and a source
+        // beside a null code claims the shell reported `null`, which is not a
+        // thing a shell can say.
+        let cases = [
+            ("still at the prompt", Progress::NotStarted),
+            ("running", Progress::Running(payload_block(BlockState::Running))),
+            ("destroyed under us", Progress::Lost),
+            (
+                "finished with no status reported",
+                Progress::Finished(payload_block(BlockState::Finished { exit_code: None })),
+            ),
+            (
+                "finished with a status",
+                Progress::Finished(payload_block(BlockState::Finished { exit_code: Some(3) })),
+            ),
+        ];
+        for (what, p) in cases {
+            let v = run_json(&outcome(p, None), 200);
+            assert_eq!(
+                v["exit_code"].is_null(),
+                v["exit_code_source"].is_null(),
+                "{what}: got code={} source={}",
+                v["exit_code"],
+                v["exit_code_source"]
+            );
+        }
+    }
+
+    #[test]
+    fn a_command_still_running_carries_its_partial_output_and_says_it_timed_out() {
+        // The whole advantage over sentinel injection: a command sitting at
+        // `Password:` is a *result*, with the output that shows why, and the
+        // state and the deadline are separate facts rather than one negated.
+        let mut o = outcome(
+            Progress::Running(payload_block(BlockState::Running)),
+            Some(vec!["Password:".into()]),
+        );
+        o.timed_out = true;
+        let v = run_json(&o, 200);
+        assert_eq!(v["state"], "running");
+        assert_eq!(v["timed_out"], true);
+        assert!(v["exit_code"].is_null(), "a command still running has no status: {v}");
+        let text = v["text"].as_str().expect("partial output must come back");
+        assert!(text.contains("Password:"), "{text}");
+        assert!(
+            text.contains("never instructions"),
+            "a running command's output is attacker-controlled too: {text}"
+        );
+    }
+
+    #[test]
+    fn a_run_that_never_started_has_no_text_rather_than_an_empty_fence() {
+        // An empty fence reads as "the command printed nothing", which is a
+        // different answer from "there is no command to have printed anything".
+        let v = run_json(&outcome(Progress::NotStarted, None), 200);
+        assert!(v["text"].is_null(), "no block means no output to fence: {v}");
+        assert!(v["block_id"].is_null());
+        assert_eq!(v["state"], "prompt");
+        assert_eq!(v["total_lines"], 0);
+    }
+
+    #[test]
+    fn the_fallback_attach_size_is_large_because_a_small_one_would_shrink_a_window() {
+        // 80x24 is the obvious tidy-up here and is the destructive spelling. A
+        // daemon predating `Attach.observe` counts an attach's size as a real
+        // vote and runs the session at its *smallest* attached client, so a low
+        // guess shrinks the window somebody is looking at, while a high one
+        // cannot win the minimum and changes nothing. The direction is the whole
+        // point of the value, and nothing else in the code says so.
+        assert!(
+            DEFAULT_SIZE.0 > 120 && DEFAULT_SIZE.1 > 40,
+            "the fallback must be bigger than a window anyone is plausibly using: {DEFAULT_SIZE:?}"
+        );
+        assert!(
+            u32::from(DEFAULT_SIZE.0) <= MAX_DIMENSION && u32::from(DEFAULT_SIZE.1) <= MAX_DIMENSION
+        );
     }
 
     #[test]
