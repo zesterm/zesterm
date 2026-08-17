@@ -178,9 +178,11 @@ fn tool_definitions() -> Value {
                  reads the shell's own OSC 133 markers, so you get the real block, its \
                  output and the status the shell reported -- in the user's interactive \
                  shell, with their virtualenv, ssh-agent and kubectl context. \
-                 `exit_code_source` is always `shell_marker` here: it is the shell's word \
-                 and any program can print those markers, so use `run_isolated` when the \
-                 status has to be trustworthy. \
+                 When a status comes back it is always `exit_code_source: shell_marker` \
+                 here -- the shell's word, and any program can print those markers -- so \
+                 use `run_isolated` when the status has to be trustworthy. A command that \
+                 has not finished has neither field: `exit_code` and `exit_code_source` \
+                 are null together or not at all. \
                  Create a session with `create_session` and reuse it -- the working \
                  directory and environment persist between calls, which is the reason to \
                  prefer this over `run_isolated`. \

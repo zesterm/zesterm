@@ -556,6 +556,24 @@ impl ToolSet {
     ///
     /// Answers whether *this call* attached, which is what decides who detaches:
     /// a session the agent was already following stays followed.
+    ///
+    /// **The one attach in this crate**, so `observe` cannot be dropped from one
+    /// path and kept in another — which would leave the daemon's own tests green
+    /// and shrink a window through whichever tool had forgotten.
+    ///
+    /// The size sent is the session's own, from the listing, and that is the
+    /// whole reason it is fetched rather than invented: a current daemon ignores
+    /// it entirely under `observe`, but one predating #278 counts it as an
+    /// ordinary vote — and it runs a session at the size of its *smallest*
+    /// attached client. Voting the size it already has is then a no-op where
+    /// voting a guess would shrink somebody's window to the guess.
+    ///
+    /// `DEFAULT_SIZE` is what remains when the listing does not have it, which a
+    /// legitimate flow does not reach: an agent can only name a session it read
+    /// out of `sessions`, and that listing is this same one. It is a guess, and
+    /// on a pre-#278 daemon it is the hazard above — so it is generous rather
+    /// than small, since a vote larger than the session's own size can never win
+    /// the minimum and therefore cannot shrink anybody.
     fn hold(&self, addr: SessionAddr) -> Result<bool, ToolError> {
         if self.conn.with(|s| s.replica(addr).is_some()) {
             return Ok(false);
@@ -563,9 +581,7 @@ impl ToolSet {
         let (cols, rows) = self
             .conn
             .with(|s| s.sessions.iter().find(|i| i.addr == addr).map(|i| (i.cols, i.rows)))
-            .unwrap_or((80, 24));
-        // Observing, always. The daemon runs a session at the size of its
-        // smallest attached client, and an agent has no pane to protect (#278).
+            .unwrap_or(DEFAULT_SIZE);
         self.conn.attach(addr, cols, rows, true)?;
         Ok(true)
     }
@@ -737,20 +753,13 @@ impl ToolSet {
         addr: SessionAddr,
         f: impl FnOnce(&crate::Replica) -> Result<T, ToolError>,
     ) -> Result<T, ToolError> {
-        let already = self.conn.with(|s| s.replica(addr).is_some());
-        if !already {
-            let (cols, rows) = self
-                .conn
-                .with(|s| s.sessions.iter().find(|i| i.addr == addr).map(|i| (i.cols, i.rows)))
-                .unwrap_or((80, 24));
-            self.conn.attach(addr, cols, rows, true)?;
-        }
+        let mine = self.hold(addr)?;
         let out = self.conn.with(|s| {
             s.replica(addr)
                 .map(f)
                 .unwrap_or(Err(ToolError::Conn(ConnError::TimedOut)))
         });
-        if !already {
+        if mine {
             // Nothing is held that is not in use: a process living for hours
             // converges on zero attachments whenever the agent stops asking.
             self.conn.detach(addr);
@@ -802,6 +811,16 @@ const MAX_TIMEOUT: Duration = Duration::from_secs(1_800);
 fn clamp_timeout(asked: Option<u32>) -> Duration {
     asked.map_or(DEFAULT_TIMEOUT, |ms| Duration::from_millis(u64::from(ms)).min(MAX_TIMEOUT))
 }
+
+/// The size an attach votes when the listing does not say.
+///
+/// See [`ToolSet::hold`]. Deliberately *larger* than any window somebody is
+/// likely to be using rather than smaller: a daemon predating `Attach.observe`
+/// counts this as a real vote and runs the session at its smallest attached
+/// client, so a low guess shrinks a human's window while a high one cannot win
+/// the minimum and changes nothing. Bounded well under `MAX_DIMENSION`, because
+/// it is still a size the far machine may have to allocate.
+const DEFAULT_SIZE: (u16, u16) = (200, 50);
 
 /// How long a session with no blocks yet is given to draw its prompt.
 ///
@@ -1315,6 +1334,25 @@ mod tests {
         assert_eq!(keys(&from_run), keys(&from_wait), "the two must not drift in what they carry");
         assert!(from_wait["command"].is_null(), "`wait` was given no command to echo back");
         assert_eq!(from_wait["state"], from_run["state"]);
+    }
+
+    #[test]
+    fn the_fallback_attach_size_is_large_because_a_small_one_would_shrink_a_window() {
+        // 80x24 is the obvious tidy-up here and is the destructive spelling. A
+        // daemon predating `Attach.observe` counts an attach's size as a real
+        // vote and runs the session at its *smallest* attached client, so a low
+        // guess shrinks the window somebody is looking at, while a high one
+        // cannot win the minimum and changes nothing. The direction is the whole
+        // point of the value, and nothing else in the code says so.
+        assert!(
+            DEFAULT_SIZE.0 > 120 && DEFAULT_SIZE.1 > 40,
+            "the fallback must be bigger than a window anyone is plausibly using: {DEFAULT_SIZE:?}"
+        );
+        // And still a grid the far machine has to allocate, so it is bounded by
+        // the same ceiling every caller-supplied dimension is.
+        assert!(
+            u32::from(DEFAULT_SIZE.0) <= MAX_DIMENSION && u32::from(DEFAULT_SIZE.1) <= MAX_DIMENSION
+        );
     }
 
     #[test]
