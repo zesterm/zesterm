@@ -734,6 +734,42 @@ entry stay). The resulting work items, measurements in the handoff README — **
       started scroll away off screen. Clearing the selection stays
       unconditional at both, because a selection made before the keystroke is
       stale wherever the view is sitting.
+- [x] **Transparency works on macOS, and opacity applies without a relaunch**
+      ([#308](https://github.com/zesterm/zesterm/issues/308)). Three findings,
+      the middle one the reason the other two mattered.
+
+      **`window.opacity` had never worked on a Mac at all.** wgpu's Metal
+      backend advertises exactly `[Opaque, PostMultiplied]`, and the code
+      required `PreMultiplied`, so every Mac fell back to opaque — and warned
+      that *the adapter* could not composite per-pixel alpha, naming the
+      hardware for a decision that was ours. On Metal `PostMultiplied` is
+      `CAMetalLayer::setOpaque(false)` and nothing else, and CoreAnimation
+      composites premultiplied, so it is the mode this renderer's output wants
+      under a name describing another API. Accepted on macOS only: on Vulkan
+      the same name means the compositor multiplies by alpha itself, which
+      would double-darken every translucent pixel. This is also why
+      `window.backdrop` could never have shown on a Mac — a backdrop is visible
+      only through pixels the surface above leaves transparent.
+
+      **`window.opacity` was classed `SurfaceRebuild` and applied only at
+      launch.** `with_transparent` is a creation attribute, `alpha_mode` was
+      decided once inside `init_gpu` and the capability then dropped, and the
+      `SurfaceRebuild` arm only resized. `Gpu` keeps the alpha modes now,
+      `alpha_mode_for` is one function both paths call so they cannot disagree,
+      and `apply_transparency` re-decides, calls `set_transparent` (which winit
+      allows post-creation on macOS and Windows — X11 takes it at build time
+      only, and says so) and rebuilds the atlas when the antialias answer flips
+      with it.
+
+      **`window.columns` / `window.rows` off `NOT_YET_WIRED`.**
+      `Insets::window_size` is the inverse of `grid_dims` and lives beside it;
+      the round trip is the correctness argument and is tested across cell
+      sizes, fractional insets and a sidebar on one edge. Sizing from cells
+      needs the font stack, and resolving fonts is ~30ms of real work *before
+      the first paint*, which is what `STARTUP_BUDGET_MS` exists to catch — so
+      it is paid only by configs that actually set the keys, which provenance
+      can tell and `Config` cannot. Measured: unchanged at 35–40ms when unset,
+      66ms when set, against a 100ms budget.
 - [x] **The window follows the OS light/dark setting**
       ([#306](https://github.com/zesterm/zesterm/issues/306)).
       `appearance.follow_system_theme` and `appearance.light_theme` off

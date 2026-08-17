@@ -107,8 +107,6 @@ pub const NOT_YET_WIRED: &[&str] = &[
     "motion.spring_response",
     "typography.features",
     "typography.ligatures",
-    "window.columns",
-    "window.rows",
 ];
 
 /// Display order of the groups. The schema's alphabetical property order is

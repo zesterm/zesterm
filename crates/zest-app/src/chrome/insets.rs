@@ -53,6 +53,30 @@ impl Insets {
         let rows = ((gh as u32) / m.cell_h.max(1)).max(1).min(u32::from(u16::MAX)) as u16;
         (cols, rows)
     }
+
+    /// The window that holds exactly `cols` × `rows` cells, in physical pixels.
+    ///
+    /// The inverse of [`Insets::grid_dims`], and kept beside it deliberately:
+    /// the pair round-trips, and that round trip is the whole correctness
+    /// argument for `window.columns` / `window.rows`. A window sized from cells
+    /// has to give the chrome its share back, or asking for 100×30 produces a
+    /// grid of 96×27 and the setting looks approximate rather than exact.
+    ///
+    /// At least one cell each way, mirroring `grid_dims`' clamp — a config with
+    /// `columns = 0` must not produce a zero-width window, which some platforms
+    /// refuse outright and others render as a title bar with nothing under it.
+    #[must_use]
+    pub fn window_size(&self, m: CellMetrics, cols: u16, rows: u16) -> (u32, u32) {
+        let cells_w = u32::from(cols.max(1)) * m.cell_w.max(1);
+        let cells_h = u32::from(rows.max(1)) * m.cell_h.max(1);
+        // Rounded up: the insets are `f32` (a scaled logical padding, so
+        // routinely fractional) while a window size is whole pixels. Truncating
+        // would leave the grid a pixel short of its own cell count and cost the
+        // last column, which is the failure this rounding exists to prevent.
+        let w = cells_w + (self.left + self.right).ceil().max(0.0) as u32;
+        let h = cells_h + (self.top + self.bottom).ceil().max(0.0) as u32;
+        (w, h)
+    }
 }
 
 /// Where a `cols` × `rows` grid sits inside `area`: centered when it is
@@ -108,6 +132,49 @@ mod tests {
             underline_thickness: 1,
             strikeout_y: cell_h / 2,
         }
+    }
+
+    #[test]
+    fn a_window_sized_from_cells_holds_exactly_those_cells() {
+        // The round trip is the correctness argument for window.columns/rows:
+        // sizing a window from a cell count is only meaningful if asking it
+        // back gives the same count. Across cell sizes, insets and asymmetric
+        // chrome -- a tab strip takes from one edge only, which is where a
+        // symmetric-padding assumption would break.
+        let cases = [
+            (metrics(10, 20), Insets::padding_only(0, 1.0)),
+            (metrics(10, 20), Insets::padding_only(8, 1.0)),
+            (metrics(10, 20), Insets::padding_only(8, 2.0)),
+            (metrics(7, 15), Insets { top: 46.0, left: 8.0, right: 8.0, bottom: 28.0 }),
+            (metrics(9, 19), Insets { top: 0.0, left: 262.0, right: 0.0, bottom: 0.0 }),
+            // Fractional insets are the ordinary case, not an edge one: the
+            // padding is logical pixels times a scale factor.
+            (metrics(11, 23), Insets { top: 23.5, left: 8.5, right: 8.5, bottom: 13.5 }),
+        ];
+        for (m, i) in cases {
+            for (cols, rows) in [(1, 1), (30, 10), (100, 30), (240, 67)] {
+                let (w, h) = i.window_size(m, cols, rows);
+                assert_eq!(
+                    i.grid_dims(m, w, h),
+                    (cols, rows),
+                    "{cols}x{rows} cells at cell {}x{} with insets {i:?} must round-trip",
+                    m.cell_w,
+                    m.cell_h
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_zero_cell_count_still_makes_a_window() {
+        // `columns = 0` is a hand-edited config away, and a zero-size window is
+        // refused outright by some platforms and drawn as empty chrome by
+        // others. Clamped to one cell, mirroring grid_dims' own floor.
+        let m = metrics(10, 20);
+        let i = Insets::padding_only(8, 1.0);
+        let (w, h) = i.window_size(m, 0, 0);
+        assert_eq!(i.grid_dims(m, w, h), (1, 1), "one cell, never none");
+        assert!(w > 0 && h > 0);
     }
 
     #[test]
