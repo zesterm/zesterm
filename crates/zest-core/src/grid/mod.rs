@@ -448,7 +448,12 @@ impl Grid {
         }
         // Nothing left to be scrolled into.
         self.display_offset = 0;
-        self.history_clears = self.history_clears.wrapping_add(1);
+        // Saturating, not wrapping: replicas honour this with a `>` compare,
+        // so a wrap to 0 would silence every clear after the 2^32nd. At
+        // saturation further clears stop announcing instead, which is the
+        // same theoretical failure without breaking the documented
+        // monotonicity on the way there.
+        self.history_clears = self.history_clears.saturating_add(1);
     }
 
     /// How many times this grid's scrollback has been destroyed (ED 3).
