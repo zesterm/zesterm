@@ -775,18 +775,79 @@ only a grow that is owed rows sets `pending_restate`, and the alternate screen
 has no scrollback, so a full-screen program redrawing the same way cannot arm
 it.
 
-**The staleness guard is asymmetric, and honestly so.** A drag emits resizes
-faster than ConPTY answers them, so a repaint laid out for a size the grid has
-already left is routine — and settling on one pays a grow's debt against a
-viewport that has since shrunk, dragging history into rows the next repaint is
-about to blank. Measured at nine rows of scrollback down to one in a twelve-row
-pane. An *announced* repaint names its size and can be told apart; the grid
-records that it is sitting that one out, because the cursor-home three bytes
-later would otherwise re-arm it. An unannounced one cannot be told apart at all,
-because there is nothing in it to compare. What protects that case is not a
-marker but the arithmetic: the settle is bounded by the blank tail at the moment
-it runs, and the unpaid remainder returns to the debt, so an early settle is a
-no-op rather than damage.
+**A stale repaint is refused by what it did, not by what it said.** A drag
+emits resizes faster than ConPTY answers them, so a repaint laid out for a size
+the grid has already left is routine — and settling on one pays a grow's debt
+against a viewport that has since moved, dragging history into rows the next
+repaint is about to blank. An *announced* repaint names its stale size and is
+recorded as sat out up front (recorded, not merely not-armed, because the
+cursor-home three bytes later would otherwise re-arm it). An unannounced one
+has nothing in its bytes to compare — and this ADR originally claimed that was
+safe, because the settle is bounded by the blank tail at the moment it runs, so
+an early settle would be a no-op. **That claim was false during a drag up, and
+it shipped the reported bug** (#312): the blank tail at that moment is
+grow-minted and real, so a stale repaint's settle pays real history into blank
+rows the *closing* repaint blanks again, with the pulled rows no longer in
+scrollback. `corpus/resize-drag-storm.vtrec` is the gesture recorded for real,
+and `probe:resize` measured the damage at the daemon layer: block content
+halved, the live prompt anchored thirteen rows below where it rendered.
+
+What tells a stale repaint apart is its own coverage. A repaint restates the
+whole of *its* viewport, every row terminated with `ESC[K`, so one the grid has
+outrun stops short of our bottom row. The grid tracks the deepest row the
+restater erased since the window opened (`restate_rows_seen`) and the settle
+requires it to have reached the bottom; a repaint that did not cover us returns
+`false` with `pending_restate` left armed for the one that does — the same
+conservation the no-room case practises through the debt. A stale repaint laid
+out *larger* than the grid needs no guard at all: its overflow scrolls, and any
+scroll already cancels the debt.
+
+Two boundary facts, both measured on the storm capture rather than reasoned to:
+**in a storm, only the very first repaint announces itself** — every later one,
+shrinks included, arrives bare, so the announced sit-out is the early form of
+this decision and never the load-bearing one. And ConPTY **coalesces**: seven
+resizes issued within a gesture came back as two repaints, one stale and one
+for the final size, so "every resize gets its repaint" is false the moment the
+mouse moves faster than the pipe.
+
+**A resize demotes whatever repaint is in flight.** `Session::resize` must
+release the terminal lock before telling the pty (the `ClosePseudoConsole`
+deadlock), so a resize can land between a repaint's first byte and its last —
+and a repaint that was armed when the grid moved was laid out for a viewport
+that no longer exists, whatever its coverage ends up being. It is demoted to
+sat-out, narrowly: only a repaint *already armed*, never unconditionally, or
+the legitimate repaint answering each grow would be sat out too. This also
+closes the corner coverage cannot see — the drag landing on the stale repaint's
+own size, which then covers every visible row.
+
+`pending_restate` deliberately survives further shrinks: the settle's bounds
+(blank tail, rows below the cursor, scrollback held) are its decay, and the
+coverage requirement is what makes those bounds sufficient again. Decaying it
+on shrink as well would double-count and under-pay a gesture that shrinks
+mid-grow and grows again.
+
+**A settle is provisional until something other than a repaint speaks.** The
+guards above refuse repaints the grid outran — and at the daemon's actual
+cadence (~120ms a step) nothing is ever stale: every step's repaint arrives at
+its own size, its settle is legitimate by everything it can see, and rows are
+still destroyed, one step at a time. The restater's buffer never got the pulled
+rows back, so the *next* step's repaint restates that buffer from home,
+overwriting the pull and blanking the tail (`corpus/resize-drag-stepped.vtrec`;
+measured live as 23 → 12 non-blank rows across one height-only drag). No local
+fact distinguishes an intermediate repaint from the final one — the difference
+is whether another resize is coming, which is the future. So the settle does
+not try to know it: the pull is recorded (`settled_pull`), and the moment the
+next restatement opens — armed, sat out, or arriving after everything was paid
+— the grid takes the pull back first: boundary up over the same rows, fresh
+blanks minted below (new ids; gaps are fine), the share owed again for that
+repaint's own settle to pay out over what *it* wrote. Conservation both ways,
+so a gesture of any length pays out exactly once, at its true end. The settle
+becomes final when the debt would be cancelled anyway — a scroll, a screen
+erase, a width change or a shrink — because the content has moved on and the
+inverse would eat rows something real wrote. The residual: output that neither
+scrolls nor erases, landing between a settle and a following repaint, would be
+re-banked with the rows it overwrote — accepted, because mid-gesture the shell
+is not speaking, and a shell that does speak almost always scrolls or erases.
 
 **Either direction of DECTCEM closes it.** ConPTY restores the inner program's
 visibility state, so a full-screen program that keeps its cursor hidden ends the

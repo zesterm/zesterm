@@ -2592,6 +2592,41 @@ three facts about Cloudflare that changed after #59 was written.
       while the host's viewport was still wrong underneath. Remote hid it;
       locally it would have been visible.
 
+- [x] **A stale repaint is refused by its coverage, and a real drag stops
+      destroying history** (#312). The arming #271 added had no staleness guard
+      for the unannounced case, and ADR-013's claim that an early settle was a
+      harmless no-op was false during a drag up: a repaint laid out for a size
+      in the middle of the gesture settled the debt into grow-minted blanks,
+      and the closing repaint blanked exactly the rows just pulled — text gone,
+      block headers intact, reported from the real gesture on real hardware and
+      measured at the daemon layer with `probe:resize` (block content 23 → 13
+      non-blank rows). A drag is a storm the suite never drove: winit fires
+      resizes throughout, ConPTY coalesces (seven resizes → two repaints in the
+      recorded capture), and **only the first repaint of a storm announces**.
+      The settle now requires the repaint to have erased down to the grid's
+      bottom row (`restate_rows_seen`) — a repaint restates the whole of its
+      viewport, every row ending `ESC[K`, so a stale one tells on itself — and
+      a resize landing mid-repaint demotes whatever is armed to sat-out.
+      `pty_dump --resize-settle-ms` exists because the recorder's fixed 800ms
+      settle structurally could not record a storm;
+      `corpus/resize-drag-storm.vtrec` replays the real one. ADR-013 revised.
+
+      And the second half, found because the daemon still failed the gesture
+      with the guard in place: **at the daemon's cadence nothing is ever stale
+      and rows were still destroyed** — every step's repaint matches its size,
+      each intermediate settle is locally legitimate, and the next repaint
+      restates ConPTY's buffer, which never got the pulled rows back. No local
+      fact distinguishes an intermediate repaint from the final one, so the
+      settle stops trying to know the future: it is **provisional**
+      (`settled_pull`), taken back the moment the next restatement opens and
+      paid out again over what that repaint wrote, becoming final when a
+      scroll, erase, width change or shrink says the content moved on.
+      `corpus/resize-drag-stepped.vtrec` replays the cadence against a golden
+      built from the fixture itself. Measured before/after at the daemon with
+      a height-only `probe:resize`: block content 23 → 12 non-blank rows
+      before, byte-identical before/after with the fix. The width axis is
+      still #224; the overflow of a stale *taller* repaint is #315.
+
       Arming is now on what both halves share — the cursor hidden and homed —
       and `Drag::Down`/`Drag::Up` is a parameter of the helper rather than a
       detail inside it. The staleness guard is asymmetric as a result and

@@ -603,6 +603,25 @@ Each of these cost real time and is documented where it bites:
   a helper, and a helper nobody has checked against a capture is a hypothesis.**
   (#271)
 
+  **And that arming, unguarded, is what let a real drag destroy history.** A
+  drag is a storm — winit fires resizes throughout the gesture, ConPTY
+  coalesces (seven resizes came back as *two* repaints in the recorded
+  capture), and **only the very first repaint of a storm announces its size;
+  every later one, shrinks included, arrives bare**. So an unannounced repaint
+  laid out for a size in the middle of the gesture arms the settle, its
+  "harmless" early payment pulls real history into the grow-minted blank tail,
+  and the closing repaint's `ESC[K`s destroy exactly those rows — text gone,
+  block headers intact, which is #200's symptom reached through #247's fix.
+  ADR-013 originally reasoned the early settle was a no-op; it was measured
+  wrong at the daemon layer (`probe:resize`: block content halved). The settle
+  now requires the repaint to have *covered* every visible row — a repaint
+  restates the whole of its viewport, each row ending in `ESC[K`, so a stale
+  one tells on itself by where its erases stop — and a resize landing
+  mid-repaint demotes whatever is armed to sat-out, stale by construction.
+  `corpus/resize-drag-storm.vtrec` replays the real storm
+  (`pty_dump --resize-settle-ms 0`, which exists because the recorder's default
+  800ms settle structurally cannot record one). (#312)
+
   **And the same trap one layer out, which had been live in every client since
   the mesh existed:** a replica grid — one deltas are applied into — is about
   to be handed a keyframe that restates every visible row, so its grow must not

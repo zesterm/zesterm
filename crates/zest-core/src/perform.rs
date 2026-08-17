@@ -81,7 +81,8 @@ impl vte::Perform for TermState {
                     && arg(1, 1) == 1
                     && !self.modes.contains(Modes::SHOW_CURSOR)
                 {
-                    self.grid_mut().note_cursor_homed_while_hidden();
+                    let t = self.template;
+                    self.grid_mut().note_cursor_homed_while_hidden(&t);
                 }
             }
             ('I', _) => self.tab(arg(0, 1)),
@@ -137,7 +138,8 @@ impl vte::Perform for TermState {
             // restatement starts here". That is all it is taken as. (#247)
             ('t', _) if !private && arg(0, 0) == 8 => {
                 let (rows, cols) = (arg(1, 0), arg(2, 0));
-                self.grid_mut().note_restatement_began(cols, rows);
+                let t = self.template;
+                self.grid_mut().note_restatement_began(cols, rows, &t);
             }
 
             // --- modes ---
