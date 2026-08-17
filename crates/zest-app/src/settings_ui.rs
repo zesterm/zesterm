@@ -107,8 +107,6 @@ pub const NOT_YET_WIRED: &[&str] = &[
     "motion.smooth_scroll",
     "motion.spring_damping",
     "motion.spring_response",
-    "shell.cwd",
-    "shell.env",
     "typography.features",
     "typography.ligatures",
     "window.columns",
@@ -1006,7 +1004,12 @@ mod tests {
         // row that keeps claiming a live setting does nothing is exactly the
         // dishonesty NOT_YET_WIRED exists to prevent.
         let (rows, _) = build(&values(), &BTreeMap::new(), "");
-        for key in ["scrolling.lines_per_notch", "scrolling.scroll_on_keypress"] {
+        for key in [
+            "scrolling.lines_per_notch",
+            "scrolling.scroll_on_keypress",
+            "shell.cwd",
+            "shell.env",
+        ] {
             let inert = rows
                 .iter()
                 .find_map(|r| match r {

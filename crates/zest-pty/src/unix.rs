@@ -666,6 +666,89 @@ mod tests {
         );
     }
 
+    /// Drain a pty to EOF. Shares the loop `spawns_a_child_and_reads_its_output`
+    /// documents: reaching EOF at all is half the assertion.
+    fn drain(pty: &mut UnixPty) -> String {
+        let mut reader = pty.take_reader().expect("a fresh pty always has a reader");
+        let mut out = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    #[test]
+    fn a_spec_with_a_working_directory_starts_the_child_there() {
+        // Nothing covered this: every other fixture in this file passes
+        // `cwd: None`, so `command.current_dir` above was exercised by no test
+        // at all and `shell.cwd` was wired to a line nobody had ever run. A
+        // fixture that cannot reach the state under test passes for reasons
+        // that have nothing to do with the code (#291).
+        //
+        // `/` rather than a temp dir, because it is the one directory that
+        // exists unchanged on every unix and needs no cleanup. Asserted as an
+        // *equality* rather than "looks like a path": the checkout this runs
+        // from is also an absolute path, so a weaker check would pass against a
+        // spec that ignored `cwd` entirely -- which is exactly the state this
+        // test exists to rule out.
+        let spec = CommandSpec {
+            command_line: "/bin/pwd".into(),
+            cwd: Some(std::path::PathBuf::from("/")),
+            env: crate::terminal_env(),
+        };
+        let mut pty = UnixPty::spawn(&spec, PtySize::new(80, 24)).expect("spawn /bin/pwd");
+        let text = drain(&mut pty);
+        // A pty is a terminal, so the line ends CR LF whatever the program
+        // wrote; trim both rather than comparing to a platform's guess.
+        assert_eq!(
+            text.trim_end_matches(['\r', '\n']),
+            "/",
+            "the child must run in the requested directory, not the parent's: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_spec_env_entry_reaches_the_child_and_an_empty_one_unsets() {
+        // The empty-means-unset convention, end to end. It is the only way to
+        // remove an inherited variable, `terminal_env` depends on it to strip
+        // another terminal's stale identity, and `shell.env` now promises it in
+        // the settings schema -- but until now it was asserted only on the
+        // Windows block builder, never through a real spawn on unix.
+        // Restored on the way out however this test leaves -- a panic between
+        // here and the end would otherwise leak a process-wide variable into
+        // whatever runs next, and cross-test flakiness that comes and goes with
+        // an unrelated failure is the worst kind to chase.
+        struct RestoreVar(&'static str);
+        impl Drop for RestoreVar {
+            fn drop(&mut self) {
+                std::env::remove_var(self.0);
+            }
+        }
+        let _restore = RestoreVar("ZESTERM_TEST_INHERITED");
+        std::env::set_var("ZESTERM_TEST_INHERITED", "from-parent");
+        let mut env = crate::terminal_env();
+        env.push(("ZESTERM_TEST_SET".into(), "from-spec".into()));
+        env.push(("ZESTERM_TEST_INHERITED".into(), String::new()));
+        let spec = CommandSpec {
+            command_line: "/bin/sh -c \"echo set=[$ZESTERM_TEST_SET] inherited=[$ZESTERM_TEST_INHERITED]\""
+                .into(),
+            cwd: None,
+            env,
+        };
+        let mut pty = UnixPty::spawn(&spec, PtySize::new(80, 24)).expect("spawn /bin/sh");
+        let text = drain(&mut pty);
+        assert!(text.contains("set=[from-spec]"), "a spec entry must reach the child: {text:?}");
+        assert!(
+            text.contains("inherited=[]"),
+            "an empty value must leave the variable genuinely absent, not empty-but-present -- \
+             code that only tests for presence takes the wrong branch otherwise: {text:?}"
+        );
+    }
+
     /// A child that prints and exits must not lose its output to a late reader.
     ///
     /// Sharp edge 6, and issue #54's macOS half. `/bin/echo` writes 23 bytes
