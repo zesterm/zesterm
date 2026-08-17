@@ -98,8 +98,6 @@ pub fn take_pending_edit(editing: &mut Option<EditBuffer>, fields: &[UiField]) -
 /// Wiring one up includes deleting its entry here — the test below only
 /// keeps this list from naming keys that do not exist at all.
 pub const NOT_YET_WIRED: &[&str] = &[
-    "appearance.follow_system_theme",
-    "appearance.light_theme",
     "cursor.shape",
     "cursor.trail",
     "motion.enabled",

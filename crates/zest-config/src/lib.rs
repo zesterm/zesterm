@@ -108,8 +108,6 @@ pub struct Options {
     pub workspace_dir: Option<PathBuf>,
     /// Command-line overrides, as a TOML table. Always the strongest layer.
     pub cli: Option<toml::Table>,
-    /// The OS reports a light appearance.
-    pub system_light: bool,
 }
 
 #[cfg(feature = "fs")]
@@ -125,16 +123,12 @@ pub fn load(options: &Options) -> Load {
     let mut errors = Vec::new();
     let mut migration = None;
 
-    // The OS appearance layer sits above defaults and below the user's file, so
-    // an explicit `theme =` always beats it.
-    if options.system_light {
-        let mut table = toml::Table::new();
-        let mut appearance = toml::Table::new();
-        appearance.insert("theme".into(), toml::Value::String("paper".into()));
-        table.insert("appearance".into(), toml::Value::Table(appearance));
-        layers.push(Layer::new(Source::System, table));
-    }
-
+    // No OS-appearance layer. There was one, and being a *layer* was the bug:
+    // it sat below the user's file so an explicit `theme =` always beat it,
+    // which is everyone who cared enough to pick a theme, and it hardcoded
+    // `paper` rather than reading `appearance.light_theme`. Following the OS is
+    // a question about the live window, not about how files merge, so the app
+    // resolves it per repaint off `follow_system_theme` and `light_theme`.
     let user_table = match paths::config_file() {
         Some(path) => match read_table(&path) {
             Ok(mut table) => {

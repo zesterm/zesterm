@@ -734,6 +734,28 @@ entry stay). The resulting work items, measurements in the handoff README — **
       started scroll away off screen. Clearing the selection stays
       unconditional at both, because a selection made before the keystroke is
       stale wherever the view is sitting.
+- [x] **The window follows the OS light/dark setting**
+      ([#306](https://github.com/zesterm/zesterm/issues/306)).
+      `appearance.follow_system_theme` and `appearance.light_theme` off
+      `NOT_YET_WIRED` — and the mechanism standing in for them deleted, because
+      being a *cascade layer* was the bug. `Options.system_light` pushed a layer
+      forcing `appearance.theme = "paper"`, and it sat **below** the user's
+      file: an explicit `theme =` beat it, which is everyone who cared enough
+      to choose one, so the feature could not work for the people who would
+      turn it on. It also hardcoded one theme rather than reading
+      `light_theme` at all. Both call sites passed `false`, so none of it had
+      ever run. `Source::System` is gone with it.
+
+      Following the OS is a property of the live window — it changes with no
+      file changing — so it resolves on the repaint path instead: a pure
+      `theme_id(config, system_light)`, seeded from `window.theme()` before the
+      first paint and updated on `WindowEvent::ThemeChanged`. The appearance is
+      tracked even when not following, so turning the setting on takes effect
+      without waiting for the next flip; only the repaint is conditional.
+      All six `config.theme` reads go through `effective_theme` now, or the
+      gallery highlights a row the window is not using. An empty `light_theme`
+      still means "follow `theme` regardless" — the shipped default, and the
+      path almost everyone takes.
 - [x] **A shell starts where and how the settings say**
       ([#303](https://github.com/zesterm/zesterm/issues/303)). `shell.cwd` and
       `shell.env` off `NOT_YET_WIRED`. The plumbing was already there and

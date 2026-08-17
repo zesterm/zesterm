@@ -19,8 +19,6 @@ use crate::settings::Settings;
 pub enum Source {
     /// Compiled-in default.
     Default,
-    /// Chosen by the OS light/dark setting.
-    System,
     /// The user's config file.
     User,
     /// A named profile within the user's config.
@@ -35,7 +33,6 @@ impl std::fmt::Display for Source {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Default => f.write_str("default"),
-            Self::System => f.write_str("system appearance"),
             Self::User => f.write_str("config file"),
             Self::Profile(p) => write!(f, "profile `{p}`"),
             Self::Workspace => f.write_str("workspace config"),
@@ -325,6 +322,25 @@ mod tests {
         let r = resolve(&[layer(Source::User, "[tabs]\nposition = \"left\"\n")]);
         assert_eq!(r.settings.tabs.position, crate::settings::TabsPosition::Left);
         assert!(r.unknown_keys.is_empty(), "tabs.* are known settings");
+    }
+
+    #[test]
+    fn the_user_file_is_the_weakest_thing_that_can_name_a_theme() {
+        // There used to be an OS-appearance layer between `Default` and `User`
+        // that forced `appearance.theme = "paper"`, and being a layer at all
+        // was the bug: it sat *below* the user's file, so an explicit `theme =`
+        // beat it -- which is everyone who cared enough to choose one -- and it
+        // hardcoded one theme rather than reading `appearance.light_theme`.
+        // Following the OS is a property of the live window, resolved by the
+        // app per repaint, so nothing weaker than `User` may name a theme
+        // again.
+        let r = resolve(&[layer(Source::User, "[appearance]\ntheme = \"nord\"\n")]);
+        assert_eq!(r.settings.appearance.theme, "nord");
+        assert_eq!(
+            r.provenance.get("appearance.theme"),
+            Some(&Source::User),
+            "the user's file owns the theme; no layer beneath it may claim the key"
+        );
     }
 
     #[test]

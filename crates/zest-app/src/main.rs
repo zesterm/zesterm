@@ -539,7 +539,6 @@ fn main() -> std::process::ExitCode {
         profile: profile_name.clone(),
         workspace_dir: std::env::current_dir().ok(),
         cli: Some(cli_table.clone()),
-        system_light: false,
     });
 
     // Reported, never fatal. A terminal that refuses to start because of a typo
