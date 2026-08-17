@@ -135,8 +135,8 @@ impl ToolSet {
         match name {
             "hosts" => self.hosts(),
             "sessions" => self.sessions(),
-            "screen" => self.screen(session_arg(args, &self.resolver)?),
-            "blocks" => self.blocks(session_arg(args, &self.resolver)?, opt_u32(args, "since_id")?),
+            "screen" => self.screen(session_arg(args, &self.resolver)?, args),
+            "blocks" => self.blocks(session_arg(args, &self.resolver)?, args),
             "output" => self.output(
                 session_arg(args, &self.resolver)?,
                 req_u32(args, "block_id")?,
@@ -190,42 +190,91 @@ impl ToolSet {
         }))
     }
 
-    fn screen(&self, addr: SessionAddr) -> Result<Value, ToolError> {
-        self.attached(addr, |r| {
-            let (cols, rows) = r.size();
-            let c = r.cursor();
-            Ok(json!({
-                "session": Resolver::format(addr),
-                "seq": r.seq(),
-                "cols": cols,
-                "rows": rows,
-                "cursor": { "row": c.row, "col": c.col, "visible": c.visible },
-                "alt_screen": r.alt_screen(),
-                "title": r.title(),
-                "text": untrusted(&r.screen_text()),
-            }))
-        })
+    /// The screen, optionally after waiting for it to move.
+    ///
+    /// `after_seq` is what arms the wait; without it this is the plain read it
+    /// has always been. The sequence it names is the *terminal's* version
+    /// counter, not a per-subscriber one, so a value from an earlier call still
+    /// means something after the attach this tool drops between them.
+    fn screen(&self, addr: SessionAddr, args: &Value) -> Result<Value, ToolError> {
+        let after = opt_u64(args, "after_seq")?;
+        let deadline = Instant::now() + clamp_timeout(opt_u32(args, "timeout_ms")?);
+        let idle = clamp_idle(opt_u32(args, "idle_ms")?);
+        self.attached_with(
+            addr,
+            |conn| match after {
+                None => Ok(Waited::default()),
+                Some(after) => wait_for_screen(conn, addr, after, deadline, idle),
+            },
+            |r, waited| {
+                let (cols, rows) = r.size();
+                let c = r.cursor();
+                let mut out = json!({
+                    "session": Resolver::format(addr),
+                    "seq": r.seq(),
+                    "cols": cols,
+                    "rows": rows,
+                    "cursor": { "row": c.row, "col": c.col, "visible": c.visible },
+                    "alt_screen": r.alt_screen(),
+                    "title": r.title(),
+                    "text": untrusted(&r.screen_text()),
+                });
+                waited.describe(&mut out);
+                Ok(out)
+            },
+        )
     }
 
-    fn blocks(&self, addr: SessionAddr, since: Option<u32>) -> Result<Value, ToolError> {
-        self.attached(addr, |r| {
-            if r.alt_screen() {
-                return Err(ToolError::AltScreen(
-                    "blocks are not emitted there -- read `screen` instead",
-                ));
-            }
-            let blocks: Vec<Value> = r
-                .blocks()
-                .iter()
-                .filter(|b| since.is_none_or(|s| b.id > s))
-                .map(block_json)
-                .collect();
-            Ok(json!({
-                "session": Resolver::format(addr),
-                "authoritative_from": r.blocks_from(),
-                "blocks": blocks,
-            }))
-        })
+    /// The commands, optionally after waiting for one to finish.
+    fn blocks(&self, addr: SessionAddr, args: &Value) -> Result<Value, ToolError> {
+        let since = opt_u32(args, "since_id")?;
+        let wait = opt_bool(args, "wait")?.unwrap_or(false);
+        let deadline = Instant::now() + clamp_timeout(opt_u32(args, "timeout_ms")?);
+        self.attached_with(
+            addr,
+            |conn| {
+                if !wait {
+                    return Ok((Waited::default(), None));
+                }
+                // Refused **before** the wait, not after it. Blocks are not
+                // emitted on the alternate screen at all, so waiting for one
+                // there is waiting for something that structurally cannot
+                // arrive -- and answering that with a full deadline of silence
+                // is the shape an agent reads as a hung tool.
+                if conn.with(|s| s.replica(addr).is_some_and(Replica::alt_screen)) {
+                    return Err(ALT_SCREEN);
+                }
+                wait_for_block(conn, addr, deadline)
+            },
+            |r, (waited, finished)| {
+                if r.alt_screen() {
+                    return Err(ALT_SCREEN);
+                }
+                let blocks: Vec<Value> = r
+                    .blocks()
+                    .iter()
+                    .filter(|b| since.is_none_or(|s| b.id > s))
+                    .map(block_json)
+                    .collect();
+                let mut out = json!({
+                    "session": Resolver::format(addr),
+                    "authoritative_from": r.blocks_from(),
+                    "blocks": blocks,
+                });
+                waited.describe(&mut out);
+                if waited.ran {
+                    // The block that ended the wait, named separately because
+                    // `since_id` cannot be trusted to have included it: OSC
+                    // 133;C reuses the trailing prompt block, so the command
+                    // that just finished is routinely one the caller was
+                    // already told about. This is the id to pass to `output`.
+                    out.as_object_mut()
+                        .expect("json! built an object")
+                        .insert("finished_block".into(), json!(finished));
+                }
+                Ok(out)
+            },
+        )
     }
 
     fn output(&self, addr: SessionAddr, id: u32, max_lines: usize) -> Result<Value, ToolError> {
@@ -443,7 +492,25 @@ impl ToolSet {
     fn attached<T>(
         &self,
         addr: SessionAddr,
-        f: impl FnOnce(&crate::Replica) -> Result<T, ToolError>,
+        f: impl FnOnce(&Replica) -> Result<T, ToolError>,
+    ) -> Result<T, ToolError> {
+        self.attached_with(addr, |_| Ok(()), |r, ()| f(r))
+    }
+
+    /// The same, with a wait held **inside** the attachment.
+    ///
+    /// The placement is the whole point. A wait is waiting for deltas, and
+    /// deltas only arrive at a subscriber — so a wait outside the attach waits
+    /// on a replica nothing is feeding, and would sit out its deadline while
+    /// the session it is watching scrolls past. The read stays above the detach
+    /// for the two reasons [`run_isolated`](Self::run_isolated) spells out, and
+    /// the detach runs even when the wait fails: a connection error is not a
+    /// reason to leave a subscriber behind on the host.
+    fn attached_with<W, T>(
+        &self,
+        addr: SessionAddr,
+        wait: impl FnOnce(&Conn) -> Result<W, ToolError>,
+        f: impl FnOnce(&Replica, W) -> Result<T, ToolError>,
     ) -> Result<T, ToolError> {
         let already = self.conn.with(|s| s.replica(addr).is_some());
         if !already {
@@ -453,11 +520,14 @@ impl ToolSet {
                 .unwrap_or((80, 24));
             self.conn.attach(addr, cols, rows, true)?;
         }
-        let out = self.conn.with(|s| {
-            s.replica(addr)
-                .map(f)
-                .unwrap_or(Err(ToolError::Conn(ConnError::TimedOut)))
-        });
+        let out = match wait(&self.conn) {
+            Ok(w) => self.conn.with(|s| {
+                s.replica(addr)
+                    .map(|r| f(r, w))
+                    .unwrap_or(Err(ToolError::Conn(ConnError::TimedOut)))
+            }),
+            Err(e) => Err(e),
+        };
         if !already {
             // Nothing is held that is not in use: a process living for hours
             // converges on zero attachments whenever the agent stops asking.
@@ -465,6 +535,197 @@ impl ToolSet {
         }
         out
     }
+}
+
+/// What blocks are, and are not, on the alternate screen.
+///
+/// One constant because `blocks` now refuses in two places — before a wait and
+/// on the read — and two spellings of the same refusal is how they drift apart.
+const ALT_SCREEN: ToolError =
+    ToolError::AltScreen("blocks are not emitted there -- read `screen` instead");
+
+/// How a bounded wait ended.
+///
+/// Four independent facts, deliberately not complements of one another — the
+/// same reasoning that keeps `run_isolated`'s `timed_out` and `exited` apart.
+/// "I gave up" and "the session ended" call for different next moves, and
+/// deriving either from the other loses the case between them.
+#[derive(Debug, Default, Clone, Copy)]
+struct Waited {
+    /// A wait was asked for at all. When false the other three are not merely
+    /// false, they are meaningless — so nothing reports them.
+    ran: bool,
+    /// What the wait was for happened.
+    changed: bool,
+    /// The deadline is why it stopped.
+    timed_out: bool,
+    /// The session's child ended. A wait stops on this rather than sitting out
+    /// its deadline against a shell that has gone (#319).
+    exited: bool,
+}
+
+impl Waited {
+    /// Add what the wait did to an answer, and nothing at all when there was no
+    /// wait — an ordinary read keeps exactly the shape it has always had, and
+    /// pays no tokens for four fields about a wait it never asked for.
+    fn describe(self, v: &mut Value) {
+        if !self.ran {
+            return;
+        }
+        let Some(o) = v.as_object_mut() else { return };
+        o.insert("waited".into(), json!(true));
+        o.insert("changed".into(), json!(self.changed));
+        o.insert("timed_out".into(), json!(self.timed_out));
+        o.insert("exited".into(), json!(self.exited));
+    }
+}
+
+/// Wait for the screen to move past `after`, then optionally for it to settle.
+///
+/// Built out of [`Conn::wait_until`] alone — there is no new waiting primitive,
+/// because the condvar the connection already notifies on every decoded message
+/// is exactly this. The daemon suppresses updates whose sequence moved without
+/// anything observable changing, so a wake here is never spurious.
+///
+/// The settle is a *loop* of bounded waits rather than one wait with a moving
+/// deadline: a condvar has to be told when to give up before it sleeps, and the
+/// moment the screen goes quiet is not known until it has.
+fn wait_for_screen(
+    conn: &Conn,
+    addr: SessionAddr,
+    after: u64,
+    deadline: Instant,
+    idle: Option<Duration>,
+) -> Result<Waited, ToolError> {
+    let mut waited = Waited { ran: true, ..Waited::default() };
+
+    // A missing replica is deliberately not an arm here. `attached_with` holds
+    // the attach across this call and only `Conn::detach` drops one, so its
+    // absence is unreachable — and a link that has actually gone is answered by
+    // `wait_until` itself, which returns `Closed` rather than waiting.
+    let moved = |seq: u64| {
+        move |s: &crate::Shared| match s.replica(addr) {
+            Some(r) if r.seq() > seq => Some(Some(r.seq())),
+            Some(r) if r.exited().is_some() => Some(None),
+            _ => None,
+        }
+    };
+
+    let mut seen = match conn.wait_until(deadline, moved(after)) {
+        Ok(Some(seq)) => seq,
+        Ok(None) => {
+            waited.exited = true;
+            return Ok(waited);
+        }
+        Err(ConnError::TimedOut) => {
+            waited.timed_out = true;
+            return Ok(waited);
+        }
+        Err(e) => return Err(e.into()),
+    };
+    waited.changed = true;
+
+    // Without a settle, one wake per burst is right for "tell me the moment
+    // anything happens" and wrong for "tell me when the build stops printing".
+    // Only the caller knows which it is asking, so the argument decides.
+    let Some(idle) = idle else { return Ok(waited) };
+    loop {
+        let quiet_at = Instant::now() + idle;
+        match conn.wait_until(quiet_at.min(deadline), moved(seen)) {
+            Ok(Some(next)) => seen = next,
+            Ok(None) => {
+                waited.exited = true;
+                return Ok(waited);
+            }
+            // Which of the two bounds fired decides what this means, and the
+            // error cannot say: quiet for `idle` is the answer being asked for,
+            // the overall deadline is a genuine timeout. Ask the clock rather
+            // than the value that was passed, which is only ever `min`.
+            Err(ConnError::TimedOut) => {
+                waited.timed_out = Instant::now() >= deadline;
+                return Ok(waited);
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+/// Wait for a command to finish, anchored on the tail block.
+///
+/// Returns the id that ended the wait, which is what `output` wants next.
+fn wait_for_block(
+    conn: &Conn,
+    addr: SessionAddr,
+    deadline: Instant,
+) -> Result<(Waited, Option<u32>), ToolError> {
+    let mut waited = Waited { ran: true, ..Waited::default() };
+    let (anchor, was_finished) = conn
+        .with(|s| s.replica(addr).map(|r| block_anchor(r.block_states())))
+        .flatten()
+        // A session with no blocks at all — bash and fish emit none — anchors
+        // below the first id there could be, so the first command to finish
+        // answers. Better than refusing: an agent asking "tell me when this
+        // ends" on such a shell is asking a reasonable thing.
+        .unwrap_or((0, false));
+
+    match conn.wait_until(deadline, |s| match s.replica(addr) {
+        Some(r) => match finished_since(r.block_states(), anchor, was_finished) {
+            Some(id) => Some(Some(id)),
+            None if r.exited().is_some() => Some(None),
+            None => None,
+        },
+        None => None,
+    }) {
+        Ok(Some(id)) => {
+            waited.changed = true;
+            Ok((waited, Some(id)))
+        }
+        Ok(None) => {
+            waited.exited = true;
+            Ok((waited, None))
+        }
+        Err(ConnError::TimedOut) => {
+            waited.timed_out = true;
+            Ok((waited, None))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The block a wait anchors on: the tail, and whether it had already ended.
+///
+/// **Not the highest id the caller has seen, which never fires.** OSC 133;C
+/// makes `begin_output` mutate `blocks.last_mut()`, so a command submitted now
+/// lands in the *existing* trailing prompt block — at an id the caller was
+/// already told about — and only the *following* prompt pushes a new one. A
+/// wait keyed on `id > since_id` therefore sits out its whole deadline for the
+/// single case it exists to serve. The anchor is the tail block's identity
+/// before the write, not the next id after it (ROADMAP, WS-I).
+///
+/// Public for the reason `tests/replay.rs` exists: this is the one rule here
+/// that a recording can check and reasoning cannot, and a helper nobody has
+/// held against a capture is a hypothesis.
+pub fn block_anchor(blocks: impl Iterator<Item = (u32, bool)>) -> Option<(u32, bool)> {
+    blocks.last()
+}
+
+/// The first block at or after the anchor that has finished.
+///
+/// The anchor itself counts only if it was still open when the wait began.
+/// Otherwise an idle shell whose last command ended an hour ago answers
+/// instantly, every time, with a block the caller already holds — which is a
+/// wait that reports success for something that has not happened.
+///
+/// Public alongside [`block_anchor`], and for the same reason.
+pub fn finished_since(
+    blocks: impl Iterator<Item = (u32, bool)>,
+    anchor: u32,
+    anchor_was_finished: bool,
+) -> Option<u32> {
+    blocks
+        .filter(|&(id, finished)| finished && id >= anchor)
+        .find(|&(id, _)| id > anchor || !anchor_was_finished)
+        .map(|(id, _)| id)
 }
 
 /// How many lines `output` returns before truncating.
@@ -509,6 +770,22 @@ const MAX_TIMEOUT: Duration = Duration::from_secs(1_800);
 /// that made `max_lines: 0` disable truncation.
 fn clamp_timeout(asked: Option<u32>) -> Duration {
     asked.map_or(DEFAULT_TIMEOUT, |ms| Duration::from_millis(u64::from(ms)).min(MAX_TIMEOUT))
+}
+
+/// How long the screen must stay still before a wait calls it settled.
+///
+/// **Absent means no settle**, not a default — and that is the one difference
+/// from [`clamp_timeout`]. Returning on the first change is right for "tell me
+/// the moment anything happens"; waiting for quiet is right for "tell me when
+/// the build stops printing". Only the caller knows which it wants, and
+/// inventing a default would silently make every wait the second kind.
+///
+/// **Zero means zero**, matching [`clamp_timeout`] and [`clamp_lines`]: a
+/// settle of no time is satisfied at once, which is simply not settling.
+/// Capped by [`MAX_TIMEOUT`], because a quiet window wider than the deadline is
+/// the deadline wearing another name.
+fn clamp_idle(asked: Option<u32>) -> Option<Duration> {
+    asked.map(|ms| Duration::from_millis(u64::from(ms)).min(MAX_TIMEOUT))
 }
 
 /// Keep both ends and drop the middle.
@@ -561,13 +838,40 @@ fn req_u32(args: &Value, field: &'static str) -> Result<u32, ToolError> {
 }
 
 fn opt_u32(args: &Value, field: &'static str) -> Result<Option<u32>, ToolError> {
+    match opt_u64(args, field)? {
+        None => Ok(None),
+        Some(n) => u32::try_from(n)
+            .map(Some)
+            .map_err(|_| ToolError::BadType { field, want: "a non-negative whole number" }),
+    }
+}
+
+/// A sequence number, which is the one argument that genuinely needs the width.
+///
+/// `Seq` is a `u64` and `after_seq` is a value this server handed out, so
+/// narrowing it to `u32` would refuse a session's own sequence after about four
+/// billion state changes — reachable by a long-lived shell, and it would fail
+/// as "that is not a number" rather than as anything a caller could act on.
+fn opt_u64(args: &Value, field: &'static str) -> Result<Option<u64>, ToolError> {
     match args.get(field) {
         None | Some(Value::Null) => Ok(None),
         Some(v) => v
             .as_u64()
-            .and_then(|n| u32::try_from(n).ok())
             .map(Some)
             .ok_or(ToolError::BadType { field, want: "a non-negative whole number" }),
+    }
+}
+
+/// A flag, refused rather than ignored when it is not one.
+///
+/// `"wait": "true"` is a plausible thing for a model to emit, and reading it as
+/// absent turns a long-poll into a plain read that answers instantly — which
+/// looks like the session never changing rather than like a rejected argument.
+fn opt_bool(args: &Value, field: &'static str) -> Result<Option<bool>, ToolError> {
+    match args.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(b)) => Ok(Some(*b)),
+        Some(_) => Err(ToolError::BadType { field, want: "true or false" }),
     }
 }
 
@@ -786,5 +1090,149 @@ mod tests {
     fn an_unknown_tool_names_itself_rather_than_failing_vaguely() {
         let err = ToolError::NoSuchTool("scren".into());
         assert!(err.to_string().contains("scren"), "the typo must be echoed back: {err}");
+    }
+
+    /// The block list a shell shows just before a command is submitted at it:
+    /// finished history, then a trailing prompt nobody has pressed Enter on.
+    fn tail_prompt() -> Vec<(u32, bool)> {
+        vec![(1, true), (2, true), (3, false)]
+    }
+
+    #[test]
+    fn a_wait_anchors_on_the_tail_block_because_a_newer_id_never_arrives() {
+        // The one that would have caught the mistake. OSC 133;C makes
+        // `begin_output` mutate `blocks.last_mut()`, so the command an agent
+        // submits now lands in block 3 -- the trailing *prompt* block, an id it
+        // has already been told about -- and only the next prompt pushes 4. A
+        // wait keyed on `id > highest_seen` therefore waits for a block that
+        // will not exist until *after* the thing it is waiting for.
+        let (anchor, was_finished) =
+            block_anchor(tail_prompt().into_iter()).expect("a shell at a prompt has blocks");
+        assert_eq!(anchor, 3, "the anchor is the tail block, not the next id after it");
+        assert!(!was_finished, "a prompt nobody has submitted has not finished");
+
+        assert_eq!(
+            finished_since(tail_prompt().into_iter(), anchor, was_finished),
+            None,
+            "nothing has finished yet, so the wait must keep waiting"
+        );
+
+        // The command ran in block 3 and ended there. No id above 3 exists.
+        let after = vec![(1, true), (2, true), (3, true)];
+        assert_eq!(
+            finished_since(after.into_iter(), anchor, was_finished),
+            Some(3),
+            "the block that finished is the anchor itself, and a wait that cannot \
+             report it is a wait that never fires"
+        );
+    }
+
+    #[test]
+    fn an_already_finished_tail_does_not_answer_a_wait_with_itself() {
+        // An idle shell whose last command ended an hour ago. Counting the
+        // anchor unconditionally makes every `wait` here return instantly with
+        // a block the caller already holds -- success reported for something
+        // that has not happened.
+        let idle = vec![(1, true), (2, true)];
+        let (anchor, was_finished) = block_anchor(idle.iter().copied()).expect("blocks");
+        assert_eq!((anchor, was_finished), (2, true));
+        assert_eq!(
+            finished_since(idle.into_iter(), anchor, was_finished),
+            None,
+            "the tail had already finished when the wait began; it is not news"
+        );
+
+        // ...and a genuinely new command finishing is.
+        let ran = vec![(1, true), (2, true), (3, true)];
+        assert_eq!(finished_since(ran.into_iter(), anchor, was_finished), Some(3));
+    }
+
+    #[test]
+    fn a_wait_on_a_running_command_fires_when_that_command_ends() {
+        // "Follow the build that is already going" -- the tail is `Running`, so
+        // the anchor is open and finishing it is what the wait is for.
+        let building = vec![(7, false)];
+        let (anchor, was_finished) = block_anchor(building.iter().copied()).expect("blocks");
+        assert_eq!(finished_since(building.into_iter(), anchor, was_finished), None);
+        assert_eq!(finished_since(vec![(7, true)].into_iter(), anchor, was_finished), Some(7));
+    }
+
+    #[test]
+    fn a_shell_with_no_blocks_at_all_still_has_something_to_wait_for() {
+        // bash and fish emit no OSC 133 -- `Shell::detect` returns `None` for
+        // `/bin/bash` -- so this is most Linux hosts rather than an edge case.
+        // The wait anchors below the first id there could be, so the first
+        // command to finish answers rather than the tool refusing.
+        assert_eq!(block_anchor(std::iter::empty()), None);
+        assert_eq!(finished_since(std::iter::empty(), 0, false), None);
+        assert_eq!(
+            finished_since(vec![(1, true)].into_iter(), 0, false),
+            Some(1),
+            "an anchor of zero must not exclude the very first block"
+        );
+    }
+
+    #[test]
+    fn a_settle_window_is_absent_by_default_and_capped_when_asked_for() {
+        // Unlike `timeout_ms`, absent is *no settle* rather than a default:
+        // inventing one would silently turn every wait from "tell me when
+        // something happens" into "tell me when it has stopped happening".
+        assert_eq!(clamp_idle(None), None, "no argument means no settle at all");
+        assert_eq!(clamp_idle(Some(0)), Some(Duration::ZERO), "zero must mean zero");
+        assert_eq!(clamp_idle(Some(500)), Some(Duration::from_millis(500)));
+        assert_eq!(
+            clamp_idle(Some(u32::MAX)),
+            Some(MAX_TIMEOUT),
+            "a quiet window wider than the deadline is the deadline wearing another name"
+        );
+    }
+
+    #[test]
+    fn a_sequence_keeps_its_full_width_where_a_size_does_not() {
+        // `after_seq` is a value this server handed out, and `Seq` is a `u64`.
+        // Narrowing it the way `cols` is narrowed would refuse a long-lived
+        // session's own sequence, reported as "that is not a number".
+        let big = u64::from(u32::MAX) + 1;
+        assert_eq!(opt_u64(&json!({ "after_seq": big }), "after_seq").expect("fits"), Some(big));
+        assert!(
+            opt_u32(&json!({ "after_seq": big }), "after_seq").is_err(),
+            "the narrow reader must still refuse it, or the two would disagree silently"
+        );
+        assert_eq!(opt_u64(&json!({}), "after_seq").expect("absent"), None);
+        assert!(opt_u64(&json!({ "after_seq": -1 }), "after_seq").is_err());
+        assert!(opt_u64(&json!({ "after_seq": "7" }), "after_seq").is_err());
+    }
+
+    #[test]
+    fn a_flag_that_is_not_a_flag_is_refused_rather_than_read_as_absent() {
+        // `"wait": "true"` is a plausible thing for a model to emit. Ignoring
+        // it turns a long-poll into a plain read that answers at once, which
+        // reads as a session that never changes rather than as a bad argument.
+        assert_eq!(opt_bool(&json!({ "wait": true }), "wait").expect("a bool"), Some(true));
+        assert_eq!(opt_bool(&json!({}), "wait").expect("absent"), None);
+        let err = opt_bool(&json!({ "wait": "true" }), "wait")
+            .expect_err("a string is not a flag, however much it looks like one");
+        assert!(err.to_string().contains("true or false"), "say the shape wanted: {err}");
+    }
+
+    #[test]
+    fn a_read_that_did_not_wait_says_nothing_about_waiting() {
+        // Four fields on every ordinary `screen` call would be tokens spent
+        // describing a wait nobody asked for -- and `changed: false` on a read
+        // that never waited is not false, it is meaningless.
+        let mut plain = json!({ "seq": 7 });
+        Waited::default().describe(&mut plain);
+        assert_eq!(plain, json!({ "seq": 7 }), "an ordinary read keeps its shape exactly");
+
+        let mut waited = json!({ "seq": 9 });
+        Waited { ran: true, changed: true, timed_out: false, exited: false }
+            .describe(&mut waited);
+        assert_eq!(waited["waited"], true);
+        assert_eq!(waited["changed"], true);
+        assert_eq!(waited["timed_out"], false);
+        assert_eq!(
+            waited["exited"], false,
+            "`timed_out` and `exited` are separate facts, so both are always reported"
+        );
     }
 }

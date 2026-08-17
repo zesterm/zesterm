@@ -189,6 +189,23 @@ fn a_harness_can_handshake_list_tools_and_read_a_session() {
         assert!(names.contains(&want), "`{want}` must be offered; got {names:?}");
     }
 
+    // The wait arguments have to reach the *advertised schema*, not merely the
+    // handler: a model calls what `tools/list` describes, so an argument the
+    // dispatcher accepts and the schema omits is one nothing will ever pass.
+    let schema_of = |name: &str| {
+        tools
+            .iter()
+            .find(|t| t["name"] == name)
+            .map(|t| t["inputSchema"]["properties"].clone())
+            .unwrap_or_else(|| panic!("`{name}` must be offered; got {names:?}"))
+    };
+    for want in ["after_seq", "timeout_ms", "idle_ms"] {
+        assert!(!schema_of("screen")[want].is_null(), "`screen` must advertise `{want}`");
+    }
+    for want in ["wait", "timeout_ms"] {
+        assert!(!schema_of("blocks")[want].is_null(), "`blocks` must advertise `{want}`");
+    }
+
     let hosts = h.call(&serde_json::json!({
         "jsonrpc": "2.0", "id": 3, "method": "tools/call",
         "params": { "name": "hosts", "arguments": {} }

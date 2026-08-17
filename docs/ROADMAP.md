@@ -27,7 +27,7 @@ is reported rather than gated.
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store, sealed channel |
 | `zest-cloud` | ✅ `TlsDuplex`, one connection as two independently owned halves, a one-request HTTP POST over it, `Endpoint` — consumed by `--enroll` and by `--relay`'s per-pipe dial-back |
 | `zest-daemon` | ✅ session ownership *and* lifecycle, protocol loop, loopback / LAN / WebSocket / relay transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing, publishes its own profiles, reports what a child exited with |
-| `zest-mcp` | ✅ reads, drives and runs terminals over MCP on stdio; `run_isolated` carries the unforgeable exit code — ⬜ `run` into the interactive shell, fleet reach |
+| `zest-mcp` | ✅ reads, drives and runs terminals over MCP on stdio; `run_isolated` carries the unforgeable exit code; `screen` and `blocks` wait instead of the caller sleeping — ⬜ `run` into the interactive shell, fleet reach |
 
 ### What works end to end today
 
@@ -170,7 +170,9 @@ the history behind them is in closed issues and PRs.
       One correction from `blocks.rs`: correlating on a block
       `id > high_water` never fires — OSC 133 `C` mutates the *existing*
       trailing prompt block, so the anchor is the tail block's identity before
-      the write, not the next id after it.
+      the write, not the next id after it. `blocks(wait:)` already anchors that
+      way, and `tests/replay.rs` measures the naive predicate against a real
+      zsh recording rather than taking the correction on trust.
 - [ ] Fleet reach for `zest-mcp`, gated on a host advertising the observer
       attach.
 - [ ] **Tokens per build, measured.** Byte stream vs delta vs block output for
@@ -191,9 +193,17 @@ the history behind them is in closed issues and PRs.
 
 **Deliberately not built:** no chat sidebar; no agent loop of our own
 (harnesses improve monthly and a terminal shipping an inferior one ages badly —
-be the substrate); no streaming "watch and react" tool, whose absence is what
-keeps prompt injection needing the agent to be steered rather than firing on
-its own; no scrollback in the cloud by default.
+be the substrate); nothing that delivers output to the agent with **no call
+outstanding**, whose absence is what keeps prompt injection needing the agent
+to be steered rather than firing on its own; no scrollback in the cloud by
+default.
+
+The line is at the call, not at the waiting: `screen(after_seq:)` and
+`blocks(wait:)` block until something happens, because a read the agent asked
+for cannot manufacture a turn. ADR-015 carries the argument, amended once
+already — it read "no streaming *or polling* tool", which forced
+sleep-and-re-read and so pushed *more* attacker-controlled output through the
+model per unit of progress watched.
 
 ### Phone
 
