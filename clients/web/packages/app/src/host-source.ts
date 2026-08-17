@@ -31,15 +31,26 @@ import { dialFor, type RelayAccess } from './dial-for.ts';
 import type { DirectoryReader } from './directory-source.ts';
 
 /**
- * The machines a shell can launch on.
+ * The machines a shell shows, and whether each can be reached right now.
  *
- * Deliberately not "the fleet": a machine the account lists but nothing can
- * dial is not a launch target, and a row that must fail is worse than no row —
- * the same rule the native app's fleet cards follow. `dialFor` returning
- * `null` is how a source says so.
+ * **Two questions, deliberately not one.** "Is this one of my machines" and
+ * "can I dial it this second" have different answers and different lifetimes:
+ * a machine whose relay is unreachable is still yours, and hiding its row
+ * would make the fleet appear to shrink whenever the network hiccuped. So
+ * `hosts()` lists it and `dialFor` answers `null`, and the caller disables the
+ * row rather than dropping it — the native app's rule for fleet cards, where
+ * `open` is `best_route(h).is_some()` and the card is drawn either way.
+ *
+ * What that rules out is the row that *must fail*: a listed machine whose
+ * click does nothing silently. `dialFor` returning `null` is a source saying
+ * "show it, do not let them press it".
  */
 export interface HostSource {
-  /** Every machine that can be launched on, in a stable order. */
+  /**
+   * Every machine this shell knows about, in a stable order — including ones
+   * nothing can currently reach. Reachability is [`HostSource.dialFor`]'s
+   * question, not this one's.
+   */
   hosts(): readonly HostChoice[];
   /**
    * How to reach one, or `null` when nothing can right now.
