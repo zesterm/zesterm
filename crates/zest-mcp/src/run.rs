@@ -227,12 +227,27 @@ pub fn warnings(blocks: &[BlockPayload], a: &Anchor, requested: &str, got: &Bloc
 
 /// A command line, or a refusal naming the tool that takes what was passed.
 ///
-/// **Refused rather than sanitized**, for the reason `opt_u16` refuses a
-/// four-billion-cell grid where `max_lines` merely clamps: a bound on a response
-/// can be silently tightened and still answer the question, while a newline
-/// changes *what runs*. Stripping it would submit a different command than the
-/// one asked for and then report the difference as a `command_mismatch` warning,
-/// which is a strange way to spell "I did something else".
+/// The rule in one sentence: **surrounding whitespace is trimmed, and anything
+/// that would submit more than one line is refused.** Those are different acts on
+/// purpose, and the line between them is whether it can change *what runs*.
+///
+/// Trimming cannot. A newline at either end of `"ls\n"` is one a model added
+/// while writing a JSON string, and submitting it means `ls` and Enter — which is
+/// exactly what this tool does with it anyway, since it appends the carriage
+/// return itself. **Only whitespace at the ends goes**, so nothing a trim removes
+/// can ever join two commands into one: `"ls\nrm -rf /"` still has its newline in
+/// the middle afterwards and is still refused. And the result echoes the command
+/// as sent, so a caller comparing what it passed against `command` in the payload
+/// sees the trim rather than having to guess at it.
+///
+/// A newline *within* the command is a different thing, and it is **refused
+/// rather than stripped** — the reason `opt_u16` refuses a four-billion-cell grid
+/// where `max_lines` merely clamps. A bound on a response can be silently
+/// tightened and still answer the question; an interior newline submits a second
+/// command, so there is no single block left to report. Stripping it would run
+/// something the caller did not ask for and then flag the difference as a
+/// `command_mismatch` warning, which is a strange way to spell "I did something
+/// else".
 pub fn check_command(command: &str) -> Result<&str, Refusal> {
     let trimmed = command.trim();
     if trimmed.contains('\n') || trimmed.contains('\r') {
@@ -397,6 +412,29 @@ mod tests {
             check_command("grep -P '\\ta'").expect("a tab is ordinary in a command line"),
             "grep -P '\\ta'"
         );
+    }
+
+    #[test]
+    fn a_newline_at_the_end_is_trimmed_and_one_in_the_middle_is_refused() {
+        // The line between trimming and refusing, which is whether it can change
+        // what runs. A trailing newline is one a model added writing a JSON
+        // string, and `"ls\n"` submitted to a shell *means* `ls` and Enter --
+        // which is what this tool sends anyway, since it appends the carriage
+        // return itself.
+        assert_eq!(check_command("ls\n").expect("a trailing newline is whitespace"), "ls");
+        assert_eq!(check_command("\r\nls\r\n").expect("either end, either spelling"), "ls");
+
+        // And the guarantee that makes the trim safe: only the *ends* go, so
+        // nothing a trim removes can join two commands into one.
+        assert_eq!(
+            check_command("ls\nrm -rf /tmp\n").expect_err("the interior newline survives the trim"),
+            Refusal::MultiLine,
+            "trimming must never turn a refused two-line command into an accepted one"
+        );
+
+        // Whitespace alone is not a command, and says which field was missing
+        // rather than being run as an empty line.
+        assert_eq!(check_command(" \n ").expect("trims to nothing"), "");
     }
 
     #[test]
