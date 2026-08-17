@@ -206,12 +206,26 @@ pub fn warnings(blocks: &[BlockPayload], a: &Anchor, requested: &str, got: &Bloc
     // this session and ours was appended to it; the shell rewrote it (an alias,
     // a correction prompt); or a program forged the markers. All three are worth
     // the caller knowing before it believes the exit code.
-    if !got.command.trim().is_empty() && got.command.trim() != requested.trim() {
+    //
+    // A block with *no* text is a third thing and gets its own warning rather
+    // than none. It is not "the block records a different command" -- it records
+    // nothing, because zsh reads the command back off the grid between `B` and
+    // `C` and that can come back empty where pwsh states it outright in 633;E.
+    // Saying nothing here would be the worse failure: no warning reads as
+    // "checked and matched", and nothing was checked at all.
+    let got = got.command.trim();
+    let requested = requested.trim();
+    if got.is_empty() {
+        out.push(
+            "no_command_text: the shell started a command but recorded no text for it, so \
+             this block could not be checked against the one that was sent"
+                .to_string(),
+        );
+    } else if got != requested {
         out.push(format!(
-            "command_mismatch: this block records `{}`, not the command that was sent. \
+            "command_mismatch: this block records `{got}`, not the command that was sent. \
              Something else was on the input line, the shell rewrote it, or the markers \
-             were printed by a program",
-            got.command.trim()
+             were printed by a program"
         ));
     }
 
@@ -494,6 +508,27 @@ mod tests {
         // The ordinary case is silent.
         let same = block(1, BlockState::Finished { exit_code: Some(0) }, Some(11), "ls");
         assert!(warnings(std::slice::from_ref(&same), &a, " ls ", &same).is_empty());
+    }
+
+    #[test]
+    fn a_block_that_recorded_no_command_text_says_so_rather_than_nothing() {
+        // Silence is the wrong answer here, and it is the failure mode this
+        // whole crate keeps paying for: no warning reads as "checked and
+        // matched", when nothing was checked at all. zsh reads the command back
+        // off the grid between `B` and `C` and can come back empty; pwsh states
+        // it outright in 633;E. It is also not a *mismatch* -- the block does not
+        // record a different command, it records none -- so folding the two
+        // together would have the payload assert something the shell never said.
+        let a = Anchor { id: 1 };
+        let blank = block(1, BlockState::Finished { exit_code: Some(0) }, Some(11), "");
+        let w = warnings(std::slice::from_ref(&blank), &a, "ls", &blank);
+        assert_eq!(w.len(), 1, "an unverifiable block must not pass silently: {w:?}");
+        assert!(w[0].starts_with("no_command_text:"), "{}", w[0]);
+        assert!(
+            !w[0].contains("command_mismatch"),
+            "recording nothing is not recording something else: {}",
+            w[0]
+        );
     }
 
     #[test]
