@@ -973,7 +973,9 @@ entry stay). The resulting work items, measurements in the handoff README — **
       into; springs arrive with tab/window motion.
 - [ ] Smooth scroll as a fractional row offset, **suppressed in the alt screen**.
 - [ ] `reduce_motion`, honouring `SPI_GETCLIENTAREAANIMATION`.
-- [ ] Per-OS backdrop: Mica via `DWMWA_SYSTEMBACKDROP_TYPE`.
+- [x] Per-OS backdrop: Mica via `DWMWA_SYSTEMBACKDROP_TYPE`, and vibrancy via
+      `NSVisualEffectView` on macOS (#310). Linux is WS-D and stays honest:
+      blur has no portable path there.
 - [ ] Polish: OSC 0/2 title, DECSCUSR cursor styles, font zoom, DPI changes.
 - [x] Box drawing and block elements are generated at cell size (`zest-font`'s
       `boxdraw`), not taken from the font. A font's glyph is as wide as the
@@ -1142,7 +1144,20 @@ not *polished*; the rest of C2 can still trail.
       layout — `None` in fullscreen, where the buttons auto-hide. The
       horizontal strip reserves that width as a drag zone; the sidebar gives
       the cluster a drag header band and runs the grid full-height beside it.
-- [ ] `NSVisualEffectView`, and the rest of the polish — still trailing.
+- [x] **`NSVisualEffectView`** ([#310](https://github.com/zesterm/zesterm/issues/310)).
+      An effect view behind winit's, `BehindWindow` blending (the point:
+      `WithinWindow` would blur this window's own text) and `Active` state (the
+      default greys out on focus loss, and a terminal spends much of its life
+      unfocused while something runs). It attaches to the `NSThemeFrame` as the
+      backmost sibling, because winit's view *is* the contentView and hosts the
+      `CAMetalLayer` — a subview of it would composite on top of the terminal
+      rather than under it. `none` removes the view rather than merely not
+      adding one, and the three Windows materials map to no backdrop with a
+      warning rather than to a guess at what Mica would have looked like.
+      Only visible because #309 landed first: until then every Mac fell back to
+      an opaque swapchain, and a backdrop shows only through pixels the surface
+      above leaves transparent.
+- [ ] The rest of the WS-C2 polish — still trailing.
 
 ### WS-D — Linux host
 
