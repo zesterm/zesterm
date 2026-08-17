@@ -102,8 +102,8 @@ pub struct Config {
     /// `smear` is not a third behaviour here: the tapered Neovide trail needs a
     /// quad whose corners lag by velocity, and this renderer's rect pipeline
     /// draws axis-aligned rectangles. It springs like `smooth` and says so once
-    /// — the same degrade-and-warn the Windows backdrop materials get on macOS,
-    /// rather than a control that silently does nothing. -> #329.
+    /// per process — the same degrade-and-warn the Windows backdrop materials
+    /// get on macOS, rather than a control that silently does nothing. -> #329.
     pub cursor_trail: bool,
     /// Blink the cursor (and the palette caret), on the shared clock.
     pub cursor_blink: bool,
@@ -205,9 +205,17 @@ impl From<&zest_config::Settings> for Config {
                 zest_config::settings::CursorTrail::None => false,
                 zest_config::settings::CursorTrail::Smooth => true,
                 zest_config::settings::CursorTrail::Smear => {
-                    tracing::warn!(
-                        "cursor.trail = \"smear\" is not implemented yet; using \"smooth\""
-                    );
+                    // Once per process: `Config::from` runs on every reload,
+                    // and the settings tab writes on every keystroke of a
+                    // slider drag. A "not implemented yet" notice repeated
+                    // twenty times is how a log stops being read.
+                    static SAID: std::sync::Once = std::sync::Once::new();
+                    SAID.call_once(|| {
+                        tracing::warn!(
+                            "cursor.trail = \"smear\" is not implemented yet (#329); \
+                             using \"smooth\""
+                        );
+                    });
                     true
                 }
             },

@@ -128,6 +128,15 @@ pub struct TermState {
     pub(crate) seq: u64,
     pub(crate) title: String,
     pub(crate) cursor_style: CursorStyle,
+    /// Whether a program has set the cursor style with DECSCUSR.
+    ///
+    /// Tracked explicitly rather than inferred from `cursor_style !=
+    /// default_cursor_style`, which is the same value for two different
+    /// situations: a program that asks for exactly the shape the default
+    /// already is (`CSI 1 SP q` against a blinking block) looks untouched by
+    /// equality, and a config reload would then quietly take its cursor away.
+    /// Provenance is not recoverable from a value.
+    pub(crate) cursor_style_from_program: bool,
     /// What `DECSCUSR 0` resets to.
     ///
     /// `cursor.shape` in the settings tree, which the schema documents as the
@@ -253,9 +262,8 @@ impl Terminal {
     /// program *has* set a style keeps it — that program is still running and
     /// still means it.
     pub fn set_default_cursor_style(&mut self, style: CursorStyle) {
-        let untouched = self.state.cursor_style == self.state.default_cursor_style;
         self.state.default_cursor_style = style;
-        if untouched {
+        if !self.state.cursor_style_from_program {
             self.state.cursor_style = style;
         }
     }
@@ -431,6 +439,7 @@ impl TermState {
             title: String::new(),
             cursor_style: CursorStyle::default(),
             default_cursor_style: CursorStyle::default(),
+            cursor_style_from_program: false,
             selection: None,
             current_hyperlink: None,
             next_hyperlink_id: 0,

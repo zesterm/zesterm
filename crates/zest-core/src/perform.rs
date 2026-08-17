@@ -159,6 +159,9 @@ impl vte::Perform for TermState {
                 // encoding has no third state to carry. Honoured here so a
                 // program that sets a bar and resets on exit hands the terminal
                 // back to `cursor.shape` rather than to a hardcoded block.
+                // 0 is *reset*: it hands the terminal back to the user's
+                // `cursor.shape`, and gives up the claim a program made on it.
+                self.cursor_style_from_program = param != 0;
                 let style = if param == 0 {
                     self.default_cursor_style
                 } else {

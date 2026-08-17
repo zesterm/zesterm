@@ -2527,3 +2527,40 @@ fn a_config_reload_does_not_override_a_running_program() {
     t.advance(b"\x1b[0 q");
     assert_eq!(t.cursor_style().shape, CursorShape::Underline, "reset lands on the new default");
 }
+
+/// A program that asks for the shape the default already is still owns it.
+///
+/// The trap in inferring provenance from a value: `CSI 1 SP q` against a
+/// default of "blinking block" leaves `cursor_style == default_cursor_style`,
+/// so an equality check reads it as untouched and a later config reload takes
+/// the program's cursor away. Provenance is not recoverable from a value, so it
+/// is tracked rather than guessed.
+#[test]
+fn a_program_asking_for_the_current_default_still_owns_the_cursor() {
+    use zest_core::{CursorShape, CursorStyle};
+
+    let mut t = Terminal::new(10, 2, 100);
+    // The default is a blinking block, and the program explicitly asks for
+    // exactly that -- the value is now indistinguishable from untouched.
+    assert_eq!(t.cursor_style(), CursorStyle { shape: CursorShape::Block, blinking: true });
+    t.advance(b"\x1b[1 q");
+
+    // The user then edits cursor.shape. The program is still running and still
+    // means the block it asked for.
+    t.set_default_cursor_style(CursorStyle { shape: CursorShape::Bar, blinking: true });
+    assert_eq!(
+        t.cursor_style().shape,
+        CursorShape::Block,
+        "an explicit DECSCUSR keeps the cursor even when it matched the default"
+    );
+
+    // ...until it resets, which gives the claim up.
+    t.advance(b"\x1b[0 q");
+    assert_eq!(t.cursor_style().shape, CursorShape::Bar);
+    t.set_default_cursor_style(CursorStyle { shape: CursorShape::Underline, blinking: true });
+    assert_eq!(
+        t.cursor_style().shape,
+        CursorShape::Underline,
+        "after a reset the config owns the shape again"
+    );
+}
