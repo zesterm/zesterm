@@ -101,8 +101,8 @@ pub fn take_pending_edit(editing: &mut Option<EditBuffer>, fields: &[UiField]) -
 ///
 /// Honesty over polish: a control that visibly does nothing reads as broken,
 /// so these rows carry a faint "not applied yet" tag instead of pretending.
-/// Wiring one up includes deleting its entry here — the test below only
-/// keeps this list from naming keys that do not exist at all.
+/// Two tests hold it: one asserts the list is *empty*, and one — kept for the
+/// day someone adds an entry anyway — checks it names only real schema keys.
 pub const NOT_YET_WIRED: &[&str] = &[
 ];
 

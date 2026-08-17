@@ -534,7 +534,14 @@ impl Scene {
                 cell.flags.contains(CellFlags::ITALIC),
             );
 
-            if !is_blank(&cell) && !shaping {
+            // Not `!shaping`: with shaping on, `segment_row` deliberately
+            // leaves out wide cells and cells carrying combining marks, and
+            // those still need their base glyph drawn. Gating on the *same*
+            // predicate the segmentation uses is what stops a cell falling
+            // between the two paths and being drawn by neither -- which is
+            // what happened to every CJK character the first time this
+            // shipped, and what ASCII-only screenshots cannot show.
+            if !is_blank(&cell) && (!shaping || breaks_run(&cell, r)) {
                 if let Some(inst) =
                     self.glyph_instance(device, queue, atlas, fonts, cell.ch, style, pen_x, baseline, fg, clip)
                 {
@@ -638,15 +645,18 @@ impl Scene {
             fonts.shape_run(text, style, vp.features)
         };
 
+        // `starts` ascends by byte offset and a shaper reports clusters in
+        // order, so one advancing index answers every lookup. Searching the
+        // list per glyph is quadratic in the run length, and a run is a whole
+        // row of text.
+        let mut at = 0usize;
         for g in shaped {
             // The cluster is a byte offset into `text`; the column it started
-            // at is what the grid cares about. `rev` + `find` because a cluster
-            // may begin mid-character for a combining sequence the shaper kept
-            // together.
-            let Some(&(_, col)) = starts.iter().rev().find(|(byte, _)| *byte <= g.cluster as usize)
-            else {
-                continue;
-            };
+            // at is what the grid cares about.
+            while at + 1 < starts.len() && starts[at + 1].0 <= g.cluster as usize {
+                at += 1;
+            }
+            let Some(&(_, col)) = starts.get(at) else { continue };
             let pen_x = ox + col as f32 * cw;
             if let Some(inst) =
                 self.glyph_at(device, queue, atlas, fonts, g.font, g.glyph, pen_x, baseline, fg, clip)
@@ -967,16 +977,18 @@ struct Run {
 /// Pure, and separate from the emitting, because this is the part that can be
 /// wrong in ways a screenshot will not show: a run that swallows a wide cell
 /// puts every glyph after it one column left.
+fn breaks_run(cell: &Cell, r: &Row) -> bool {
+    is_blank(cell)
+        || cell.flags.intersects(CellFlags::WIDE_SPACER | CellFlags::HIDDEN | CellFlags::WIDE)
+        || r.extra(cell).is_some_and(|e| !e.zerowidth.is_empty())
+}
+
 fn segment_row(r: &Row, cols: usize, palette: &PaletteSnapshot) -> Vec<Run> {
     let mut runs: Vec<Run> = Vec::new();
     let mut cur = Run::default();
     for col in 0..cols {
         let cell = r.get(col).copied().unwrap_or_default();
-        let breaks = is_blank(&cell)
-            || cell
-                .flags
-                .intersects(CellFlags::WIDE_SPACER | CellFlags::HIDDEN | CellFlags::WIDE)
-            || r.extra(&cell).is_some_and(|e| !e.zerowidth.is_empty());
+        let breaks = breaks_run(&cell, r);
         let style = Style::new(
             cell.flags.contains(CellFlags::BOLD),
             cell.flags.contains(CellFlags::ITALIC),
@@ -1430,6 +1442,45 @@ mod tests {
         assert_eq!(runs[0].text, "a");
         assert_eq!(runs[1].text, "b");
         assert_eq!(runs[1].starts, vec![(0, 3)], "and the tail keeps its real column");
+    }
+
+    #[test]
+    fn every_cell_a_run_skips_is_drawn_by_the_other_path() {
+        // The bug this pairing exists to prevent, and the one ASCII-only
+        // screenshots cannot show: `segment_row` leaves wide cells and
+        // mark-carrying cells out of its runs, so if the per-cell path also
+        // skips them when shaping is on, they are drawn by *neither* and every
+        // CJK character silently disappears.
+        //
+        // Asserted as a partition: for every column, exactly one of "inside a
+        // run" and "breaks a run" is true. The two paths gate on that same
+        // predicate, so this is what keeps them exhaustive.
+        let pal = palette();
+        let mut g = row_of("a漢xb c");
+        g.row_mut(0).get_mut(1).unwrap().flags.insert(CellFlags::WIDE);
+        {
+            let c = g.row_mut(0).get_mut(2).unwrap();
+            c.ch = ' ';
+            c.flags.insert(CellFlags::WIDE_SPACER);
+        }
+        let cols = 6;
+        let runs = segment_row(g.row(0), cols, &pal);
+        let in_a_run: std::collections::BTreeSet<usize> =
+            runs.iter().flat_map(|r| r.starts.iter().map(|(_, c)| *c)).collect();
+
+        for col in 0..cols {
+            let cell = g.row(0).get(col).copied().unwrap_or_default();
+            let breaks = breaks_run(&cell, g.row(0));
+            assert_ne!(
+                breaks,
+                in_a_run.contains(&col),
+                "column {col} must be handled by exactly one path, not both or neither"
+            );
+        }
+        assert!(
+            breaks_run(&g.row(0).get(1).copied().unwrap(), g.row(0)),
+            "the wide cell is the one that has to fall to the per-cell path"
+        );
     }
 
     #[test]
