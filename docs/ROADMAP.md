@@ -734,6 +734,40 @@ entry stay). The resulting work items, measurements in the handoff README — **
       started scroll away off screen. Clearing the selection stays
       unconditional at both, because a selection made before the keystroke is
       stale wherever the view is sitting.
+- [x] **Motion: springs, and the rule that they stop**
+      ([#317](https://github.com/zesterm/zesterm/issues/317)). The five
+      `motion.*` keys off `NOT_YET_WIRED`. Implements #5's spec rather than a
+      new design: springs `(response, damping)` not easing curves, because
+      terminal motion is interruption-dominated — a wheel notch arriving
+      mid-scroll must bend the motion, not restart it, and that is exactly what
+      an easing curve cannot do without a visible velocity discontinuity.
+
+      **Substepped at a fixed 240Hz.** Integrated once per frame the same
+      numbers are a different spring at 60Hz and at 144Hz, and the faster
+      display gets the worse one — which would make `spring_response` mean
+      something different on every machine.
+
+      **Every animator provably settles**, which is the 0%-idle guarantee at
+      this seam: `Spring::step` snaps exactly to target inside an epsilon and
+      *reports* rest, and `anim_deadline` schedules nothing once it does. An
+      animator that only approached its target would keep the event loop awake
+      for ever at a fraction of a pixel per frame. Measured on a real window:
+      zero CPU time over six seconds of idle.
+
+      Smooth scroll needed no renderer work at all — `Viewport::scroll_px` and
+      the `grid_origin` uniform behind it were built for this and had been fed a
+      constant `0.0` ever since, with chrome text already opting out per
+      instance via `FLAG_FIXED`. The grid's own `display_offset` still moves in
+      whole rows the moment the wheel turns, so the session, the selection and
+      every hit test stay integral; the spring carries only the visual debt.
+      Suppressed in the alternate screen, where `vim` and `less` scroll by
+      design and easing that fights the program.
+
+      `platform::reduce_motion` joins the per-OS table —
+      `SPI_GETCLIENTAREAANIMATION` on Windows,
+      `NSWorkspace.accessibilityDisplayShouldReduceMotion` on macOS, `false`
+      where the question has no answer, since that means "nothing asked us to
+      reduce motion" rather than "motion is wanted".
 - [x] **Transparency works on macOS, and opacity applies without a relaunch**
       ([#308](https://github.com/zesterm/zesterm/issues/308)). Three findings,
       the middle one the reason the other two mattered.

@@ -100,11 +100,6 @@ pub fn take_pending_edit(editing: &mut Option<EditBuffer>, fields: &[UiField]) -
 pub const NOT_YET_WIRED: &[&str] = &[
     "cursor.shape",
     "cursor.trail",
-    "motion.enabled",
-    "motion.respect_system_reduce_motion",
-    "motion.smooth_scroll",
-    "motion.spring_damping",
-    "motion.spring_response",
     "typography.features",
     "typography.ligatures",
 ];

@@ -18,6 +18,7 @@ mod fleet;
 mod keymap;
 mod launch;
 mod launcher;
+mod motion;
 mod pipeline_cache;
 mod platform;
 mod profiles_ui;
