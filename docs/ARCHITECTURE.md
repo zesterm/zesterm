@@ -798,9 +798,27 @@ outrun stops short of our bottom row. The grid tracks the deepest row the
 restater erased since the window opened (`restate_rows_seen`) and the settle
 requires it to have reached the bottom; a repaint that did not cover us returns
 `false` with `pending_restate` left armed for the one that does — the same
-conservation the no-room case practises through the debt. A stale repaint laid
-out *larger* than the grid needs no guard at all: its overflow scrolls, and any
-scroll already cancels the debt.
+conservation the no-room case practises through the debt.
+
+**A stale repaint laid out *taller* than the grid is refused at its scrolls.**
+This section originally ended "a stale repaint laid out larger than the grid
+needs no guard at all: its overflow scrolls, and any scroll already cancels
+the debt" — which is true and was the bug (#315): that cancel
+exists for content moving on, and a stale repaint's overflow is not that. Each
+overflow scroll cancelled a debt still owed (stranding the drag) and banked the
+scrolled-off row — the repaint's own restatement of content the grid already
+held above the viewport — so the host's history carried the same rows twice,
+and scrolling up after a drag (or a `cls`) showed them twice. The grid now
+keeps a *bracket* flag (`restatement_open`), wider than the armed state:
+opened by either arming marker whatever the arming decides — sat-out and
+unarmed repaints write rows too, and the shrink phase arms nothing — and
+closed by the DECTCEM that closes every repaint. A full-screen scroll inside
+the bracket on a restated-elsewhere grid drops the overflowing row instead of
+banking it and leaves the debt alone. The residual, accepted and stated: a
+program that hides the cursor, homes, and then streams past the bottom without
+ever touching DECTCEM would lose those rows from history. Every measured
+ConPTY repaint is DECTCEM-bracketed, ordinary output opens no bracket, and a
+grid nobody restates never reaches the branch.
 
 Two boundary facts, both measured on the storm capture rather than reasoned to:
 **in a storm, only the very first repaint announces itself** — every later one,

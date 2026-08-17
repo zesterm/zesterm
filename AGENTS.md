@@ -622,6 +622,19 @@ Each of these cost real time and is documented where it bites:
   (`pty_dump --resize-settle-ms 0`, which exists because the recorder's default
   800ms settle structurally cannot record one). (#312)
 
+  **And the shrink half of the same storm, where the stale repaint is *taller*
+  than the grid:** its overflow scrolls, and each scroll did two bad things at
+  once — cancelled the restate debt (that cancel exists for content moving on,
+  and #312 explicitly reasoned the overflow "saves itself" through it, which
+  was the bug) and banked the scrolled-off row, a duplicate of content the
+  grid already held, so scrolling up after a drag showed the same rows twice.
+  Everything inside a repaint's DECTCEM bracket is the restater re-stating
+  content we hold, so the grid keeps a bracket flag (`restatement_open`, wider
+  than the armed state — sat-out and unarmed repaints write rows too) and a
+  full-screen scroll inside it drops the row and leaves the debt alone.
+  `corpus/resize-drag-overflow.vtrec` is one capture that exercises this, the
+  coverage refusal and the final settle in a single recorded gesture. (#315)
+
   **And the same trap one layer out, which had been live in every client since
   the mesh existed:** a replica grid — one deltas are applied into — is about
   to be handed a keyframe that restates every visible row, so its grow must not
