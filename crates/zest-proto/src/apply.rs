@@ -66,6 +66,10 @@ pub struct Applier {
     /// every transport has to remember to apply is a rule that one of them
     /// eventually will not.
     applied: u64,
+    /// Shadow of [`Keyframe::history_clears`]: the last announced-destruction
+    /// count this client has honoured. Only ever raised — an alt-screen
+    /// keyframe carries the alt grid's 0 and must not re-arm. (#314)
+    history_clears: u32,
 }
 
 impl Applier {
@@ -87,6 +91,17 @@ impl Applier {
         // Modes before rows, for the same reason the encoder emits them first:
         // ALT_SCREEN decides which of the two grids these rows belong to.
         term.remote().set_modes(k.modes);
+
+        // An advanced counter means an ED 3 destroyed the session's scrollback
+        // since this client last honoured one — drop ours too, including any
+        // history the host never held. Before the dedupe below and the row
+        // writes: with history gone there is nothing to deduplicate against,
+        // and the rows this keyframe carries are the whole surviving session.
+        // Never lowered: an alt-screen keyframe carries that grid's 0. (#314)
+        if k.history_clears > self.history_clears {
+            term.remote().clear_history();
+            self.history_clears = k.history_clears;
+        }
 
         // History this keyframe is about to re-deliver stops being history.
         //
@@ -429,6 +444,21 @@ mod tests {
             }
         }
 
+        /// Push the client a keyframe with no other change, as the daemon does
+        /// in answer to `TermEvent::HistoryCleared` (or any resync).
+        fn keyframe(&mut self) {
+            self.seq += 1;
+            let cur = self.live_cursor();
+            let k = self.enc.keyframe(
+                self.host.grid(),
+                cur,
+                self.host.modes(),
+                "",
+                self.host.blocks(),
+            );
+            self.app.apply_keyframe(&mut self.client, &k, self.seq);
+        }
+
         /// Resize the host and push it a keyframe, as `reconcile_size` does.
         fn resize(&mut self, cols: usize, rows: usize) {
             self.host.resize(cols, rows);
@@ -547,6 +577,74 @@ mod tests {
             !p.client.screen_text().contains("entry 0"),
             "cls left the listing on the client's screen:\n{}",
             p.client.screen_text()
+        );
+    }
+
+    #[test]
+    fn cls_with_ed3_clears_every_replicas_history_too() {
+        // The reported gesture, host to client: `cls` in pwsh is `2J 3J H`
+        // (measured — Clear-Host under ConPTY emits the 3J explicitly), the
+        // host destroys its scrollback, and the keyframe the daemon owes
+        // everyone carries `history_clears` so the replica drops its own.
+        // Without it the client keeps the history and scrolling up shows
+        // everything the user just asked to be rid of. (#314)
+        let mut p = Pair::new(20, 4);
+        p.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\n");
+        for i in 0..8 {
+            p.feed(format!("entry {i}\r\n").as_bytes());
+        }
+        assert!(p.client.grid().scrollback_len() > 0, "the client holds no history, so this proves nothing");
+
+        p.feed(b"\x1b[2J\x1b[3J\x1b[H");
+        assert_eq!(p.host.grid().scrollback_len(), 0, "the host kept what ED 3 destroyed");
+
+        // The daemon answers `TermEvent::HistoryCleared` with a keyframe.
+        p.keyframe();
+        assert_eq!(
+            p.client.grid().scrollback_len(),
+            0,
+            "the client still holds history the session no longer has"
+        );
+        p.assert_same("the client's screen drifted across a cls");
+    }
+
+    #[test]
+    fn a_reattaching_client_drops_history_cleared_while_it_was_away() {
+        // The counter is level-triggered on the keyframe, not edge-triggered on
+        // the event, for exactly this client: one that was not attached when
+        // the `cls` happened. Its next keyframe carries the advanced counter
+        // and its history — including any the host never held — goes too.
+        let mut p = Pair::new(20, 4);
+        p.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\n");
+        assert!(p.client.grid().scrollback_len() > 0, "the client holds no history, so this proves nothing");
+
+        // The cls happens while nobody watches: the host clears, and the next
+        // thing the client sees is an ordinary keyframe.
+        p.host.advance(b"\x1b[2J\x1b[3J\x1b[H");
+        p.keyframe();
+
+        assert_eq!(
+            p.client.grid().scrollback_len(),
+            0,
+            "a keyframe carrying an advanced counter left the client's history alone"
+        );
+    }
+
+    #[test]
+    fn a_keyframe_with_an_unmoved_counter_keeps_the_clients_longer_history() {
+        // The other half, which pins that this does not regress deliberate
+        // asymmetry: eviction is silent, and a client keeping more history
+        // than the host keeps it. Only announced destruction reaches across.
+        let mut p = Pair::new(20, 4);
+        p.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\n");
+        let held = p.client.grid().scrollback_len();
+        assert!(held > 0, "the client holds no history, so this proves nothing");
+
+        p.keyframe();
+        assert_eq!(
+            p.client.grid().scrollback_len(),
+            held,
+            "an ordinary keyframe evicted the client's history"
         );
     }
 

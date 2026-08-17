@@ -98,6 +98,40 @@ test('a keyframe merges attributes rather than replacing them', () => {
   assert.ok(v.attrs.has(2));
 });
 
+test('a keyframe that says history was cleared empties scrollback', () => {
+  // `history_clears` is what carries an ED 3 to a client that applies
+  // keyframes: the rows are not damaged, they are gone, and nothing else in a
+  // keyframe can say so. Advanced counter drops the view's history — and
+  // suppresses the displaced-row carry-over for the same keyframe, or the
+  // pre-cls viewport rows would be filed straight back into scrollback.
+  // Unmoved (or absent) counter leaves history alone: eviction stays silent,
+  // and a client's longer history stays its own. (#314)
+  const cursor = { row: 0, col: 0, visible: true, shape: 0 } as const;
+  const v = new GridView();
+  v.applyKeyframe({ cols: 20, rows_data: [row(0, 'a'), row(1, 'b'), row(2, 'c')], attrs: [], cursor, modes: 0 });
+  v.applyKeyframe({ cols: 20, rows_data: [row(3, 'd'), row(4, 'e'), row(5, 'f')], attrs: [], cursor, modes: 0 });
+  assert.ok(v.scrollback.length > 0, 'the view holds no history, so this proves nothing');
+
+  v.applyKeyframe({
+    cols: 20,
+    rows_data: [row(6, '$'), { line: NO_LINE, runs: [], wrapped: false }, { line: NO_LINE, runs: [], wrapped: false }],
+    attrs: [],
+    cursor,
+    modes: 0,
+    history_clears: 1,
+  });
+  assert.equal(
+    v.scrollback.length,
+    0,
+    'a keyframe carrying an advanced counter left the view holding destroyed history',
+  );
+
+  // The same counter again destroys nothing more.
+  v.applyKeyframe({ cols: 20, rows_data: [row(7, 'g'), row(8, 'h')], attrs: [], cursor, modes: 0, history_clears: 1 });
+  v.applyKeyframe({ cols: 20, rows_data: [row(9, 'i'), row(10, 'j')], attrs: [], cursor, modes: 0, history_clears: 1 });
+  assert.ok(v.scrollback.length > 0, 'an unmoved counter re-cleared history it had no right to');
+});
+
 test('a row past the end grows the grid rather than being dropped', () => {
   // A resize this client has not been told about. Growing is the forgiving
   // answer; dropping would leave a permanently stale line. `Applier` asks for a

@@ -825,6 +825,91 @@ fn a_clear_leaves_the_blocks_that_scrolled_out_of_reach() {
 }
 
 #[test]
+fn csi_3j_clears_scrollback_and_2j_does_not() {
+    // ED 2 clears the screen and ED 3 also clears scrollback -- xterm's and
+    // Windows Terminal's reading, and the one pwsh asks for: `Clear-Host`
+    // under ConPTY emits an explicit `ESC[3J` (measured on this box; the
+    // corpus has no 3J anywhere, so these are hand-built on purpose). zesterm
+    // treated the two alike and kept all history, so `cls` followed by
+    // scrolling up showed everything the user had just asked to be rid of. (#314)
+    let mut t = Terminal::new(20, 4, 100);
+    for i in 0..12 {
+        t.advance(format!("line {i}\r\n").as_bytes());
+    }
+    let held = t.grid().scrollback_len();
+    assert!(held > 0, "the fixture never scrolled");
+
+    t.advance(b"\x1b[2J");
+    assert_eq!(t.grid().scrollback_len(), held, "ED 2 must keep scrollback");
+
+    t.advance(b"\x1b[3J");
+    assert_eq!(t.grid().scrollback_len(), 0, "ED 3 must clear scrollback");
+}
+
+#[test]
+fn scrolling_up_after_a_windows_cls_finds_nothing() {
+    // The reported gesture, whole: `cls`, scroll up, expect nothing. The bytes
+    // are what pwsh's Clear-Host emits under ConPTY -- 2J and 3J together,
+    // then home.
+    let mut t = Terminal::new(20, 4, 100);
+    for i in 0..12 {
+        t.advance(format!("line {i}\r\n").as_bytes());
+    }
+    t.advance(b"\x1b[2J\x1b[3J\x1b[H");
+
+    t.scroll_display(10);
+    assert_eq!(t.grid().display_offset(), 0, "there is history to scroll into after a cls");
+    assert!(
+        !t.screen_text().contains("line"),
+        "the cleared content is still reachable: {:?}",
+        t.screen_text()
+    );
+}
+
+#[test]
+fn a_block_only_in_scrollback_does_not_survive_ed_3() {
+    // The counterpart of the ED 2 pin above: with the rows themselves
+    // destroyed, a block that described them describes nothing, and keeping it
+    // would render a header over content that no longer exists anywhere.
+    let mut t = Terminal::new(20, 3, 100);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07old\x1b]133;C\x07\r\nout\r\n\x1b]133;D;0\x07");
+    for _ in 0..6 {
+        t.advance(b"filler\r\n");
+    }
+    assert_eq!(t.blocks().blocks().len(), 1, "the fixture's block is in scrollback");
+
+    t.advance(b"\x1b[2J\x1b[3J\x1b[H");
+    assert!(
+        t.blocks().blocks().is_empty(),
+        "a block whose rows ED 3 destroyed is still in the index"
+    );
+}
+
+#[test]
+fn ed_3_announces_history_cleared() {
+    // Scrollback dying is a change no delta can describe -- the rows are not
+    // damaged, they are gone -- so every subscriber is owed a keyframe, the
+    // `ViewportRebased` precedent. ED 2 alone announces nothing.
+    let mut t = Terminal::new(20, 4, 100);
+    for i in 0..12 {
+        t.advance(format!("line {i}\r\n").as_bytes());
+    }
+    let _ = t.take_events();
+
+    t.advance(b"\x1b[2J");
+    assert!(
+        !t.take_events().iter().any(|e| matches!(e, TermEvent::HistoryCleared)),
+        "ED 2 does not destroy history and must not claim to"
+    );
+
+    t.advance(b"\x1b[3J");
+    assert!(
+        t.take_events().iter().any(|e| matches!(e, TermEvent::HistoryCleared)),
+        "ED 3 destroyed history without telling anyone"
+    );
+}
+
+#[test]
 fn erasing_below_the_cursor_leaves_the_index_alone() {
     // ED 0 is what a line editor emits on every keystroke -- PSReadLine repaints
     // with it constantly. Invalidating there would delete the block the user is

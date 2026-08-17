@@ -50,6 +50,16 @@ pub enum TermEvent {
     /// now, and there is no delta that says so — `docs/CONTRACTS.md` has why
     /// there is no `DeltaOp::Resize`, and this is the same argument. (#247)
     ViewportRebased,
+    /// ED 3 destroyed the primary grid's scrollback (`Grid::clear_history`).
+    ///
+    /// The `ViewportRebased` argument one notch further: the rows are not
+    /// damaged, they are *gone*, and no delta can say so. Every subscriber is
+    /// owed a keyframe — and the keyframe carries `Grid::history_clears` too,
+    /// so a client that misses this one (a reconnect, a phone that slept)
+    /// still learns, and a client deliberately holding more history than the
+    /// host still drops it. Announced destruction, as opposed to eviction,
+    /// which stays silent on purpose (`docs/CONTRACTS.md`). (#314)
+    HistoryCleared,
 }
 
 /// Damage accumulated since the last frame.

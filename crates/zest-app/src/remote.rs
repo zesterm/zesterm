@@ -510,7 +510,7 @@ impl RemoteSession {
                             };
 
                             match msg {
-                                HostMessage::Keyframe { seq, rows_data, attrs, cursor, cols, rows, modes, blocks, blocks_from, title, .. } => {
+                                HostMessage::Keyframe { seq, rows_data, attrs, cursor, cols, rows, modes, blocks, blocks_from, title, history_clears, .. } => {
                                     let k = zest_proto::Keyframe {
                                         cols,
                                         rows,
@@ -521,6 +521,7 @@ impl RemoteSession {
                                         blocks,
                                         blocks_from,
                                         title,
+                                        history_clears,
                                     };
                                     {
                                         let mut term = terminal.lock_unfair();

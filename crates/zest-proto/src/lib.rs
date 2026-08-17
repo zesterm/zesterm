@@ -417,6 +417,15 @@ pub enum HostMessage {
         /// absent.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         title: String,
+        /// How many times ED 3 has destroyed the host's scrollback; see
+        /// [`Keyframe::history_clears`](crate::Keyframe::history_clears).
+        ///
+        /// Additive (`blocks_from`'s precedent), so an older peer still
+        /// decodes; its default of 0 never advances a replica's shadow, so a
+        /// host that predates this simply never announces a clear — which is
+        /// what every host did before it existed.
+        #[serde(default)]
+        history_clears: u32,
     },
     /// A change from `base` to `seq`.
     ///

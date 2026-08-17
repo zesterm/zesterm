@@ -492,6 +492,7 @@ fn on_message(state: &State, tx: &Sender<Outbound>, msg: HostMessage) {
             blocks,
             blocks_from,
             title,
+            history_clears,
         } => {
             let k = zest_proto::Keyframe {
                 cols,
@@ -503,6 +504,7 @@ fn on_message(state: &State, tx: &Sender<Outbound>, msg: HostMessage) {
                 blocks,
                 blocks_from,
                 title: title.clone(),
+                history_clears,
             };
             match s.replica_mut(session) {
                 Some(r) => {

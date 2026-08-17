@@ -177,6 +177,8 @@ pub struct Grid {
     /// no size in its bytes to compare, but there is one in its behaviour.
     /// See [`Self::settle_restate`]. (#312)
     restate_rows_seen: usize,
+    /// Times ED 3 destroyed this grid's scrollback; see [`Self::history_clears`].
+    history_clears: u32,
     pub cursor: Cursor,
     pub region: ScrollRegion,
 }
@@ -215,6 +217,7 @@ impl Grid {
             sitting_out: false,
             settled_pull: 0,
             restate_rows_seen: 0,
+            history_clears: 0,
             cursor: Cursor::default(),
             region: ScrollRegion::full(rows),
         }
@@ -420,6 +423,47 @@ impl Grid {
             self.display_offset = self.display_offset.saturating_sub(n).min(self.scrollback_len);
         }
         n
+    }
+
+    /// Destroy all scrollback, because ED 3 said to.
+    ///
+    /// ED 2 clears the screen and ED 3 also clears scrollback — xterm's and
+    /// Windows Terminal's reading, and the one pwsh asks for: `Clear-Host`
+    /// under ConPTY emits an explicit `ESC[3J`. The viewport is untouched
+    /// (the accompanying ED 2 handles the painting) and the ring never
+    /// empties, because the viewport rows remain. The destroyed ids become
+    /// one more gap in the numbering, which [`Self::oldest_line_id`] already
+    /// reads around. The `evicted` capture is deliberately left alone: it is
+    /// an opt-in durable log a daemon keeps, and `cls` does not delete log
+    /// files. (#314)
+    ///
+    /// Bumps [`Self::history_clears`] **unconditionally**, empty or not: a
+    /// replica deliberately holding more history than this grid must still
+    /// drop it on a `cls`. Announced destruction is not silent eviction —
+    /// `docs/CONTRACTS.md` keeps those apart on purpose.
+    pub fn clear_history(&mut self) {
+        if self.scrollback_len > 0 {
+            self.storage.remove_range(0, self.scrollback_len);
+            self.scrollback_len = 0;
+        }
+        // Nothing left to be scrolled into.
+        self.display_offset = 0;
+        // Saturating, not wrapping: replicas honour this with a `>` compare,
+        // so a wrap to 0 would silence every clear after the 2^32nd. At
+        // saturation further clears stop announcing instead, which is the
+        // same theoretical failure without breaking the documented
+        // monotonicity on the way there.
+        self.history_clears = self.history_clears.saturating_add(1);
+    }
+
+    /// How many times this grid's scrollback has been destroyed (ED 3).
+    ///
+    /// Monotonic, and carried on every keyframe so the announcement is
+    /// level-triggered rather than edge-triggered: a client that missed the
+    /// event still learns on its next keyframe, whenever that is.
+    #[must_use]
+    pub fn history_clears(&self) -> u32 {
+        self.history_clears
     }
 
     /// The id of the oldest line still held, scrollback included.
