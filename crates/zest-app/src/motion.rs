@@ -90,6 +90,11 @@ impl Spring {
     /// load, since a `cat` flood needs the bytes drawn far more than it needs
     /// the scroll eased.
     pub fn snap_to(&mut self, target: f32) {
+        // A non-finite target would survive the snap and leave `moving()` true
+        // for ever, because `NaN != NaN`: the one place "arrive immediately"
+        // could fail to arrive. Nothing reachable passes one today; this is
+        // here so that stays true of a caller nobody has written yet.
+        let target = if target.is_finite() { target } else { 0.0 };
         self.value = target;
         self.target = target;
         self.velocity = 0.0;
@@ -112,8 +117,16 @@ impl Spring {
             self.snap_to(self.target);
             return false;
         }
-        let response = response.clamp(0.01, 2.0);
-        let damping = damping.clamp(0.1, 2.0);
+        // `f32::clamp` *preserves* NaN, so clamping is not sanitizing. TOML
+        // accepts `nan` as a float literal, so `spring_response = nan` in a
+        // hand-edited config reaches here intact, makes `omega` NaN, and then
+        // `value` NaN -- at which point `value != target` is true for ever,
+        // `moving()` never goes false, and the event loop never sleeps again.
+        // A config typo that silently pins a core at 100% is exactly what the
+        // settle guarantee exists to rule out, so it is ruled out twice: the
+        // config boundary sanitizes, and so does this.
+        let response = if response.is_finite() { response.clamp(0.01, 2.0) } else { 0.16 };
+        let damping = if damping.is_finite() { damping.clamp(0.1, 2.0) } else { 1.0 };
         // Angular frequency from the response time, the standard
         // (response, damping ratio) parameterization.
         let omega = std::f32::consts::TAU / response;
@@ -131,6 +144,15 @@ impl Spring {
             self.value += self.velocity * h;
         }
 
+        // The invariant this whole module exists for, checked rather than
+        // reasoned about: a non-finite value can never come to rest, because
+        // `NaN != target` is true for ever. Nothing above should be able to
+        // produce one now, and if something later can, it ends the animation
+        // instead of the machine's idle.
+        if !self.value.is_finite() || !self.velocity.is_finite() {
+            self.snap_to(self.target);
+            return false;
+        }
         if (self.value - self.target).abs() <= REST_VALUE && self.velocity.abs() <= REST_VELOCITY {
             self.snap_to(self.target);
             return false;
@@ -224,6 +246,47 @@ mod tests {
         let mut s = Spring::at(0.0);
         s.retarget(5.0);
         assert!(!s.step(f32::NAN, RESPONSE, CRITICAL));
+        assert!(s.value().is_finite());
+    }
+
+    #[test]
+    fn a_nonsense_parameter_cannot_make_a_spring_that_never_stops() {
+        // `f32::clamp` preserves NaN, so clamping to the schema's range is not
+        // sanitizing -- and TOML accepts `nan` as a float literal, so
+        // `spring_response = nan` reaches the integrator intact from a
+        // hand-edited config. NaN omega gives NaN value, `value != target` is
+        // then true for ever, `moving()` never goes false, and the event loop
+        // never sleeps again: a config typo pinning a core at 100%.
+        for (response, damping) in [
+            (f32::NAN, CRITICAL),
+            (RESPONSE, f32::NAN),
+            (f32::NAN, f32::NAN),
+            (f32::INFINITY, CRITICAL),
+            (RESPONSE, f32::NEG_INFINITY),
+        ] {
+            let mut s = Spring::at(0.0);
+            s.retarget(10.0);
+            for _ in 0..2_000 {
+                if !s.step(1.0 / 60.0, response, damping) {
+                    break;
+                }
+            }
+            assert!(
+                !s.moving(),
+                "response {response} damping {damping} must still come to rest"
+            );
+            assert!(s.value().is_finite(), "and must not leave a NaN behind");
+        }
+    }
+
+    #[test]
+    fn a_spring_cannot_be_parked_on_a_value_it_can_never_leave() {
+        // `snap_to` is "arrive immediately", and a non-finite target is the one
+        // argument that could make it fail to arrive: `NaN != NaN`, so
+        // `moving()` would stay true even after snapping.
+        let mut s = Spring::at(0.0);
+        s.snap_to(f32::NAN);
+        assert!(!s.moving(), "snapping must always end the animation");
         assert!(s.value().is_finite());
     }
 

@@ -201,11 +201,21 @@ impl From<&zest_config::Settings> for Config {
             motion_enabled: s.motion.enabled,
             respect_reduce_motion: s.motion.respect_system_reduce_motion,
             smooth_scroll: s.motion.smooth_scroll,
-            // Clamped to the schema's own ranges: these reach an integrator,
-            // and a zero or negative response is a division by zero wearing a
-            // preference's clothes.
-            spring_response: s.motion.spring_response.clamp(0.01, 2.0),
-            spring_damping: s.motion.spring_damping.clamp(0.1, 2.0),
+            // Sanitized, then clamped to the schema's own ranges: these reach
+            // an integrator, a zero or negative response is a division by zero
+            // wearing a preference's clothes -- and `f32::clamp` *preserves*
+            // NaN, while TOML accepts `nan` as a float literal. A config typo
+            // must not be able to make a spring that never settles.
+            spring_response: finite_or(
+                s.motion.spring_response,
+                zest_config::settings::Motion::default().spring_response,
+            )
+            .clamp(0.01, 2.0),
+            spring_damping: finite_or(
+                s.motion.spring_damping,
+                zest_config::settings::Motion::default().spring_damping,
+            )
+            .clamp(0.1, 2.0),
             // Empty means "inherit", which is not the same as a cwd of `""` —
             // that would be an invalid directory and fail every spawn.
             shell_cwd: (!s.shell.cwd.trim().is_empty())
@@ -3137,6 +3147,15 @@ impl App {
     /// own `Instant::now()` drift apart within a second and the drift is
     /// visible where they meet.
     fn step_motion(&mut self) -> bool {
+        // Asked every frame, not only when the wheel turns: `motion.enabled`
+        // can go false, or the OS can be asked to reduce motion, *while*
+        // something is in flight -- and an animation that carried on after the
+        // user switched it off would be one more setting that does not apply.
+        if !self.motion_allowed() || !self.config.smooth_scroll {
+            self.scroll_spring.snap_to(0.0);
+            self.last_anim = None;
+            return false;
+        }
         if !self.scroll_spring.moving() {
             // Nothing in flight: drop the clock so the next animation starts
             // from a fresh `dt` rather than integrating however long the
@@ -12076,6 +12095,22 @@ fn pane_opacity(window: f32, identity: Option<&crate::tabs::ProfileIdentity>) ->
     identity.and_then(|i| i.opacity).map_or(window, |o| o.clamp(0.0, 1.0))
 }
 
+/// `value` when it is a real number, `fallback` when it is not.
+///
+/// `f32::clamp` preserves NaN, so clamping a hand-edited `nan` out of a config
+/// file does nothing at all — and a NaN reaching the spring integrator makes an
+/// animation that can never report rest, which is the event loop never sleeping
+/// again. The fallback is the schema's own default, so a nonsense value behaves
+/// as though the key had been left out.
+fn finite_or(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value
+    } else {
+        tracing::warn!(?value, "a motion setting is not a real number; using the default");
+        fallback
+    }
+}
+
 /// The theme this window should actually be wearing.
 ///
 /// Resolved here rather than in the cascade, which is where it used to live and
@@ -12447,6 +12482,23 @@ mod motion_settings_tests {
         s.motion.spring_damping = 99.0;
         let c = Config::from(&s);
         assert!(c.spring_response <= 2.0 && c.spring_damping <= 2.0);
+    }
+
+    #[test]
+    fn a_nonsense_spring_setting_falls_back_to_the_default() {
+        // TOML accepts `nan` and `inf` as float literals, and `f32::clamp`
+        // preserves NaN -- so without sanitizing, one character in a config
+        // file produces a spring that never settles and an event loop that
+        // never sleeps.
+        let default = zest_config::Settings::default().motion;
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut s = zest_config::Settings::default();
+            s.motion.spring_response = bad;
+            s.motion.spring_damping = bad;
+            let c = Config::from(&s);
+            assert_eq!(c.spring_response, default.spring_response, "{bad} -> the schema default");
+            assert_eq!(c.spring_damping, default.spring_damping);
+        }
     }
 
     #[test]

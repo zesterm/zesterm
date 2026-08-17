@@ -253,9 +253,10 @@ pub fn set_background_color(_window: &winit::window::Window, _r: u8, _g: u8, _b:
 ///
 /// An accessibility setting, not a preference we own: vestibular disorders make
 /// animated scrolling genuinely unpleasant, and `motion.respect_system_reduce_motion`
-/// defaults to on for that reason. Queried rather than cached at startup so
-/// toggling it in System Settings takes effect at the next config reload
-/// instead of the next launch — the call is a cheap property read either way.
+/// defaults to on for that reason. Read live on every consultation rather than
+/// cached at startup — it is a cheap property read, and caching it would mean
+/// toggling the switch in System Settings did nothing until the app was
+/// restarted, which is the class of bug this whole sweep is closing.
 ///
 /// `false` where the platform has no such notion, which is the honest answer:
 /// it means "nothing has asked us to reduce motion", not "motion is wanted".
