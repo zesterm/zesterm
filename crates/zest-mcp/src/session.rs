@@ -123,6 +123,29 @@ impl Replica {
         self.term.in_alt_screen()
     }
 
+    /// The modes the host has set on this session.
+    ///
+    /// Two of them decide how a keystroke is spelled, and neither is on the
+    /// wire anywhere else: `SessionInfo` carries `alt_screen` and nothing more,
+    /// so `Keyframe.modes` and `DeltaOp::Modes` -- that is, a replica -- are the
+    /// only way to learn them. That is why `input` attaches for the calls that
+    /// need them and only those.
+    #[must_use]
+    pub fn modes(&self) -> Modes {
+        self.term.modes()
+    }
+
+    /// Text delivered the way a person pasting delivers it.
+    ///
+    /// [`zest_core::Terminal::encode_paste`] rather than a second copy of the
+    /// rule here: it normalizes line endings and wraps in the bracketed-paste
+    /// markers exactly when the program asked for them, and the native window
+    /// pastes through the same function.
+    #[must_use]
+    pub fn encode_paste(&self, text: &str) -> Vec<u8> {
+        self.term.encode_paste(text)
+    }
+
     #[must_use]
     pub fn title(&self) -> &str {
         &self.title

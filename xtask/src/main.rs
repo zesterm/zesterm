@@ -92,6 +92,15 @@ const BOUNDARIES: &[Boundary] = &[
     // copy of the app's session handling, which is the shape ADR-007 exists to
     // prevent. Written as a rule rather than left to absence: a crate in no list
     // is unconstrained, and this one has an obvious wrong direction to grow in.
+    //
+    // The `winit` entry has a dev-dependency beside it and still means what it
+    // says: `zest-mcp` carries `zest-input` (and so `winit`) in
+    // `[dev-dependencies]` for `tests/keys.rs`, which holds its named-key table
+    // byte-for-byte against the encoder the native window uses. `cargo tree
+    // --edges normal` does not see it, per the note on `TLS_AND_HTTP` below, so
+    // this is allowed rather than overlooked -- a window toolkit reachable from
+    // a *test* is not the failure this rule exists to catch, and nothing here
+    // ships in the binary.
     Boundary {
         krate: "zest-mcp",
         forbidden: &[&["wgpu", "winit", "zest-app", "zest-render-wgpu", "zest-font"]],

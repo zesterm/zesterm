@@ -20,6 +20,6 @@ pub mod mouse;
 pub mod select;
 
 pub use ime::{Ime, Preedit};
-pub use key::encode;
+pub use key::{encode, encode_press};
 pub use mouse::{encode_mouse, MouseAction, MouseButton};
 pub use select::MouseState;

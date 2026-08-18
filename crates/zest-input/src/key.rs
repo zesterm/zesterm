@@ -107,6 +107,31 @@ pub fn encode(event: &KeyEvent, mods: ModifiersState, modes: Modes) -> Option<Ve
     .encode(modes)
 }
 
+/// Encode a key press from its parts, for a caller with no `KeyEvent`.
+///
+/// [`KeyEvent`] has a private platform tail and cannot be constructed outside
+/// winit -- this file's own tests say so and route around it through
+/// `KeyPress`. So a consumer that must be held *against* this encoder had no
+/// way to reach it, and `zest-mcp`'s `keys.rs` is exactly that: a third
+/// implementation of one table, after `clients/web/packages/input/src/key.ts`.
+/// It is pinned byte-for-byte by `zest-mcp/tests/keys.rs`, which calls this.
+///
+/// **Not a second path.** It builds the same [`KeyPress`] [`encode`] builds, so
+/// a divergence between the two is impossible by construction rather than by
+/// review.
+///
+/// Presses only. Releases and repeats are expressible only under the kitty
+/// protocol, which needs the whole `KeyEvent` to say which one it was.
+#[must_use]
+pub fn encode_press(
+    key: &Key,
+    location: KeyLocation,
+    mods: ModifiersState,
+    modes: Modes,
+) -> Option<Vec<u8>> {
+    KeyPress { key, location, mods, event: EventType::Press }.encode(modes)
+}
+
 impl KeyPress<'_> {
     fn encode(&self, modes: Modes) -> Option<Vec<u8>> {
         // Falling through with Super held would encode the *unmodified* key, so

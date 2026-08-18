@@ -37,10 +37,12 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{json, Value};
+use zest_core::Modes;
 use zest_proto::{BlockPayload, BlockState, ClientMessage, SessionAddr};
 
 use crate::addr::{AddrError, Resolver};
 use crate::conn::{Conn, ConnError};
+use crate::keys::{self, Chord, KeyError};
 use crate::run::{self, Anchor, Progress, Refusal};
 use crate::session::Replica;
 
@@ -70,6 +72,11 @@ pub enum ToolError {
     /// to reach for instead and that text is the whole value.
     #[error("{0}")]
     Run(#[from] Refusal),
+    /// A key name `input` will not act on. Same reasoning as [`Self::Run`]:
+    /// every arm names what to send instead, and a key that is quietly ignored
+    /// is indistinguishable from one the application chose not to handle (#345).
+    #[error("{0}")]
+    Key(#[from] KeyError),
 }
 
 /// Where an exit code came from, carried on every one this server reports.
@@ -300,22 +307,87 @@ impl ToolSet {
         })
     }
 
+    /// Type into a session: characters, named keys, or a paste.
+    ///
+    /// # Every part is its own write, and why that is not enough
+    ///
+    /// `submit` used to append `\r` to the same buffer as the text, and a TUI
+    /// that tells a keystroke from a paste on exactly that boundary read the
+    /// whole thing as pasted: the CR became a literal newline in the composer
+    /// and nothing was submitted, so every message cost two round trips (#344).
+    ///
+    /// Each part is now its own [`ClientMessage::Input`], which is one
+    /// `write_all` in the daemon and one unbuffered `write` on the pty -- the
+    /// path holds no batching anywhere. **That is necessary and not
+    /// sufficient.** A tty hands the next raw-mode `read()` everything queued,
+    /// so a child that was not already parked in `read` still sees both writes
+    /// in one buffer; on Windows there is no read boundary to preserve at all,
+    /// since conhost parses the pipe into input records on its own schedule.
+    /// The split removes the case that was *always* wrong and leaves a race.
+    ///
+    /// What actually closes it is `paste`, because then the boundary is in the
+    /// byte stream rather than in a read the caller does not control.
+    ///
+    /// # `paste` is an argument, never an inference on `text`
+    ///
+    /// The tempting version -- wrap `text` in the bracketed-paste markers
+    /// whenever the session has DEC 2004 set -- is wrong, and quietly. 2004 is
+    /// set for a program's whole run, not for the moments a paste would be
+    /// right: `nvim` has it on in normal mode, so `text: ":wq"` would be
+    /// *inserted into the buffer* instead of executed, with nothing to see. A
+    /// wrong action that looks like success is the worst thing this crate can
+    /// produce.
+    ///
+    /// The web client already ruled on this and ruled that it must be explicit:
+    /// `packages/input/src/paste.ts` brackets and `text.ts` refuses to, on the
+    /// grounds that "a composition commit is typing". These two arguments are
+    /// those two functions.
+    ///
+    /// The CR is never *inside* the markers. zsh, bash readline and PSReadLine
+    /// all insert a bracketed paste into the line buffer without running it, and
+    /// a CR within the brackets is inserted literally -- which is #344 again in
+    /// a different hat. Outside them it executes, exactly as it does for a
+    /// person who pastes and then presses Enter.
     fn input(&self, addr: SessionAddr, args: &Value) -> Result<Value, ToolError> {
-        let text = args.get("text").and_then(Value::as_str).unwrap_or("");
-        let submit = args.get("submit").and_then(Value::as_bool).unwrap_or(false);
-        if text.is_empty() && !submit {
-            return Err(ToolError::Missing { field: "text" });
-        }
-        let mut bytes = text.as_bytes().to_vec();
-        if submit {
-            // `\r`, not `\n`. It is a terminal on the other end, and a line
-            // feed is not what Enter sends.
-            bytes.push(b'\r');
-        }
-        // No attach needed: `Input` is not a subscriber operation, so typing
-        // into a session costs nothing and disturbs no arbitration.
-        self.conn.send(ClientMessage::Input { session: addr, bytes });
-        Ok(json!({ "session": Resolver::format(addr), "sent": true }))
+        // Parse everything before sending anything. A refusal on a bad third
+        // key must leave the session untouched rather than half-typed-into.
+        let plan = Plan::parse(args)?;
+
+        // Only the six DECCKM-sensitive keys and a paste need the session's
+        // modes, and those are reachable only from a replica -- `SessionInfo`
+        // carries `alt_screen` and nothing else. So the common calls
+        // (`{text, submit}`, `ctrl+c`, `enter`, `tab`, `f5`, ...) still type
+        // with no attach at all, as this tool always has.
+        let sent = if plan.needs_modes() {
+            // Encoded *and sent* inside the attachment. Encoding there is what
+            // stops the modes going stale between reading them and writing with
+            // them; sending there is what keeps `Registry::sweep` from
+            // collecting a session between our detach and our bytes, which
+            // would drop them silently. `attached` is a no-op when a replica
+            // already exists, which it does whenever the caller has been
+            // reading `screen`.
+            //
+            // The cost of the attach lands on a session that has died: this
+            // waits out the reply deadline rather than refusing at once, the
+            // same way `screen` and `blocks` already do. That is #347, and it
+            // is one refusal for every tool rather than a new one here.
+            self.attached(addr, |r| {
+                let writes = plan.writes(r.modes(), |t| r.encode_paste(t));
+                let sent = writes.len();
+                for bytes in writes {
+                    self.conn.send(ClientMessage::Input { session: addr, bytes });
+                }
+                Ok(sent)
+            })?
+        } else {
+            let writes = plan.writes(Modes::empty(), |t| t.as_bytes().to_vec());
+            let sent = writes.len();
+            for bytes in writes {
+                self.conn.send(ClientMessage::Input { session: addr, bytes });
+            }
+            sent
+        };
+        Ok(json!({ "session": Resolver::format(addr), "sent": true, "writes": sent }))
     }
 
     /// Send `^C`, as a person would.
@@ -327,6 +399,11 @@ impl ToolSet {
     /// `run` promising that a timeout does not kill is only honest if there is
     /// a way to stop what it started — an agent that can begin a `sleep 30`
     /// and not end it has been handed a leak, not a primitive.
+    ///
+    /// `input` can now spell it — `keys: ["ctrl+c"]` produces this exact byte,
+    /// and a test asserts the two agree. The tool stays anyway: it is the chord
+    /// an agent reaches for under pressure, five other tool descriptions point
+    /// at it by name, and one byte does not need a string parser at runtime.
     ///
     /// No attach: `Input` is not a subscriber operation.
     fn interrupt(&self, addr: SessionAddr) -> Result<Value, ToolError> {
@@ -604,6 +681,133 @@ impl ToolSet {
     }
 }
 
+/// One `input` call, parsed, before anything is sent.
+///
+/// Pure and separate from the tool for the reason `run.rs` is: the thing worth
+/// testing here is *how many writes and in what order*, and a message boundary
+/// is not observable from a client watching a real pty. So the #344 regression
+/// test lives against this type and asserts two entries where there used to be
+/// one -- a live test could not have caught the bug it fixes.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Plan {
+    text: Option<String>,
+    paste: Option<String>,
+    keys: Vec<Chord>,
+}
+
+impl Plan {
+    fn parse(args: &Value) -> Result<Self, ToolError> {
+        // An empty string types nothing, so it is *absent* rather than a write
+        // of zero bytes -- which the daemon drops anyway, leaving a call that
+        // reported success and did nothing. This is also what `text` meant
+        // before `keys` existed.
+        let text = opt_str(args, "text")?.filter(|t| !t.is_empty()).map(str::to_string);
+        let paste = opt_str(args, "paste")?.filter(|t| !t.is_empty()).map(str::to_string);
+        // One slot, two spellings: which one is meant decides whether the bytes
+        // are bracketed, and there is no sensible order for both at once.
+        if text.is_some() && paste.is_some() {
+            return Err(ToolError::BadType {
+                field: "text",
+                want: "used on its own -- `text` is typing and `paste` is pasting, so send one \
+                       or the other",
+            });
+        }
+
+        let mut keys = match args.get("keys") {
+            None | Some(Value::Null) => Vec::new(),
+            // A bare string is unambiguous, and refusing it would cost a round
+            // trip to teach a model something the schema already says.
+            Some(Value::String(one)) => vec![one.parse::<Chord>()?],
+            Some(Value::Array(list)) => list
+                .iter()
+                .map(|v| match v.as_str() {
+                    Some(name) => name.parse::<Chord>().map_err(ToolError::from),
+                    None => Err(ToolError::BadType { field: "keys", want: "a list of key names" }),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            Some(_) => {
+                return Err(ToolError::BadType {
+                    field: "keys",
+                    want: "a key name or a list of key names",
+                })
+            }
+        };
+
+        // Sugar, implemented as the thing it is sugar for so the two cannot
+        // drift. `\r`, not `\n`: it is a terminal on the other end, and a line
+        // feed is not what Enter sends.
+        if opt_bool(args, "submit")?.unwrap_or(false) {
+            let enter = "enter".parse::<Chord>().expect("`enter` is in the table");
+            // `submit` *is* a trailing Enter, so asking for both sends two --
+            // and in a dialog the second one accepts whatever the first opened.
+            // Refused rather than de-duplicated: silently dropping a keystroke
+            // the caller asked for would make `keys: ["enter", "enter"]`
+            // unpredictable, and a caller who wants two can still say so.
+            if plan_ends_with_enter(&keys) {
+                return Err(ToolError::BadType {
+                    field: "submit",
+                    want: "left off when `keys` already ends with \"enter\" -- together they \
+                           press Enter twice, and the second accepts whatever the first opened",
+                });
+            }
+            keys.push(enter);
+        }
+
+        if text.is_none() && paste.is_none() && keys.is_empty() {
+            return Err(ToolError::BadType {
+                field: "text",
+                want: "given, along with or instead of `paste`, `keys` or `submit` -- this call \
+                       would type nothing",
+            });
+        }
+        Ok(Self { text, paste, keys })
+    }
+
+    /// Whether encoding this needs the session's modes.
+    ///
+    /// A paste needs DEC 2004 and the cursor family needs DECCKM. Nothing else
+    /// does, which is what keeps ordinary typing free of an attach.
+    fn needs_modes(&self) -> bool {
+        self.paste.is_some() || self.keys.iter().any(keys::needs_modes)
+    }
+
+    /// Every write this call makes, in order. One entry is one
+    /// [`ClientMessage::Input`], which is one `write` on the pty.
+    fn writes(&self, modes: Modes, encode_paste: impl Fn(&str) -> Vec<u8>) -> Vec<Vec<u8>> {
+        let mut out = Vec::with_capacity(2 + self.keys.len());
+        if let Some(t) = &self.text {
+            out.push(t.as_bytes().to_vec());
+        }
+        if let Some(p) = &self.paste {
+            out.push(encode_paste(p));
+        }
+        out.extend(self.keys.iter().map(|c| keys::encode(c, modes)));
+        out
+    }
+}
+
+/// Whether these keys already end in a plain Enter, which `submit` would repeat.
+///
+/// Plain: a modified Enter is a different chord that applications distinguish
+/// (`alt+enter` opens a line in several editors), so it does not collide.
+fn plan_ends_with_enter(keys: &[Chord]) -> bool {
+    keys.last().is_some_and(|c| {
+        c.base == keys::Base::Named(keys::Named::Enter) && c.mods == keys::Mods::default()
+    })
+}
+
+/// A string argument, refusing a wrong type rather than reading it as absent.
+///
+/// The same reasoning as [`opt_bool`]: `{"text": 42}` silently becoming "no
+/// text" is a call that reports success and types nothing.
+fn opt_str<'a>(args: &'a Value, field: &'static str) -> Result<Option<&'a str>, ToolError> {
+    match args.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s)),
+        Some(_) => Err(ToolError::BadType { field, want: "a string" }),
+    }
+}
+
 /// What blocks are, and are not, on the alternate screen.
 ///
 /// One constant because `blocks` now refuses in two places — before a wait and
@@ -774,6 +978,14 @@ fn submit_and_wait(
 
     // `\r`, not `\n`. It is a terminal on the other end and a line feed is not
     // what Enter sends -- the same rule `input` states next door.
+    //
+    // One write, command and CR together, deliberately -- **not** the split
+    // `input` makes for #344. `anchor_when_ready` has already established that
+    // this is a shell sitting at a prompt (no alt screen, no command running),
+    // where readline takes the whole buffer correctly and the paste/keystroke
+    // distinction a TUI draws does not exist. Splitting it here would change
+    // bytes that `tests/replay.rs` pins against recorded sessions, to fix
+    // nothing. The two differ on purpose.
     let mut bytes = command.as_bytes().to_vec();
     bytes.push(b'\r');
     conn.send(ClientMessage::Input { session: addr, bytes });
@@ -1213,6 +1425,164 @@ fn opt_u16(args: &Value, field: &'static str) -> Result<Option<u16>, ToolError> 
             Ok(n) if u32::from(n) <= MAX_DIMENSION => Ok(Some(n)),
             _ => Err(ToolError::BadType { field, want: "at most 1000" }),
         },
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+
+    /// The writes one call makes, with no session and no daemon.
+    ///
+    /// `encode_paste` is stubbed as the plain-text branch here; the bracketing
+    /// itself is `Terminal::encode_paste`, tested in `zest-core` and reached
+    /// through `Replica::encode_paste` so there is no second copy of the rule.
+    fn writes(args: Value, modes: Modes) -> Vec<Vec<u8>> {
+        Plan::parse(&args)
+            .expect("this call should parse")
+            .writes(modes, |t| t.as_bytes().to_vec())
+    }
+
+    #[test]
+    fn submit_is_its_own_write() {
+        // #344. The text and the CR used to share one `ClientMessage::Input`,
+        // which is one `write` on the pty -- and a TUI that tells a keystroke
+        // from a paste on that boundary took the whole thing as pasted, so the
+        // CR landed in the composer as a newline and nothing submitted.
+        //
+        // This assertion lives here rather than in `tests/live.rs` because a
+        // message boundary is not observable from a client watching a real pty:
+        // a live test could not have caught the bug it fixes.
+        let out = writes(json!({ "text": "echo hi", "submit": true }), Modes::empty());
+        assert_eq!(
+            out,
+            vec![b"echo hi".to_vec(), b"\r".to_vec()],
+            "the text and the Enter must be two writes, not one"
+        );
+    }
+
+    #[test]
+    fn submit_is_exactly_the_enter_key() {
+        // Sugar implemented as the thing it is sugar for, so the two cannot
+        // drift into disagreeing about what Enter sends.
+        assert_eq!(
+            writes(json!({ "submit": true }), Modes::empty()),
+            writes(json!({ "keys": ["enter"] }), Modes::empty())
+        );
+    }
+
+    #[test]
+    fn every_key_is_its_own_write() {
+        // #345 measured several sequences in one write being swallowed whole.
+        let out = writes(json!({ "keys": ["down", "down", "enter"] }), Modes::empty());
+        assert_eq!(out.len(), 3, "three keys, three keystrokes: {out:?}");
+        assert_eq!(out[0], b"\x1b[B");
+        assert_eq!(out[2], b"\r");
+    }
+
+    #[test]
+    fn the_parts_are_written_in_a_stated_order() {
+        let out = writes(
+            json!({ "text": "hi", "keys": ["tab"], "submit": true }),
+            Modes::empty(),
+        );
+        assert_eq!(out, vec![b"hi".to_vec(), b"\t".to_vec(), b"\r".to_vec()]);
+    }
+
+    #[test]
+    fn a_bad_key_sends_nothing_at_all() {
+        // Parsed before anything is written, so a refusal on the third key
+        // leaves the session untouched rather than half-typed-into -- which
+        // would be unrecoverable, since nothing can un-type it.
+        let err = Plan::parse(&json!({ "keys": ["down", "down", "nope"] }))
+            .expect_err("an unknown key must refuse");
+        assert!(err.to_string().contains("pageup"), "and name the vocabulary: {err}");
+    }
+
+    #[test]
+    fn text_and_paste_are_not_both() {
+        // Which one is meant decides whether the bytes are bracketed, and there
+        // is no sensible order for both at once.
+        assert!(Plan::parse(&json!({ "text": "a", "paste": "b" })).is_err());
+    }
+
+    #[test]
+    fn a_call_that_would_type_nothing_is_refused() {
+        let err = Plan::parse(&json!({})).expect_err("an empty call types nothing");
+        assert!(err.to_string().contains("paste"), "the refusal names the options: {err}");
+    }
+
+    #[test]
+    fn only_arrows_and_pastes_need_an_attach() {
+        // What keeps ordinary typing free of an attach, as this tool always was.
+        let needs = |v: Value| Plan::parse(&v).expect("parses").needs_modes();
+        assert!(needs(json!({ "keys": ["up"] })), "DECCKM decides what Up sends");
+        assert!(needs(json!({ "paste": "x" })), "DEC 2004 decides whether to bracket");
+        assert!(!needs(json!({ "text": "hi", "submit": true })));
+        assert!(!needs(json!({ "keys": ["ctrl+c", "f5", "pageup"] })));
+    }
+
+    #[test]
+    fn arrows_follow_the_sessions_mode() {
+        assert_eq!(writes(json!({ "keys": ["up"] }), Modes::empty())[0], b"\x1b[A");
+        assert_eq!(writes(json!({ "keys": ["up"] }), Modes::APP_CURSOR)[0], b"\x1bOA");
+    }
+
+    #[test]
+    fn a_single_key_may_be_named_without_a_list() {
+        // Unambiguous, and refusing it would cost a round trip to teach a model
+        // something the schema already says.
+        assert_eq!(
+            writes(json!({ "keys": "enter" }), Modes::empty()),
+            vec![b"\r".to_vec()]
+        );
+    }
+
+    #[test]
+    fn an_empty_string_types_nothing_rather_than_writing_nothing() {
+        // `{"text": ""}` used to pass validation and send a zero-byte write,
+        // which the daemon drops -- so the call reported success and did
+        // nothing at all.
+        assert!(Plan::parse(&json!({ "text": "" })).is_err());
+        assert!(Plan::parse(&json!({ "paste": "" })).is_err());
+        // ...but an empty text alongside a real key is just an absent text.
+        assert_eq!(writes(json!({ "text": "", "submit": true }), Modes::empty()), vec![b"\r".to_vec()]);
+    }
+
+    #[test]
+    fn submit_alongside_a_trailing_enter_is_refused_not_doubled() {
+        // Two Enters in a dialog: the second accepts whatever the first opened.
+        // Refused rather than de-duplicated, so that a caller who genuinely
+        // wants two can still ask for them.
+        assert!(Plan::parse(&json!({ "keys": ["enter"], "submit": true })).is_err());
+        assert!(
+            Plan::parse(&json!({ "keys": ["enter", "enter"] })).is_ok(),
+            "asking for two Enters explicitly stays possible"
+        );
+        // A modified Enter is a different chord -- `alt+enter` opens a line in
+        // several editors -- so it does not collide with `submit`.
+        assert_eq!(
+            writes(json!({ "keys": ["alt+enter"], "submit": true }), Modes::empty()).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn the_interrupt_tool_and_the_ctrl_c_key_send_the_same_byte() {
+        // `interrupt` keeps its own `ETX` const -- one byte does not need a
+        // string parser at runtime -- so this is what stops the two drifting
+        // now that `input` can spell the same chord.
+        assert_eq!(writes(json!({ "keys": ["ctrl+c"] }), Modes::empty()), vec![vec![ETX]]);
+    }
+
+    #[test]
+    fn a_wrongly_typed_argument_is_refused_rather_than_read_as_absent() {
+        // `{"submit": "true"}` used to be silently dropped by `as_bool`, so the
+        // call reported success and submitted nothing -- a plausible model
+        // emission, and a plausible contributor to the #344 reports.
+        assert!(Plan::parse(&json!({ "text": "x", "submit": "true" })).is_err());
+        assert!(Plan::parse(&json!({ "text": 42 })).is_err());
+        assert!(Plan::parse(&json!({ "keys": [42] })).is_err());
     }
 }
 
