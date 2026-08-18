@@ -205,6 +205,16 @@ fn a_harness_can_handshake_list_tools_and_read_a_session() {
     for want in ["wait", "timeout_ms"] {
         assert!(!schema_of("blocks")[want].is_null(), "`blocks` must advertise `{want}`");
     }
+    // Same rule for the keys surface. A model that cannot see `keys` in the
+    // schema goes on hand-encoding escape sequences into `text`, which is the
+    // thing #345 measured at roughly 2 attempts in 10.
+    for want in ["text", "paste", "keys", "submit"] {
+        assert!(!schema_of("input")[want].is_null(), "`input` must advertise `{want}`");
+    }
+    assert_eq!(
+        schema_of("input")["keys"]["type"], "array",
+        "`keys` is advertised as a list, so one call can send several"
+    );
 
     let hosts = h.call(&serde_json::json!({
         "jsonrpc": "2.0", "id": 3, "method": "tools/call",

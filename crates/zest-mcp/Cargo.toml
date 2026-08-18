@@ -47,3 +47,13 @@ serde_json = { workspace = true }
 # `tests/live.rs` drives `serve()` in-process, so there is no binary to find and
 # no socket path to collide on.
 zest-daemon = { workspace = true }
+# Not a runtime dependency, deliberately: `zest-input`'s public API takes winit
+# types and this is a headless stdio binary -- the `winit` entry in this crate's
+# `xtask` boundary still means what it says. It is here for `tests/keys.rs`
+# alone, which holds `src/keys.rs` byte-for-byte against the encoder the native
+# window uses. Without it a third copy of one table drifts, which is what gave
+# `Grid::drop_scrollback_rows` three semantics.
+zest-input = { workspace = true }
+# The cross-check's vocabulary: `Key`, `NamedKey`, `ModifiersState`. Test builds
+# only; nothing here reaches the binary.
+winit = { workspace = true }

@@ -1247,6 +1247,42 @@ opened its block a beat later, roughly one run in eight. Nothing on the wire say
 bounded drain afterwards; the alternative is reporting a command that plainly ran
 as never having started.
 
+### This client's keystrokes are encoded server-side, and that is an exception
+
+`crates/zest-input/src/lib.rs` states the rule the other way round: the protocol
+has the *keyboard* encode a keystroke, because modifier conventions belong to the
+platform that produced the event, and every Rust consumer already holds a
+`winit::KeyEvent`. An agent holds nothing. It has no keyboard, no layout and no
+platform, so `zest-mcp` takes named keys — `down`, `shift+tab`, `ctrl+c` — and
+encodes them from the session's own `Modes`.
+
+That is forced rather than chosen. An arrow is `ESC [ A` or `ESC O A` depending on
+DECCKM, which is set by the program and lives on the host, so the encoding cannot
+be done anywhere else and be right. Asking a model to emit the sequence itself was
+measured at roughly 2 attempts in 10 reaching the application (#345). The cost is a
+third implementation of one table, and it is paid down by a test rather than by
+care: `zest-mcp/tests/keys.rs` holds it byte-for-byte against `zest-input`.
+
+### The paste boundary has to be stated, because it cannot be inferred
+
+A terminal distinguishes typing from pasting, and applications act on the
+difference — that is what DEC 2004 is for. Two things follow for an agent surface.
+
+**A write boundary is not a read boundary.** Sending text and its Enter as two
+`ClientMessage::Input`s gives two `write`s on the pty and nothing more: a tty
+hands the next raw-mode `read()` everything queued, and on Windows conhost parses
+the input pipe into console records on its own schedule. So splitting removes the
+case that was always wrong and leaves a race. The boundary that survives is one
+carried *in the byte stream* — the bracketed-paste markers.
+
+**And which of the two was meant cannot be guessed from the mode.** 2004 is set
+for a program's whole run, not for the moments a paste would be right; `nvim` has
+it on in normal mode. So wrapping text automatically whenever the bit is set would
+turn `:wq` into a buffer insertion, silently — a wrong action that looks like
+success, which is the failure class this crate spends the most effort avoiding.
+`input` therefore has `text` and `paste` as separate arguments, mirroring the web
+client's `text.ts` and `paste.ts`, and infers nothing. (#344)
+
 ### The trap this ADR was written after
 
 `HostMessage::Exited { code: Option<i32> }` existed on the wire from protocol 2

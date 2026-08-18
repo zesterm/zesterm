@@ -186,17 +186,51 @@ fn tool_definitions() -> Value {
         {
             "name": "input",
             "description":
-                "Type into a session, as if at the keyboard. Set `submit` to press Enter \
-                 afterwards. This goes into a live terminal a person may be using: it \
-                 can answer a prompt, and it can equally interrupt what they are doing.",
+                "Type into a session, as if at the keyboard. `text` is characters, `keys` \
+                 is named keys, and `paste` is text delivered the way a person pasting \
+                 delivers it. \
+                 Use `keys` rather than writing escape sequences into `text`: an arrow is \
+                 `ESC [ A` or `ESC O A` depending on a mode only this server can see, so a \
+                 hand-written sequence is right about half the time and silently does \
+                 nothing the rest. \
+                 Each part is sent as its own keystroke, in the order text, paste, keys, \
+                 submit -- so a full-screen program that tells a keystroke from a paste \
+                 sees them as separate events rather than as one. \
+                 This goes into a live terminal a person may be using: it can answer a \
+                 prompt, and it can equally interrupt what they are doing.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "session": { "type": "string", "description": SESSION_DESC },
-                    "text": { "type": "string", "description": "The characters to type." },
+                    "text": {
+                        "type": "string",
+                        "description": "The characters to type, sent as one keystroke run."
+                    },
+                    "paste": {
+                        "type": "string",
+                        "description":
+                            "Text to deliver as a paste. Wrapped in bracketed-paste markers \
+                             when the program asked for them, exactly as a real terminal \
+                             does, so an editor or a composer takes it as pasted text rather \
+                             than as keystrokes. Newlines become carriage returns. Cannot be \
+                             combined with `text`."
+                    },
+                    "keys": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description":
+                            "Named keys, each sent as its own keystroke, in order: enter, \
+                             esc, tab, backspace, delete, insert, space, up, down, left, \
+                             right, home, end, pageup, pagedown, f1-f12. Prefix with `ctrl+`, \
+                             `alt+` and/or `shift+` in any order -- `shift+tab`, \
+                             `ctrl+shift+left`. `ctrl+<letter>` sends that control code. An \
+                             unknown name is refused rather than ignored."
+                    },
                     "submit": {
                         "type": "boolean",
-                        "description": "Press Enter after the text. Default false."
+                        "description":
+                            "Press Enter after everything else, as its own keystroke. The \
+                             same as putting \"enter\" last in `keys`. Default false."
                     }
                 },
                 "required": ["session"]

@@ -27,7 +27,7 @@ is reported rather than gated.
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store, sealed channel |
 | `zest-cloud` | ✅ `TlsDuplex`, one connection as two independently owned halves, a one-request HTTP POST over it, `Endpoint` — consumed by `--enroll` and by `--relay`'s per-pipe dial-back |
 | `zest-daemon` | ✅ session ownership *and* lifecycle, protocol loop, loopback / LAN / WebSocket / relay transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing, publishes its own profiles, reports what a child exited with |
-| `zest-mcp` | ✅ reads, drives and runs terminals over MCP on stdio; `run` correlates a command in the user's own shell and `run_isolated` carries the unforgeable exit code; `screen` and `blocks` wait instead of the caller sleeping — ⬜ fleet reach |
+| `zest-mcp` | ✅ reads, drives and runs terminals over MCP on stdio; `run` correlates a command in the user's own shell and `run_isolated` carries the unforgeable exit code; `screen` and `blocks` wait instead of the caller sleeping; `input` takes named keys and a paste, each its own keystroke — ⬜ fleet reach |
 
 ### What works end to end today
 
@@ -178,6 +178,22 @@ the history behind them is in closed issues and PRs.
       which two `run`s back to back land in almost every time. `warnings` say
       when the block records a different command than the one sent, or none at
       all. → ADR-015.
+- [x] **Named keys, and every part its own keystroke.** An agent has no
+      keyboard, so `input` takes `keys: ["down","down","enter"]` and encodes
+      them host-side — an arrow is `ESC [ A` or `ESC O A` depending on DECCKM,
+      which lives on the host, so a hand-written sequence reached the
+      application roughly 2 attempts in 10 and arrived as literal text the
+      rest. Unknown names refuse with the vocabulary; a key that silently does
+      nothing is indistinguishable from one the app ignored. `text`, `paste`,
+      each key and `submit`'s Enter are separate writes — sharing one made a
+      TUI read the whole thing as a paste and drop the CR into its composer.
+      Splitting is *necessary and not sufficient* (a tty hands the next read
+      everything queued), so `paste` carries the boundary in the byte stream
+      instead; it is a separate argument and never inferred from `text`,
+      because DEC 2004 is set for a program's whole run and auto-wrapping
+      `:wq` for `nvim` would insert it rather than run it. The table is the
+      third copy of one rule, held byte-for-byte against `zest-input` by
+      `tests/keys.rs` rather than by review. → #344, #345.
 - [ ] Fleet reach for `zest-mcp`, gated on a host advertising the observer
       attach.
 - [ ] **Tokens per build, measured.** Byte stream vs delta vs block output for

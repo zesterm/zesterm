@@ -301,9 +301,46 @@ fn the_tools_answer_over_a_real_connection() {
     );
 
     // Typing needs no attachment, so this is a send with nothing to wait on.
-    tools
+    let sent = tools
         .call("input", &serde_json::json!({ "session": session, "text": "echo hi", "submit": true }))
         .expect("input");
+    assert_eq!(sent["writes"], 2, "the text and the Enter are two keystrokes (#344): {sent}");
+
+    // Named keys, over the wire. What the bytes *are* is settled next door
+    // against `zest-input`; what this adds is that a key survives the whole
+    // path -- parse, encode, seal, frame, daemon -- and reaches a live session.
+    let keys = tools
+        .call("input", &serde_json::json!({ "session": session, "keys": ["down", "down", "enter"] }))
+        .expect("named keys");
+    assert_eq!(keys["writes"], 3, "three keys, three keystrokes: {keys}");
+
+    // An arrow needs the session's DECCKM, which lives only on a replica -- so
+    // this call attaches, reads, writes and detaches. Asserting it leaves
+    // nothing behind is the same property `detaching_leaves_the_session_running`
+    // holds for reads.
+    let attached_after = tools
+        .call("sessions", &serde_json::json!({}))
+        .expect("sessions")["sessions"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|s| s["id"] == session.as_str())
+        .map(|s| s["attached"].as_bool().unwrap_or(false));
+    assert_eq!(
+        attached_after,
+        Some(false),
+        "typing an arrow must not leave this server attached to somebody's session"
+    );
+
+    // A refusal, not a silent no-op: the whole complaint in #345 is that a key
+    // which does nothing is indistinguishable from one the app ignored.
+    let err = tools
+        .call("input", &serde_json::json!({ "session": session, "keys": ["nope"] }))
+        .expect_err("an unknown key name must refuse");
+    assert!(
+        err.to_string().contains("pageup"),
+        "the refusal must carry the vocabulary a model can retry from: {err}"
+    );
 
     let id_before = registry.get(
         tools.resolver().resolve(&session).expect("resolve").session,

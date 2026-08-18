@@ -5627,8 +5627,10 @@ dependencies = [
  "thiserror 2.0.19",
  "tracing",
  "tracing-subscriber",
+ "winit",
  "zest-core",
  "zest-daemon",
+ "zest-input",
  "zest-mesh",
  "zest-proto",
 ]

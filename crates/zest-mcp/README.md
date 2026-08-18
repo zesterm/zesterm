@@ -29,7 +29,7 @@ prints the default.
 | `output` | what one command printed, by block id |
 | `run` | run a command in an existing shell and wait for the shell to say it ended |
 | `run_isolated` | run a command in a terminal of its own, for the **unforgeable** exit code |
-| `input` / `interrupt` | type into a session, or send it Ctrl+C |
+| `input` / `interrupt` | type into a session, send it named keys or a paste, or send it Ctrl+C |
 | `create_session` / `close_session` | start a terminal, or end one |
 
 Sessions are named `<host>:<session>`, e.g. `540d2d00:7`.
@@ -60,6 +60,57 @@ copy of it. `src/run.rs` adds only what *writing* needs on top: the states a wai
 does not care about (a command the shell never started, a block a screen clear
 destroyed), and the refusals a wait does not need (an alt screen, a shell with no
 markers, a command already running, and the gap between `D` and the next prompt).
+
+## Keys have names, because an agent has no keyboard
+
+Every other client encodes a keystroke at the keyboard that produced it —
+`zest-input` from a `winit::KeyEvent`, the browser from a `KeyboardEvent` —
+because modifier conventions belong to the platform. There is no such platform
+here, so `input` takes **named keys** and encodes them on this side:
+`keys: ["down", "down", "enter"]`, with `ctrl+`, `alt+` and `shift+` prefixes.
+
+That is not decoration. An arrow is `ESC [ A` or `ESC O A` depending on DECCKM,
+which lives on the *host* — so a model writing the sequence into a JSON string is
+right about half the time and silently does nothing the rest. Measured: roughly
+**2 attempts in 10** reached the application, the remainder arriving as literal
+text in a composer (`❯ [Z[Z[Z`) or as nothing at all. An unknown name is refused
+with the vocabulary rather than ignored, because a key that quietly does nothing
+is indistinguishable from one the application chose not to handle.
+
+**Each part is its own keystroke.** `text`, then `paste`, then each key, then
+`submit`'s Enter — one `ClientMessage::Input` each, which is one `write` on the
+pty. `submit` used to share a write with the text, and a TUI that tells a
+keystroke from a paste on exactly that boundary took the whole thing as pasted:
+the CR became a newline in the composer and nothing submitted, so every message
+cost two round trips ([#344]).
+
+Splitting the write is necessary and **not sufficient** — a tty hands the next
+raw-mode `read()` everything queued, and on Windows conhost parses the pipe into
+input records on its own schedule. What closes it is `paste`, a separate argument
+that wraps text in the bracketed-paste markers when the program asked for them,
+exactly as a real terminal does. Separate, and never inferred from `text`: DEC
+2004 is set for a program's whole run, not for the moments a paste would be right
+— `nvim` has it on in normal mode, so auto-wrapping `text: ":wq"` would insert it
+into the buffer instead of executing it, with nothing to see. The web client
+already draws this line, in `paste.ts` and `text.ts`.
+
+The Enter is never *inside* the markers: every shell inserts a bracketed paste
+into the line buffer without running it, so a CR within the brackets is inserted
+literally — which is [#344] again wearing a different hat. Outside them it
+executes, exactly as it does for a person who pastes and then presses Enter.
+
+Only the six DECCKM-sensitive keys and a paste need the session's modes, and
+those are reachable only from a replica — so ordinary typing still costs no
+attach, as it always has.
+
+**This is the third copy of one table.** `crates/zest-input/src/key.rs` is the
+source of truth and `clients/web/packages/input/src/key.ts` is a case-for-case
+port of it; `src/keys.rs` exists only because `zest-input` takes `winit` types in
+its public API. Three copies of one rule is what gave `Grid::drop_scrollback_rows`
+three semantics, so this one is not held by review: `tests/keys.rs` encodes every
+name both ways — 27 bases × 8 modifier combinations × DECCKM on and off — and
+byte-inequality fails the build. `zest_input::key::encode_press` exists for it,
+because `KeyEvent` has a private platform tail and cannot be built outside winit.
 
 ## What makes the shapes small
 
@@ -167,7 +218,12 @@ real zsh recording, and measures the naive predicate beside it.
 ## Tests
 
 - `src/run.rs` — the correlation as a pure function: every refusal, every id
-  case, nothing spawned.
+  case, nothing spawned. `src/tools.rs`'s `Plan` is the same idea for `input`:
+  how many writes and in what order, with no daemon. The [#344] regression test
+  lives there rather than in `tests/live.rs` because a message boundary is not
+  observable from a client watching a real pty — a live test could not have
+  caught the bug it fixes.
+- `tests/keys.rs` — the named-key table against `zest-input`, byte for byte.
 - `tests/replay.rs` — the replica against real recorded sessions (`blocks-zsh`,
   `vim-macos`, and three more) replayed through `FrameReader`. No pty, no shell.
   `run`'s correlation is held here too, against a genuine zsh session recorded
@@ -188,4 +244,6 @@ asserting something weaker.
 [#60]: https://github.com/zesterm/zesterm/issues/60
 [#274]: https://github.com/zesterm/zesterm/issues/274
 [#278]: https://github.com/zesterm/zesterm/pull/278
+[#344]: https://github.com/zesterm/zesterm/issues/344
+[#345]: https://github.com/zesterm/zesterm/issues/345
 [#285]: https://github.com/zesterm/zesterm/issues/285

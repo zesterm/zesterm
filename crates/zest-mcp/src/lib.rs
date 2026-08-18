@@ -53,6 +53,7 @@
 
 pub mod addr;
 pub mod conn;
+pub mod keys;
 pub mod rpc;
 pub mod run;
 pub mod session;
@@ -60,6 +61,7 @@ pub mod tools;
 
 pub use addr::{AddrError, Resolver};
 pub use conn::{Conn, Shared};
+pub use keys::{Chord, KeyError};
 pub use run::{Anchor, Progress, Refusal};
 pub use session::Replica;
 pub use rpc::{Server, Tools};
