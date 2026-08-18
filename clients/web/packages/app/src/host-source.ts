@@ -33,6 +33,20 @@ import { dialFor, type RelayAccess } from './dial-for.ts';
 import type { DirectoryReader } from './directory-source.ts';
 
 /**
+ * One empty list, shared and frozen.
+ *
+ * `sessions()` is read by the palette on every keystroke *and* by the route
+ * watch, so a fresh `[]` per call is an allocation on a hot path — and, where
+ * a watch compares its dependencies by reference, a value that is never equal
+ * to itself. Whether sigx does that is not something this file should have to
+ * know: a stable empty makes the question moot rather than answered.
+ *
+ * Frozen because it is shared: one caller mutating it would hand every other
+ * caller a list that is not empty.
+ */
+const NO_SESSIONS: readonly SessionEntry[] = Object.freeze([]);
+
+/**
  * The machines a shell shows, and whether each can be reached right now.
  *
  * **Two questions, deliberately not one.** "Is this one of my machines" and
@@ -120,7 +134,9 @@ export function localHostSource(
     },
     sessions: () => {
       const dir = directory();
-      return dir.kind === 'ready' ? dir.view.sessions : [];
+      // The actor's own array while ready — stable between turns, so a
+      // reference comparison sees no change until the list really changes.
+      return dir.kind === 'ready' ? dir.view.sessions : NO_SESSIONS;
     },
     find: (hostId, sessionId) => {
       const dir = directory();

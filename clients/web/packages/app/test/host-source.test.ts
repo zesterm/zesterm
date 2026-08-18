@@ -132,6 +132,21 @@ test('sessions() is empty rather than absent while nothing is ready', () => {
   assert.deepEqual(source.sessions(), []);
 });
 
+test('the empty list is the same list every time, and cannot be mutated', () => {
+  // `sessions()` is read by the palette on every keystroke *and* by the route
+  // watch. A fresh `[]` per call is an allocation on a hot path and, where a
+  // watch compares dependencies by reference, a value never equal to itself —
+  // a watch that re-fires forever while a machine is still connecting.
+  const source = localHostSource(reading({ kind: 'pending' }));
+  assert.equal(source.sessions(), source.sessions(), 'same reference');
+
+  // And shared, so it has to be unmutable: one caller pushing into it would
+  // hand every other caller a list that is not empty.
+  assert.throws(() => {
+    (source.sessions() as SessionEntry[]).push(entry(HOST, '1'));
+  });
+});
+
 test('find() takes both halves of the pair, and the host half is load-bearing', () => {
   // **A session id is unique to its machine, not across the fleet.** Matching
   // on the id alone opens whichever host answered first — invisible on
