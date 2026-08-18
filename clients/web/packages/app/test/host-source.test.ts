@@ -204,7 +204,7 @@ const PENDING_SOURCE: DirectorySource = () => () => ({ kind: 'pending' });
  * timers and a redial ladder, none of which these rules depend on.
  */
 function fakeLive(
-  snapshots: readonly { id: string; label: string; online: boolean; sessions: readonly SessionEntry[] }[],
+  snapshots: { id: string; label: string; online: boolean; sessions: readonly SessionEntry[] }[],
 ): LiveDirectory & { created: { hostId: string; size: { cols: number; rows: number } }[] } {
   const created: { hostId: string; size: { cols: number; rows: number } }[] = [];
   return {
@@ -302,4 +302,42 @@ test('a hosted create on a sleeping machine rejects rather than hanging', async 
   // A promise that never settles is a launcher row that spins for ever.
   const live = fakeLive([{ id: OTHER, label: 'pi', online: false, sessions: [] }]);
   await assert.rejects(() => liveHostSource(live, RELAY).create(OTHER, { cols: 80, rows: 24 }));
+});
+
+test('the hosted seam hands back the same session list until it really changes', () => {
+  // `LiveDirectory.snapshots()` builds a fresh array on every call by design,
+  // so flattening it naively hands back a new array each time — and
+  // `routeWatch` depends on this value. Where a watch compares dependencies by
+  // reference that is one which is never equal to itself: it re-fires on every
+  // tick, for ever, and only on the hosted path.
+  const one = entry(HOST, '1');
+  const snapshots = [{ id: HOST, label: 'mac', online: true, sessions: [one] }];
+  const live = fakeLive(snapshots);
+  const source = liveHostSource(live, RELAY);
+
+  const first = source.sessions();
+  assert.equal(source.sessions(), first, 'same list while nothing has changed');
+
+  // A machine gaining a session is a change, and must be seen.
+  snapshots[0]!.sessions = [one, entry(HOST, '2')];
+  const second = source.sessions();
+  assert.notEqual(second, first, 'a new session is a new list');
+  assert.equal(second.length, 2);
+  assert.equal(source.sessions(), second, 'and then stable again');
+
+  // …and so is losing one, which a length-only check would miss in the
+  // other direction.
+  snapshots[0]!.sessions = [one];
+  const third = source.sessions();
+  assert.equal(third.length, 1);
+  assert.notEqual(third, second);
+});
+
+test('an empty fleet is the shared empty list, on the hosted path too', () => {
+  const live = fakeLive([{ id: HOST, label: 'mac', online: true, sessions: [] }]);
+  const source = liveHostSource(live, RELAY);
+  assert.equal(source.sessions(), source.sessions());
+  assert.throws(() => {
+    (source.sessions() as SessionEntry[]).push(entry(HOST, '1'));
+  }, 'and it is frozen, because it is shared with every other empty source');
 });

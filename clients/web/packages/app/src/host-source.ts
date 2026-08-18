@@ -215,13 +215,55 @@ export function localHostSource(
 export function liveHostSource(live: LiveDirectory, relay: RelayAccess | null): HostSource {
   const isOnline = (hostId: string): boolean =>
     live.snapshots().some((s) => s.host.id === hostId && s.presence.kind === 'online');
+
+  /**
+   * The last list handed out, returned again whenever nothing has changed.
+   *
+   * **`sessions()` has to be reference-stable and cannot simply be cheap.**
+   * `LiveDirectory.snapshots()` builds a fresh array on every call by design,
+   * so flattening it hands back a new array each time — and `routeWatch`
+   * depends on this value. Where a watch compares its dependencies by
+   * reference, that is a dependency which is never equal to itself: the watch
+   * re-fires on every tick, for ever, on the hosted path only. The palette
+   * reads it on every keystroke too.
+   *
+   * So the flattened list is compared element-by-element against the last one
+   * and the cached array returned when they match. Entries are the machines'
+   * own objects and stable between turns, so identity comparison is the right
+   * test rather than a deep one.
+   */
+  let cached: readonly SessionEntry[] = NO_SESSIONS;
+
+  const sessions = (): readonly SessionEntry[] => {
+    const snapshots = live.snapshots();
+    // Walked rather than flattened first: the common case is "nothing
+    // changed", and building an array to discard it is the allocation this
+    // exists to avoid.
+    let n = 0;
+    let same = true;
+    for (const snapshot of snapshots) {
+      for (const e of snapshot.sessions) {
+        if (cached[n] !== e) same = false;
+        n += 1;
+        if (!same) break;
+      }
+      if (!same) break;
+    }
+    if (same && n === cached.length) return cached;
+    const next = snapshots.flatMap((s) => s.sessions);
+    // The shared frozen empty, so an empty fleet is the same list every time
+    // — the rule `NO_SESSIONS` exists for, applied on this path too.
+    cached = next.length === 0 ? NO_SESSIONS : next;
+    return cached;
+  };
+
   return {
     hosts: () => live.snapshots().map((s) => ({ id: s.host.id, label: s.host.label })),
     // Only a machine that is actually answering. A *row* for a sleeping
     // machine is honest; a *dial* to one is a click that hangs until it times
     // out, which is the affordance rule inverted.
     dialFor: (hostId) => (isOnline(hostId) ? dialFor({ kind: 'relay', hostId }, relay) : null),
-    sessions: () => live.snapshots().flatMap((s) => s.sessions),
+    sessions,
     find: (hostId, sessionId) =>
       live
         .snapshots()
