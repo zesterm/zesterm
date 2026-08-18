@@ -231,7 +231,12 @@ export const Shell = component<{
     return hostSource
       .create(hostId, { cols: 120, rows: 32 })
       .then((entry) => {
-        const dial = hostSource.dialFor(hostId);
+        // `entry.host`, not the `hostId` we asked for. The tab is built from
+        // the entry, so dialling anything else opens a tab labelled one
+        // machine and connects it to another — and the two agreeing by
+        // construction is cheaper than trusting every implementation to
+        // return what it was asked about.
+        const dial = hostSource.dialFor(entry.host);
         // Created and then unreachable is a real ordering: the machine
         // answered the create and dropped before the attach. The session
         // exists and the directory will list it, so this is not an error to

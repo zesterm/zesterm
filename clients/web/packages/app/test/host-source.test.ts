@@ -341,3 +341,17 @@ test('an empty fleet is the shared empty list, on the hosted path too', () => {
     (source.sessions() as SessionEntry[]).push(entry(HOST, '1'));
   }, 'and it is frozen, because it is shared with every other empty source');
 });
+
+test('a created entry names the machine it was asked for', () => {
+  // The shell dials `entry.host` rather than the id it asked about, so the tab
+  // and its connection agree by construction. This pins the other half: a
+  // source must not answer a create with an entry belonging to some other
+  // machine, or the tab would be right and the *request* would have been
+  // ignored.
+  const live = fakeLive([{ id: HOST, label: 'mac', online: true, sessions: [] }]);
+  return liveHostSource(live, RELAY)
+    .create(HOST, { cols: 80, rows: 24 })
+    .then((created) => {
+      assert.equal(created.host, HOST);
+    });
+});
