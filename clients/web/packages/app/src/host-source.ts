@@ -26,9 +26,25 @@
 
 import type { Dial } from '@zesterm/client';
 
+import type { SessionEntry } from '@zesterm/control';
+
 import type { HostChoice } from './chrome-model.ts';
 import { dialFor, type RelayAccess } from './dial-for.ts';
 import type { DirectoryReader } from './directory-source.ts';
+
+/**
+ * One empty list, shared and frozen.
+ *
+ * `sessions()` is read by the palette on every keystroke *and* by the route
+ * watch, so a fresh `[]` per call is an allocation on a hot path — and, where
+ * a watch compares its dependencies by reference, a value that is never equal
+ * to itself. Whether sigx does that is not something this file should have to
+ * know: a stable empty makes the question moot rather than answered.
+ *
+ * Frozen because it is shared: one caller mutating it would hand every other
+ * caller a list that is not empty.
+ */
+const NO_SESSIONS: readonly SessionEntry[] = Object.freeze([]);
 
 /**
  * The machines a shell shows, and whether each can be reached right now.
@@ -60,6 +76,24 @@ export interface HostSource {
    * neighbour.
    */
   dialFor(hostId: string): Dial | null;
+  /**
+   * Every session on every machine this shell knows about.
+   *
+   * The palette searches this, so it is "the fleet's sessions" rather than
+   * "a machine's" — the same widening the native app's ⌘K got when it started
+   * watching more than one host (#265).
+   */
+  sessions(): readonly SessionEntry[];
+  /**
+   * One session, by the pair that names it.
+   *
+   * **Both halves, always.** A session id is unique to its machine and not
+   * across the fleet, so matching on the id alone would open whichever host
+   * answered first. That is invisible on loopback — one machine, so the host
+   * always matches — and on the hosted path it is a URL opening a session on
+   * the wrong computer.
+   */
+  find(hostId: string, sessionId: string): SessionEntry | null;
 }
 
 /**
@@ -97,6 +131,22 @@ export function localHostSource(
       // loopback is the only machine there is, so the mistake would be
       // invisible here and land on the hosted path instead.
       return host !== null && host.id === hostId ? host.dial : null;
+    },
+    sessions: () => {
+      const dir = directory();
+      // The actor's own array while ready — stable between turns, so a
+      // reference comparison sees no change until the list really changes.
+      return dir.kind === 'ready' ? dir.view.sessions : NO_SESSIONS;
+    },
+    find: (hostId, sessionId) => {
+      const dir = directory();
+      if (dir.kind !== 'ready') return null;
+      // Host *and* session. On loopback the host check can never fail, which
+      // is exactly why it has to be written here rather than left to the one
+      // caller who remembers.
+      return (
+        dir.view.sessions.find((e) => e.host === hostId && e.session === sessionId) ?? null
+      );
     },
   };
 }

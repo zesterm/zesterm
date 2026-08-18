@@ -12,7 +12,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { DirectoryView } from '@zesterm/control';
+import type { DirectoryView, SessionEntry } from '@zesterm/control';
 
 import type { DirectoryStatus } from '../src/directory-source.ts';
 import { localHostSource } from '../src/host-source.ts';
@@ -20,12 +20,28 @@ import { localHostSource } from '../src/host-source.ts';
 const HOST = 'ab'.repeat(32);
 const OTHER = 'cd'.repeat(32);
 
+const entry = (host: string, session: string): SessionEntry => ({
+  host,
+  session,
+  title: 'zsh',
+  cwd: '/src',
+  cols: 80,
+  rows: 24,
+  altScreen: false,
+  attached: false,
+});
+
 const VIEW: DirectoryView = {
   connected: true,
   host: { id: HOST, label: 'mac' },
   sessions: [],
   dataPlane: { kind: 'ws', host: '127.0.0.1', port: 7718 },
   lastCreated: null,
+};
+
+const WITH_SESSIONS: DirectoryView = {
+  ...VIEW,
+  sessions: [entry(HOST, '1'), entry(HOST, '2')],
 };
 
 /** A reader stuck on one status, which is all the seam reads. */
@@ -96,4 +112,54 @@ test('the seam re-reads the directory rather than caching it', () => {
   assert.deepEqual(source.hosts(), []);
   status = { kind: 'ready', view: VIEW };
   assert.deepEqual(source.hosts(), [{ id: HOST, label: 'mac' }], 'the next read sees it');
+});
+
+test('sessions() is every session the shell knows about', () => {
+  // The palette searches this, so it is "the fleet's sessions" rather than
+  // "a machine's". On loopback that is one machine's; the seam is what lets
+  // the hosted path answer with several without `Shell` changing.
+  const source = localHostSource(reading({ kind: 'ready', view: WITH_SESSIONS }));
+  assert.deepEqual(
+    source.sessions().map((e) => e.session),
+    ['1', '2'],
+  );
+});
+
+test('sessions() is empty rather than absent while nothing is ready', () => {
+  // The palette maps over this every keystroke; an `undefined` here would be a
+  // crash in a search box.
+  const source = localHostSource(reading({ kind: 'pending' }));
+  assert.deepEqual(source.sessions(), []);
+});
+
+test('the empty list is the same list every time, and cannot be mutated', () => {
+  // `sessions()` is read by the palette on every keystroke *and* by the route
+  // watch. A fresh `[]` per call is an allocation on a hot path and, where a
+  // watch compares dependencies by reference, a value never equal to itself —
+  // a watch that re-fires forever while a machine is still connecting.
+  const source = localHostSource(reading({ kind: 'pending' }));
+  assert.equal(source.sessions(), source.sessions(), 'same reference');
+
+  // And shared, so it has to be immutable: one caller pushing into it would
+  // hand every other caller a list that is not empty.
+  assert.throws(() => {
+    (source.sessions() as SessionEntry[]).push(entry(HOST, '1'));
+  });
+});
+
+test('find() takes both halves of the pair, and the host half is load-bearing', () => {
+  // **A session id is unique to its machine, not across the fleet.** Matching
+  // on the id alone opens whichever host answered first — invisible on
+  // loopback, where there is one host and it always matches, and on the hosted
+  // path it is a URL opening a session on the wrong computer. So the check
+  // lives here rather than in whichever caller remembers it.
+  const source = localHostSource(reading({ kind: 'ready', view: WITH_SESSIONS }));
+  assert.equal(source.find(HOST, '1')?.session, '1');
+  assert.equal(source.find(OTHER, '1'), null, 'right session id, wrong machine');
+  assert.equal(source.find(HOST, '9'), null, 'right machine, no such session');
+});
+
+test('find() answers null rather than throwing while nothing is ready', () => {
+  const source = localHostSource(reading({ kind: 'pending' }));
+  assert.equal(source.find(HOST, '1'), null);
 });
