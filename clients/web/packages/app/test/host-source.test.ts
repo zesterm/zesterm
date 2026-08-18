@@ -140,7 +140,7 @@ test('the empty list is the same list every time, and cannot be mutated', () => 
   const source = localHostSource(reading({ kind: 'pending' }));
   assert.equal(source.sessions(), source.sessions(), 'same reference');
 
-  // And shared, so it has to be unmutable: one caller pushing into it would
+  // And shared, so it has to be immutable: one caller pushing into it would
   // hand every other caller a list that is not empty.
   assert.throws(() => {
     (source.sessions() as SessionEntry[]).push(entry(HOST, '1'));
