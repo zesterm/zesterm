@@ -114,7 +114,7 @@ export const Shell = component<{
   //
   // Built in setup, because it closes over live reads whose subscriptions
   // belong to this instance (`directory-source.ts`).
-  const hostSource: HostSource = (ctx.props.hosts ?? (() => localHostSource(actorDirectorySource())))();
+  const hostSource: HostSource = (ctx.props.hosts ?? (() => localHostSource(actorDirectorySource(), device.signer)))();
   const listSource: DirectorySource = ctx.props.listSource ?? actorDirectorySource;
 
   const store = signal<{
@@ -213,40 +213,39 @@ export const Shell = component<{
   // Returns the chain so `SessionList` can hold its button for the whole round
   // trip rather than for the synchronous call — a create is asynchronous in
   // both worlds, so a guard that clears on return guards nothing.
-  const createAt = (dial: Dial): Promise<void> => {
+  /**
+   * Ask the seam to start a session, then open the tab it named.
+   *
+   * The *how* belongs to the source, not here: loopback opens a one-shot
+   * data-plane connection, and the hosted path creates over the connection it
+   * is already holding for that machine (#340). Doing it here would have meant
+   * a second relay pipe, ticket and handshake per create, for a machine the
+   * browser is already talking to.
+   *
+   * Returns the chain so a caller can hold its button for the whole round trip
+   * rather than for the synchronous call — a create is asynchronous in both
+   * worlds, so a guard that clears on return guards nothing.
+   */
+  const createOn = (hostId: string): Promise<void> => {
     store.launcherOpen = false;
-    return createSessionOverDataPlane({ dial, signer: device.signer, cols: 120, rows: 32 })
-      .then((addr) => {
+    return hostSource
+      .create(hostId, { cols: 120, rows: 32 })
+      .then((entry) => {
+        const dial = hostSource.dialFor(hostId);
+        // Created and then unreachable is a real ordering: the machine
+        // answered the create and dropped before the attach. The session
+        // exists and the directory will list it, so this is not an error to
+        // shout about — but opening a tab with no way to dial it would be.
+        if (dial === null) {
+          store.error = 'the session was created but that machine is no longer reachable';
+          return;
+        }
         store.error = null;
-        openTarget(
-          {
-            dial,
-            entry: {
-              host: addr.host,
-              session: addr.session.toString(),
-              title: '',
-              cwd: '',
-              cols: 120,
-              rows: 32,
-              altScreen: false,
-              attached: false,
-            },
-          },
-          true,
-        );
+        openTarget({ dial, entry }, true);
       })
       .catch((e: unknown) => {
         store.error = e instanceof Error ? e.message : String(e);
       });
-  };
-
-  const createOn = (hostId: string): void => {
-    const dial = hostSource.dialFor(hostId);
-    if (dial === null) {
-      store.error = 'that machine is not dialable from here';
-      return;
-    }
-    void createAt(dial);
   };
 
   /**
@@ -454,13 +453,12 @@ export const Shell = component<{
           source={listSource}
           deviceKind={device.kind}
           onOpen={(t: OpenTarget) => openTarget(t, true)}
-          // The seam hands over the whole view rather than a URL, because the
-          // hosted path has no URL to hand: it creates on the connection it is
-          // already holding. Loopback answers it the way it always has.
-          onCreate={(view: DirectoryView) => {
-            const dial = dialFor(view.dataPlane, null);
-            return dial === null ? undefined : createAt(dial);
-          }}
+          // The pane's own create button, answered by the same seam the
+          // launcher uses (#340) — the list knows which machine it is showing,
+          // and `createOn` knows how that machine is reached.
+          onCreate={(view: DirectoryView) =>
+            view.host === null ? undefined : createOn(view.host.id)
+          }
         />
       );
     })();

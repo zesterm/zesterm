@@ -24,13 +24,15 @@
  * reader already lives.
  */
 
+import type { ClientSigner } from '@zesterm/auth';
 import type { Dial } from '@zesterm/client';
-
 import type { SessionEntry } from '@zesterm/control';
 
 import type { HostChoice } from './chrome-model.ts';
+import { createSessionOverDataPlane } from './create-session.ts';
 import { dialFor, type RelayAccess } from './dial-for.ts';
 import type { DirectoryReader } from './directory-source.ts';
+import type { LiveDirectory } from './live-directory.ts';
 
 /**
  * One empty list, shared and frozen.
@@ -94,6 +96,23 @@ export interface HostSource {
    * the wrong computer.
    */
   find(hostId: string, sessionId: string): SessionEntry | null;
+  /**
+   * Start a session on a machine.
+   *
+   * **In the seam and not in the shell**, because the two paths answer it
+   * differently and the difference is not cosmetic. Loopback opens a one-shot
+   * data-plane connection — a `ws://` to the sidecar is free, and
+   * `create-session.ts` explains why a create rides the data plane rather than
+   * the actors socket (ADR-005). The hosted path already holds one connection
+   * per enrolled machine and creates over *that* one; going through `dialFor`
+   * there would mint a second relay pipe, a second ticket and a second
+   * handshake, then throw all of it away — per create, for a machine the
+   * browser is already talking to.
+   *
+   * Rejects rather than hangs when the machine cannot be reached; the caller
+   * turns that into a message.
+   */
+  create(hostId: string, size: { cols: number; rows: number }): Promise<SessionEntry>;
 }
 
 /**
@@ -105,6 +124,7 @@ export interface HostSource {
  */
 export function localHostSource(
   directory: DirectoryReader,
+  signer: ClientSigner,
   relay: RelayAccess | null = null,
 ): HostSource {
   const own = (): { id: string; label: string; dial: Dial | null } | null => {
@@ -148,5 +168,69 @@ export function localHostSource(
         dir.view.sessions.find((e) => e.host === hostId && e.session === sessionId) ?? null
       );
     },
+    create: (hostId, size) => {
+      const host = own();
+      // The same id check `dialFor` makes, and for the same reason: a create
+      // aimed at a machine this source does not hold must refuse rather than
+      // land on the only one it has.
+      if (host === null || host.id !== hostId || host.dial === null) {
+        return Promise.reject(new Error('that machine is not dialable from here'));
+      }
+      return createSessionOverDataPlane({
+        dial: host.dial,
+        signer,
+        cols: size.cols,
+        rows: size.rows,
+      }).then((addr) => ({
+        host: addr.host,
+        session: addr.session.toString(),
+        // A freshly created session has none of this yet; the daemon's own
+        // `sessions` push fills it in for everyone, this tab included. The
+        // blanks live here rather than at the call site so "what a new entry
+        // looks like" is written once.
+        title: '',
+        cwd: '',
+        cols: size.cols,
+        rows: size.rows,
+        altScreen: false,
+        attached: false,
+      }));
+    },
+  };
+}
+
+/**
+ * The hosted path: the account's machines, over the connections
+ * [`LiveDirectory`] is already holding.
+ *
+ * `snapshots()` carries each machine's host info, presence and sessions —
+ * every question this seam asks — so there is no second store here and no
+ * second answer to who is online.
+ *
+ * **Listed is not the same as reachable**, the rule #334 settled: every
+ * machine in the account gets a row, asleep ones included, because hiding them
+ * would make the fleet appear to shrink whenever the network hiccuped.
+ * `dialFor` and `create` are where "not right now" is said.
+ */
+export function liveHostSource(live: LiveDirectory, relay: RelayAccess | null): HostSource {
+  const isOnline = (hostId: string): boolean =>
+    live.snapshots().some((s) => s.host.id === hostId && s.presence.kind === 'online');
+  return {
+    hosts: () => live.snapshots().map((s) => ({ id: s.host.id, label: s.host.label })),
+    // Only a machine that is actually answering. A *row* for a sleeping
+    // machine is honest; a *dial* to one is a click that hangs until it times
+    // out, which is the affordance rule inverted.
+    dialFor: (hostId) => (isOnline(hostId) ? dialFor({ kind: 'relay', hostId }, relay) : null),
+    sessions: () => live.snapshots().flatMap((s) => s.sessions),
+    find: (hostId, sessionId) =>
+      live
+        .snapshots()
+        .find((s) => s.host.id === hostId)
+        ?.sessions.find((e) => e.session === sessionId) ?? null,
+    // Over the connection already watching that machine, which is the whole
+    // reason this method is on the seam. `live.createSession` rejects if that
+    // machine is not connected, so an unreachable one refuses rather than
+    // hangs.
+    create: (hostId, size) => live.createSession(hostId, size),
   };
 }
