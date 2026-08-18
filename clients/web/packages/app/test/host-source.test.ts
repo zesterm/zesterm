@@ -50,9 +50,12 @@ const WITH_SESSIONS: DirectoryView = {
 const reading = (status: DirectoryStatus) => () => status;
 
 /**
- * Never called by these tests — a create is only reached through a `dial`, and
- * every test here either refuses before that or does not create at all. It
- * exists so `localHostSource` can be built at all.
+ * A signer that would fail loudly if anything reached it.
+ *
+ * The create tests here *do* call `create`, and they all refuse before a
+ * connection is opened — a wrong host id, or a directory that is not ready —
+ * so nothing ever signs. Rejecting rather than returning a fake signature is
+ * what makes that an assertion rather than an assumption.
  */
 const SIGNER: ClientSigner = {
   clientId: 'ff'.repeat(32),

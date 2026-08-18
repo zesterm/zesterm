@@ -461,9 +461,18 @@ export const Shell = component<{
           // The pane's own create button, answered by the same seam the
           // launcher uses (#340) — the list knows which machine it is showing,
           // and `createOn` knows how that machine is reached.
-          onCreate={(view: DirectoryView) =>
-            view.host === null ? undefined : createOn(view.host.id)
-          }
+          onCreate={(view: DirectoryView) => {
+            // The button's enabled state is `connected` and a dialable plane,
+            // neither of which implies the daemon has said *who* it is yet. So
+            // this is reachable, and returning `undefined` would make a live
+            // button silently do nothing — the failure this whole seam keeps
+            // being about.
+            if (view.host === null) {
+              store.error = 'that machine has not said which machine it is yet';
+              return undefined;
+            }
+            return createOn(view.host.id);
+          }}
         />
       );
     })();
