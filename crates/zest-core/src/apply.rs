@@ -168,6 +168,25 @@ impl RemoteWriter<'_> {
         }
     }
 
+    /// File the top `n` viewport rows as history, before a keyframe that
+    /// starts later than they do overwrites the only copy of them.
+    ///
+    /// The replica half of the host's strand (#341); see
+    /// [`crate::grid::Grid::bank_viewport_top`]. The exclusive counterpart of
+    /// [`Self::drop_history`]: a keyframe either re-delivers rows this grid
+    /// filed as history (take back the stale copies) or starts beyond rows it
+    /// still shows (bank them) — never both, because the first requires the
+    /// newest held line to be at or past the keyframe's first and the second
+    /// requires the opposite.
+    pub fn bank_displaced(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        let template = self.state.template;
+        self.state.grid_mut().bank_viewport_top(n, &template);
+        self.state.touch_full();
+    }
+
     /// Destroy this replica's scrollback, because the host's keyframe says an
     /// ED 3 destroyed the session's.
     ///

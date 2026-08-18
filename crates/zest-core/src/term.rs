@@ -532,9 +532,31 @@ impl TermState {
         self.touch_full();
     }
 
+    /// End the restore before ordinary output lands on it.
+    ///
+    /// Called from every content op the parser can drive — a print, a
+    /// linefeed, a cursor move — and a no-op everywhere but the one moment it
+    /// exists for: the first output after a settle, when the restater still
+    /// addresses the screen in its own coordinates, offset by the pull. See
+    /// [`crate::grid::Grid::strand_settled`]. The restatement's own opening
+    /// home never reaches this: the bracket opens first, and an open bracket
+    /// is not ordinary output. (#341)
+    pub(crate) fn strand_if_diverged(&mut self) {
+        if !self.grid().needs_strand() {
+            return;
+        }
+        let t = self.template;
+        if self.grid_mut().strand_settled(&t) {
+            // The boundary moved: the same keyframe debt as a settle.
+            self.events.push(TermEvent::ViewportRebased);
+            self.touch_full();
+        }
+    }
+
     // --- writing ---------------------------------------------------------
 
     pub(crate) fn write_char(&mut self, ch: char) {
+        self.strand_if_diverged();
         let width = ch.width().unwrap_or(0);
 
         // Zero-width: a combining mark attaches to the previous cell rather
@@ -648,6 +670,7 @@ impl TermState {
     }
 
     pub(crate) fn linefeed(&mut self) {
+        self.strand_if_diverged();
         let bottom = self.grid().region.bottom;
         if self.grid().cursor.row == bottom {
             let template = self.template;
@@ -662,12 +685,14 @@ impl TermState {
     }
 
     pub(crate) fn carriage_return(&mut self) {
+        self.strand_if_diverged();
         self.grid_mut().cursor.col = 0;
         self.grid_mut().cursor.pending_wrap = false;
         self.touch();
     }
 
     pub(crate) fn backspace(&mut self) {
+        self.strand_if_diverged();
         let col = self.grid().cursor.col;
         if col > 0 {
             self.grid_mut().cursor.col = col - 1;
@@ -677,6 +702,7 @@ impl TermState {
     }
 
     pub(crate) fn tab(&mut self, count: usize) {
+        self.strand_if_diverged();
         let cols = self.grid().cols();
         let mut col = self.grid().cursor.col;
         for _ in 0..count.max(1) {
@@ -693,6 +719,7 @@ impl TermState {
     /// Move the cursor, honoring origin mode (DECOM), which makes addressing
     /// relative to the scroll region.
     pub(crate) fn goto(&mut self, row: usize, col: usize) {
+        self.strand_if_diverged();
         let (rows, cols) = (self.grid().rows(), self.grid().cols());
         let (min_row, max_row) = if self.modes.contains(Modes::ORIGIN) {
             (self.grid().region.top, self.grid().region.bottom)
@@ -707,6 +734,7 @@ impl TermState {
     }
 
     pub(crate) fn move_up(&mut self, n: usize) {
+        self.strand_if_diverged();
         let top = if self.modes.contains(Modes::ORIGIN) { self.grid().region.top } else { 0 };
         let row = self.grid().cursor.row.saturating_sub(n.max(1)).max(top);
         self.grid_mut().cursor.row = row;
@@ -715,6 +743,7 @@ impl TermState {
     }
 
     pub(crate) fn move_down(&mut self, n: usize) {
+        self.strand_if_diverged();
         let bottom = if self.modes.contains(Modes::ORIGIN) {
             self.grid().region.bottom
         } else {
@@ -727,6 +756,7 @@ impl TermState {
     }
 
     pub(crate) fn move_left(&mut self, n: usize) {
+        self.strand_if_diverged();
         let col = self.grid().cursor.col.saturating_sub(n.max(1));
         self.grid_mut().cursor.col = col;
         self.grid_mut().cursor.pending_wrap = false;
@@ -734,6 +764,7 @@ impl TermState {
     }
 
     pub(crate) fn move_right(&mut self, n: usize) {
+        self.strand_if_diverged();
         let cols = self.grid().cols();
         let col = (self.grid().cursor.col + n.max(1)).min(cols - 1);
         self.grid_mut().cursor.col = col;

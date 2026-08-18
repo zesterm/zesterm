@@ -1501,6 +1501,69 @@ fn a_multi_step_drag_with_lagging_repaints_comes_back_whole() {
 }
 
 #[test]
+fn ordinary_output_after_a_restore_strands_the_pull_instead_of_overwriting_it() {
+    // Inspected live before it was understood (#341): after a drag restored
+    // the listing, running `ls` again interleaved two listings -- rows like
+    // "Length Namees" and "AGENTS.mdchain.toml", a block header mid-print.
+    // The repaints are all handled now; this is *ordinary output*. After a
+    // settle, ConPTY's buffer still holds only its kept rows at the top, so
+    // the shell's next render positions with absolute coordinates in
+    // ConPTY's row-space -- offset from ours by everything the settle pulled
+    // -- and writes land mid-listing with no erase over the tails.
+    //
+    // The restore is a between-gestures view. The first ordinary content op
+    // (a print, a linefeed, a cursor move that is not a restatement's hidden
+    // home) strands the pull: boundary up over the restored rows, blanks
+    // minted below, cursor realigned, and the write lands exactly where
+    // ConPTY meant it -- which is where Windows Terminal would have had the
+    // prompt all along.
+    let mut t = Terminal::new(40, 12, 500);
+    t.set_pty_restates_viewport(true);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\n");
+    for i in 0..9 {
+        t.advance(format!("entry {i}\r\n").as_bytes());
+    }
+    t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+
+    let kept = ["entry 6", "entry 7", "entry 8", "$ "];
+    t.resize(40, 4);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 4, &kept, Drag::Down));
+    t.resize(40, 12);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 12, &kept, Drag::Up));
+    assert_eq!(t.grid().scrollback_len(), 0, "the round trip did not settle, so this proves nothing");
+    let _ = t.take_events();
+
+    // The user types `ls` again. ConPTY's screen is the four kept rows at the
+    // top, so the shell's render addresses row 4 -- which in the restored
+    // grid is the middle of the listing.
+    t.advance(b"\x1b[4;3Hls\r\n");
+    for i in 0..9 {
+        t.advance(format!("entry {i}\r\n").as_bytes());
+    }
+    t.advance(b"$ ");
+
+    // The strand moved the boundary, so every client is owed a keyframe.
+    assert!(
+        t.take_events().iter().any(|e| matches!(e, TermEvent::ViewportRebased)),
+        "the boundary moved (or rows were destroyed) without a keyframe"
+    );
+    // Both listings, whole: every entry exactly twice across history and
+    // screen, with its own text -- an overlay leaves counts unbalanced and
+    // rows carrying two generations of text.
+    for n in 0..9 {
+        let want = format!("entry {n}");
+        let copies = (0..t.grid().total_lines())
+            .filter_map(|i| t.grid().line(i))
+            .filter(|r| r.text().trim_end() == want)
+            .count();
+        assert_eq!(
+            copies, 2,
+            "{want:?} exists {copies} times -- the second listing was written over the first"
+        );
+    }
+}
+
+#[test]
 fn a_shrink_after_a_settle_does_not_forget_the_pull_the_repaint_needs_taken_back() {
     // The reported gesture's third leg, and the one every earlier test
     // stopped short of: drag up, drag down -- the settle restores the screen
@@ -2200,9 +2263,11 @@ fn a_recorded_conpty_drag_comes_back_as_it_was() {
     // read as this test's assertions being wrong rather than its clock.
     const SHRINK_AT_US: u128 = 1_400_000;
     const GROW_AT_US: u128 = 3_600_000;
+    const RESTORED_UNTIL_US: u128 = 5_000_000;
 
     let chunks = parse_vtrec_timed(&bytes);
     let (mut shrunk, mut grown) = (None, None);
+    let mut restored: Option<(usize, String)> = None;
     for (i, (us, chunk)) in chunks.iter().enumerate() {
         if shrunk.is_none() && *us >= SHRINK_AT_US {
             t.resize(100, 8);
@@ -2211,6 +2276,12 @@ fn a_recorded_conpty_drag_comes_back_as_it_was() {
         if grown.is_none() && *us >= GROW_AT_US {
             t.resize(100, 30);
             grown = Some(i);
+        }
+        // The restore holds until the shell speaks again: the recording's
+        // trailing output (pwsh exiting) legitimately strands it. The restore
+        // assertions therefore run between the settle and that output. (#341)
+        if *us >= RESTORED_UNTIL_US && restored.is_none() {
+            restored = Some((t.grid().scrollback_len(), t.screen_text()));
         }
         t.advance(chunk);
     }
@@ -2232,14 +2303,13 @@ fn a_recorded_conpty_drag_comes_back_as_it_was() {
 
     // The listing is back on screen rather than parked above it, and the last
     // line of it sits where it did before the drag rather than seven rows down
-    // from the top of an otherwise empty window.
+    // from the top of an otherwise empty window — measured while the restore
+    // held, before the shell's trailing output stranded it.
+    let (held, screen) = restored.expect("the recording ended before the restore window");
     assert_eq!(
-        t.grid().scrollback_len(),
-        0,
-        "the grow never gave back what the shrink took: {} rows still in history",
-        t.grid().scrollback_len()
+        held, 0,
+        "the grow never gave back what the shrink took: {held} rows still in history"
     );
-    let screen = t.screen_text();
     for name in ["AGENTS.md", "Cargo.lock", "README.md", "rust-toolchain.toml"] {
         assert!(screen.contains(name), "{name} is not on screen after the drag");
     }
@@ -2254,6 +2324,13 @@ fn a_recorded_conpty_drag_comes_back_as_it_was() {
         last_ink >= 23,
         "the content is bunched at the top: last non-blank row is {last_ink} of 30"
     );
+    // And after the trailing output: stranded, never destroyed.
+    for name in ["AGENTS.md", "Cargo.lock", "README.md", "rust-toolchain.toml"] {
+        let found = (0..t.grid().total_lines())
+            .filter_map(|i| t.grid().line(i))
+            .any(|r| r.text().contains(name));
+        assert!(found, "{name} was destroyed when the trailing output stranded the restore");
+    }
 }
 
 #[test]
@@ -2293,9 +2370,11 @@ fn a_recorded_drag_storm_survives_its_stale_repaints() {
     // they were issued: back-to-back, faster than ConPTY's first answer.
     const SHRINK_AT_US: u128 = 1_450_000;
     const GROWS_AT_US: u128 = 1_901_000;
+    const RESTORED_UNTIL_US: u128 = 5_000_000;
 
     let chunks = parse_vtrec_timed(&bytes);
     let (mut shrunk, mut grown) = (None, None);
+    let mut restored: Option<(usize, String)> = None;
     for (i, (us, chunk)) in chunks.iter().enumerate() {
         if shrunk.is_none() && *us >= SHRINK_AT_US {
             t.resize(100, 8);
@@ -2307,6 +2386,11 @@ fn a_recorded_drag_storm_survives_its_stale_repaints() {
             t.resize(100, 26);
             t.resize(100, 30);
             grown = Some(i);
+        }
+        // The restore holds until the shell's trailing output strands it, so
+        // the restore assertions are taken here, mid-recording. (#341)
+        if *us >= RESTORED_UNTIL_US && restored.is_none() {
+            restored = Some((t.grid().scrollback_len(), t.screen_text()));
         }
         t.advance(chunk);
     }
@@ -2349,13 +2433,11 @@ fn a_recorded_drag_storm_survives_its_stale_repaints() {
         "the last repaint does not cover the final viewport, so the debt is honestly unpaid"
     );
 
+    let (held, screen) = restored.expect("the recording ended before the restore window");
     assert_eq!(
-        t.grid().scrollback_len(),
-        0,
-        "the storm never gave back what the shrink took: {} rows still in history",
-        t.grid().scrollback_len()
+        held, 0,
+        "the storm never gave back what the shrink took: {held} rows still in history"
     );
-    let screen = t.screen_text();
     for name in ["AGENTS.md", "Cargo.lock", "README.md", "rust-toolchain.toml"] {
         assert!(
             screen.contains(name),
@@ -2374,6 +2456,13 @@ fn a_recorded_drag_storm_survives_its_stale_repaints() {
         last_ink >= 20,
         "the content is bunched at the top: last non-blank row is {last_ink} of 30"
     );
+    // And after the trailing output stranded the restore: present, somewhere.
+    for name in ["AGENTS.md", "Cargo.lock", "README.md", "rust-toolchain.toml"] {
+        let found = (0..t.grid().total_lines())
+            .filter_map(|i| t.grid().line(i))
+            .any(|r| r.text().contains(name));
+        assert!(found, "{name} was destroyed when the trailing output stranded the restore");
+    }
 }
 
 #[test]
@@ -2406,9 +2495,14 @@ fn a_recorded_overflowing_storm_is_reversible_and_leaves_no_duplicates() {
     // As in the stepped test below: the expected end state is the session as
     // if the drag never happened — every chunk except the drag window's.
     const DRAG_WINDOW_US: core::ops::Range<u128> = 2_000_000..3_000_000;
+    const RESTORED_UNTIL_US: u128 = 5_000_000;
     let mut plain = Terminal::new(100, 30, 500);
     plain.set_pty_restates_viewport(true);
+    let mut plain_mid: Option<String> = None;
     for (us, chunk) in &chunks {
+        if *us >= RESTORED_UNTIL_US && plain_mid.is_none() {
+            plain_mid = Some(plain.screen_text());
+        }
         if !DRAG_WINDOW_US.contains(us) {
             plain.advance(chunk);
         }
@@ -2419,6 +2513,7 @@ fn a_recorded_overflowing_storm_is_reversible_and_leaves_no_duplicates() {
     const SHRINKS_AT_US: u128 = 2_000_000;
     const GROWS_AT_US: u128 = 2_300_000;
     let (mut shrunk, mut grown) = (false, false);
+    let mut restored: Option<(usize, String)> = None;
     for (us, chunk) in &chunks {
         if !shrunk && *us >= SHRINKS_AT_US {
             t.resize(100, 24);
@@ -2433,20 +2528,21 @@ fn a_recorded_overflowing_storm_is_reversible_and_leaves_no_duplicates() {
             t.resize(100, 30);
             grown = true;
         }
+        // The restore holds until the shell's trailing output strands it (#341).
+        if *us >= RESTORED_UNTIL_US && restored.is_none() {
+            restored = Some((t.grid().scrollback_len(), t.screen_text()));
+        }
         t.advance(chunk);
     }
     assert!(shrunk && grown, "the recording ended before the drag did -- re-record");
 
+    let (held, screen) = restored.expect("the recording ended before the restore window");
     assert_eq!(
-        t.screen_text(),
-        plain.screen_text(),
+        screen,
+        plain_mid.expect("the plain replay never reached the restore window"),
         "the storm did not come back to the screen an undisturbed replay shows"
     );
-    assert_eq!(
-        t.grid().scrollback_len(),
-        plain.grid().scrollback_len(),
-        "the storm left a different amount of history than the undisturbed replay"
-    );
+    assert_eq!(held, 0, "the storm left history parked above the viewport");
     // The same rows, the same number of times — the overflow used to bank the
     // repaint's restatement of rows the grid already held, so the storm's
     // history carried extra copies the undisturbed replay does not. Compared
@@ -2558,9 +2654,14 @@ fn a_recorded_stepped_drag_is_reversible() {
     // reversible drag must come back to exactly this screen. A golden built
     // from the fixture itself, so a re-recording carries its own expectation.
     const DRAG_WINDOW_US: core::ops::Range<u128> = 2_000_000..3_000_000;
+    const RESTORED_UNTIL_US: u128 = 5_000_000;
     let mut plain = Terminal::new(80, 24, 500);
     plain.set_pty_restates_viewport(true);
+    let mut plain_mid: Option<(usize, String)> = None;
     for (us, chunk) in &chunks {
+        if *us >= RESTORED_UNTIL_US && plain_mid.is_none() {
+            plain_mid = Some((plain.grid().scrollback_len(), plain.screen_text()));
+        }
         if !DRAG_WINDOW_US.contains(us) {
             plain.advance(chunk);
         }
@@ -2570,23 +2671,29 @@ fn a_recorded_stepped_drag_is_reversible() {
     t.set_pty_restates_viewport(true);
     let sizes = [20usize, 14, 8, 14, 20, 24];
     let mut next = 0usize;
+    let mut restored: Option<(usize, String)> = None;
     for (us, chunk) in &chunks {
         while next < sizes.len() && *us >= 2_000_000 + (next as u128) * 120_000 {
             t.resize(80, sizes[next]);
             next += 1;
         }
+        // The restore holds until the shell's trailing output strands it (#341).
+        if *us >= RESTORED_UNTIL_US && restored.is_none() {
+            restored = Some((t.grid().scrollback_len(), t.screen_text()));
+        }
         t.advance(chunk);
     }
     assert_eq!(next, sizes.len(), "the recording ended before the drag did — re-record");
 
+    let (held, screen) = restored.expect("the recording ended before the restore window");
+    let (plain_held, plain_screen) =
+        plain_mid.expect("the plain replay never reached the restore window");
     assert_eq!(
-        t.screen_text(),
-        plain.screen_text(),
+        screen, plain_screen,
         "the stepped drag did not come back to the screen an undisturbed replay shows"
     );
     assert_eq!(
-        t.grid().scrollback_len(),
-        plain.grid().scrollback_len(),
+        held, plain_held,
         "the drag left a different amount of history than the undisturbed replay"
     );
 }
