@@ -360,6 +360,7 @@ impl TermState {
 
     /// Absolute addressing that ignores origin mode, for column moves.
     fn goto_absolute(&mut self, row: usize, col: usize) {
+        self.strand_if_diverged();
         let cols = self.grid().cols();
         self.grid_mut().cursor.row = row;
         self.grid_mut().cursor.col = col.min(cols - 1);
@@ -368,6 +369,7 @@ impl TermState {
     }
 
     fn back_tab(&mut self, count: usize) {
+        self.strand_if_diverged();
         let mut col = self.grid().cursor.col;
         for _ in 0..count.max(1) {
             col = (0..col).rev().find(|&c| self.tabs.get(c).copied().unwrap_or(false)).unwrap_or(0);
@@ -377,6 +379,7 @@ impl TermState {
     }
 
     fn reverse_index(&mut self) {
+        self.strand_if_diverged();
         let top = self.grid().region.top;
         if self.grid().cursor.row == top {
             let t = self.template;
@@ -389,6 +392,7 @@ impl TermState {
     }
 
     fn erase_in_display(&mut self, mode: usize) {
+        self.strand_if_diverged();
         let t = self.template;
         let (row, col) = (self.grid().cursor.row, self.grid().cursor.col);
         let (rows, cols) = (self.grid().rows(), self.grid().cols());
@@ -454,6 +458,7 @@ impl TermState {
     }
 
     fn erase_in_line(&mut self, mode: usize) {
+        self.strand_if_diverged();
         let t = self.template;
         let (row, col) = (self.grid().cursor.row, self.grid().cursor.col);
         let cols = self.grid().cols();
@@ -467,6 +472,7 @@ impl TermState {
     }
 
     fn erase_chars(&mut self, n: usize) {
+        self.strand_if_diverged();
         let t = self.template;
         let (row, col) = (self.grid().cursor.row, self.grid().cursor.col);
         let cols = self.grid().cols();

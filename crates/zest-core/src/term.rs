@@ -685,12 +685,14 @@ impl TermState {
     }
 
     pub(crate) fn carriage_return(&mut self) {
+        self.strand_if_diverged();
         self.grid_mut().cursor.col = 0;
         self.grid_mut().cursor.pending_wrap = false;
         self.touch();
     }
 
     pub(crate) fn backspace(&mut self) {
+        self.strand_if_diverged();
         let col = self.grid().cursor.col;
         if col > 0 {
             self.grid_mut().cursor.col = col - 1;
@@ -700,6 +702,7 @@ impl TermState {
     }
 
     pub(crate) fn tab(&mut self, count: usize) {
+        self.strand_if_diverged();
         let cols = self.grid().cols();
         let mut col = self.grid().cursor.col;
         for _ in 0..count.max(1) {
@@ -731,6 +734,7 @@ impl TermState {
     }
 
     pub(crate) fn move_up(&mut self, n: usize) {
+        self.strand_if_diverged();
         let top = if self.modes.contains(Modes::ORIGIN) { self.grid().region.top } else { 0 };
         let row = self.grid().cursor.row.saturating_sub(n.max(1)).max(top);
         self.grid_mut().cursor.row = row;
@@ -739,6 +743,7 @@ impl TermState {
     }
 
     pub(crate) fn move_down(&mut self, n: usize) {
+        self.strand_if_diverged();
         let bottom = if self.modes.contains(Modes::ORIGIN) {
             self.grid().region.bottom
         } else {
@@ -751,6 +756,7 @@ impl TermState {
     }
 
     pub(crate) fn move_left(&mut self, n: usize) {
+        self.strand_if_diverged();
         let col = self.grid().cursor.col.saturating_sub(n.max(1));
         self.grid_mut().cursor.col = col;
         self.grid_mut().cursor.pending_wrap = false;
@@ -758,6 +764,7 @@ impl TermState {
     }
 
     pub(crate) fn move_right(&mut self, n: usize) {
+        self.strand_if_diverged();
         let cols = self.grid().cols();
         let col = (self.grid().cursor.col + n.max(1)).min(cols - 1);
         self.grid_mut().cursor.col = col;
