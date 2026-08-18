@@ -482,7 +482,7 @@ you need before you trip on it.
   height-axis ownership dance — the DECTCEM-bracketed settle, the coverage
   guard against stale repaints, the debt that bounds the pull, and the fact
   that only a storm's *first* repaint announces its size — is ADR-013, written
-  after #200/#247/#271/#312/#315/#335 each paid for a different corner of it. The two
+  after #200/#247/#271/#312/#315/#335/#341 each paid for a different corner of it. The two
   meta-lessons survive here: **a capture beats a helper** (a synthetic helper
   that announced sizes ConPTY does not kept a broken fix green), and the flag
   is set at the *door* that makes a terminal a replica (`Terminal::remote`),

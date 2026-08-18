@@ -992,11 +992,28 @@ The shrink instead *decrements* the pull by exactly what it banks over the
 top: those rows are back in scrollback and out of the repaint's reach, the
 remainder stays provisional for the incoming bracket, and the two counts
 consume each other one for one because a shrink banks from the top of the
-viewport, which is exactly where the pull sits. The residual: output that
-neither scrolls nor erases, landing between a settle and a following repaint,
-would be re-banked with the rows it overwrote — accepted, because mid-gesture
-the shell is not speaking, and a shell that does speak almost always scrolls
-or erases.
+viewport, which is exactly where the pull sits.
+
+**The restore is a between-gestures view, and ordinary output ends it** (#341).
+An earlier revision of this ADR accepted "output landing between a settle and
+a following repaint" as a residual; it was the next reported bug, inspected
+live: after a restore, ConPTY's buffer still holds only its kept rows, so the
+shell's next render — `ls` typed after the drag — positions with absolute
+coordinates in *ConPTY's* row-space, offset from ours by the pull, and writes
+land mid-listing with no erase over the tails ("Length Namees",
+"AGENTS.mdchain.toml", a block header mid-print). No settle bookkeeping can
+absorb that: the divergence is the restore itself, and only a repaint bracket
+gives the re-bank a hook. So the first ordinary content op — a print, a
+linefeed, a cursor move that is not a restatement's opening hidden home —
+**strands** the pull instead: boundary up over the restored rows (into
+scrollback, still reachable), blanks minted below, cursor realigned, debts
+cancelled, `ViewportRebased` owed to every client. The write then lands
+exactly where ConPTY meant it, and the prompt visibly snaps to where Windows
+Terminal would have had it all along — which is the accepted trade: the drag
+restores the view, and the first keystroke afterwards files it as history.
+The opening hidden home is the one cursor move excluded, and its `perform`
+arm runs the bracket-open *before* the `goto` for exactly that reason: an
+open bracket is what tells the strand to stand down so the re-bank can work.
 
 **Either direction of DECTCEM closes it.** ConPTY restores the inner program's
 visibility state, so a full-screen program that keeps its cursor hidden ends the

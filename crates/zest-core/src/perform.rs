@@ -71,12 +71,18 @@ impl vte::Perform for TermState {
                 self.goto(row, col);
             }
             ('H', _) | ('f', _) => {
-                self.goto(arg(0, 1) - 1, arg(1, 1) - 1);
                 // Homing the cursor while it is hidden is how ConPTY's repaint
                 // starts, and on a *grow* it is the only marker there is — the
                 // size announcement comes on the shrink and not on the way back
                 // (`corpus/resize-drag.vtrec`). See
                 // `Grid::note_cursor_homed_while_hidden`. (#271)
+                //
+                // **Before** the `goto`, which is the opposite of the natural
+                // reading order: `goto` strands a lingering restore on the
+                // grounds that a cursor move is ordinary output, and this home
+                // is the one cursor move that is not — it opens the
+                // restatement bracket, and an open bracket is what tells the
+                // strand to stand down so the re-bank can do its job. (#341)
                 if arg(0, 1) == 1
                     && arg(1, 1) == 1
                     && !self.modes.contains(Modes::SHOW_CURSOR)
@@ -84,6 +90,7 @@ impl vte::Perform for TermState {
                     let t = self.template;
                     self.grid_mut().note_cursor_homed_while_hidden(&t);
                 }
+                self.goto(arg(0, 1) - 1, arg(1, 1) - 1);
             }
             ('I', _) => self.tab(arg(0, 1)),
             ('Z', _) => self.back_tab(arg(0, 1)),

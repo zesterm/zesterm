@@ -517,6 +517,36 @@ impl Grid {
         self.history_clears
     }
 
+    /// File the top `n` viewport rows as history, for a **replica** whose
+    /// keyframe starts later than the viewport it holds.
+    ///
+    /// The mirror of the host's strand (#341): when the host files a restore
+    /// as history, its keyframe's viewport begins after rows this replica
+    /// still shows, and writing the keyframe over them would delete the
+    /// client's only copy. The web view banks them (`grid-view.ts`'s
+    /// displaced branch); this is the same move for a grid: the boundary
+    /// slides down over `n` fresh rows minted at the bottom, so the old top
+    /// rows become the scrollback tail and the keyframe writes into blanks.
+    pub fn bank_viewport_top(&mut self, n: usize, template: &Cell) {
+        if n == 0 {
+            return;
+        }
+        let len = self.storage.len();
+        self.storage.resize_rows(len + n, self.cols, template);
+        self.scrollback_len += n;
+        if self.scrollback_len > self.scrollback_limit {
+            let over = self.scrollback_len - self.scrollback_limit;
+            let len = self.storage.len();
+            // Draining from the top is eviction of the oldest history, which
+            // is the ordinary meaning of the limit.
+            self.storage.resize_rows(len - over, self.cols, template);
+            self.scrollback_len = self.scrollback_limit;
+        }
+        if self.display_offset > 0 {
+            self.display_offset = (self.display_offset + n).min(self.scrollback_len);
+        }
+    }
+
     /// The id of the oldest line still held, scrollback included.
     ///
     /// Read off the row rather than computed as `active_row(0).id -
@@ -918,6 +948,51 @@ impl Grid {
         // reader on the same text means moving the offset by the same `k` —
         // the mirror of the settle's adjustment.
         self.display_offset = (self.display_offset + k).min(self.scrollback_len);
+    }
+
+    /// Whether ordinary output is about to land on a screen the last settle
+    /// left diverged from the restater's. See [`Self::strand_settled`].
+    #[must_use]
+    pub(crate) fn needs_strand(&self) -> bool {
+        self.settled_pull > 0 && !self.restatement_open
+    }
+
+    /// End the restore: strand the last settle's pull into scrollback, before
+    /// ordinary output lands on it.
+    ///
+    /// After a settle this viewport holds more of the session than the
+    /// restater's buffer does, and the restater addresses the screen in *its*
+    /// coordinates — offset by the pull. Repaints handle that through the
+    /// re-bank; ordinary output cannot, because there is no bracket to hook
+    /// and no repaint coming to pay anything back. So the restore is a
+    /// between-gestures view: the first ordinary content op moves the
+    /// boundary up over the pulled rows (into scrollback, where they remain
+    /// reachable), mints blanks below, realigns the cursor, and cancels the
+    /// debts — the gesture is over. The write then lands exactly where the
+    /// restater meant it, which is where Windows Terminal would have had the
+    /// prompt all along. (#341)
+    pub(crate) fn strand_settled(&mut self, template: &Cell) -> bool {
+        let k = core::mem::take(&mut self.settled_pull);
+        if k == 0 {
+            return false;
+        }
+        self.restate_debt = 0;
+        self.pending_restate = 0;
+        // Conservation, not a clamp: the settle took these k rows *out* of
+        // scrollback, so putting them back cannot exceed the limit it already
+        // respected.
+        self.scrollback_len += k;
+        self.storage.resize_rows(self.scrollback_len + self.rows, self.cols, template);
+        self.cursor.row = self.cursor.row.saturating_sub(k);
+        // A reader who is scrolled back stays on the text they are reading;
+        // a reader at the live bottom stays at the live bottom. Unlike the
+        // re-bank's adjustment this one has no paired settle to undo it, so
+        // moving an offset of zero would pin the display into history and the
+        // screen would go on showing the restore the strand just ended.
+        if self.display_offset > 0 {
+            self.display_offset = (self.display_offset + k).min(self.scrollback_len);
+        }
+        true
     }
 
     pub(crate) fn note_restatement_began(&mut self, cols: usize, rows: usize, template: &Cell) {

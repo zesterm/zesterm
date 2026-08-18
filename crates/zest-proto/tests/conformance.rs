@@ -676,6 +676,7 @@ fn a_recorded_conpty_drag_keeps_all_three_participants_agreeing() {
     const SHRINK_AT_US: u64 = 1_400_000;
     const GROW_AT_US: u64 = 3_600_000;
     let (mut shrunk, mut grown) = (false, false);
+    let mut restored_seen = false;
     for (step, (us, chunk)) in timed.iter().enumerate() {
         if !shrunk && *us >= SHRINK_AT_US {
             term.resize(100, 8);
@@ -688,6 +689,9 @@ fn a_recorded_conpty_drag_keeps_all_three_participants_agreeing() {
             grown = true;
         }
         term.advance(chunk);
+        if grown && term.grid().scrollback_len() == 0 {
+            restored_seen = true;
+        }
         if term
             .take_events()
             .iter()
@@ -737,10 +741,22 @@ fn a_recorded_conpty_drag_keeps_all_three_participants_agreeing() {
     }
     assert!(shrunk && grown, "the recording ended before the drag did");
 
-    assert_eq!(term.grid().scrollback_len(), 0, "the host did not settle -- see vt.rs");
+    // The settle restored the screen mid-recording; the shell's trailing
+    // output then stranded the restore (#341), so the end state is stranded —
+    // and all three participants must agree on where history ends.
+    assert!(restored_seen, "the host never settled -- see vt.rs");
+    assert!(
+        term.grid().scrollback_len() > 0,
+        "the trailing output never stranded the restore -- see #341"
+    );
     assert_eq!(
         client.grid().scrollback_len(),
         term.grid().scrollback_len(),
         "the client and the host disagree about where history ends"
+    );
+    assert_eq!(
+        view.scrollback.len(),
+        term.grid().scrollback_len(),
+        "the view and the host disagree about where history ends"
     );
 }

@@ -98,7 +98,8 @@ impl Applier {
         // writes: with history gone there is nothing to deduplicate against,
         // and the rows this keyframe carries are the whole surviving session.
         // Never lowered: an alt-screen keyframe carries that grid's 0. (#314)
-        if k.history_clears > self.history_clears {
+        let cleared = k.history_clears > self.history_clears;
+        if cleared {
             term.remote().clear_history();
             self.history_clears = k.history_clears;
         }
@@ -124,7 +125,31 @@ impl Applier {
         // carrying one blank row.
         let named: Vec<zest_core::LineId> =
             k.rows_data.iter().map(|r| r.line).filter(|&l| l >= 0).map(line_id).collect();
-        term.remote().drop_history(&named);
+        // The two directions are exclusive by construction, exactly as in
+        // `grid-view.ts` and `decode.rs`: a keyframe starting *later* than
+        // rows this replica still shows (the host stranded a restore, #341)
+        // banks them before they are overwritten; one re-delivering rows held
+        // as history takes the stale copies back (#291/#313). Suppressed on a
+        // clearing keyframe — those rows are pre-destruction (#314).
+        if let Some(&first) = named.iter().min() {
+            let displaced = if cleared {
+                0
+            } else {
+                let g = term.grid();
+                let last_held = (g.scrollback_len() > 0)
+                    .then(|| g.line(g.scrollback_len() - 1).map(|r| r.id))
+                    .flatten();
+                (0..g.rows())
+                    .map(|r| g.active_row(r).id)
+                    .take_while(|&id| id < first && last_held.is_none_or(|l| id > l))
+                    .count()
+            };
+            if displaced > 0 {
+                term.remote().bank_displaced(displaced);
+            } else {
+                term.remote().drop_history(&named);
+            }
+        }
 
         let mut max_line = i64::MIN;
         for (i, payload) in k.rows_data.iter().enumerate() {
