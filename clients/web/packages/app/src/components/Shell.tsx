@@ -33,7 +33,7 @@ import {
 import { createSessionOverDataPlane } from '../create-session.ts';
 import { dialFor } from '../dial-for.ts';
 import type { DeviceKey } from '../device-key.ts';
-import { actorDirectorySource } from '../directory-source.ts';
+import { actorDirectorySource, type DirectorySource } from '../directory-source.ts';
 import { localHostSource, type HostSource } from '../host-source.ts';
 import {
   activate,
@@ -72,7 +72,28 @@ import { SidebarTabs, VerticalHeader } from './SidebarTabs.tsx';
 import { TabStrip } from './TabStrip.tsx';
 import { TerminalView, type TerminalHooks } from './TerminalView.tsx';
 
-export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
+export const Shell = component<{
+  device: DeviceKey;
+  theme: Theme;
+  /**
+   * Which machines this shell holds, and how to reach each (#332, #338).
+   *
+   * A **function**, called once in setup, for the lifetime rule
+   * `directory-source.ts` sets out: it closes over live reads whose
+   * subscriptions must belong to this instance, and a source built by a parent
+   * and handed down already-made would move them there.
+   *
+   * Defaulted so the loopback path stays a one-liner and every existing caller
+   * keeps working; the hosted path supplies the account's machines instead.
+   */
+  hosts?: () => HostSource;
+  /**
+   * Where the session-list pane reads from. Per-host by nature — see
+   * `directory-source.ts` on why the hosted half kept `DirectoryStatus`
+   * describing exactly one machine.
+   */
+  listSource?: DirectorySource;
+}>((ctx) => {
   const { device, theme } = ctx.props;
   // `useRoute()`, not `useParams()`, and the params are read off it at every
   // use rather than captured here. `useParams()` IS `useRoute().params`, and
@@ -84,19 +105,17 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
   // it one hook over. (#196)
   const route = useRoute();
   const navigate = useNavigate();
-  // The shell's own directory read, beside the one SessionList makes: the
-  // launcher needs the host and the route watcher needs to resolve a session
-  // id to an entry, and neither may borrow a reader whose lifetime belongs to
-  // the list (see directory-source.ts on why sources are per-component).
-  const directory = actorDirectorySource();
-  // What this shell can launch on, and how to reach each (#332). Built here,
-  // in setup, because it closes over `directory` — a live actor read whose
-  // subscription belongs to this instance (see `directory-source.ts`).
+  // Everything this shell knows about machines and their sessions, behind one
+  // seam (#338). It used to build `actorDirectorySource()` here and ask it
+  // four questions — every one of them "what sessions exist", which is a
+  // question about the *fleet* and not about a directory. A directory
+  // describes one host, so on the hosted path there is one per machine and
+  // this code could not be handed "the" one.
   //
-  // Loopback answers with the directory's own machine, which is exactly what
-  // the three inlined lookups below used to do. The hosted path answers with
-  // the account's machines, and `Shell` does not have to know which it got.
-  const hostSource: HostSource = localHostSource(directory);
+  // Built in setup, because it closes over live reads whose subscriptions
+  // belong to this instance (`directory-source.ts`).
+  const hostSource: HostSource = (ctx.props.hosts ?? (() => localHostSource(actorDirectorySource())))();
+  const listSource: DirectorySource = ctx.props.listSource ?? actorDirectorySource;
 
   const store = signal<{
     tabs: TabsState;
@@ -250,11 +269,12 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
         blocks: hooks.blocks(),
       });
     }
-    const dir = directory();
     return {
       sources: {
         blocks: blockItems(attached, Date.now()),
-        sessions: sessionItems(store.tabs.tabs, dir.kind === 'ready' ? dir.view.sessions : [], labels),
+        // Every machine's sessions, not one machine's — the same widening the
+        // native app's ⌘K got when it started watching more than one host.
+        sessions: sessionItems(store.tabs.tabs, hostSource.sessions(), labels),
         hosts: hostItems(hostChoices()),
         actions: actionItems(),
       },
@@ -285,16 +305,12 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
         activateAndNavigate(target.tabId);
         break;
       case 'open-session': {
-        const dir = directory();
-        if (dir.kind !== 'ready') break;
-        const entry = dir.view.sessions.find(
-          (e) => e.host === target.hostId && e.session === target.sessionId,
-        );
-        // Dialled by the *entry's* host, not by "the directory's plane" —
-        // the same question `createOn` asks, and on a shell that holds
-        // several machines they are different answers (#332).
+        // Both halves of the pair, and the route dialled by the entry's own
+        // host — the same question `createOn` asks, and on a shell holding
+        // several machines they are different answers (#332, #338).
+        const entry = hostSource.find(target.hostId, target.sessionId);
         const dial = hostSource.dialFor(target.hostId);
-        if (entry !== undefined && dial !== null) openTarget({ entry, dial }, true);
+        if (entry !== null && dial !== null) openTarget({ entry, dial }, true);
         break;
       }
       case 'create-session':
@@ -325,18 +341,21 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
       store.tabs = activate(store.tabs, id);
       return;
     }
-    const dir = directory();
-    if (dir.kind !== 'ready') return;
-    const entry = dir.view.sessions.find((e) => e.host === h && e.session === s);
+    const entry = hostSource.find(h, s);
     // By the host the URL names, for `open-session`'s reason: a shell holding
     // several machines cannot dial "the" plane.
     const dial = hostSource.dialFor(h);
-    if (entry === undefined || dial === null) return;
+    if (entry === null || dial === null) return;
     openTarget({ entry, dial }, false);
   };
 
   const routeWatch = watch(
-    () => [route.params['hostId'], route.params['sessionId'], directory()] as const,
+    // `hostSource.sessions()` rather than the old `directory()`: the watch has
+    // to re-run when a machine finally answers, or a session named in the URL
+    // never opens — the tab simply does not appear, with nothing to see. The
+    // reads inside `sessions()` are the reactive ones, so depending on its
+    // result is depending on all of them.
+    () => [route.params['hostId'], route.params['sessionId'], hostSource.sessions()] as const,
     syncRoute,
     { immediate: true },
   );
@@ -432,7 +451,7 @@ export const Shell = component<{ device: DeviceKey; theme: Theme }>((ctx) => {
       }
       return (
         <SessionList
-          source={actorDirectorySource}
+          source={listSource}
           deviceKind={device.kind}
           onOpen={(t: OpenTarget) => openTarget(t, true)}
           // The seam hands over the whole view rather than a URL, because the
