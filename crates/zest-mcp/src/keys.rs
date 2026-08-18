@@ -236,7 +236,13 @@ fn parse_base(token: &str, spelled: &str, mods: Mods) -> Result<Base, KeyError> 
 
     // A single character. `ctrl+c` and `alt+b` are keys; a bare `c` is text, and
     // saying so keeps a model from spelling a word as a list of letters.
-    let mut chars = token.chars();
+    //
+    // Whitespace-trimmed rather than `squashed`: `_` and `-` are *themselves*
+    // control chords -- `ctrl+_` is 0x1f and `ctrl+-` passes the character
+    // through -- so stripping them here would refuse two chords that work.
+    // Only spaces around a name are noise; inside it they are not.
+    let single = token.trim();
+    let mut chars = single.chars();
     if let (Some(ch), None) = (chars.next(), chars.next()) {
         if mods.shift {
             return Err(KeyError::ShiftedCharacter(spelled.to_string()));
@@ -487,6 +493,19 @@ mod tests {
         assert!(matches!("shift+a".parse::<Chord>(), Err(KeyError::ShiftedCharacter(_))));
         assert!("ctrl+c".parse::<Chord>().is_ok(), "a control chord is a key");
         assert!("alt+b".parse::<Chord>().is_ok());
+    }
+
+    #[test]
+    fn punctuation_chords_survive_the_separator_squashing() {
+        // `_` and `-` are control chords in their own right, so the character
+        // branch trims whitespace and nothing else. Squashing them the way a
+        // *name* is squashed would refuse two chords that work.
+        assert_eq!(bytes("ctrl+_", PLAIN), vec![0x1f]);
+        assert_eq!(bytes("ctrl+[", PLAIN), vec![0x1b]);
+        assert_eq!(bytes("ctrl+\\", PLAIN), vec![0x1c]);
+        // ...while stray spaces around a character are just noise, as they are
+        // around a name.
+        assert_eq!(bytes("ctrl+ c", PLAIN), vec![0x03]);
     }
 
     #[test]

@@ -230,7 +230,8 @@ fn tool_definitions() -> Value {
                         "type": "boolean",
                         "description":
                             "Press Enter after everything else, as its own keystroke. The \
-                             same as putting \"enter\" last in `keys`. Default false."
+                             same as putting \"enter\" last in `keys` -- so do not do both, \
+                             which would press Enter twice. Default false."
                     }
                 },
                 "required": ["session"]

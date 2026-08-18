@@ -358,20 +358,35 @@ impl ToolSet {
         // carries `alt_screen` and nothing else. So the common calls
         // (`{text, submit}`, `ctrl+c`, `enter`, `tab`, `f5`, ...) still type
         // with no attach at all, as this tool always has.
-        let writes = if plan.needs_modes() {
-            // Sent *inside* the attachment, so the modes cannot go stale
-            // between reading them and writing with them. `attached_with` is a
-            // no-op when a replica already exists, which it does whenever the
-            // caller has been reading `screen`.
-            self.attached(addr, |r| Ok(plan.writes(r.modes(), |t| r.encode_paste(t))))?
+        let sent = if plan.needs_modes() {
+            // Encoded *and sent* inside the attachment. Encoding there is what
+            // stops the modes going stale between reading them and writing with
+            // them; sending there is what keeps `Registry::sweep` from
+            // collecting a session between our detach and our bytes, which
+            // would drop them silently. `attached` is a no-op when a replica
+            // already exists, which it does whenever the caller has been
+            // reading `screen`.
+            //
+            // The cost of the attach lands on a session that has died: this
+            // waits out the reply deadline rather than refusing at once, the
+            // same way `screen` and `blocks` already do. That is #347, and it
+            // is one refusal for every tool rather than a new one here.
+            self.attached(addr, |r| {
+                let writes = plan.writes(r.modes(), |t| r.encode_paste(t));
+                let sent = writes.len();
+                for bytes in writes {
+                    self.conn.send(ClientMessage::Input { session: addr, bytes });
+                }
+                Ok(sent)
+            })?
         } else {
-            plan.writes(Modes::empty(), |t| t.as_bytes().to_vec())
+            let writes = plan.writes(Modes::empty(), |t| t.as_bytes().to_vec());
+            let sent = writes.len();
+            for bytes in writes {
+                self.conn.send(ClientMessage::Input { session: addr, bytes });
+            }
+            sent
         };
-
-        let sent = writes.len();
-        for bytes in writes {
-            self.conn.send(ClientMessage::Input { session: addr, bytes });
-        }
         Ok(json!({ "session": Resolver::format(addr), "sent": true, "writes": sent }))
     }
 
@@ -682,8 +697,12 @@ struct Plan {
 
 impl Plan {
     fn parse(args: &Value) -> Result<Self, ToolError> {
-        let text = opt_str(args, "text")?.map(str::to_string);
-        let paste = opt_str(args, "paste")?.map(str::to_string);
+        // An empty string types nothing, so it is *absent* rather than a write
+        // of zero bytes -- which the daemon drops anyway, leaving a call that
+        // reported success and did nothing. This is also what `text` meant
+        // before `keys` existed.
+        let text = opt_str(args, "text")?.filter(|t| !t.is_empty()).map(str::to_string);
+        let paste = opt_str(args, "paste")?.filter(|t| !t.is_empty()).map(str::to_string);
         // One slot, two spellings: which one is meant decides whether the bytes
         // are bracketed, and there is no sensible order for both at once.
         if text.is_some() && paste.is_some() {
@@ -718,7 +737,20 @@ impl Plan {
         // drift. `\r`, not `\n`: it is a terminal on the other end, and a line
         // feed is not what Enter sends.
         if opt_bool(args, "submit")?.unwrap_or(false) {
-            keys.push("enter".parse::<Chord>().expect("`enter` is in the table"));
+            let enter = "enter".parse::<Chord>().expect("`enter` is in the table");
+            // `submit` *is* a trailing Enter, so asking for both sends two --
+            // and in a dialog the second one accepts whatever the first opened.
+            // Refused rather than de-duplicated: silently dropping a keystroke
+            // the caller asked for would make `keys: ["enter", "enter"]`
+            // unpredictable, and a caller who wants two can still say so.
+            if plan_ends_with_enter(&keys) {
+                return Err(ToolError::BadType {
+                    field: "submit",
+                    want: "left off when `keys` already ends with \"enter\" -- together they \
+                           press Enter twice, and the second accepts whatever the first opened",
+                });
+            }
+            keys.push(enter);
         }
 
         if text.is_none() && paste.is_none() && keys.is_empty() {
@@ -752,6 +784,16 @@ impl Plan {
         out.extend(self.keys.iter().map(|c| keys::encode(c, modes)));
         out
     }
+}
+
+/// Whether these keys already end in a plain Enter, which `submit` would repeat.
+///
+/// Plain: a modified Enter is a different chord that applications distinguish
+/// (`alt+enter` opens a line in several editors), so it does not collide.
+fn plan_ends_with_enter(keys: &[Chord]) -> bool {
+    keys.last().is_some_and(|c| {
+        c.base == keys::Base::Named(keys::Named::Enter) && c.mods == keys::Mods::default()
+    })
 }
 
 /// A string argument, refusing a wrong type rather than reading it as absent.
@@ -1493,6 +1535,35 @@ mod input_tests {
         assert_eq!(
             writes(json!({ "keys": "enter" }), Modes::empty()),
             vec![b"\r".to_vec()]
+        );
+    }
+
+    #[test]
+    fn an_empty_string_types_nothing_rather_than_writing_nothing() {
+        // `{"text": ""}` used to pass validation and send a zero-byte write,
+        // which the daemon drops -- so the call reported success and did
+        // nothing at all.
+        assert!(Plan::parse(&json!({ "text": "" })).is_err());
+        assert!(Plan::parse(&json!({ "paste": "" })).is_err());
+        // ...but an empty text alongside a real key is just an absent text.
+        assert_eq!(writes(json!({ "text": "", "submit": true }), Modes::empty()), vec![b"\r".to_vec()]);
+    }
+
+    #[test]
+    fn submit_alongside_a_trailing_enter_is_refused_not_doubled() {
+        // Two Enters in a dialog: the second accepts whatever the first opened.
+        // Refused rather than de-duplicated, so that a caller who genuinely
+        // wants two can still ask for them.
+        assert!(Plan::parse(&json!({ "keys": ["enter"], "submit": true })).is_err());
+        assert!(
+            Plan::parse(&json!({ "keys": ["enter", "enter"] })).is_ok(),
+            "asking for two Enters explicitly stays possible"
+        );
+        // A modified Enter is a different chord -- `alt+enter` opens a line in
+        // several editors -- so it does not collide with `submit`.
+        assert_eq!(
+            writes(json!({ "keys": ["alt+enter"], "submit": true }), Modes::empty()).len(),
+            2
         );
     }
 

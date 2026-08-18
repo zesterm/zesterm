@@ -306,34 +306,9 @@ fn the_tools_answer_over_a_real_connection() {
         .expect("input");
     assert_eq!(sent["writes"], 2, "the text and the Enter are two keystrokes (#344): {sent}");
 
-    // Named keys, over the wire. What the bytes *are* is settled next door
-    // against `zest-input`; what this adds is that a key survives the whole
-    // path -- parse, encode, seal, frame, daemon -- and reaches a live session.
-    let keys = tools
-        .call("input", &serde_json::json!({ "session": session, "keys": ["down", "down", "enter"] }))
-        .expect("named keys");
-    assert_eq!(keys["writes"], 3, "three keys, three keystrokes: {keys}");
-
-    // An arrow needs the session's DECCKM, which lives only on a replica -- so
-    // this call attaches, reads, writes and detaches. Asserting it leaves
-    // nothing behind is the same property `detaching_leaves_the_session_running`
-    // holds for reads.
-    let attached_after = tools
-        .call("sessions", &serde_json::json!({}))
-        .expect("sessions")["sessions"]
-        .as_array()
-        .expect("array")
-        .iter()
-        .find(|s| s["id"] == session.as_str())
-        .map(|s| s["attached"].as_bool().unwrap_or(false));
-    assert_eq!(
-        attached_after,
-        Some(false),
-        "typing an arrow must not leave this server attached to somebody's session"
-    );
-
     // A refusal, not a silent no-op: the whole complaint in #345 is that a key
-    // which does nothing is indistinguishable from one the app ignored.
+    // which does nothing is indistinguishable from one the app ignored. Parsed
+    // before anything is sent, so this needs no live session behind it.
     let err = tools
         .call("input", &serde_json::json!({ "session": session, "keys": ["nope"] }))
         .expect_err("an unknown key name must refuse");
@@ -348,6 +323,53 @@ fn the_tools_answer_over_a_real_connection() {
     assert!(id_before.is_some(), "input must not have ended the session");
 
     tools.call("close_session", &serde_json::json!({ "session": session })).expect("close");
+}
+
+#[test]
+fn an_arrow_key_reaches_a_live_session_and_lets_go_of_it_again() {
+    // Arrows are the one family whose bytes depend on the session -- DECCKM
+    // decides `ESC [ A` against `ESC O A` -- and that mode lives only on a
+    // replica, so this call attaches, encodes, writes and detaches.
+    //
+    // `long_lived_cmd` rather than `quiet_cmd`: the latter exits at once, and
+    // an attach to a session the registry has already swept waits out the reply
+    // deadline instead of answering. That is #347's cost and it applies to
+    // `screen` and `blocks` equally; what this test is about is the live path.
+    let (addr, registry) = serve_daemon();
+    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+    let created = tools
+        .call(
+            "create_session",
+            &serde_json::json!({ "command": long_lived_cmd(), "cols": COLS, "rows": ROWS }),
+        )
+        .expect("create_session");
+    let session = created["session"].as_str().expect("a session id").to_string();
+
+    let keys = tools
+        .call(
+            "input",
+            &serde_json::json!({ "session": session, "keys": ["down", "down", "enter"] }),
+        )
+        .expect("named keys");
+    assert_eq!(keys["writes"], 3, "three keys, three keystrokes: {keys}");
+
+    // Reading a mode must not leave a subscriber behind on somebody's session,
+    // the same property `detaching_leaves_the_session_running` holds for reads.
+    let listed = tools.call("sessions", &serde_json::json!({})).expect("sessions");
+    let attached = listed["sessions"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|s| s["id"] == session.as_str())
+        .map(|s| s["attached"].as_bool().unwrap_or(true));
+    assert_eq!(
+        attached,
+        Some(false),
+        "typing an arrow must not leave this server attached: {listed}"
+    );
+
+    tools.call("close_session", &serde_json::json!({ "session": session })).expect("close");
+    registry.close(tools.resolver().resolve(&session).expect("resolve").session);
 }
 
 #[test]
