@@ -54,6 +54,12 @@ enum Outbound {
 pub struct Shared {
     /// The last session listing this connection was told about.
     pub sessions: Vec<SessionInfo>,
+    /// Bumped on every `Sessions` message, so a caller that asked for a fresh
+    /// listing can tell the answer to its own request from the listing that was
+    /// already there. A count rather than a flag: two `ListSessions` in flight
+    /// would race to clear one flag, and the loser would return the listing the
+    /// winner asked for.
+    pub sessions_gen: u64,
     /// What this machine says it is and can launch. Sticky: `None` on a
     /// `Sessions` push means "nothing new to say", never "it has none", so it
     /// is only ever replaced by a `Some`.
@@ -254,6 +260,34 @@ impl Conn {
             rows,
         });
         self.wait_for(|s| s.created)
+    }
+
+    /// Ask the host for a listing, and wait for it to answer.
+    ///
+    /// The listing is a **question**, not a cache read. `Shared::sessions` is
+    /// only written when a `Sessions` message arrives, and this connection sets
+    /// `Watch { sessions: false }` -- so without asking, the newest listing is
+    /// whatever our own last `CreateSession`/`CloseSession` happened to return.
+    /// Everything a session acquires after it is spawned -- its title, its OSC 7
+    /// cwd, whether it went to the alternate screen -- was therefore reported at
+    /// the value it held a millisecond after the spawn, which is empty for all
+    /// three, until the agent happened to create something else. An agent that
+    /// reads `alt_screen: false` off a session running vim goes to `blocks`,
+    /// which is empty on the alternate screen by design, and concludes the
+    /// session is idle. (#360)
+    ///
+    /// Asking, rather than subscribing: a push arriving while a request/reply is
+    /// in flight is discarded by `DaemonClient`, which is why the watch is off in
+    /// the first place, and a subscription is in any case only as fresh as the
+    /// last push where this is as fresh as the call.
+    pub fn list_sessions(&self) -> Result<Vec<SessionInfo>, ConnError> {
+        let seen = {
+            let (lock, _) = &*self.state;
+            let s = lock.lock().expect("state");
+            s.sessions_gen
+        };
+        self.send(ClientMessage::ListSessions);
+        self.wait_for(|s| (s.sessions_gen != seen).then(|| s.sessions.clone()))
     }
 
     /// Attach, and wait for the keyframe that answers it.
@@ -473,6 +507,7 @@ fn on_message(state: &State, tx: &Sender<Outbound>, msg: HostMessage) {
                 s.created = sessions.iter().find(|si| si.addr.session == id).map(|si| si.addr);
             }
             s.sessions = sessions;
+            s.sessions_gen = s.sessions_gen.wrapping_add(1);
             // Sticky. `None` is "nothing new to say" -- which is also what a
             // daemon predating the field sends -- so clearing on one would
             // blank this machine's facts every time somebody opened a shell.
