@@ -42,6 +42,7 @@ describes only the current shape.
 | `KeyStore`, `SecretStore`, `CredentialStore` | `crates/zest-mesh/src/keystore.rs` | draft — `zest-mesh` may change it freely | `zest-mesh`, `zest-daemon` |
 | `key::encode`, `key::encode_press` — the legacy keystroke encoding | `crates/zest-input/src/key.rs` | **frozen** — two ports pinned to it: `clients/web/packages/input/src/key.ts` (by review, and it says so in its header) and `crates/zest-mcp/src/keys.rs` (by `crates/zest-mcp/tests/keys.rs`, byte-for-byte over every name × modifier × DECCKM state). `encode_press` exists because `winit::KeyEvent` has a private platform tail and cannot be built outside winit, so no external test could reach the encoder at all | `zest-app`, `zest-mcp`, `clients/web` |
 | `DaemonConfig`, `SessionHandle`, `SessionState` | `crates/zest-daemon/src/lib.rs` | draft — daemon-internal, may change freely | `zest-daemon` |
+| `SessionEntry`, `HostInfo`, `DataPlane`, `HostFacts`, `LaunchTarget`, `DirectoryView` | `clients/web/packages/control/src/session-directory.actor.ts` | **frozen** — the actor wire between the sidecar (which writes) and the app (which reads); JSON, and deliberately free of `@zesterm/proto` (see below) | `clients/web` |
 | TypeScript bindings | `crates/zest-proto/bindings/` | **generated** — `cargo xtask check-bindings` | `clients/web`, `cloud/` |
 | Conformance fixtures | `crates/zest-proto/fixtures/` | **generated** — `cargo xtask check-fixtures` | `clients/web` |
 | Settings schema + walked UI fields | `clients/web/packages/settings/generated/` | **generated** — `cargo xtask check-export-web` | `clients/web` |
@@ -50,6 +51,25 @@ describes only the current shape.
 "Draft" means it has a single consumer and may still change freely. It freezes
 when a second consumer builds on it — which is how `DaemonClient` and
 `find_or_spawn` froze, when `zest-mcp` became their second caller.
+
+### The control actors carry a projection, not the wire shape
+
+`@zesterm/control` depends on `@sigx/actors` and nothing else, and its actor
+wire is `@sigx/serialize` JSON. So the daemon's types stop at that boundary and
+are projected: `SessionInfo` → `SessionEntry`, `HostOffer` → `HostFacts`,
+`HostProfile` → `LaunchTarget`, each by a function beside the type
+(`sessionEntryOf`, `hostFactsOf`) whose parameter is **structural** rather than
+imported.
+
+Two reasons, and the second is the one that bites. A dependency added for one
+argument's type is a dependency every actors host then carries — including a
+Bun sidecar that has no business knowing what msgpack is. And `SessionId` is a
+`bigint` on the wire, which JSON cannot carry at all.
+
+They are renamed rather than sharing a name because one name for two
+representations is how a `snake_case` field ends up read off a `camelCase`
+object — a mistake that typechecks in neither direction only while the names
+differ.
 
 ### Generated artifacts are contracts too
 

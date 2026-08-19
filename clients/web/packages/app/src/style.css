@@ -588,11 +588,13 @@ body {
   flex-direction: column;
 }
 
-/* --- page frame (design §7–§8: fleet, themes) -----------------------------
+/* --- page frame (design §7–§8, §12: fleet, themes, launch targets) --------
 
    The full-page directory screens share one frame: 34px/38px padding, the
    19px/600 heading with its faint tagline, and the dim lede capped at 640px.
-   The frame scrolls as a whole (invariant 10). */
+   The frame scrolls as a whole (invariant 10). `.profiles-page` carries
+   `.fleet-page` too rather than restating it — three screens that look alike
+   because they ARE alike, not because three rules happen to agree. */
 
 .fleet-page {
   flex: 1;
@@ -636,6 +638,107 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.09em;
   color: var(--zt-dim);
+}
+
+/* --- launch targets (design §12), read-only ------------------------------
+
+   The rail without the editor: what each machine publishes, under the machine
+   that owns it. The design's editor — inheritance chips, swatch picker, live
+   preview — needs writes the browser does not have, so none of it is here and
+   the screen says so rather than drawing controls that cannot save. */
+
+.profiles-page .page-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.profiles-page .page-head h1 {
+  flex: 1;
+}
+
+.profiles-host {
+  margin-top: 26px;
+}
+
+.profiles-host h2 {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0 0 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--zt-dim);
+}
+
+/* Mono, and only ever what the machine actually answered. */
+.profiles-host .host-facts {
+  font-family: var(--zt-mono, ui-monospace, monospace);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--zt-faint);
+}
+
+.target-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--zt-line);
+  border-radius: 9px;
+  overflow: hidden;
+}
+
+.target-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+}
+
+.target-row + .target-row {
+  border-top: 1px solid var(--zt-line);
+}
+
+.target-row .row-tile {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  background: var(--zt-sel-soft);
+  color: var(--zt-dim);
+}
+
+.target-row .row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.target-row .row-name {
+  font-size: 12.5px;
+  color: var(--zt-fg);
+}
+
+/* The command wraps rather than truncating: a WSL invocation is long and the
+   whole point of this screen is seeing what will actually run. */
+.target-row .row-sub {
+  font-family: var(--zt-mono, ui-monospace, monospace);
+  font-size: 10px;
+  color: var(--zt-faint);
+  overflow-wrap: anywhere;
+}
+
+.profiles-page .page-lede {
+  margin: 0;
 }
 
 .card-grid {

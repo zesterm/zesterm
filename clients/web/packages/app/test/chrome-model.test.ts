@@ -414,3 +414,29 @@ test('an empty route param is not a machine', () => {
     { kind: 'list', hostId: TAB_HOST },
   );
 });
+
+test('the profiles screen beats every other arm, because it names no machine', () => {
+  // `/profiles` carries no hostId and no sessionId, so each arm below it would
+  // fall through — to the landing on the hosted path, to the default list on
+  // loopback. ⌘⇧, would then change the URL and leave the screen exactly as it
+  // was, which is the state that chord was already in (claimed, then
+  // discarded) with a misleading address bar added.
+  assert.deepEqual(pane({ atProfiles: true, hasLanding: true }), { kind: 'profiles' });
+  assert.deepEqual(pane({ atProfiles: true, defaultHostId: TAB_HOST }), { kind: 'profiles' });
+  const id = tabIdOf(TAB_HOST, '7');
+  assert.deepEqual(
+    pane({
+      atProfiles: true,
+      activeTabId: id,
+      activeHasTarget: true,
+      routeHost: TAB_HOST,
+      routeSession: '7',
+    }),
+    { kind: 'profiles' },
+    'even over a terminal whose session the params still name',
+  );
+  // And absent means absent: the flag is opt-in, so every existing caller and
+  // every other URL is unaffected.
+  assert.deepEqual(pane({ hasLanding: true }), { kind: 'landing' });
+  assert.deepEqual(pane({ atProfiles: false, hasLanding: true }), { kind: 'landing' });
+});

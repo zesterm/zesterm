@@ -43,8 +43,11 @@ it injected, nothing installed) produce **command blocks** — what ran, where,
 what it printed, how it ended — that cross the wire, drive copy-output/re-run,
 and give an agent `blocks` instead of a build log. The fleet is visible and
 launchable from one window: every reachable machine's sessions and published
-launch profiles in the ⌘K picker, the fleet cards and the `+` menu. The hosted
-web client attaches to a local daemon over WebSocket, and `zest-mcp` gives any
+launch profiles in the ⌘K picker, the fleet cards and the `+` menu. **The
+browser is the same window**: signed in, it holds a connection per enrolled
+machine and gets the tab strip, the sidebar, the palette and the same
+host-grouped `+` menu — every machine's profiles, launchable, on a phone. The
+hosted web client attaches to a local daemon over WebSocket, and `zest-mcp` gives any
 agent harness the same terminals as tools, including `run_isolated`'s exit code
 that nothing inside the terminal can forge.
 
@@ -135,6 +138,15 @@ the history behind them is in closed issues and PRs.
 
 ### Web client & devices
 
+- [x] **The browser is host-plural, and the fleet is in the chrome.** The
+      hosted path was three screens inside one component with no tabs, no
+      launcher and no palette; it mounts the same `Shell` the loopback path
+      does, over a `HostSource` that answers for every enrolled machine.
+      Profiles cross the wire (`Hello.watch_hosts` → `Sessions.offer`,
+      ADR-014), so the `+` menu groups launch targets by the machine that will
+      run them and `⌘⇧,` opens them read-only — every profile it can see lives
+      in the config of the machine that publishes it, and editing happens
+      there. #332, #338, #342, #351, #352.
 - [ ] **The device registry UI** — the account's list of machines and browsers.
       The Worker's half is in (`/api/enroll/*`, `/api/hosts`, `/api/devices`,
       revoke routes); the devices screen is not.

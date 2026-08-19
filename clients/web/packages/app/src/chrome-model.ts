@@ -298,6 +298,7 @@ export function isIconRail(width: number): boolean {
 export type PaneChoice =
   | { readonly kind: 'terminal'; readonly tabId: string }
   | { readonly kind: 'landing' }
+  | { readonly kind: 'profiles' }
   | { readonly kind: 'list'; readonly hostId: string };
 
 /**
@@ -314,12 +315,19 @@ export function paneFor(args: {
   readonly activeHasTarget: boolean;
   readonly routeHost: string | undefined;
   readonly routeSession: string | undefined;
+  /** The URL is `/profiles`. */
+  readonly atProfiles?: boolean;
   /** The caller supplied something to show when no machine is named. */
   readonly hasLanding: boolean;
   /** The machine to list when the URL names none. */
   readonly defaultHostId: string | null;
 }): PaneChoice {
   const { activeTabId, activeHasTarget, hasLanding } = args;
+  // First, and above the terminal arm: `/profiles` names no machine and no
+  // session, so every arm below would fall through to the landing or to the
+  // default list — the chord would appear to do nothing while the URL said
+  // otherwise, which is the state ⌘⇧, was already in.
+  if (args.atProfiles === true) return { kind: 'profiles' };
   // `''` is not a machine. The router can yield an empty param for an
   // unmatched or partial match (`/h//s/7`), and `Shell.syncRoute` already
   // treats that as "no machine named" — so this has to as well, or the two

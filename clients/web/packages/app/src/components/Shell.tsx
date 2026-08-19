@@ -35,6 +35,7 @@ import {
 } from '../chrome-model.ts';
 import { createSessionOverDataPlane } from '../create-session.ts';
 import { fitGrid } from '../grid-fit.ts';
+import { PROFILES_PATH, SHELL_PATH } from '../route-table.ts';
 import { dialFor } from '../dial-for.ts';
 import type { DeviceKey } from '../device-key.ts';
 import { actorDirectorySource, type DirectorySource } from '../directory-source.ts';
@@ -71,6 +72,7 @@ import {
   type PaletteItem,
 } from '../palette/sources.ts';
 import { Palette } from './Palette.tsx';
+import { ProfilesPane } from './ProfilesPane.tsx';
 import { SessionList, type OpenTarget } from './SessionList.tsx';
 import { SidebarTabs, VerticalHeader } from './SidebarTabs.tsx';
 import { TabStrip } from './TabStrip.tsx';
@@ -418,6 +420,12 @@ export const Shell = component<{
       case 'palette':
         store.palette = store.palette.open ? closePalette(store.palette) : openPalette();
         break;
+      case 'profiles':
+        // A route rather than an overlay, and a child of the shell record:
+        // the profiles screen replaces the pane, and a sibling record would
+        // remount the Shell and discard every open tab (`route-table.ts`).
+        void navigate(PROFILES_PATH);
+        break;
       case 'layout-toggle': {
         const next = toggleLayout(store.layout);
         store.layout = next;
@@ -436,7 +444,7 @@ export const Shell = component<{
         if (row !== undefined) void createOn(row);
         break;
       }
-      // split / settings / profiles / copy-output / re-run: claimed so the
+      // split / settings / copy-output / re-run: claimed so the
       // terminal never types them, acted on by their own work items.
       default:
         break;
@@ -483,6 +491,9 @@ export const Shell = component<{
       routeSession: routeS,
       hasLanding: ctx.props.landing !== undefined,
       defaultHostId: defaultHostId(),
+      // `route.path`, not a param: `/profiles` names nothing, so there is no
+      // param to read and the arm has to be the URL itself.
+      atProfiles: route.path === PROFILES_PATH,
     });
 
     const pane = ((): unknown => {
@@ -502,6 +513,21 @@ export const Shell = component<{
             register={(hooks: TerminalHooks | null) => {
               if (hooks === null) termHooks.delete(id);
               else termHooks.set(id, hooks);
+            }}
+          />
+        );
+      }
+      if (choice.kind === 'profiles') {
+        return (
+          <ProfilesPane
+            hosts={hostChoices}
+            factsOf={factsOf}
+            onLaunch={(t) => void createOn(t)}
+            // Back where they were, or the landing when there is nowhere to
+            // go back to — never a dead screen with no way out.
+            onClose={() => {
+              const back = active === null ? null : urlOfTab(active);
+              void navigate(back ?? SHELL_PATH);
             }}
           />
         );
