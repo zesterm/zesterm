@@ -117,10 +117,11 @@ because `KeyEvent` has a private platform tail and cannot be built outside winit
 A build with a progress bar writes one row hundreds of times; the emulator has
 already collapsed that before anything here looks, so `screen` is bounded by the
 grid rather than by how chatty the command was. `blocks` carries no output text
-at all — a command, a cwd, a state and two timestamps — so fifty commands of
-history costs less than one screen of a build log. `output` is the only bulk-text
-call, is scoped to one block, and truncates in the **middle**: an error is
-usually at the end and the command that caused it at the beginning.
+at all — a command, a cwd, a state, where it sits in the session's lines, and
+two timestamps — so fifty commands of history costs less than one screen of a
+build log. `output` is the only bulk-text call, is scoped to one block, and
+truncates in the **middle**: an error is usually at the end and the command that
+caused it at the beginning.
 
 ADR-004 measures the *transport* half of this (~1 MB of pty bytes against ~3 KB
 of delta for `cat 1MB`). These are the other half, and they are different
