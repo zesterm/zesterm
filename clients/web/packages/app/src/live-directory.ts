@@ -384,10 +384,10 @@ export function liveDirectory(options: LiveDirectoryOptions): LiveDirectory {
     const link = options.openLink(w.host, eventsFor(w));
     if (link === null) {
       patch(w.host.id, {
-      presence: { kind: 'failed', message: NO_RELAY },
-      sessions: [],
-      facts: null,
-    });
+        presence: { kind: 'failed', message: NO_RELAY },
+        sessions: [],
+        facts: null,
+      });
       return;
     }
     // Set before `connect()`, which emits its first connection event

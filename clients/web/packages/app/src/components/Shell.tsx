@@ -21,7 +21,6 @@ import { component, onMounted, onUnmounted, signal, watch } from 'sigx';
 import { useNavigate, useRoute } from '@sigx/router';
 import type { Theme } from '@zesterm/theme';
 import { modsOf, shellChord, type ShellAction } from '@zesterm/input';
-import type { Dial } from '@zesterm/client';
 import type { DirectoryView, HostFacts } from '@zesterm/control';
 
 import {
@@ -33,7 +32,6 @@ import {
   type HostChoice,
   type LauncherTargetRow,
 } from '../chrome-model.ts';
-import { createSessionOverDataPlane } from '../create-session.ts';
 import { fitGrid } from '../grid-fit.ts';
 import { PROFILES_PATH, SHELL_PATH } from '../route-table.ts';
 import { dialFor } from '../dial-for.ts';
