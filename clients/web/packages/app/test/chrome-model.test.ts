@@ -9,6 +9,7 @@ import {
   LAUNCHER_WIDTH,
   chipTitle,
   chipTooltip,
+  factsLine,
   isIconRail,
   launcherAlign,
   launchableRows,
@@ -439,4 +440,18 @@ test('the profiles screen beats every other arm, because it names no machine', (
   // every other URL is unaffected.
   assert.deepEqual(pane({ hasLanding: true }), { kind: 'landing' });
   assert.deepEqual(pane({ atProfiles: false, hasLanding: true }), { kind: 'landing' });
+});
+
+test('a facts line shows every part the machine answered, and nothing else', () => {
+  // Every string in the offer may be empty — a daemon that cannot answer one
+  // sends `''` rather than omitting it — so gating the whole line on `os`
+  // would hide an arch we do have. The two screens that draw this would then
+  // disagree about the same machine, which is worse than either being terse.
+  assert.equal(factsLine(['windows', 'x86_64', '10.0.26220']), 'windows · x86_64 · 10.0.26220');
+  assert.equal(factsLine(['', 'aarch64', '']), 'aarch64');
+  assert.equal(factsLine([undefined, 'aarch64']), 'aarch64');
+  // Nothing said is an empty string, so the caller draws no element at all —
+  // an empty one still takes its gap and reads as a fact that failed to load.
+  assert.equal(factsLine(['', '', '']), '');
+  assert.equal(factsLine([undefined, undefined]), '');
 });

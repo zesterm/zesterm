@@ -68,9 +68,29 @@ export function gridFor(
  * the alt screen must fit its canvas exactly, while the blocks body only ever
  * gets narrower and wraps.
  */
+/**
+ * One measuring context for the process.
+ *
+ * `fitGrid` runs from a `ResizeObserver`, so it is called on every frame of a
+ * window drag — for every open terminal. A canvas per call is a DOM element
+ * and a 2D context per frame per pane, discarded immediately. Lazily created
+ * rather than at module scope because this module is imported by tests that
+ * have no `document` at all.
+ *
+ * `undefined` = not asked yet; `null` = asked, and this browser gave us none.
+ */
+let measuring: CanvasRenderingContext2D | null | undefined;
+
+function context(): CanvasRenderingContext2D | null {
+  if (measuring === undefined) {
+    measuring = document.createElement('canvas').getContext('2d');
+  }
+  return measuring;
+}
+
 export function fitGrid(el: Element | null, dpr: number): GridSize {
   if (el === null) return DEFAULT_GRID;
-  const meas = document.createElement('canvas').getContext('2d');
+  const meas = context();
   if (meas === null) return DEFAULT_GRID;
   return gridFor(
     { width: el.clientWidth, height: el.clientHeight },

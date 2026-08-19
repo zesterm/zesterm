@@ -22,7 +22,7 @@
 import { component } from 'sigx';
 import type { HostFacts } from '@zesterm/control';
 
-import type { HostChoice } from '../chrome-model.ts';
+import { factsLine, type HostChoice } from '../chrome-model.ts';
 
 export const ProfilesPane = component<{
   hosts: () => readonly HostChoice[];
@@ -54,18 +54,15 @@ export const ProfilesPane = component<{
         ) : (
           hosts.map((h) => {
             const facts = ctx.props.factsOf(h.id);
+            // Only what it said, and everything it said. Gating the line on
+            // `os` alone would hide an arch we do have — and would disagree
+            // with the launcher's header about the same machine.
+            const line = factsLine([facts?.os, facts?.arch, facts?.osVersion]);
             return (
               <section key={h.id} class="profiles-host">
                 <h2>
                   {h.label}
-                  {/* Only what it said. A machine that has not answered gets
-                      the sentence below instead of a row of blanks — an os we
-                      cannot fill would be a dash pretending to be a fact. */}
-                  {facts === null || facts.os === '' ? null : (
-                    <span class="host-facts">
-                      {[facts.os, facts.arch, facts.osVersion].filter((p) => p !== '').join(' · ')}
-                    </span>
-                  )}
+                  {line === '' ? null : <span class="host-facts">{line}</span>}
                 </h2>
                 {facts === null ? (
                   // Not "no profiles": this machine has told us nothing at

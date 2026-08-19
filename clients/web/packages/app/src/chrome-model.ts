@@ -130,6 +130,23 @@ export interface LauncherTargetRow {
 
 export type LauncherRow = LauncherGroupRow | LauncherTargetRow;
 
+/**
+ * A machine's facts as one dim line: the parts it actually answered, joined.
+ *
+ * Every string in `HostOffer` may be empty — a daemon that cannot answer one
+ * sends `""` rather than omitting the field — so a caller that gates the whole
+ * line on *one* of them hides the others. "An os row we cannot fill would be a
+ * dash pretending to be a fact" is the rule; dropping an arch we DO have is
+ * that rule overshooting, and the two screens showing this would then disagree
+ * about the same machine.
+ *
+ * Empty out means there is nothing to draw — the caller renders no element at
+ * all rather than an empty one, which would still take its gap.
+ */
+export function factsLine(parts: readonly (string | undefined)[]): string {
+  return parts.filter((p): p is string => p !== undefined && p !== '').join(' · ');
+}
+
 /** The rows `⌘N` and `⏎` can actually run, in menu order. */
 export function launchableRows(rows: readonly LauncherRow[]): readonly LauncherTargetRow[] {
   return rows.filter((r): r is LauncherTargetRow => r.kind === 'target');
@@ -182,7 +199,9 @@ export function launcherRows(
         // Only what it actually said. "An os row we cannot fill would be a
         // dash pretending to be a fact" is the native fleet card's rule, and
         // a header is the same promise in a smaller space.
-        sub: [facts?.os ?? '', facts?.arch ?? ''].filter((p) => p !== '').join(' · '),
+        // os and arch only: a header has one line's room, and the version is
+        // the least identifying of the three.
+        sub: factsLine([facts?.os, facts?.arch]),
       });
     }
     rows.push({
