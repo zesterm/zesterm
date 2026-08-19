@@ -1083,3 +1083,64 @@ fn a_listing_reflects_a_session_this_connection_did_not_create() {
     registry.close(a.session);
     registry.close(theirs.id);
 }
+
+/// `sessions` and `screen` must never disagree about the same session.
+///
+/// The invariant #346 asked to have pinned. Both tools describe one terminal, so
+/// a field that differs between them means one of the two is reading something
+/// other than the session — which is what a cache is. #361 made the listing a
+/// question rather than a cache read; this is the assertion that keeps it one.
+///
+/// Size is the field moved here because it is the only one of the three that can
+/// be moved without a child printing, which `tests/live.rs` does not wait on
+/// (#285). It is not a lesser case: `sessions` reporting the size a session was
+/// *created* with while `screen` reported the size it had been resized *to* is
+/// one of the rows in #346's evidence table, and a listing rebuilt from the
+/// creation request rather than from the grid reproduces it exactly. Title and
+/// `alt_screen` are compared too, and travel in the same `Registry::list` answer
+/// as the size, so they cannot come from a different source than the one this
+/// asserts.
+#[test]
+fn a_listing_and_a_screen_never_disagree_about_one_session() {
+    let (addr, registry) = serve_daemon();
+    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+
+    let created = tools
+        .call("create_session", &serde_json::json!({ "command": long_lived_cmd(), "cols": COLS, "rows": ROWS }))
+        .expect("create_session");
+    let session = created["session"].as_str().expect("a session id").to_string();
+    let a = tools.resolver().resolve(&session).expect("the id this server minted");
+
+    // Somebody's window changes shape. Nothing on this connection asked for it,
+    // so nothing of ours replies and nothing would invalidate a cache.
+    let grown = (COLS + 20, ROWS + 6);
+    registry.get(a.session).expect("the session just created").resize(grown.0, grown.1);
+
+    let listed = tools.call("sessions", &serde_json::json!({})).expect("sessions");
+    let mine = listed["sessions"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|s| s["id"] == session.as_str())
+        .expect("the session this test created")
+        .clone();
+    let screen = tools
+        .call("screen", &serde_json::json!({ "session": session }))
+        .expect("screen");
+
+    assert_eq!(
+        (mine["cols"].as_u64(), mine["rows"].as_u64()),
+        (Some(u64::from(grown.0)), Some(u64::from(grown.1))),
+        "a listing reports the grid a session has, not the one it was asked for: {mine}"
+    );
+    for field in ["cols", "rows", "title", "alt_screen"] {
+        assert_eq!(
+            mine[field], screen[field],
+            "`sessions` and `screen` describe one terminal, so a `{field}` that differs \
+             means one of them is reading something that is not the session (#346): \
+             {mine} vs {screen}"
+        );
+    }
+
+    registry.close(a.session);
+}
