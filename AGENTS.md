@@ -482,7 +482,13 @@ you need before you trip on it.
   height-axis ownership dance — the DECTCEM-bracketed settle, the coverage
   guard against stale repaints, the debt that bounds the pull, and the fact
   that only a storm's *first* repaint announces its size — is ADR-013, written
-  after #200/#247/#271/#312/#315/#335/#341 each paid for a different corner of it. The two
+  after #200/#247/#271/#312/#315/#335/#341 each paid for a different corner of
+  it — and the *width* axis (#224) is the same ownership question answered the
+  same way: the two reflows can never disagree about wrapping (ConPTY restates
+  logical lines and relies on our autowrap) but a widen restates **from home**
+  where our reflow bottom-anchors, so the viewport re-anchors top-aligned on
+  the line the restater still holds, banking the surplus and, when its buffer's
+  top row was a wrapped *fragment*, banking through the merged line too. The two
   meta-lessons survive here: **a capture beats a helper** (a synthetic helper
   that announced sizes ConPTY does not kept a broken fix green), and the flag
   is set at the *door* that makes a terminal a replica (`Terminal::remote`),

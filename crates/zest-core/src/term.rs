@@ -488,11 +488,62 @@ impl TermState {
             self.selection = None;
         }
         let template = self.template;
+        // The line at the top of the viewport is the line at the top of the
+        // restater's buffer — we mirror it, and a width reflow must keep the
+        // two anchored together. See below. Captured only for a width change
+        // on a restated grid with the primary screen live: the alt grid never
+        // reflows, and ConPTY's repaint describes whichever screen is active.
+        // Alongside the id: whether that top row is a *fragment* — the
+        // continuation of a line that wrapped out of the restater's buffer.
+        // Its restatement will begin with the same fragment (measured:
+        // `resize-width.vtrec`'s widen repaint opens `ESC[H crates ESC[K`),
+        // while our reflow merges the fragment back into its whole line — so
+        // the whole line must be banked too, or the fragment overwrites it
+        // and the head of the line is destroyed.
+        let anchor = (cols != self.grid.cols()
+            && self.grid.viewport_restated_elsewhere()
+            && self.alt_grid.is_none())
+        .then(|| {
+            let fragment = self
+                .grid
+                .scrollback_len()
+                .checked_sub(1)
+                .and_then(|i| self.grid.line(i))
+                .is_some_and(|r| r.wrapped);
+            (self.grid.active_row(0).id, fragment)
+        });
         let reindex = self.grid.resize(cols, rows, &template);
         if let Some(alt) = self.alt_grid.as_mut() {
             // The alternate screen never reflows and carries no blocks, so its
             // reindex is always empty. Dropped rather than merged.
             let _ = alt.resize(cols, rows, &template);
+        }
+        // Both reflows agree about *wrapping* — ConPTY restates logical lines
+        // and relies on our autowrap (#224, measured) — but not about
+        // *anchoring*: ours puts the prompt back at the bottom, while ConPTY
+        // restates from home whatever its viewport-tall buffer still holds.
+        // On a widen that difference put real rows exactly where ConPTY's
+        // ELs land, and they were erased in place — the loss half of #224.
+        // So the viewport re-anchors top-aligned on the pre-resize top line:
+        // where that line now sits deeper than row 0, the rows above it are
+        // filed as history (the strand view — scroll up to see them) and the
+        // blanks minted below are what the repaint writes into. On a narrow,
+        // both sides tail-anchor onto the prompt and the line is already at
+        // (or above) the top, so this is a no-op there by construction.
+        if let Some(k) = anchor
+            .and_then(|(old, fragment)| {
+                let new = reindex.lookup(old)?;
+                let row = self.grid.row_of_line(new)?;
+                // A fragment top banks *through* the line the reflow made it
+                // whole again — the restater will rewrite the fragment, and
+                // it must land on a blank rather than on the merged line.
+                Some(row + usize::from(fragment))
+            })
+            .filter(|&k| k > 0)
+        {
+            self.grid.bank_viewport_top(k, &template);
+            // The boundary moved; no delta can say so.
+            self.events.push(TermEvent::ViewportRebased);
         }
         // Blocks are re-anchored rather than cleared, unlike the selection
         // above. Losing the block for a build because the window was widened

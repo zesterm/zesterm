@@ -188,6 +188,26 @@ Its replay compares the multiset of non-blank line texts against a drag-free
 replay of the same fixture: the layout may differ (some of the listing
 legitimately lives in scrollback at 26 rows), the content may not.
 
+### `resize-width.vtrec` — the width axis
+
+Two `ls`es at 100x30, narrowed to 50 and widened back, slow steps (#224):
+
+```powershell
+cargo run -p zest-pty --example pty_dump -- `
+  --record crates\zest-core\tests\corpus\resize-width.vtrec `
+  --cmd "pwsh -NoLogo -c `"ls; ls; Start-Sleep 8`"" `
+  --size 100x30 --resize-after-ms 2500 --resize-settle-ms 1500 --resize 50x30 `
+  --resize-after-ms 0 --resize-settle-ms 2000 --resize 100x30
+```
+
+What it proves: ConPTY restates logical lines (the two reflows cannot disagree
+about wrapping), the narrow halves tail-anchor identically, and the widen
+repaint restates **from home** — opening, in this capture, by rewriting the
+wrapped *fragment* its buffer's top row held (`ESC[H crates ESC[K`), which is
+the corner the width anchor's fragment rule exists for. The replay asserts
+nothing is destroyed or doubled, allowing only the restater's own fragment
+rows as extras.
+
 Worth adding as they become relevant: `vim`, `htop`/`btm`, `tmux`, a `cargo build`,
 and the `@sigx/terminal` showcase example — the last being a useful check that
 zesterm can host the user's own TUI framework correctly.
