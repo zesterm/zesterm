@@ -1020,3 +1020,66 @@ fn a_block_wait_gives_up_on_time_and_refuses_a_flag_that_is_not_one() {
     let a = tools.resolver().resolve(&session).expect("the id this server minted");
     registry.close(a.session);
 }
+
+/// A listing must describe the sessions as they are *now*, not as they were the
+/// last time this connection created or closed one.
+///
+/// `sessions` served a cache for a long time, and the cache was only ever
+/// refreshed by the reply to this connection's own `CreateSession` /
+/// `CloseSession` — the connection opts out of the watch push on purpose. So
+/// every field that a session acquires *after* it is spawned (its title, its
+/// OSC 7 cwd, whether it went to the alternate screen) stayed at the empty value
+/// it had a millisecond after the spawn, for as long as the agent did not happen
+/// to create something else. An agent reading `alt_screen: false` off a session
+/// running vim goes to `blocks`, which is empty on the alternate screen by
+/// design, and concludes the session is idle.
+///
+/// The second client here is the registry itself, which is what a session
+/// created from the app or from another agent looks like from this connection:
+/// no reply of ours is involved, so nothing invalidates a cache. Asserting on a
+/// *foreign* session rather than on a title keeps this test free of any wait for
+/// a child to print, which is this module's rule. (#360)
+#[test]
+fn a_listing_reflects_a_session_this_connection_did_not_create() {
+    let (addr, registry) = serve_daemon();
+    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+
+    // One create of our own, so the cache is warm and populated: without this
+    // the listing would be empty for the ordinary reason rather than the one
+    // under test.
+    let created = tools
+        .call("create_session", &serde_json::json!({ "command": long_lived_cmd(), "cols": COLS, "rows": ROWS }))
+        .expect("create_session");
+    let ours = created["session"].as_str().expect("a session id").to_string();
+
+    let listed = tools.call("sessions", &serde_json::json!({})).expect("sessions");
+    let before = listed["sessions"].as_array().expect("array").len();
+
+    // Somebody else opens a shell. Nothing on this connection asked for it and
+    // nothing replies to us about it.
+    let theirs = registry
+        .create(
+            &zest_pty::CommandSpec {
+                command_line: long_lived_cmd(),
+                cwd: None,
+                env: Vec::new(),
+            },
+            zest_pty::PtySize::new(COLS, ROWS),
+            1000,
+        )
+        .expect("a second client's session");
+
+    let listed = tools.call("sessions", &serde_json::json!({})).expect("sessions");
+    let ids: Vec<&str> =
+        listed["sessions"].as_array().expect("array").iter().filter_map(|s| s["id"].as_str()).collect();
+    assert_eq!(
+        ids.len(),
+        before + 1,
+        "a listing is a question asked of the daemon, not a cache invalidated by our own \
+         writes — every field a session gains after it spawns is stale until it is: {listed}"
+    );
+
+    let a = tools.resolver().resolve(&ours).expect("the id this server minted");
+    registry.close(a.session);
+    registry.close(theirs.id);
+}

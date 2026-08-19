@@ -47,6 +47,11 @@ serde_json = { workspace = true }
 # `tests/live.rs` drives `serve()` in-process, so there is no binary to find and
 # no socket path to collide on.
 zest-daemon = { workspace = true }
+# `CommandSpec` and `PtySize`, so `tests/live.rs` can create a session straight
+# on the registry -- which is what a session opened by the app or by another
+# agent looks like from this connection, and the only way to test a listing
+# that no reply of ours invalidates.
+zest-pty = { workspace = true }
 # Not a runtime dependency, deliberately: `zest-input`'s public API takes winit
 # types and this is a headless stdio binary -- the `winit` entry in this crate's
 # `xtask` boundary still means what it says. It is here for `tests/keys.rs`

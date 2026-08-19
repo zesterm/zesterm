@@ -189,7 +189,11 @@ impl ToolSet {
     }
 
     fn sessions(&self) -> Result<Value, ToolError> {
-        let sessions = self.conn.with(|s| s.sessions.clone());
+        // Asked, not read: see `Conn::list_sessions`. Reading `Shared::sessions`
+        // here served whatever our own last create or close returned, so a
+        // session's title, cwd and `alt_screen` were frozen at the values they
+        // held just after it spawned -- empty, empty and false. (#360)
+        let sessions = self.conn.list_sessions()?;
         Ok(json!({
             "sessions": sessions.iter().map(|s| json!({
                 "id": Resolver::format(s.addr),

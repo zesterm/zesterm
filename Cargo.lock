@@ -5633,6 +5633,7 @@ dependencies = [
  "zest-input",
  "zest-mesh",
  "zest-proto",
+ "zest-pty",
 ]
 
 [[package]]

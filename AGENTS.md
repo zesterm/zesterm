@@ -614,6 +614,21 @@ you need before you trip on it.
   versions** (the protocol is at 3). Deriving one from the other produces
   signatures that will not verify with nothing naming the cause; a test pins
   the literal and asserts the two numbers differ.
+- **A cache refreshed only by your own writes reads as live right up until
+  somebody else acts.** `zest-mcp`'s `sessions` served `Shared::sessions`, which
+  is written only when a `Sessions` message arrives — and the connection sets
+  `Watch { sessions: false }`, so the only thing that ever arrived was the reply
+  to our own `CreateSession`/`CloseSession`. Every field a session gains *after*
+  it spawns (title, OSC 7 cwd, `alt_screen`) therefore reported the value it held
+  a millisecond after the spawn: empty, empty, false. The daemon was innocent
+  throughout — `Registry::list` reads all three live. What makes this expensive
+  to diagnose is that **both obvious ways to check it are the two things that
+  hide it**: attaching a viewer to look is a state change that lands a push, and
+  creating a second session to compare against refreshes the whole list — so the
+  bug is invisible to a human at the tab and to an agent that pokes it twice. The
+  fix is that a listing is a *question* (`Conn::list_sessions`), which is what the
+  `sessions: false` comment already argued for and what the code had stopped
+  doing. (#360)
 - **`rmp-serde` writes the narrowest integer that fits**, so a `u64` that
   `ts-rs` types as `bigint` reaches JavaScript as a plain `number` for every
   realistic value. Normalized at one boundary in
