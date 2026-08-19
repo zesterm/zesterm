@@ -313,7 +313,7 @@ cargo xtask export-web                         # regenerate the web client's sch
 cargo run -p zest-proto --example fixture_dump -- --only vim-macos --print 7
                                                # one fixture frame, decoded, to stdout
 
-zesterm-dev                                    # build both binaries and open a window
+zesterm-dev                                    # build the workspace and open a window
 zesterm-dev --no-build --attach-probe          # probe flags stay in the foreground
 .\scripts\zesterm-dev.ps1                      # the same thing, in PowerShell on Windows
 cargo run --profile fast -p zest-app           # the terminal, quick rebuild
