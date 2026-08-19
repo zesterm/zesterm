@@ -206,7 +206,14 @@ export function paneFor(args: {
   /** The machine to list when the URL names none. */
   readonly defaultHostId: string | null;
 }): PaneChoice {
-  const { activeTabId, activeHasTarget, routeHost, routeSession, hasLanding } = args;
+  const { activeTabId, activeHasTarget, hasLanding } = args;
+  // `''` is not a machine. The router can yield an empty param for an
+  // unmatched or partial match (`/h//s/7`), and `Shell.syncRoute` already
+  // treats that as "no machine named" — so this has to as well, or the two
+  // disagree: the route watcher would open nothing while the pane rendered a
+  // session list for a host id that is the empty string.
+  const routeHost = args.routeHost === '' ? undefined : args.routeHost;
+  const routeSession = args.routeSession === '' ? undefined : args.routeSession;
   // The terminal only when the URL names *the active tab's* session. Matching
   // on the params alone would show whichever tab happened to be active while
   // the URL described another — the two move in separate updates, and a render

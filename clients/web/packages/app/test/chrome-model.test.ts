@@ -256,3 +256,21 @@ test('loopback before the directory says who it is still lists', () => {
   // its place would make a slow start look like a broken one.
   assert.deepEqual(pane({ defaultHostId: null }), { kind: 'list', hostId: '' });
 });
+
+test('an empty route param is not a machine', () => {
+  // The router can yield `''` for an unmatched or partial match (`/h//s/7`),
+  // and `Shell.syncRoute` already treats that as "no machine named". If this
+  // did not, the two would disagree: the route watcher opens nothing while the
+  // pane renders a session list for a host id that is the empty string.
+  assert.deepEqual(pane({ routeHost: '', hasLanding: true }), { kind: 'landing' });
+  assert.deepEqual(pane({ routeHost: '', defaultHostId: TAB_HOST }), {
+    kind: 'list',
+    hostId: TAB_HOST,
+  });
+  // And an empty *session* leaves it a machine, not a terminal.
+  const id = tabIdOf(TAB_HOST, '7');
+  assert.deepEqual(
+    pane({ activeTabId: id, activeHasTarget: true, routeHost: TAB_HOST, routeSession: '' }),
+    { kind: 'list', hostId: TAB_HOST },
+  );
+});
