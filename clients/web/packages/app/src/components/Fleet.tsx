@@ -234,15 +234,6 @@ export const Fleet = component<{
   const user = bootstrap.user as User;
 
   /**
-   * Three screens rather than three routes.
-   *
-   * The route table already points `/hosts`, `/h/:id` and `/h/:id/s/:id` at
-   * this component, so switching here is what exists today; making them real
-   * routes is a separate change with its own argument about deep links, and
-   * doing it inside this one would bury the part that matters.
-   */
-
-  /**
    * The fleet grid, as the shell's landing pane (#344).
    *
    * A closure rather than an element: it is called inside `Shell`'s render, so
