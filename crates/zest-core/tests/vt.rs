@@ -1501,6 +1501,122 @@ fn a_multi_step_drag_with_lagging_repaints_comes_back_whole() {
 }
 
 #[test]
+fn a_widen_repaint_lands_on_the_rows_that_already_hold_its_content() {
+    // The width axis (#224), with the loss half the height work made visible:
+    // `ls`, drag the width smaller then bigger, and rows are destroyed. The
+    // narrow halves agree — both reflows tail-anchor onto the prompt, row for
+    // row (measured, `resize-width.vtrec`). The widen is the trap: ConPTY
+    // un-wraps its viewport-tall buffer into fewer, wider rows and restates
+    // them **from home**, ELs below — while our reflow put the prompt back at
+    // the *bottom*, so the restatement overwrote the top of the listing with
+    // a copy of its tail and the ELs erased the middle. In place, ids intact,
+    // nowhere in scrollback: destroyed, which is what "the content is
+    // fourteen rows too high" always was.
+    //
+    // The fix is the height model's posture: after a width reflow on a
+    // restated grid, the viewport re-anchors **top-aligned on the line ConPTY
+    // still holds** — the pre-resize viewport-top line, whose new position
+    // the reflow's `Reindex` knows. Surplus above is scrollback (scroll up to
+    // see it, exactly the strand view); the blanks below are what the ELs
+    // land on.
+    let mut t = Terminal::new(40, 12, 500);
+    t.set_pty_restates_viewport(true);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\n");
+    for i in 0..9 {
+        // Long enough that 20 columns wraps each into two rows.
+        t.advance(format!("entry {i} ------------------- x\r\n").as_bytes());
+    }
+    t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+
+    // Narrow. Our reflow and ConPTY's agree on the tail; its repaint restates
+    // the *logical lines* its buffer holds (six of ours), which our autowrap
+    // lays back into exactly the twelve rows on screen. Announced, like every
+    // first repaint of a gesture.
+    t.resize(20, 12);
+    let narrow_kept = [
+        "entry 4 ------------------- x",
+        "entry 5 ------------------- x",
+        "entry 6 ------------------- x",
+        "entry 7 ------------------- x",
+        "entry 8 ------------------- x",
+        "$ ",
+    ];
+    t.advance(&conpty_repaint_after_a_squeeze(20, 12, &narrow_kept, Drag::Down));
+
+    // And back out. ConPTY un-wraps its twelve narrow rows into six wide ones
+    // and restates them from home, ELs the rest — the shape of chunk #20 in
+    // the recording, unannounced with the cursor placed at the end.
+    t.resize(40, 12);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 12, &narrow_kept, Drag::Up));
+
+    // Nothing destroyed, nothing doubled: every entry exactly once across
+    // history and screen…
+    for n in 0..9 {
+        let want = format!("entry {n} ------------------- x");
+        let copies = (0..t.grid().total_lines())
+            .filter_map(|i| t.grid().line(i))
+            .filter(|r| r.text().trim_end() == want)
+            .count();
+        assert_eq!(
+            copies, 1,
+            "{want:?} exists {copies} times after the widen repaint"
+        );
+    }
+    // …and the screen is ConPTY-aligned: its top line at our row 0, the
+    // prompt where it put the cursor, the ELs having landed on blanks.
+    assert_eq!(
+        t.grid().row(0).text().trim_end(),
+        "entry 4 ------------------- x",
+        "the viewport is not anchored on the line ConPTY still holds"
+    );
+    assert_eq!(t.grid().row(5).text().trim_end(), "$", "the prompt is not where ConPTY put it");
+}
+
+#[test]
+fn a_scrolled_back_reader_does_not_shift_the_width_anchor() {
+    // The anchor is the line at the top of the *live* screen — the restater
+    // repaints that, never whatever a reader happens to be looking at. Read
+    // through display space, a scrolled-back reader at resize time shifts the
+    // anchor (or hides it entirely, skipping the banking), and the widen
+    // repaint destroys rows exactly as if the fix were absent. (#224)
+    let mut t = Terminal::new(40, 12, 500);
+    t.set_pty_restates_viewport(true);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\n");
+    for i in 0..20 {
+        t.advance(format!("entry {i} ------------------- x\r\n").as_bytes());
+    }
+    t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+
+    t.resize(20, 12);
+    let narrow_kept = [
+        "entry 15 ------------------- x",
+        "entry 16 ------------------- x",
+        "entry 17 ------------------- x",
+        "entry 18 ------------------- x",
+        "entry 19 ------------------- x",
+        "$ ",
+    ];
+    t.advance(&conpty_repaint_after_a_squeeze(20, 12, &narrow_kept, Drag::Down));
+
+    // The reader scrolls up to look at something, and the drag continues.
+    t.scroll_display(8);
+    t.resize(40, 12);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 12, &narrow_kept, Drag::Up));
+
+    for n in 0..20 {
+        let want = format!("entry {n} ------------------- x");
+        let copies = (0..t.grid().total_lines())
+            .filter_map(|i| t.grid().line(i))
+            .filter(|r| r.text().trim_end() == want)
+            .count();
+        assert_eq!(
+            copies, 1,
+            "{want:?} exists {copies} times after a widen under a scrolled-back reader"
+        );
+    }
+}
+
+#[test]
 fn ordinary_output_after_a_restore_strands_the_pull_instead_of_overwriting_it() {
     // Inspected live before it was understood (#341): after a drag restored
     // the listing, running `ls` again interleaved two listings -- rows like
@@ -2564,6 +2680,88 @@ fn a_recorded_overflowing_storm_is_reversible_and_leaves_no_duplicates() {
         "the storm's history holds different rows (or extra copies) than the \
          undisturbed replay's"
     );
+}
+
+#[test]
+fn a_recorded_width_drag_destroys_nothing() {
+    // `corpus/resize-width.vtrec`: two `ls`es at 100x30, narrowed to 50 and
+    // widened back, real ConPTY answering both moves. The narrow repaint
+    // (announced) agrees with our reflow row for row; the widen repaint
+    // un-wraps ConPTY's thirty narrow rows into sixteen wide ones and
+    // restates them from home, ELs below — which erased the middle of the
+    // listing in place until the viewport learned to re-anchor on the line
+    // ConPTY still holds. (#224)
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/corpus/resize-width.vtrec"
+    ))
+    .expect("the recording exists");
+    let chunks = parse_vtrec_timed(&bytes);
+
+    // The expected content is the session with no drag: every chunk except
+    // the gesture window's. Layout differs by design — after the widen the
+    // surplus lives in scrollback (the strand view) — so the comparison is
+    // the multiset of non-blank line texts, nothing destroyed and nothing
+    // doubled.
+    const DRAG_WINDOW_US: core::ops::Range<u128> = 2_400_000..5_000_000;
+    let mut plain = Terminal::new(100, 30, 500);
+    plain.set_pty_restates_viewport(true);
+    for (us, chunk) in &chunks {
+        if !DRAG_WINDOW_US.contains(us) {
+            plain.advance(chunk);
+        }
+    }
+
+    let mut t = Terminal::new(100, 30, 500);
+    t.set_pty_restates_viewport(true);
+    const NARROW_AT_US: u128 = 2_450_000;
+    const WIDEN_AT_US: u128 = 3_950_000;
+    let (mut narrowed, mut widened) = (false, false);
+    for (us, chunk) in &chunks {
+        if !narrowed && *us >= NARROW_AT_US {
+            t.resize(50, 30);
+            narrowed = true;
+        }
+        if !widened && *us >= WIDEN_AT_US {
+            t.resize(100, 30);
+            widened = true;
+        }
+        t.advance(chunk);
+    }
+    assert!(narrowed && widened, "the recording ended before the drag did -- re-record");
+
+    let texts = |t: &Terminal| -> Vec<String> {
+        let mut v: Vec<String> = (0..t.grid().total_lines())
+            .filter_map(|i| t.grid().line(i))
+            .map(|r| r.text().trim_end().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        v.sort();
+        v
+    };
+    // Nothing destroyed and nothing doubled: every row of the undisturbed
+    // session survives the drag, exactly as many times. The drag replay may
+    // hold *more* — ConPTY's widen repaint opens by rewriting the wrapped
+    // fragment its buffer's top row held (`ESC[H crates ESC[K`, measured), so
+    // one fragment row is its honest screen content and Windows Terminal
+    // shows the same one. Every extra must be such a fragment: a proper
+    // suffix of a line the session holds.
+    let (mine, theirs) = (texts(&t), texts(&plain));
+    let mut extra = mine.clone();
+    for want in &theirs {
+        match extra.iter().position(|s| s == want) {
+            Some(i) => {
+                extra.remove(i);
+            }
+            None => panic!("the width drag destroyed {want:?}"),
+        }
+    }
+    for e in &extra {
+        assert!(
+            theirs.iter().any(|w| w.ends_with(e.as_str()) && w != e),
+            "the drag left a row that is not the restater's fragment of anything: {e:?}"
+        );
+    }
 }
 
 #[test]

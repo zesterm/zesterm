@@ -246,6 +246,13 @@ impl Grid {
         self.viewport_restated_elsewhere = yes;
     }
 
+    /// Whether something else has the last word on this viewport; see the
+    /// setter.
+    #[must_use]
+    pub fn viewport_restated_elsewhere(&self) -> bool {
+        self.viewport_restated_elsewhere
+    }
+
     #[must_use]
     pub fn cols(&self) -> usize {
         self.cols

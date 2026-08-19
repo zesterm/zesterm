@@ -845,8 +845,9 @@ which is the point: the mistake is now unrepresentable, not merely avoided.
 
 ## ADR-013 — The restater owns the viewport for one repaint, and we own it after
 
-**Status:** accepted (#247), for the *height* axis. The width axis is #224 and
-is deliberately not decided here.
+**Status:** accepted (#247) for the *height* axis; extended to the width axis
+(#224) once the height model had been paid for in full — the width section is
+at the end of this ADR.
 
 ConPTY answers a resize by restating the whole viewport, and its pseudoconsole
 buffer is only as tall as that viewport. So a shrink discards what no longer
@@ -1063,6 +1064,39 @@ The boundary moving is a change no delta can describe — there is no
 subscriber a keyframe (`TermEvent::ViewportRebased`). One per completed drag
 rather than one per `ResizeObserver` tick, because only a grow that is owed
 something arms it.
+
+### The width axis: anchor on the line the restater still holds
+
+Deferred while the height model was paid for, then decided from its lessons
+(#224). Two facts, both measured (`corpus/resize-width.vtrec`): ConPTY restates
+*logical lines* and relies on our autowrap, so the two reflows can never
+disagree about wrapping — and they disagree about **anchoring**. A narrow is
+safe: both sides tail-anchor onto the prompt, row for row. A widen is not: our
+reflow puts the prompt back at the bottom, while ConPTY un-wraps its
+viewport-tall buffer into fewer rows and restates them **from home**, ELs
+below — which lands the erases on real content mid-viewport. Erased in place,
+ids intact, nowhere in scrollback: the loss half of what #224 reported as "the
+content is fourteen rows too high".
+
+So a width reflow on a restated grid re-anchors the viewport **top-aligned on
+the pre-resize viewport-top line** — the line at the top of the restater's
+buffer, which we know because we mirror it, and whose post-reflow position the
+`Reindex` answers. Rows above it are banked as history
+(`Grid::bank_viewport_top` — the strand view again: scroll up to see them);
+the blanks minted below are exactly what the repaint's ELs land on, and its
+restatement rewrites rows that already hold that content. On a narrow the
+anchor line is already at the top and the whole move is a no-op by
+construction. The boundary moved, so it costs a keyframe, like every move on
+this seam.
+
+One corner carries the whole recording's lesson: when the buffer's top row is
+a *fragment* — the continuation of a line that wrapped out of the restater's
+buffer — its restatement begins by rewriting that fragment
+(`ESC[H crates ESC[K`, verbatim), while our reflow has merged the fragment
+back into its whole line. The anchor banks *through* the merged line in that
+case, so the fragment lands on a blank; the whole line lives in history and
+the fragment row on screen is the restater's honest screen content — Windows
+Terminal shows the same one.
 
 ---
 
