@@ -533,7 +533,12 @@ impl TermState {
         if let Some(k) = anchor
             .and_then(|(old, fragment)| {
                 let new = reindex.lookup(old)?;
-                let row = self.grid.row_of_line(new)?;
+                // Active space, never `row_of_line` (display space): the
+                // restater repaints the live screen, and a reader who is
+                // scrolled back at resize time must not shift the anchor —
+                // or hide it entirely and skip the banking.
+                let rows = self.grid.rows();
+                let row = (0..rows).find(|&r| self.grid.active_row(r).id == new)?;
                 // A fragment top banks *through* the line the reflow made it
                 // whole again — the restater will rewrite the fragment, and
                 // it must land on a blank rather than on the merged line.

@@ -1573,6 +1573,50 @@ fn a_widen_repaint_lands_on_the_rows_that_already_hold_its_content() {
 }
 
 #[test]
+fn a_scrolled_back_reader_does_not_shift_the_width_anchor() {
+    // The anchor is the line at the top of the *live* screen — the restater
+    // repaints that, never whatever a reader happens to be looking at. Read
+    // through display space, a scrolled-back reader at resize time shifts the
+    // anchor (or hides it entirely, skipping the banking), and the widen
+    // repaint destroys rows exactly as if the fix were absent. (#224)
+    let mut t = Terminal::new(40, 12, 500);
+    t.set_pty_restates_viewport(true);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\n");
+    for i in 0..20 {
+        t.advance(format!("entry {i} ------------------- x\r\n").as_bytes());
+    }
+    t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+
+    t.resize(20, 12);
+    let narrow_kept = [
+        "entry 15 ------------------- x",
+        "entry 16 ------------------- x",
+        "entry 17 ------------------- x",
+        "entry 18 ------------------- x",
+        "entry 19 ------------------- x",
+        "$ ",
+    ];
+    t.advance(&conpty_repaint_after_a_squeeze(20, 12, &narrow_kept, Drag::Down));
+
+    // The reader scrolls up to look at something, and the drag continues.
+    t.scroll_display(8);
+    t.resize(40, 12);
+    t.advance(&conpty_repaint_after_a_squeeze(40, 12, &narrow_kept, Drag::Up));
+
+    for n in 0..20 {
+        let want = format!("entry {n} ------------------- x");
+        let copies = (0..t.grid().total_lines())
+            .filter_map(|i| t.grid().line(i))
+            .filter(|r| r.text().trim_end() == want)
+            .count();
+        assert_eq!(
+            copies, 1,
+            "{want:?} exists {copies} times after a widen under a scrolled-back reader"
+        );
+    }
+}
+
+#[test]
 fn ordinary_output_after_a_restore_strands_the_pull_instead_of_overwriting_it() {
     // Inspected live before it was understood (#341): after a drag restored
     // the listing, running `ls` again interleaved two listings -- rows like
