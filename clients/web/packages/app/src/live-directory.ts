@@ -61,7 +61,13 @@ import {
   type ConnectionEvents,
   type TimerHandle,
 } from '@zesterm/client';
-import { sessionEntryOf, type HostInfo, type SessionEntry } from '@zesterm/control';
+import {
+  hostFactsOf,
+  sessionEntryOf,
+  type HostFacts,
+  type HostInfo,
+  type SessionEntry,
+} from '@zesterm/control';
 import { signal } from 'sigx';
 
 import { dialFor, type RelayAccess } from './dial-for.ts';
@@ -144,6 +150,16 @@ export interface HostSnapshot {
   readonly host: HostInfo;
   readonly presence: HostPresence;
   readonly sessions: readonly SessionEntry[];
+  /**
+   * What this machine says it is and can launch (#352), or null while it has
+   * not said.
+   *
+   * Sticky across ordinary session pushes and dropped when the link goes —
+   * the rule `zest-app`'s `fleet.rs` settled for the same data: an absent
+   * offer on a push means "nothing new to say", while a machine that is no
+   * longer answering must not keep offering launch targets that cannot run.
+   */
+  readonly facts: HostFacts | null;
   readonly lastCreated: string | null;
 }
 
@@ -266,7 +282,7 @@ export function liveDirectory(options: LiveDirectoryOptions): LiveDirectory {
     // The sessions go with the link. An empty list under an "asleep" banner is
     // honest; the list as it was ten minutes ago, under the same banner, is
     // not — the same rule `SessionDirectory.setLink` applies on loopback.
-    patch(w.host.id, { presence: { kind: 'offline' }, sessions: [] });
+    patch(w.host.id, { presence: { kind: 'offline' }, sessions: [], facts: null });
     const delay = w.probeDelay;
     w.probeDelay = Math.min(w.probeDelay * 2, probeMaxMs);
     if (w.probe !== null) clock.cancel(w.probe);
@@ -287,7 +303,11 @@ export function liveDirectory(options: LiveDirectoryOptions): LiveDirectory {
           // code takes longer than any timeout worth having, so a pairing
           // request is not a machine that failed to answer.
           clearDeadline(w);
-          patch(w.host.id, { presence: { kind: 'pairing', code: connection.code }, sessions: [] });
+          patch(w.host.id, {
+            presence: { kind: 'pairing', code: connection.code },
+            sessions: [],
+            facts: null,
+          });
           break;
         case 'connected':
           clearDeadline(w);
@@ -302,7 +322,7 @@ export function liveDirectory(options: LiveDirectoryOptions): LiveDirectory {
           // arming is guarded rather than the event.
           armDeadline(w);
           failCreates(w, 'the connection to that machine dropped');
-          patch(w.host.id, { presence: { kind: 'probing' }, sessions: [] });
+          patch(w.host.id, { presence: { kind: 'probing' }, sessions: [], facts: null });
           break;
         case 'failed': {
           // The handshake said no and said it is not retryable — a denied
@@ -320,10 +340,16 @@ export function liveDirectory(options: LiveDirectoryOptions): LiveDirectory {
           patch(w.host.id, {
             presence: { kind: 'failed', message: connection.message },
             sessions: [],
+            facts: null,
           });
           break;
         }
       }
+    },
+    // Its own event, for the reason `ConnectionEvents` gives: an absent offer
+    // means "nothing new to say", so this fires only when there is something.
+    onHostOffer: (offer) => {
+      patch(w.host.id, { facts: hostFactsOf(offer) });
     },
     onSessions: (sessions, created) => {
       const entries = sessions.map(sessionEntryOf);
@@ -356,14 +382,18 @@ export function liveDirectory(options: LiveDirectoryOptions): LiveDirectory {
   const open = (w: Watch): void => {
     const link = options.openLink(w.host, eventsFor(w));
     if (link === null) {
-      patch(w.host.id, { presence: { kind: 'failed', message: NO_RELAY }, sessions: [] });
+      patch(w.host.id, {
+      presence: { kind: 'failed', message: NO_RELAY },
+      sessions: [],
+      facts: null,
+    });
       return;
     }
     // Set before `connect()`, which emits its first connection event
     // synchronously — an event that finds `w.link` still null would be talking
     // about a watch that does not exist yet.
     w.link = link;
-    patch(w.host.id, { presence: { kind: 'probing' }, sessions: [] });
+    patch(w.host.id, { presence: { kind: 'probing' }, sessions: [], facts: null });
     armDeadline(w);
     link.connect();
   };
@@ -399,6 +429,7 @@ export function liveDirectory(options: LiveDirectoryOptions): LiveDirectory {
             connected: true,
             host: snapshot.host,
             sessions: snapshot.sessions,
+            facts: snapshot.facts,
             // Always `relay`: a hosted `https://` page may not open a `ws://`
             // address on someone's LAN, so there is no other plane this path
             // could name. `dialFor` is what turns it back into a socket.
@@ -420,6 +451,7 @@ export function liveDirectory(options: LiveDirectoryOptions): LiveDirectory {
                 host: { id: h.id, label: h.label },
                 presence: { kind: 'probing' },
                 sessions: [],
+                facts: null,
                 lastCreated: null,
               }
             : { ...current, host: { id: h.id, label: h.label } };

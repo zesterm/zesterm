@@ -10,6 +10,7 @@ const VIEW: DirectoryView = {
   host: { id: 'ab'.repeat(32), label: 'mac' },
   sessions: [],
   dataPlane: { kind: 'ws', host: '127.0.0.1', port: 7718 },
+  facts: null,
   lastCreated: null,
 };
 

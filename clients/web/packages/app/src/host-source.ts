@@ -26,7 +26,7 @@
 
 import type { ClientSigner } from '@zesterm/auth';
 import type { Dial } from '@zesterm/client';
-import type { SessionEntry } from '@zesterm/control';
+import type { HostFacts, SessionEntry } from '@zesterm/control';
 
 import type { HostChoice } from './chrome-model.ts';
 import { createSessionOverDataPlane } from './create-session.ts';
@@ -113,6 +113,16 @@ export interface HostSource {
    * turns that into a message.
    */
   create(hostId: string, size: { cols: number; rows: number }): Promise<SessionEntry>;
+  /**
+   * What one machine says it is and can launch (#352), or null when it has
+   * not said — an older daemon, or one this shell has not reached yet.
+   *
+   * **Null is not "no launch targets".** A machine with an empty profile
+   * table answers `launchTargets: []`; a machine that has said nothing
+   * answers null, and the launcher owes those two different rows. Collapsing
+   * them is how "we cannot reach it" gets drawn as "it has nothing".
+   */
+  factsOf(hostId: string): HostFacts | null;
 }
 
 /**
@@ -167,6 +177,11 @@ export function localHostSource(
       return (
         dir.view.sessions.find((e) => e.host === hostId && e.session === sessionId) ?? null
       );
+    },
+    factsOf: (hostId) => {
+      const dir = directory();
+      if (dir.kind !== 'ready' || dir.view.host?.id !== hostId) return null;
+      return dir.view.facts;
     },
     create: (hostId, size) => {
       const host = own();
@@ -269,6 +284,7 @@ export function liveHostSource(live: LiveDirectory, relay: RelayAccess | null): 
         .snapshots()
         .find((s) => s.host.id === hostId)
         ?.sessions.find((e) => e.session === sessionId) ?? null,
+    factsOf: (hostId) => live.snapshots().find((s) => s.host.id === hostId)?.facts ?? null,
     // Over the connection already watching that machine, which is the whole
     // reason this method is on the seam. `live.createSession` rejects if that
     // machine is not connected, so an unreachable one refuses rather than
