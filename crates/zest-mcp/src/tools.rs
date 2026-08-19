@@ -1882,7 +1882,7 @@ mod tests {
         assert_eq!(v["output_line"], 6);
         assert_eq!(
             v["end_line"], 5,
-            "a silent command ends above where its output began, and the payload says so              rather than hiding it"
+            "a silent command ends above where its output began, and the payload says so"
         );
     }
 
