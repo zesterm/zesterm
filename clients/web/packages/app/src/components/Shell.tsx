@@ -26,6 +26,7 @@ import type { DirectoryView } from '@zesterm/control';
 
 import {
   launcherRows,
+  paneFor,
   shortHostId,
   tabIdOf,
   type HostChoice,
@@ -88,11 +89,25 @@ export const Shell = component<{
    */
   hosts?: () => HostSource;
   /**
-   * Where the session-list pane reads from. Per-host by nature — see
-   * `directory-source.ts` on why the hosted half kept `DirectoryStatus`
-   * describing exactly one machine.
+   * Where the session-list pane reads from, for the machine it is showing.
+   *
+   * **Per host, and not a generalisation for its own sake**: a
+   * `DirectoryStatus` describes exactly one machine (`directory-source.ts`
+   * explains why the hosted half kept it that way), so a shell that can show
+   * several needs one source per machine rather than one source.
    */
-  listSource?: DirectorySource;
+  listSourceFor?: (hostId: string) => DirectorySource;
+  /**
+   * What the pane shows at bare `/hosts`, where no machine is named.
+   *
+   * Loopback has one machine, so the honest answer is its session list, and
+   * that is the default. The hosted path answers with the fleet grid — which
+   * is why this is a prop rather than a `bootstrap.mode` check: a component
+   * that switches on the mode is one that has to be re-tested in both, and
+   * the loopback path is the one that must keep working when Cloudflare does
+   * not (ADR-005).
+   */
+  landing?: () => unknown;
 }>((ctx) => {
   const { device, theme } = ctx.props;
   // `useRoute()`, not `useParams()`, and the params are read off it at every
@@ -115,7 +130,7 @@ export const Shell = component<{
   // Built in setup, because it closes over live reads whose subscriptions
   // belong to this instance (`directory-source.ts`).
   const hostSource: HostSource = (ctx.props.hosts ?? (() => localHostSource(actorDirectorySource(), device.signer)))();
-  const listSource: DirectorySource = ctx.props.listSource ?? actorDirectorySource;
+  const listSourceFor = ctx.props.listSourceFor ?? ((): DirectorySource => actorDirectorySource);
 
   const store = signal<{
     tabs: TabsState;
@@ -427,16 +442,20 @@ export const Shell = component<{
     // lands). `key` forces a remount per tab: a TerminalView's client is
     // created in setup, so reusing the instance across tabs would leave it
     // attached to the previous session.
+    const choice = paneFor({
+      activeTabId: active === null ? null : active.id,
+      activeHasTarget: active !== null && targets.get(active.id) !== undefined,
+      routeHost: routeH,
+      routeSession: routeS,
+      hasLanding: ctx.props.landing !== undefined,
+      defaultHostId: defaultHostId(),
+    });
+
     const pane = ((): unknown => {
-      const target = active === null ? undefined : targets.get(active.id);
-      if (
-        active !== null &&
-        target !== undefined &&
-        routeH !== undefined &&
-        routeS !== undefined &&
-        active.id === tabIdOf(routeH, routeS)
-      ) {
-        const id = active.id;
+      if (choice.kind === 'terminal') {
+        const id = choice.tabId;
+        const target = targets.get(id);
+        if (target === undefined) return null;
         return (
           <TerminalView
             key={id}
@@ -453,9 +472,18 @@ export const Shell = component<{
           />
         );
       }
+      if (choice.kind === 'landing') return ctx.props.landing?.() ?? null;
+      const listHost = choice.hostId;
       return (
         <SessionList
-          source={listSource}
+          // Keyed by machine only when sources actually differ by machine.
+          // `SessionList` creates its source in *its* setup (the lifetime rule
+          // in `directory-source.ts`), so crossing between machines has to
+          // remount it or the pane keeps reading the one it first subscribed
+          // to. Loopback's source ignores the id, so keying there would buy
+          // nothing and cost a remount the moment the host id arrived.
+          {...(ctx.props.listSourceFor === undefined ? {} : { key: listHost })}
+          source={listSourceFor(listHost)}
           deviceKind={device.kind}
           onOpen={(t: OpenTarget) => openTarget(t, true)}
           // The pane's own create button, answered by the same seam the

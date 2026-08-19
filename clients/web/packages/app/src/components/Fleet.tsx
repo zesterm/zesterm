@@ -1,10 +1,23 @@
 /**
  * Your machines, and what can reach them — as the design §7 card grid.
  *
- * On the **local** path this is the real session list, unchanged: the sidecar
- * hosts the `SessionDirectory` actor and the daemon is a `ws://` away.
+ * **Both paths are the tabbed shell now** (#344). This mounts it and hands it
+ * what differs: the machines it can launch on, where each machine's session
+ * list comes from, and this grid to show when the URL names no machine.
  *
- * On the **hosted** path it is the account's registry. Two lists, because they
+ * The hosted path used to be three screens *inside this component* — grid,
+ * then a machine's session list, then a bare terminal with a `← back` — with
+ * `state.open` and `state.session` switching between them. Which meant the one
+ * path that actually has a fleet had no tabs, no launcher and no palette, and
+ * crossing between machines threw away whatever you had open. The note that
+ * used to sit here said making them real routes was a separate change; the
+ * routes already existed (`route-table.ts`), and what was missing was a shell
+ * that could hold more than one machine (#332, #338, #340).
+ *
+ * On the **local** path the shell is unchanged: the sidecar hosts the
+ * `SessionDirectory` actor and the daemon is a `ws://` away.
+ *
+ * On the **hosted** path this grid is the account's registry. Two lists, because they
  * answer different questions — `hosts` is your machines, `devices` is the
  * browsers and phones holding keys that can attach to them. A browser never
  * appears in a fleet listing because it serves no sessions, so this is the only
@@ -23,6 +36,7 @@
  */
 
 import { component, onUnmounted, signal } from 'sigx';
+import { useNavigate } from '@sigx/router';
 import type { Theme } from '@zesterm/theme';
 
 import type { Bootstrap, User } from '../bootstrap.ts';
@@ -36,6 +50,7 @@ import {
   ownDeviceAction,
   ownDeviceApproved,
 } from '../fleet-model.ts';
+import { liveHostSource } from '../host-source.ts';
 import { liveDirectory, relayLinks } from '../live-directory.ts';
 import { relayAccess } from '../relay-access.ts';
 import {
@@ -49,8 +64,6 @@ import {
 } from '../registry.ts';
 import { AccountMenu } from './AccountMenu.tsx';
 import { EnrollCode } from './EnrollCode.tsx';
-import { SessionList, type OpenTarget } from './SessionList.tsx';
-import { TerminalView } from './TerminalView.tsx';
 import { Shell } from './Shell.tsx';
 
 type Load =
@@ -64,6 +77,7 @@ export const Fleet = component<{
   theme: Theme;
 }>((ctx) => {
   const { bootstrap, device, theme } = ctx.props;
+  const navigate = useNavigate();
 
   // The local path never touches any of this, so nothing is fetched there.
   if (bootstrap.mode === 'local') {
@@ -73,10 +87,6 @@ export const Fleet = component<{
   const state = signal<{
     load: Load;
     busy: string | null;
-    /** Which machine's sessions are showing, if any. */
-    open: { readonly id: string; readonly label: string } | null;
-    /** Which session is attached, if any. */
-    session: OpenTarget | null;
     /** The one open enrolment panel, if any — minting for either kind replaces it. */
     mint: { readonly kind: 'host' | 'device'; readonly code: string; readonly expiresAt: number } | null;
     /** Which kind a mint is in flight for, so the buttons can say so. */
@@ -85,8 +95,6 @@ export const Fleet = component<{
   }>({
     load: { phase: 'loading' },
     busy: null,
-    open: null,
-    session: null,
     mint: null,
     minting: null,
     mintError: null,
@@ -226,74 +234,14 @@ export const Fleet = component<{
   const user = bootstrap.user as User;
 
   /**
-   * Three screens rather than three routes.
+   * The fleet grid, as the shell's landing pane (#344).
    *
-   * The route table already points `/hosts`, `/h/:id` and `/h/:id/s/:id` at
-   * this component, so switching here is what exists today; making them real
-   * routes is a separate change with its own argument about deep links, and
-   * doing it inside this one would bury the part that matters.
+   * A closure rather than an element: it is called inside `Shell`'s render, so
+   * the signal reads inside it register there and the grid updates when the
+   * registry does — without `Fleet` re-rendering a shell that is holding open
+   * tabs and live pipes.
    */
-
-  return () => {
-    if (state.session !== null) {
-      const target = state.session;
-      // The terminal keeps the chrome, and the way back is the point: a
-      // full-bleed pane with no header is a screen the user can only leave by
-      // reloading the page, which drops every pipe this tab is holding.
-      return (
-        <div class="shell">
-          <header class="topbar">
-            <span class="brand">zesterm</span>
-            <button class="button subtle" onClick={() => (state.session = null)}>
-              ← sessions
-            </button>
-            <span class="grow" />
-            <AccountMenu user={user} />
-          </header>
-          <TerminalView
-            entry={target.entry}
-            dial={target.dial}
-            signer={device.signer}
-            theme={theme}
-          />
-        </div>
-      );
-    }
-    if (state.open !== null && live !== null) {
-      const machine = state.open;
-      return (
-        <div class="shell">
-          <header class="topbar">
-            <span class="brand">zesterm</span>
-            <button class="button subtle" onClick={() => (state.open = null)}>
-              ← fleet
-            </button>
-            <span class="grow" />
-            <AccountMenu user={user} />
-          </header>
-          <div class="fleet-page">
-            <SessionList
-              source={live.sourceFor(machine.id)}
-              relay={relay}
-              title={machine.label}
-              connectingLabel="reaching this machine…"
-              deviceKind={device.kind}
-              onOpen={(t: OpenTarget) => (state.session = t)}
-              onCreate={() =>
-                live
-                  .createSession(machine.id, { cols: 120, rows: 32 })
-                  .catch((e: unknown) => {
-                    state.load = {
-                      phase: 'failed',
-                      error: e instanceof Error ? e.message : String(e),
-                    };
-                  })
-              }
-            />
-          </div>
-        </div>
-      );
-    }
+  const grid = (): unknown => {
     // Local consts rather than `state.mint?.…` in the JSX: narrowing does not
     // survive into the nested closures, and each render reads one snapshot.
     const minted = state.mint;
@@ -305,12 +253,6 @@ export const Fleet = component<{
       ownDeviceApproved(state.load.devices, device.signer.clientId, device.ephemeral === true);
     const mintErr = state.mintError;
     return (
-    <div class="shell">
-      <header class="topbar">
-        <span class="brand">zesterm</span>
-        <AccountMenu user={user} />
-      </header>
-
       <div class="fleet-page">
         <header class="page-head">
           <h1>
@@ -319,6 +261,12 @@ export const Fleet = component<{
               every machine is a host · every window, tab and phone is a client
             </span>
           </h1>
+          {/* The account menu rides the page head now that the shell owns the
+              chrome: sign-out is account UI, and the fleet screen is where the
+              account is. A second topbar inside a pane would be one bar too
+              many. */}
+          <span class="grow" />
+          <AccountMenu user={user} />
           <p class="page-lede">
             The directory knows which machines exist and how to reach them. Sessions never leave
             the machine they run on.
@@ -424,10 +372,7 @@ export const Fleet = component<{
                               button that opens a screen saying "asleep" is a
                               worse answer than no button. */}
                           {card.presence.reachable ? (
-                            <button
-                              class="button"
-                              onClick={() => (state.open = { id: h.id, label: h.label })}
-                            >
+                            <button class="button" onClick={() => void navigate(`/h/${h.id}`)}>
                               open
                             </button>
                           ) : null}
@@ -541,7 +486,32 @@ export const Fleet = component<{
           </>
         ) : null}
       </div>
-    </div>
+    );
+  };
+
+  // The hosted path is the tabbed shell too (#344). It used to be three
+  // screens inside this component — grid, then a machine's session list, then
+  // a bare terminal with a `← back` — which meant no tabs, no launcher and no
+  // palette on the one path that actually has a fleet.
+  //
+  // `Shell` holds the tabs; this hands it the account's machines and the grid
+  // to show when no machine is named. Built once, outside the render, so a
+  // registry refetch does not rebuild the seam under a shell that is holding
+  // live pipes.
+  const hosts = live === null ? null : liveHostSource(live, relay);
+  return () => {
+    // Nothing to watch and nothing to reach: a deployment with no relay. The
+    // grid says so per card; a shell whose every launcher row was dead would
+    // not.
+    if (live === null || hosts === null) return grid();
+    return (
+      <Shell
+        device={device}
+        theme={theme}
+        hosts={() => hosts}
+        listSourceFor={(hostId) => live.sourceFor(hostId)}
+        landing={grid}
+      />
     );
   };
 });
