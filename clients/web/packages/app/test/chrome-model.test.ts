@@ -11,6 +11,7 @@ import {
   launcherAlign,
   launcherKeyOf,
   launcherRows,
+  paneFor,
   shouldScrollIntoView,
   shortHostId,
   tabIdOf,
@@ -185,4 +186,73 @@ test('the icon-rail predicate agrees with the @media (max-width: 900px) rule', (
   assert.equal(ICON_RAIL_MAX_WIDTH, 900, 'style.css hardcodes 900px; this constant mirrors it');
   assert.equal(isIconRail(900), true, 'max-width is inclusive, so 900 collapses');
   assert.equal(isIconRail(901), false, 'one pixel wider keeps the full sidebar');
+});
+
+const TAB_HOST = 'ab'.repeat(32);
+const OTHER_HOST = 'cd'.repeat(32);
+
+/** Everything false-ish, so each test names only what it is about. */
+const pane = (over: Partial<Parameters<typeof paneFor>[0]> = {}) =>
+  paneFor({
+    activeTabId: null,
+    activeHasTarget: false,
+    routeHost: undefined,
+    routeSession: undefined,
+    hasLanding: false,
+    defaultHostId: null,
+    ...over,
+  });
+
+test('the terminal shows only when the URL names the ACTIVE tab’s session', () => {
+  // The URL and the active tab move in separate updates, so a render can land
+  // between them. Matching on the params alone would show whichever tab
+  // happened to be active while the URL described another — the wrong
+  // machine's shell, wearing the right URL.
+  const id = tabIdOf(TAB_HOST, '7');
+  assert.deepEqual(
+    pane({ activeTabId: id, activeHasTarget: true, routeHost: TAB_HOST, routeSession: '7' }),
+    { kind: 'terminal', tabId: id },
+  );
+  assert.deepEqual(
+    pane({ activeTabId: id, activeHasTarget: true, routeHost: OTHER_HOST, routeSession: '7' }),
+    { kind: 'list', hostId: OTHER_HOST },
+    'the URL names another machine: show that machine, not this terminal',
+  );
+});
+
+test('a tab whose dial target has gone is not a terminal', () => {
+  // `targets` is dropped when a tab closes; rendering a TerminalView without
+  // one would be a pane with nothing to dial.
+  const id = tabIdOf(TAB_HOST, '7');
+  assert.deepEqual(
+    pane({ activeTabId: id, activeHasTarget: false, routeHost: TAB_HOST, routeSession: '7' }),
+    { kind: 'list', hostId: TAB_HOST },
+  );
+});
+
+test('a machine named in the URL beats the landing', () => {
+  // `/h/:hostId` is how the fleet grid's own "open" button gets you to a
+  // machine. Answering it with the grid would make that button a no-op — you
+  // would press open and stay exactly where you were.
+  assert.deepEqual(pane({ routeHost: OTHER_HOST, hasLanding: true }), {
+    kind: 'list',
+    hostId: OTHER_HOST,
+  });
+});
+
+test('no machine named, and a landing to show: the landing', () => {
+  // The hosted path at bare `/hosts` — the fleet grid.
+  assert.deepEqual(pane({ hasLanding: true, defaultHostId: TAB_HOST }), { kind: 'landing' });
+});
+
+test('no machine named and no landing lists the default one', () => {
+  // Loopback, which has exactly one machine and has always shown its list at
+  // `/hosts`.
+  assert.deepEqual(pane({ defaultHostId: TAB_HOST }), { kind: 'list', hostId: TAB_HOST });
+});
+
+test('loopback before the directory says who it is still lists', () => {
+  // The list is the thing that shows "reaching its sidecar…". A blank pane in
+  // its place would make a slow start look like a broken one.
+  assert.deepEqual(pane({ defaultHostId: null }), { kind: 'list', hostId: '' });
 });

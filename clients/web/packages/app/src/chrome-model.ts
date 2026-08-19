@@ -180,3 +180,53 @@ export const ICON_RAIL_MAX_WIDTH = 900;
 export function isIconRail(width: number): boolean {
   return width <= ICON_RAIL_MAX_WIDTH;
 }
+
+/** What the shell's pane shows right now. */
+export type PaneChoice =
+  | { readonly kind: 'terminal'; readonly tabId: string }
+  | { readonly kind: 'landing' }
+  | { readonly kind: 'list'; readonly hostId: string };
+
+/**
+ * Which of the three the pane is showing (#344).
+ *
+ * Pure, because this is the rule the hosted shell turns on and it has three
+ * cases that a component render cannot be asked about. The shell used to have
+ * two — terminal or list — and the hosted path had its own three *screens*
+ * instead of tabs.
+ */
+export function paneFor(args: {
+  /** The active tab, and whether its dial target is still held. */
+  readonly activeTabId: string | null;
+  readonly activeHasTarget: boolean;
+  readonly routeHost: string | undefined;
+  readonly routeSession: string | undefined;
+  /** The caller supplied something to show when no machine is named. */
+  readonly hasLanding: boolean;
+  /** The machine to list when the URL names none. */
+  readonly defaultHostId: string | null;
+}): PaneChoice {
+  const { activeTabId, activeHasTarget, routeHost, routeSession, hasLanding } = args;
+  // The terminal only when the URL names *the active tab's* session. Matching
+  // on the params alone would show whichever tab happened to be active while
+  // the URL described another — the two move in separate updates, and a render
+  // between them must not settle on the stale one.
+  if (
+    activeTabId !== null &&
+    activeHasTarget &&
+    routeHost !== undefined &&
+    routeSession !== undefined &&
+    activeTabId === tabIdOf(routeHost, routeSession)
+  ) {
+    return { kind: 'terminal', tabId: activeTabId };
+  }
+  // A machine named in the URL is that machine's list, even when a landing
+  // exists: `/h/:hostId` is how the fleet grid's own "open" button gets you to
+  // a machine, so answering it with the grid would make that button a no-op.
+  if (routeHost !== undefined) return { kind: 'list', hostId: routeHost };
+  if (hasLanding) return { kind: 'landing' };
+  // Loopback: one machine, and `''` until the directory says who it is.
+  // Listing anyway is the point — the list is what shows "reaching its
+  // sidecar…", and a blank pane would make a slow start look like a broken one.
+  return { kind: 'list', hostId: args.defaultHostId ?? '' };
+}
