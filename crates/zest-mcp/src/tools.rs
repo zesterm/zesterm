@@ -12,10 +12,11 @@
 //! numbers. `screen` is bounded by the grid rather than by how chatty the
 //! command was, because the emulator has already collapsed every `\r`-redrawn
 //! progress bar into one row. `blocks` carries **no output text at all** — a
-//! command, a cwd, a state and two timestamps is about 25 tokens, so fifty
-//! commands of history costs less than one screen of a build log. `output` is
-//! the only bulk-text call, it is scoped to one block, and when it truncates it
-//! says so and keeps both ends.
+//! command, a cwd, a state and two timestamps is about 25 tokens, and the line
+//! anchors add roughly ten more to a finished block and one anchor's worth to a
+//! prompt, so fifty commands of history still costs less than one screen of a
+//! build log. `output` is the only bulk-text call, it is scoped to one block,
+//! and when it truncates it says so and keeps both ends.
 //!
 //! # Two defences that belong here rather than in the harness
 //!
@@ -1313,6 +1314,39 @@ fn truncate_middle(rows: &[String], max: usize) -> (Vec<&str>, usize) {
     (out, omitted)
 }
 
+/// One block, as every tool that returns one describes it.
+///
+/// # Why the line anchors are here
+///
+/// `prompt_line`, `output_line` and `end_line` are absolute line ids, and they
+/// answer a question no other field can: how many lines the *host* says this
+/// block covers, against how many rows a reader actually holds for it. The span
+/// only bounds the rows from above -- trailing blanks are trimmed -- but a wide
+/// span answered with none of them, or with half, is the anchors and the
+/// content having diverged, which is #200's signature and the one thing the
+/// sidecar's `probe:resize` was reached for. Nothing downstream can recompute
+/// them; they exist only because the host counted the lines as they were
+/// printed. Leaving them out made that class of bug invisible from MCP while
+/// looking like a payload that had simply been kept lean.
+///
+/// **A command that printed nothing has an inverted range, not a missing
+/// anchor.** `133;C` fires before the shell echoes the newline and `133;D`
+/// after the trailing one, and the parser corrects both -- so `false` comes
+/// back with `output_line: 6` and `end_line: 5`, which is in the recorded
+/// corpus (`a_command_that_printed_nothing_answers_empty_rather_than_echoing_itself`).
+/// A reader differencing the two gets zero or minus one and must read that as
+/// "printed nothing", not as a corrupt payload.
+///
+/// **They are absolute between reflows, not forever.** A width change renumbers
+/// every line in the session, so an anchor carried across a resize names a
+/// different line or none at all. Compare anchors from a single read; never one
+/// cached over a resize.
+///
+/// **An anchor the block does not have is left out, not written as null.** A
+/// long history is mostly prompt blocks, and two null keys on each of them is
+/// cost carrying no fact. `exit_code` is deliberately the other way round:
+/// there the null *is* the fact, because a shell that reported no status is not
+/// a shell that reported zero.
 fn block_json(b: &BlockPayload) -> Value {
     let (state, exit) = match b.state {
         BlockState::Prompt => ("prompt", None),
@@ -1321,16 +1355,25 @@ fn block_json(b: &BlockPayload) -> Value {
         // green tick for a command that actually failed is worse than nothing.
         BlockState::Finished { exit_code } => ("finished", Some(exit_code)),
     };
-    json!({
+    let mut v = json!({
         "id": b.id,
         "command": b.command,
         "cwd": b.cwd,
         "state": state,
         "exit_code": exit.flatten(),
         "exit_code_source": exit.map(|_| ExitSource::ShellMarker),
+        // Always: a block has a prompt line from the moment it exists.
+        "prompt_line": b.prompt_line,
         "started_ms": b.started_ms,
         "ended_ms": b.ended_ms,
-    })
+    });
+    let obj = v.as_object_mut().expect("json! built an object");
+    for (key, line) in [("output_line", b.output_line), ("end_line", b.end_line)] {
+        if let Some(line) = line {
+            obj.insert(key.into(), json!(line));
+        }
+    }
+    v
 }
 
 fn session_arg(args: &Value, r: &Resolver) -> Result<SessionAddr, ToolError> {
@@ -1781,6 +1824,9 @@ mod tests {
             v["exit_code_source"], "shell_marker",
             "every exit code says where it came from, because OSC 133 is forgeable"
         );
+        assert_eq!(v["prompt_line"], 0, "a closed block carries all three anchors");
+        assert_eq!(v["output_line"], 1);
+        assert_eq!(v["end_line"], 2);
     }
 
     #[test]
@@ -1803,6 +1849,68 @@ mod tests {
             v["exit_code_source"].is_null(),
             "a command still running has no status to attribute to anything"
         );
+        assert_eq!(v["prompt_line"], 0);
+        assert_eq!(v["output_line"], 1, "a running block has printed somewhere");
+        // `is_null()` would pass against either shape: serde's index operator
+        // answers `Null` for a key that is not there, so only `get` can tell an
+        // omitted anchor from one written as null -- which is the whole rule.
+        assert!(
+            v.get("end_line").is_none(),
+            "a running block has no end, and an anchor it does not have is left out rather than nulled"
+        );
+    }
+
+    #[test]
+    fn a_command_that_printed_nothing_keeps_its_inverted_range() {
+        // Not a defensive tidy-up: `133;C` fires before the shell echoes the
+        // newline and `133;D` after the trailing one, so a silent command really
+        // does end one line above where its output began -- the recorded `false`
+        // in `blocks-zsh` is exactly this. Clamping it, or dropping `end_line`
+        // for looking wrong, would turn "printed nothing" into "still running".
+        let b = BlockPayload {
+            id: 4,
+            prompt_line: 5,
+            output_line: Some(6),
+            end_line: Some(5),
+            state: BlockState::Finished { exit_code: Some(1) },
+            command: "false".into(),
+            cwd: "/".into(),
+            started_ms: None,
+            ended_ms: None,
+        };
+        let v = block_json(&b);
+        assert_eq!(v["output_line"], 6);
+        assert_eq!(
+            v["end_line"], 5,
+            "a silent command ends above where its output began, and the payload says so"
+        );
+    }
+
+    #[test]
+    fn a_prompt_block_carries_where_it_starts_and_nothing_else() {
+        // The common case in a long history, and the one the omission rule
+        // exists for: nothing has been submitted, so two of the three anchors
+        // do not exist yet and writing them as null would be pure cost on every
+        // block of a fifty-command read.
+        let b = BlockPayload {
+            id: 3,
+            prompt_line: 91_442,
+            output_line: None,
+            end_line: None,
+            state: BlockState::Prompt,
+            command: String::new(),
+            cwd: "/".into(),
+            started_ms: None,
+            ended_ms: None,
+        };
+        let v = block_json(&b);
+        assert_eq!(v["state"], "prompt");
+        assert_eq!(
+            v["prompt_line"], 91_442,
+            "where the prompt began is known the moment the block exists"
+        );
+        assert!(v.get("output_line").is_none(), "nothing submitted, so no output to anchor");
+        assert!(v.get("end_line").is_none());
     }
 
     #[test]
