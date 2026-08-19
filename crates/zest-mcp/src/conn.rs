@@ -71,6 +71,16 @@ pub struct Shared {
     pub closed: bool,
     /// The last error the reader saw, if any.
     pub error: Option<String>,
+    /// The last error the host sent *about a particular session*, with a counter
+    /// so a waiter can tell one that arrived during its wait from one that was
+    /// already sitting there when it started.
+    ///
+    /// Separate from `error` rather than replacing it: `error` is the link's
+    /// state, read alongside `closed` to say why a replica is missing, and a
+    /// per-session refusal is not that -- the link is perfectly healthy.
+    pub session_error: Option<(SessionAddr, String)>,
+    /// Bumped with every `session_error`. See [`Conn::attach`].
+    pub session_error_gen: u64,
     /// The session the most recent `CreateSession` produced.
     ///
     /// Read from `Sessions.created` rather than by taking the newest of the
@@ -304,8 +314,26 @@ impl Conn {
         rows: u16,
         observe: bool,
     ) -> Result<(), ConnError> {
+        // The host answers an attach on a session it does not have with an
+        // `Error` naming it, and it answers immediately. Before this, that
+        // reply was recorded into `Shared::error` and woke nothing, so the
+        // waiter span its full deadline and every tool that attaches -- which
+        // is all of them but `sessions` and `hosts` -- took twenty seconds to
+        // report a session the daemon had already denied in milliseconds. The
+        // agent's own successful `close_session` is enough to reach it. (#347)
+        let seen = self.with(|s| s.session_error_gen);
         self.send(ClientMessage::Attach { session, cols, rows, observe });
-        self.wait_for(|s| s.replica(session).map(|_| ()))
+        self.wait_for(|s| {
+            if let Some(v) = s.replica(session).map(|_| ()) {
+                return Some(Ok(v));
+            }
+            match &s.session_error {
+                Some((addr, msg)) if *addr == session && s.session_error_gen != seen => {
+                    Some(Err(ConnError::Refused(msg.clone())))
+                }
+                _ => None,
+            }
+        })?
     }
 
     /// Stop watching. The session keeps running -- this is not `CloseSession`.
@@ -337,6 +365,12 @@ pub enum ConnError {
     /// cannot name a duration without being wrong for one of them.
     #[error("the deadline passed before the daemon answered (requests allow {REPLY_DEADLINE:?})")]
     TimedOut,
+    /// The host refused this session by name. Answered at once rather than at
+    /// the deadline: a refusal is an answer, and twenty seconds of silence is
+    /// indistinguishable inside an agent loop from a busy session or a slow
+    /// host. (#347)
+    #[error("{0}")]
+    Refused(String),
 }
 
 impl Drop for Conn {
@@ -576,7 +610,11 @@ fn on_message(state: &State, tx: &Sender<Outbound>, msg: HostMessage) {
                 r.set_exited(code);
             }
         }
-        HostMessage::Error { message, .. } => {
+        HostMessage::Error { session, message } => {
+            if let Some(addr) = session {
+                s.session_error = Some((addr, message.clone()));
+                s.session_error_gen = s.session_error_gen.wrapping_add(1);
+            }
             s.error = Some(message);
         }
         _ => {}
