@@ -202,7 +202,7 @@ test('a local create refuses a machine this source does not hold', () => {
   // the caller asked.
   const source = local({ kind: 'ready', view: VIEW });
   return assert.rejects(
-    () => source.create(OTHER, { cols: 80, rows: 24 }),
+    () => source.create(OTHER, { command: '', cwd: '', cols: 80, rows: 24 }),
     /not dialable/,
     'a create names a machine, and a wrong name is a refusal',
   );
@@ -210,7 +210,7 @@ test('a local create refuses a machine this source does not hold', () => {
 
 test('a local create refuses while nothing is ready', async () => {
   const source = local({ kind: 'pending' });
-  await assert.rejects(() => source.create(HOST, { cols: 80, rows: 24 }));
+  await assert.rejects(() => source.create(HOST, { command: '', cwd: '', cols: 80, rows: 24 }));
 });
 
 /** Not read by the rules under test; the stub has to return something. */
@@ -319,15 +319,15 @@ test('a hosted create goes through the connection already watching that machine'
   // handshake, then discard all of it — per create, for a machine the browser
   // is already talking to.
   const live = fakeLive([{ id: HOST, label: 'mac', online: true, sessions: [] }]);
-  const created = await liveHostSource(live, RELAY).create(HOST, { cols: 80, rows: 24 });
-  assert.deepEqual(live.created, [{ hostId: HOST, size: { cols: 80, rows: 24 } }]);
+  const created = await liveHostSource(live, RELAY).create(HOST, { command: '', cwd: '', cols: 80, rows: 24 });
+  assert.deepEqual(live.created, [{ hostId: HOST, size: { command: '', cwd: '', cols: 80, rows: 24 } }]);
   assert.equal(created.session, 'new');
 });
 
 test('a hosted create on a sleeping machine rejects rather than hanging', async () => {
   // A promise that never settles is a launcher row that spins for ever.
   const live = fakeLive([{ id: OTHER, label: 'pi', online: false, sessions: [] }]);
-  await assert.rejects(() => liveHostSource(live, RELAY).create(OTHER, { cols: 80, rows: 24 }));
+  await assert.rejects(() => liveHostSource(live, RELAY).create(OTHER, { command: '', cwd: '', cols: 80, rows: 24 }));
 });
 
 test('the hosted seam hands back the same session list until it really changes', () => {
@@ -376,7 +376,7 @@ test('a created entry names the machine it was asked for', () => {
   // ignored.
   const live = fakeLive([{ id: HOST, label: 'mac', online: true, sessions: [] }]);
   return liveHostSource(live, RELAY)
-    .create(HOST, { cols: 80, rows: 24 })
+    .create(HOST, { command: '', cwd: '', cols: 80, rows: 24 })
     .then((created) => {
       assert.equal(created.host, HOST);
     });

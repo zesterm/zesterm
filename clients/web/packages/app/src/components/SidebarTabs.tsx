@@ -12,7 +12,13 @@
 
 import { component } from 'sigx';
 
-import { chipTitle, chipTooltip, shortHostId, type LauncherRow } from '../chrome-model.ts';
+import {
+  chipTitle,
+  chipTooltip,
+  shortHostId,
+  type LauncherRow,
+  type LauncherTargetRow,
+} from '../chrome-model.ts';
 import { groupByHost, type Tab } from '../state/tabs.ts';
 import { LauncherMenu } from './LauncherMenu.tsx';
 
@@ -64,7 +70,7 @@ export const SidebarTabs = component<{
   launcherRows: readonly LauncherRow[];
   onActivate: (id: string) => void;
   onLauncherToggle: () => void;
-  onLaunch: (hostId: string) => void;
+  onLaunch: (row: LauncherTargetRow) => void;
   onLauncherDismiss: () => void;
   onPalette: () => void;
   onHosts: () => void;

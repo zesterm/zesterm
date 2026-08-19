@@ -14,6 +14,21 @@ import { ConnectionClient, type Dial } from '@zesterm/client';
 import type { SessionAddr } from '@zesterm/proto';
 
 /**
+ * What to start, and how big.
+ *
+ * `command` and `cwd` were hard-coded `''` at both call sites, which is what
+ * made launching a published profile structurally impossible rather than
+ * merely unimplemented (#352). Empty still means "that machine's default
+ * shell" — the meaning `create_session` has always given it.
+ */
+export interface CreateSpec {
+  readonly command: string;
+  readonly cwd: string;
+  readonly cols: number;
+  readonly rows: number;
+}
+
+/**
  * A `Dial`, not a `ws://` URL.
  *
  * It took a URL and called `wsDial` itself, which meant it could **only** ever
@@ -26,10 +41,9 @@ import type { SessionAddr } from '@zesterm/proto';
 export function createSessionOverDataPlane(args: {
   dial: Dial;
   signer: ClientSigner;
-  cols: number;
-  rows: number;
+  spec: CreateSpec;
 }): Promise<SessionAddr> {
-  const { dial, signer, cols, rows } = args;
+  const { dial, signer, spec } = args;
   return new Promise((resolve, reject) => {
     // `let`, and never dereferenced without a check. The timer is armed
     // before the client exists, so a constructor that throws leaves this
@@ -56,7 +70,7 @@ export function createSessionOverDataPlane(args: {
         events: {
           onConnection: (state) => {
             if (state.phase === 'connected') {
-              client?.createSession({ command: '', cwd: '', cols, rows });
+              client?.createSession(spec);
             } else if (state.phase === 'failed') {
               settle();
               reject(new Error(state.message));

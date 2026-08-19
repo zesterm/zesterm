@@ -29,11 +29,10 @@ import {
   shellChord,
 } from '@zesterm/input';
 import { sliceBlocks, type BlockPayload } from '@zesterm/proto';
-import { measureMetrics } from '@zesterm/render';
 import { resolveTerminalPalette, type Theme } from '@zesterm/theme';
 import type { SessionEntry } from '@zesterm/control';
 
-import { GRID_FONT_SIZE, MONO_FAMILY } from '../chrome-model.ts';
+import { fitGrid } from '../grid-fit.ts';
 import { currentTheme, themeStore } from '../state/theme.ts';
 import { NO_FOLDS, foldedFor, toggle, type FoldsState } from '../state/folds.ts';
 import {
@@ -193,15 +192,14 @@ export const TerminalView = component<{
     // canvas exactly, while the blocks body (same family, 12.5px) only gets
     // narrower and wraps per invariant 11. Sized before connect() so the
     // attach itself carries the measured dims rather than entry's.
-    const meas = document.createElement('canvas').getContext('2d');
-    if (meas !== null && wrapEl !== null) {
-      const m = measureMetrics(meas, MONO_FAMILY, GRID_FONT_SIZE, window.devicePixelRatio || 1);
+    // `fitGrid`, shared with the create path: a session is sized before its
+    // pane exists, and two copies of this arithmetic would spawn every shell
+    // at one size and resize it to another a frame later (#352).
+    if (wrapEl !== null) {
       const fit = (): void => {
         if (wrapEl === null) return;
-        client.resize(
-          Math.max(2, Math.floor((wrapEl.clientWidth * m.dpr) / m.cellW)),
-          Math.max(1, Math.floor((wrapEl.clientHeight * m.dpr) / m.cellH)),
-        );
+        const size = fitGrid(wrapEl, window.devicePixelRatio);
+        client.resize(size.cols, size.rows);
       };
       fit();
       sizeObserver = new ResizeObserver(fit);

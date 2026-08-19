@@ -29,7 +29,7 @@ import type { Dial } from '@zesterm/client';
 import type { HostFacts, SessionEntry } from '@zesterm/control';
 
 import type { HostChoice } from './chrome-model.ts';
-import { createSessionOverDataPlane } from './create-session.ts';
+import { createSessionOverDataPlane, type CreateSpec } from './create-session.ts';
 import { dialFor, type RelayAccess } from './dial-for.ts';
 import type { DirectoryReader } from './directory-source.ts';
 import type { LiveDirectory } from './live-directory.ts';
@@ -112,7 +112,7 @@ export interface HostSource {
    * Rejects rather than hangs when the machine cannot be reached; the caller
    * turns that into a message.
    */
-  create(hostId: string, size: { cols: number; rows: number }): Promise<SessionEntry>;
+  create(hostId: string, spec: CreateSpec): Promise<SessionEntry>;
   /**
    * What one machine says it is and can launch (#352), or null when it has
    * not said — an older daemon, or one this shell has not reached yet.
@@ -183,7 +183,7 @@ export function localHostSource(
       if (dir.kind !== 'ready' || dir.view.host?.id !== hostId) return null;
       return dir.view.facts;
     },
-    create: (hostId, size) => {
+    create: (hostId, spec) => {
       const host = own();
       // The same id check `dialFor` makes, and for the same reason: a create
       // aimed at a machine this source does not hold must refuse rather than
@@ -191,12 +191,7 @@ export function localHostSource(
       if (host === null || host.id !== hostId || host.dial === null) {
         return Promise.reject(new Error('that machine is not dialable from here'));
       }
-      return createSessionOverDataPlane({
-        dial: host.dial,
-        signer,
-        cols: size.cols,
-        rows: size.rows,
-      }).then((addr) => ({
+      return createSessionOverDataPlane({ dial: host.dial, signer, spec }).then((addr) => ({
         host: addr.host,
         session: addr.session.toString(),
         // A freshly created session has none of this yet; the daemon's own
@@ -205,8 +200,8 @@ export function localHostSource(
         // looks like" is written once.
         title: '',
         cwd: '',
-        cols: size.cols,
-        rows: size.rows,
+        cols: spec.cols,
+        rows: spec.rows,
         altScreen: false,
         attached: false,
       }));
@@ -289,6 +284,6 @@ export function liveHostSource(live: LiveDirectory, relay: RelayAccess | null): 
     // reason this method is on the seam. `live.createSession` rejects if that
     // machine is not connected, so an unreachable one refuses rather than
     // hangs.
-    create: (hostId, size) => live.createSession(hostId, size),
+    create: (hostId, spec) => live.createSession(hostId, spec),
   };
 }

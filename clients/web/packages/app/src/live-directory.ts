@@ -70,6 +70,7 @@ import {
 } from '@zesterm/control';
 import { signal } from 'sigx';
 
+import type { CreateSpec } from './create-session.ts';
 import { dialFor, type RelayAccess } from './dial-for.ts';
 import type { DirectorySource, DirectoryStatus } from './directory-source.ts';
 
@@ -192,7 +193,7 @@ export interface LiveDirectory {
    * Start a session on a machine, over the connection that is already
    * watching it. Rejects if that machine is not connected.
    */
-  createSession(hostId: string, size: { cols: number; rows: number }): Promise<SessionEntry>;
+  createSession(hostId: string, spec: CreateSpec): Promise<SessionEntry>;
   /** Close every connection and cancel every timer. */
   close(): void;
 }
@@ -493,7 +494,7 @@ export function liveDirectory(options: LiveDirectoryOptions): LiveDirectory {
       });
     },
 
-    createSession(hostId: string, size: { cols: number; rows: number }): Promise<SessionEntry> {
+    createSession(hostId: string, spec: CreateSpec): Promise<SessionEntry> {
       const w = watches.get(hostId);
       const snapshot = state.hosts[hostId];
       if (w === undefined || w.link === null || snapshot?.presence.kind !== 'online') {
@@ -509,7 +510,7 @@ export function liveDirectory(options: LiveDirectoryOptions): LiveDirectory {
         w.pending.push({ resolve, reject, timer });
         // The watching connection, not a new one — the whole reason this lives
         // here rather than in `create-session.ts`.
-        link.createSession({ command: '', cwd: '', cols: size.cols, rows: size.rows });
+        link.createSession(spec);
       });
     },
 

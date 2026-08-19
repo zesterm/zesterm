@@ -1175,6 +1175,40 @@ body {
   color: var(--zt-faint);
 }
 
+/* A machine's header. Same treatment as the palette's group labels and the
+   sidebar's host headers (10.5px / .09em / uppercase) — three lists that all
+   mean "the rows below belong to this", and one of them looking different
+   would read as a different kind of thing. Drawn only once there is more than
+   one machine; `launcherRows` decides. */
+.launcher-group {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 10px 2px;
+}
+
+.launcher-group:first-child {
+  padding-top: 2px;
+}
+
+.launcher-group .group-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--zt-dim);
+  white-space: nowrap;
+}
+
+.launcher-group .group-sub {
+  font-family: var(--zt-mono, ui-monospace, monospace);
+  font-size: 10px;
+  color: var(--zt-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .launcher-row {
   display: flex;
   align-items: center;

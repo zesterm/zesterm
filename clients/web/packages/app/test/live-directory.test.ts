@@ -80,7 +80,7 @@ class FakeClock implements Clock {
 class FakeLink implements DirectoryLink {
   connects = 0;
   closes = 0;
-  readonly creates: Array<{ cols: number; rows: number }> = [];
+  readonly creates: Array<{ command: string; cwd: string; cols: number; rows: number }> = [];
   readonly events: ConnectionEvents;
 
   constructor(events: ConnectionEvents) {
@@ -97,7 +97,10 @@ class FakeLink implements DirectoryLink {
   }
 
   createSession(opts: { command: string; cwd: string; cols: number; rows: number }): void {
-    this.creates.push({ cols: opts.cols, rows: opts.rows });
+    // The whole spec, not just the size: what a create *runs* is now the
+    // launcher's business, and a harness that dropped it would let the
+    // command be lost between here and the daemon without a test noticing.
+    this.creates.push({ ...opts });
   }
 
   /** The full handshake outcome, as `ConnectionClient` reports it. */
@@ -474,13 +477,13 @@ test('creating a session reuses the watching connection', async () => {
   const link = links.current(MAC.id);
   link.welcome();
 
-  const created = directory.createSession(MAC.id, { cols: 120, rows: 32 });
+  const created = directory.createSession(MAC.id, { command: '', cwd: '', cols: 120, rows: 32 });
   assert.equal(
     links.for(MAC.id).length,
     1,
     'over the relay a second connection is a second ticket, a second pipe and a second handshake for one message',
   );
-  assert.deepEqual(link.creates, [{ cols: 120, rows: 32 }]);
+  assert.deepEqual(link.creates, [{ command: '', cwd: '', cols: 120, rows: 32 }]);
 
   link.sessions([info(9n)], 9n);
   const entry = await created;
@@ -493,7 +496,7 @@ test('a create the daemon answers with an error is rejected, not left to time ou
   const link = links.current(MAC.id);
   link.welcome();
 
-  const created = directory.createSession(MAC.id, { cols: 80, rows: 24 });
+  const created = directory.createSession(MAC.id, { command: '', cwd: '', cols: 80, rows: 24 });
   link.events.onError?.('the shell could not be spawned');
   // Past the give-up timer on purpose. A swallowed error would otherwise leave
   // this promise unsettled and hang the suite rather than fail it — and the
@@ -511,7 +514,7 @@ test('a create on a machine that is not connected is refused at once', async () 
   const { directory } = harness();
   directory.setHosts([MAC]);
   await assert.rejects(
-    directory.createSession(MAC.id, { cols: 80, rows: 24 }),
+    directory.createSession(MAC.id, { command: '', cwd: '', cols: 80, rows: 24 }),
     /not connected/,
     'there is no connection to write it down, and queueing it would start a session at an unknown time',
   );
@@ -523,7 +526,7 @@ test('a create still in flight when the link drops is rejected rather than left 
   const link = links.current(MAC.id);
   link.welcome();
 
-  const created = directory.createSession(MAC.id, { cols: 80, rows: 24 });
+  const created = directory.createSession(MAC.id, { command: '', cwd: '', cols: 80, rows: 24 });
   link.drop();
   await assert.rejects(created, /dropped/, 'the connection that was going to answer it is gone');
 });
@@ -533,7 +536,7 @@ test('a create nobody answers gives up on the clock', async () => {
   directory.setHosts([MAC]);
   links.current(MAC.id).welcome();
 
-  const created = directory.createSession(MAC.id, { cols: 80, rows: 24 });
+  const created = directory.createSession(MAC.id, { command: '', cwd: '', cols: 80, rows: 24 });
   clock.advance(REACH_TIMEOUT_MS * 3);
   await assert.rejects(created, /in time/, 'a promise nothing settles is a button that stays busy for ever');
 });
@@ -613,4 +616,24 @@ test('each machine keeps its own offer', () => {
   const byId = new Map(directory.snapshots().map((s) => [s.host.id, s]));
   assert.deepEqual(byId.get(MAC.id)?.facts?.launchTargets.map((t) => t.name), ['zsh']);
   assert.deepEqual(byId.get(PC.id)?.facts?.launchTargets.map((t) => t.name), ['wsl', 'pwsh']);
+});
+
+test('a create carries the profile it was asked for, verbatim', () => {
+  // What the machine published, sent back to it. The daemon resolved the
+  // profile through its own defaults before publishing (ADR-014), so anything
+  // this client rewrote on the way would be a second, worse resolution.
+  const { links, directory } = harness();
+  directory.setHosts([MAC]);
+  const link = links.current(MAC.id);
+  link.welcome();
+
+  void directory.createSession(MAC.id, {
+    command: 'wsl.exe -d Ubuntu',
+    cwd: '/home/andy',
+    cols: 143,
+    rows: 41,
+  });
+  assert.deepEqual(link.creates, [
+    { command: 'wsl.exe -d Ubuntu', cwd: '/home/andy', cols: 143, rows: 41 },
+  ]);
 });

@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
+import type { HostFacts } from '@zesterm/control';
+
 import {
   MONO_FAMILY,
   ICON_RAIL_MAX_WIDTH,
@@ -9,6 +11,7 @@ import {
   chipTooltip,
   isIconRail,
   launcherAlign,
+  launchableRows,
   launcherKeyOf,
   launcherRows,
   paneFor,
@@ -63,8 +66,31 @@ const HOSTS: readonly HostChoice[] = [
   { id: 'h-mac', label: 'mac' },
 ];
 
+/** What a machine published, as `launcherRows` reads it. */
+const published = (
+  targets: readonly { name: string; command?: string; cwd?: string }[],
+  extra: Partial<HostFacts> = {},
+): HostFacts => ({
+  os: '',
+  arch: '',
+  osVersion: '',
+  defaultShell: '',
+  launchTargets: targets.map((t) => ({
+    name: t.name,
+    command: t.command ?? '',
+    startingDirectory: t.cwd ?? '',
+    icon: '',
+    colorScheme: '',
+    tabColor: null,
+  })),
+  ...extra,
+});
+
+/** `factsOf` over a plain table; anything absent has said nothing. */
+const saying = (table: Readonly<Record<string, HostFacts>>) => (id: string) => table[id] ?? null;
+
 test('the current host comes first, tagged default', () => {
-  const rows = launcherRows(HOSTS, 'h-studio');
+  const rows = launchableRows(launcherRows(HOSTS, 'h-studio'));
   assert.equal(rows[0]?.hostId, 'h-studio', '⏎ runs the first row, which must be the default');
   assert.equal(rows[0]?.isDefault, true);
   assert.deepEqual(
@@ -81,7 +107,7 @@ test('the current host comes first, tagged default', () => {
 
 test('chords are assigned by menu position, ⌘1 through ⌘9 only', () => {
   const many = Array.from({ length: 11 }, (_, i) => ({ id: `h${i}`, label: `host${i}` }));
-  const rows = launcherRows(many, null);
+  const rows = launchableRows(launcherRows(many, null));
   assert.equal(rows[0]?.chord, '⌘1');
   assert.equal(rows[8]?.chord, '⌘9');
   assert.equal(rows[9]?.chord, null, 'there is no ⌘10 — a chord that cannot be typed is a lie');
@@ -89,7 +115,7 @@ test('chords are assigned by menu position, ⌘1 through ⌘9 only', () => {
 
 test('an unknown or absent default tags nothing and preserves order', () => {
   for (const def of [null, 'h-ghost']) {
-    const rows = launcherRows(HOSTS, def);
+    const rows = launchableRows(launcherRows(HOSTS, def));
     assert.deepEqual(
       rows.map((r) => r.hostId),
       ['h-forge', 'h-studio', 'h-mac'],
@@ -103,13 +129,127 @@ test('an unknown or absent default tags nothing and preserves order', () => {
 });
 
 test('row copy is the designed sentence over honest data', () => {
-  const rows = launcherRows([{ id: 'a'.repeat(64), label: 'studio' }], null);
+  const rows = launchableRows(launcherRows([{ id: 'a'.repeat(64), label: 'studio' }], null));
   assert.equal(rows[0]?.name, 'New session on studio');
   assert.equal(
     rows[0]?.sub,
     'a'.repeat(12),
     'the sub-line is the shortened host id — never a fabricated command or latency',
   );
+});
+
+// --- what each machine publishes (#352) -------------------------------------
+
+test('one machine grows no headers, however much it publishes', () => {
+  // Every loopback shell and most accounts are one machine, and a header over
+  // a single group is chrome for a fleet that does not exist. The native
+  // launcher draws none there for the same reason.
+  const rows = launcherRows(
+    [{ id: 'h-mac', label: 'mac' }],
+    'h-mac',
+    saying({ 'h-mac': published([{ name: 'zsh' }, { name: 'nu' }]) }),
+  );
+  assert.equal(rows.filter((r) => r.kind === 'group').length, 0);
+  assert.deepEqual(
+    rows.map((r) => (r.kind === 'target' ? r.profile : 'GROUP')),
+    [null, 'zsh', 'nu'],
+    'the shell row first, then what the machine published, in its order',
+  );
+});
+
+test('two machines each get a header, and their targets stay under it', () => {
+  const rows = launcherRows(
+    HOSTS.slice(0, 2),
+    'h-forge',
+    saying({
+      'h-forge': published([{ name: 'Ubuntu', command: 'wsl.exe -d Ubuntu' }], {
+        os: 'windows',
+        arch: 'x86_64',
+      }),
+      'h-studio': published([{ name: 'zsh' }]),
+    }),
+  );
+  assert.deepEqual(
+    rows.map((r) => (r.kind === 'group' ? `# ${r.label}` : (r.profile ?? 'shell'))),
+    ['# forge', 'shell', 'Ubuntu', '# studio', 'shell', 'zsh'],
+  );
+  const header = rows[0];
+  assert.equal(header?.kind === 'group' ? header.sub : null, 'windows · x86_64');
+  const bare = rows[3];
+  assert.equal(
+    bare?.kind === 'group' ? bare.sub : null,
+    '',
+    'a machine that said no os gets no os — a dash pretending to be a fact is worse than a blank',
+  );
+});
+
+test('digits number the whole menu, not each machine', () => {
+  // ⌘2 must be the second row you can SEE. Counting per group, or counting
+  // headers, shifts every digit past the first machine — and the row that
+  // then runs is somebody else's.
+  const rows = launcherRows(
+    HOSTS.slice(0, 2),
+    'h-forge',
+    saying({ 'h-forge': published([{ name: 'Ubuntu' }]) }),
+  );
+  assert.deepEqual(
+    rows.map((r) => (r.kind === 'group' ? 'HEADER' : r.chord)),
+    ['HEADER', '⌘1', '⌘2', 'HEADER', '⌘3'],
+  );
+  assert.deepEqual(
+    launchableRows(rows).map((r) => r.chord),
+    ['⌘1', '⌘2', '⌘3'],
+    'and `launchableRows` is the same walk, so ⌘N indexes what it draws',
+  );
+});
+
+test('a machine that has said nothing still offers a shell', () => {
+  // Null is not an empty list, but both leave the same rows: an older daemon,
+  // a machine nothing can reach, and one with no profiles all get their "New
+  // session on…" row, because that row does not depend on the offer and it is
+  // the only way to get a shell there at all.
+  for (const facts of [null, published([])]) {
+    const rows = launchableRows(
+      launcherRows([{ id: 'h-mac', label: 'mac' }], null, () => facts),
+    );
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.profile, null);
+    assert.equal(rows[0]?.command, '', 'empty is "that machine\'s default shell"');
+  }
+});
+
+test('a row carries what to run, because the wire has no profile field', () => {
+  // `create_session` takes a command and a cwd. The machine resolved the
+  // profile through its own defaults before publishing it (ADR-014), so the
+  // row sends what it was told rather than re-resolving against a config this
+  // client does not have.
+  const rows = launchableRows(
+    launcherRows(
+      [{ id: 'h-forge', label: 'forge' }],
+      null,
+      saying({
+        'h-forge': published([{ name: 'Ubuntu', command: 'wsl.exe -d Ubuntu', cwd: '/home/andy' }]),
+      }),
+    ),
+  );
+  assert.equal(rows[1]?.command, 'wsl.exe -d Ubuntu');
+  assert.equal(rows[1]?.cwd, '/home/andy');
+  assert.equal(rows[1]?.sub, 'wsl.exe -d Ubuntu', 'the sub-line shows what will run');
+});
+
+test('the shell row names the machine\'s own shell once it has said', () => {
+  const withShell = launchableRows(
+    launcherRows(
+      [{ id: 'a'.repeat(64), label: 'forge' }],
+      null,
+      saying({ ['a'.repeat(64)]: published([], { defaultShell: 'pwsh.exe' }) }),
+    ),
+  );
+  assert.equal(withShell[0]?.sub, 'pwsh.exe');
+  // And falls back to the shortened id rather than guessing one — the rule
+  // the sub-line has always followed.
+  const silent = launchableRows(launcherRows([{ id: 'a'.repeat(64), label: 'forge' }], null));
+  assert.equal(silent[0]?.sub, 'a'.repeat(12));
 });
 
 test('scroll-into-view fires only when the chip leaves the viewport', () => {

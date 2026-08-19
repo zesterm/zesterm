@@ -3,18 +3,24 @@
  * there is no separate default-only new-tab control, and `⏎` runs the
  * default row, so the default stays one keystroke away.
  *
- * Rows carry the profile-row shape (icon tile, name over a mono sub-line,
- * host chip, ⌘N) so profile rows drop straight in when profiles land; today
- * they are "New session on <host>" per known host, built by `launcherRows`.
+ * Rows are a machine's shell plus whatever that machine published (#352),
+ * grouped under its name once there is more than one machine to tell apart.
  *
- * The mock's *Manage profiles* row is deliberately absent: the browser has
- * no profiles yet, and a dead row in a short menu reads as a broken feature.
- * *Run on another host…* stays and acts — it moves focus into the host rows.
+ * The mock's *Manage profiles* row is deliberately absent: every profile the
+ * browser can see belongs to a host and is read-only from here, so the row
+ * would open an editor that cannot write. *Run on another host…* stays and
+ * acts — it moves focus into the host rows.
  */
 
 import { component, onMounted, onUnmounted } from 'sigx';
 
-import { launcherKeyOf, type LauncherAlign, type LauncherRow } from '../chrome-model.ts';
+import {
+  launchableRows,
+  launcherKeyOf,
+  type LauncherAlign,
+  type LauncherRow,
+  type LauncherTargetRow,
+} from '../chrome-model.ts';
 
 export const LauncherMenu = component<{
   rows: readonly LauncherRow[];
@@ -27,15 +33,23 @@ export const LauncherMenu = component<{
    * before that.
    */
   align: LauncherAlign;
-  onRun: (hostId: string) => void;
+  /**
+   * The row, not its host id: a machine now has more than one row and they
+   * launch different things. Passing the id alone was enough while every row
+   * meant "a shell on that machine", and would now silently run the shell for
+   * every profile.
+   */
+  onRun: (row: LauncherTargetRow) => void;
   onDismiss: () => void;
 }>((ctx) => {
   let rootEl: HTMLElement | null = null;
   let firstHostRow: HTMLButtonElement | null = null;
 
   /** `⏎ runs the default` — and with nothing tagged, the first row stands in. */
-  const defaultRow = (): LauncherRow | undefined =>
-    ctx.props.rows.find((r) => r.isDefault) ?? ctx.props.rows[0];
+  const defaultRow = (): LauncherTargetRow | undefined => {
+    const launchable = launchableRows(ctx.props.rows);
+    return launchable.find((r) => r.isDefault) ?? launchable[0];
+  };
 
   // Every advertised chord — ⏎, ⇧⏎, Esc — is claimed at document capture
   // while the menu is open: focus usually still sits in the terminal's
@@ -61,7 +75,7 @@ export const LauncherMenu = component<{
         if (row !== undefined) {
           e.preventDefault();
           e.stopPropagation();
-          ctx.props.onRun(row.hostId);
+          ctx.props.onRun(row);
         }
         return;
       }
@@ -90,29 +104,47 @@ export const LauncherMenu = component<{
     document.removeEventListener('mousedown', onDocMouseDown, true);
   });
 
-  return () => (
+  return () => {
+    // The first *launchable* row, not the first row: once machines have
+    // headers, index 0 is a header, and ⇧⏎ — the "Run on another host…"
+    // row's own action — would focus nothing and silently do nothing.
+    const first = launchableRows(ctx.props.rows)[0];
+    return (
     <div class={`launcher align-${ctx.props.align}`} role="menu">
       <div class="launcher-head">⏎ runs the default</div>
-      {ctx.props.rows.map((r, i) => (
-        <button
-          key={r.hostId}
-          class="launcher-row"
-          role="menuitem"
-          ref={(el: HTMLButtonElement) => {
-            if (i === 0) firstHostRow = el;
-          }}
-          onClick={() => ctx.props.onRun(r.hostId)}
-        >
-          <span class="row-tile">❯</span>
-          <span class="row-main">
-            <span class="row-name">{r.name}</span>
-            <span class="row-sub">{r.sub}</span>
-          </span>
-          {r.isDefault ? <span class="default-tag">default</span> : null}
-          <span class="host-chip">{r.hostLabel}</span>
-          {r.chord !== null ? <span class="row-chord">{r.chord}</span> : null}
-        </button>
-      ))}
+      {ctx.props.rows.map((r) =>
+        r.kind === 'group' ? (
+          // Not a `menuitem`: a header is not selectable, and announcing it as
+          // one would put a dead stop in every screen reader's row count.
+          <div key={`g:${r.hostId}`} class="launcher-group" role="presentation">
+            <span class="group-label">{r.label}</span>
+            {r.sub === '' ? null : <span class="group-sub">{r.sub}</span>}
+          </div>
+        ) : (
+          <button
+            // The machine AND the profile: a host id alone stopped being
+            // unique the moment a machine could contribute more than one row,
+            // and a duplicate key is a row the framework may reuse for its
+            // neighbour.
+            key={`${r.hostId}:${r.profile ?? ''}`}
+            class="launcher-row"
+            role="menuitem"
+            ref={(el: HTMLButtonElement) => {
+              if (r === first) firstHostRow = el;
+            }}
+            onClick={() => ctx.props.onRun(r)}
+          >
+            <span class="row-tile">❯</span>
+            <span class="row-main">
+              <span class="row-name">{r.name}</span>
+              <span class="row-sub">{r.sub}</span>
+            </span>
+            {r.isDefault ? <span class="default-tag">default</span> : null}
+            <span class="host-chip">{r.hostLabel}</span>
+            {r.chord !== null ? <span class="row-chord">{r.chord}</span> : null}
+          </button>
+        ),
+      )}
       <div class="launcher-divider" />
       <button class="launcher-row" role="menuitem" onClick={() => firstHostRow?.focus()}>
         <span class="row-tile">›</span>
@@ -122,5 +154,6 @@ export const LauncherMenu = component<{
         <span class="row-chord">⇧⏎</span>
       </button>
     </div>
-  );
+    );
+  };
 });
