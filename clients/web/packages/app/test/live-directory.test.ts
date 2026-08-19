@@ -80,7 +80,7 @@ class FakeClock implements Clock {
 class FakeLink implements DirectoryLink {
   connects = 0;
   closes = 0;
-  readonly creates: Array<{ cols: number; rows: number }> = [];
+  readonly creates: Array<{ command: string; cwd: string; cols: number; rows: number }> = [];
   readonly events: ConnectionEvents;
 
   constructor(events: ConnectionEvents) {
@@ -97,7 +97,10 @@ class FakeLink implements DirectoryLink {
   }
 
   createSession(opts: { command: string; cwd: string; cols: number; rows: number }): void {
-    this.creates.push({ cols: opts.cols, rows: opts.rows });
+    // The whole spec, not just the size: what a create *runs* is now the
+    // launcher's business, and a harness that dropped it would let the
+    // command be lost between here and the daemon without a test noticing.
+    this.creates.push({ ...opts });
   }
 
   /** The full handshake outcome, as `ConnectionClient` reports it. */
@@ -111,6 +114,28 @@ class FakeLink implements DirectoryLink {
 
   sessions(infos: readonly SessionInfo[], created: bigint | null = null): void {
     this.events.onSessions?.(infos, created);
+  }
+
+  /**
+   * The offer, on its own — which is how it arrives. `ConnectionClient` fires
+   * it only when a `Sessions` carried one, so a test that could not push a
+   * listing without an offer could not reproduce the sticky case at all.
+   */
+  offer(...profiles: string[]): void {
+    this.events.onHostOffer?.({
+      os: 'linux',
+      arch: 'x86_64',
+      os_version: '6.8.0',
+      default_shell: '/bin/bash',
+      profiles: profiles.map((name) => ({
+        name,
+        command: `/bin/${name}`,
+        starting_directory: '',
+        icon: '',
+        color_scheme: '',
+        tab_color: null,
+      })),
+    });
   }
 }
 
@@ -452,13 +477,13 @@ test('creating a session reuses the watching connection', async () => {
   const link = links.current(MAC.id);
   link.welcome();
 
-  const created = directory.createSession(MAC.id, { cols: 120, rows: 32 });
+  const created = directory.createSession(MAC.id, { command: '', cwd: '', cols: 120, rows: 32 });
   assert.equal(
     links.for(MAC.id).length,
     1,
     'over the relay a second connection is a second ticket, a second pipe and a second handshake for one message',
   );
-  assert.deepEqual(link.creates, [{ cols: 120, rows: 32 }]);
+  assert.deepEqual(link.creates, [{ command: '', cwd: '', cols: 120, rows: 32 }]);
 
   link.sessions([info(9n)], 9n);
   const entry = await created;
@@ -471,7 +496,7 @@ test('a create the daemon answers with an error is rejected, not left to time ou
   const link = links.current(MAC.id);
   link.welcome();
 
-  const created = directory.createSession(MAC.id, { cols: 80, rows: 24 });
+  const created = directory.createSession(MAC.id, { command: '', cwd: '', cols: 80, rows: 24 });
   link.events.onError?.('the shell could not be spawned');
   // Past the give-up timer on purpose. A swallowed error would otherwise leave
   // this promise unsettled and hang the suite rather than fail it — and the
@@ -489,7 +514,7 @@ test('a create on a machine that is not connected is refused at once', async () 
   const { directory } = harness();
   directory.setHosts([MAC]);
   await assert.rejects(
-    directory.createSession(MAC.id, { cols: 80, rows: 24 }),
+    directory.createSession(MAC.id, { command: '', cwd: '', cols: 80, rows: 24 }),
     /not connected/,
     'there is no connection to write it down, and queueing it would start a session at an unknown time',
   );
@@ -501,7 +526,7 @@ test('a create still in flight when the link drops is rejected rather than left 
   const link = links.current(MAC.id);
   link.welcome();
 
-  const created = directory.createSession(MAC.id, { cols: 80, rows: 24 });
+  const created = directory.createSession(MAC.id, { command: '', cwd: '', cols: 80, rows: 24 });
   link.drop();
   await assert.rejects(created, /dropped/, 'the connection that was going to answer it is gone');
 });
@@ -511,7 +536,104 @@ test('a create nobody answers gives up on the clock', async () => {
   directory.setHosts([MAC]);
   links.current(MAC.id).welcome();
 
-  const created = directory.createSession(MAC.id, { cols: 80, rows: 24 });
+  const created = directory.createSession(MAC.id, { command: '', cwd: '', cols: 80, rows: 24 });
   clock.advance(REACH_TIMEOUT_MS * 3);
   await assert.rejects(created, /in time/, 'a promise nothing settles is a button that stays busy for ever');
+});
+
+// --- what a machine offers ---------------------------------------------------
+
+test('the offer survives every session push that does not carry one', () => {
+  // The daemon sends the offer on the first listing and again only when its
+  // config reloads; every ordinary session push omits it. Clearing on a push
+  // with nothing new to say would empty the launcher the moment anyone opened
+  // a shell, which is the failure this stickiness exists to prevent.
+  const { links, directory } = harness();
+  directory.setHosts([MAC]);
+  const link = links.current(MAC.id);
+  link.welcome();
+  link.offer('wsl', 'pwsh');
+  assert.deepEqual(
+    directory.snapshots()[0]?.facts?.launchTargets.map((t) => t.name),
+    ['wsl', 'pwsh'],
+  );
+
+  link.sessions([info(1n)]);
+  assert.deepEqual(
+    directory.snapshots()[0]?.facts?.launchTargets.map((t) => t.name),
+    ['wsl', 'pwsh'],
+    'a listing with no offer means nothing changed about the machine',
+  );
+
+  // And a reload replaces it wholesale rather than merging — the daemon's
+  // list is the truth, and a merge would resurrect a deleted profile.
+  link.offer('wsl');
+  assert.deepEqual(
+    directory.snapshots()[0]?.facts?.launchTargets.map((t) => t.name),
+    ['wsl'],
+  );
+});
+
+test('a machine that stops answering stops offering', () => {
+  // Stronger than the rule for sessions: a stale session row is a listing that
+  // may be wrong, while a stale launch target is a row that MUST fail when
+  // pressed. The next connection republishes on its first listing, so this
+  // costs a blank menu for as long as the machine is actually gone.
+  const { clock, links, directory } = harness();
+  directory.setHosts([MAC]);
+  const link = links.current(MAC.id);
+  link.welcome();
+  link.offer('wsl');
+
+  link.drop();
+  assert.equal(directory.snapshots()[0]?.facts, null, 'a dropped link publishes nothing');
+
+  clock.advance(REACH_TIMEOUT_MS);
+  assert.equal(directory.snapshots()[0]?.presence.kind, 'offline');
+  assert.equal(directory.snapshots()[0]?.facts, null);
+
+  // Back up: the fresh connection's own offer is what fills it again.
+  clock.advance(clock.nextIn() ?? 0);
+  const second = links.current(MAC.id);
+  second.welcome();
+  second.offer('pwsh');
+  assert.deepEqual(
+    directory.snapshots()[0]?.facts?.launchTargets.map((t) => t.name),
+    ['pwsh'],
+  );
+});
+
+test('each machine keeps its own offer', () => {
+  // One store, two machines: the offer is keyed by the connection that carried
+  // it, so a second machine's reload cannot overwrite the first's targets.
+  const { links, directory } = harness();
+  directory.setHosts([MAC, PC]);
+  links.current(MAC.id).welcome();
+  links.current(MAC.id).offer('zsh');
+  links.current(PC.id).welcome();
+  links.current(PC.id).offer('wsl', 'pwsh');
+
+  const byId = new Map(directory.snapshots().map((s) => [s.host.id, s]));
+  assert.deepEqual(byId.get(MAC.id)?.facts?.launchTargets.map((t) => t.name), ['zsh']);
+  assert.deepEqual(byId.get(PC.id)?.facts?.launchTargets.map((t) => t.name), ['wsl', 'pwsh']);
+});
+
+test('a create carries the profile it was asked for, verbatim', () => {
+  // What the machine published, sent back to it. The daemon resolved the
+  // profile through its own defaults before publishing (ADR-014), so anything
+  // this client rewrote on the way would be a second, worse resolution.
+  const { links, directory } = harness();
+  directory.setHosts([MAC]);
+  const link = links.current(MAC.id);
+  link.welcome();
+
+  void directory.createSession(MAC.id, {
+    command: 'wsl.exe -d Ubuntu',
+    cwd: '/home/andy',
+    cols: 143,
+    rows: 41,
+  });
+  assert.deepEqual(link.creates, [
+    { command: 'wsl.exe -d Ubuntu', cwd: '/home/andy', cols: 143, rows: 41 },
+  ]);
 });

@@ -18,6 +18,7 @@ import {
   isSessions,
   parseHostMessage,
   type ClientMessage,
+  type HostOffer,
   type SessionAddr,
   type SessionInfo,
 } from '@zesterm/proto';
@@ -29,6 +30,19 @@ import { REDIAL_MAX_MS, REDIAL_MIN_MS, type ConnectionState } from './session-cl
 
 export interface ConnectionEvents {
   onSessions?(sessions: readonly SessionInfo[], created: bigint | null): void;
+  /**
+   * What the machine says it is and can launch (#262), when it has something
+   * new to say.
+   *
+   * **Its own event, rather than a third argument to `onSessions`.** The offer
+   * rides *some* `Sessions` messages and not others — the first reply on a
+   * `watch_hosts` connection, and again whenever that machine's config
+   * reloads — so an absent one means "nothing changed", not "no profiles". A
+   * single callback carrying both would hand every consumer a null it has to
+   * re-interpret, and the natural reading of it clears the launcher on every
+   * ordinary session push.
+   */
+  onHostOffer?(offer: HostOffer): void;
   onConnection?(state: ConnectionState): void;
   onError?(message: string): void;
 }
@@ -261,6 +275,10 @@ export class ConnectionClient {
 
     if (isSessions(msg)) {
       this.#events.onSessions?.(msg.sessions, msg.created);
+      // After the sessions, so a consumer that reacts to the offer already
+      // sees the listing it arrived with — the first one always does, since
+      // the daemon puts the initial offer on the reply to `list_sessions`.
+      if (msg.offer !== null) this.#events.onHostOffer?.(msg.offer);
       return;
     }
     if (isErrorMessage(msg)) {

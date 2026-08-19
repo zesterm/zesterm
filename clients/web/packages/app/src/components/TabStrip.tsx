@@ -14,6 +14,7 @@ import {
   launcherAlign,
   shouldScrollIntoView,
   type LauncherRow,
+  type LauncherTargetRow,
 } from '../chrome-model.ts';
 import type { Tab } from '../state/tabs.ts';
 import { LauncherMenu } from './LauncherMenu.tsx';
@@ -27,7 +28,7 @@ export const TabStrip = component<{
   onActivate: (id: string) => void;
   onClose: (id: string) => void;
   onLauncherToggle: () => void;
-  onLaunch: (hostId: string) => void;
+  onLaunch: (row: LauncherTargetRow) => void;
   onLauncherDismiss: () => void;
   onPalette: () => void;
 }>((ctx) => {

@@ -13,7 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { ClientSigner } from '@zesterm/auth';
-import type { DirectoryView, SessionEntry } from '@zesterm/control';
+import type { DirectoryView, HostFacts, SessionEntry } from '@zesterm/control';
 
 import type { DirectorySource, DirectoryStatus } from '../src/directory-source.ts';
 import { liveHostSource, localHostSource } from '../src/host-source.ts';
@@ -33,11 +33,27 @@ const entry = (host: string, session: string): SessionEntry => ({
   attached: false,
 });
 
+const facts = (...names: string[]): HostFacts => ({
+  os: 'macos',
+  arch: 'aarch64',
+  osVersion: '25.5.0',
+  defaultShell: '/bin/zsh',
+  launchTargets: names.map((name) => ({
+    name,
+    command: `/bin/${name}`,
+    startingDirectory: '',
+    icon: '',
+    colorScheme: '',
+    tabColor: null,
+  })),
+});
+
 const VIEW: DirectoryView = {
   connected: true,
   host: { id: HOST, label: 'mac' },
   sessions: [],
   dataPlane: { kind: 'ws', host: '127.0.0.1', port: 7718 },
+  facts: null,
   lastCreated: null,
 };
 
@@ -186,7 +202,7 @@ test('a local create refuses a machine this source does not hold', () => {
   // the caller asked.
   const source = local({ kind: 'ready', view: VIEW });
   return assert.rejects(
-    () => source.create(OTHER, { cols: 80, rows: 24 }),
+    () => source.create(OTHER, { command: '', cwd: '', cols: 80, rows: 24 }),
     /not dialable/,
     'a create names a machine, and a wrong name is a refusal',
   );
@@ -194,7 +210,7 @@ test('a local create refuses a machine this source does not hold', () => {
 
 test('a local create refuses while nothing is ready', async () => {
   const source = local({ kind: 'pending' });
-  await assert.rejects(() => source.create(HOST, { cols: 80, rows: 24 }));
+  await assert.rejects(() => source.create(HOST, { command: '', cwd: '', cols: 80, rows: 24 }));
 });
 
 /** Not read by the rules under test; the stub has to return something. */
@@ -207,7 +223,13 @@ const PENDING_SOURCE: DirectorySource = () => () => ({ kind: 'pending' });
  * timers and a redial ladder, none of which these rules depend on.
  */
 function fakeLive(
-  snapshots: { id: string; label: string; online: boolean; sessions: readonly SessionEntry[] }[],
+  snapshots: {
+    id: string;
+    label: string;
+    online: boolean;
+    sessions: readonly SessionEntry[];
+    facts?: HostFacts;
+  }[],
 ): LiveDirectory & { created: { hostId: string; size: { cols: number; rows: number } }[] } {
   const created: { hostId: string; size: { cols: number; rows: number } }[] = [];
   return {
@@ -217,6 +239,7 @@ function fakeLive(
         host: { id: s.id, label: s.label },
         presence: s.online ? ({ kind: 'online' } as const) : ({ kind: 'offline' } as const),
         sessions: s.sessions,
+        facts: s.facts ?? null,
         lastCreated: null,
       })),
     createSession: (hostId, size) => {
@@ -296,15 +319,15 @@ test('a hosted create goes through the connection already watching that machine'
   // handshake, then discard all of it — per create, for a machine the browser
   // is already talking to.
   const live = fakeLive([{ id: HOST, label: 'mac', online: true, sessions: [] }]);
-  const created = await liveHostSource(live, RELAY).create(HOST, { cols: 80, rows: 24 });
-  assert.deepEqual(live.created, [{ hostId: HOST, size: { cols: 80, rows: 24 } }]);
+  const created = await liveHostSource(live, RELAY).create(HOST, { command: '', cwd: '', cols: 80, rows: 24 });
+  assert.deepEqual(live.created, [{ hostId: HOST, size: { command: '', cwd: '', cols: 80, rows: 24 } }]);
   assert.equal(created.session, 'new');
 });
 
 test('a hosted create on a sleeping machine rejects rather than hanging', async () => {
   // A promise that never settles is a launcher row that spins for ever.
   const live = fakeLive([{ id: OTHER, label: 'pi', online: false, sessions: [] }]);
-  await assert.rejects(() => liveHostSource(live, RELAY).create(OTHER, { cols: 80, rows: 24 }));
+  await assert.rejects(() => liveHostSource(live, RELAY).create(OTHER, { command: '', cwd: '', cols: 80, rows: 24 }));
 });
 
 test('the hosted seam hands back the same session list until it really changes', () => {
@@ -353,8 +376,63 @@ test('a created entry names the machine it was asked for', () => {
   // ignored.
   const live = fakeLive([{ id: HOST, label: 'mac', online: true, sessions: [] }]);
   return liveHostSource(live, RELAY)
-    .create(HOST, { cols: 80, rows: 24 })
+    .create(HOST, { command: '', cwd: '', cols: 80, rows: 24 })
     .then((created) => {
       assert.equal(created.host, HOST);
     });
+});
+
+test('a machine that has said nothing is not a machine with nothing to launch', () => {
+  // Null and `[]` are different answers and the launcher owes them different
+  // rows: an older daemon, or one this shell has not reached, says nothing;
+  // a machine with an empty profile table says so. Collapsing the two draws
+  // "we cannot reach it" as "it has nothing".
+  assert.equal(local({ kind: 'ready', view: VIEW }).factsOf(HOST), null);
+  assert.deepEqual(
+    local({ kind: 'ready', view: { ...VIEW, facts: facts() } }).factsOf(HOST)?.launchTargets,
+    [],
+  );
+  assert.equal(local({ kind: 'pending' }).factsOf(HOST), null);
+});
+
+test('facts are answered for the machine that published them and no other', () => {
+  // The loopback source holds one machine, so an id check here can never fail
+  // — which is exactly why it has to be written rather than left to the one
+  // caller who remembers. The mistake it prevents lands on the hosted path.
+  const source = local({ kind: 'ready', view: { ...VIEW, facts: facts('wsl') } });
+  assert.equal(source.factsOf(HOST)?.launchTargets[0]?.name, 'wsl');
+  assert.equal(source.factsOf(OTHER), null);
+});
+
+test('each machine answers with its own launch targets', () => {
+  const live = fakeLive([
+    { id: HOST, label: 'mac', online: true, sessions: [], facts: facts('zsh') },
+    { id: OTHER, label: 'forge', online: true, sessions: [], facts: facts('wsl', 'pwsh') },
+  ]);
+  const source = liveHostSource(live, RELAY);
+  assert.deepEqual(
+    source.factsOf(OTHER)?.launchTargets.map((t) => t.name),
+    ['wsl', 'pwsh'],
+  );
+  assert.deepEqual(
+    source.factsOf(HOST)?.launchTargets.map((t) => t.name),
+    ['zsh'],
+  );
+  // A machine the account does not hold is null, not the first one's.
+  assert.equal(source.factsOf('ef'.repeat(32)), null);
+});
+
+test('an offline machine still lists, and still says what it offers', () => {
+  // Two questions with different answers, the rule #334 settled: a machine
+  // whose relay is unreachable is still yours. Its facts are the last thing
+  // it said, and `LiveDirectory` — not this seam — is what clears them when
+  // the link goes, so a source that dropped them here would disagree with
+  // the store it reads from.
+  const live = fakeLive([
+    { id: HOST, label: 'mac', online: false, sessions: [], facts: facts('zsh') },
+  ]);
+  const source = liveHostSource(live, RELAY);
+  assert.deepEqual(source.hosts(), [{ id: HOST, label: 'mac' }]);
+  assert.equal(source.dialFor(HOST), null);
+  assert.equal(source.factsOf(HOST)?.launchTargets.length, 1);
 });

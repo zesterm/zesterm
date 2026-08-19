@@ -7,7 +7,10 @@
 export {
   SessionDirectory,
   sessionEntryOf,
+  hostFactsOf,
   type SessionEntry,
+  type LaunchTarget,
+  type HostFacts,
   type HostInfo,
   type DataPlane,
   type DirectoryState,

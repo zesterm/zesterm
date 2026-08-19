@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { createMemoryHistory, createRouter } from '@sigx/router';
 
-import { SHELL_CHILD_PATHS, SHELL_PATH, safeNextPath } from '../src/route-table.ts';
+import { PROFILES_PATH, SHELL_CHILD_PATHS, SHELL_PATH, safeNextPath } from '../src/route-table.ts';
 
 // The exact record shape routes.tsx builds, minus the components — the
 // RouterView key is derived from paths alone, so this is the whole mechanism.
@@ -72,12 +72,22 @@ test('the params record is replaced on navigation, so it can never be captured',
 });
 
 test('the child paths are absolute', () => {
+  // The invariant is the leading slash, not the `/h/` prefix: the matcher
+  // takes a '/'-prefixed child as-is and joins anything else under
+  // `SHELL_PATH`, so a relative `profiles` would match `/hosts/profiles` and
+  // never the URL that is actually navigated to. Asserting the prefix instead
+  // read the same while there was only one family of children, and broke the
+  // moment a screen that is not a machine joined them (#352).
   for (const path of SHELL_CHILD_PATHS) {
     assert.ok(
-      path.startsWith('/h/'),
-      `'${path}' must start with '/h/' — a relative child joins under ${SHELL_PATH} and never matches a real /h/… URL`,
+      path.startsWith('/'),
+      `'${path}' must be absolute — a relative child joins under ${SHELL_PATH} and never matches the URL navigated to`,
     );
   }
+  assert.ok(
+    SHELL_CHILD_PATHS.includes(PROFILES_PATH),
+    'the profiles screen is a CHILD of the shell record: as a sibling it carries a different RouterView key, so opening it would remount the Shell and discard every open tab',
+  );
 });
 
 test('safeNextPath mirrors the Worker safeNext, plus the loop the server never sees', () => {
@@ -97,4 +107,22 @@ test('safeNextPath mirrors the Worker safeNext, plus the loop the server never s
   for (const [raw, want, why] of cases) {
     assert.equal(safeNextPath(raw), want, why);
   }
+});
+
+test('the profiles screen shares the shell record key, so tabs survive opening it', () => {
+  // The same mechanism the session URLs rely on, asserted through the real
+  // router rather than by reading the table: RouterView keys the routed
+  // component by `matched[0].path`, so two URLs whose first matched record
+  // differs are two different mounts — and a remount here throws away every
+  // open terminal, its socket and its scrollback.
+  assert.equal(
+    router.resolve(PROFILES_PATH).matched[0]?.path,
+    SHELL_PATH,
+    'opening the profiles screen must not remount the Shell',
+  );
+  assert.equal(
+    router.resolve(PROFILES_PATH).matched.at(-1)?.path,
+    PROFILES_PATH,
+    'and it must still be the matched leaf, or the pane would never know it is there',
+  );
 });

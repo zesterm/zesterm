@@ -21,17 +21,19 @@ import { component, onMounted, onUnmounted, signal, watch } from 'sigx';
 import { useNavigate, useRoute } from '@sigx/router';
 import type { Theme } from '@zesterm/theme';
 import { modsOf, shellChord, type ShellAction } from '@zesterm/input';
-import type { Dial } from '@zesterm/client';
-import type { DirectoryView } from '@zesterm/control';
+import type { DirectoryView, HostFacts } from '@zesterm/control';
 
 import {
+  launchableRows,
   launcherRows,
   paneFor,
   shortHostId,
   tabIdOf,
   type HostChoice,
+  type LauncherTargetRow,
 } from '../chrome-model.ts';
-import { createSessionOverDataPlane } from '../create-session.ts';
+import { fitGrid } from '../grid-fit.ts';
+import { PROFILES_PATH, SHELL_PATH } from '../route-table.ts';
 import { dialFor } from '../dial-for.ts';
 import type { DeviceKey } from '../device-key.ts';
 import { actorDirectorySource, type DirectorySource } from '../directory-source.ts';
@@ -68,6 +70,7 @@ import {
   type PaletteItem,
 } from '../palette/sources.ts';
 import { Palette } from './Palette.tsx';
+import { ProfilesPane } from './ProfilesPane.tsx';
 import { SessionList, type OpenTarget } from './SessionList.tsx';
 import { SidebarTabs, VerticalHeader } from './SidebarTabs.tsx';
 import { TabStrip } from './TabStrip.tsx';
@@ -158,6 +161,13 @@ export const Shell = component<{
   // the map without the palette changing.
   const termHooks = new Map<string, TerminalHooks>();
 
+  /**
+   * The pane box, kept so a create can be sized before there is a terminal in
+   * it. Null until the first render mounts one — `fitGrid` falls back then,
+   * which is the right answer for "nothing is on screen to measure".
+   */
+  let paneEl: HTMLElement | null = null;
+
   const tabFor = (target: OpenTarget): Tab => {
     const e = target.entry;
     const id = tabIdOf(e.host, e.session);
@@ -219,6 +229,11 @@ export const Shell = component<{
   // remembered choice here rather than positional luck — its own item.
   const defaultHostId = (): string | null => hostChoices()[0]?.id ?? null;
 
+  // What each machine published: its facts, and the profiles it can launch.
+  // Read through the seam rather than stored, so the menu is built from the
+  // machine's latest word every time it opens.
+  const factsOf = (hostId: string): HostFacts | null => hostSource.factsOf(hostId);
+
   const hostLabelsOf = (): Readonly<Record<string, string>> =>
     Object.fromEntries(hostChoices().map((h) => [h.id, h.label]));
 
@@ -241,10 +256,23 @@ export const Shell = component<{
    * rather than for the synchronous call — a create is asynchronous in both
    * worlds, so a guard that clears on return guards nothing.
    */
-  const createOn = (hostId: string): Promise<void> => {
+  const createOn = (row: {
+    readonly hostId: string;
+    readonly command: string;
+    readonly cwd: string;
+  }): Promise<void> => {
     store.launcherOpen = false;
     return hostSource
-      .create(hostId, { cols: 120, rows: 32 })
+      .create(row.hostId, {
+        command: row.command,
+        cwd: row.cwd,
+        // Measured off the box the pane is about to fill, not `120x32`. The
+        // daemon lays the shell's first prompt out at the size it is told, so
+        // a guess here is a first screen of output formatted for a width the
+        // window never had. `fitGrid` is the pane's own arithmetic, shared so
+        // the two cannot disagree.
+        ...fitGrid(paneEl, window.devicePixelRatio),
+      })
       .then((entry) => {
         // `entry.host`, not the `hostId` we asked for. The tab is built from
         // the entry, so dialling anything else opens a tab labelled one
@@ -333,7 +361,8 @@ export const Shell = component<{
         break;
       }
       case 'create-session':
-        createOn(target.hostId);
+        // A plain shell: the palette names a machine, never a profile.
+        void createOn({ hostId: target.hostId, command: '', cwd: '' });
         break;
       case 'layout-toggle':
         dispatch({ kind: 'layout-toggle' });
@@ -389,6 +418,12 @@ export const Shell = component<{
       case 'palette':
         store.palette = store.palette.open ? closePalette(store.palette) : openPalette();
         break;
+      case 'profiles':
+        // A route rather than an overlay, and a child of the shell record:
+        // the profiles screen replaces the pane, and a sibling record would
+        // remount the Shell and discard every open tab (`route-table.ts`).
+        void navigate(PROFILES_PATH);
+        break;
       case 'layout-toggle': {
         const next = toggleLayout(store.layout);
         store.layout = next;
@@ -396,13 +431,18 @@ export const Shell = component<{
         break;
       }
       case 'tab-n': {
-        // ⌘N launches the Nth launcher row — the browser's stand-in for "the
-        // Nth profile" until profiles exist here.
-        const row = launcherRows(hostChoices(), defaultHostId())[action.n - 1];
-        if (row !== undefined) createOn(row.hostId);
+        // ⌘N launches the Nth launcher row — a machine's shell, or one of the
+        // profiles it publishes (#352).
+        // Indexed over the launchable rows, so ⌘2 is the second row you can
+        // see: a group header is drawn but cannot run, and counting it would
+        // shift every digit past the first machine by one.
+        const row = launchableRows(
+          launcherRows(hostChoices(), defaultHostId(), factsOf),
+        )[action.n - 1];
+        if (row !== undefined) void createOn(row);
         break;
       }
-      // split / settings / profiles / copy-output / re-run: claimed so the
+      // split / settings / copy-output / re-run: claimed so the
       // terminal never types them, acted on by their own work items.
       default:
         break;
@@ -429,7 +469,7 @@ export const Shell = component<{
   return () => {
     const tabs = store.tabs;
     const active = tabs.tabs.find((t) => t.id === tabs.activeId) ?? null;
-    const rows = launcherRows(hostChoices(), defaultHostId());
+    const rows = launcherRows(hostChoices(), defaultHostId(), factsOf);
     const labels = hostLabelsOf();
     // Read inside the render, so the pane tracks the URL: activation and
     // navigation are two separate updates and the render triggered by the
@@ -449,6 +489,9 @@ export const Shell = component<{
       routeSession: routeS,
       hasLanding: ctx.props.landing !== undefined,
       defaultHostId: defaultHostId(),
+      // `route.path`, not a param: `/profiles` names nothing, so there is no
+      // param to read and the arm has to be the URL itself.
+      atProfiles: route.path === PROFILES_PATH,
     });
 
     const pane = ((): unknown => {
@@ -468,6 +511,21 @@ export const Shell = component<{
             register={(hooks: TerminalHooks | null) => {
               if (hooks === null) termHooks.delete(id);
               else termHooks.set(id, hooks);
+            }}
+          />
+        );
+      }
+      if (choice.kind === 'profiles') {
+        return (
+          <ProfilesPane
+            hosts={hostChoices}
+            factsOf={factsOf}
+            onLaunch={(t) => void createOn(t)}
+            // Back where they were, or the landing when there is nowhere to
+            // go back to — never a dead screen with no way out.
+            onClose={() => {
+              const back = active === null ? null : urlOfTab(active);
+              void navigate(back ?? SHELL_PATH);
             }}
           />
         );
@@ -499,7 +557,7 @@ export const Shell = component<{
               store.error = 'that machine has not said which machine it is yet';
               return undefined;
             }
-            return createOn(view.host.id);
+            return createOn({ hostId: view.host.id, command: '', cwd: '' });
           }}
         />
       );
@@ -549,7 +607,9 @@ export const Shell = component<{
               onPalette={() => dispatch({ kind: 'palette' })}
               onHosts={() => void navigate('/hosts')}
             />
-            <section class="pane">{pane}</section>
+            <section class="pane" ref={(el: HTMLElement) => (paneEl = el)}>
+              {pane}
+            </section>
           </div>
         </div>
       );
@@ -572,7 +632,9 @@ export const Shell = component<{
           onLauncherDismiss={() => (store.launcherOpen = false)}
           onPalette={() => dispatch({ kind: 'palette' })}
         />
-        <section class="pane">{pane}</section>
+        <section class="pane" ref={(el: HTMLElement) => (paneEl = el)}>
+          {pane}
+        </section>
       </div>
     );
   };

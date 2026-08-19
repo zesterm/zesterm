@@ -11,11 +11,25 @@
 export const SHELL_PATH = '/hosts';
 
 /**
+ * The profiles screen (design §12, `⌘⇧,`).
+ *
+ * A child of the shell record like the session URLs, and for the same reason:
+ * as a sibling it would carry a different RouterView key, so opening profiles
+ * would remount the Shell and discard every open tab — the exact bug the note
+ * above is about, one screen later.
+ */
+export const PROFILES_PATH = '/profiles';
+
+/**
  * Absolute on purpose: the matcher takes a '/'-prefixed child path as-is
  * instead of joining it under the parent, which is what lets the `/h/…` URLs
  * live under the `/hosts` record without sharing its prefix.
  */
-export const SHELL_CHILD_PATHS: readonly string[] = ['/h/:hostId', '/h/:hostId/s/:sessionId'];
+export const SHELL_CHILD_PATHS: readonly string[] = [
+  '/h/:hostId',
+  '/h/:hostId/s/:sessionId',
+  PROFILES_PATH,
+];
 
 /**
  * Where to land after signing in — the client mirror of the Worker's

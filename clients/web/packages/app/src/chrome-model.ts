@@ -6,6 +6,8 @@
  * stay thin over these functions.
  */
 
+import type { HostFacts } from '@zesterm/control';
+
 import type { Tab } from './state/tabs.ts';
 
 /**
@@ -73,42 +75,172 @@ export interface HostChoice {
 }
 
 /**
- * One launcher menu row. The shape deliberately carries everything the
- * profile-row markup needs (name over a mono sub-line, host chip, ⌘N) so
- * that profile rows drop into the same slots when profiles land — the menu
- * does not get rebuilt for them.
+ * A machine's header in the launcher menu.
+ *
+ * Grouping is by **the machine that will run the row**, which is what makes
+ * "which computer" structural rather than a chip you have to notice — design
+ * §2's argument for the vertical sidebar, applied to the menu. In the browser
+ * that is also the only grouping available: every launch target it can see was
+ * published by a machine and is pinned to it by construction (ADR-014), so
+ * there is no `any machine` bucket and no local-definition bucket here, unlike
+ * the native launcher which reads a config file as well.
  */
-export interface LauncherRow {
+export interface LauncherGroupRow {
+  readonly kind: 'group';
   readonly hostId: string;
-  readonly hostLabel: string;
-  readonly name: string;
-  /** Mono sub-line. The shortened host id — real data, never a fabricated command. */
+  readonly label: string;
+  /** `windows · x86_64`, or empty when the machine has not said. */
   readonly sub: string;
-  readonly isDefault: boolean;
-  /** `⌘1`…`⌘9` by menu position; null past the ninth — there is no ⌘10. */
-  readonly chord: string | null;
 }
 
 /**
- * Hosts → launcher rows. The current host comes first tagged `default` —
- * it is the row `⏎` runs — and the rest keep their given order, so the menu
- * is stable across opens. An unknown or null default tags nothing; `⏎` then
- * falls to the first row, which the menu resolves, not this builder.
+ * One thing the menu can launch. The shape carries everything the row markup
+ * needs — name over a mono sub-line, host chip, ⌘N.
+ */
+export interface LauncherTargetRow {
+  readonly kind: 'target';
+  readonly hostId: string;
+  readonly hostLabel: string;
+  /**
+   * Which published profile this row runs, or null for the machine's plain
+   * shell. Identity and display only — what is actually sent is `command`.
+   */
+  readonly profile: string | null;
+  /**
+   * What to run, already resolved by the machine that published it through
+   * *its own* `profiles.defaults`. Empty means that machine's default shell,
+   * which is what `create_session` has always meant by an empty command.
+   *
+   * The command and not the profile name, because `CreateSession` carries no
+   * profile field — the native app sends the published command for a remote
+   * launch for the same reason (ADR-014: the resolution happened on the
+   * machine that owns the profile, and re-resolving it here would need a
+   * config this client does not have).
+   */
+  readonly command: string;
+  /** Where to start it. Empty means the machine's own default. */
+  readonly cwd: string;
+  readonly name: string;
+  /** Mono sub-line — real data, never a fabricated command. */
+  readonly sub: string;
+  readonly isDefault: boolean;
+  /** `⌘1`…`⌘9` by launchable position; null past the ninth — there is no ⌘10. */
+  readonly chord: string | null;
+}
+
+export type LauncherRow = LauncherGroupRow | LauncherTargetRow;
+
+/**
+ * A machine's facts as one dim line: the parts it actually answered, joined.
+ *
+ * Every string in `HostOffer` may be empty — a daemon that cannot answer one
+ * sends `""` rather than omitting the field — so a caller that gates the whole
+ * line on *one* of them hides the others. "An os row we cannot fill would be a
+ * dash pretending to be a fact" is the rule; dropping an arch we DO have is
+ * that rule overshooting, and the two screens showing this would then disagree
+ * about the same machine.
+ *
+ * Empty out means there is nothing to draw — the caller renders no element at
+ * all rather than an empty one, which would still take its gap.
+ */
+export function factsLine(parts: readonly (string | undefined)[]): string {
+  return parts.filter((p): p is string => p !== undefined && p !== '').join(' · ');
+}
+
+/** The rows `⌘N` and `⏎` can actually run, in menu order. */
+export function launchableRows(rows: readonly LauncherRow[]): readonly LauncherTargetRow[] {
+  return rows.filter((r): r is LauncherTargetRow => r.kind === 'target');
+}
+
+/**
+ * Hosts → launcher rows, grouped by the machine that will run them (#352).
+ *
+ * The default machine comes first and its shell row is tagged `default` — it
+ * is what `⏎` runs — and the rest keep their given order, so the menu is
+ * stable across opens. An unknown or null default tags nothing; `⏎` then falls
+ * to the first row, which the menu resolves, not this builder.
+ *
+ * `factsOf` answers what each machine published. **Null is not an empty
+ * list**: a machine that has said nothing (an older daemon, one nothing can
+ * reach, one whose connection has not landed yet) contributes no targets, and
+ * a machine with an empty profile table contributes none either — but both
+ * still get their "New session on…" row, because that row is how you get a
+ * shell at all and it does not depend on the offer.
+ *
+ * **Headers appear only once there is more than one machine.** A one-machine
+ * setup — every loopback shell, and most accounts — must not grow chrome for a
+ * fleet it does not have; the native launcher draws none there for the same
+ * reason.
  */
 export function launcherRows(
   hosts: readonly HostChoice[],
   defaultHostId: string | null,
+  factsOf: (hostId: string) => HostFacts | null = () => null,
 ): readonly LauncherRow[] {
   const def = defaultHostId === null ? undefined : hosts.find((h) => h.id === defaultHostId);
   const ordered = def === undefined ? hosts : [def, ...hosts.filter((h) => h.id !== def.id)];
-  return ordered.map((h, i) => ({
-    hostId: h.id,
-    hostLabel: h.label,
-    name: `New session on ${h.label}`,
-    sub: shortHostId(h.id),
-    isDefault: def !== undefined && h.id === def.id,
-    chord: i < 9 ? `⌘${i + 1}` : null,
-  }));
+  const grouped = ordered.length > 1;
+  const rows: LauncherRow[] = [];
+  // Counted across groups rather than within one, so ⌘2 is the second row you
+  // can see wherever it sits — the digits number the menu, not a section of
+  // it. `launchableRows` is the same walk, and `Shell` indexes with it.
+  let nth = 0;
+  const chordOf = (): string | null => {
+    nth += 1;
+    return nth <= 9 ? `⌘${nth}` : null;
+  };
+  for (const h of ordered) {
+    const facts = factsOf(h.id);
+    if (grouped) {
+      rows.push({
+        kind: 'group',
+        hostId: h.id,
+        label: h.label,
+        // Only what it actually said. "An os row we cannot fill would be a
+        // dash pretending to be a fact" is the native fleet card's rule, and
+        // a header is the same promise in a smaller space.
+        // os and arch only: a header has one line's room, and the version is
+        // the least identifying of the three.
+        sub: factsLine([facts?.os, facts?.arch]),
+      });
+    }
+    rows.push({
+      kind: 'target',
+      hostId: h.id,
+      hostLabel: h.label,
+      profile: null,
+      // Empty is "that machine's default shell" — the meaning
+      // `create_session` has always given an empty command, so the row that
+      // means "just a shell" says nothing rather than guessing one.
+      command: '',
+      cwd: '',
+      name: `New session on ${h.label}`,
+      // The machine's own default shell once it has said, and the shortened
+      // id until then — never a guess about what it runs.
+      sub: facts?.defaultShell !== undefined && facts.defaultShell !== ''
+        ? facts.defaultShell
+        : shortHostId(h.id),
+      isDefault: def !== undefined && h.id === def.id,
+      chord: chordOf(),
+    });
+    for (const target of facts?.launchTargets ?? []) {
+      rows.push({
+        kind: 'target',
+        hostId: h.id,
+        hostLabel: h.label,
+        profile: target.name,
+        command: target.command,
+        cwd: target.startingDirectory,
+        name: target.name,
+        // What that machine resolved it to. Empty means "its default shell",
+        // which the machine has already told us the name of.
+        sub: target.command === '' ? (facts?.defaultShell ?? '') : target.command,
+        isDefault: false,
+        chord: chordOf(),
+      });
+    }
+  }
+  return rows;
 }
 
 /** What a document-level keydown means to the open launcher menu. */
@@ -185,6 +317,7 @@ export function isIconRail(width: number): boolean {
 export type PaneChoice =
   | { readonly kind: 'terminal'; readonly tabId: string }
   | { readonly kind: 'landing' }
+  | { readonly kind: 'profiles' }
   | { readonly kind: 'list'; readonly hostId: string };
 
 /**
@@ -201,12 +334,19 @@ export function paneFor(args: {
   readonly activeHasTarget: boolean;
   readonly routeHost: string | undefined;
   readonly routeSession: string | undefined;
+  /** The URL is `/profiles`. */
+  readonly atProfiles?: boolean;
   /** The caller supplied something to show when no machine is named. */
   readonly hasLanding: boolean;
   /** The machine to list when the URL names none. */
   readonly defaultHostId: string | null;
 }): PaneChoice {
   const { activeTabId, activeHasTarget, hasLanding } = args;
+  // First, and above the terminal arm: `/profiles` names no machine and no
+  // session, so every arm below would fall through to the landing or to the
+  // default list — the chord would appear to do nothing while the URL said
+  // otherwise, which is the state ⌘⇧, was already in.
+  if (args.atProfiles === true) return { kind: 'profiles' };
   // `''` is not a machine. The router can yield an empty param for an
   // unmatched or partial match (`/h//s/7`), and `Shell.syncRoute` already
   // treats that as "no machine named" — so this has to as well, or the two

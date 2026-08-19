@@ -13,7 +13,13 @@
 import type { Host } from '@sigx/actors/host';
 import { generateIdentity, seedSigner } from '@zesterm/auth';
 import { ConnectionClient, type Dial } from '@zesterm/client';
-import { LOCAL_DIRECTORY_KEY, SessionDirectory, sessionEntryOf, type DataPlane } from '@zesterm/control';
+import {
+  hostFactsOf,
+  LOCAL_DIRECTORY_KEY,
+  SessionDirectory,
+  sessionEntryOf,
+  type DataPlane,
+} from '@zesterm/control';
 
 export interface FeedOptions {
   readonly host: Host;
@@ -47,6 +53,13 @@ export function startFeed(options: FeedOptions): () => void {
           sessions.map(sessionEntryOf),
           created === null ? null : created.toString(),
         );
+      },
+      // What this machine is and can launch (#352). Projected here rather
+      // than in the actor: `@zesterm/control` depends on `@sigx/actors` and
+      // nothing else, so the wire shape stops at this boundary — the same
+      // rule `sessionEntryOf` is called under, one line above.
+      onHostOffer: (offer) => {
+        void directory.setFacts(hostFactsOf(offer));
       },
       onConnection: (state) => {
         log(`daemon link: ${state.phase}`);
