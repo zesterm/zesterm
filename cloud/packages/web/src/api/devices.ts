@@ -29,6 +29,7 @@ import { json, jsonObject } from '../http.ts';
 import { KEY_LEN, SIGNATURE_LEN } from '../enroll/preimage.ts';
 import { verifyRegistration } from '../enroll/register-preimage.ts';
 import { DEVICE_KINDS, labelOk } from './enroll.ts';
+import { incumbentRefusal } from './incumbent.ts';
 import { currentUser } from './session.ts';
 
 /**
@@ -99,13 +100,12 @@ export async function registerDevice(request: Request, env: Env, now: number): P
 
   const id = hex(key);
   const incumbent = await existingDevice(env.DB, id);
-  if (incumbent !== null && (incumbent.user_id !== user.id || incumbent.revoked_at !== null)) {
-    // The claim's two-situations-one-answer: another account's key is not this
-    // caller's business, and a revoked key that could re-register has
-    // un-revoked itself — un-revoking is an act by the owner, not by the key:
-    // the restore route, from the fleet screen's revoked section (#365).
-    return json({ error: 'already_enrolled' }, 409);
-  }
+  // A revoked key that could re-register has un-revoked itself — un-revoking
+  // is an act by the owner, not by the key: the restore route, from the fleet
+  // screen's revoked section (#365). The `detail` and its safety argument
+  // live on `incumbentRefusal`.
+  const refusal = incumbentRefusal(incumbent, user.id);
+  if (refusal !== null) return refusal;
 
   if (incumbent === null) {
     const counts = await countDevices(env.DB, user.id);
@@ -139,8 +139,9 @@ export async function registerDevice(request: Request, env: Env, now: number): P
   if (device === null) {
     // The upsert's own guard fired between the check above and the write —
     // the owner revoked the key in that window. Same answer as finding it
-    // revoked up front, because it is the same fact a moment later.
-    return json({ error: 'already_enrolled' }, 409);
+    // revoked up front, because it is the same fact a moment later; `revoked`
+    // inline because `user_id` cannot change in the window.
+    return json({ error: 'already_enrolled', detail: 'revoked' }, 409);
   }
 
   // The listing's envelope shape. No token: registration hands out no

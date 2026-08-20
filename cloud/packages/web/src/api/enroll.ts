@@ -28,6 +28,7 @@ import {
 import type { DeviceKind, EnrollKind } from '../db/types.ts';
 import type { Env } from '../env.ts';
 import { json, jsonObject } from '../http.ts';
+import { incumbentRefusal } from './incumbent.ts';
 import { createMachineToken } from '../db/machine-tokens.ts';
 import { findUser } from '../db/users.ts';
 import { looksLikeEnrollCode } from '../enroll/codes.ts';
@@ -225,19 +226,14 @@ export async function claimEnrollCode(request: Request, env: Env, now: number): 
   const kind: EnrollKind = codeRow.kind;
   const incumbent =
     kind === 'host' ? await existingHost(env.DB, id) : await existingDevice(env.DB, id);
-  if (
-    incumbent !== null &&
-    (incumbent.user_id !== codeRow.user_id || incumbent.revoked_at !== null)
-  ) {
-    // Two different situations, one answer. Another account's key is not this
-    // caller's business, and a revoked one is refused because revocation is a
-    // positive statement: a machine that could re-enrol itself with a fresh
-    // code has un-revoked itself, which is the one thing the schema's comment
-    // says must not happen. Un-revoking is an act by the owner, in the
-    // browser: `POST /api/{hosts,devices}/:id/restore`, cookie-only, from the
-    // fleet screen's revoked section (#365).
-    return json({ error: 'already_enrolled' }, 409);
-  }
+  // A revoked key is refused because revocation is a positive statement: a
+  // machine that could re-enrol itself with a fresh code has un-revoked
+  // itself, which is the one thing the schema's comment says must not happen.
+  // Un-revoking is the owner's act, in the browser: the restore route, from
+  // the fleet screen's revoked section (#365). The refusal's `detail`, and
+  // why disclosing it is safe here, live on `incumbentRefusal`.
+  const refusal = incumbentRefusal(incumbent, codeRow.user_id);
+  if (refusal !== null) return refusal;
 
   if ((await spendEnrollCode(env.DB, code, id, now)) === null) {
     // Live a moment ago, gone now: another claim won the race. Same answer as
@@ -270,8 +266,10 @@ export async function claimEnrollCode(request: Request, env: Env, now: number): 
     // The guard in `enrolHost`/`enrolDevice` fired between the check above and
     // the insert — the owner revoked the key in that window. The code is spent,
     // which is the safe direction: a refusal that leaves the code alive is a
-    // refusal an attacker can retry.
-    return json({ error: 'already_enrolled' }, 409);
+    // refusal an attacker can retry. `revoked` inline rather than through
+    // `incumbentRefusal`: `user_id` cannot change in the window, so revocation
+    // is the only way the upsert's guard fires.
+    return json({ error: 'already_enrolled', detail: 'revoked' }, 409);
   }
 
   // The credential the machine keeps. Minted *after* the enrol so a failure

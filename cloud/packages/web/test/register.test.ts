@@ -253,7 +253,7 @@ test('another account’s key, and a revoked key, are both already_enrolled', as
   const stolen = await bodyFor(7, 'user-b', 'not-yours');
   const res = await register(db, theirs, stolen.body);
   assert.equal(res?.status, 409);
-  assert.deepEqual(await res!.json(), { error: 'already_enrolled' });
+  assert.deepEqual(await res!.json(), { error: 'already_enrolled', detail: 'other_account' });
   assert.deepEqual(
     rowOf(db, `SELECT user_id, label FROM devices WHERE id = ?`, first.key.id),
     { user_id: 'user-a', label: 'mine' },
@@ -267,7 +267,7 @@ test('another account’s key, and a revoked key, are both already_enrolled', as
   const again = await bodyFor(7, 'user-a', 'mine');
   const refused = await register(db, mine, again.body, NOW + 1);
   assert.equal(refused?.status, 409);
-  assert.deepEqual(await refused!.json(), { error: 'already_enrolled' });
+  assert.deepEqual(await refused!.json(), { error: 'already_enrolled', detail: 'revoked' });
   db.close();
 });
 

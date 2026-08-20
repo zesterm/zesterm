@@ -491,7 +491,7 @@ test('a revoked key cannot re-link itself, and the refusal leaves the grant aliv
   await routeApi(post(`/api/link/${second}/approve`, {}, cookie), env(db), fetch, NOW + 3_000);
   const res = await claim(db, key, second, NOW + 4_000);
   assert.equal(res.status, 409, 'revocation is a positive statement; a fresh grant does not un-revoke');
-  assert.deepEqual(await res!.json(), { error: 'already_enrolled' });
+  assert.deepEqual(await res!.json(), { error: 'already_enrolled', detail: 'revoked' });
   assert.deepEqual(
     rowOf(db, `SELECT claimed_at FROM link_grants WHERE id = ?`, second),
     { claimed_at: null },
