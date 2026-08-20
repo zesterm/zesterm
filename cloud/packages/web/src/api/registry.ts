@@ -10,6 +10,7 @@
 import { fromHex } from '@zesterm/cloud-shared';
 
 import { revokeAttestationsFor } from '../db/attestations.ts';
+import { listRegistryEvents, recordRegistryEvent } from '../db/events.ts';
 import {
   listDevices,
   listHosts,
@@ -108,12 +109,12 @@ export async function revokeRegistryEntry(
   // of a key is a different primary key rather than the same machine.
   if (fromHex(id, KEY_LEN) === null) return json({ error: 'not_found' }, 404);
 
-  const revokedAt =
+  const revoked =
     kind === 'host'
       ? await revokeHost(env.DB, id, user.id, now)
       : await revokeDevice(env.DB, id, user.id, now);
 
-  if (kind === 'device' && revokedAt !== null) {
+  if (kind === 'device' && revoked !== null) {
     // Revoking a device takes its attestations with it — the ones vouching
     // FOR it and the ones it made as an approver. Here rather than inside
     // `revokeDevice`, because the attestation table's liveness is not a JOIN
@@ -123,7 +124,22 @@ export async function revokeRegistryEntry(
     await revokeAttestationsFor(env.DB, id, user.id, now);
   }
 
-  return revokedAt === null ? json({ error: 'not_found' }, 404) : json({ id, revokedAt });
+  if (revoked === null) return json({ error: 'not_found' }, 404);
+  // Only the transition is an event: `COALESCE` answers a second click with
+  // the ORIGINAL timestamp, so `revokedAt === now` is exactly "this call is
+  // the one that revoked it" — a re-click is a success to the person and a
+  // non-event to the log (#373 review finding).
+  if (revoked.revokedAt === now) {
+    await recordRegistryEvent(env.DB, user.id, {
+      action: 'revoke',
+      actor: 'owner',
+      subjectKind: kind,
+      subjectId: id,
+      subjectLabel: revoked.label,
+      at: now,
+    });
+  }
+  return json({ id, revokedAt: revoked.revokedAt });
 }
 
 /**
@@ -158,5 +174,36 @@ export async function restoreRegistryEntry(
       ? await restoreHost(env.DB, id, user.id)
       : await restoreDevice(env.DB, id, user.id);
 
-  return restored ? json({ id }) : json({ error: 'not_found' }, 404);
+  if (restored === null) return json({ error: 'not_found' }, 404);
+  // `changed` gates the event for revoke's reason: restoring an already-live
+  // row is a success to the person and a non-event to the log.
+  if (restored.changed) {
+    await recordRegistryEvent(env.DB, user.id, {
+      action: 'restore',
+      actor: 'owner',
+      subjectKind: kind,
+      subjectId: id,
+      subjectLabel: restored.label,
+      at: now,
+    });
+  }
+  return json({ id });
+}
+
+/**
+ * `GET /api/registry/events` — the account's recent history, newest first.
+ *
+ * Cookie-only like the revoked view it explains: which keys were cast out,
+ * brought back, or joined — and by which kind of authority — is the owner's
+ * reading, not something any machine credential needs to reach the machines
+ * that exist.
+ */
+export async function listRegistryEventsRoute(
+  request: Request,
+  env: Env,
+  now: number,
+): Promise<Response> {
+  const user = await currentUser(request, env, now);
+  if (user === null) return json({ error: 'unauthorized' }, 401);
+  return json({ events: await listRegistryEvents(env.DB, user.id) });
 }

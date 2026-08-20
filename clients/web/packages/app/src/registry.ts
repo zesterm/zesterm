@@ -149,6 +149,52 @@ export async function fetchRegistry(fetchImpl: typeof fetch = fetch): Promise<Re
   };
 }
 
+/** One line of the account's history — see the Worker's `RegistryEvent`. */
+export interface AccountEvent {
+  readonly action: 'revoke' | 'restore' | 'approve' | 'enroll' | 'register' | 'claim';
+  readonly actor: 'owner' | 'device' | 'machine';
+  readonly subjectKind: 'host' | 'device';
+  readonly subjectLabel: string;
+  readonly at: number;
+}
+
+const ACTIONS: readonly string[] = ['revoke', 'restore', 'approve', 'enroll', 'register', 'claim'];
+const ACTORS: readonly string[] = ['owner', 'device', 'machine'];
+
+export function parseEvent(value: unknown): AccountEvent | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const e = value as Record<string, unknown>;
+  const action = str(e['action']);
+  const actor = str(e['actor']);
+  const kind = e['subjectKind'];
+  const label = str(e['subjectLabel']);
+  const at = millis(e['at']);
+  if (action === null || !ACTIONS.includes(action)) return null;
+  if (actor === null || !ACTORS.includes(actor)) return null;
+  // Validated like `action` and `actor`, never coerced: a kind nobody defined
+  // is a row that does not parse, not a device by default.
+  if (kind !== 'host' && kind !== 'device') return null;
+  if (label === null || at === null) return null;
+  return {
+    action: action as AccountEvent['action'],
+    actor: actor as AccountEvent['actor'],
+    subjectKind: kind,
+    subjectLabel: label,
+    at,
+  };
+}
+
+/**
+ * The account's recent history (#373). Its own fetch rather than part of
+ * `fetchRegistry`, because history failing to load must not take the two
+ * working lists down with it — the caller decides that, and the fleet screen
+ * decides "show nothing".
+ */
+export async function fetchEvents(fetchImpl: typeof fetch = fetch): Promise<AccountEvent[]> {
+  const body = (await getJson('/api/registry/events', fetchImpl)) as { events?: unknown[] };
+  return (body.events ?? []).map(parseEvent).filter((x): x is AccountEvent => x !== null);
+}
+
 /**
  * Revoke a key.
  *

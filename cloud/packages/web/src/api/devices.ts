@@ -28,6 +28,7 @@ import type { Env } from '../env.ts';
 import { json, jsonObject } from '../http.ts';
 import { KEY_LEN, SIGNATURE_LEN } from '../enroll/preimage.ts';
 import { verifyRegistration } from '../enroll/register-preimage.ts';
+import { recordRegistryEvent } from '../db/events.ts';
 import { DEVICE_KINDS, labelOk } from './enroll.ts';
 import { incumbentRefusal } from './incumbent.ts';
 import { currentUser } from './session.ts';
@@ -143,6 +144,15 @@ export async function registerDevice(request: Request, env: Env, now: number): P
     // inline because `user_id` cannot change in the window.
     return json({ error: 'already_enrolled', detail: 'revoked' }, 409);
   }
+
+  await recordRegistryEvent(env.DB, user.id, {
+    action: 'register',
+    actor: 'owner',
+    subjectKind: 'device',
+    subjectId: device.id,
+    subjectLabel: device.label,
+    at: now,
+  });
 
   // The listing's envelope shape. No token: registration hands out no
   // credential — a pending device holds nothing, and even the bootstrap row

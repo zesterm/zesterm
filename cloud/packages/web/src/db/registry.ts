@@ -355,21 +355,29 @@ export async function ownsLiveHost(db: Db, id: string, userId: string): Promise<
  * deliberately, because the alternative is an endpoint that answers "does this
  * key exist" for keys that are none of the caller's business.
  */
+// `label` rides the RETURNING for the audit event (#373): the label at the
+// moment of the act is what the log stores, and a second read here would be a
+// second moment it could differ from.
+export interface RevokedRow {
+  readonly revokedAt: number;
+  readonly label: string;
+}
+
 export async function revokeHost(
   db: Db,
   id: string,
   userId: string,
   now: number,
-): Promise<number | null> {
+): Promise<RevokedRow | null> {
   const row = await db
     .prepare(
       `UPDATE hosts SET revoked_at = COALESCE(revoked_at, ?)
         WHERE id = ? AND user_id = ?
-       RETURNING revoked_at`,
+       RETURNING revoked_at, label`,
     )
     .bind(now, id, userId)
-    .first<{ revoked_at: number }>();
-  return row === null ? null : row.revoked_at;
+    .first<{ revoked_at: number; label: string }>();
+  return row === null ? null : { revokedAt: row.revoked_at, label: row.label };
 }
 
 export async function revokeDevice(
@@ -377,16 +385,16 @@ export async function revokeDevice(
   id: string,
   userId: string,
   now: number,
-): Promise<number | null> {
+): Promise<RevokedRow | null> {
   const row = await db
     .prepare(
       `UPDATE devices SET revoked_at = COALESCE(revoked_at, ?)
         WHERE id = ? AND user_id = ?
-       RETURNING revoked_at`,
+       RETURNING revoked_at, label`,
     )
     .bind(now, id, userId)
-    .first<{ revoked_at: number }>();
-  return row === null ? null : row.revoked_at;
+    .first<{ revoked_at: number; label: string }>();
+  return row === null ? null : { revokedAt: row.revoked_at, label: row.label };
 }
 
 /**
@@ -404,12 +412,35 @@ export async function revokeDevice(
  * `null` keeps revoke's meaning — no such row under this account, which is
  * also what a stranger's machine looks like, for the reason `revokeHost` gives.
  */
-export async function restoreHost(db: Db, id: string, userId: string): Promise<boolean> {
+export interface RestoredRow {
+  readonly label: string;
+  /**
+   * Whether this call is the one that brought the row back. The audit log
+   * records only transitions — a second click on a slow page is a success to
+   * the person and a non-event to the log (#373 review finding).
+   */
+  readonly changed: boolean;
+}
+
+export async function restoreHost(db: Db, id: string, userId: string): Promise<RestoredRow | null> {
+  // The transition first — `RETURNING` sees post-update values, so "was it
+  // revoked" has to be part of the WHERE — then the already-live read for the
+  // idempotent success. Two statements, no race worth guarding: the second
+  // click landing between them still answers success about a live row.
   const row = await db
-    .prepare(`UPDATE hosts SET revoked_at = NULL WHERE id = ? AND user_id = ? RETURNING id`)
+    .prepare(
+      `UPDATE hosts SET revoked_at = NULL
+        WHERE id = ? AND user_id = ? AND revoked_at IS NOT NULL
+       RETURNING label`,
+    )
     .bind(id, userId)
-    .first<{ id: string }>();
-  return row !== null;
+    .first<{ label: string }>();
+  if (row !== null) return { label: row.label, changed: true };
+  const live = await db
+    .prepare(`SELECT label FROM hosts WHERE id = ? AND user_id = ?`)
+    .bind(id, userId)
+    .first<{ label: string }>();
+  return live === null ? null : { label: live.label, changed: false };
 }
 
 /**
@@ -418,10 +449,23 @@ export async function restoreHost(db: Db, id: string, userId: string): Promise<b
  * restoring the row speaks for the row, not for the vouchers, and whoever
  * vouched can vouch again as the ordinary renewal.
  */
-export async function restoreDevice(db: Db, id: string, userId: string): Promise<boolean> {
+export async function restoreDevice(
+  db: Db,
+  id: string,
+  userId: string,
+): Promise<RestoredRow | null> {
   const row = await db
-    .prepare(`UPDATE devices SET revoked_at = NULL WHERE id = ? AND user_id = ? RETURNING id`)
+    .prepare(
+      `UPDATE devices SET revoked_at = NULL
+        WHERE id = ? AND user_id = ? AND revoked_at IS NOT NULL
+       RETURNING label`,
+    )
     .bind(id, userId)
-    .first<{ id: string }>();
-  return row !== null;
+    .first<{ label: string }>();
+  if (row !== null) return { label: row.label, changed: true };
+  const live = await db
+    .prepare(`SELECT label FROM devices WHERE id = ? AND user_id = ?`)
+    .bind(id, userId)
+    .first<{ label: string }>();
+  return live === null ? null : { label: live.label, changed: false };
 }

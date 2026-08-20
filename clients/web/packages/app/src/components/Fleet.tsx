@@ -46,6 +46,7 @@ import {
   browserLabel,
   deviceRow,
   deviceVouchAction,
+  eventLine,
   hostCard,
   mintPanelOnStart,
   ownDeviceAction,
@@ -57,11 +58,13 @@ import { liveDirectory, relayLinks } from '../live-directory.ts';
 import { relayAccess } from '../relay-access.ts';
 import {
   approveDevice,
+  fetchEvents,
   fetchRegistry,
   mintEnrollCode,
   registerDevice,
   restore,
   revoke,
+  type AccountEvent,
   type Device,
   type Host,
 } from '../registry.ts';
@@ -95,12 +98,15 @@ export const Fleet = component<{
     /** Which kind a mint is in flight for, so the buttons can say so. */
     minting: 'host' | 'device' | null;
     mintError: { readonly kind: 'host' | 'device'; readonly message: string } | null;
+    /** The account's recent history (#373). Empty renders no section. */
+    activity: readonly AccountEvent[];
   }>({
     load: { phase: 'loading' },
     busy: null,
     mint: null,
     minting: null,
     mintError: null,
+    activity: [],
   });
 
   /**
@@ -130,6 +136,13 @@ export const Fleet = component<{
   let registerTried = false;
 
   const load = (): void => {
+    // Beside the registry, never gating it: history failing to load shows an
+    // account without its Activity section, not an error over two good lists.
+    fetchEvents()
+      .then((events) => {
+        state.activity = events;
+      })
+      .catch(() => {});
     fetchRegistry()
       .then((r) => {
         state.load = { phase: 'ready', hosts: r.hosts, devices: r.devices };
@@ -572,6 +585,27 @@ export const Fleet = component<{
                       >
                         restore
                       </button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
+
+            {state.activity.length > 0 ? (
+              <section>
+                <div class="section-head">
+                  <h2>Activity</h2>
+                </div>
+                <p class="fineprint">
+                  Every change to what this account trusts, newest first — so &ldquo;who revoked
+                  that?&rdquo; has an answer.
+                </p>
+                <ul class="rows">
+                  {/* A bounded scan, not an export: the section answers "what
+                      happened lately", and the server already caps the list. */}
+                  {state.activity.slice(0, 8).map((e, i) => (
+                    <li key={`${e.at}-${i}`} class="row">
+                      <span class="row-meta">{eventLine(e, Date.now())}</span>
                     </li>
                   ))}
                 </ul>

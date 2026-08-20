@@ -8,6 +8,7 @@ import {
   copyOutcome,
   deviceRow,
   deviceVouchAction,
+  eventLine,
   fingerprintDisplay,
   hostCard,
   mintPanelOnStart,
@@ -452,6 +453,25 @@ test('the remove button says deny on a pending row and revoke on an approved one
   };
   assert.equal(deviceRow(base, 2).removeLabel, 'deny');
   assert.equal(deviceRow({ ...base, status: 'approved' }, 2).removeLabel, 'revoke');
+});
+
+test('an event line says what happened, to what, on whose authority, and when', () => {
+  // The incident the Activity section exists for was a revoke nobody
+  // remembered making — the authority is the load-bearing part of the line.
+  const at = 1_000;
+  const now = at + 3 * 24 * 60 * 60_000;
+  const line = eventLine(
+    { action: 'revoke', actor: 'owner', subjectLabel: 'ANDII-ALIEN01', at },
+    now,
+  );
+  assert.equal(line, "revoked ANDII-ALIEN01 · from this account's browser · 3d ago");
+
+  assert.ok(
+    eventLine({ action: 'enroll', actor: 'machine', subjectLabel: 'andy-mac', at }, now).includes(
+      'by the machine itself',
+    ),
+    'a claim is the key proving possession of itself, and the line says so',
+  );
 });
 
 test('partitionRevoked keeps live rows launchable and revoked rows out of every live path', () => {

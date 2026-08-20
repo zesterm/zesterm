@@ -84,6 +84,7 @@ POST /api/hosts/:id/revoke      signed in, own only
 POST /api/devices/:id/revoke    signed in, own only
 POST /api/hosts/:id/restore     signed in, own only  -- revoke's inverse (#365)
 POST /api/devices/:id/restore   signed in, own only
+GET  /api/registry/events       signed in only       -> { events: [...] } -- the audit log (#373)
 ```
 
 Restore exists because revocation used to be a one-way door with no owner-side
@@ -94,6 +95,14 @@ against that row, so the credential the machine held all along simply resolves
 again and it is back on its next poll. Cookie-only on purpose: a machine
 credential that could un-revoke its own principal would undo the refusal
 enrolment gives a revoked key. Machine bearers never see the revoked view.
+
+Every act that changes what an account trusts — revoke, restore, approve, and
+the three enrolment paths — writes one row to `registry_events` (#373), an
+append-only log the fleet screen renders as its Activity section. It exists
+because a machine once spent ten days locked out by a Revoke click nobody
+remembered making; the log stores the label at the moment of the act and the
+*kind* of authority behind it (owner session, device bearer, the machine's own
+signed claim), and deliberately nothing more.
 
 The code is eight characters of an alphabet with no `0`/`O` and no `1`/`I`/`L`,
 because a person reads it off one screen and types it into another. It lives ten

@@ -28,6 +28,7 @@ import {
 import type { DeviceKind, EnrollKind } from '../db/types.ts';
 import type { Env } from '../env.ts';
 import { json, jsonObject } from '../http.ts';
+import { recordRegistryEvent } from '../db/events.ts';
 import { incumbentRefusal } from './incumbent.ts';
 import { createMachineToken } from '../db/machine-tokens.ts';
 import { findUser } from '../db/users.ts';
@@ -281,6 +282,18 @@ export async function claimEnrollCode(request: Request, env: Env, now: number): 
     kind,
     principalId: id,
     now,
+  });
+
+  // 'machine', not 'owner': the code was a person's act, but *this* request
+  // is the key proving possession of itself — the audit line should say which
+  // end performed it (#373).
+  await recordRegistryEvent(env.DB, codeRow.user_id, {
+    action: 'enroll',
+    actor: 'machine',
+    subjectKind: kind,
+    subjectId: id,
+    subjectLabel: label,
+    at: now,
   });
 
   // For the machine to print — "enrolled with <account>" — never to decide
