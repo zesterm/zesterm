@@ -179,18 +179,11 @@ fn main() {
                      so it is reachable from anywhere (--no-relay opts out)"
                 );
             }
-            // The mirror of the app's #228 mapping: a device code fed to
-            // --enroll. The generic refusal would say "get a fresh code",
-            // which mints another one of the same wrong kind.
-            Err(enroll::EnrollError::Refused { ref message, .. }) if message == "wrong_kind" => {
-                eprintln!(
-                    "zest-daemon: that code is for the app's sign-in — \
-                     in the browser use Add a machine instead"
-                );
-                std::process::exit(1);
-            }
+            // `refusal_text` turns wrong_kind (#228) and already_enrolled's
+            // two causes (#368) into the person's next move; everything else
+            // it renders as Display, so this arm is every failure.
             Err(e) => {
-                eprintln!("zest-daemon: {e}");
+                eprintln!("zest-daemon: {}", enroll::refusal_text(&e));
                 std::process::exit(1);
             }
         }

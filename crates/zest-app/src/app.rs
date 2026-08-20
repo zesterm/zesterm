@@ -1172,6 +1172,23 @@ fn enroll_failure(e: &zest_daemon::enroll::EnrollError) -> String {
         EnrollError::Refused { message, .. } if message == "wrong_kind" => {
             "that code is for a machine — in the browser use Add a device instead".into()
         }
+        // The 409 the catch-all below used to swallow (#368): a fresh code
+        // hits it identically forever, so "mint a fresh one" was a loop. The
+        // Worker's `detail` (#367) says which way out; without one (an older
+        // deployment) both ways are named, because either beats the loop.
+        EnrollError::Refused { message, detail, .. } if message == "already_enrolled" => {
+            match detail.as_deref() {
+                Some("other_account") => "this app's key is enrolled with a different account — \
+                     manage it from that account's fleet screen"
+                    .into(),
+                Some("revoked") => "this app was revoked — restore it in the browser (fleet \
+                     screen, Revoked section), then sign in again"
+                    .into(),
+                _ => "this app's key is already enrolled — if it was revoked, restore it in \
+                     the browser (fleet screen, Revoked section)"
+                    .into(),
+            }
+        }
         // The Worker deliberately answers a dead code and a bad signature
         // identically (no liveness oracle), so the next move is the same
         // whatever the refusal said: mint a fresh code.
@@ -13780,6 +13797,46 @@ mod enroll_tests {
             enroll_failure_text(&e, "X").contains("only a local client"),
             "a real refusal must not be rewritten"
         );
+    }
+
+    #[test]
+    fn already_enrolled_never_says_mint_a_fresh_one() {
+        // The loop #368 kills: a revoked (or foreign-account) key hits the
+        // same 409 with every code ever minted, so "mint a fresh one" sent
+        // the person in circles. Every shape of the refusal — with either
+        // detail or with none (a Worker predating #367) — must name a way
+        // out instead.
+        use super::enroll_failure;
+        let refused = |detail: Option<&str>| zest_daemon::enroll::EnrollError::Refused {
+            status: 409,
+            message: "already_enrolled".into(),
+            detail: detail.map(String::from),
+        };
+
+        let revoked = enroll_failure(&refused(Some("revoked")));
+        assert!(
+            revoked.contains("restore") && !revoked.contains("mint"),
+            "revoked means restore, not another code: {revoked:?}"
+        );
+        let foreign = enroll_failure(&refused(Some("other_account")));
+        assert!(
+            foreign.contains("different account") && !foreign.contains("mint"),
+            "a key on another account cannot be restored from this one: {foreign:?}"
+        );
+        let bare = enroll_failure(&refused(None));
+        assert!(
+            bare.contains("restore") && !bare.contains("mint"),
+            "an old Worker names no cause, but a fresh code still cannot help: {bare:?}"
+        );
+
+        // And the collapsed dead-code/bad-signature refusal keeps its advice
+        // — there a fresh code genuinely is the next move.
+        let dead = enroll_failure(&zest_daemon::enroll::EnrollError::Refused {
+            status: 400,
+            message: "invalid_code".into(),
+            detail: None,
+        });
+        assert!(dead.contains("mint a fresh one"), "got {dead:?}");
     }
 }
 

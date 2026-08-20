@@ -176,8 +176,14 @@ pub enum EnrollError {
     #[error("could not reach the control plane: {0}")]
     Transport(String),
     /// It completed, and the answer was no.
+    ///
+    /// `detail` is the Worker's optional second word (#367): for
+    /// `already_enrolled` it names which of the two collapsed causes held —
+    /// `revoked` or `other_account` — because they need opposite next moves.
+    /// `None` from a Worker that predates it; absent from `Display` on
+    /// purpose, since [`refusal_text`] is what turns the pair into a sentence.
     #[error("the control plane refused this enrolment ({status}): {message}")]
-    Refused { status: u16, message: String },
+    Refused { status: u16, message: String, detail: Option<String> },
     /// It completed, said yes, and said something this cannot act on.
     #[error("the control plane's answer was not an enrolment: {0}")]
     BadResponse(String),
@@ -284,10 +290,8 @@ pub fn enroll(
     let response = http.post_json(&url, &signed_body(identity, code, label)?)?;
 
     if !(200..300).contains(&response.status) {
-        return Err(EnrollError::Refused {
-            status: response.status,
-            message: message_from(&response.body),
-        });
+        let (message, detail) = refusal_from(&response.body);
+        return Err(EnrollError::Refused { status: response.status, message, detail });
     }
 
     #[derive(serde::Deserialize)]
@@ -298,13 +302,18 @@ pub fn enroll(
         // OAuth endpoint reports a bad code, and `cloud/`'s own tests exercise
         // it. Read here so that shape is a refusal rather than a missing token.
         error: Option<String>,
+        detail: Option<String>,
     }
 
     let answer: Answer = serde_json::from_str(&response.body)
         .map_err(|e| EnrollError::BadResponse(format!("{e}; body was {:?}", clip(&response.body))))?;
 
     if let Some(error) = answer.error {
-        return Err(EnrollError::Refused { status: response.status, message: error });
+        return Err(EnrollError::Refused {
+            status: response.status,
+            message: error,
+            detail: answer.detail,
+        });
     }
 
     let token = answer.token.filter(|t| !t.trim().is_empty()).ok_or_else(|| {
@@ -344,21 +353,56 @@ pub fn forget_token(secrets: &dyn SecretStore) -> Result<bool, EnrollError> {
     Ok(had)
 }
 
-/// The most useful sentence in a refusal body.
+/// The most useful sentence in a refusal body, and the optional cause beside it.
 ///
-/// `cloud/`'s Worker answers `{"error":"forbidden"}`, but a 502 from in front
+/// `cloud/`'s Worker answers `{"error":"forbidden"}` — since #367 sometimes
+/// with a `detail` naming which collapsed cause held — but a 502 from in front
 /// of it is an HTML page, so this falls back to the raw body rather than
 /// reporting nothing when the JSON does not parse — "the control plane refused
 /// this" with no reason is the least actionable error there is.
-fn message_from(body: &str) -> String {
+fn refusal_from(body: &str) -> (String, Option<String>) {
     #[derive(serde::Deserialize)]
     struct Refusal {
         error: Option<String>,
+        detail: Option<String>,
     }
-    serde_json::from_str::<Refusal>(body)
-        .ok()
-        .and_then(|r| r.error)
-        .unwrap_or_else(|| clip(body))
+    match serde_json::from_str::<Refusal>(body) {
+        Ok(Refusal { error: Some(error), detail }) => (error, detail),
+        _ => (clip(body), None),
+    }
+}
+
+/// A refusal as the sentence a person at a *host* enrolment should read —
+/// `--enroll` on a terminal, or the app's "Enroll this machine" card via the
+/// `EnrollSeam` (the app's own device sign-in has its own wording, because the
+/// next move points at the other kind's button).
+///
+/// One function for both call sites, because two copies of "what does
+/// already_enrolled mean" would drift — that is how the app spent a release
+/// telling revoked machines to mint fresh codes (#368).
+pub fn refusal_text(e: &EnrollError) -> String {
+    let EnrollError::Refused { message, detail, .. } = e else {
+        return e.to_string();
+    };
+    match (message.as_str(), detail.as_deref()) {
+        // A device code fed to a host enrolment (#228): the generic advice
+        // would mint another code of the same wrong kind.
+        ("wrong_kind", _) => {
+            "that code is for the app's sign-in — in the browser use Add a machine instead".into()
+        }
+        ("already_enrolled", Some("revoked")) => "this machine was revoked — restore it in the \
+             browser (fleet screen, Revoked section), then try again"
+            .into(),
+        ("already_enrolled", Some("other_account")) => "this machine's key is enrolled with a \
+             different account — manage it from that account's fleet screen"
+            .into(),
+        // A Worker predating #367 names no cause, but a fresh code is still
+        // never the fix for this refusal.
+        ("already_enrolled", _) => "this machine's key is already enrolled — if it was revoked, \
+             restore it in the browser (fleet screen, Revoked section)"
+            .into(),
+        _ => e.to_string(),
+    }
 }
 
 /// Enough of a response to diagnose it, and not a whole error page.
@@ -719,6 +763,86 @@ mod tests {
             "the control plane's own words are the only actionable part; got {err}"
         );
         assert!(token_in(&store).is_none(), "nothing was granted, so nothing may be kept");
+    }
+
+    #[test]
+    fn a_refusal_carries_the_workers_detail_when_one_is_sent() {
+        // #367's server half names the cause beside the error; this is the
+        // client half picking it up. `detail` is what turns "already_enrolled"
+        // from a dead end into a next move (#368).
+        let store = MemoryKeyStore::new();
+        let http = FakeControlPlane::answering(
+            409,
+            r#"{"error":"already_enrolled","detail":"revoked"}"#,
+        );
+        let err = enroll(&identity(), "C", "l", "https://example", &http, &store)
+            .expect_err("a 409 is not an enrolment");
+        let EnrollError::Refused { status, message, detail } = err else {
+            panic!("expected a refusal, got {err}");
+        };
+        assert_eq!(status, 409);
+        assert_eq!(message, "already_enrolled");
+        assert_eq!(
+            detail.as_deref(),
+            Some("revoked"),
+            "the detail is the difference between 'restore it' and 'wrong account'"
+        );
+    }
+
+    #[test]
+    fn a_refusal_without_a_detail_is_the_old_shape_unchanged() {
+        // The deploy-skew pin: a Worker predating #367 sends no `detail`, and
+        // this daemon may be newer than the deployment it talks to. Absent
+        // must be `None` and the rendered error must keep carrying the
+        // control plane's own word.
+        let store = MemoryKeyStore::new();
+        let http = FakeControlPlane::answering(409, r#"{"error":"already_enrolled"}"#);
+        let err = enroll(&identity(), "C", "l", "https://example", &http, &store)
+            .expect_err("still a refusal");
+        assert!(
+            matches!(err, EnrollError::Refused { ref detail, .. } if detail.is_none()),
+            "got {err}"
+        );
+        assert!(err.to_string().contains("already_enrolled"), "got {err}");
+    }
+
+    #[test]
+    fn refusal_text_is_the_persons_next_move() {
+        let refused = |message: &str, detail: Option<&str>| EnrollError::Refused {
+            status: 409,
+            message: message.into(),
+            detail: detail.map(String::from),
+        };
+
+        assert!(
+            refusal_text(&refused("wrong_kind", None)).contains("Add a machine"),
+            "a device code fed to --enroll: the fresh-code advice mints the same wrong kind"
+        );
+        let revoked = refusal_text(&refused("already_enrolled", Some("revoked")));
+        assert!(
+            revoked.contains("revoked") && revoked.contains("restore"),
+            "a revoked machine's only way back is the owner restoring it; got {revoked:?}"
+        );
+        assert!(
+            refusal_text(&refused("already_enrolled", Some("other_account")))
+                .contains("different account"),
+            "restoring cannot help a key that lives on another account"
+        );
+        let bare = refusal_text(&refused("already_enrolled", None));
+        assert!(
+            bare.contains("restore"),
+            "an old Worker names no cause, but 'mint a fresh code' is still never the fix \
+             for already_enrolled; got {bare:?}"
+        );
+        assert!(
+            refusal_text(&refused("invalid_code", None)).contains("refused this enrolment"),
+            "every other refusal keeps the Display phrasing, which carries the status and word"
+        );
+        assert_eq!(
+            refusal_text(&EnrollError::Transport("no route".into())),
+            EnrollError::Transport("no route".into()).to_string(),
+            "a transport failure is not a refusal and keeps its own words"
+        );
     }
 
     #[test]

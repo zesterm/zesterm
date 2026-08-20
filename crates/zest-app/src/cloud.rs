@@ -92,10 +92,8 @@ pub fn enroll_desktop(
     let response = http.post_json(&url, &signed_client_body(identity, code, label)?)?;
 
     if !(200..300).contains(&response.status) {
-        return Err(EnrollError::Refused {
-            status: response.status,
-            message: message_from(&response.body),
-        });
+        let (message, detail) = refusal_from(&response.body);
+        return Err(EnrollError::Refused { status: response.status, message, detail });
     }
 
     #[derive(serde::Deserialize)]
@@ -105,13 +103,18 @@ pub fn enroll_desktop(
         // A 200 carrying an error is a refusal, not a missing token — the
         // GitHub-OAuth shape the daemon's enroll documents.
         error: Option<String>,
+        detail: Option<String>,
     }
 
     let answer: Answer = serde_json::from_str(&response.body)
         .map_err(|e| EnrollError::BadResponse(format!("{e}; body was {:?}", clip(&response.body))))?;
 
     if let Some(error) = answer.error {
-        return Err(EnrollError::Refused { status: response.status, message: error });
+        return Err(EnrollError::Refused {
+            status: response.status,
+            message: error,
+            detail: answer.detail,
+        });
     }
 
     let token = answer.token.filter(|t| !t.trim().is_empty()).ok_or_else(|| {
@@ -204,10 +207,8 @@ pub fn start_link(
     let url = format!("{}{LINK_START_PATH}", base_url.trim_end_matches('/'));
     let response = http.post_json(&url, &body)?;
     if !(200..300).contains(&response.status) {
-        return Err(EnrollError::Refused {
-            status: response.status,
-            message: message_from(&response.body),
-        });
+        let (message, detail) = refusal_from(&response.body);
+        return Err(EnrollError::Refused { status: response.status, message, detail });
     }
 
     #[derive(serde::Deserialize)]
@@ -746,17 +747,24 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The most useful sentence in a refusal body — the daemon's `message_from`,
-/// private there and three lines here.
-fn message_from(body: &str) -> String {
+/// The most useful sentence in a refusal body, with the Worker's optional
+/// `detail` beside it (#367) — the daemon's `refusal_from`, private there and
+/// a few lines here.
+fn refusal_from(body: &str) -> (String, Option<String>) {
     #[derive(serde::Deserialize)]
     struct Refusal {
         error: Option<String>,
+        detail: Option<String>,
     }
-    serde_json::from_str::<Refusal>(body)
-        .ok()
-        .and_then(|r| r.error)
-        .unwrap_or_else(|| clip(body))
+    match serde_json::from_str::<Refusal>(body) {
+        Ok(Refusal { error: Some(error), detail }) => (error, detail),
+        _ => (clip(body), None),
+    }
+}
+
+/// The sentence alone, for the flows that keep no detail.
+fn message_from(body: &str) -> String {
+    refusal_from(body).0
 }
 
 /// Enough of a response to diagnose it, and not a whole error page.
