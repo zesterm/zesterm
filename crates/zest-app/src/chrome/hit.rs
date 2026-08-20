@@ -63,6 +63,18 @@ pub enum HitRegion {
     ApprovalApprove,
     /// The approval modal's Deny button.
     ApprovalDeny,
+    /// The close-confirm's panel and its full-window scrim. Swallows and does
+    /// not dismiss, on the approval modal's rule: the question exists because
+    /// the answer is destructive, and "clicked it away" is not one of the
+    /// three answers.
+    ConfirmPanel,
+    /// The close-confirm's "Close and stop it" button.
+    ConfirmClose,
+    /// The close-confirm's "Detach" button — drawn only when there is a
+    /// daemon to leave the session with.
+    ConfirmDetach,
+    /// The close-confirm's "Cancel" button.
+    ConfirmCancel,
     /// A tab; clicking activates it.
     Tab(SessionAddr),
     /// A tab's close button.
@@ -340,6 +352,10 @@ pub fn wheel_target(hit: Option<HitRegion>, pane_focus_right: Option<bool>) -> W
         R::ApprovalPanel
         | R::ApprovalApprove
         | R::ApprovalDeny
+        | R::ConfirmPanel
+        | R::ConfirmClose
+        | R::ConfirmDetach
+        | R::ConfirmCancel
         | R::ScreenPanel
         | R::ThemeCard(_)
         | R::FleetCard(_)

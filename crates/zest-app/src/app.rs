@@ -1093,6 +1093,107 @@ enum ApproveFailure {
     Message(String),
 }
 
+/// What closing a tab should actually do, once the settings and the tab's own
+/// state have both been consulted (#381).
+///
+/// `Close` is the existing rule and not a synonym for "kill": it drops a
+/// remote, dead or exited tab and kills a live local one, exactly as before.
+enum CloseDecision {
+    Close,
+    Detach,
+    Ask(crate::chrome::model::ConfirmCloseModel),
+}
+
+/// The same three outcomes without the words, so the *policy* can be decided
+/// by a function that needs no event loop, no window and no terminal — the
+/// rule `visible_approval` and `chrome::hit::wheel_target` already follow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClosePolicy {
+    Close,
+    Detach,
+    Ask,
+}
+
+/// What the app knows about a tab at the moment something asks to close it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TabFacts {
+    /// The child is already gone — this close is bookkeeping.
+    already_exited: bool,
+    /// The host answered and said the session no longer exists.
+    dead: bool,
+    /// The session runs on this machine.
+    local: bool,
+    /// A worker is still dialling; there is no session yet.
+    connecting: bool,
+    /// A command is running, or a full-screen program has the alt screen.
+    busy: bool,
+    /// A daemon is holding this session, so letting go of it leaves it
+    /// running. False for an in-process pty, which this window owns outright.
+    can_detach: bool,
+}
+
+/// What closing a tab should do.
+///
+/// The three short-circuits come first and they are the same fact three times:
+/// there is nothing of *ours* to end. An exited child is gone, a dead session
+/// is gone, a remote one is somebody else's machine's business, and a
+/// connecting one has not started. All four are `Close`, which drops rather
+/// than kills — and a question with one answer is not a question.
+const fn close_policy(
+    action: zest_config::settings::CloseAction,
+    confirm_when_busy: bool,
+    facts: TabFacts,
+) -> ClosePolicy {
+    use zest_config::settings::CloseAction;
+    if facts.already_exited || facts.dead || !facts.local || facts.connecting {
+        return ClosePolicy::Close;
+    }
+    // Nothing to detach *to*. `finish_close_tab` would drop the tab, which for
+    // an in-process pty is a kill however it is spelled — so answering
+    // `Detach` here would be the setting quietly doing the one thing it exists
+    // to prevent. Closing is all closing can mean without a daemon, and the
+    // fallback is rare enough (`--no-daemon`, or one that would not start)
+    // that a modal on every ⌘W would be noise about a fact that will not
+    // change while the window lives.
+    if !facts.can_detach && matches!(action, CloseAction::Detach) {
+        return ClosePolicy::Close;
+    }
+    match action {
+        CloseAction::Detach => ClosePolicy::Detach,
+        CloseAction::Ask => ClosePolicy::Ask,
+        // Independent of the setting on purpose: someone who wants ⌘W to end
+        // a shell still wants to be stopped before it ends a build.
+        CloseAction::Kill if facts.busy && confirm_when_busy => ClosePolicy::Ask,
+        CloseAction::Kill => ClosePolicy::Close,
+    }
+}
+
+/// What the modal calls the thing it would end.
+///
+/// Named rather than described: "something is running" is the sentence this
+/// modal exists to avoid, because the whole reason to stop someone is that
+/// they may have forgotten what.
+fn what_is_running(command: Option<&str>, alt_screen: bool) -> String {
+    match command.map(str::trim) {
+        Some(c) if !c.is_empty() => c.to_string(),
+        // Either a running block whose command text never arrived (OSC 133;C
+        // with no B, and nothing readable off the grid) or — far more often —
+        // no block at all, because the alternate screen records no markers.
+        _ if alt_screen => "A full-screen program".to_string(),
+        _ => "A command".to_string(),
+    }
+}
+
+/// The faint line under the close question, when there is a daemon holding
+/// the session and Detach is therefore a real answer.
+const DETACH_HINT: &str =
+    "Detaching leaves it running: the session stays in \u{2318}K, and comes back on the next launch.";
+
+/// …and when there is not. An in-process pty is this window's, so there is
+/// nothing on the other side of letting go of it.
+const NO_DAEMON_HINT: &str =
+    "This tab's shell is owned by this window, so there is nothing to leave it with.";
+
 /// The approval ladder, on the worker's thread: token → `/api/me` (the
 /// `userId` the signed statement must name — deliberately fetched per
 /// approval, since #210 chose to persist nothing but the token) → build,
@@ -1611,6 +1712,14 @@ pub struct App {
     /// idea of what it has seen. Keyed by address, so a tab closed and
     /// reopened does not inherit one.
     attention: std::collections::HashMap<zest_proto::SessionAddr, zest_proto::AttentionCause>,
+    /// A close that is waiting for an answer (#381): ⌘W or a chip × landed on
+    /// a tab that is still running something.
+    ///
+    /// Holds the model rather than just the address, so what the person was
+    /// answering about is fixed at the moment the question was asked — a tab
+    /// whose command finishes while the modal is up must not silently become
+    /// a different question.
+    confirm_close: Option<crate::chrome::model::ConfirmCloseModel>,
     /// The `⋯` rect the block pass drew last frame, and whose block. The menu
     /// hangs off it, so the affordance and its menu come from one computation
     /// and cannot drift apart.
@@ -1911,6 +2020,7 @@ impl App {
             block_menu: None,
             block_menu_anchor: None,
             attention: std::collections::HashMap::new(),
+            confirm_close: None,
             app_tabs: crate::tabs::AppTabs::default(),
             provenance,
             unknown_keys,
@@ -2667,6 +2777,17 @@ impl App {
                 if let Some(tab) = self.tabs.active() {
                     let addr = tab.addr;
                     self.close_tab(addr, false, el);
+                }
+            }
+            Action::DetachTab => {
+                // Only a session can be detached. The app tabs' own ⌘W rule
+                // above does not apply: there is no third outcome for a place.
+                if self.settings_tab_active() || self.screen == AppScreen::Profiles {
+                    return;
+                }
+                if let Some(tab) = self.tabs.active() {
+                    let addr = tab.addr;
+                    self.detach_tab(addr, el);
                 }
             }
             Action::ToggleFleetPicker => self.toggle_picker(),
@@ -5189,6 +5310,7 @@ impl App {
             block_menu: block_menu_model,
             notice,
             approval,
+            confirm_close: self.confirm_close.clone(),
         };
 
         let colors = self.chrome_colors;
@@ -5300,6 +5422,19 @@ impl App {
         match (region, button) {
             (HitRegion::ApprovalApprove, MouseButton::Left) => self.decide_approval(true),
             (HitRegion::ApprovalDeny, MouseButton::Left) => self.decide_approval(false),
+            (HitRegion::ConfirmClose, MouseButton::Left) => {
+                self.answer_confirm_close(Some(true), el);
+            }
+            (HitRegion::ConfirmDetach, MouseButton::Left) => {
+                self.answer_confirm_close(Some(false), el);
+            }
+            (HitRegion::ConfirmCancel, MouseButton::Left) => {
+                self.answer_confirm_close(None, el);
+            }
+            // The panel and its scrim swallow, and deliberately do not
+            // dismiss: one of the three answers destroys a running command,
+            // and "clicked it away" must not be able to reach any of them.
+            (HitRegion::ConfirmPanel, _) => {}
             // The panel (and its full-window scrim) swallows everything
             // else: a security prompt neither dismisses on a stray click
             // nor lets one fall through to the grid beneath it.
@@ -8386,12 +8521,192 @@ impl App {
             self.close_settings_tab();
             return;
         }
+        // Decided *before* the tab leaves the strip: a confirm that has
+        // already taken it out has nothing left to cancel back to.
+        match self.close_decision(addr, already_exited) {
+            CloseDecision::Close => self.finish_close_tab(addr, already_exited, false, el),
+            CloseDecision::Detach => self.finish_close_tab(addr, already_exited, true, el),
+            CloseDecision::Ask(question) => {
+                // The one-overlay rule (`toggle_picker` and friends): a
+                // question drawn over an open menu is a question about a tab
+                // whose chip you can no longer see.
+                self.picker = None;
+                self.palette_ui = None;
+                self.launcher = None;
+                self.block_menu = None;
+                self.confirm_close = Some(question);
+                self.mark_chrome_dirty();
+            }
+        }
+    }
+
+    /// What closing `addr` should actually do, per the settings and what the
+    /// tab is doing right now.
+    fn close_decision(
+        &self,
+        addr: zest_proto::SessionAddr,
+        already_exited: bool,
+    ) -> CloseDecision {
+        let Some(tab) = self.tabs.iter().find(|t| t.addr == addr) else {
+            return CloseDecision::Close;
+        };
+        let facts = TabFacts {
+            already_exited,
+            dead: tab.dead,
+            local: tab.local,
+            connecting: tab.connecting,
+            busy: Self::tab_is_busy(tab),
+            can_detach: !matches!(tab.source().origin(), Origin::InProcess),
+        };
+        match close_policy(
+            self.config.tabs.close_action,
+            self.config.tabs.confirm_close_when_busy,
+            facts,
+        ) {
+            ClosePolicy::Close => CloseDecision::Close,
+            ClosePolicy::Detach => CloseDecision::Detach,
+            ClosePolicy::Ask => CloseDecision::Ask(self.close_question(tab)),
+        }
+    }
+
+    /// Whether this tab is doing something a close would destroy.
+    ///
+    /// **`alt_screen` is in this test on purpose.** `BlockIndex` records no
+    /// markers at all while the alternate screen is up
+    /// (`zest_core`'s `block_line`), so a tab running `vim` or `htop` reports
+    /// no running block — and a full-screen editor with unsaved work is
+    /// exactly where a mistaken ⌘W costs the most.
+    ///
+    /// The honest limit, stated rather than papered over: a shell with no
+    /// integration (bash, fish, `cmd.exe`) mints no blocks either, so a
+    /// command running under one of those is invisible here. `alt_screen`
+    /// still covers its TUIs.
+    fn tab_is_busy(tab: &Tab) -> bool {
+        let term = tab.source().terminal();
+        let term = term.lock();
+        term.blocks().last().is_some_and(zest_core::Block::is_running)
+            || term.modes().contains(zest_core::Modes::ALT_SCREEN)
+    }
+
+    /// The question to put on screen for this tab, with what it would end
+    /// *named* — "something is running" is the sentence this modal exists to
+    /// avoid, because the whole reason to stop someone is that they may have
+    /// forgotten what.
+    fn close_question(&self, tab: &Tab) -> crate::chrome::model::ConfirmCloseModel {
+        let (title, what) = {
+            let term = tab.source().terminal();
+            let term = term.lock();
+            let title = term.title().trim().to_string();
+            let running = term
+                .blocks()
+                .last()
+                .filter(|b| b.is_running())
+                .map(|b| b.command.trim().to_string())
+                .filter(|c| !c.is_empty());
+            let what = what_is_running(
+                running.as_deref(),
+                term.modes().contains(zest_core::Modes::ALT_SCREEN),
+            );
+            (title, what)
+        };
+        let title = if title.is_empty() { "shell".to_string() } else { title };
+        let can_detach = !matches!(tab.source().origin(), Origin::InProcess);
+        crate::chrome::model::ConfirmCloseModel {
+            addr: tab.addr,
+            title: format!("Close \u{201c}{title}\u{201d}?"),
+            body: format!("{what} is still running."),
+            hint: if can_detach {
+                DETACH_HINT.to_string()
+            } else {
+                NO_DAEMON_HINT.to_string()
+            },
+            choices: if can_detach {
+                crate::chrome::model::ConfirmChoices::DetachOrClose
+            } else {
+                crate::chrome::model::ConfirmChoices::CloseOnly
+            },
+        }
+    }
+
+    /// What ⌘B has to say when there is no daemon to leave the session with.
+    ///
+    /// A panel rather than a log line: the action promised not to end the
+    /// shell, so doing nothing *silently* is indistinguishable from a broken
+    /// keybinding. It states the refusal and offers one button, which is
+    /// deliberately not "Close and stop it" — answering "that cannot be
+    /// detached" with a destructive default is how a gesture that promised
+    /// not to end a shell ends one.
+    fn refuse_detach(&mut self, tab_addr: zest_proto::SessionAddr, title: String) {
+        self.picker = None;
+        self.palette_ui = None;
+        self.launcher = None;
+        self.block_menu = None;
+        self.confirm_close = Some(crate::chrome::model::ConfirmCloseModel {
+            addr: tab_addr,
+            title: format!("Cannot detach \u{201c}{title}\u{201d}"),
+            body: String::new(),
+            hint: NO_DAEMON_HINT.to_string(),
+            choices: crate::chrome::model::ConfirmChoices::Acknowledge,
+        });
+        self.mark_chrome_dirty();
+    }
+
+    /// Answer the confirm. `Some(true)` closes, `Some(false)` detaches,
+    /// `None` cancels; the modal empties either way.
+    fn answer_confirm_close(&mut self, close: Option<bool>, el: &ActiveEventLoop) {
+        let Some(q) = self.confirm_close.take() else { return };
+        self.mark_chrome_dirty();
+        match close {
+            // The tab may have gone while the question was up (its shell
+            // exited, or another path closed it); `finish_close_tab` no-ops on
+            // an address the strip no longer holds.
+            Some(true) => self.finish_close_tab(q.addr, false, false, el),
+            Some(false) => self.finish_close_tab(q.addr, false, true, el),
+            None => {}
+        }
+    }
+
+    /// Stop watching a tab's session and leave it running (⌘B, #381).
+    ///
+    /// The whole mechanism is `Drop`: `RemoteSession`'s destructor sends
+    /// `Detach` and joins its writer, which is also what closing the window
+    /// has always done to every tab.
+    fn detach_tab(&mut self, addr: zest_proto::SessionAddr, el: &ActiveEventLoop) {
+        if addr == crate::tabs::settings_addr() {
+            // An app tab has no session; closing it is the only thing that
+            // means anything, and ⌘W already does that.
+            self.close_settings_tab();
+            return;
+        }
+        // An in-process pty has no daemon to leave it with — dropping it
+        // hangs the shell up either way. Say so rather than doing the one
+        // thing this action promises not to.
+        let in_process = self.tabs.iter().find(|t| t.addr == addr).map(|t| {
+            (matches!(t.source().origin(), Origin::InProcess), t.source().terminal().lock().title().trim().to_string())
+        });
+        if let Some((true, title)) = in_process {
+            let title = if title.is_empty() { "shell".to_string() } else { title };
+            self.refuse_detach(addr, title);
+            return;
+        }
+        self.finish_close_tab(addr, false, true, el);
+    }
+
+    /// Take the tab out of the strip and let go of its session — killing it
+    /// only when it is this machine's, alive, and `detach` was not asked for.
+    fn finish_close_tab(
+        &mut self,
+        addr: zest_proto::SessionAddr,
+        already_exited: bool,
+        detach: bool,
+        el: &ActiveEventLoop,
+    ) {
         let was_active = self.tabs.is_active(addr);
         let Some(tab) = self.tabs.close(addr) else { return };
         // The map is keyed by address and a closed tab will never be looked
         // at, so nothing else would ever take this entry out.
         self.attention.remove(&addr);
-        if already_exited || tab.dead || !tab.local {
+        if already_exited || tab.dead || !tab.local || detach {
             // Dropping detaches (the destructor sends it); a remote session
             // keeps running on its host, which is the point of the fleet.
             drop(tab);
@@ -10625,6 +10940,32 @@ impl ApplicationHandler<Wakeup> for App {
                             return;
                         }
                     }
+                }
+
+                // The close confirm owns the keyboard outright, which the
+                // approval modal above deliberately does not: that one opens
+                // on the network's schedule over whoever was mid-command, so
+                // it may not eat their keystrokes. This one opened *because*
+                // of a keystroke, and letting the next one through to a shell
+                // the question is about to end would be the worse mistake.
+                if self.confirm_close.is_some() {
+                    use winit::keyboard::{Key, NamedKey};
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => self.answer_confirm_close(None, el),
+                        // Enter takes the answer that destroys nothing, and
+                        // takes it only when there is one — a reflexive Enter
+                        // after ⌘W must never be the thing that kills a
+                        // build.
+                        Key::Named(NamedKey::Enter)
+                            if self.confirm_close.as_ref().is_some_and(|c| {
+                                c.choices == crate::chrome::model::ConfirmChoices::DetachOrClose
+                            }) =>
+                        {
+                            self.answer_confirm_close(Some(false), el);
+                        }
+                        _ => {}
+                    }
+                    return;
                 }
 
                 // The open block menu owns the keyboard, on the launcher's
@@ -14635,5 +14976,130 @@ mod attention_tests {
     #[test]
     fn a_background_tab_is_always_news() {
         assert!(attention_is_news(false, true), "you are looking at a different tab");
+    }
+}
+
+#[cfg(test)]
+mod close_policy_tests {
+    use super::{close_policy, what_is_running, ClosePolicy, TabFacts};
+    use zest_config::settings::CloseAction;
+
+    /// A live, idle, local tab — the case every other one varies from.
+    const fn live() -> TabFacts {
+        TabFacts {
+            already_exited: false,
+            dead: false,
+            local: true,
+            connecting: false,
+            busy: false,
+            can_detach: true,
+        }
+    }
+
+    #[test]
+    fn the_default_is_exactly_what_the_app_did_before() {
+        // The one property that must survive this change: someone who never
+        // opens Settings must not find ⌘W has quietly started meaning
+        // something else.
+        assert_eq!(
+            close_policy(CloseAction::Kill, true, live()),
+            ClosePolicy::Close,
+            "an idle local tab closes without a question, as it always has"
+        );
+        let cfg = zest_config::settings::Tabs::default();
+        assert_eq!(cfg.close_action, CloseAction::Kill, "and that is the shipped default");
+        assert!(cfg.confirm_close_when_busy);
+    }
+
+    #[test]
+    fn nothing_of_ours_to_end_is_never_a_question() {
+        // Four different reasons there is no decision to make, and all four
+        // must reach `Close` — which *drops* rather than kills. A modal here
+        // would be a question with one answer, and it would fire on the exit
+        // path (`Wakeup::TabExited`), where nobody pressed anything at all.
+        for (name, facts) in [
+            ("an exited child", TabFacts { already_exited: true, busy: true, ..live() }),
+            ("a session the host says is gone", TabFacts { dead: true, busy: true, ..live() }),
+            ("a shell on another machine", TabFacts { local: false, busy: true, ..live() }),
+            ("a tab still being dialled", TabFacts { connecting: true, busy: true, ..live() }),
+        ] {
+            for action in [CloseAction::Kill, CloseAction::Detach, CloseAction::Ask] {
+                assert_eq!(
+                    close_policy(action, true, facts),
+                    ClosePolicy::Close,
+                    "{name}, under {action:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn busy_is_what_turns_a_close_into_a_question() {
+        assert_eq!(
+            close_policy(CloseAction::Kill, true, TabFacts { busy: true, ..live() }),
+            ClosePolicy::Ask,
+            "a running command is the whole reason to stop someone"
+        );
+        assert_eq!(
+            close_policy(CloseAction::Kill, false, TabFacts { busy: true, ..live() }),
+            ClosePolicy::Close,
+            "and switching the confirm off really does switch it off"
+        );
+    }
+
+    #[test]
+    fn detach_needs_no_confirmation_because_it_destroys_nothing() {
+        // The asymmetry is the point: the question exists because one answer
+        // is irreversible. Configured to detach, ⌘W is not.
+        assert_eq!(
+            close_policy(CloseAction::Detach, true, TabFacts { busy: true, ..live() }),
+            ClosePolicy::Detach
+        );
+        assert_eq!(close_policy(CloseAction::Detach, true, live()), ClosePolicy::Detach);
+    }
+
+    #[test]
+    fn detach_cannot_be_honoured_where_there_is_nothing_to_detach_to() {
+        // The setting must never be the thing that ends a shell. An
+        // in-process pty has no daemon holding it, so `finish_close_tab`'s
+        // "detach" is a drop, and a drop hangs it up — `Detach` here would be
+        // the option chosen *to avoid* killing quietly killing.
+        let no_daemon = TabFacts { can_detach: false, ..live() };
+        assert_eq!(
+            close_policy(CloseAction::Detach, true, no_daemon),
+            ClosePolicy::Close,
+            "closing is all closing can mean without a daemon"
+        );
+        assert_eq!(
+            close_policy(CloseAction::Detach, true, TabFacts { busy: true, ..no_daemon }),
+            ClosePolicy::Close,
+            "and being busy does not conjure a daemon"
+        );
+        // The setting still works where it can be honoured.
+        assert_eq!(close_policy(CloseAction::Detach, true, live()), ClosePolicy::Detach);
+    }
+
+    #[test]
+    fn ask_asks_even_when_nothing_is_running() {
+        // `Ask` is the answer to "which of these did you mean", not to "are
+        // you sure" — so it does not consult `busy`, and `confirm_when_busy`
+        // cannot switch it off.
+        assert_eq!(close_policy(CloseAction::Ask, false, live()), ClosePolicy::Ask);
+        assert_eq!(
+            close_policy(CloseAction::Ask, false, TabFacts { busy: true, ..live() }),
+            ClosePolicy::Ask
+        );
+    }
+
+    #[test]
+    fn the_question_names_what_it_would_end() {
+        assert_eq!(what_is_running(Some("cargo build --release"), false), "cargo build --release");
+        assert_eq!(what_is_running(Some("  npm test  "), false), "npm test", "trimmed");
+        // The alternate screen records no OSC 133 markers at all, so this is
+        // the *usual* case for a TUI rather than an edge one.
+        assert_eq!(what_is_running(None, true), "A full-screen program");
+        assert_eq!(what_is_running(Some("   "), true), "A full-screen program");
+        // A running block whose command text never arrived.
+        assert_eq!(what_is_running(None, false), "A command");
     }
 }

@@ -103,6 +103,10 @@ pub const KEYS: &[(&str, Invalidation)] = &[
     // Read when a signal arrives, so a change is in force for the next one.
     ("tabs.attention_bell", Invalidation::None),
     ("tabs.attention_notify", Invalidation::None),
+    // Both are read at the moment a tab is closed, so a change is in force for
+    // the very next ⌘W with nothing to invalidate.
+    ("tabs.close_action", Invalidation::None),
+    ("tabs.confirm_close_when_busy", Invalidation::None),
     ("shell.command", Invalidation::Restart),
     ("shell.cwd", Invalidation::Restart),
     ("shell.env", Invalidation::Restart),

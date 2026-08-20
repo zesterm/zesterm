@@ -402,6 +402,24 @@ pub enum TabsPosition {
     Left,
 }
 
+/// What closing a tab does to a session that runs on this machine.
+///
+/// Only local sessions have a choice to make. A remote one always detaches —
+/// a window here closing must not end a shell there, which is the whole point
+/// of the fleet (ADR-007) — and a dead one has nothing left to end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum CloseAction {
+    /// End the shell, as every ordinary terminal does. The default, because
+    /// it is what the hand already expects from ⌘W.
+    Kill,
+    /// Leave it running in the daemon and stop watching it. The session is
+    /// still there in the picker, and on the next launch, and from a phone.
+    Detach,
+    /// Ask every time.
+    Ask,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Tabs {
@@ -444,6 +462,22 @@ pub struct Tabs {
     /// shells, a notification almost never fires by accident.
     #[schemars(extend("x_zest_group" = "Tabs", "x_zest_widget" = "toggle"))]
     pub attention_notify: bool,
+    /// What closing a tab does to a shell that runs on this machine: end it,
+    /// leave it running in the daemon, or ask.
+    ///
+    /// Closing the *window* has always detached everything, this machine's
+    /// shells included — so `kill` is ⌘W disagreeing with ⌘Q on purpose,
+    /// because that is what the hand expects of it.
+    #[schemars(extend("x_zest_group" = "Tabs", "x_zest_widget" = "select"))]
+    pub close_action: CloseAction,
+    /// Ask before closing a tab with a command running or a full-screen
+    /// program on the alternate screen.
+    ///
+    /// Independent of `close_action`: it is the question "are you sure", not
+    /// the question "which of these did you mean", and someone who wants
+    /// `kill` still wants to be stopped before ⌘W ends a build.
+    #[schemars(extend("x_zest_group" = "Tabs", "x_zest_widget" = "toggle"))]
+    pub confirm_close_when_busy: bool,
 }
 
 impl Default for Tabs {
@@ -458,6 +492,11 @@ impl Default for Tabs {
             restore: true,
             attention_bell: true,
             attention_notify: true,
+            // Today's behaviour, kept as the default: someone who never opens
+            // Settings must not find ⌘W has quietly started meaning something
+            // else.
+            close_action: CloseAction::Kill,
+            confirm_close_when_busy: true,
         }
     }
 }

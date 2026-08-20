@@ -90,6 +90,26 @@
         }
       ]
     },
+    "CloseAction": {
+      "description": "What closing a tab does to a session that runs on this machine.\n\nOnly local sessions have a choice to make. A remote one always detaches —\na window here closing must not end a shell there, which is the whole point\nof the fleet (ADR-007) — and a dead one has nothing left to end.",
+      "oneOf": [
+        {
+          "const": "kill",
+          "description": "End the shell, as every ordinary terminal does. The default, because\nit is what the hand already expects from ⌘W.",
+          "type": "string"
+        },
+        {
+          "const": "detach",
+          "description": "Leave it running in the daemon and stop watching it. The session is\nstill there in the picker, and on the next launch, and from a phone.",
+          "type": "string"
+        },
+        {
+          "const": "ask",
+          "description": "Ask every time.",
+          "type": "string"
+        }
+      ]
+    },
     "Cursor": {
       "properties": {
         "blink": {
@@ -297,6 +317,20 @@
         "attention_notify": {
           "default": true,
           "description": "Mark a tab when a program in it asks for a desktop notification\n(`OSC 9`, `OSC 777;notify`).\n\nIts own switch rather than sharing the bell's, because the two are\nnoisy in different situations — a bell fires on tab-completion in some\nshells, a notification almost never fires by accident.",
+          "type": "boolean",
+          "x_zest_group": "Tabs",
+          "x_zest_widget": "toggle"
+        },
+        "close_action": {
+          "$ref": "#/$defs/CloseAction",
+          "default": "kill",
+          "description": "What closing a tab does to a shell that runs on this machine: end it,\nleave it running in the daemon, or ask.\n\nClosing the *window* has always detached everything, this machine's\nshells included — so `kill` is ⌘W disagreeing with ⌘Q on purpose,\nbecause that is what the hand expects of it.",
+          "x_zest_group": "Tabs",
+          "x_zest_widget": "select"
+        },
+        "confirm_close_when_busy": {
+          "default": true,
+          "description": "Ask before closing a tab with a command running or a full-screen\nprogram on the alternate screen.\n\nIndependent of `close_action`: it is the question \"are you sure\", not\nthe question \"which of these did you mean\", and someone who wants\n`kill` still wants to be stopped before ⌘W ends a build.",
           "type": "boolean",
           "x_zest_group": "Tabs",
           "x_zest_widget": "toggle"
@@ -620,6 +654,8 @@
       "default": {
         "attention_bell": true,
         "attention_notify": true,
+        "close_action": "kill",
+        "confirm_close_when_busy": true,
         "position": "top",
         "restore": true,
         "show_single_tab": true,

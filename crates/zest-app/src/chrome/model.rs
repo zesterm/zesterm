@@ -983,6 +983,11 @@ pub struct ChromeModel {
     /// the other modals — its text is a security decision, and chrome that
     /// could cover it would be chrome that could spoof it by omission.
     pub approval: Option<ApprovalModel>,
+    /// A ⌘W that landed on a busy tab and is waiting for an answer (#381).
+    /// Below the approval modal — that one is a security decision and this
+    /// one is not — and above everything else, because the keystroke that
+    /// opened it was the user's own.
+    pub confirm_close: Option<ConfirmCloseModel>,
 }
 
 /// What the approval modal says. Composed by the app (which holds the
@@ -999,6 +1004,52 @@ pub struct ApprovalModel {
     pub code: String,
     /// Pre-formatted validity line ("code expires in 2m").
     pub expires: String,
+}
+
+/// The close-a-busy-tab question (#381).
+///
+/// The words are composed by the app and drawn verbatim — the same division
+/// [`ApprovalModel::expires`] and [`TabModel::age`] already follow, because
+/// only the app knows what the tab is running and whether there is a daemon to
+/// leave it with, and a layout that assembled sentences would need to know
+/// both.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfirmCloseModel {
+    /// Which tab this is about. Carried so the answer cannot be applied to a
+    /// different tab than the one the question named — the strip can change
+    /// underneath an open modal.
+    pub addr: SessionAddr,
+    /// The heading — `Close “vim”?`.
+    pub title: String,
+    /// The sentence under it, or empty for none.
+    pub body: String,
+    /// The faint line under that: what the other answer would do, or why
+    /// there is no other answer.
+    pub hint: String,
+    /// Which answers this question actually has.
+    pub choices: ConfirmChoices,
+}
+
+/// The buttons a [`ConfirmCloseModel`] offers.
+///
+/// An enum rather than a pair of flags because only three of the four
+/// combinations mean anything — and the fourth, a question with nothing to
+/// answer it, is exactly the one a pair of flags makes reachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmChoices {
+    /// Detach, Close and stop it, Cancel. A busy tab whose session a daemon
+    /// is holding: all three outcomes exist.
+    DetachOrClose,
+    /// Close and stop it, Cancel. A busy tab this window owns outright, so
+    /// there is nothing to leave the shell with. A Detach button here would
+    /// be a button for an outcome the build cannot produce, and the person
+    /// would believe the shell survived.
+    CloseOnly,
+    /// Cancel alone — really "OK". ⌘B on a tab with no daemon: the answer is
+    /// *no*, and offering to end the shell instead would be answering a
+    /// question nobody asked, one destructive click away from a gesture that
+    /// promised not to.
+    Acknowledge,
 }
 
 /// The knobs `layout` reads, resolved to physical pixels by the caller.

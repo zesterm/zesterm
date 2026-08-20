@@ -22,6 +22,10 @@ use crate::chrome::model::PaletteRow;
 pub enum Action {
     NewTab,
     CloseTab,
+    /// Stop watching this tab's session and let it keep running in the
+    /// daemon. Closing the *window* has always done this to every tab; this
+    /// is the same outcome for one of them, on purpose (ADR-007).
+    DetachTab,
     ToggleFleetPicker,
     /// 0-based; ⌘1..⌘8.
     ActivateTab(u8),
@@ -217,6 +221,21 @@ pub static BINDINGS: &[Binding] = &[
         Category::Fleet,
     ),
     b(Mods::Desktop, ChordKey::Char("w"), Action::CloseTab, "W", "Close tab", Category::Tabs),
+    // B for background, and **not** ⌘⇧W, which is what a hand reaches for
+    // first. Every Desktop row must also be reachable as Ctrl+Shift+<key> on
+    // Windows (`every_desktop_chord_has_a_ctrl_shift_form`), and a shifted
+    // letter collapses onto the same Ctrl+Shift form as its unshifted twin —
+    // so ⌘⇧W and ⌘W are one chord on the primary platform, and the second row
+    // would simply shadow Close tab there. A free letter is the only spelling
+    // that is the same gesture on both.
+    b(
+        Mods::Desktop,
+        ChordKey::Char("b"),
+        Action::DetachTab,
+        "B",
+        "Detach tab (leave it running)",
+        Category::Tabs,
+    ),
     // Each digit is its own palette command — "go to tab 3" must be
     // searchable and runnable, not a footnote of "1–8". Matched by position:
     // see `ChordKey::Code` for why a digit is the one thing that cannot be
