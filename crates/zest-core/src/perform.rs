@@ -400,11 +400,15 @@ impl TermState {
     /// understand" produces for a *latched* value. Ignoring is right for a
     /// one-shot; for state it is a leak.
     fn osc_progress(&mut self, params: &[&[u8]]) {
-        let num = |i: usize| -> Option<u8> {
+        // Parsed wide and clamped after, never as the `u8` it ends up in: a
+        // producer sending 300 would *fail to parse* as a `u8` and fall to 0,
+        // which is a rewind rather than a clamp -- and the only reason that
+        // reads as fine is that a test written with 140 in it fits either way.
+        let num = |i: usize| -> Option<u32> {
             params
                 .get(i)
                 .and_then(|b| core::str::from_utf8(b).ok())
-                .and_then(|s| s.trim().parse::<u8>().ok())
+                .and_then(|s| s.trim().parse::<u32>().ok())
         };
         let state = num(2).unwrap_or(0);
         // Percentages beyond 100 are clamped rather than refused. A build
@@ -412,7 +416,7 @@ impl TermState {
         // done, and refusing it would stop the bar where the last good value
         // left it -- a wrong number frozen, which is worse than a right one
         // rounded.
-        let percent = num(3).unwrap_or(0).min(100);
+        let percent = u8::try_from(num(3).unwrap_or(0).min(100)).unwrap_or(100);
         let was_busy = !matches!(self.progress, Progress::None);
         self.progress = match state {
             1 => Progress::At { percent, state: ProgressState::Normal },

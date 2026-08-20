@@ -383,6 +383,12 @@ fn a_progress_state_that_cannot_be_read_clears_rather_than_lingers() {
     // right one rounded.
     t.advance(b"\x1b]9;4;1;140\x07");
     assert_eq!(t.progress(), Progress::At { percent: 100, state: ProgressState::Normal });
+    // And past 255, which is where parsing straight into the `u8` it ends up
+    // in stops clamping and starts *rewinding*: the parse fails, the value
+    // falls to 0, and a bar at 99% jumps back to the start. 140 fits either
+    // way, so a test written only with that number proves nothing here.
+    t.advance(b"\x1b]9;4;1;300\x07");
+    assert_eq!(t.progress(), Progress::At { percent: 100, state: ProgressState::Normal });
 }
 
 #[test]

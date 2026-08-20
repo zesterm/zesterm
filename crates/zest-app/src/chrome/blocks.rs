@@ -270,8 +270,7 @@ pub fn layout_blocks(
                 [right - d, band[1] + (band[3] - d) / 2.0, d, d],
                 colors.warn,
                 fill,
-                spin,
-                1.0,
+                super::layout::RingStyle::Spin(spin),
                 clip,
             );
             right -= d + GAP * s;

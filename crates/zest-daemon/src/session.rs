@@ -527,13 +527,17 @@ impl Session {
     /// `None` when it is already up to date, which is every poll of a session
     /// that is not running anything — the 0%-idle rule applied to a second
     /// kind of traffic.
+    ///
+    /// **Subscribers first, then the terminal** — the order `poll` takes, and
+    /// the only reason to care is that taking them the other way round is a
+    /// deadlock waiting for two connections to poll the same session at once.
+    /// It happens not to be one today, because the terminal guard would fall
+    /// out of scope before the second lock is asked for; a rule that holds by
+    /// where a brace sits is one an edit breaks silently.
     pub fn progress_for(&self, handle: u64) -> Option<Progress> {
-        let now: Progress = {
-            let term = self.terminal.lock().expect("terminal lock");
-            term.progress().into()
-        };
         let mut subs = self.subscribers.lock().expect("subscriber lock");
         let sub = subs.get_mut(&handle)?;
+        let now: Progress = self.terminal.lock().expect("terminal lock").progress().into();
         (sub.sent_progress != now).then(|| {
             sub.sent_progress = now;
             now

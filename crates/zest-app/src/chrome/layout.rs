@@ -218,13 +218,27 @@ pub(super) fn accent_color(colors: &ChromeColors, choice: AccentChoice) -> Linea
 
 /// A little status dot, as the SDF pipeline draws circles: a square rect
 /// with radius d/2.
+/// How a [`ring`] is drawn: turning, or standing still at a fraction.
+///
+/// An enum rather than "a fraction of 1.0 means spin", which is what this was
+/// first: a determinate bar reaching 100% is exactly `1.0`, so the one state
+/// that means *finished* rendered as the one that means *still going*. The two
+/// are different pictures and inferring one from the other's edge value is how
+/// they came to be the same one.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum RingStyle {
+    /// Busy, no idea how far: one small bite orbiting on the clock.
+    Spin(f32),
+    /// `0.0..=1.0` of the ring left whole. `1.0` is a closed ring, and closed
+    /// is what "done" looks like.
+    Arc(f32),
+}
+
 /// A spinning ring, or an arc of one.
 ///
 /// An SDF box cannot draw an arc, so this is a ring with a *bite* taken out of
 /// it in the colour of whatever is behind — which reads exactly the same and
-/// costs two rects. `phase` is where the bite sits, `0.0..1.0` round the
-/// circle; `fraction` is how much of the ring to leave whole, so `1.0` is a
-/// spinner (one small bite, orbiting) and anything less is a progress arc.
+/// costs two rects.
 ///
 /// **`bg` is not optional and cannot be defaulted.** The bite has to match
 /// what is underneath it, and a tab chip's background differs between its
@@ -236,8 +250,7 @@ pub(super) fn ring(
     rect: [f32; 4],
     ink: LinearRgba,
     bg: LinearRgba,
-    phase: f32,
-    fraction: f32,
+    style: RingStyle,
     clip: [f32; 4],
 ) {
     let d = rect[2].min(rect[3]);
@@ -249,25 +262,11 @@ pub(super) fn ring(
         border_width: 1.5 * (d / 8.0).max(1.0),
         ..RectInstance::filled([rect[0], rect[1], d, d], LinearRgba::TRANSPARENT, clip)
     });
-    // A full ring means "done", and a bite in it would read as still going.
-    if fraction >= 1.0 && phase < 0.0 {
-        return;
-    }
-    // The gap: one bite for a spinner, and for an arc as many as it takes to
-    // erase the part that has not happened yet. Stepping rather than one wide
-    // rect because a rect is a chord, not an arc — at more than a few degrees
-    // it cuts across the ring instead of along it.
     let bite = (d * 0.4).max(2.0);
-    let missing = (1.0 - fraction).clamp(0.0, 1.0);
-    let steps = if missing <= 0.0 { 1 } else { ((missing * 24.0).ceil() as usize).max(1) };
-    for i in 0..steps {
-        let t = if missing <= 0.0 {
-            phase
-        } else {
-            // Sweep backwards from the top, so a bar fills clockwise the way
-            // every other progress indicator does.
-            fraction + missing * (i as f32 / steps as f32)
-        };
+    // Each gap is a rounded square sitting *on* the stroke, so a sweep needs
+    // several: one wide rect would be a chord, and past a few degrees a chord
+    // cuts across the ring rather than along it.
+    let mut gap = |t: f32| {
         let angle = (t - 0.25) * core::f32::consts::TAU;
         rects.push(RectInstance::rounded(
             [
@@ -280,6 +279,22 @@ pub(super) fn ring(
             bg,
             clip,
         ));
+    };
+    match style {
+        RingStyle::Spin(phase) => gap(phase),
+        RingStyle::Arc(fraction) => {
+            let missing = (1.0 - fraction).clamp(0.0, 1.0);
+            // A closed ring: nothing to erase, and nothing that moves.
+            if missing <= f32::EPSILON {
+                return;
+            }
+            let steps = ((missing * 24.0).ceil() as usize).max(1);
+            for i in 0..steps {
+                // Sweeping backwards from the top, so a bar fills clockwise
+                // the way every other progress indicator does.
+                gap(fraction + missing * (i as f32 / steps as f32));
+            }
+        }
     }
 }
 
@@ -2117,20 +2132,24 @@ fn horizontal(
                 zest_core::Progress::None => tab.running.then_some(colors.warn),
             };
             if let Some(ink) = progress_ink {
-                let fraction = match tab.progress {
-                    zest_core::Progress::At { percent, .. } => f32::from(percent) / 100.0,
+                let style = match tab.progress {
+                    zest_core::Progress::At { percent, .. } => {
+                        RingStyle::Arc(f32::from(percent) / 100.0)
+                    }
                     // A shell-reported command and an indeterminate bar are
                     // the same fact — busy, no idea how far — and get the
-                    // same spinner.
-                    _ => 1.0,
+                    // same spinner. A *determinate* one never does: at 100%
+                    // it would be a closed ring that still turned, which is
+                    // the one state meaning finished drawn as the one meaning
+                    // still going.
+                    _ => RingStyle::Spin(model.anim.spin),
                 };
                 ring(
                     &mut out.rects,
                     [tile[0] - 2.0 * s, tile[1] - 2.0 * s, tile[2] + 4.0 * s, tile[3] + 4.0 * s],
                     ink,
                     chip_bg,
-                    model.anim.spin,
-                    fraction,
+                    style,
                     clip,
                 );
             }
@@ -4490,6 +4509,55 @@ mod tests {
             inked(&idle, colors().warn),
             "failed is not also 'running': the row has one dot, so the newer              fact has to win outright"
         );
+    }
+
+    #[test]
+    fn a_finished_bar_is_a_closed_ring_and_a_still_one() {
+        // 100% is exactly the fraction that "a fraction of 1.0 means spin"
+        // collides with, so the one state meaning *finished* rendered as the
+        // one meaning *still going*. Two properties, and the second is what
+        // the first was hiding: a full ring has no gap in it, and it does not
+        // change when the clock does.
+        let m = metrics(1200.0, 800.0, 1.0);
+        let at = |percent, spin| {
+            let mut t = tab(1, TabOrigin::Local, TabPresence::Online);
+            t.progress =
+                zest_core::Progress::At { percent, state: zest_core::ProgressState::Normal };
+            let mut mo = model(vec![t], TabsPosition::Top);
+            mo.anim.spin = spin;
+            layout(&mo, &colors(), &m, &mut measure)
+        };
+        let full = at(100, 0.0);
+        let half = at(50, 0.0);
+        assert!(
+            full.rects.len() < half.rects.len(),
+            "a closed ring draws fewer gaps than a half-full one ({} vs {})",
+            full.rects.len(),
+            half.rects.len()
+        );
+
+        // And the clock does not move it. An indeterminate one *must* move,
+        // which is what makes this a distinction rather than a preference.
+        let a = at(100, 0.0);
+        let b = at(100, 0.6);
+        assert_eq!(
+            a.rects.len(),
+            b.rects.len(),
+            "a finished bar is the same picture at every phase of the clock"
+        );
+
+        let spin_at = |spin| {
+            let mut t = tab(1, TabOrigin::Local, TabPresence::Online);
+            t.progress = zest_core::Progress::Indeterminate;
+            let mut mo = model(vec![t], TabsPosition::Top);
+            mo.anim.spin = spin;
+            let l = layout(&mo, &colors(), &m, &mut measure);
+            // Both axes: the bite's x is identical at phases 0.0 and 0.5
+            // (cos is zero at both quarter turns), so comparing one would
+            // report a ring that turns perfectly well as frozen.
+            l.rects.iter().map(|r| (r.rect[0].to_bits(), r.rect[1].to_bits())).collect::<Vec<_>>()
+        };
+        assert_ne!(spin_at(0.0), spin_at(0.5), "an indeterminate ring turns");
     }
 
     #[test]

@@ -5165,7 +5165,14 @@ impl App {
         // ran. The clock is what the chip's ring and the row's dot both turn
         // on, and neither position has a claim on it.
         self.anim_pulse = tab_models.iter().any(|t| t.running);
-        self.anim_spin_tabs = tab_models.iter().any(|t| t.progress.is_busy());
+        // Only what actually *turns*. A determinate arc is a static picture
+        // that changes when the number does, so keeping the 80ms timer alive
+        // for it would spend a frame every 80ms redrawing an identical ring —
+        // and 0%-idle is a property this app has tests for, not a hope.
+        self.anim_spin_tabs = tab_models.iter().any(|t| {
+            matches!(t.progress, zest_core::Progress::Indeterminate)
+                || (t.running && !t.progress.is_busy())
+        });
 
         // Which chip is lit — exactly one (invariant 9). The Profiles pane
         // wins while its screen is up (its chip sits right after the

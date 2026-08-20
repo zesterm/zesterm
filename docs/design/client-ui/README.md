@@ -675,8 +675,12 @@ and Ghostty all render it, which is what makes it interoperable rather than inve
   *identity* — its profile, its host, the link's health — and a mark forced to choose
   between "which machine is this" and "is it busy" answers the less urgent question half
   the time.
-- **A ring is two rects, not an arc**: an SDF box cannot draw one, so it is a ring with a
-  bite taken out in the colour of whatever is behind it. That background is a parameter and
+- **A ring is a ring plus its gaps, not an arc**: an SDF box cannot draw one, so it is a
+  circle with bites taken out in the colour of whatever is behind it. A spinner has one
+  bite, orbiting; a bar erases the part that has not happened yet, and at 100% erases
+  nothing — a closed ring, standing still. Spinner and bar are separate cases rather
+  than one fraction, because 100% is exactly where inferring the first from the second
+  makes *finished* render as *still going*. That background is a parameter and
   cannot be defaulted — a chip's differs between its active fill, the strip, and a hover
   fill, which is exactly why the block header's copy could hardcode one and this one cannot.
 - **Reaching 0 after being busy, and reporting an error, both light the attention dot.**
