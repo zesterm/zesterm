@@ -1044,14 +1044,14 @@ impl Connection {
                                 account: enrolled.account,
                                 message: String::new(),
                             },
-                            // Rendered as the CLI renders it — `Display` is
-                            // what `zest-daemon: {e}` prints — because the
-                            // message is the person's next move and the app
-                            // shows it verbatim.
+                            // Rendered as the CLI renders it — `refusal_text`
+                            // is what `--enroll` prints — because the message
+                            // is the person's next move and the app shows it
+                            // verbatim (#368).
                             Err(e) => HostMessage::EnrollResult {
                                 ok: false,
                                 account: None,
-                                message: e.to_string(),
+                                message: crate::enroll::refusal_text(&e),
                             },
                         };
                         *cell.lock().expect("enroll lock") = Some(msg);
@@ -2099,6 +2099,61 @@ mod tests {
                 .expect("store readable")
                 .is_some(),
             "the token must land in the daemon's own store, exactly like --enroll"
+        );
+    }
+
+    #[test]
+    fn a_refused_claim_reaches_the_app_as_the_persons_next_move() {
+        // The seam's error is shown verbatim by the app's card (#227), so what
+        // crosses it must already be the sentence to act on. Before #368 this
+        // shipped `Display` — "the control plane refused this enrolment (409):
+        // already_enrolled" — which names no move at all.
+        struct RefusingControlPlane;
+        impl crate::enroll::ControlPlane for RefusingControlPlane {
+            fn post_json(
+                &self,
+                _url: &str,
+                _body: &str,
+            ) -> Result<crate::enroll::Response, crate::enroll::EnrollError> {
+                Ok(crate::enroll::Response {
+                    status: 409,
+                    body: r#"{"error":"already_enrolled","detail":"revoked"}"#.into(),
+                })
+            }
+        }
+        let mut cfg = config();
+        cfg.enroll = Some(crate::EnrollSeam {
+            base_url: "https://control.test".into(),
+            http: Arc::new(RefusingControlPlane),
+            secrets: Arc::new(zest_mesh::keystore::MemoryKeyStore::new()),
+        });
+        let mut c = Connection::new(
+            cfg,
+            Arc::new(Registry::new()),
+            crate::auth::Auth::Transport(test_authenticator()),
+            "test",
+        );
+        let mut peer = authenticate(&mut c);
+
+        let out = peer.send(&mut c, &ClientMessage::Enroll { code: "GOLDCODE".into() });
+        assert!(out.is_empty(), "the reply comes off the worker: {out:?}");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let result = loop {
+            let msgs = c.take_enroll_result();
+            if !msgs.is_empty() {
+                break msgs;
+            }
+            assert!(Instant::now() < deadline, "the enrolment never settled");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let [HostMessage::EnrollResult { ok, message, .. }] = &result[..] else {
+            panic!("expected an EnrollResult, got {result:?}");
+        };
+        assert!(!ok);
+        assert!(
+            message.contains("restore"),
+            "a revoked machine's refusal must say the way back, not restate the 409; \
+             got {message:?}"
         );
     }
 
