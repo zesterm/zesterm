@@ -346,6 +346,12 @@ pub fn layout(
             &mut out,
         );
     }
+    if let Some(confirm) = &model.confirm_close {
+        // Above the other overlays and below the approval modal. It opened
+        // because the user pressed ⌘W, so it may own the window; the approval
+        // opens on the network's schedule and outranks everything.
+        confirm_close_overlay(confirm, model.hover, colors, m, measure, &mut out);
+    }
     if let Some(approval) = &model.approval {
         // Above every other overlay, deliberately: unlike them it opens on
         // the *network's* schedule, not the user's, so it cannot rely on the
@@ -723,6 +729,138 @@ fn approval_overlay(
             tracking: 0.0,
         });
         out.hit.push(rect, region);
+    }
+}
+
+// The close-confirm (#381), logical px. Shorter than the approval panel: it
+// carries a question and a sentence, not a code to compare digit by digit.
+const CONFIRM_W: f32 = 470.0;
+const CONFIRM_H: f32 = 168.0;
+/// Buttons size to their labels — "Close and stop it" does not fit the
+/// approval modal's fixed 96px — with a floor so "Cancel" is not a sliver.
+const CONFIRM_BTN_MIN: f32 = 84.0;
+const CONFIRM_BTN_PAD: f32 = 14.0;
+
+/// The close-a-busy-tab confirm: ⌘W landed on something that is still
+/// running, and the three outcomes differ enough to be worth asking.
+///
+/// Scrim swallows rather than dismisses, on the approval modal's rule — the
+/// question exists *because* one of the answers is destructive, and "clicked
+/// it away" is not one of the three. Esc is Cancel.
+///
+/// Drawn under the approval modal and over everything else: this one opened
+/// because the user pressed a key, so it may own the window; that one opens on
+/// the network's schedule and outranks it.
+fn confirm_close_overlay(
+    confirm: &super::model::ConfirmCloseModel,
+    hover: Option<HitRegion>,
+    colors: &ChromeColors,
+    m: &ChromeMetrics,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+    out: &mut ChromeLayout,
+) {
+    let s = m.scale;
+    let no_clip = [0.0, 0.0, m.width, m.height];
+
+    out.rects.push(RectInstance::filled(no_clip, colors.scrim, no_clip));
+    out.hit.push(no_clip, HitRegion::ConfirmPanel);
+
+    let w = (CONFIRM_W * s).min((m.width - 2.0 * EDGE_PAD * s).max(0.0));
+    let h = CONFIRM_H * s;
+    let x = (m.width - w) / 2.0;
+    let y = ((m.height - h) * 0.32).max(0.0);
+    let panel = [x, y, w, h];
+    out.rects.push(RectInstance {
+        radii: [APPROVAL_RADIUS * s; 4],
+        border: colors.line,
+        border_width: HAIRLINE * s,
+        shadow_blur: 20.0 * s,
+        shadow_alpha: colors.shadow_alpha,
+        ..RectInstance::filled(panel, colors.panel_bg, no_clip)
+    });
+    out.hit.push(panel, HitRegion::ConfirmPanel);
+
+    // Three lines, drawn verbatim: the app composed them, because only the app
+    // knows what is running and whether there is a daemon to leave it with.
+    let pad = APPROVAL_PAD * s;
+    let title_px = UI_BODY * s;
+    out.texts.push(TextRun {
+        text: confirm.title.clone(),
+        pos: [x + pad, y + pad + title_px * 0.8],
+        max_width: w - 2.0 * pad,
+        color: colors.text_active,
+        clip: panel,
+        px: title_px,
+        bold: true,
+        tracking: 0.0,
+    });
+
+    let body_px = UI_BODY * s;
+    if !confirm.body.is_empty() {
+        out.texts.push(TextRun {
+            text: confirm.body.clone(),
+            pos: [x + pad, y + 54.0 * s + body_px * 0.72],
+            max_width: w - 2.0 * pad,
+            color: colors.text_inactive,
+            clip: panel,
+            px: body_px,
+            bold: false,
+            tracking: 0.0,
+        });
+    }
+    let sub_px = UI_STATUS * s;
+    out.texts.push(TextRun {
+        text: confirm.hint.clone(),
+        pos: [x + pad, y + 80.0 * s + sub_px * 0.72],
+        max_width: w - 2.0 * pad,
+        color: colors.text_faint,
+        clip: panel,
+        px: sub_px,
+        bold: false,
+        tracking: 0.0,
+    });
+
+    // Right to left, so the corner position — the one every dialog has taught
+    // the hand to reach for — holds the answer that destroys nothing. Cancel
+    // ends up leftmost, where a misfire is cheapest.
+    let btn_h = APPROVAL_BTN_H * s;
+    let by = y + h - pad - btn_h;
+    let mut right = x + w - pad;
+    let mut buttons: Vec<(&str, HitRegion, LinearRgba)> = Vec::with_capacity(3);
+    if confirm.can_detach {
+        buttons.push(("Detach", HitRegion::ConfirmDetach, colors.accent));
+    }
+    buttons.push(("Close and stop it", HitRegion::ConfirmClose, colors.danger));
+    buttons.push(("Cancel", HitRegion::ConfirmCancel, colors.text_inactive));
+    for (label, region, ink) in buttons {
+        let label_px = UI_BODY * s;
+        let bw = (measure(label, label_px, false, 0.0) + 2.0 * CONFIRM_BTN_PAD * s)
+            .max(CONFIRM_BTN_MIN * s);
+        let rect = [right - bw, by, bw, btn_h];
+        let hovered = hover == Some(region);
+        out.rects.push(RectInstance {
+            radii: [7.0 * s; 4],
+            border: ink,
+            border_width: HAIRLINE * s,
+            ..RectInstance::filled(
+                rect,
+                if hovered { colors.tab_hover_bg } else { colors.panel_bg },
+                panel,
+            )
+        });
+        let lw = measure(label, label_px, false, 0.0);
+        out.texts.push(TextRun {
+            text: label.into(),
+            pos: [rect[0] + (bw - lw) / 2.0, baseline_in(by, btn_h, label_px)],
+            max_width: bw,
+            color: ink,
+            clip: panel,
+            px: label_px,
+            bold: false,
+            tracking: 0.0,
+        });
+        out.hit.push(rect, region);
+        right = rect[0] - APPROVAL_BTN_GAP * s;
     }
 }
 
@@ -2802,6 +2940,7 @@ mod tests {
             block_menu: None,
             notice: None,
             approval: None,
+            confirm_close: None,
         }
     }
 
@@ -4262,6 +4401,103 @@ mod tests {
             quiet.texts.iter().all(|t| t.text != "481502"),
             "a resolved request leaves no trace of its code"
         );
+    }
+
+    fn confirm(can_detach: bool) -> super::super::model::ConfirmCloseModel {
+        super::super::model::ConfirmCloseModel {
+            addr: addr(1),
+            title: "Close \u{201c}vim\u{201d}?".into(),
+            body: "cargo build --release is still running.".into(),
+            hint: "Detaching leaves it running.".into(),
+            can_detach,
+        }
+    }
+
+    /// The first pixel in the window that answers as `region`, if any.
+    fn find_region(l: &ChromeLayout, region: HitRegion) -> Option<(f32, f32)> {
+        (0..800).step_by(2).find_map(|y| {
+            (0..1200).step_by(4).find_map(|x| {
+                (l.hit.hit(x as f32, y as f32) == Some(region)).then_some((x as f32, y as f32))
+            })
+        })
+    }
+
+    #[test]
+    fn the_close_confirm_owns_the_window_and_its_answers_are_where_it_says() {
+        // #381. Three properties: the question names what it would end (a
+        // modal that says "something is running" is one nobody can answer),
+        // every button answers exactly where it is drawn, and a click
+        // anywhere else lands on the panel rather than falling through to a
+        // grid that would start a selection under an open question.
+        let mut mo = model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+        mo.confirm_close = Some(confirm(true));
+        let m = metrics(1200.0, 800.0, 1.0);
+        let l = layout(&mo, &colors(), &m, &mut measure);
+
+        assert!(
+            l.texts.iter().any(|t| t.text.contains("cargo build --release")),
+            "the modal names the command it would end"
+        );
+        let close = find_region(&l, HitRegion::ConfirmClose).expect("Close answers somewhere");
+        let detach = find_region(&l, HitRegion::ConfirmDetach).expect("Detach answers somewhere");
+        let cancel = find_region(&l, HitRegion::ConfirmCancel).expect("Cancel answers somewhere");
+        assert!(
+            cancel.0 < close.0 && close.0 < detach.0,
+            "the corner every dialog trains the hand to reach holds the answer that \
+             destroys nothing; Cancel sits leftmost, where a misfire is cheapest \
+             (cancel {cancel:?}, close {close:?}, detach {detach:?})"
+        );
+
+        for (x, y) in [(600.0, 700.0), (30.0, 120.0), (1100.0, 60.0)] {
+            assert_eq!(
+                l.hit.hit(x, y),
+                Some(HitRegion::ConfirmPanel),
+                "({x},{y}) must land on the modal, not fall through it"
+            );
+        }
+
+        mo.confirm_close = None;
+        let quiet = layout(&mo, &colors(), &m, &mut measure);
+        assert!(
+            find_region(&quiet, HitRegion::ConfirmPanel).is_none(),
+            "an answered question leaves nothing behind"
+        );
+    }
+
+    #[test]
+    fn the_confirm_offers_no_detach_when_there_is_nothing_to_detach_from() {
+        // An in-process pty has no daemon holding it, so Detach would be a
+        // button for an outcome this build cannot produce — worse than one
+        // fewer button, because the person would believe the shell survived.
+        let mut mo = model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+        mo.confirm_close = Some(confirm(false));
+        let m = metrics(1200.0, 800.0, 1.0);
+        let l = layout(&mo, &colors(), &m, &mut measure);
+        assert!(
+            find_region(&l, HitRegion::ConfirmDetach).is_none(),
+            "no Detach button, and no region pretending to be one"
+        );
+        assert!(find_region(&l, HitRegion::ConfirmClose).is_some(), "the other two remain");
+        assert!(find_region(&l, HitRegion::ConfirmCancel).is_some());
+    }
+
+    #[test]
+    fn the_confirm_never_hands_the_wheel_to_the_strip_behind_it() {
+        // The exhaustive `wheel_target` exists because regions drawn inside
+        // the grid area used to fall through to "must be the strip" (#256).
+        // A modal is the clearest case: nothing behind it may move.
+        for region in [
+            HitRegion::ConfirmPanel,
+            HitRegion::ConfirmClose,
+            HitRegion::ConfirmDetach,
+            HitRegion::ConfirmCancel,
+        ] {
+            assert_eq!(
+                super::super::hit::wheel_target(Some(region), None),
+                super::super::hit::WheelTarget::Swallow,
+                "{region:?} must swallow the wheel"
+            );
+        }
     }
 
     #[test]

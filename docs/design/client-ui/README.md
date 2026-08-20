@@ -616,6 +616,8 @@ replaces wholesale so a profile can *clear* an inherited variable), `src/ui.rs`
 | `⏎` in the launcher | Run the default profile |
 | Pick a profile in the launcher | Appends a tab running that profile on its pinned host, and focuses it |
 | `⇧⏎` in the launcher | Run the highlighted profile on a host you choose |
+| `⌘W` | Close the tab. On this machine's shells that ends them; a remote one only detaches |
+| `⌘B` | Detach the tab — stop watching, leave the session running in the daemon |
 | Click a modified dot | Reset that field — delete the key from the config file |
 | Drag a slider / click its track | Set the value, quantised to the schema step |
 | Mobile: tap a block | Expand output. Long-press: re-run |
@@ -657,6 +659,27 @@ on failure, and a `notify-send` wrapper all light it without any of them being k
 - `tabs.attention_bell` and `tabs.attention_notify`, both on by default, switch the two
   sources independently: a bell fires on tab-completion in some shells, a notification
   almost never fires by accident.
+**Closing a tab is a choice, and only sometimes a question.** Closing the *window* has
+always detached every tab, this machine's shells included — a session that cannot outlive
+its window is the fleet negated (ADR-007) — while `⌘W` ends them, because that is what the
+hand expects of it. The two disagree on purpose. What was missing was any way to ask for
+the other outcome, and any warning before the destructive one:
+
+- **`⌘B` detaches.** Its own chord, not a modifier on `⌘W`: the outcomes are not degrees of
+  one another. `B` for background, and deliberately not `⌘⇧W` — every desktop chord must
+  also be reachable as `Ctrl+Shift+<key>` on Windows, where a shifted letter collapses onto
+  its unshifted twin's chord, so `⌘⇧W` and `⌘W` would be one gesture on the primary platform.
+- **A confirm appears only when closing would destroy something** — a running command, or a
+  full-screen program on the alternate screen (which records no OSC 133 markers at all, so
+  it is the *usual* reason a TUI looks idle). 470×168, `ui.panel`, radius 12, the approval
+  modal's scrim: it swallows rather than dismisses, because one of the three answers is
+  irreversible. Buttons right to left — **Detach** in the affirmative corner (accent),
+  **Close and stop it** (danger), **Cancel** — so the corner every dialog trains the hand to
+  reach holds the answer that destroys nothing. `Esc` cancels; `⏎` detaches, and does nothing
+  at all when there is no daemon to detach to.
+- **`tabs.close_action`** (`kill` | `detach` | `ask`, default `kill`) and
+  **`tabs.confirm_close_when_busy`** (default on) are the two settings. They are independent:
+  one answers "which of these did you mean", the other "are you sure".
 
 ---
 
