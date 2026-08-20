@@ -398,12 +398,35 @@ export async function revokeDevice(
  * `null` keeps revoke's meaning — no such row under this account, which is
  * also what a stranger's machine looks like, for the reason `revokeHost` gives.
  */
-export async function restoreHost(db: Db, id: string, userId: string): Promise<string | null> {
+export interface RestoredRow {
+  readonly label: string;
+  /**
+   * Whether this call is the one that brought the row back. The audit log
+   * records only transitions — a second click on a slow page is a success to
+   * the person and a non-event to the log (#373 review finding).
+   */
+  readonly changed: boolean;
+}
+
+export async function restoreHost(db: Db, id: string, userId: string): Promise<RestoredRow | null> {
+  // The transition first — `RETURNING` sees post-update values, so "was it
+  // revoked" has to be part of the WHERE — then the already-live read for the
+  // idempotent success. Two statements, no race worth guarding: the second
+  // click landing between them still answers success about a live row.
   const row = await db
-    .prepare(`UPDATE hosts SET revoked_at = NULL WHERE id = ? AND user_id = ? RETURNING label`)
+    .prepare(
+      `UPDATE hosts SET revoked_at = NULL
+        WHERE id = ? AND user_id = ? AND revoked_at IS NOT NULL
+       RETURNING label`,
+    )
     .bind(id, userId)
     .first<{ label: string }>();
-  return row === null ? null : row.label;
+  if (row !== null) return { label: row.label, changed: true };
+  const live = await db
+    .prepare(`SELECT label FROM hosts WHERE id = ? AND user_id = ?`)
+    .bind(id, userId)
+    .first<{ label: string }>();
+  return live === null ? null : { label: live.label, changed: false };
 }
 
 /**
@@ -412,10 +435,23 @@ export async function restoreHost(db: Db, id: string, userId: string): Promise<s
  * restoring the row speaks for the row, not for the vouchers, and whoever
  * vouched can vouch again as the ordinary renewal.
  */
-export async function restoreDevice(db: Db, id: string, userId: string): Promise<string | null> {
+export async function restoreDevice(
+  db: Db,
+  id: string,
+  userId: string,
+): Promise<RestoredRow | null> {
   const row = await db
-    .prepare(`UPDATE devices SET revoked_at = NULL WHERE id = ? AND user_id = ? RETURNING label`)
+    .prepare(
+      `UPDATE devices SET revoked_at = NULL
+        WHERE id = ? AND user_id = ? AND revoked_at IS NOT NULL
+       RETURNING label`,
+    )
     .bind(id, userId)
     .first<{ label: string }>();
-  return row === null ? null : row.label;
+  if (row !== null) return { label: row.label, changed: true };
+  const live = await db
+    .prepare(`SELECT label FROM devices WHERE id = ? AND user_id = ?`)
+    .bind(id, userId)
+    .first<{ label: string }>();
+  return live === null ? null : { label: live.label, changed: false };
 }

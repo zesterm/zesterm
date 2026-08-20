@@ -125,14 +125,20 @@ export async function revokeRegistryEntry(
   }
 
   if (revoked === null) return json({ error: 'not_found' }, 404);
-  await recordRegistryEvent(env.DB, user.id, {
-    action: 'revoke',
-    actor: 'owner',
-    subjectKind: kind,
-    subjectId: id,
-    subjectLabel: revoked.label,
-    at: now,
-  });
+  // Only the transition is an event: `COALESCE` answers a second click with
+  // the ORIGINAL timestamp, so `revokedAt === now` is exactly "this call is
+  // the one that revoked it" — a re-click is a success to the person and a
+  // non-event to the log (#373 review finding).
+  if (revoked.revokedAt === now) {
+    await recordRegistryEvent(env.DB, user.id, {
+      action: 'revoke',
+      actor: 'owner',
+      subjectKind: kind,
+      subjectId: id,
+      subjectLabel: revoked.label,
+      at: now,
+    });
+  }
   return json({ id, revokedAt: revoked.revokedAt });
 }
 
@@ -169,14 +175,18 @@ export async function restoreRegistryEntry(
       : await restoreDevice(env.DB, id, user.id);
 
   if (restored === null) return json({ error: 'not_found' }, 404);
-  await recordRegistryEvent(env.DB, user.id, {
-    action: 'restore',
-    actor: 'owner',
-    subjectKind: kind,
-    subjectId: id,
-    subjectLabel: restored,
-    at: now,
-  });
+  // `changed` gates the event for revoke's reason: restoring an already-live
+  // row is a success to the person and a non-event to the log.
+  if (restored.changed) {
+    await recordRegistryEvent(env.DB, user.id, {
+      action: 'restore',
+      actor: 'owner',
+      subjectKind: kind,
+      subjectId: id,
+      subjectLabel: restored.label,
+      at: now,
+    });
+  }
   return json({ id });
 }
 

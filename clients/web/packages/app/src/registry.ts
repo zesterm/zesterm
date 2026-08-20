@@ -166,15 +166,19 @@ export function parseEvent(value: unknown): AccountEvent | null {
   const e = value as Record<string, unknown>;
   const action = str(e['action']);
   const actor = str(e['actor']);
+  const kind = e['subjectKind'];
   const label = str(e['subjectLabel']);
   const at = millis(e['at']);
   if (action === null || !ACTIONS.includes(action)) return null;
   if (actor === null || !ACTORS.includes(actor)) return null;
+  // Validated like `action` and `actor`, never coerced: a kind nobody defined
+  // is a row that does not parse, not a device by default.
+  if (kind !== 'host' && kind !== 'device') return null;
   if (label === null || at === null) return null;
   return {
     action: action as AccountEvent['action'],
     actor: actor as AccountEvent['actor'],
-    subjectKind: e['subjectKind'] === 'host' ? 'host' : 'device',
+    subjectKind: kind,
     subjectLabel: label,
     at,
   };

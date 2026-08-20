@@ -121,6 +121,14 @@ test('an event row missing what a line needs is dropped, not rendered as undefin
   assert.equal(parseEvent(good)?.subjectLabel, 'andy-mac');
   assert.equal(parseEvent({ ...good, action: 'exploded' }), null, 'a verb nobody renders');
   assert.equal(parseEvent({ ...good, actor: 'ghost' }), null, 'an authority nobody defined');
+  assert.equal(
+    parseEvent({ ...good, subjectKind: 'toaster' }),
+    null,
+    'a kind nobody defined is dropped, never coerced to device',
+  );
+  const { subjectKind, ...withoutKind } = good;
+  void subjectKind;
+  assert.equal(parseEvent(withoutKind), null, 'and a missing kind is the same non-row');
   assert.equal(parseEvent({ ...good, subjectLabel: '' }), null, 'a line about nothing named');
   assert.equal(parseEvent({ ...good, at: 'yesterday' }), null);
   assert.equal(parseEvent(null), null);

@@ -110,6 +110,35 @@ test('a revoke and its restore each write one owner event carrying the label', a
   db.close();
 });
 
+test('idempotent re-clicks are non-events: the log records transitions only', async () => {
+  // Revoke twice and restore twice: each pair is one transition each way, so
+  // the log holds exactly two rows. Duplicate audit lines for acts that
+  // changed nothing are how a log stops being believed (#375 review finding).
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  seedHost(db, MAC, 'user-a', 'andy-mac');
+
+  await routeApi(post(`/api/hosts/${MAC}/revoke`, cookie), env(db), fetch, NOW);
+  const again = await routeApi(post(`/api/hosts/${MAC}/revoke`, cookie), env(db), fetch, NOW + 5_000);
+  assert.equal(again?.status, 200, 'the re-click is still a success to the person');
+
+  await routeApi(post(`/api/hosts/${MAC}/restore`, cookie), env(db), fetch, NOW + 10_000);
+  const alreadyLive = await routeApi(
+    post(`/api/hosts/${MAC}/restore`, cookie),
+    env(db),
+    fetch,
+    NOW + 15_000,
+  );
+  assert.equal(alreadyLive?.status, 200);
+
+  assert.deepEqual(
+    events(db).map((e) => e.action),
+    ['revoke', 'restore'],
+    'two transitions, two rows — the re-clicks left nothing',
+  );
+  db.close();
+});
+
 test('a refused revoke writes no event', async () => {
   // An audit line for an act that did not happen is worse than a missing one:
   // it answers "what happened" with something that did not.
