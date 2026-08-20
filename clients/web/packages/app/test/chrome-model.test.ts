@@ -515,3 +515,56 @@ test('no sessions is no rows, and asks the seam nothing', () => {
   assert.deepEqual(rows, []);
   assert.equal(calls, 0, 'a mint or a ticket per empty render would be a real cost');
 });
+
+test('the seam is asked once per machine, not once per session', () => {
+  // `dialFor` is not a lookup on the hosted path: it walks a snapshots array
+  // that `LiveDirectory` rebuilds on every call, and mints a fresh dial. A
+  // machine with a dozen sessions would otherwise pay for a dozen scans per
+  // render, for an answer that cannot differ between two rows naming the same
+  // machine.
+  const asked: string[] = [];
+  const rows = sessionRows(
+    [
+      sess(TAB_HOST, '1'),
+      sess(OTHER_HOST, '2'),
+      sess(TAB_HOST, '3'),
+      sess(TAB_HOST, '4'),
+      sess(OTHER_HOST, '5'),
+    ],
+    (hostId) => {
+      asked.push(hostId);
+      return DIAL;
+    },
+  );
+  assert.deepEqual(asked, [TAB_HOST, OTHER_HOST], 'each machine once, in first-seen order');
+  assert.equal(rows.length, 5, 'and every session still gets its row');
+});
+
+test('rows naming one machine share one dial, so a caller may compare them', () => {
+  // Reference stability across the rows of a single call — the property a
+  // caller comparing dials would otherwise not have, and one a per-row mint
+  // silently destroys.
+  let minted = 0;
+  const rows = sessionRows([sess(TAB_HOST, '1'), sess(TAB_HOST, '2')], () => {
+    minted += 1;
+    return (() => {}) as unknown as Dial;
+  });
+  assert.equal(minted, 1);
+  assert.equal(rows[0]?.dial, rows[1]?.dial);
+});
+
+test('an unreachable machine is cached as unreachable, not re-asked', () => {
+  // `null` is an answer. Caching it in a `Map` and probing with `undefined` is
+  // what keeps "we asked and it cannot be reached" from being re-asked once
+  // per row — the case a truthiness check would get exactly backwards.
+  let asked = 0;
+  const rows = sessionRows([sess(TAB_HOST, '1'), sess(TAB_HOST, '2')], () => {
+    asked += 1;
+    return null;
+  });
+  assert.equal(asked, 1);
+  assert.deepEqual(
+    rows.map((r) => r.dial),
+    [null, null],
+  );
+});

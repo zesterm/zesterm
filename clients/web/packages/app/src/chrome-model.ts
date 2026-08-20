@@ -165,7 +165,23 @@ export function sessionRows(
   sessions: readonly SessionEntry[],
   dialFor: (hostId: string) => Dial | null,
 ): readonly SessionRow[] {
-  return sessions.map((entry) => ({ entry, dial: dialFor(entry.host) }));
+  // Once per machine, not once per row. `dialFor` is not a lookup on the
+  // hosted path: it walks a snapshots array that `LiveDirectory` rebuilds on
+  // every call, and mints a fresh dial closure — so a machine with a dozen
+  // sessions paid for a dozen scans on every render of a list whose answer
+  // cannot differ between two rows naming the same machine.
+  //
+  // It also makes the dials reference-stable across the rows of one call,
+  // which is the property a caller comparing them would otherwise not have.
+  const byHost = new Map<string, Dial | null>();
+  return sessions.map((entry) => {
+    let dial = byHost.get(entry.host);
+    if (dial === undefined) {
+      dial = dialFor(entry.host);
+      byHost.set(entry.host, dial);
+    }
+    return { entry, dial };
+  });
 }
 
 /**

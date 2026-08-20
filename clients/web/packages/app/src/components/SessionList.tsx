@@ -22,7 +22,7 @@ import { component, signal } from 'sigx';
 import type { Dial } from '@zesterm/client';
 import { type DirectoryView, type SessionEntry } from '@zesterm/control';
 
-import { sessionRows } from '../chrome-model.ts';
+import { sessionRows, tabIdOf } from '../chrome-model.ts';
 import { runExclusive } from '../busy-guard.ts';
 import { describeDeviceKey, type DeviceKeyKind } from '../device-key.ts';
 import type { DirectorySource, DirectoryStatus } from '../directory-source.ts';
@@ -167,7 +167,12 @@ export const SessionList = component<{
                 // `sessionRows`' two decisions — pure, and tested, because a
                 // rule living in this markup is one no test here can reach.
                 sessionRows(view.sessions, ctx.props.dialFor).map(({ entry: s, dial }) => (
-                  <li>
+                  // The machine AND the session. A session id is unique to its
+                  // own daemon and not across the fleet, so keying on it alone
+                  // would collide the moment this pane showed two machines —
+                  // and `tabIdOf` is the pair every other surface already
+                  // identifies a session by.
+                  <li key={tabIdOf(s.host, s.session)}>
                     <button
                       class="session-row"
                       disabled={dial === null}
