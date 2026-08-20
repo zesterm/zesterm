@@ -340,6 +340,41 @@
     "restartHint": false
   },
   {
+    "key": "tabs.close_action",
+    "group": "Tabs",
+    "widget": "select",
+    "description": "What closing a tab does to a shell that runs on this machine: end it,\nleave it running in the daemon, or ask.\n\nClosing the *window* has always detached everything, this machine's\nshells included — so `kill` is ⌘W disagreeing with ⌘Q on purpose,\nbecause that is what the hand expects of it.",
+    "range": null,
+    "integer": false,
+    "variants": [
+      {
+        "value": "kill",
+        "description": "End the shell, as every ordinary terminal does. The default, because\nit is what the hand already expects from ⌘W."
+      },
+      {
+        "value": "detach",
+        "description": "Leave it running in the daemon and stop watching it. The session is\nstill there in the picker, and on the next launch, and from a phone."
+      },
+      {
+        "value": "ask",
+        "description": "Ask every time."
+      }
+    ],
+    "default": "kill",
+    "restartHint": false
+  },
+  {
+    "key": "tabs.confirm_close_when_busy",
+    "group": "Tabs",
+    "widget": "toggle",
+    "description": "Ask before closing a tab with a command running or a full-screen\nprogram on the alternate screen.\n\nIndependent of `close_action`: it is the question \"are you sure\", not\nthe question \"which of these did you mean\", and someone who wants\n`kill` still wants to be stopped before ⌘W ends a build.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": true,
+    "restartHint": false
+  },
+  {
     "key": "tabs.position",
     "group": "Tabs",
     "widget": "select",
