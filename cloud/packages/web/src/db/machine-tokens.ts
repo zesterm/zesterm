@@ -172,10 +172,16 @@ export async function explainMachineToken(
 ): Promise<TokenRefusal | null> {
   if (!looksLikeMachineToken(token)) return null;
   const id = await sessionIdOf(token);
+  // `disabled_at` rides the same read: a disabled account's machines get the
+  // bare 401 whatever else is true of the token — the account's standing is
+  // not the machine's business, and the JOIN here is what keeps that rule
+  // from depending on which refusal happens to be checked first.
   const row = await db
     .prepare(
-      `SELECT user_id, principal_kind, principal_id, expires_at, revoked_at
-         FROM machine_tokens WHERE id = ?`,
+      `SELECT t.user_id, t.principal_kind, t.principal_id, t.expires_at, t.revoked_at,
+              u.disabled_at
+         FROM machine_tokens t JOIN users u ON u.id = t.user_id
+        WHERE t.id = ?`,
     )
     .bind(id)
     .first<{
@@ -184,8 +190,10 @@ export async function explainMachineToken(
       principal_id: string;
       expires_at: number;
       revoked_at: number | null;
+      disabled_at: number | null;
     }>();
   if (row === null) return null;
+  if (row.disabled_at !== null) return null;
   if (row.revoked_at !== null) return 'revoked';
   if (row.expires_at <= now) return 'expired';
 
