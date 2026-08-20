@@ -204,6 +204,14 @@ chip, a spacer, and `⌘K`. The launcher is not here — it sits beside the side
 1. Search row, flush under the header: the search pill (`flex:1`, 30px, radius 7px, `ui.panel`, 1px `ui.line`, `⌘K` in 11px mono + "Search sessions, blocks, hosts" in 12px `ui.faint`) with the **same `+` to its right** — searching and starting a session are the two things you do at the top of a sidebar. Its menu anchors `top:40px; left:0` from the button so it opens rightwards over the pane; right-anchored it runs off the window's left edge.
 3. Host groups, 14px apart, **built from the same tab list the horizontal strip renders** — grouped by the host each tab runs on, so a session launched from a profile appears under that profile's host (`⬢ Ubuntu` under FORGE) and carries the same selection styling. Do not build this list from a separate array or from literal markup: a hardcoded row cannot be selected, and a truncated list cannot show a session the user just started. Group header: 6px status dot + host name (10.5px, 600, `.09em`, uppercase, `ui.dim`) + a mono sub-label (`macOS · LAN 0.3ms`) in 10px `ui.faint`.
 4. Session rows: 7px/8px padding, radius 8px, 9px gap. 5px state dot (running `warn` pulsing 1.6s, idle `ui.faint`, live `success`), then title 12.5px over a 10.5px mono cwd in `ui.faint`, then age right-aligned in 10px mono. Selected row fill `ui.accentSoft`; hover `ui.selSoft`.
+   **The age's slot is also the close's**: under the pointer the age is replaced by
+   the same 16px `×` the horizontal chip carries (`ui.faint`, hover fill `ui.line`),
+   and the slot is reserved at the wider of the two either way so the title never
+   reflows when the pointer arrives. A row 262px wide with a two-line label cannot
+   spend width on both, which is why this one is revealed rather than always drawn
+   — but a sidebar with no way to point at "close" is worse, and was the state
+   before #379: middle-click, unadvertised, or nothing. The pinned Settings row
+   still carries none (§11: app tabs have no close).
 5. Footer strip, 42px, top border `#1b2338`: `● 4 hosts online · 1 asleep` — clicking opens the fleet view.
 
 The header's session identity reads from the **active tab** — literal text there contradicts the pane the moment the active tab is not the first one.

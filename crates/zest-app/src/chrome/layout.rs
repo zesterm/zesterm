@@ -2465,7 +2465,12 @@ fn vertical(
             let row = [ROW_HPAD * s, y, sw - 2.0 * ROW_HPAD * s, row_h];
 
             let active = ti == model.active;
-            let hovered = model.hover == Some(HitRegion::Tab(tab.addr));
+            // The row and its × reveal together and stay revealed together.
+            // Testing `Tab` alone would hide the × the moment the pointer
+            // entered it, and the click would then fall back through to the
+            // row and *activate* the tab instead of closing it.
+            let close_hovered = model.hover == Some(HitRegion::TabClose(tab.addr));
+            let hovered = close_hovered || model.hover == Some(HitRegion::Tab(tab.addr));
             if active {
                 out.rects.push(RectInstance::rounded(row, 8.0 * s, colors.accent_soft, rows_clip));
             } else if hovered {
@@ -2496,9 +2501,47 @@ fn vertical(
             let text_x = row[0] + 8.0 * s + dot_d + TAB_INNER_GAP * s;
             let mut text_right = row[0] + row[2] - 8.0 * s;
 
-            if !tab.age.is_empty() {
-                let age_px = UI_CHORD * s;
-                let age_w = measure(&tab.age, age_px, false, 0.0);
+            // One slot at the row's right edge: the age until the pointer
+            // arrives, the × while it is here. Reserved at the wider of the
+            // two whichever is showing, so the title and cwd are handed the
+            // same budget either way — a row whose text reflowed under the
+            // pointer would be worse than no × at all. (The horizontal chip
+            // can afford to draw its × always; a 262px row with a two-line
+            // label cannot spend the width on both.)
+            let age_px = UI_CHORD * s;
+            let age_w =
+                if tab.age.is_empty() { 0.0 } else { measure(&tab.age, age_px, false, 0.0) };
+            let slot_w = age_w.max(CLOSE * s);
+            if hovered {
+                let close = [
+                    text_right - CLOSE * s,
+                    y + (row_h - CLOSE * s) / 2.0,
+                    CLOSE * s,
+                    CLOSE * s,
+                ];
+                if close_hovered {
+                    out.rects.push(RectInstance::rounded(close, 4.0 * s, colors.line, rows_clip));
+                }
+                // After the row's own region, never before it: `hit()` walks
+                // in reverse, so the last one pushed is the one that wins.
+                if let Some(hit) = intersect(close, rows_clip) {
+                    out.hit.push(hit, HitRegion::TabClose(tab.addr));
+                }
+                let glyph_w = measure("\u{d7}", UI_BODY * s, false, 0.0);
+                out.texts.push(TextRun {
+                    text: "\u{d7}".into(),
+                    pos: [
+                        close[0] + (close[2] - glyph_w) / 2.0,
+                        baseline_in(close[1], close[3], UI_BODY * s),
+                    ],
+                    max_width: close[2],
+                    color: if close_hovered { colors.text_active } else { colors.text_faint },
+                    clip: rows_clip,
+                    px: UI_BODY * s,
+                    bold: false,
+                    tracking: 0.0,
+                });
+            } else if age_w > 0.0 {
                 out.texts.push(TextRun {
                     text: tab.age.clone(),
                     pos: [text_right - age_w, baseline_in(y, row_h, age_px)],
@@ -2509,8 +2552,8 @@ fn vertical(
                     bold: false,
                     tracking: 0.0,
                 });
-                text_right -= age_w + TEXT_PAD * s;
             }
+            text_right -= slot_w + TEXT_PAD * s;
 
             // Unreachability in words, here as everywhere (#23).
             let title = if tab.presence == TabPresence::Unreachable {
@@ -2921,6 +2964,128 @@ mod tests {
             closes,
             [addr(1), addr(2)].into(),
             "each tab's × answers as that tab's close"
+        );
+    }
+
+    /// Every `TabClose` region the sidebar emits, as a set of addresses.
+    fn sidebar_closes(l: &ChromeLayout) -> std::collections::HashSet<SessionAddr> {
+        // Stepped by two: the × is 16px square, so nothing this looks for can
+        // fall between samples, and the sidebar is a lot of pixels to walk.
+        (0..220)
+            .step_by(2)
+            .flat_map(|x| (0..800).step_by(2).map(move |y| (x, y)))
+            .filter_map(|(x, y)| match l.hit.hit(x as f32, y as f32) {
+                Some(HitRegion::TabClose(a)) => Some(a),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_sidebar_row_offers_its_close_only_under_the_pointer() {
+        // The horizontal chip draws its × always; a 262px row with a two-line
+        // label cannot spare the width, so the sidebar swaps the age for it.
+        // Resting rows therefore carry no close region at all — which is the
+        // half of this that has to be asserted, or a stray region over the
+        // age label would close a tab nobody pointed at.
+        let tabs = vec![
+            tab(1, TabOrigin::Local, TabPresence::Online),
+            tab(2, TabOrigin::Local, TabPresence::Online),
+        ];
+        let m = metrics(1200.0, 800.0, 1.0);
+        let resting = layout(&model(tabs.clone(), TabsPosition::Left), &colors(), &m, &mut measure);
+        assert!(
+            sidebar_closes(&resting).is_empty(),
+            "an unpointed sidebar offers no close anywhere"
+        );
+
+        let mut mo = model(tabs, TabsPosition::Left);
+        mo.hover = Some(HitRegion::Tab(addr(2)));
+        let hovered = layout(&mo, &colors(), &m, &mut measure);
+        assert_eq!(
+            sidebar_closes(&hovered),
+            [addr(2)].into(),
+            "the pointed row offers its close, and only that row's"
+        );
+    }
+
+    #[test]
+    fn the_sidebar_close_survives_its_own_hover() {
+        // The rule that makes the affordance usable at all: the region that
+        // reveals the × must also *keep* it revealed. Testing `Tab` alone
+        // hides the × the instant the pointer enters it, the hit map loses
+        // the region, and the click lands on the row underneath — so the
+        // gesture activates the tab it was aimed at closing.
+        let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut mo = model(tabs, TabsPosition::Left);
+        mo.hover = Some(HitRegion::TabClose(addr(1)));
+        let l = layout(&mo, &colors(), &m, &mut measure);
+        assert_eq!(
+            sidebar_closes(&l),
+            [addr(1)].into(),
+            "a × under the pointer is still a ×"
+        );
+    }
+
+    #[test]
+    fn the_sidebar_close_wins_over_its_row() {
+        // `TabClose` is pushed after `Tab` and `hit()` walks in reverse.
+        // Pushed the other way round the × is decoration: every pixel of it
+        // answers as the row, and clicking it activates instead of closes.
+        let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut mo = model(tabs, TabsPosition::Left);
+        mo.hover = Some(HitRegion::Tab(addr(1)));
+        let l = layout(&mo, &colors(), &m, &mut measure);
+        assert!(
+            !sidebar_closes(&l).is_empty(),
+            "the × must out-rank the row it sits inside"
+        );
+    }
+
+    #[test]
+    fn a_sidebar_row_does_not_reflow_when_its_close_appears() {
+        // The × takes the age's slot rather than one of its own, and the slot
+        // is reserved at the wider of the two whichever is showing. Without
+        // that, a title would jump — or worse, re-ellipsise — under the
+        // pointer, which reads as the row changing rather than as an
+        // affordance appearing.
+        let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
+        let m = metrics(1200.0, 800.0, 1.0);
+        let width_of = |hover: Option<HitRegion>| {
+            let mut mo = model(tabs.clone(), TabsPosition::Left);
+            mo.hover = hover;
+            let l = layout(&mo, &colors(), &m, &mut measure);
+            l.texts
+                .iter()
+                .find(|t| t.text == "tab 1")
+                .map(|t| t.max_width)
+                .expect("the row draws its title")
+        };
+        assert_eq!(
+            width_of(None),
+            width_of(Some(HitRegion::Tab(addr(1)))),
+            "the title's budget is the same with the × showing and without it"
+        );
+    }
+
+    #[test]
+    fn the_pinned_settings_row_offers_no_close() {
+        // Closing Settings is closing a tab, but from its own chrome — app
+        // tabs carry no × in either position (§11), and the pinned row is
+        // laid out by its own code, so the horizontal rule does not cover it.
+        let mut settings = tab(2, TabOrigin::Local, TabPresence::Online);
+        settings.kind = TabKind::Settings;
+        settings.title = "Settings".into();
+        let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online), settings];
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut mo = model(tabs, TabsPosition::Left);
+        mo.hover = Some(HitRegion::Tab(addr(2)));
+        let l = layout(&mo, &colors(), &m, &mut measure);
+        assert!(
+            !sidebar_closes(&l).contains(&addr(2)),
+            "the pinned Settings row has no × to point at"
         );
     }
 
