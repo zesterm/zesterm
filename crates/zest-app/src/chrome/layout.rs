@@ -14,7 +14,9 @@ use zest_config::settings::TabsPosition;
 use zest_render_wgpu::{border_sides, LinearRgba, RectInstance};
 
 use super::hit::{CaptionButton, ChromeHitMap, HitRegion, ResizeEdge};
-use super::model::{AccentChoice, ChromeMetrics, ChromeModel, LinkKind, TabKind, TabPresence};
+use super::model::{
+    AccentChoice, ChromeMetrics, ChromeModel, ConfirmChoices, LinkKind, TabKind, TabPresence,
+};
 use super::theme::ChromeColors;
 
 /// One run of UI text, to be shaped and emitted at redraw.
@@ -827,11 +829,24 @@ fn confirm_close_overlay(
     let by = y + h - pad - btn_h;
     let mut right = x + w - pad;
     let mut buttons: Vec<(&str, HitRegion, LinearRgba)> = Vec::with_capacity(3);
-    if confirm.can_detach {
-        buttons.push(("Detach", HitRegion::ConfirmDetach, colors.accent));
+    match confirm.choices {
+        ConfirmChoices::DetachOrClose => {
+            buttons.push(("Detach", HitRegion::ConfirmDetach, colors.accent));
+            buttons.push(("Close and stop it", HitRegion::ConfirmClose, colors.danger));
+            buttons.push(("Cancel", HitRegion::ConfirmCancel, colors.text_inactive));
+        }
+        ConfirmChoices::CloseOnly => {
+            buttons.push(("Close and stop it", HitRegion::ConfirmClose, colors.danger));
+            buttons.push(("Cancel", HitRegion::ConfirmCancel, colors.text_inactive));
+        }
+        // One button, and it is not destructive. This panel is a *refusal*,
+        // not a question: ⌘B asked for something that cannot happen here, and
+        // putting "Close and stop it" in the corner would leave the gesture
+        // that promised not to end the shell one click from ending it.
+        ConfirmChoices::Acknowledge => {
+            buttons.push(("OK", HitRegion::ConfirmCancel, colors.accent));
+        }
     }
-    buttons.push(("Close and stop it", HitRegion::ConfirmClose, colors.danger));
-    buttons.push(("Cancel", HitRegion::ConfirmCancel, colors.text_inactive));
     for (label, region, ink) in buttons {
         let label_px = UI_BODY * s;
         let bw = (measure(label, label_px, false, 0.0) + 2.0 * CONFIRM_BTN_PAD * s)
@@ -4403,13 +4418,13 @@ mod tests {
         );
     }
 
-    fn confirm(can_detach: bool) -> super::super::model::ConfirmCloseModel {
+    fn confirm(choices: ConfirmChoices) -> super::super::model::ConfirmCloseModel {
         super::super::model::ConfirmCloseModel {
             addr: addr(1),
             title: "Close \u{201c}vim\u{201d}?".into(),
             body: "cargo build --release is still running.".into(),
             hint: "Detaching leaves it running.".into(),
-            can_detach,
+            choices,
         }
     }
 
@@ -4430,7 +4445,7 @@ mod tests {
         // anywhere else lands on the panel rather than falling through to a
         // grid that would start a selection under an open question.
         let mut mo = model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
-        mo.confirm_close = Some(confirm(true));
+        mo.confirm_close = Some(confirm(ConfirmChoices::DetachOrClose));
         let m = metrics(1200.0, 800.0, 1.0);
         let l = layout(&mo, &colors(), &m, &mut measure);
 
@@ -4470,7 +4485,7 @@ mod tests {
         // button for an outcome this build cannot produce — worse than one
         // fewer button, because the person would believe the shell survived.
         let mut mo = model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
-        mo.confirm_close = Some(confirm(false));
+        mo.confirm_close = Some(confirm(ConfirmChoices::CloseOnly));
         let m = metrics(1200.0, 800.0, 1.0);
         let l = layout(&mo, &colors(), &m, &mut measure);
         assert!(
@@ -4479,6 +4494,32 @@ mod tests {
         );
         assert!(find_region(&l, HitRegion::ConfirmClose).is_some(), "the other two remain");
         assert!(find_region(&l, HitRegion::ConfirmCancel).is_some());
+    }
+
+    #[test]
+    fn a_refusal_offers_nothing_destructive() {
+        // ⌘B on a tab with no daemon is answered with a statement, not a
+        // question. Putting "Close and stop it" in the corner would leave the
+        // one gesture that promised not to end a shell a single click from
+        // ending it — and the corner is the position every dialog trains the
+        // hand to reach for.
+        let mut mo = model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+        mo.confirm_close = Some(super::super::model::ConfirmCloseModel {
+            addr: addr(1),
+            title: "Cannot detach \u{201c}shell\u{201d}".into(),
+            body: String::new(),
+            hint: "This tab's shell is owned by this window.".into(),
+            choices: ConfirmChoices::Acknowledge,
+        });
+        let m = metrics(1200.0, 800.0, 1.0);
+        let l = layout(&mo, &colors(), &m, &mut measure);
+        assert!(find_region(&l, HitRegion::ConfirmClose).is_none(), "nothing here ends a shell");
+        assert!(find_region(&l, HitRegion::ConfirmDetach).is_none(), "and nothing pretends to");
+        assert!(find_region(&l, HitRegion::ConfirmCancel).is_some(), "one way out, which is out");
+        assert!(
+            l.texts.iter().any(|t| t.text.starts_with("Cannot detach")),
+            "and it says so rather than asking"
+        );
     }
 
     #[test]

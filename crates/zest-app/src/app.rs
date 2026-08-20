@@ -1127,6 +1127,9 @@ struct TabFacts {
     connecting: bool,
     /// A command is running, or a full-screen program has the alt screen.
     busy: bool,
+    /// A daemon is holding this session, so letting go of it leaves it
+    /// running. False for an in-process pty, which this window owns outright.
+    can_detach: bool,
 }
 
 /// What closing a tab should do.
@@ -1143,6 +1146,16 @@ const fn close_policy(
 ) -> ClosePolicy {
     use zest_config::settings::CloseAction;
     if facts.already_exited || facts.dead || !facts.local || facts.connecting {
+        return ClosePolicy::Close;
+    }
+    // Nothing to detach *to*. `finish_close_tab` would drop the tab, which for
+    // an in-process pty is a kill however it is spelled — so answering
+    // `Detach` here would be the setting quietly doing the one thing it exists
+    // to prevent. Closing is all closing can mean without a daemon, and the
+    // fallback is rare enough (`--no-daemon`, or one that would not start)
+    // that a modal on every ⌘W would be noise about a fact that will not
+    // change while the window lives.
+    if !facts.can_detach && matches!(action, CloseAction::Detach) {
         return ClosePolicy::Close;
     }
     match action {
@@ -8543,6 +8556,7 @@ impl App {
             local: tab.local,
             connecting: tab.connecting,
             busy: Self::tab_is_busy(tab),
+            can_detach: !matches!(tab.source().origin(), Origin::InProcess),
         };
         match close_policy(
             self.config.tabs.close_action,
@@ -8606,15 +8620,22 @@ impl App {
             } else {
                 NO_DAEMON_HINT.to_string()
             },
-            can_detach,
+            choices: if can_detach {
+                crate::chrome::model::ConfirmChoices::DetachOrClose
+            } else {
+                crate::chrome::model::ConfirmChoices::CloseOnly
+            },
         }
     }
 
-    /// What ⇧⌘W has to say when there is no daemon to leave the session with.
+    /// What ⌘B has to say when there is no daemon to leave the session with.
     ///
-    /// A modal rather than a log line: the action promised not to end the
-    /// shell, so doing it anyway is the one outcome that must not happen
-    /// quietly. It offers the only thing this build *can* do, and Cancel.
+    /// A panel rather than a log line: the action promised not to end the
+    /// shell, so doing nothing *silently* is indistinguishable from a broken
+    /// keybinding. It states the refusal and offers one button, which is
+    /// deliberately not "Close and stop it" — answering "that cannot be
+    /// detached" with a destructive default is how a gesture that promised
+    /// not to end a shell ends one.
     fn refuse_detach(&mut self, tab_addr: zest_proto::SessionAddr, title: String) {
         self.picker = None;
         self.palette_ui = None;
@@ -8622,10 +8643,10 @@ impl App {
         self.block_menu = None;
         self.confirm_close = Some(crate::chrome::model::ConfirmCloseModel {
             addr: tab_addr,
-            title: format!("Detach \u{201c}{title}\u{201d}?"),
+            title: format!("Cannot detach \u{201c}{title}\u{201d}"),
             body: String::new(),
             hint: NO_DAEMON_HINT.to_string(),
-            can_detach: false,
+            choices: crate::chrome::model::ConfirmChoices::Acknowledge,
         });
         self.mark_chrome_dirty();
     }
@@ -8645,7 +8666,7 @@ impl App {
         }
     }
 
-    /// Stop watching a tab's session and leave it running (⇧⌘W, #381).
+    /// Stop watching a tab's session and leave it running (⌘B, #381).
     ///
     /// The whole mechanism is `Drop`: `RemoteSession`'s destructor sends
     /// `Detach` and joins its writer, which is also what closing the window
@@ -10936,7 +10957,9 @@ impl ApplicationHandler<Wakeup> for App {
                         // after ⌘W must never be the thing that kills a
                         // build.
                         Key::Named(NamedKey::Enter)
-                            if self.confirm_close.as_ref().is_some_and(|c| c.can_detach) =>
+                            if self.confirm_close.as_ref().is_some_and(|c| {
+                                c.choices == crate::chrome::model::ConfirmChoices::DetachOrClose
+                            }) =>
                         {
                             self.answer_confirm_close(Some(false), el);
                         }
@@ -14969,6 +14992,7 @@ mod close_policy_tests {
             local: true,
             connecting: false,
             busy: false,
+            can_detach: true,
         }
     }
 
@@ -15031,6 +15055,27 @@ mod close_policy_tests {
             close_policy(CloseAction::Detach, true, TabFacts { busy: true, ..live() }),
             ClosePolicy::Detach
         );
+        assert_eq!(close_policy(CloseAction::Detach, true, live()), ClosePolicy::Detach);
+    }
+
+    #[test]
+    fn detach_cannot_be_honoured_where_there_is_nothing_to_detach_to() {
+        // The setting must never be the thing that ends a shell. An
+        // in-process pty has no daemon holding it, so `finish_close_tab`'s
+        // "detach" is a drop, and a drop hangs it up — `Detach` here would be
+        // the option chosen *to avoid* killing quietly killing.
+        let no_daemon = TabFacts { can_detach: false, ..live() };
+        assert_eq!(
+            close_policy(CloseAction::Detach, true, no_daemon),
+            ClosePolicy::Close,
+            "closing is all closing can mean without a daemon"
+        );
+        assert_eq!(
+            close_policy(CloseAction::Detach, true, TabFacts { busy: true, ..no_daemon }),
+            ClosePolicy::Close,
+            "and being busy does not conjure a daemon"
+        );
+        // The setting still works where it can be honoured.
         assert_eq!(close_policy(CloseAction::Detach, true, live()), ClosePolicy::Detach);
     }
 

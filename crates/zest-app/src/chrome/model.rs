@@ -1026,10 +1026,30 @@ pub struct ConfirmCloseModel {
     /// The faint line under that: what the other answer would do, or why
     /// there is no other answer.
     pub hint: String,
-    /// Whether Detach is offered at all. An in-process session has no daemon
-    /// to leave it with, and a button for an outcome this build cannot
-    /// produce is worse than one fewer button.
-    pub can_detach: bool,
+    /// Which answers this question actually has.
+    pub choices: ConfirmChoices,
+}
+
+/// The buttons a [`ConfirmCloseModel`] offers.
+///
+/// An enum rather than a pair of flags because only three of the four
+/// combinations mean anything — and the fourth, a question with nothing to
+/// answer it, is exactly the one a pair of flags makes reachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmChoices {
+    /// Detach, Close and stop it, Cancel. A busy tab whose session a daemon
+    /// is holding: all three outcomes exist.
+    DetachOrClose,
+    /// Close and stop it, Cancel. A busy tab this window owns outright, so
+    /// there is nothing to leave the shell with. A Detach button here would
+    /// be a button for an outcome the build cannot produce, and the person
+    /// would believe the shell survived.
+    CloseOnly,
+    /// Cancel alone — really "OK". ⌘B on a tab with no daemon: the answer is
+    /// *no*, and offering to end the shell instead would be answering a
+    /// question nobody asked, one destructive click away from a gesture that
+    /// promised not to.
+    Acknowledge,
 }
 
 /// The knobs `layout` reads, resolved to physical pixels by the caller.
