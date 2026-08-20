@@ -102,7 +102,8 @@ export async function registerDevice(request: Request, env: Env, now: number): P
   if (incumbent !== null && (incumbent.user_id !== user.id || incumbent.revoked_at !== null)) {
     // The claim's two-situations-one-answer: another account's key is not this
     // caller's business, and a revoked key that could re-register has
-    // un-revoked itself — un-revoking is an act by the owner, not by the key.
+    // un-revoked itself — un-revoking is an act by the owner, not by the key:
+    // the restore route, from the fleet screen's revoked section (#365).
     return json({ error: 'already_enrolled' }, 409);
   }
 

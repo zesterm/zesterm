@@ -291,6 +291,39 @@ test('a bad bearer token never falls back to the cookie', async () => {
   db.close();
 });
 
+test('restoring the principal revives the token it was still holding', async () => {
+  // The JOIN in the other direction — the property the whole recovery surface
+  // leans on. Revoke wrote one column on the principal row and nothing on the
+  // token; restore clears that one column, so the credential the machine kept
+  // in its keychain simply works again, with no re-enrolment and no new token.
+  // A locked-out machine's owner clicks Restore in the browser and the machine
+  // is back on its next poll.
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  for (const [kind, seed, table] of [
+    ['host', 6, 'hosts'],
+    ['device', 7, 'devices'],
+  ] as const) {
+    const machine = await enrolled(db, cookie, kind, seed);
+
+    // `/api/me` answers 200 either way and names the principal only when the
+    // token resolves — which makes it the one probe both kinds can share.
+    const principalOf = async (res: Response | null): Promise<string | undefined> => {
+      const body = (await res!.json()) as { principal?: { id: string } };
+      return body.principal?.id;
+    };
+
+    await routeApi(post(`/api/${table}/${machine.id}/revoke`, {}, cookie), env(db), fetch, NOW);
+    const dead = await routeApi(bearer('/api/me', machine.token), env(db), fetch, NOW);
+    assert.equal(await principalOf(dead), undefined, `${kind}: revoked means the token resolves to nobody`);
+
+    await routeApi(post(`/api/${table}/${machine.id}/restore`, {}, cookie), env(db), fetch, NOW);
+    const alive = await routeApi(bearer('/api/me', machine.token), env(db), fetch, NOW);
+    assert.equal(await principalOf(alive), machine.id, `${kind}: the same stored token resolves again`);
+  }
+  db.close();
+});
+
 test('revoking the principal kills its token with no second write', async () => {
   const db = testDb();
   const cookie = await signedIn(db, 'user-a');

@@ -308,6 +308,181 @@ test('the registry routes refuse the wrong method', async () => {
 
   const rev = await routeApi(get(`/api/hosts/${MAC}/revoke`, cookie), env(db), fetch, NOW);
   assert.equal(rev?.status, 405, 'revoking is a POST');
+
+  const rest = await routeApi(get(`/api/hosts/${MAC}/restore`, cookie), env(db), fetch, NOW);
+  assert.equal(rest?.status, 405, 'restoring is a POST');
+  db.close();
+});
+
+// --- the revoked view, and restoring ---------------------------------------
+
+test('the owner can ask to see revoked rows, and only the owner', async () => {
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  seedHost(db, { id: MAC, userId: 'user-a', label: 'andy-mac' });
+  seedHost(db, { id: WINDOWS, userId: 'user-a', label: 'old-box', revokedAt: NOW - 1 });
+
+  const res = await routeApi(get('/api/hosts?include=revoked', cookie), env(db), fetch, NOW);
+  const { hosts } = (await res!.json()) as Array<never> & {
+    hosts: Array<{ id: string; revokedAt: number | null; online: boolean }>;
+  };
+  assert.deepEqual(
+    hosts.map((h) => [h.id, h.revokedAt]),
+    [
+      [MAC, null],
+      [WINDOWS, NOW - 1],
+    ],
+    'the revoked view carries when, because that is the fact the owner is deciding from',
+  );
+  assert.equal(
+    hosts[1]?.online,
+    false,
+    'a revoked machine is never online: the ticket route refuses it, so reachable would be a lie',
+  );
+
+  const plain = await routeApi(get('/api/hosts', cookie), env(db), fetch, NOW);
+  const def = (await plain!.json()) as { hosts: Array<Record<string, unknown>> };
+  assert.deepEqual(def.hosts.map((h) => h['id']), [MAC], 'the default view is unchanged');
+  assert.ok(!('revokedAt' in (def.hosts[0] ?? {})), 'and its shape is unchanged too');
+  db.close();
+});
+
+test('a machine token never sees revoked rows, however it asks', async () => {
+  // The revoked view is the owner's recovery surface. A device's bearer token
+  // reads the fleet, but which keys were cast out — and when — is account
+  // history, not something a machine needs to reach the machines that exist.
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  seedHost(db, { id: MAC, userId: 'user-a', label: 'andy-mac' });
+  seedHost(db, { id: WINDOWS, userId: 'user-a', label: 'old-box', revokedAt: NOW - 1 });
+  const token = await deviceToken(db, cookie);
+
+  const res = await routeApi(
+    new Request(`${ORIGIN}/api/hosts?include=revoked`, {
+      headers: { authorization: `Bearer ${token}` },
+    }),
+    env(db),
+    fetch,
+    NOW,
+  );
+  const { hosts } = (await res!.json()) as { hosts: Array<Record<string, unknown>> };
+  assert.deepEqual(hosts.map((h) => h['id']), [MAC]);
+  assert.ok(!('revokedAt' in (hosts[0] ?? {})));
+  db.close();
+});
+
+test('restoring my own machine puts it back in the account', async () => {
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  seedHost(db, { id: MAC, userId: 'user-a', label: 'andy-mac', revokedAt: NOW - 1 });
+
+  const res = await routeApi(revoke(`/api/hosts/${MAC}/restore`, cookie), env(db), fetch, NOW);
+  assert.equal(res?.status, 200);
+  assert.deepEqual(await res!.json(), { id: MAC });
+
+  const after = (await (
+    await routeApi(get('/api/hosts', cookie), env(db), fetch, NOW)
+  )!.json()) as { hosts: Array<{ id: string }> };
+  assert.deepEqual(after.hosts.map((h) => h.id), [MAC], 'restored means listed again');
+  db.close();
+});
+
+test('restoring twice is not an error, like revoking twice', async () => {
+  // The second click on a slow page, in the other direction: the row is
+  // already what the owner asked for, and telling them it failed teaches them
+  // the button is broken.
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  seedHost(db, { id: MAC, userId: 'user-a', label: 'andy-mac', revokedAt: NOW - 1 });
+
+  await routeApi(revoke(`/api/hosts/${MAC}/restore`, cookie), env(db), fetch, NOW);
+  const again = await routeApi(revoke(`/api/hosts/${MAC}/restore`, cookie), env(db), fetch, NOW + 5_000);
+  assert.equal(again?.status, 200);
+  db.close();
+});
+
+test('another account’s machine cannot be restored, and is not admitted to exist', async () => {
+  const db = testDb();
+  const mine = await signedIn(db, 'user-a');
+  await signedIn(db, 'user-b');
+  seedHost(db, { id: WINDOWS, userId: 'user-b', label: 'not-mine', revokedAt: NOW - 1 });
+
+  const theirs = await routeApi(revoke(`/api/hosts/${WINDOWS}/restore`, mine), env(db), fetch, NOW);
+  const nobody = await routeApi(revoke(`/api/hosts/${MAC}/restore`, mine), env(db), fetch, NOW);
+
+  assert.equal(theirs?.status, 404);
+  assert.deepEqual(
+    await theirs!.json(),
+    await nobody!.json(),
+    'the ids are public keys; the revoke rule about strangers holds in both directions',
+  );
+  assert.deepEqual(
+    rowOf(db, `SELECT revoked_at FROM hosts WHERE id = ?`, WINDOWS),
+    { revoked_at: NOW - 1 },
+    'and their machine must still be revoked',
+  );
+  db.close();
+});
+
+test('restoring requires a session, and a machine token is not one', async () => {
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  seedHost(db, { id: MAC, userId: 'user-a', label: 'andy-mac', revokedAt: NOW - 1 });
+  const token = await deviceToken(db, cookie);
+
+  const anonymous = await routeApi(revoke(`/api/hosts/${MAC}/restore`), env(db), fetch, NOW);
+  assert.equal(anonymous?.status, 401);
+
+  // A bearer request has no origin, and restore is deliberately not on the
+  // BEARER list — so the CSRF rule refuses it before any handler runs. A
+  // machine must not be able to un-revoke itself; that is the whole point of
+  // the 409 it gets at enrolment.
+  const asMachine = await routeApi(
+    new Request(`${ORIGIN}/api/hosts/${MAC}/restore`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: '{}',
+    }),
+    env(db),
+    fetch,
+    NOW,
+  );
+  assert.equal(asMachine?.status, 403);
+
+  assert.deepEqual(
+    rowOf(db, `SELECT revoked_at FROM hosts WHERE id = ?`, MAC),
+    { revoked_at: NOW - 1 },
+    'neither caller may have restored it on the way to the refusal',
+  );
+  db.close();
+});
+
+test('restoring a device does not resurrect its attestations', async () => {
+  // The attestations were other devices' signed statements, revoked when the
+  // subject was. The owner restoring the row restores the row; whoever vouched
+  // can vouch again, and the Worker treats that as the ordinary renewal.
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  seedDevice(db, { id: PHONE, userId: 'user-a', label: 'andy-phone' });
+  db.raw
+    .prepare(
+      `INSERT INTO device_attestations (device_id, by_device, user_id, blob, iat, exp)
+       VALUES (?, ?, 'user-a', 'blob', ?, ?)`,
+    )
+    .run(PHONE, MAC, NOW - 10, NOW + 1_000_000);
+
+  await routeApi(revoke(`/api/devices/${PHONE}/revoke`, cookie), env(db), fetch, NOW);
+  const res = await routeApi(revoke(`/api/devices/${PHONE}/restore`, cookie), env(db), fetch, NOW + 1);
+  assert.equal(res?.status, 200);
+
+  assert.deepEqual(rowOf(db, `SELECT revoked_at FROM devices WHERE id = ?`, PHONE), {
+    revoked_at: null,
+  });
+  assert.deepEqual(
+    rowOf(db, `SELECT revoked_at FROM device_attestations WHERE device_id = ?`, PHONE),
+    { revoked_at: NOW },
+    'the vouch stays withdrawn; restoring the row is not restoring the vouches',
+  );
   db.close();
 });
 

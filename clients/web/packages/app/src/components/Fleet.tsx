@@ -42,6 +42,7 @@ import type { Theme } from '@zesterm/theme';
 import type { Bootstrap, User } from '../bootstrap.ts';
 import type { DeviceKey } from '../device-key.ts';
 import {
+  ago,
   browserLabel,
   deviceRow,
   deviceVouchAction,
@@ -49,6 +50,7 @@ import {
   mintPanelOnStart,
   ownDeviceAction,
   ownDeviceApproved,
+  partitionRevoked,
 } from '../fleet-model.ts';
 import { liveHostSource } from '../host-source.ts';
 import { liveDirectory, relayLinks } from '../live-directory.ts';
@@ -58,6 +60,7 @@ import {
   fetchRegistry,
   mintEnrollCode,
   registerDevice,
+  restore,
   revoke,
   type Device,
   type Host,
@@ -131,8 +134,12 @@ export const Fleet = component<{
       .then((r) => {
         state.load = { phase: 'ready', hosts: r.hosts, devices: r.devices };
         // Only the machines still in the account: a revoked host's connection
-        // is closed by the same call that stops listing it.
-        live?.setHosts(r.hosts.map((h) => ({ id: h.id, label: h.label })));
+        // is closed by the same call that stops listing it — which is why the
+        // split happens before `setHosts`, now that the listing carries the
+        // revoked rows too.
+        live?.setHosts(
+          partitionRevoked(r.hosts).live.map((h) => ({ id: h.id, label: h.label })),
+        );
 
         // This browser's own key, silently, when the account does not list it
         // yet. Silent in both directions — no button and no error: the row
@@ -142,10 +149,17 @@ export const Fleet = component<{
         // excluded in `ownDeviceAction`: they are gone next load, and a
         // pending row per visit helps nobody.
         const account = bootstrap.user?.id;
+        const devicesSplit = partitionRevoked(r.devices);
         if (
           account !== undefined &&
           !registerTried &&
-          ownDeviceAction(r.devices, device.signer.clientId, device.ephemeral === true) === 'register'
+          // The live list only: a revoked own key must not try to re-register
+          // — the Worker 409s that by design. Its way back is the revoked
+          // section below, where this browser appears by name with a restore
+          // button like any other device.
+          !devicesSplit.revoked.some((d) => d.id === device.signer.clientId) &&
+          ownDeviceAction(devicesSplit.live, device.signer.clientId, device.ephemeral === true) ===
+            'register'
         ) {
           registerTried = true;
           registerDevice({
@@ -170,12 +184,31 @@ export const Fleet = component<{
   load();
 
   const drop = (table: 'hosts' | 'devices', id: string, label: string): void => {
-    // Revocation is a positive statement and cannot be undone from here — the
-    // row stays revoked so a key cannot quietly re-enrol as though it were new.
-    // That is worth one confirm.
-    if (!confirm(`Revoke ${label}? It will have to enrol again to reach your machines.`)) return;
+    // Revocation is a positive statement — the key cannot quietly re-enrol as
+    // though it were new. That is worth one confirm; that only the OWNER can
+    // undo it (the revoked section below) is what the confirm is telling them.
+    if (!confirm(`Revoke ${label}? It loses access to your machines until you restore it here.`))
+      return;
     state.busy = id;
     revoke(table, id)
+      .then(() => {
+        state.busy = null;
+        load();
+      })
+      .catch((e: unknown) => {
+        state.busy = null;
+        state.load = { phase: 'failed', error: e instanceof Error ? e.message : String(e) };
+      });
+  };
+
+  /**
+   * The way back for a machine revoked by mistake (#365). No confirm, unlike
+   * `drop`: restoring is reversible by the revoke sitting next to it, and the
+   * row spells out what is being restored.
+   */
+  const bringBack = (table: 'hosts' | 'devices', id: string): void => {
+    state.busy = id;
+    restore(table, id)
       .then(() => {
         state.busy = null;
         load();
@@ -245,12 +278,20 @@ export const Fleet = component<{
     // Local consts rather than `state.mint?.…` in the JSX: narrowing does not
     // survive into the nested closures, and each render reads one snapshot.
     const minted = state.mint;
+    // One split per render, read by every section below: the live halves feed
+    // the grids and the vouching logic, the revoked halves feed only the
+    // recovery section — see `partitionRevoked` for why nothing else may see
+    // them.
+    const hostsSplit = partitionRevoked<Host>(state.load.phase === 'ready' ? state.load.hosts : []);
+    const devicesSplit = partitionRevoked<Device>(
+      state.load.phase === 'ready' ? state.load.devices : [],
+    );
     // Whether this browser may sign vouchers, computed once per render from
     // the same snapshot the rows render from — so the buttons and the banner
     // can never disagree about it.
     const canVouch =
       state.load.phase === 'ready' &&
-      ownDeviceApproved(state.load.devices, device.signer.clientId, device.ephemeral === true);
+      ownDeviceApproved(devicesSplit.live, device.signer.clientId, device.ephemeral === true);
     const mintErr = state.mintError;
     return (
       <div class="fleet-page">
@@ -312,7 +353,7 @@ export const Fleet = component<{
                   onClose={() => (state.mint = null)}
                 />
               ) : null}
-              {state.load.hosts.length === 0 ? (
+              {hostsSplit.live.length === 0 ? (
                 <p class="muted">
                   No machines yet. Run <code>zest-daemon --enroll &lt;code&gt;</code> on one to add
                   it.
@@ -325,7 +366,7 @@ export const Fleet = component<{
                       when something real supplies one — the registry does not.
                       localHostId is null: on the hosted path the browser is a
                       DEVICE, so no host is identifiably this machine. */}
-                  {state.load.hosts.map((h) => {
+                  {hostsSplit.live.map((h) => {
                     const card = hostCard(h, {
                       localHostId: null,
                       now: Date.now(),
@@ -416,7 +457,7 @@ export const Fleet = component<{
                 />
               ) : null}
               {ownDeviceAction(
-                state.load.devices,
+                devicesSplit.live,
                 device.signer.clientId,
                 device.ephemeral === true,
               ) === 'awaiting-approval' ? (
@@ -430,11 +471,11 @@ export const Fleet = component<{
                   vouches for it.
                 </p>
               ) : null}
-              {state.load.devices.length === 0 ? (
+              {devicesSplit.live.length === 0 ? (
                 <p class="muted">Nothing enrolled yet.</p>
               ) : (
                 <ul class="rows">
-                  {state.load.devices.map((d) => {
+                  {devicesSplit.live.map((d) => {
                     const row = deviceRow(d, Date.now());
                     const action = deviceVouchAction(d, device.signer.clientId, canVouch);
                     return (
@@ -483,6 +524,59 @@ export const Fleet = component<{
                 </ul>
               )}
             </section>
+
+            {hostsSplit.revoked.length + devicesSplit.revoked.length > 0 ? (
+              <section>
+                <div class="section-head">
+                  <h2>Revoked</h2>
+                </div>
+                <p class="fineprint">
+                  These keys were revoked and cannot reach your machines. Restoring one puts it
+                  back exactly as it was — a machine still holding its credential is back on its
+                  next poll, with nothing to re-enrol.
+                </p>
+                <ul class="rows">
+                  {/* One flat list, hosts then devices: what the reader is
+                      deciding is "did I mean to cast this out", and the
+                      when-it-happened is the fact that decides it. Never
+                      launchable, never watched — see `partitionRevoked`. */}
+                  {[
+                    ...hostsSplit.revoked.map((h) => ({
+                      table: 'hosts' as const,
+                      id: h.id,
+                      name: h.label,
+                      meta: `machine · revoked ${ago(h.revokedAt, Date.now())}`,
+                    })),
+                    ...devicesSplit.revoked.map((d) => ({
+                      table: 'devices' as const,
+                      id: d.id,
+                      name: d.label,
+                      meta: `${d.kind} · revoked ${ago(d.revokedAt, Date.now())}`,
+                    })),
+                  ].map((row) => (
+                    <li key={row.id} class="row">
+                      <span class="row-name muted">{row.name}</span>
+                      <span class="row-meta">
+                        {row.meta}
+                        {row.id === device.signer.clientId ? (
+                          // The one row where the reader is the key: without
+                          // this, a person whose browser was revoked is
+                          // staring at the fix with nothing saying so.
+                          <span class="warn"> · this browser</span>
+                        ) : null}
+                      </span>
+                      <button
+                        class="button"
+                        disabled={state.busy === row.id}
+                        onClick={() => bringBack(row.table, row.id)}
+                      >
+                        restore
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
           </>
         ) : null}
       </div>

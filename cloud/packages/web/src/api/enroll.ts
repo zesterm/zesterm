@@ -233,7 +233,9 @@ export async function claimEnrollCode(request: Request, env: Env, now: number): 
     // caller's business, and a revoked one is refused because revocation is a
     // positive statement: a machine that could re-enrol itself with a fresh
     // code has un-revoked itself, which is the one thing the schema's comment
-    // says must not happen. Un-revoking is an act by the owner, in the browser.
+    // says must not happen. Un-revoking is an act by the owner, in the
+    // browser: `POST /api/{hosts,devices}/:id/restore`, cookie-only, from the
+    // fleet screen's revoked section (#365).
     return json({ error: 'already_enrolled' }, 409);
   }
 

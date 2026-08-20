@@ -13,6 +13,7 @@ import {
   mintPanelOnStart,
   ownDeviceAction,
   ownDeviceApproved,
+  partitionRevoked,
   presenceOf,
 } from '../src/fleet-model.ts';
 import type { DirectoryStatus } from '../src/directory-source.ts';
@@ -49,6 +50,7 @@ const HOST: Host = {
   platform: 'macos',
   enrolledAt: 1_000,
   lastSeenAt: null,
+  revokedAt: null,
 };
 
 test('a host card carries os, key and last seen from the record', () => {
@@ -290,6 +292,7 @@ test('ownDeviceAction: an unlisted key registers, a pending own row banners, app
     status,
     enrolledAt: 1,
     lastSeenAt: null,
+    revokedAt: null,
   });
 
   assert.equal(ownDeviceAction([], own, false), 'register', 'the account has never seen this key');
@@ -346,6 +349,7 @@ test('deviceRow keeps the pending marker and the key warning out of the meta str
       status: 'pending',
       enrolledAt: 1,
       lastSeenAt: 1_000,
+      revokedAt: null,
     },
     61_000 + 1_000,
   );
@@ -363,6 +367,7 @@ test('deviceRow keeps the pending marker and the key warning out of the meta str
       status: 'approved',
       enrolledAt: 1,
       lastSeenAt: null,
+      revokedAt: null,
     },
     2,
   );
@@ -381,6 +386,7 @@ test('only an approved, non-ephemeral own key may vouch', () => {
     status,
     enrolledAt: 1,
     lastSeenAt: null,
+    revokedAt: null,
   });
 
   assert.equal(ownDeviceApproved([device(own, 'approved')], own, false), true);
@@ -408,6 +414,7 @@ test('deviceVouchAction offers approve on pending rows, vouch on approved ones, 
     status,
     enrolledAt: 1,
     lastSeenAt: null,
+    revokedAt: null,
   });
 
   assert.equal(deviceVouchAction(device(other, 'pending'), own, true), 'approve');
@@ -441,7 +448,23 @@ test('the remove button says deny on a pending row and revoke on an approved one
     status: 'pending',
     enrolledAt: 1,
     lastSeenAt: null,
+    revokedAt: null,
   };
   assert.equal(deviceRow(base, 2).removeLabel, 'deny');
   assert.equal(deviceRow({ ...base, status: 'approved' }, 2).removeLabel, 'revoke');
+});
+
+test('partitionRevoked keeps live rows launchable and revoked rows out of every live path', () => {
+  // The recovery view rides the same listing, so the split is one function
+  // both sections read — a revoked host that leaked into the live list would
+  // be watched, dialled and offered for launch, all against a row the ticket
+  // route refuses.
+  const live = { id: 'a'.repeat(64), revokedAt: null };
+  const gone = { id: 'b'.repeat(64), revokedAt: 5 };
+  const split = partitionRevoked([live, gone]);
+  assert.deepEqual(split.live, [live]);
+  assert.deepEqual(split.revoked, [gone]);
+
+  const none = partitionRevoked([live]);
+  assert.deepEqual(none.revoked, [], 'no revoked rows is the ordinary case, not a special one');
 });

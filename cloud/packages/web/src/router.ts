@@ -17,7 +17,7 @@ import { approveDevice, listAccountAttestations } from './api/attest.ts';
 import { approveLink, claimLink, denyLink, getLinkGrant, startLink } from './api/link.ts';
 import { registerDevice } from './api/devices.ts';
 import { claimEnrollCode, mintEnrollCode } from './api/enroll.ts';
-import { listRegistry, revokeRegistryEntry } from './api/registry.ts';
+import { listRegistry, restoreRegistryEntry, revokeRegistryEntry } from './api/registry.ts';
 import { mintRelayTicket } from './api/relay.ts';
 import { finishLogin, logout, startLogin } from './auth/routes.ts';
 import { carriesBearer, requestPrincipal } from './api/principal.ts';
@@ -83,6 +83,14 @@ const APPROVE = /^\/api\/devices\/([^/]+)\/approve$/;
 
 /** `/api/hosts/:id/revoke`, `/api/devices/:id/revoke`. */
 const REVOKE = /^\/api\/(hosts|devices)\/([^/]+)\/revoke$/;
+
+/**
+ * `/api/hosts/:id/restore`, `/api/devices/:id/restore` — revoke's inverse
+ * (#365). Deliberately not in `BEARER`: restoring is the owner's act, and a
+ * machine credential that could un-revoke its own principal would undo the
+ * refusal enrolment gives a revoked key.
+ */
+const RESTORE = /^\/api\/(hosts|devices)\/([^/]+)\/restore$/;
 
 /** `GET /api/link/:id` — the approval page's read. Cookie, full CSRF. */
 const LINK_GET = /^\/api\/link\/([^/]+)$/;
@@ -231,6 +239,13 @@ export async function routeApi(
     if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
     const [, table = '', id = ''] = revoke;
     return revokeRegistryEntry(request, env, table === 'hosts' ? 'host' : 'device', id, now);
+  }
+
+  const restore = RESTORE.exec(path);
+  if (restore !== null) {
+    if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+    const [, table = '', id = ''] = restore;
+    return restoreRegistryEntry(request, env, table === 'hosts' ? 'host' : 'device', id, now);
   }
 
   // An unknown path under either prefix is JSON, never the SPA fallback:

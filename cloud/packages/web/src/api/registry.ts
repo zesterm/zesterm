@@ -10,7 +10,14 @@
 import { fromHex } from '@zesterm/cloud-shared';
 
 import { revokeAttestationsFor } from '../db/attestations.ts';
-import { listDevices, listHosts, revokeDevice, revokeHost } from '../db/registry.ts';
+import {
+  listDevices,
+  listHosts,
+  restoreDevice,
+  restoreHost,
+  revokeDevice,
+  revokeHost,
+} from '../db/registry.ts';
 import type { EnrollKind } from '../db/types.ts';
 import type { Env } from '../env.ts';
 import { json } from '../http.ts';
@@ -19,7 +26,11 @@ import { currentUser } from './session.ts';
 import { requestPrincipal } from './principal.ts';
 
 /**
- * `GET /api/hosts` and `GET /api/devices`. Revoked rows are simply not there.
+ * `GET /api/hosts` and `GET /api/devices`. Revoked rows are simply not there —
+ * unless the *owner* asks with `?include=revoked`, which is the recovery view
+ * the restore route exists for. Cookie principals only: a machine reads these
+ * lists to reach the machines that exist, and which keys were cast out is
+ * account history, not something a bearer credential needs.
  *
  * `/api/hosts` answers people and **devices** — the desktop app reads its
  * fleet with a bearer token — and carries `relayOrigin` beside the list,
@@ -45,11 +56,18 @@ export async function listRegistry(
   const principal = await requestPrincipal(request, env, now);
   if (principal === null) return json({ error: 'unauthorized' }, 401);
 
+  // The owner's opt-in, and nobody else's: a bearer asking gets the ordinary
+  // live view, silently — refusing outright would turn a copy-pasted URL into
+  // an error for a caller the default answer serves fine.
+  const includeRevoked =
+    principal.kind === 'user' &&
+    new URL(request.url).searchParams.get('include') === 'revoked';
+
   if (kind === 'host') {
     if (principal.kind === 'host') return json({ error: 'unauthorized' }, 401);
     const userId = principal.kind === 'user' ? principal.user.id : principal.userId;
     return json({
-      hosts: await listHosts(env.DB, userId, now),
+      hosts: await listHosts(env.DB, userId, now, includeRevoked),
       relayOrigin: env.RELAY_ORIGIN ?? null,
     });
   }
@@ -59,7 +77,7 @@ export async function listRegistry(
   // serving shells has no business learning which keys are pending.
   if (principal.kind === 'host') return json({ error: 'unauthorized' }, 401);
   const userId = principal.kind === 'user' ? principal.user.id : principal.userId;
-  return json({ devices: await listDevices(env.DB, userId) });
+  return json({ devices: await listDevices(env.DB, userId, includeRevoked) });
 }
 
 /**
@@ -106,4 +124,39 @@ export async function revokeRegistryEntry(
   }
 
   return revokedAt === null ? json({ error: 'not_found' }, 404) : json({ id, revokedAt });
+}
+
+/**
+ * `POST /api/hosts/:id/restore` and `POST /api/devices/:id/restore`.
+ *
+ * The act the enrolment comments promise — "un-revoking is an act by the
+ * owner, in the browser" — so it is cookie-only on purpose: `currentUser`,
+ * never `requestPrincipal`. A machine credential must not be able to un-revoke
+ * its own principal; that a revoked key cannot bring itself back is the whole
+ * point of the 409 it gets at enrolment, and a bearer here would be that key
+ * bringing itself back with one extra request.
+ *
+ * Restoring clears the row's `revoked_at` and nothing else — see
+ * `restoreHost` for why that alone puts the machine back on the account.
+ * Idempotent like revoke; 404 collapses "not yours" and "not enrolled" for
+ * revoke's reason.
+ */
+export async function restoreRegistryEntry(
+  request: Request,
+  env: Env,
+  kind: EnrollKind,
+  id: string,
+  now: number,
+): Promise<Response> {
+  const user = await currentUser(request, env, now);
+  if (user === null) return json({ error: 'unauthorized' }, 401);
+
+  if (fromHex(id, KEY_LEN) === null) return json({ error: 'not_found' }, 404);
+
+  const restored =
+    kind === 'host'
+      ? await restoreHost(env.DB, id, user.id)
+      : await restoreDevice(env.DB, id, user.id);
+
+  return restored ? json({ id }) : json({ error: 'not_found' }, 404);
 }

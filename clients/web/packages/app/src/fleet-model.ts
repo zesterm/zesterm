@@ -108,6 +108,23 @@ export async function copyOutcome(
 }
 
 /**
+ * The live/revoked split every consumer of the registry must make, in one
+ * place. The recovery view rides the same listing, so a revoked host that
+ * leaked into the live list would be watched, dialled and offered for launch —
+ * all against a row the ticket route refuses. Live paths (the card grid, the
+ * directory's `setHosts`, the own-device logic) read `live`; the recovery
+ * section reads `revoked`.
+ */
+export function partitionRevoked<T extends { readonly revokedAt: number | null }>(
+  rows: readonly T[],
+): { live: T[]; revoked: T[] } {
+  const live: T[] = [];
+  const revoked: T[] = [];
+  for (const row of rows) (row.revokedAt === null ? live : revoked).push(row);
+  return { live, revoked };
+}
+
+/**
  * What the fleet screen should do about this browser's own key, decided after
  * each registry load.
  *
