@@ -6,7 +6,7 @@ use crate::cell::Cell;
 use crate::grid::ScrollRegion;
 use crate::modes::{CursorStyle, Modes};
 use crate::palette::Rgb;
-use crate::term::{AttentionCause, TermEvent, TermState};
+use crate::term::{AttentionCause, Progress, ProgressState, TermEvent, TermState};
 
 impl vte::Perform for TermState {
     fn print(&mut self, ch: char) {
@@ -354,7 +354,9 @@ impl vte::Perform for TermState {
             // notification would turn every progress tick into one.
             Some(9) => {
                 let first = params.get(1).and_then(|b| core::str::from_utf8(b).ok()).unwrap_or("");
-                if first != "4" {
+                if first == "4" {
+                    self.osc_progress(params);
+                } else {
                     self.raise_attention(AttentionCause::Notify);
                 }
             }
@@ -388,6 +390,51 @@ impl TermState {
     /// Record that the program asked to be noticed.
     fn raise_attention(&mut self, cause: AttentionCause) {
         self.events.push(TermEvent::Attention { cause });
+    }
+
+    /// `OSC 9 ; 4 ; st ; pr` — ConEmu's taskbar progress.
+    ///
+    /// A malformed `st` reads as `0` (cleared) rather than being ignored: a
+    /// progress state that cannot be parsed must not leave a spinner turning
+    /// for the rest of the session, which is what "ignore what you do not
+    /// understand" produces for a *latched* value. Ignoring is right for a
+    /// one-shot; for state it is a leak.
+    fn osc_progress(&mut self, params: &[&[u8]]) {
+        // Parsed wide and clamped after, never as the `u8` it ends up in: a
+        // producer sending 300 would *fail to parse* as a `u8` and fall to 0,
+        // which is a rewind rather than a clamp -- and the only reason that
+        // reads as fine is that a test written with 140 in it fits either way.
+        let num = |i: usize| -> Option<u32> {
+            params
+                .get(i)
+                .and_then(|b| core::str::from_utf8(b).ok())
+                .and_then(|s| s.trim().parse::<u32>().ok())
+        };
+        let state = num(2).unwrap_or(0);
+        // Percentages beyond 100 are clamped rather than refused. A build
+        // script that computes 103 is still a build script that is nearly
+        // done, and refusing it would stop the bar where the last good value
+        // left it -- a wrong number frozen, which is worse than a right one
+        // rounded.
+        let percent = u8::try_from(num(3).unwrap_or(0).min(100)).unwrap_or(100);
+        let was_busy = !matches!(self.progress, Progress::None);
+        self.progress = match state {
+            1 => Progress::At { percent, state: ProgressState::Normal },
+            2 => Progress::At { percent, state: ProgressState::Error },
+            3 => Progress::Indeterminate,
+            4 => Progress::At { percent, state: ProgressState::Warning },
+            // 0, and anything unrecognised.
+            _ => Progress::None,
+        };
+        // Stopping being busy is the thing the person was waiting for, and so
+        // is failing. Both raise the same signal a bell would -- which is what
+        // makes "my build finished" work for a program that reports progress
+        // and never rings.
+        let done = was_busy && matches!(self.progress, Progress::None);
+        let failed = matches!(self.progress, Progress::At { state: ProgressState::Error, .. });
+        if done || failed {
+            self.raise_attention(AttentionCause::Notify);
+        }
     }
 
     /// Absolute addressing that ignores origin mode, for column moves.

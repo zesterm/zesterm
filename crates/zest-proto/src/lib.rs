@@ -488,6 +488,21 @@ pub enum HostMessage {
     /// is indistinguishable from one nothing can fill. `#[serde(default)]`
     /// makes adding it free the day something shows it.
     Attention { session: SessionAddr, cause: AttentionCause },
+    /// A long job in this session reported how it is going (`OSC 9;4`).
+    ///
+    /// Behind `Hello.watch_signals`, like [`Self::Attention`], and a
+    /// `HostMessage` for the same reason: it describes the *session*, not the
+    /// grid. Nothing about a progress bar decides where a row lands, which is
+    /// what a `DeltaOp` would have to be ordered against.
+    ///
+    /// **Unlike `Attention` this is state, and the difference is the whole
+    /// reason they are two messages** even though they arrive through the same
+    /// escape sequence. A client attaching halfway through a build must learn
+    /// the bar is at 60%; a client attaching after a bell has rung must hear
+    /// nothing about it. So the host keeps a per-subscriber shadow of what it
+    /// last sent here — a fresh subscriber's is `None`, so it is told at once
+    /// if the session is already busy — and keeps no memory at all of a bell.
+    Progress { session: SessionAddr, progress: delta::Progress },
     /// Something went wrong, phrased for a person.
     Error { session: Option<SessionAddr>, message: String },
 }

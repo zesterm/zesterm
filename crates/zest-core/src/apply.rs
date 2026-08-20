@@ -240,6 +240,16 @@ impl RemoteWriter<'_> {
         self.state.touch();
     }
 
+    /// Mirror the host's `OSC 9;4` progress.
+    ///
+    /// No `touch()`: a progress tick changes no cell, and bumping the damage
+    /// sequence for one would make a build's per-percent chatter look like
+    /// grid output to every subscriber below. The chrome reads this directly
+    /// and repaints on its own invalidation.
+    pub fn set_progress(&mut self, progress: crate::term::Progress) {
+        self.state.progress = progress;
+    }
+
     /// Mirror the host's modes.
     ///
     /// This is what lets an attached client encode its own keystrokes: whether

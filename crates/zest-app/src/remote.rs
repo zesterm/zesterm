@@ -568,6 +568,18 @@ impl RemoteSession {
                                 HostMessage::Attention { cause, .. } => {
                                     wake(Wakeup::Attention(addr, cause));
                                 }
+                                // Written into the replica rather than carried
+                                // in the wakeup: it is state, and the tab
+                                // model reads it off the terminal exactly as
+                                // it reads the title. `SignalChanged` then
+                                // only has to say "look again", which is what
+                                // keeps the chrome's invalidation honest for a
+                                // *background* tab -- `grid_dirty` consults
+                                // the active source alone.
+                                HostMessage::Progress { progress, .. } => {
+                                    terminal.lock_unfair().remote().set_progress(progress.into());
+                                    wake(Wakeup::SignalChanged);
+                                }
                                 HostMessage::Error { message, .. } => {
                                     tracing::warn!(%message, "daemon reported an error");
                                 }

@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use zest_core::{ChangeSource, Modes, Terminal, TermEvent};
 use zest_proto::delta::CursorState;
+use zest_proto::delta::Progress;
 use zest_proto::{AttentionCause, AttrDef, Delta, Encoder, Keyframe, RowPayload, SessionId};
 use zest_pty::{CommandSpec, PtySize, PtyTransport};
 
@@ -71,6 +72,15 @@ struct Subscriber {
     /// and a queue here would be an unbounded buffer fed by the remote end of
     /// a pty.
     pending_attention: Option<AttentionCause>,
+    /// Progress as this subscriber was last told it.
+    ///
+    /// A shadow rather than a pending slot, because progress is *state*: a
+    /// build ticking 1..100 owes one message per change and none while it sits
+    /// still, and a subscriber that attaches at 60% has to be told 60 rather
+    /// than nothing. Starting at `None` is what makes that second half work
+    /// with no special case — the first comparison differs, so the first poll
+    /// says so.
+    sent_progress: Progress,
     /// Called when this subscriber has something to collect.
     ///
     /// Without it a connection blocked in `read` never learns that the shell
@@ -314,6 +324,7 @@ impl Session {
                 acked: 0,
                 needs_keyframe: false,
                 pending_attention: None,
+                sent_progress: Progress::None,
                 wake,
                 size: size.map(clamp_size),
             },
@@ -509,6 +520,28 @@ impl Session {
 
         sub.sent = seq;
         Some((base, seq, out))
+    }
+
+    /// What this subscriber has not been told about the session's progress.
+    ///
+    /// `None` when it is already up to date, which is every poll of a session
+    /// that is not running anything — the 0%-idle rule applied to a second
+    /// kind of traffic.
+    ///
+    /// **Subscribers first, then the terminal** — the order `poll` takes, and
+    /// the only reason to care is that taking them the other way round is a
+    /// deadlock waiting for two connections to poll the same session at once.
+    /// It happens not to be one today, because the terminal guard would fall
+    /// out of scope before the second lock is asked for; a rule that holds by
+    /// where a brace sits is one an edit breaks silently.
+    pub fn progress_for(&self, handle: u64) -> Option<Progress> {
+        let mut subs = self.subscribers.lock().expect("subscriber lock");
+        let sub = subs.get_mut(&handle)?;
+        let now: Progress = self.terminal.lock().expect("terminal lock").progress().into();
+        (sub.sent_progress != now).then(|| {
+            sub.sent_progress = now;
+            now
+        })
     }
 
     /// Take this subscriber's pending signal, if it has one.
@@ -929,6 +962,54 @@ mod tests {
              watching one shell must both see it"
         );
         assert_eq!(s.take_attention(b), None, "and taking it is what makes it seen");
+    }
+
+    #[test]
+    fn progress_is_told_once_per_change_and_to_a_late_subscriber_at_once() {
+        // The property that makes this state rather than an event, and the
+        // reason it is a shadow rather than a pending slot like attention's.
+        let s = Session::spawn(
+            SessionId(1),
+            &echo("\u{1b}]9;4;1;60\u{7}"),
+            PtySize::new(80, 24),
+            100,
+            |_| {},
+        )
+        .expect("spawn");
+        let (a, _, _) = s.attach();
+
+        let mut first = None;
+        assert!(
+            wait_for(|| {
+                first = first.or_else(|| s.progress_for(a));
+                first.is_some()
+            }),
+            "the child's progress never reached the subscriber"
+        );
+        assert_eq!(
+            first,
+            Some(Progress::At { percent: 60, state: zest_proto::delta::ProgressState::Normal })
+        );
+        assert_eq!(
+            s.progress_for(a),
+            None,
+            "and nothing again until it moves -- the 0%-idle rule, applied to \
+             a second kind of traffic"
+        );
+
+        // A subscriber that arrives now is behind, and must be told at once
+        // rather than waiting for the next change that may never come. Its
+        // shadow starts at `None`, so this needs no special case.
+        let (b, _, _) = s.attach();
+        assert_eq!(
+            s.progress_for(b),
+            Some(Progress::At {
+                percent: 60,
+                state: zest_proto::delta::ProgressState::Normal
+            }),
+            "attaching halfway through a build tells you where the build is"
+        );
+        assert_eq!(s.progress_for(b), None);
     }
 
     #[test]

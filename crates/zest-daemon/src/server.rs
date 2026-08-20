@@ -743,6 +743,14 @@ impl Connection {
                     out.push(HostMessage::Attention { session: addr, cause });
                 }
             }
+            // And the shadow advances either way, for the same reason: a
+            // client that did not ask is not owed the message, but it is also
+            // not owed every tick it missed the moment anything changes.
+            if let Some(progress) = session.progress_for(handle) {
+                if self.watch_signals {
+                    out.push(HostMessage::Progress { session: addr, progress });
+                }
+            }
 
             // The snapshot from above, not a fresh read, and the difference is
             // load-bearing. A session that exits *between* the two would be

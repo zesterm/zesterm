@@ -22,7 +22,7 @@ is reported rather than gated.
 | `zest-render-wgpu` | ✅ pipelines, atlas, offscreen resolve, selection |
 | `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema — **every declared setting is consumed** (a test keeps `NOT_YET_WIRED` empty) |
 | `zest-input` | ✅ keys + SGR mouse + selection + IME + Kitty CSI u (flags 1, 2, 8), Rust and TypeScript — ⬜ Kitty flags 4/16, keypad |
-| `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), restore-on-launch — runs on Windows *and* macOS (Metal, transparent titlebar), springs + smooth scroll + reduce_motion, cursor shapes (config *and* DECSCUSR) with a spring trail — ⬜ Snap Layouts, polish |
+| `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), restore-on-launch — runs on Windows *and* macOS (Metal, transparent titlebar), springs + smooth scroll + reduce_motion, cursor shapes (config *and* DECSCUSR) with a spring trail, **tabs that say what is happening in them** — close and detach in both positions, a busy ring from OSC 133 *or* OSC 9;4, and an attention dot from BEL / OSC 9 / OSC 777 that names no program — ⬜ Snap Layouts, polish |
 | `zest-proto` | ✅ protocol 3, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, sealing, cell-for-cell conformance, chaos-resync, command blocks |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store, sealed channel |
 | `zest-cloud` | ✅ `TlsDuplex`, one connection as two independently owned halves, a one-request HTTP POST over it, `Endpoint` — consumed by `--enroll` and by `--relay`'s per-pipe dial-back |
@@ -66,6 +66,19 @@ the history behind them is in closed issues and PRs.
 - [ ] Polish: OSC 0/2 title, font zoom, DPI changes. (DECSCUSR cursor styles
       and `cursor.shape`/`cursor.trail` are done; `smear` is #329.)
 - [ ] Perf validation: vtebench, >500 MB/s, <2ms CPU frame, <10ms keypress→pixel.
+- [ ] The tab-signal tail (#379–#385 left these deliberately): a right-click tab
+      menu, which is where Detach belongs once there is one — today it is ⌘B, the
+      palette row, and the busy confirm's button; **kitty's OSC 99**, whose
+      `d=`/`i=` chunking is a parser of its own rather than another arm; and the
+      notification *text* `OSC 9`/`OSC 777` supply, which is off the wire until
+      something renders it, because a field nothing reads is indistinguishable
+      from one nothing can fill.
+- [ ] `SessionInfo` says nothing about whether a session is busy, so the ⌘K
+      picker and the fleet cards cannot show it for a session this window is not
+      attached to. It needs a field *and* a new `Registry::touch` site with a
+      debounce: the listing is never pushed on a block transition today, which is
+      also why a watcher's `title` and `cwd` go stale until something unrelated
+      moves the generation.
 
 ### Input
 
