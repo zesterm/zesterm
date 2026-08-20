@@ -172,7 +172,20 @@ export async function enrolHost(
   return row === null ? null : publicHost(row, args.now);
 }
 
-/** The same shape for a browser, phone or desktop app. See `enrolHost`. */
+/**
+ * The same shape for a browser, phone or desktop app. See `enrolHost`.
+ *
+ * Unlike `registerDevice`'s conflict branch, this one DOES set
+ * `status = 'approved'` (#372) — and the difference is the authority behind
+ * the request, not an oversight. A registration rides a session cookie the
+ * browser sends on its own, so a refresh must never flip status; a *code*
+ * exists only because a person minted it signed-in and carried it here, so a
+ * claim is that person's explicit act — the same standing the bootstrap rule
+ * in `api/devices.ts` gives an account's first key. Left alone, a pending
+ * device claiming a valid code "succeeded" into a token the resolve join
+ * refused forever, with nothing anywhere saying why. `approved_by` stays
+ * NULL: approved by dint of the code, not by a vouching device.
+ */
 export async function enrolDevice(
   db: Db,
   args: { id: string; userId: string; label: string; kind: DeviceKind; now: number },
@@ -181,7 +194,8 @@ export async function enrolDevice(
     .prepare(
       `INSERT INTO devices (id, user_id, label, kind, enrolled_at)
        VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET label = excluded.label, kind = excluded.kind
+       ON CONFLICT(id) DO UPDATE SET label = excluded.label, kind = excluded.kind,
+                                     status = 'approved'
         WHERE devices.user_id = excluded.user_id AND devices.revoked_at IS NULL
        RETURNING *`,
     )
