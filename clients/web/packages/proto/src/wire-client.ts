@@ -54,6 +54,16 @@ export type ClientMessage =
        * somewhere else is the whole point.
        */
       readonly watch_hosts: boolean;
+      /**
+       * Ask to be told when an attached session asks to be noticed — it rang,
+       * or asked for a desktop notification (#383).
+       *
+       * Not politeness. A `host_message` tag a client cannot decode is not
+       * skipped, it ends the connection, so the daemon sends `attention` only
+       * to a client that set this. Setting it is this build saying it is new
+       * enough to survive them.
+       */
+      readonly watch_signals: boolean;
     }
   | {
       readonly t: 'auth';
@@ -155,6 +165,7 @@ export function encodeClientMessageBody(msg: ClientMessage): Uint8Array {
         watch_sessions: msg.watch_sessions,
         watch_pairings: msg.watch_pairings,
         watch_hosts: msg.watch_hosts,
+        watch_signals: msg.watch_signals,
       };
       break;
     case 'auth':

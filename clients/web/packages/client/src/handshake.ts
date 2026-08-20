@@ -107,6 +107,11 @@ export class HandshakeDriver {
       // daemon would silently not subscribe us anyway.
       watch_pairings: false,
       watch_hosts: this.#options.watchHosts ?? false,
+      // Unconditional: this is a build that can decode `attention`, and the
+      // flag is what tells the daemon so. It is not a preference — an
+      // undecodable frame ends a connection rather than being skipped, which
+      // is why the host has to be told rather than left to guess.
+      watch_signals: true,
     };
   }
 

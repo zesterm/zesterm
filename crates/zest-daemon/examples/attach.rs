@@ -146,6 +146,7 @@ fn run<R: Read + Send + 'static, W: Write + Send + 'static>(
             watch_sessions: false,
             watch_pairings: false,
             watch_hosts: false,
+            watch_signals: false,
         },
     );
     // The session is created once the handshake completes, not before: a host
@@ -345,6 +346,14 @@ fn run<R: Read + Send + 'static, W: Write + Send + 'static>(
                 }
                 HostMessage::Exited { session, code } => {
                     eprintln!("[attach] session {session} exited ({code:?})");
+                }
+                // Never reached: this example's `Hello` sets `watch_signals:
+                // false`, so the daemon sends none. Printed rather than
+                // ignored anyway, because a probe whose job is to say which
+                // layer is wrong must not be the one thing that swallows a
+                // message quietly.
+                HostMessage::Attention { session, cause } => {
+                    eprintln!("[attach] session {session} asked to be noticed ({cause:?})");
                 }
                 HostMessage::Error { message, .. } => eprintln!("[attach] error: {message}"),
                 HostMessage::Scrollback { .. } => {}

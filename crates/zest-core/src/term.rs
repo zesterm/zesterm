@@ -23,6 +23,31 @@ use crate::palette::{Palette, PaletteSnapshot, Rgb};
 /// same order of magnitude.
 const KITTY_STACK_DEPTH: usize = 8;
 
+/// Why a session is asking to be noticed.
+///
+/// Provenance, not severity. A client renders the same dot for both; what this
+/// buys is a truthful tooltip and a setting per source, and the reason it is a
+/// field rather than a caveat somewhere is that "which of these was it" is not
+/// recoverable from the fact that something happened.
+///
+/// # Why there is no latched flag beside it
+///
+/// A flag would have to be *cleared* by someone, and with two devices watching
+/// one shell there is no answer to who: the host has no idea which client is
+/// looking at what. So attention is only ever an event here. Each viewer keeps
+/// its own idea of what it has seen, which removes the question rather than
+/// answering it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum AttentionCause {
+    /// `BEL` — the oldest "hey" in the terminal.
+    Bell,
+    /// `OSC 9 ; <text>` or `OSC 777 ; notify ; <title> ; <body>`: the program
+    /// asked for a desktop notification. Whether one is actually raised is the
+    /// host's business; the tab marking itself is not.
+    Notify,
+}
+
 /// Things the terminal needs the host to do, which it cannot do itself.
 ///
 /// Returned rather than performed because `zest-core` has no I/O: the host owns
@@ -35,7 +60,23 @@ pub enum TermEvent {
     /// OSC 0/2: the window title changed.
     Title(String),
     /// The bell rang.
+    ///
+    /// Kept beside [`TermEvent::Attention`] rather than replaced by it: a host
+    /// may still want to *ring* (an audible bell, a taskbar flash) as well as
+    /// mark the tab, and those are different decisions.
     Bell,
+    /// The program asked to be noticed: `BEL`, `OSC 9`, or `OSC 777;notify`.
+    ///
+    /// Emitted alongside `Bell` for the bell, because the two answer different
+    /// questions. Carries where it came from, so a client can say *why* it is
+    /// showing a dot and a setting can switch each source off independently —
+    /// the discipline `ExitSource` follows in ADR-015.
+    ///
+    /// It carries no *text*, though `OSC 9` and `OSC 777` both supply some.
+    /// Nothing renders a notification body yet, and a field nothing reads
+    /// reads exactly like a field nothing *can* fill — the trap ADR-015 was
+    /// written after. Adding it when something shows it is free.
+    Attention { cause: AttentionCause },
     /// The cursor's shape or blink changed (DECSCUSR).
     CursorStyle(CursorStyle),
     /// A synchronized-output block began or ended (DEC 2026). While begun, the

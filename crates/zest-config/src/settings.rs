@@ -429,6 +429,21 @@ pub struct Tabs {
     /// sessions are reachable only through the picker.
     #[schemars(extend("x_zest_group" = "Tabs", "x_zest_widget" = "toggle"))]
     pub restore: bool,
+    /// Mark a tab when a program in it rings the bell (`BEL`).
+    ///
+    /// The oldest "look at me" a terminal has, and the one most agent and
+    /// build tools already emit — which is the point: nothing here knows the
+    /// name of any program, only that one chose to say something.
+    #[schemars(extend("x_zest_group" = "Tabs", "x_zest_widget" = "toggle"))]
+    pub attention_bell: bool,
+    /// Mark a tab when a program in it asks for a desktop notification
+    /// (`OSC 9`, `OSC 777;notify`).
+    ///
+    /// Its own switch rather than sharing the bell's, because the two are
+    /// noisy in different situations — a bell fires on tab-completion in some
+    /// shells, a notification almost never fires by accident.
+    #[schemars(extend("x_zest_group" = "Tabs", "x_zest_widget" = "toggle"))]
+    pub attention_notify: bool,
 }
 
 impl Default for Tabs {
@@ -441,6 +456,8 @@ impl Default for Tabs {
             sidebar_width: 262,
             show_single_tab: true,
             restore: true,
+            attention_bell: true,
+            attention_notify: true,
         }
     }
 }

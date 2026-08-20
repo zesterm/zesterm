@@ -358,6 +358,14 @@ pub struct Connection {
     /// This client asked (`Hello.watch_hosts`) what this machine offers, and
     /// to be told when that changes (#262).
     watch_hosts: bool,
+    /// This client asked (`Hello.watch_signals`) to be told when a session it
+    /// is attached to rings or notifies.
+    ///
+    /// The gate on `HostMessage::Attention`, and it is not politeness: a tag
+    /// an older client cannot decode ends its connection. The session fills
+    /// every subscriber's slot regardless — it has no idea who asked — and
+    /// this is where the answer is dropped for a client that did not.
+    watch_signals: bool,
     /// The offer generation this connection last told its client about. `0`
     /// means "has never sent one", and `OfferSource` starts at 1, so a
     /// subscriber's very first `Sessions` carries the offer without needing a
@@ -465,6 +473,7 @@ impl Connection {
             waker: None,
             watch_sessions: false,
             watch_hosts: false,
+            watch_signals: false,
             seen_offer_generation: 0,
             offer_watch_token: None,
             watch_token: None,
@@ -722,6 +731,19 @@ impl Connection {
                 None => {}
             }
 
+            // Outside the `updates || ended` throttle above, and not folded
+            // into `poll`: a session that is idle produces no delta at all, so
+            // a bell folded into the update path would arrive behind output
+            // that may never come. The coalescing floor exists to spare the
+            // *bandwidth* of a busy grid; one signal is two words.
+            // Drained whether or not this client asked, so a slot cannot sit
+            // filled for the life of a connection that will never read it.
+            if let Some(cause) = session.take_attention(handle) {
+                if self.watch_signals {
+                    out.push(HostMessage::Attention { session: addr, cause });
+                }
+            }
+
             // The snapshot from above, not a fresh read, and the difference is
             // load-bearing. A session that exits *between* the two would be
             // reported here having had its delta skipped a few lines earlier —
@@ -827,10 +849,12 @@ impl Connection {
                 watch_sessions,
                 watch_pairings,
                 watch_hosts,
+                watch_signals,
             } => {
                 self.watch_sessions = watch_sessions;
                 self.watch_pairings = watch_pairings;
                 self.watch_hosts = watch_hosts;
+                self.watch_signals = watch_signals;
                 let Some(h) = self.handshake_mut() else {
                     return vec![HostMessage::Error {
                         session: None,
@@ -1820,6 +1844,10 @@ mod tests {
                 watch_sessions,
                 watch_pairings,
                 watch_hosts,
+                // The tests that need signals set it on the connection
+                // directly; every other one must look like a client that
+                // never asked, which is the case the gate exists for.
+                watch_signals: false,
             },
         );
         let [HostMessage::Challenge { nonce, host, label, version, dh, signature }] = &out[..]
@@ -2687,6 +2715,7 @@ mod tests {
                 watch_sessions: false,
                 watch_pairings: false,
                 watch_hosts: false,
+                watch_signals: false,
             },
         );
         let [HostMessage::Challenge { nonce, host, label, version, dh, signature }] = &out[..]
@@ -2721,6 +2750,7 @@ mod tests {
             watch_sessions: false,
             watch_pairings: false,
             watch_hosts: false,
+            watch_signals: false,
         }
     }
 
@@ -2935,6 +2965,7 @@ mod tests {
                 watch_sessions: false,
                 watch_pairings: false,
                 watch_hosts: false,
+                watch_signals: false,
             },
         );
         assert!(
@@ -3405,6 +3436,94 @@ mod tests {
             "a granted resize must reach watchers as a fresh listing"
         );
         registry.close(addr.session);
+    }
+
+    /// A child that rings the bell and exits, on either platform.
+    fn bell_cmd() -> String {
+        if cfg!(windows) {
+            "cmd.exe /c echo \u{7}".into()
+        } else {
+            "/bin/echo \u{7}".into()
+        }
+    }
+
+    /// Poll until one of the messages matches, or give up.
+    fn poll_until(
+        c: &mut Connection,
+        mut f: impl FnMut(&HostMessage) -> bool,
+    ) -> Option<HostMessage> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            if let Some(m) = c.poll().into_iter().find(&mut f) {
+                return Some(m);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        None
+    }
+
+    #[test]
+    fn a_bell_reaches_a_client_that_asked_for_signals() {
+        let (mut c, registry) = conn();
+        let mut peer = authenticate(&mut c);
+        // The flag the `Hello` would have set. Set here rather than through
+        // the handshake helper so the two halves of this property can be
+        // asserted against one another below.
+        c.watch_signals = true;
+        peer.send(
+            &mut c,
+            &ClientMessage::CreateSession {
+                command: bell_cmd(),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+            },
+        );
+        let addr = registry.list(config().host)[0].addr;
+        peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
+
+        let got = poll_until(&mut c, |m| matches!(m, HostMessage::Attention { .. }));
+        assert!(
+            matches!(got, Some(HostMessage::Attention { cause, .. }) if cause == zest_proto::AttentionCause::Bell),
+            "a client that asked for signals is sent the bell, got {got:?}"
+        );
+    }
+
+    #[test]
+    fn a_bell_never_reaches_a_client_that_did_not_ask() {
+        // **The load-bearing half.** A `HostMessage` tag an older client
+        // cannot decode is not skipped: `DaemonClient::recv` maps an
+        // undecodable frame to a transport error, which ends the connection.
+        // So sending this to a client that did not ask does not merely
+        // annoy it — it disconnects it, and the symptom is a window that goes
+        // blank the first time a shell rings.
+        let (mut c, registry) = conn();
+        let mut peer = authenticate(&mut c);
+        assert!(!c.watch_signals, "the default is not to send them");
+        peer.send(
+            &mut c,
+            &ClientMessage::CreateSession {
+                command: bell_cmd(),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+            },
+        );
+        let addr = registry.list(config().host)[0].addr;
+        peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
+
+        // Wait for the child to have *exited*, so the bell has certainly been
+        // parsed by now — waiting a fixed time would pass on a machine slow
+        // enough that nothing had happened yet, which is the failure mode a
+        // negative assertion is most prone to.
+        let ended = poll_until(&mut c, |m| matches!(m, HostMessage::Exited { .. }));
+        assert!(ended.is_some(), "the child never exited, so this proves nothing");
+        // Drain whatever is left, and check the whole conversation.
+        let rest = c.poll();
+        assert!(
+            !rest.iter().any(|m| matches!(m, HostMessage::Attention { .. })),
+            "an unasked client was sent a signal: {rest:?}"
+        );
     }
 
     #[test]

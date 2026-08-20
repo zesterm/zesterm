@@ -44,4 +44,4 @@ pub use modes::{CursorShape, CursorStyle, Modes};
 pub use palette::{Palette, PaletteSnapshot, Rgb};
 pub use selection::{AbsPos, Selection, SelectionMode};
 pub use subscribe::{ChangeSource, SubscriberId, Update};
-pub use term::{Damage, TermEvent, Terminal};
+pub use term::{AttentionCause, Damage, TermEvent, Terminal};

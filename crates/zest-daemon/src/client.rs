@@ -58,6 +58,7 @@ fn discarded(waiting_for: &str, msg: &HostMessage) {
         HostMessage::Update { .. } => "Update",
         HostMessage::Scrollback { .. } => "Scrollback",
         HostMessage::Exited { .. } => "Exited",
+        HostMessage::Attention { .. } => "Attention",
         HostMessage::Error { .. } => "Error",
     };
     tracing::warn!(
@@ -116,6 +117,15 @@ pub struct Watch {
     /// launch targets are what a client is there to see, and the whole point
     /// is reading them from somewhere else.
     pub hosts: bool,
+    /// `Hello.watch_signals`: send [`HostMessage::Attention`] when an attached
+    /// session rings, notifies, or otherwise asks to be noticed.
+    ///
+    /// Off unless asked for, and the reason is sharper than for the flags
+    /// above: a `HostMessage` tag a client cannot decode does not go unread,
+    /// it ends the connection. So this is not a subscription in the "would you
+    /// like these" sense — it is the client saying it is new enough to survive
+    /// them.
+    pub signals: bool,
 }
 
 /// An authenticated connection to one daemon.
@@ -157,7 +167,7 @@ impl DaemonClient {
             identity,
             label,
             expect_host,
-            Watch { sessions: watch_sessions, pairings: false, hosts: false },
+            Watch { sessions: watch_sessions, pairings: false, hosts: false, signals: false },
             None,
         )
     }
@@ -179,7 +189,7 @@ impl DaemonClient {
         Self::connect_impl(read, write, identity, label, expect_host, watch, None)
     }
 
-    /// [`Self::connect`], with a listener for the approval wait.
+    /// [`Self::connect_watching`], with a listener for the approval wait.
     ///
     /// `on_pending` is called — on this same thread, mid-connect — each time
     /// the host answers `AuthPending`: a person over there is being asked to
@@ -193,18 +203,10 @@ impl DaemonClient {
         identity: &Arc<ClientIdentity>,
         label: &str,
         expect_host: Option<zest_proto::HostId>,
-        watch_sessions: bool,
+        watch: Watch,
         on_pending: Option<OnPending<'_>>,
     ) -> Result<Self, DaemonError> {
-        Self::connect_impl(
-            read,
-            write,
-            identity,
-            label,
-            expect_host,
-            Watch { sessions: watch_sessions, pairings: false, hosts: false },
-            on_pending,
-        )
+        Self::connect_impl(read, write, identity, label, expect_host, watch, on_pending)
     }
 
     fn connect_impl(
@@ -237,6 +239,7 @@ impl DaemonClient {
             watch_sessions: watch.sessions,
             watch_pairings: watch.pairings,
             watch_hosts: watch.hosts,
+            watch_signals: watch.signals,
         })?;
 
         // Challenge -> Auth -> Welcome. Two round trips on connect, which on a
@@ -717,7 +720,7 @@ mod tests {
             &identity,
             "test",
             None,
-            false,
+            Watch::default(),
             Some(&on_pending),
         )
         .expect("an approved device must end up welcomed");

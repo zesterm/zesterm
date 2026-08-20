@@ -721,6 +721,8 @@ fn write_client_messages(path: &Path) {
                 // in the one canonical encoding proves only that it can be
                 // omitted, which is not the property this fixture is for.
                 watch_hosts: true,
+                // …and the same for #383's, for the same reason.
+                watch_signals: true,
             },
         ),
         ("auth", ClientMessage::Auth { signature: Sig64::from_bytes([0xef; 64]) }),

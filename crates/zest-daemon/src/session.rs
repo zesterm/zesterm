@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use zest_core::{ChangeSource, Modes, Terminal, TermEvent};
 use zest_proto::delta::CursorState;
-use zest_proto::{AttrDef, Delta, Encoder, Keyframe, RowPayload, SessionId};
+use zest_proto::{AttentionCause, AttrDef, Delta, Encoder, Keyframe, RowPayload, SessionId};
 use zest_pty::{CommandSpec, PtySize, PtyTransport};
 
 use crate::DaemonError;
@@ -64,6 +64,13 @@ struct Subscriber {
     /// Set by `RequestKeyframe`, and by an acknowledgement of a sequence this
     /// subscriber was never sent.
     needs_keyframe: bool,
+    /// The session asked to be noticed and this subscriber has not been told.
+    ///
+    /// One slot, last-wins, deliberately: attention is not a log. A shell
+    /// ringing forty times while nobody polls is still one thing to look at,
+    /// and a queue here would be an unbounded buffer fed by the remote end of
+    /// a pty.
+    pending_attention: Option<AttentionCause>,
     /// Called when this subscriber has something to collect.
     ///
     /// Without it a connection blocked in `read` never learns that the shell
@@ -210,6 +217,14 @@ impl Session {
                                 TermEvent::HistoryCleared => {
                                     keyframe_everyone(&subscribers);
                                 }
+                                // Every subscriber is told, and the connection
+                                // decides whether its client asked. The session
+                                // has no idea who is watching it, which is the
+                                // same reason it does not try to remember who
+                                // has *seen* one.
+                                TermEvent::Attention { cause } => {
+                                    tell_everyone(&subscribers, cause.into());
+                                }
                                 _ => {}
                             }
                         }
@@ -298,6 +313,7 @@ impl Session {
                 sent: 0,
                 acked: 0,
                 needs_keyframe: false,
+                pending_attention: None,
                 wake,
                 size: size.map(clamp_size),
             },
@@ -493,6 +509,16 @@ impl Session {
 
         sub.sent = seq;
         Some((base, seq, out))
+    }
+
+    /// Take this subscriber's pending signal, if it has one.
+    ///
+    /// Separate from [`Self::poll`] because it is not an update: an idle
+    /// session that rings produces no delta at all, and folding the two would
+    /// mean a bell only arrived behind output that may never come.
+    pub fn take_attention(&self, handle: u64) -> Option<AttentionCause> {
+        let mut subs = self.subscribers.lock().expect("subscriber lock");
+        subs.get_mut(&handle)?.pending_attention.take()
     }
 
     /// Record what a client says it has applied.
@@ -694,6 +720,18 @@ fn keyframe_everyone(subscribers: &Mutex<HashMap<u64, Subscriber>>) {
     }
 }
 
+/// Hand every current subscriber the same signal.
+///
+/// Current, not future: a client that attaches after the bell is never told,
+/// which is the right answer for something that means "look at this now".
+fn tell_everyone(subscribers: &Mutex<HashMap<u64, Subscriber>>, cause: AttentionCause) {
+    if let Ok(mut subs) = subscribers.lock() {
+        for sub in subs.values_mut() {
+            sub.pending_attention = Some(cause);
+        }
+    }
+}
+
 /// What a subscriber should be sent.
 #[derive(Debug, Clone)]
 pub enum Update {
@@ -855,6 +893,42 @@ mod tests {
             wait_for(|| s.poll(handle).is_some()),
             "nothing was ever sent to the subscriber"
         );
+    }
+
+    #[test]
+    fn a_bell_from_a_real_child_reaches_every_subscriber_exactly_once() {
+        // Driven through a real pty rather than injected into the subscriber
+        // map, because the seam a helper would skip -- `TermEvent::Attention`
+        // reaching `tell_everyone` from the reader thread -- is precisely the
+        // half that can stop working while everything either side of it still
+        // passes.
+        let s = Session::spawn(
+            SessionId(1),
+            &echo("\u{7}"),
+            PtySize::new(80, 24),
+            100,
+            |_| {},
+        )
+        .expect("spawn");
+        let (a, _, _) = s.attach();
+        let (b, _, _) = s.attach();
+
+        let mut first = None;
+        assert!(
+            wait_for(|| {
+                first = first.or_else(|| s.take_attention(a));
+                first.is_some()
+            }),
+            "the child's bell never reached the subscriber"
+        );
+        assert_eq!(first, Some(AttentionCause::Bell));
+        assert_eq!(
+            s.take_attention(b),
+            Some(AttentionCause::Bell),
+            "every subscriber is told, not whichever asked first: two devices \
+             watching one shell must both see it"
+        );
+        assert_eq!(s.take_attention(b), None, "and taking it is what makes it seen");
     }
 
     #[test]

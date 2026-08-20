@@ -125,6 +125,7 @@ test('every client message round-trips through the real decoder', () => {
       watch_sessions: true,
       watch_pairings: false,
       watch_hosts: false,
+      watch_signals: false,
     },
     { t: 'auth', signature: 'ef'.repeat(64) },
     { t: 'pairing_decision', client: 'cd'.repeat(32), approve: false },
@@ -154,6 +155,7 @@ test('the wire map is built in declaration order, whatever order the caller used
   // the object "backwards" must still produce canonical bytes.
   const backwards = {
     watch_hosts: false,
+    watch_signals: false,
     watch_pairings: false,
     watch_sessions: false,
     nonce: '00'.repeat(32),
@@ -173,6 +175,7 @@ test('the wire map is built in declaration order, whatever order the caller used
     watch_sessions: false,
     watch_pairings: false,
     watch_hosts: false,
+    watch_signals: false,
   };
   assert.deepEqual(encodeClientMessage(backwards), encodeClientMessage(forwards));
 });

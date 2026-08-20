@@ -165,6 +165,18 @@ pub enum ClientMessage {
         /// that did not ask. Both degrade to exactly today's behaviour.
         #[serde(default)]
         watch_hosts: bool,
+        /// Ask to be told when an attached session asks to be noticed.
+        ///
+        /// The gate on [`HostMessage::Attention`], and it is load-bearing
+        /// rather than tidy: a `HostMessage` tag an older client cannot decode
+        /// does not go unread, it **kills the connection** — `DaemonClient::recv`
+        /// maps a frame it cannot decode to `DaemonError::Transport`. So the
+        /// daemon must never send one to a client that did not ask, and this
+        /// is how it knows. `#[serde(default)]` for `watch_sessions`' reason:
+        /// an old daemon ignores the flag and sends nothing, which is exactly
+        /// today's behaviour at both ends.
+        #[serde(default)]
+        watch_signals: bool,
     },
     /// The client's proof, answering [`HostMessage::Challenge`].
     ///
@@ -448,8 +460,61 @@ pub enum HostMessage {
     },
     /// The child process ended.
     Exited { session: SessionAddr, code: Option<i32> },
+    /// The session asked to be noticed: `BEL`, `OSC 9`, or `OSC 777;notify`.
+    ///
+    /// A `HostMessage` rather than a `DeltaOp` because it describes the
+    /// *session*, not the grid — the same reason [`Self::Exited`] is one. It
+    /// also needs no ordering against the rows: `AltScreen` has to come before
+    /// them because it decides which grid they land in, and nothing about a
+    /// bell decides anything.
+    ///
+    /// **Sent only to a client that set `Hello.watch_signals`.** A new
+    /// `HostMessage` tag is not the harmless kind of addition — an older peer
+    /// fails to decode the whole frame and `DaemonClient::recv` maps that to
+    /// `DaemonError::Transport`, which *ends the connection*. The flag is what
+    /// makes this additive in practice as well as in shape, and it is the same
+    /// device `watch_sessions`, `watch_pairings` and `watch_hosts` each use.
+    ///
+    /// # There is no "unread" bit on the host, deliberately
+    ///
+    /// A latched flag would have to be cleared by someone, and with two
+    /// devices watching one shell there is no answer to who. So the host
+    /// reports the moment and each viewer keeps its own idea of what it has
+    /// seen — which removes the question instead of answering it. A client
+    /// that was not attached when the bell rang is simply never told, which is
+    /// the right answer for a signal that means "look at this now".
+    /// It carries no notification *text*, though `OSC 9` and `OSC 777` both
+    /// supply some: nothing renders a body yet, and a wire field nothing reads
+    /// is indistinguishable from one nothing can fill. `#[serde(default)]`
+    /// makes adding it free the day something shows it.
+    Attention { session: SessionAddr, cause: AttentionCause },
     /// Something went wrong, phrased for a person.
     Error { session: Option<SessionAddr>, message: String },
+}
+
+/// Why a session is asking to be noticed.
+///
+/// Mirrors `zest_core::AttentionCause` for [`delta::BlockState`]'s reason:
+/// this side carries a `ts_rs` derive, and `zest-core` has to keep building
+/// for `wasm32` without one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum AttentionCause {
+    /// `BEL` — the oldest "hey" in the terminal.
+    Bell,
+    /// `OSC 9` or `OSC 777;notify`: the program asked for a desktop
+    /// notification.
+    Notify,
+}
+
+impl From<zest_core::AttentionCause> for AttentionCause {
+    fn from(c: zest_core::AttentionCause) -> Self {
+        match c {
+            zest_core::AttentionCause::Bell => Self::Bell,
+            zest_core::AttentionCause::Notify => Self::Notify,
+        }
+    }
 }
 
 /// A session as it appears in a listing.
@@ -587,6 +652,7 @@ mod tests {
             watch_sessions: false,
             watch_pairings: false,
             watch_hosts: false,
+            watch_signals: false,
         };
         let json = serde_json::to_string(&msg).expect("serialize");
         let back: ClientMessage = serde_json::from_str(&json).expect("deserialize");
@@ -610,7 +676,8 @@ mod tests {
             "watch_sessions":true,"watch_pairings":false}"#;
         let parsed: ClientMessage = serde_json::from_str(json).expect("a pre-#262 Hello decodes");
         assert!(
-            matches!(parsed, ClientMessage::Hello { watch_hosts: false, watch_sessions: true, .. }),
+            matches!(parsed, ClientMessage::Hello { watch_hosts: false,
+            watch_signals: false, watch_sessions: true, .. }),
             "the absent field is 'did not subscribe', and the rest still reads"
         );
 
@@ -760,6 +827,7 @@ mod tests {
             watch_sessions: false,
             watch_pairings: false,
             watch_hosts: false,
+            watch_signals: false,
         };
         let ClientMessage::Hello { nonce, dh, .. } = msg else { panic!("expected Hello") };
         assert!(nonce.is_absent());

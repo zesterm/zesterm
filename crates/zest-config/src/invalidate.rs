@@ -100,6 +100,9 @@ pub const KEYS: &[(&str, Invalidation)] = &[
     ("tabs.sidebar_width", Invalidation::Geometry),
     ("tabs.show_single_tab", Invalidation::Geometry),
     ("tabs.restore", Invalidation::None),
+    // Read when a signal arrives, so a change is in force for the next one.
+    ("tabs.attention_bell", Invalidation::None),
+    ("tabs.attention_notify", Invalidation::None),
     ("shell.command", Invalidation::Restart),
     ("shell.cwd", Invalidation::Restart),
     ("shell.env", Invalidation::Restart),
