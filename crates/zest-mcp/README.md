@@ -24,7 +24,7 @@ prints the default.
 |---|---|
 | `hosts` | the machines this server can reach, what each is, and what it can launch |
 | `sessions` | terminals on a host: id, title, cwd, size, `alt_screen`, attached |
-| `screen` | what a session shows now, as text |
+| `screen` | what a session shows now, as text — with `styled` saying where it is dim or reversed |
 | `blocks` | the commands that have run — no output text, so history is cheap |
 | `output` | what one command printed, by block id |
 | `run` | run a command in an existing shell and wait for the shell to say it ended |
@@ -111,6 +111,51 @@ three semantics, so this one is not held by review: `tests/keys.rs` encodes ever
 name both ways — 27 bases × 8 modifier combinations × DECCKM on and off — and
 byte-inequality fails the build. `zest_input::key::encode_press` exists for it,
 because `KeyEvent` has a private platform tail and cannot be built outside winit.
+
+## Dim text is not typed text
+
+Flattened to characters, text an application is *offering* is identical to text
+the user has **committed**. A CLI's greyed suggestion and a real command line
+have the same `>` and the same letters; rendered, a human sees one is a ghost.
+Through `screen` they were indistinguishable — and an Enter sent for any other
+reason **accepts** the suggestion. The one that prompted [#348] read "go ahead,
+branch and open the issue", one keystroke from real work in the repo.
+
+The same flattening loses a picker's *selection* whenever it is drawn by
+inverting the row rather than by printing a marker, which leaves nothing at all
+to read the cursor position from — so an arrows-only dialog could be navigated
+but not aimed.
+
+So `screen` carries `styled`: `{row, col, len, attrs}`, where `row` indexes the
+returned lines and `col`/`len` are grid columns, the units `cursor` already uses.
+
+Three choices in that shape are worth stating:
+
+- **Positions, never text.** Returning attributed *runs* would restate the whole
+  screen a second time, JSON-escaped — 3-5x the tokens of the plain text on a
+  realistic TUI frame, 20x+ on a syntax-highlighted one. Spans measured 2-23
+  bytes across the recorded corpus. It also means the value contains no
+  characters a terminal produced, so it needs no untrusted fence of its own:
+  there is nothing in it a hostile program could author.
+- **Always, not on request.** A safety signal behind an opt-in flag is absent
+  exactly when it was needed, because the caller who would set the flag is the
+  one who already suspected. The key is omitted entirely when a screen carries
+  no attributes, which is the common case for a shell at a prompt.
+- **No colour.** `fg`/`bg` are where nearly all the run-splitting lives, and
+  neither case above needs them: dim is its own bit and reverse is its own bit.
+  A red error line is still just text. The three *layout* bits share the same
+  word — `WIDE`, `WIDE_SPACER`, `WRAPLINE` — and are masked out, because 250 of
+  274 flagged runs in the `vim-macos` recording are `WRAPLINE` alone.
+
+**A blind spot, stated.** No recording in the corpus contains reverse video at
+all, so the selection case cannot be replayed from a fixture; it is covered by
+VT-driven tests in `src/session.rs` instead. Same shape as [#17]. And an
+application that fakes selection with explicit colours rather than SGR 7 sets no
+`INVERSE` bit and will not appear here.
+
+`changed_since` ([#319] item 3) was decided alongside this and deliberately not
+built: spans live in a sibling key keyed by row, so a future row filter composes
+with them rather than changing their shape.
 
 ## What makes the shapes small
 
@@ -247,4 +292,7 @@ asserting something weaker.
 [#278]: https://github.com/zesterm/zesterm/pull/278
 [#344]: https://github.com/zesterm/zesterm/issues/344
 [#345]: https://github.com/zesterm/zesterm/issues/345
+[#348]: https://github.com/zesterm/zesterm/issues/348
+[#319]: https://github.com/zesterm/zesterm/issues/319
+[#17]: https://github.com/zesterm/zesterm/issues/17
 [#285]: https://github.com/zesterm/zesterm/issues/285

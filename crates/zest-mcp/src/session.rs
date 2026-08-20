@@ -17,7 +17,7 @@
 //! delta for `cat 1MB`); this is the other half, and they are different
 //! numbers.
 
-use zest_core::{Modes, Terminal};
+use zest_core::{CellFlags, Modes, Terminal};
 use zest_proto::{Applied, Applier, BlockPayload, CursorState, Delta, Keyframe, SessionAddr};
 
 /// The host's own reading of a terminal's cursor, mirrored.
@@ -46,6 +46,104 @@ fn cursor_of(term: &Terminal) -> CursorState {
 /// command's output is usually still here, small enough that a fleet of
 /// followed sessions is not a memory story.
 const REPLICA_SCROLLBACK: usize = 2_000;
+
+/// The span walk, over a grid rather than a replica.
+///
+/// Free so a test can drive it with a real VT stream: the recorded corpus is
+/// almost entirely *colour*, which this deliberately does not report, and it
+/// contains **no reverse video at all** -- so the selection-bar case #348 turns
+/// on cannot be replayed from a fixture. The corpus having blind spots is a
+/// known shape here (#17); the answer is to say which, not to test what the
+/// recordings happen to contain and call it coverage.
+fn spans_of(grid: &zest_core::Grid, visible_rows: usize, max: usize) -> (Vec<StyledSpan>, usize) {
+    let mut spans = Vec::new();
+    let mut omitted = 0usize;
+
+    for row in 0..visible_rows {
+        let cells = grid.row(row).cells();
+        // Clipped to the trimmed length: a span over trailing blanks describes
+        // text the caller was not given, and a selection bar's padding is not
+        // information it can act on.
+        let end = grid.row(row).trimmed_len().min(cells.len());
+        let mut col = 0usize;
+        while col < end {
+            let flags = cells[col].flags & StyledSpan::VISUAL;
+            if flags.is_empty() {
+                col += 1;
+                continue;
+            }
+            let start = col;
+            while col < end && (cells[col].flags & StyledSpan::VISUAL) == flags {
+                col += 1;
+            }
+            if spans.len() < max {
+                spans.push(StyledSpan { row, col: start, len: col - start, flags });
+            } else {
+                omitted += 1;
+            }
+        }
+    }
+    (spans, omitted)
+}
+
+/// A run of cells carrying visual attributes, in the coordinates
+/// [`Replica::screen_text`] uses.
+///
+/// Positions and flags, never text -- see [`Replica::styled_spans`] for why
+/// that shape, and for what it deliberately leaves out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StyledSpan {
+    /// Index into the lines `screen_text` returned.
+    pub row: usize,
+    /// Grid column, the units `cursor` uses -- not a character offset.
+    pub col: usize,
+    /// Width in grid columns.
+    pub len: usize,
+    /// Always a subset of [`StyledSpan::VISUAL`], and never empty.
+    pub flags: CellFlags,
+}
+
+impl StyledSpan {
+    /// The bits that are *styling*, as against layout.
+    ///
+    /// Written as what it includes rather than as `!(WIDE | WIDE_SPACER |
+    /// WRAPLINE)`: a complement silently adopts every flag added later, and the
+    /// next flag added to `CellFlags` is as likely to be a layout bit as a
+    /// visual one. This way a new bit is invisible here until somebody decides
+    /// it belongs, which is the safe direction to fail in.
+    pub const VISUAL: CellFlags = CellFlags::BOLD
+        .union(CellFlags::DIM)
+        .union(CellFlags::ITALIC)
+        .union(CellFlags::UNDERLINE)
+        .union(CellFlags::DOUBLE_UNDERLINE)
+        .union(CellFlags::UNDERCURL)
+        .union(CellFlags::STRIKEOUT)
+        .union(CellFlags::INVERSE)
+        .union(CellFlags::HIDDEN)
+        .union(CellFlags::BLINK);
+
+    /// The flags, as the names a tool result spells them.
+    ///
+    /// `reverse` rather than `inverse`: it is the word the terminal world uses
+    /// for the thing a selection bar is drawn with, and the word #348 is
+    /// written in.
+    #[must_use]
+    pub fn names(&self) -> Vec<&'static str> {
+        const NAMED: &[(CellFlags, &str)] = &[
+            (CellFlags::BOLD, "bold"),
+            (CellFlags::DIM, "dim"),
+            (CellFlags::ITALIC, "italic"),
+            (CellFlags::UNDERLINE, "underline"),
+            (CellFlags::DOUBLE_UNDERLINE, "double_underline"),
+            (CellFlags::UNDERCURL, "undercurl"),
+            (CellFlags::STRIKEOUT, "strikeout"),
+            (CellFlags::INVERSE, "reverse"),
+            (CellFlags::HIDDEN, "hidden"),
+            (CellFlags::BLINK, "blink"),
+        ];
+        NAMED.iter().filter(|(f, _)| self.flags.contains(*f)).map(|(_, n)| *n).collect()
+    }
+}
 
 /// A session this process is attached to.
 pub struct Replica {
@@ -164,6 +262,20 @@ impl Replica {
         self.exited = Some(code);
     }
 
+    /// How many viewport rows [`screen_text`](Self::screen_text) returns.
+    ///
+    /// One function because [`styled_spans`](Self::styled_spans) numbers its
+    /// rows against that text: a span naming row 7 of a nine-line screen must
+    /// mean the same row the caller is looking at. Two independent trims would
+    /// agree until the day a blank-but-styled row made them disagree, and the
+    /// symptom would be an attribute reported against somebody else's line.
+    fn visible_rows(&self) -> usize {
+        let grid = self.term.grid();
+        (0..grid.rows())
+            .rposition(|i| !grid.row(i).text().trim().is_empty())
+            .map_or(0, |i| i + 1)
+    }
+
     /// The visible screen as text, one row per line.
     ///
     /// Trailing blank rows are dropped: an 80x24 shell showing a prompt is two
@@ -172,10 +284,63 @@ impl Replica {
     /// what `Grid::screen_text` already does.
     #[must_use]
     pub fn screen_text(&self) -> String {
-        let full = self.term.screen_text();
-        let trimmed: Vec<&str> = full.lines().collect();
-        let end = trimmed.iter().rposition(|l| !l.trim().is_empty()).map_or(0, |i| i + 1);
-        trimmed[..end].join("\n")
+        let grid = self.term.grid();
+        let rows: Vec<String> = (0..self.visible_rows()).map(|i| grid.row(i).text()).collect();
+        rows.join("\n")
+    }
+
+    /// Where the screen is dim, reversed, bold and so on -- as positions, with
+    /// no text of their own.
+    ///
+    /// # The bug this exists for
+    ///
+    /// Flattened to characters, text an application is *offering* is identical
+    /// to text the user has *committed*. A CLI's dimmed suggestion and a real
+    /// typed command line have the same `>` and the same characters, so an
+    /// agent reads a ghost as a pending instruction -- and an Enter sent for
+    /// any other reason accepts it. The suggestion that prompted #348 was "go
+    /// ahead, branch and open the issue", one keystroke from real work.
+    ///
+    /// The same flattening loses a picker's *selection* whenever it is drawn by
+    /// inverting the row rather than by printing a marker, which leaves nothing
+    /// at all to read the cursor position from.
+    ///
+    /// # Why positions and not runs of text
+    ///
+    /// Returning `(text, attributes)` runs would restate the whole screen a
+    /// second time, JSON-escaped: measured at 3-5x the tokens of the plain text
+    /// on a realistic TUI frame, and 20x+ on a syntax-highlighted one. Spans
+    /// carry coordinates and flag names only -- 2-23 bytes across the recorded
+    /// fixtures -- and the caller cross-references them against the text it
+    /// already has. It also means this value contains **no characters the
+    /// terminal produced**, so it needs no untrusted fence of its own; there is
+    /// nothing in it a hostile program could author.
+    ///
+    /// # What is deliberately not reported
+    ///
+    /// Colour. `fg`/`bg` are where nearly all the run-splitting lives (a
+    /// highlighted editor row is ~50 changes), and neither #348 case needs
+    /// them: dim is its own bit and inverse is its own bit, resolved into
+    /// colours only by a renderer holding a palette this process does not have.
+    ///
+    /// And the three *layout* bits share the same word: `WIDE`, `WIDE_SPACER`
+    /// and `WRAPLINE`. They are not styling, and reporting them would bury the
+    /// signal -- 250 of 274 flagged runs in the `vim-macos` fixture are
+    /// `WRAPLINE` alone.
+    ///
+    /// # Coordinates
+    ///
+    /// `row` indexes the lines [`screen_text`](Self::screen_text) returned;
+    /// `col` and `len` are **grid columns**, the same units `cursor` already
+    /// uses, which is not the same as a byte or character offset once a wide
+    /// character is on the row. Spans are clipped to the row's trimmed length,
+    /// because a span over trailing blanks describes text the caller cannot
+    /// see.
+    ///
+    /// Returns `(spans, omitted)`, bounded like every other bulk answer here.
+    #[must_use]
+    pub fn styled_spans(&self, max: usize) -> (Vec<StyledSpan>, usize) {
+        spans_of(self.term.grid(), self.visible_rows(), max)
     }
 
     /// Everything the replica holds, as at most `max` lines plus the count it
@@ -332,5 +497,115 @@ impl Replica {
         let end = out.iter().rposition(|l| !l.is_empty()).map_or(0, |i| i + 1);
         out.truncate(end);
         Some(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A terminal with `bytes` played into it, and the spans that produces.
+    ///
+    /// Real VT rather than hand-set flags: the thing worth testing is that SGR
+    /// 2 and SGR 7 arrive as the bits this reports, and a test that set the
+    /// bits itself would pass with the parser wired to anything.
+    fn spans(cols: usize, rows: usize, bytes: &str) -> Vec<StyledSpan> {
+        let mut term = Terminal::new(cols, rows, 100);
+        term.advance(bytes.as_bytes());
+        let visible = (0..term.grid().rows())
+            .rposition(|i| !term.grid().row(i).text().trim().is_empty())
+            .map_or(0, |i| i + 1);
+        spans_of(term.grid(), visible, 4_000).0
+    }
+
+    #[test]
+    fn a_dimmed_suggestion_is_distinguishable_from_typed_text() {
+        // #348 exactly: the two are identical once flattened, and an agent that
+        // reads the ghost as a pending instruction is one Enter from acting on
+        // text nobody wrote.
+        let out = spans(40, 3, "> \x1b[2mgo ahead, branch it\x1b[0m");
+        assert_eq!(out.len(), 1, "the typed part carries no attribute: {out:?}");
+        assert_eq!(out[0].names(), vec!["dim"]);
+        assert_eq!(out[0].col, 2, "the span starts after the prompt the user typed");
+        assert_eq!(out[0].len, "go ahead, branch it".len());
+    }
+
+    #[test]
+    fn a_reverse_video_row_says_where_the_selection_is() {
+        // The case no recording can supply, and the one that decides whether a
+        // picker is driveable: a menu that marks its selection by inverting the
+        // row rather than by printing a marker leaves nothing in the text.
+        let out = spans(20, 4, "one\r\n\x1b[7mtwo\x1b[0m\r\nthree");
+        let reversed: Vec<_> = out.iter().filter(|s| s.names().contains(&"reverse")).collect();
+        assert_eq!(reversed.len(), 1, "one row is selected: {out:?}");
+        assert_eq!(reversed[0].row, 1, "and it is the second line of the screen");
+        assert_eq!(reversed[0].col, 0);
+        assert_eq!(reversed[0].len, 3);
+    }
+
+    #[test]
+    fn adjacent_runs_with_different_attributes_do_not_merge() {
+        let out = spans(40, 2, "\x1b[1mbold\x1b[0m\x1b[2mdim\x1b[0m");
+        assert_eq!(out.len(), 2, "two attributes, two spans: {out:?}");
+        assert_eq!(out[0].names(), vec!["bold"]);
+        assert_eq!(out[1].names(), vec!["dim"]);
+        assert_eq!(out[1].col, 4);
+    }
+
+    #[test]
+    fn combined_attributes_are_reported_together() {
+        let out = spans(40, 2, "\x1b[1;4;7mhi\x1b[0m");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].names(), vec!["bold", "underline", "reverse"]);
+    }
+
+    #[test]
+    fn colour_alone_is_not_an_attribute() {
+        // Deliberate, and the reason this is affordable on every call: colour is
+        // where nearly all the run-splitting lives, and neither #348 case needs
+        // it. A red error line is still just text.
+        assert!(spans(40, 2, "\x1b[31mred\x1b[0m").is_empty());
+        assert!(spans(40, 2, "\x1b[48;5;27mbg\x1b[0m").is_empty());
+    }
+
+    #[test]
+    fn a_wide_character_splits_no_span_of_its_own() {
+        // `WIDE` and `WIDE_SPACER` live in the same word as the visual bits, so
+        // an unmasked walk reports every CJK character as a styled run.
+        let out = spans(20, 2, "\x1b[1m\u{4e16}\u{754c}\x1b[0m");
+        assert_eq!(out.len(), 1, "one bold run, not one per half-cell: {out:?}");
+        assert_eq!(out[0].names(), vec!["bold"]);
+    }
+
+    #[test]
+    fn the_ceiling_counts_what_it_dropped_rather_than_ending_quietly() {
+        // Bounded like every other bulk answer here. A list that just stops is
+        // indistinguishable from a screen that had no more attributes, which is
+        // the reasoning `omitted_lines` already carries.
+        let mut term = Terminal::new(40, 4, 100);
+        // Alternating bold and plain, so every other cell opens a new span.
+        for _ in 0..20 {
+            term.advance(b"\x1b[1mx\x1b[0my");
+        }
+        let visible = (0..term.grid().rows())
+            .rposition(|i| !term.grid().row(i).text().trim().is_empty())
+            .map_or(0, |i| i + 1);
+        let (all, none) = spans_of(term.grid(), visible, 4_000);
+        assert_eq!(none, 0);
+        assert!(all.len() > 5, "this screen needs several spans to bound: {}", all.len());
+
+        let (capped, omitted) = spans_of(term.grid(), visible, 3);
+        assert_eq!(capped.len(), 3);
+        assert_eq!(omitted, all.len() - 3, "everything past the ceiling is counted");
+    }
+
+    #[test]
+    fn a_span_stops_at_the_end_of_the_text() {
+        // An inverted bar usually runs to the edge of the screen, but the text
+        // the caller was handed stops at the last non-blank cell -- so a span
+        // past it would name columns that are not in the answer.
+        let out = spans(30, 2, "\x1b[7mrow\x1b[K\x1b[0m");
+        assert_eq!(out.len(), 1);
+        assert!(out[0].len <= 3, "clipped to the trimmed row: {out:?}");
     }
 }

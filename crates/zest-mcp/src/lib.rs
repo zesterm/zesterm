@@ -63,6 +63,6 @@ pub use addr::{AddrError, Resolver};
 pub use conn::{Conn, Shared};
 pub use keys::{Chord, KeyError};
 pub use run::{Anchor, Progress, Refusal};
-pub use session::Replica;
+pub use session::{Replica, StyledSpan};
 pub use rpc::{Server, Tools};
 pub use tools::{ToolError, ToolSet};
