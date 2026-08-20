@@ -542,6 +542,24 @@ export const Shell = component<{
           // nothing and cost a remount the moment the host id arrived.
           {...(ctx.props.listSourceFor === undefined ? {} : { key: listHost })}
           source={listSourceFor(listHost)}
+          // The seam, handed down rather than re-derived. `SessionList` used
+          // to turn a `DataPlane` plus an optional relay into a dial itself,
+          // which is how the hosted pane ended up with every row disabled
+          // (#376): this shell never had a relay to give it, and the loopback
+          // one correctly has none.
+          dialFor={(hostId: string) => hostSource.dialFor(hostId)}
+          // The machine's own name whenever we know it — on both paths, one
+          // rule. Dropped in #351 along with the dial, so the hosted pane was
+          // headed `zesterm` while the tab strip beside it named the machine.
+          // Naming it only on the host-plural path would be the same
+          // two-rules-for-one-thing that produced this bug.
+          {...(labels[listHost] === undefined ? {} : { title: labels[listHost] })}
+          // The two worlds really do connect differently, so this one IS
+          // conditional: loopback waits on its sidecar, and a machine reached
+          // through the relay has no sidecar anywhere in the path.
+          {...(ctx.props.listSourceFor === undefined
+            ? {}
+            : { connectingLabel: 'reaching this machine…' })}
           deviceKind={device.kind}
           onOpen={(t: OpenTarget) => openTarget(t, true)}
           // The pane's own create button, answered by the same seam the

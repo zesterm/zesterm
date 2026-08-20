@@ -436,3 +436,44 @@ test('an offline machine still lists, and still says what it offers', () => {
   assert.equal(source.dialFor(HOST), null);
   assert.equal(source.factsOf(HOST)?.launchTargets.length, 1);
 });
+
+test('every session the pane can list is a session the seam can dial', () => {
+  // The invariant the fleet pane rests on, and the one #376 broke: it draws a
+  // row per session and asks the seam how to reach it. The pane used to answer
+  // that itself, from a `DataPlane` plus an optional relay, so a caller with
+  // no relay to give produced a full list in which nothing could be clicked.
+  //
+  // Written over the entries rather than over the machines because that is the
+  // shape the pane walks — a row resolves on `entry.host`, never on the
+  // machine the pane was opened for.
+  const live = fakeLive([
+    { id: HOST, label: 'mac', online: true, sessions: [entry(HOST, '1'), entry(HOST, '2')] },
+    { id: OTHER, label: 'forge', online: true, sessions: [entry(OTHER, '9')] },
+  ]);
+  const source = liveHostSource(live, RELAY);
+  for (const e of source.sessions()) {
+    assert.notEqual(
+      source.dialFor(e.host),
+      null,
+      `session ${e.session} is listed on ${e.host} and must be clickable`,
+    );
+  }
+
+  // And the converse, which is what makes the row honestly disabled rather
+  // than a click that hangs: a machine that stopped answering keeps no dial.
+  const asleep = liveHostSource(
+    fakeLive([{ id: HOST, label: 'mac', online: false, sessions: [entry(HOST, '1')] }]),
+    RELAY,
+  );
+  assert.equal(asleep.dialFor(HOST), null);
+});
+
+test('the loopback pane can dial the sessions it lists too', () => {
+  // Same invariant on the path that was never broken — worth pinning because
+  // the fix routes BOTH panes through the seam, and a loopback regression
+  // would otherwise only show up in a browser.
+  const source = local({ kind: 'ready', view: WITH_SESSIONS });
+  for (const e of source.sessions()) {
+    assert.notEqual(source.dialFor(e.host), null, `session ${e.session} must be clickable`);
+  }
+});

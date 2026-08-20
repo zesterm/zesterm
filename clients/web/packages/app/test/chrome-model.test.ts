@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { HostFacts } from '@zesterm/control';
+import type { Dial } from '@zesterm/client';
+import type { HostFacts, SessionEntry } from '@zesterm/control';
 
 import {
   MONO_FAMILY,
@@ -16,6 +17,7 @@ import {
   launcherKeyOf,
   launcherRows,
   paneFor,
+  sessionRows,
   shouldScrollIntoView,
   shortHostId,
   tabIdOf,
@@ -454,4 +456,62 @@ test('a facts line shows every part the machine answered, and nothing else', () 
   // an empty one still takes its gap and reads as a fact that failed to load.
   assert.equal(factsLine(['', '', '']), '');
   assert.equal(factsLine([undefined, undefined]), '');
+});
+
+// --- the fleet pane's rows (#376) -------------------------------------------
+
+const sess = (host: string, session: string): SessionEntry => ({
+  host,
+  session,
+  title: 'zsh',
+  cwd: '/src',
+  cols: 80,
+  rows: 24,
+  altScreen: false,
+  attached: false,
+});
+
+const DIAL = (() => {}) as unknown as Dial;
+
+test('a row is clickable exactly when the seam can reach the machine it names', () => {
+  // The bug this exists for: the pane derived each row's dial itself, from a
+  // `DataPlane` plus an OPTIONAL relay. The hosted shell had no relay to give
+  // it, so every row in a full list came out disabled — and because forgetting
+  // the relay and correctly having none (loopback) are the same call, neither
+  // the compiler nor the suite had anything to say.
+  const reachable = new Set([TAB_HOST]);
+  const rows = sessionRows(
+    [sess(TAB_HOST, '1'), sess(OTHER_HOST, '2'), sess(TAB_HOST, '3')],
+    (hostId) => (reachable.has(hostId) ? DIAL : null),
+  );
+  assert.deepEqual(
+    rows.map((r) => r.dial !== null),
+    [true, false, true],
+  );
+  // A row that cannot be reached is still a row: the session exists, and
+  // dropping it would make the list disagree with what the machine reported.
+  assert.equal(rows.length, 3);
+});
+
+test('a row dials the machine it names, not the one the pane was opened for', () => {
+  // On loopback the two are always the same value, which is exactly why the
+  // distinction has to be written down rather than left to whichever caller
+  // remembers it. A pane opened on one machine, listing a session on another,
+  // must ask about the second.
+  const asked: string[] = [];
+  sessionRows([sess(OTHER_HOST, '9')], (hostId) => {
+    asked.push(hostId);
+    return DIAL;
+  });
+  assert.deepEqual(asked, [OTHER_HOST], 'the entry names the machine, so the entry decides');
+});
+
+test('no sessions is no rows, and asks the seam nothing', () => {
+  let calls = 0;
+  const rows = sessionRows([], () => {
+    calls += 1;
+    return DIAL;
+  });
+  assert.deepEqual(rows, []);
+  assert.equal(calls, 0, 'a mint or a ticket per empty render would be a real cost');
 });
