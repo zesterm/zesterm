@@ -108,6 +108,40 @@ export async function copyOutcome(
 }
 
 /**
+ * An audit event as its Activity row reads (#373): what happened, to which
+ * label, on whose authority, how long ago — one string, because the section
+ * is a log to scan, not a table to style.
+ *
+ * The actor is spelled out because it is the fact the section exists for: the
+ * incident behind it was a revoke nobody remembered making, and "from this
+ * account's browser" is what turns "who did this?" into "that was me".
+ */
+export function eventLine(
+  e: {
+    readonly action: 'revoke' | 'restore' | 'approve' | 'enroll' | 'register' | 'claim';
+    readonly actor: 'owner' | 'device' | 'machine';
+    readonly subjectLabel: string;
+    readonly at: number;
+  },
+  now: number,
+): string {
+  const verb = {
+    revoke: 'revoked',
+    restore: 'restored',
+    approve: 'approved',
+    enroll: 'enrolled',
+    register: 'registered',
+    claim: 'linked',
+  }[e.action];
+  const by = {
+    owner: "from this account's browser",
+    device: 'by an approved device',
+    machine: 'by the machine itself',
+  }[e.actor];
+  return `${verb} ${e.subjectLabel} · ${by} · ${ago(e.at, now)}`;
+}
+
+/**
  * The live/revoked split every consumer of the registry must make, in one
  * place. The recovery view rides the same listing, so a revoked host that
  * leaked into the live list would be watched, dialled and offered for launch —

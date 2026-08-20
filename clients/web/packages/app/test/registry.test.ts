@@ -15,6 +15,8 @@ import {
   fetchRegistry,
   mintEnrollCode,
   parseDevice,
+  fetchEvents,
+  parseEvent,
   parseHost,
   registerDevice,
   restore,
@@ -106,6 +108,37 @@ test('a failed list is an error the screen can show, not an empty account', asyn
   await assert.rejects(
     fetchRegistry(serving({ [HOSTS_URL]: { hosts: [] }, [DEVICES_URL]: { devices: [] } }, 500)),
   );
+});
+
+test('an event row missing what a line needs is dropped, not rendered as undefined', () => {
+  const good = {
+    action: 'revoke',
+    actor: 'owner',
+    subjectKind: 'host',
+    subjectLabel: 'andy-mac',
+    at: 5,
+  };
+  assert.equal(parseEvent(good)?.subjectLabel, 'andy-mac');
+  assert.equal(parseEvent({ ...good, action: 'exploded' }), null, 'a verb nobody renders');
+  assert.equal(parseEvent({ ...good, actor: 'ghost' }), null, 'an authority nobody defined');
+  assert.equal(parseEvent({ ...good, subjectLabel: '' }), null, 'a line about nothing named');
+  assert.equal(parseEvent({ ...good, at: 'yesterday' }), null);
+  assert.equal(parseEvent(null), null);
+});
+
+test('fetchEvents reads the envelope and drops what does not parse', async () => {
+  const got = await fetchEvents(
+    serving({
+      '/api/registry/events': {
+        events: [
+          { action: 'restore', actor: 'owner', subjectKind: 'device', subjectLabel: 'Edge', at: 9 },
+          'nonsense',
+        ],
+      },
+    }),
+  );
+  assert.equal(got.length, 1);
+  assert.equal(got[0]?.action, 'restore');
 });
 
 test('restore is a JSON POST, the same posture as revoke', async () => {

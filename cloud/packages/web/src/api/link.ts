@@ -29,6 +29,7 @@ import {
   LINK_GRANT_TTL_MS,
 } from '../db/link.ts';
 import { enrolDevice, existingDevice } from '../db/registry.ts';
+import { recordRegistryEvent } from '../db/events.ts';
 import { createMachineToken } from '../db/machine-tokens.ts';
 import { findUser } from '../db/users.ts';
 import type { DeviceKind } from '../db/types.ts';
@@ -271,6 +272,15 @@ export async function claimLink(request: Request, env: Env, now: number): Promis
     principalId: id,
     now,
   });
+  await recordRegistryEvent(env.DB, owner, {
+    action: 'claim',
+    actor: 'machine',
+    subjectKind: 'device',
+    subjectId: id,
+    subjectLabel: row.label,
+    at: now,
+  });
+
   const account = await findUser(env.DB, owner);
   return json({
     device: enrolled,

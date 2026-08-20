@@ -29,6 +29,7 @@ import {
   revokedDeviceIds,
 } from '../db/attestations.ts';
 import type { Db, DeviceStatus } from '../db/types.ts';
+import { recordRegistryEvent } from '../db/events.ts';
 import type { Env } from '../env.ts';
 import { json, jsonObject } from '../http.ts';
 import { KEY_LEN } from '../enroll/preimage.ts';
@@ -192,6 +193,17 @@ export async function approveDevice(
     // the race — `revokeAttestationsFor` runs on every device revoke.
     return json({ error: 'not_found' }, 404);
   }
+
+  await recordRegistryEvent(env.DB, userId, {
+    action: 'approve',
+    // The desktop app approves with its bearer token, the browser with the
+    // session — the audit line says which kind of authority acted (#373).
+    actor: principal.kind === 'user' ? 'owner' : 'device',
+    subjectKind: 'device',
+    subjectId: device.id,
+    subjectLabel: device.label,
+    at: now,
+  });
 
   return json({ device });
 }

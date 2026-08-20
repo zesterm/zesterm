@@ -341,21 +341,29 @@ export async function ownsLiveHost(db: Db, id: string, userId: string): Promise<
  * deliberately, because the alternative is an endpoint that answers "does this
  * key exist" for keys that are none of the caller's business.
  */
+// `label` rides the RETURNING for the audit event (#373): the label at the
+// moment of the act is what the log stores, and a second read here would be a
+// second moment it could differ from.
+export interface RevokedRow {
+  readonly revokedAt: number;
+  readonly label: string;
+}
+
 export async function revokeHost(
   db: Db,
   id: string,
   userId: string,
   now: number,
-): Promise<number | null> {
+): Promise<RevokedRow | null> {
   const row = await db
     .prepare(
       `UPDATE hosts SET revoked_at = COALESCE(revoked_at, ?)
         WHERE id = ? AND user_id = ?
-       RETURNING revoked_at`,
+       RETURNING revoked_at, label`,
     )
     .bind(now, id, userId)
-    .first<{ revoked_at: number }>();
-  return row === null ? null : row.revoked_at;
+    .first<{ revoked_at: number; label: string }>();
+  return row === null ? null : { revokedAt: row.revoked_at, label: row.label };
 }
 
 export async function revokeDevice(
@@ -363,16 +371,16 @@ export async function revokeDevice(
   id: string,
   userId: string,
   now: number,
-): Promise<number | null> {
+): Promise<RevokedRow | null> {
   const row = await db
     .prepare(
       `UPDATE devices SET revoked_at = COALESCE(revoked_at, ?)
         WHERE id = ? AND user_id = ?
-       RETURNING revoked_at`,
+       RETURNING revoked_at, label`,
     )
     .bind(now, id, userId)
-    .first<{ revoked_at: number }>();
-  return row === null ? null : row.revoked_at;
+    .first<{ revoked_at: number; label: string }>();
+  return row === null ? null : { revokedAt: row.revoked_at, label: row.label };
 }
 
 /**
@@ -390,12 +398,12 @@ export async function revokeDevice(
  * `null` keeps revoke's meaning — no such row under this account, which is
  * also what a stranger's machine looks like, for the reason `revokeHost` gives.
  */
-export async function restoreHost(db: Db, id: string, userId: string): Promise<boolean> {
+export async function restoreHost(db: Db, id: string, userId: string): Promise<string | null> {
   const row = await db
-    .prepare(`UPDATE hosts SET revoked_at = NULL WHERE id = ? AND user_id = ? RETURNING id`)
+    .prepare(`UPDATE hosts SET revoked_at = NULL WHERE id = ? AND user_id = ? RETURNING label`)
     .bind(id, userId)
-    .first<{ id: string }>();
-  return row !== null;
+    .first<{ label: string }>();
+  return row === null ? null : row.label;
 }
 
 /**
@@ -404,10 +412,10 @@ export async function restoreHost(db: Db, id: string, userId: string): Promise<b
  * restoring the row speaks for the row, not for the vouchers, and whoever
  * vouched can vouch again as the ordinary renewal.
  */
-export async function restoreDevice(db: Db, id: string, userId: string): Promise<boolean> {
+export async function restoreDevice(db: Db, id: string, userId: string): Promise<string | null> {
   const row = await db
-    .prepare(`UPDATE devices SET revoked_at = NULL WHERE id = ? AND user_id = ? RETURNING id`)
+    .prepare(`UPDATE devices SET revoked_at = NULL WHERE id = ? AND user_id = ? RETURNING label`)
     .bind(id, userId)
-    .first<{ id: string }>();
-  return row !== null;
+    .first<{ label: string }>();
+  return row === null ? null : row.label;
 }

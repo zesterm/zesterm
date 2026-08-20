@@ -17,7 +17,12 @@ import { approveDevice, listAccountAttestations } from './api/attest.ts';
 import { approveLink, claimLink, denyLink, getLinkGrant, startLink } from './api/link.ts';
 import { registerDevice } from './api/devices.ts';
 import { claimEnrollCode, mintEnrollCode } from './api/enroll.ts';
-import { listRegistry, restoreRegistryEntry, revokeRegistryEntry } from './api/registry.ts';
+import {
+  listRegistry,
+  listRegistryEventsRoute,
+  restoreRegistryEntry,
+  revokeRegistryEntry,
+} from './api/registry.ts';
 import { mintRelayTicket } from './api/relay.ts';
 import { finishLogin, logout, startLogin } from './auth/routes.ts';
 import { carriesBearer, requestPrincipal } from './api/principal.ts';
@@ -198,6 +203,13 @@ export async function routeApi(
   if (path === '/api/hosts' || path === '/api/devices') {
     if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
     return listRegistry(request, env, path === '/api/hosts' ? 'host' : 'device', now);
+  }
+
+  // Cookie-only, like the revoked view it explains — deliberately not in
+  // BEARER: an account's history is the owner's reading (#373).
+  if (path === '/api/registry/events') {
+    if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+    return listRegistryEventsRoute(request, env, now);
   }
 
   // The two ORIGINLESS halves first, then the cookie-authenticated remainder
