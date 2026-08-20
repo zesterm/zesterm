@@ -820,7 +820,7 @@ mod tests {
         );
         let revoked = refusal_text(&refused("already_enrolled", Some("revoked")));
         assert!(
-            revoked.contains("revoked") && revoked.contains("estore"),
+            revoked.contains("revoked") && revoked.contains("restore"),
             "a revoked machine's only way back is the owner restoring it; got {revoked:?}"
         );
         assert!(
@@ -830,7 +830,7 @@ mod tests {
         );
         let bare = refusal_text(&refused("already_enrolled", None));
         assert!(
-            bare.contains("estore"),
+            bare.contains("restore"),
             "an old Worker names no cause, but 'mint a fresh code' is still never the fix \
              for already_enrolled; got {bare:?}"
         );
