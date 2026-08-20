@@ -259,30 +259,57 @@ export async function countDevices(
 
 // `now` for the reason `publicHost` takes one: `online` is a verdict about how
 // fresh the relay's last proof of a parked link is, not a column.
-export async function listHosts(db: Db, userId: string, now: number): Promise<PublicHost[]> {
+//
+// `includeRevoked` is the owner's recovery view (#365): the revoked rows come
+// back too, and every row then carries `revokedAt` so the screen can tell the
+// two apart. The default answer keeps its exact shape — the field is absent,
+// not null — because machine bearers read this listing and deployed parsers
+// must keep seeing what they were built against.
+export async function listHosts(
+  db: Db,
+  userId: string,
+  now: number,
+  includeRevoked = false,
+): Promise<PublicHost[]> {
   const { results } = await db
     .prepare(
       `SELECT * FROM hosts
-        WHERE user_id = ? AND revoked_at IS NULL
+        WHERE user_id = ?${includeRevoked ? '' : ' AND revoked_at IS NULL'}
         ORDER BY enrolled_at, id`,
     )
     .bind(userId)
     .all<HostRow>();
   // An arrow rather than a bare reference: `map` passes the index as a second
   // argument, which would silently become the clock.
-  return results.map((row) => publicHost(row, now));
+  if (!includeRevoked) return results.map((row) => publicHost(row, now));
+  return results.map((row) => {
+    const pub = publicHost(row, now);
+    return {
+      ...pub,
+      // A revoked machine is never online, whatever the relay last recorded:
+      // the ticket route refuses it (`ownsLiveHost`), so nothing can reach it,
+      // and a green dot on a row offering only "restore" would be a lie.
+      online: pub.online && row.revoked_at === null,
+      revokedAt: row.revoked_at,
+    };
+  });
 }
 
-export async function listDevices(db: Db, userId: string): Promise<PublicDevice[]> {
+export async function listDevices(
+  db: Db,
+  userId: string,
+  includeRevoked = false,
+): Promise<PublicDevice[]> {
   const { results } = await db
     .prepare(
       `SELECT * FROM devices
-        WHERE user_id = ? AND revoked_at IS NULL
+        WHERE user_id = ?${includeRevoked ? '' : ' AND revoked_at IS NULL'}
         ORDER BY enrolled_at, id`,
     )
     .bind(userId)
     .all<DeviceRow>();
-  return results.map(publicDevice);
+  if (!includeRevoked) return results.map(publicDevice);
+  return results.map((row) => ({ ...publicDevice(row), revokedAt: row.revoked_at }));
 }
 
 /**
@@ -346,4 +373,41 @@ export async function revokeDevice(
     .bind(now, id, userId)
     .first<{ revoked_at: number }>();
   return row === null ? null : row.revoked_at;
+}
+
+/**
+ * Restore: the revoke's inverse, and deliberately nothing more.
+ *
+ * One column is cleared and no token is touched, which is `machine-tokens.ts`'s
+ * "no second write" doctrine run in reverse: liveness is a JOIN against this
+ * row, so the token the machine has been holding all along simply resolves
+ * again — the machine is back on its next poll, with no re-enrolment. A
+ * machine whose token meanwhile expired re-enrols with a fresh code, and that
+ * now *succeeds*, because the incumbent it collides with is live and its own.
+ *
+ * Idempotent the way revoke is: restoring a row that is already live matches
+ * and answers success, because a second click on a slow page is not an error.
+ * `null` keeps revoke's meaning — no such row under this account, which is
+ * also what a stranger's machine looks like, for the reason `revokeHost` gives.
+ */
+export async function restoreHost(db: Db, id: string, userId: string): Promise<boolean> {
+  const row = await db
+    .prepare(`UPDATE hosts SET revoked_at = NULL WHERE id = ? AND user_id = ? RETURNING id`)
+    .bind(id, userId)
+    .first<{ id: string }>();
+  return row !== null;
+}
+
+/**
+ * See `restoreHost`. The device's attestations stay revoked: those were other
+ * devices' signed statements, withdrawn when the subject was — the owner
+ * restoring the row speaks for the row, not for the vouchers, and whoever
+ * vouched can vouch again as the ordinary renewal.
+ */
+export async function restoreDevice(db: Db, id: string, userId: string): Promise<boolean> {
+  const row = await db
+    .prepare(`UPDATE devices SET revoked_at = NULL WHERE id = ? AND user_id = ? RETURNING id`)
+    .bind(id, userId)
+    .first<{ id: string }>();
+  return row !== null;
 }

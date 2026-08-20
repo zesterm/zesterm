@@ -17,6 +17,7 @@ import {
   parseDevice,
   parseHost,
   registerDevice,
+  restore,
   revoke,
 } from '../src/registry.ts';
 
@@ -42,9 +43,16 @@ function serving(table: Record<string, unknown>, status = 200): typeof fetch {
   }) as unknown as typeof fetch;
 }
 
+// What `fetchRegistry` actually requests: the owner's recovery view, so a
+// revoked machine has somewhere to be seen and restored. The Worker ignores
+// the parameter for bearer callers and older deployments never read it, so
+// asking is always safe.
+const HOSTS_URL = '/api/hosts?include=revoked';
+const DEVICES_URL = '/api/devices?include=revoked';
+
 test('both lists are read, and the envelopes are the Worker\'s', async () => {
   const got = await fetchRegistry(
-    serving({ '/api/hosts': { hosts: [HOST] }, '/api/devices': { devices: [DEVICE] } }),
+    serving({ [HOSTS_URL]: { hosts: [HOST] }, [DEVICES_URL]: { devices: [DEVICE] } }),
   );
   assert.equal(got.hosts.length, 1);
   assert.equal(got.hosts[0]?.label, 'andy-mac');
@@ -57,12 +65,22 @@ test('a row missing what a row needs is dropped, not rendered as undefined', asy
   // entry someone could revoke, which is worse than not listing it.
   const got = await fetchRegistry(
     serving({
-      '/api/hosts': { hosts: [HOST, { id: 'x'.repeat(64) }, null, 'nonsense'] },
-      '/api/devices': { devices: [DEVICE, { ...DEVICE, kind: 'toaster' }] },
+      [HOSTS_URL]: { hosts: [HOST, { id: 'x'.repeat(64) }, null, 'nonsense'] },
+      [DEVICES_URL]: { devices: [DEVICE, { ...DEVICE, kind: 'toaster' }] },
     }),
   );
   assert.equal(got.hosts.length, 1, 'only the complete host survives');
   assert.equal(got.devices.length, 1, 'a kind nobody renders is not a device');
+});
+
+test('revokedAt is read when present and null when the Worker predates it', () => {
+  // Absent must read as live: an older Worker lists only live rows and says
+  // nothing about revocation, and inventing "revoked" for every row on it
+  // would render the whole account into the recovery section.
+  assert.equal(parseHost(HOST)?.revokedAt, null);
+  assert.equal(parseHost({ ...HOST, revokedAt: 7 })?.revokedAt, 7);
+  assert.equal(parseDevice(DEVICE)?.revokedAt, null);
+  assert.equal(parseDevice({ ...DEVICE, revokedAt: 7 })?.revokedAt, 7);
 });
 
 test('a key of unknown safety is assumed readable, not assumed safe', async () => {
@@ -86,8 +104,34 @@ test('a failed list is an error the screen can show, not an empty account', asyn
   // Rendering "no machines yet" because the request 500'd would tell someone
   // their fleet is gone.
   await assert.rejects(
-    fetchRegistry(serving({ '/api/hosts': { hosts: [] }, '/api/devices': { devices: [] } }, 500)),
+    fetchRegistry(serving({ [HOSTS_URL]: { hosts: [] }, [DEVICES_URL]: { devices: [] } }, 500)),
   );
+});
+
+test('restore is a JSON POST, the same posture as revoke', async () => {
+  // The way back in for a machine revoked by mistake: same CSRF posture,
+  // because the Worker refuses anything else 403.
+  let seen: { method?: string | undefined; ct?: string | undefined; credentials?: string | undefined } = {};
+  const capturing: typeof fetch = ((url: string, init?: RequestInit) => {
+    seen = {
+      method: init?.method,
+      ct: (init?.headers as Record<string, string> | undefined)?.['content-type'],
+      credentials: init?.credentials,
+    };
+    assert.match(url, /^\/api\/devices\/[0-9a-f]{64}\/restore$/);
+    return Promise.resolve(new Response(null, { status: 200 }));
+  }) as unknown as typeof fetch;
+
+  await restore('devices', DEVICE.id, capturing);
+  assert.equal(seen.method, 'POST');
+  assert.equal(seen.ct, 'application/json');
+  assert.equal(seen.credentials, 'same-origin', 'the session cookie has to be sent');
+});
+
+test('a refused restore is reported rather than swallowed', async () => {
+  const refusing: typeof fetch = (() =>
+    Promise.resolve(new Response(null, { status: 404 }))) as unknown as typeof fetch;
+  await assert.rejects(restore('hosts', HOST.id, refusing), /404/);
 });
 
 test('revoke is a JSON POST, because anything else is refused 403', async () => {

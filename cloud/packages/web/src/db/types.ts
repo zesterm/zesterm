@@ -152,6 +152,13 @@ export interface PublicHost {
    * fleet screen's other sources (mDNS on the LAN) are what speak for those.
    */
   readonly online: boolean;
+  /**
+   * Present only in the owner's `include=revoked` view (`null` there for a
+   * live row), absent everywhere else — so the default listing and every
+   * machine-bearer listing keep the shape they always had. When it is set the
+   * row is history the owner can act on (restore), never a machine to launch.
+   */
+  readonly revokedAt?: number | null;
 }
 
 export interface PublicDevice {
@@ -172,6 +179,8 @@ export interface PublicDevice {
   readonly status: DeviceStatus;
   readonly enrolledAt: number;
   readonly lastSeenAt: number | null;
+  /** Same contract as `PublicHost.revokedAt`: the owner's revoked view only. */
+  readonly revokedAt?: number | null;
 }
 
 // Field by field, for the reason `publicUser` is: both tables will grow

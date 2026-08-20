@@ -22,6 +22,13 @@ export interface Host {
   readonly platform: string;
   readonly enrolledAt: number;
   readonly lastSeenAt: number | null;
+  /**
+   * When the owner revoked this machine, or `null` for a live one. Absent in
+   * the answer reads as live: an older Worker lists only live rows and says
+   * nothing about revocation, and inventing "revoked" for every row on it
+   * would render the whole account into the recovery section.
+   */
+  readonly revokedAt: number | null;
 }
 
 export type DeviceKind = 'browser' | 'phone' | 'desktop';
@@ -48,6 +55,8 @@ export interface Device {
   readonly status: DeviceStatus;
   readonly enrolledAt: number;
   readonly lastSeenAt: number | null;
+  /** See `Host.revokedAt`. */
+  readonly revokedAt: number | null;
 }
 
 const KINDS: readonly string[] = ['browser', 'phone', 'desktop'];
@@ -73,6 +82,7 @@ export function parseHost(value: unknown): Host | null {
     platform: typeof h['platform'] === 'string' ? h['platform'] : '',
     enrolledAt,
     lastSeenAt: millis(h['lastSeenAt']),
+    revokedAt: millis(h['revokedAt']),
   };
 }
 
@@ -100,6 +110,7 @@ export function parseDevice(value: unknown): Device | null {
     status: d['status'] === 'pending' ? 'pending' : 'approved',
     enrolledAt,
     lastSeenAt: millis(d['lastSeenAt']),
+    revokedAt: millis(d['revokedAt']),
   };
 }
 
@@ -117,11 +128,18 @@ export interface Registry {
   readonly devices: readonly Device[];
 }
 
-/** Both lists, in parallel. Rejects if either does, so the screen can say so. */
+/**
+ * Both lists, in parallel. Rejects if either does, so the screen can say so.
+ *
+ * `include=revoked` is the owner's recovery view: revoked rows come back too,
+ * carrying `revokedAt`, so a machine revoked by mistake has somewhere to be
+ * seen and restored. An older Worker ignores the parameter and answers the
+ * live view, which parses identically — every row reads as live.
+ */
 export async function fetchRegistry(fetchImpl: typeof fetch = fetch): Promise<Registry> {
   const [h, d] = await Promise.all([
-    getJson('/api/hosts', fetchImpl),
-    getJson('/api/devices', fetchImpl),
+    getJson('/api/hosts?include=revoked', fetchImpl),
+    getJson('/api/devices?include=revoked', fetchImpl),
   ]);
   return {
     hosts: ((h as { hosts?: unknown[] }).hosts ?? []).map(parseHost).filter((x): x is Host => x !== null),
@@ -149,6 +167,26 @@ export async function revoke(
     credentials: 'same-origin',
   });
   if (!res.ok) throw new Error(`revoke answered ${res.status}`);
+}
+
+/**
+ * Restore a revoked key: revoke's inverse, same CSRF posture.
+ *
+ * The row comes back to the account and — because the Worker's token liveness
+ * is a JOIN against it — whatever token the machine has been holding all along
+ * simply works again. Nothing needs to happen on the machine.
+ */
+export async function restore(
+  table: 'hosts' | 'devices',
+  id: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const res = await fetchImpl(`/api/${table}/${encodeURIComponent(id)}/restore`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    credentials: 'same-origin',
+  });
+  if (!res.ok) throw new Error(`restore answered ${res.status}`);
 }
 
 /**

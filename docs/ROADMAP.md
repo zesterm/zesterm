@@ -147,9 +147,11 @@ the history behind them is in closed issues and PRs.
       run them and `⌘⇧,` opens them read-only — every profile it can see lives
       in the config of the machine that publishes it, and editing happens
       there. #332, #338, #342, #351, #352.
-- [ ] **The device registry UI** — the account's list of machines and browsers.
-      The Worker's half is in (`/api/enroll/*`, `/api/hosts`, `/api/devices`,
-      revoke routes); the devices screen is not.
+- [x] **The device registry UI** — the account's list of machines and browsers
+      (`Fleet.tsx` + `registry.ts` over `/api/enroll/*`, `/api/hosts`,
+      `/api/devices` and the revoke routes), including recovery: revoked rows
+      stay visible in a Revoked section and `POST /api/{hosts,devices}/:id/restore`
+      puts one back — the machine's stored token simply resolves again. #365.
 - [ ] Browser device enrollment: non-extractable Ed25519 key, approved via the
       desktop modal with a matching code.
 - [ ] Bun single-file sidecar hosting `@sigx/actors`, spawned as a child of the

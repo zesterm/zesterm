@@ -237,8 +237,9 @@ export async function claimLink(request: Request, env: Env, now: number): Promis
   if (incumbent !== null && (incumbent.user_id !== owner || incumbent.revoked_at !== null)) {
     // The code claim's two-situations-one-answer, verbatim: another account's
     // key is not this caller's business, and a revoked key that could re-link
-    // itself has un-revoked itself. Checked before the spend, so the refusal
-    // leaves the grant for whoever debugs it rather than burning it.
+    // itself has un-revoked itself (the owner un-revokes with the restore
+    // route, #365). Checked before the spend, so the refusal leaves the grant
+    // for whoever debugs it rather than burning it.
     return json({ error: 'already_enrolled' }, 409);
   }
 

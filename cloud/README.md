@@ -78,9 +78,22 @@ POST /api/enroll/code    signed in    { kind }        -> { code, expiresAt }
 POST /api/enroll/claim   a daemon     { code, hostId, label, sig }
 GET  /api/hosts          signed in                    -> { hosts: [...] }
 GET  /api/devices        signed in                    -> { devices: [...] }
+GET  /api/hosts?include=revoked     signed in only   -> revoked rows too, each with revokedAt
+GET  /api/devices?include=revoked   signed in only   -> same, for devices
 POST /api/hosts/:id/revoke      signed in, own only
 POST /api/devices/:id/revoke    signed in, own only
+POST /api/hosts/:id/restore     signed in, own only  -- revoke's inverse (#365)
+POST /api/devices/:id/restore   signed in, own only
 ```
+
+Restore exists because revocation used to be a one-way door with no owner-side
+key: a machine revoked by mistake kept its keychain credential, 401'd on every
+poll, and re-enrolment answered `409 already_enrolled` forever. Restoring
+clears the row's `revoked_at` and nothing else — token liveness is a JOIN
+against that row, so the credential the machine held all along simply resolves
+again and it is back on its next poll. Cookie-only on purpose: a machine
+credential that could un-revoke its own principal would undo the refusal
+enrolment gives a revoked key. Machine bearers never see the revoked view.
 
 The code is eight characters of an alphabet with no `0`/`O` and no `1`/`I`/`L`,
 because a person reads it off one screen and types it into another. It lives ten
