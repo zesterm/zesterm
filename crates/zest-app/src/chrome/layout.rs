@@ -2508,6 +2508,11 @@ fn vertical(
             // pointer would be worse than no × at all. (The horizontal chip
             // can afford to draw its × always; a 262px row with a two-line
             // label cannot spend the width on both.)
+            //
+            // Unconditional, including on a row with no age yet: the × can
+            // appear on any session row, so a slot that materialised with the
+            // pointer would move the title under it. Making the reserve
+            // conditional is the tempting fix and it is the bug.
             let age_px = UI_CHORD * s;
             let age_w =
                 if tab.age.is_empty() { 0.0 } else { measure(&tab.age, age_px, false, 0.0) };
@@ -3051,10 +3056,11 @@ mod tests {
         // that, a title would jump — or worse, re-ellipsise — under the
         // pointer, which reads as the row changing rather than as an
         // affordance appearing.
-        let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
         let m = metrics(1200.0, 800.0, 1.0);
-        let width_of = |hover: Option<HitRegion>| {
-            let mut mo = model(tabs.clone(), TabsPosition::Left);
+        let width_of = |age: &str, hover: Option<HitRegion>| {
+            let mut t = tab(1, TabOrigin::Local, TabPresence::Online);
+            t.age = age.into();
+            let mut mo = model(vec![t], TabsPosition::Left);
             mo.hover = hover;
             let l = layout(&mo, &colors(), &m, &mut measure);
             l.texts
@@ -3064,9 +3070,22 @@ mod tests {
                 .expect("the row draws its title")
         };
         assert_eq!(
-            width_of(None),
-            width_of(Some(HitRegion::Tab(addr(1)))),
+            width_of("2m", None),
+            width_of("2m", Some(HitRegion::Tab(addr(1)))),
             "the title's budget is the same with the × showing and without it"
+        );
+        // And with no age at all — a restored tab has none until its session
+        // first produces something. The slot is reserved anyway, because the
+        // × can appear on any session row and a slot that materialised with
+        // the pointer would move the title under it. That the reserve costs a
+        // few pixels on a row showing neither is the price of the affordance,
+        // and it is *this* assertion rather than a comment because the
+        // tempting fix — making the reserve conditional — reintroduces
+        // exactly the jump above.
+        assert_eq!(
+            width_of("", None),
+            width_of("", Some(HitRegion::Tab(addr(1)))),
+            "a row with no age still does not move when its × appears"
         );
     }
 
