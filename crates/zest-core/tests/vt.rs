@@ -295,6 +295,70 @@ fn osc_background_query_is_answered() {
     assert!(replies[0].starts_with("\x1b]11;rgb:"), "got {:?}", replies[0]);
 }
 
+/// Every `AttentionCause` this input produced, in order.
+fn attentions(t: &mut Terminal) -> Vec<zest_core::AttentionCause> {
+    t.take_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            TermEvent::Attention { cause } => Some(cause),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_bell_asks_to_be_noticed_and_still_rings() {
+    use zest_core::AttentionCause;
+    // Two events for one byte, deliberately: `Bell` is "ring something" and
+    // `Attention` is "mark this tab". A host may want either, both or neither,
+    // and folding them into one would make that a single decision.
+    let mut t = Terminal::new(10, 2, 0);
+    t.advance(b"");
+    let events = t.take_events();
+    assert!(events.contains(&TermEvent::Bell), "the bell still rings: {events:?}");
+    assert!(
+        events.contains(&TermEvent::Attention { cause: AttentionCause::Bell }),
+        "and it also asks to be noticed: {events:?}"
+    );
+}
+
+#[test]
+fn osc_9_is_a_notification_unless_it_is_progress() {
+    use zest_core::AttentionCause;
+    // The whole subtlety of this arm. `OSC 9` carries two different sequences
+    // and only the sub-parameter separates them: `9;4;…` is ConEmu's taskbar
+    // *progress*, which a build emits continuously. Reading the 9 alone and
+    // calling it a notification turns every progress tick into a demand for
+    // attention — which is worse than not supporting either.
+    let mut t = Terminal::new(10, 2, 0);
+    t.advance(b"]9;build finished");
+    assert_eq!(attentions(&mut t), vec![AttentionCause::Notify]);
+
+    t.advance(b"]9;4;1;60");
+    assert!(attentions(&mut t).is_empty(), "progress is not a notification");
+    t.advance(b"]9;4;3;0");
+    assert!(attentions(&mut t).is_empty(), "indeterminate progress either");
+
+    // A bare `OSC 9` with no text is still someone saying something.
+    t.advance(b"]9");
+    assert_eq!(attentions(&mut t), vec![AttentionCause::Notify]);
+}
+
+#[test]
+fn osc_777_asks_only_for_the_notify_verb() {
+    use zest_core::AttentionCause;
+    // 777 is a family, not a sequence: `notify` is one verb among several
+    // (`precmd`, `preexec`) that this terminal does not implement. An unknown
+    // verb has to fall through rather than be read as a notification, or a
+    // shell hook fires the dot on every prompt.
+    let mut t = Terminal::new(10, 2, 0);
+    t.advance(b"]777;notify;Build;it worked");
+    assert_eq!(attentions(&mut t), vec![AttentionCause::Notify]);
+
+    t.advance(b"]777;precmd");
+    assert!(attentions(&mut t).is_empty(), "an unimplemented verb asks for nothing");
+}
+
 #[test]
 fn osc_palette_set_then_reset() {
     let mut t = Terminal::new(10, 2, 0);

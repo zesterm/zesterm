@@ -102,6 +102,13 @@ pub struct TabModel {
     /// A command is currently running in this session — the sidebar's
     /// pulsing dot.
     pub running: bool,
+    /// This session asked to be noticed while you were looking elsewhere.
+    ///
+    /// The cause rides along rather than collapsing to a `bool` because the
+    /// chrome should be able to say *why* it is showing a dot, and "which of
+    /// these was it" is not recoverable from the fact that something happened
+    /// (the discipline `ExitSource` follows in ADR-015).
+    pub attention: Option<zest_proto::AttentionCause>,
     /// How long since this session last produced output, pre-formatted
     /// ("2m", "12h"); empty when unknown.
     pub age: String,

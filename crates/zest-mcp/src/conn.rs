@@ -147,7 +147,16 @@ impl Conn {
             identity,
             label,
             expect_host,
-            Watch { sessions: false, pairings: false, hosts: true },
+            Watch {
+                sessions: false,
+                pairings: false,
+                hosts: true,
+                // Nothing here reads a bell yet. An agent could plausibly want
+                // one -- "the thing you started is asking for you" -- but
+                // asking for messages no tool surfaces would be a
+                // subscription that exists to be discarded.
+                signals: false,
+            },
         )?;
 
         let host = client.host();

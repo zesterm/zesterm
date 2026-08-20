@@ -318,6 +318,28 @@
     "restartHint": false
   },
   {
+    "key": "tabs.attention_bell",
+    "group": "Tabs",
+    "widget": "toggle",
+    "description": "Mark a tab when a program in it rings the bell (`BEL`).\n\nThe oldest \"look at me\" a terminal has, and the one most agent and\nbuild tools already emit — which is the point: nothing here knows the\nname of any program, only that one chose to say something.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": true,
+    "restartHint": false
+  },
+  {
+    "key": "tabs.attention_notify",
+    "group": "Tabs",
+    "widget": "toggle",
+    "description": "Mark a tab when a program in it asks for a desktop notification\n(`OSC 9`, `OSC 777;notify`).\n\nIts own switch rather than sharing the bell's, because the two are\nnoisy in different situations — a bell fires on tab-completion in some\nshells, a notification almost never fires by accident.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": true,
+    "restartHint": false
+  },
+  {
     "key": "tabs.position",
     "group": "Tabs",
     "widget": "select",

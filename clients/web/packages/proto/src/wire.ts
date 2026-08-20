@@ -510,6 +510,26 @@ export interface Exited {
   readonly code: number | null;
 }
 
+/**
+ * Why a session is asking to be noticed. Mirrors `AttentionCause` in the
+ * generated bindings.
+ */
+export type AttentionCause = 'bell' | 'notify';
+
+/**
+ * The session asked to be noticed: `BEL`, `OSC 9`, or `OSC 777;notify` (#383).
+ *
+ * Only ever arrives on a connection that set `watch_signals`. There is no
+ * matching "unread" bit on the host: with two devices watching one shell there
+ * is no answer to who should clear one, so the host reports the moment and
+ * every viewer keeps its own idea of what it has seen.
+ */
+export interface Attention {
+  readonly t: 'attention';
+  readonly session: SessionAddr;
+  readonly cause: AttentionCause;
+}
+
 export interface ErrorMessage {
   readonly t: 'error';
   readonly session: SessionAddr | null;
@@ -540,6 +560,7 @@ export type HostMessage =
   | Sessions
   | Scrollback
   | Exited
+  | Attention
   | ErrorMessage
   | UnknownMessage;
 
@@ -565,7 +586,20 @@ export const isPairingRequested = modeled<PairingRequested>('pairing_requested')
 export const isSessions = modeled<Sessions>('sessions');
 export const isScrollback = modeled<Scrollback>('scrollback');
 export const isExited = modeled<Exited>('exited');
+export const isAttention = modeled<Attention>('attention');
 export const isErrorMessage = modeled<ErrorMessage>('error');
+
+/**
+ * An unknown cause reads as `bell` rather than throwing.
+ *
+ * A newer host that has learned a third way to ask for attention should leave
+ * this client slightly less informative, not unable to decode the frame — the
+ * same rule `AttrDef.flags` and `DeltaOp::Modes` already follow. The dot is
+ * the same dot either way; only the word for it would be wrong.
+ */
+export function parseAttentionCause(v: unknown): AttentionCause {
+  return v === 'notify' ? 'notify' : 'bell';
+}
 
 export function parseSessionAddr(v: unknown): SessionAddr {
   const o = obj(v, 'SessionAddr');
@@ -682,6 +716,12 @@ export function parseHostMessage(v: unknown): HostMessage {
         t,
         session: parseSessionAddr(o['session']),
         code: o['code'] === null || o['code'] === undefined ? null : num(o['code'], 'exited.code'),
+      };
+    case 'attention':
+      return {
+        t,
+        session: parseSessionAddr(o['session']),
+        cause: parseAttentionCause(o['cause']),
       };
     case 'error':
       return {

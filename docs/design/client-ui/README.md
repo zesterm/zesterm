@@ -139,7 +139,7 @@ everything shares one atlas (per `docs/CONTRACTS.md`).
 - **Tab chip:** 34px tall, flex-basis 168px, min 104px / max 232px wide, radius `9px 9px 0 0`, padding `0 11px`, 9px gap, `margin-bottom:-1px` so it overlaps the border.
   - Active: fill `ui.bg`, 1px `ui.line` on top/left/right, no bottom border, plus a 2px `ui.accent` inset rule along the top edge.
   - Inactive: transparent fill and border; hover → `ui.selSoft`.
-  - Contents left→right: an 18px rounded glyph tile carrying the **profile's icon** in its **tab colour** on a 12%-alpha wash of it (inactive: `ui.faint`, no wash), the **title only** at 12.5px (`ui.fg` active / `ui.dim` inactive, `flex:1` + ellipsis), and a 16px close affordance (`ui.faint`, hover fill `ui.line`). **No second line** — host and cwd on a 34px chip made every tab look cramped and were unreadable at 9.5px; they live in the tab's `title` tooltip and the vertical sidebar and header, which have room for them. Chips are `flex:0 1 168px; min-width:104px; max-width:232px`.
+  - Contents left→right: an 18px rounded glyph tile carrying the **profile's icon** in its **tab colour** on a 12%-alpha wash of it (inactive: `ui.faint`, no wash) — with a 6px `ui.info` **attention badge** on its top-right corner when the session has asked to be noticed and you have not looked yet — the **title only** at 12.5px (`ui.fg` active / `ui.dim` inactive, `flex:1` + ellipsis), and a 16px close affordance (`ui.faint`, hover fill `ui.line`). **No second line** — host and cwd on a 34px chip made every tab look cramped and were unreadable at 9.5px; they live in the tab's `title` tooltip and the vertical sidebar and header, which have room for them. Chips are `flex:0 1 168px; min-width:104px; max-width:232px`.
 - **New tab is a single `+`** — 32×30, borderless, 22px glyph, `ui.dim` ink, `ui.selSoft` fill
   with `ui.accent` ink while its menu is open. It **opens the launcher menu**; there is no
   separate caret and no default-only half. A split button was tried and dropped: two adjacent
@@ -203,7 +203,7 @@ chip, a spacer, and `⌘K`. The launcher is not here — it sits beside the side
 **Sidebar,** top to bottom:
 1. Search row, flush under the header: the search pill (`flex:1`, 30px, radius 7px, `ui.panel`, 1px `ui.line`, `⌘K` in 11px mono + "Search sessions, blocks, hosts" in 12px `ui.faint`) with the **same `+` to its right** — searching and starting a session are the two things you do at the top of a sidebar. Its menu anchors `top:40px; left:0` from the button so it opens rightwards over the pane; right-anchored it runs off the window's left edge.
 3. Host groups, 14px apart, **built from the same tab list the horizontal strip renders** — grouped by the host each tab runs on, so a session launched from a profile appears under that profile's host (`⬢ Ubuntu` under FORGE) and carries the same selection styling. Do not build this list from a separate array or from literal markup: a hardcoded row cannot be selected, and a truncated list cannot show a session the user just started. Group header: 6px status dot + host name (10.5px, 600, `.09em`, uppercase, `ui.dim`) + a mono sub-label (`macOS · LAN 0.3ms`) in 10px `ui.faint`.
-4. Session rows: 7px/8px padding, radius 8px, 9px gap. 5px state dot (running `warn` pulsing 1.6s, idle `ui.faint`, live `success`), then title 12.5px over a 10.5px mono cwd in `ui.faint`, then age right-aligned in 10px mono. Selected row fill `ui.accentSoft`; hover `ui.selSoft`.
+4. Session rows: 7px/8px padding, radius 8px, 9px gap. 5px state dot (**attention `ui.info`** — it outranks the rest, being the one state that is asking for you — then running `warn` pulsing 1.6s, idle `ui.faint`, live `success`), then title 12.5px over a 10.5px mono cwd in `ui.faint`, then age right-aligned in 10px mono. Selected row fill `ui.accentSoft`; hover `ui.selSoft`.
    **The age's slot is also the close's**: under the pointer the age is replaced by
    the same 16px `×` the horizontal chip carries (`ui.faint`, hover fill `ui.line`),
    and the slot is reserved at the wider of the two either way so the title never
@@ -634,6 +634,29 @@ and a block whose host went away mid-run (rail → `ui.faint`, metadata `interru
 **Responsive:** below ~900px the sidebar collapses to a 48px icon rail (host dots only);
 below ~640px the desktop layout is not used at all — that is the mobile client.
 The tab strip never wraps to a second row; it scrolls, and the active tab is kept in view.
+
+**A tab can say it wants you.** The rule is one sentence and names no program:
+*a tab earns the attention dot when its session emits a signal meaning "look at me",
+at a moment when you were not looking at it.* Three inputs, all of them something a
+program deliberately sends — `BEL`, `OSC 9 ; <text>`, and `OSC 777 ; notify ; …` —
+so an agent CLI whose notification channel is the terminal bell, a `make` that rings
+on failure, and a `notify-send` wrapper all light it without any of them being known here.
+
+- **"Looking at" needs both halves**: the tab is active *and* the window has focus. The
+  same bell arriving while zesterm sits behind a browser is precisely the case the dot
+  exists for. It clears on activating the tab, and on the window regaining focus.
+- **The mark differs by position because the surfaces do.** The chip gets a badge on its
+  glyph tile — that tile's ink already carries link degradation, and one mark cannot
+  honestly say two things — while the sidebar row has one dot and no link ink to collide
+  with, so it recolours in place. Neither costs a pixel of the title's budget.
+- **There is no unread bit on the host.** A latched flag would have to be cleared by
+  someone, and with two devices watching one shell there is no answer to who — so the host
+  reports the moment and every viewer keeps its own idea of what it has seen. A client that
+  was not attached when the bell rang is simply never told, which is the right answer for a
+  signal meaning "look at this now".
+- `tabs.attention_bell` and `tabs.attention_notify`, both on by default, switch the two
+  sources independently: a bell fires on tab-completion in some shells, a notification
+  almost never fires by accident.
 
 ---
 

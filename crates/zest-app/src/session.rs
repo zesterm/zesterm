@@ -104,6 +104,14 @@ pub enum Wakeup {
     /// silently swapping a fresh shell in under a labeled tab is how someone
     /// types into the wrong machine.
     SessionGone(zest_proto::SessionAddr),
+    /// A session asked to be noticed — it rang, or asked for a notification.
+    ///
+    /// **Its own variant rather than `Redraw`, and that is load-bearing.**
+    /// `grid_dirty` is computed from the *active* source alone, so a
+    /// background tab's `Redraw` reaches a frame that finds nothing to draw
+    /// and skips. The dot lives in the chrome, which needs its own
+    /// invalidation — the same argument `PairingChanged` already makes.
+    Attention(zest_proto::SessionAddr, zest_proto::AttentionCause),
 }
 
 pub struct Session {
@@ -204,8 +212,25 @@ impl Session {
                         // hangs whatever asked -- a DSR or an OSC 11 background
                         // query waits forever for an answer.
                         for event in events {
-                            if let TermEvent::Reply(bytes) = event {
-                                let _ = reply_tx.send(bytes);
+                            match event {
+                                TermEvent::Reply(bytes) => {
+                                    let _ = reply_tx.send(bytes);
+                                }
+                                // Wired here as well as in the daemon path on
+                                // purpose: a signal that worked over the socket
+                                // and silently did nothing under `--no-daemon`
+                                // is the shape of bug that goes unnoticed for
+                                // months. The address is a placeholder --
+                                // `wake_for` stamps the real one, being the
+                                // only half that knows it, exactly as it does
+                                // turning `Exited` into `TabExited`.
+                                TermEvent::Attention { cause } => {
+                                    wake(Wakeup::Attention(
+                                        crate::tabs::placeholder_addr(0),
+                                        cause.into(),
+                                    ));
+                                }
+                                _ => {}
                             }
                         }
 

@@ -150,6 +150,7 @@ mod tests {
             watch_sessions: false,
             watch_pairings: false,
             watch_hosts: false,
+            watch_signals: false,
         }
     }
 

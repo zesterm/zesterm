@@ -6,7 +6,7 @@ use crate::cell::Cell;
 use crate::grid::ScrollRegion;
 use crate::modes::{CursorStyle, Modes};
 use crate::palette::Rgb;
-use crate::term::{TermEvent, TermState};
+use crate::term::{AttentionCause, TermEvent, TermState};
 
 impl vte::Perform for TermState {
     fn print(&mut self, ch: char) {
@@ -15,7 +15,13 @@ impl vte::Perform for TermState {
 
     fn execute(&mut self, byte: u8) {
         match byte {
-            0x07 => self.events.push(TermEvent::Bell),
+            // Two events, not one: `Bell` is "ring something" and
+            // `Attention` is "mark this tab". A host may want either, both, or
+            // neither, and folding them would make that one decision.
+            0x07 => {
+                self.events.push(TermEvent::Bell);
+                self.raise_attention(AttentionCause::Bell);
+            }
             0x08 => self.backspace(),
             0x09 => self.tab(1),
             // LF, VT and FF all move down a line. LNM additionally returns the
@@ -341,6 +347,27 @@ impl vte::Perform for TermState {
             // onto the next block, and reported for a session nobody is
             // attached to.
             Some(7) => self.osc_cwd(params),
+            // 9: iTerm2/ConEmu. Two sequences share this number and only the
+            // sub-parameter tells them apart -- `OSC 9 ; 4 ; …` is ConEmu's
+            // taskbar *progress*, anything else is a notification whose body
+            // is the rest of the string. Reading the 9 alone and calling it a
+            // notification would turn every progress tick into one.
+            Some(9) => {
+                let first = params.get(1).and_then(|b| core::str::from_utf8(b).ok()).unwrap_or("");
+                if first != "4" {
+                    self.raise_attention(AttentionCause::Notify);
+                }
+            }
+            // 777: the rxvt dialect. `OSC 777 ; notify ; <title> ; <body>`,
+            // and only that verb -- 777 also carries `precmd` and others we do
+            // not implement, so an unknown verb must fall through rather than
+            // be read as a notification.
+            Some(777) => {
+                let verb = params.get(1).and_then(|b| core::str::from_utf8(b).ok()).unwrap_or("");
+                if verb == "notify" {
+                    self.raise_attention(AttentionCause::Notify);
+                }
+            }
             // 133: semantic prompt markers -- the shell saying where a command
             // begins and ends. See [`crate::blocks`].
             Some(133) => self.osc_prompt(params),
@@ -356,6 +383,11 @@ impl vte::Perform for TermState {
 impl TermState {
     fn reply(&mut self, bytes: &[u8]) {
         self.events.push(TermEvent::Reply(bytes.to_vec()));
+    }
+
+    /// Record that the program asked to be noticed.
+    fn raise_attention(&mut self, cause: AttentionCause) {
+        self.events.push(TermEvent::Attention { cause });
     }
 
     /// Absolute addressing that ignores origin mode, for column moves.

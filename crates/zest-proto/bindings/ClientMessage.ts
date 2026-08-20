@@ -83,7 +83,20 @@ watch_pairings: boolean,
  * this flag and sends no offer; a new daemon sends none to a client
  * that did not ask. Both degrade to exactly today's behaviour.
  */
-watch_hosts: boolean, } | { "t": "auth", signature: Sig64, } | { "t": "pairing_decision", client: ClientId, approve: boolean, } | { "t": "enroll", code: string, } | { "t": "request_keyframe", session: SessionAddr, } | { "t": "list_sessions" } | { "t": "create_session", 
+watch_hosts: boolean, 
+/**
+ * Ask to be told when an attached session asks to be noticed.
+ *
+ * The gate on [`HostMessage::Attention`], and it is load-bearing
+ * rather than tidy: a `HostMessage` tag an older client cannot decode
+ * does not go unread, it **kills the connection** — `DaemonClient::recv`
+ * maps a frame it cannot decode to `DaemonError::Transport`. So the
+ * daemon must never send one to a client that did not ask, and this
+ * is how it knows. `#[serde(default)]` for `watch_sessions`' reason:
+ * an old daemon ignores the flag and sends nothing, which is exactly
+ * today's behaviour at both ends.
+ */
+watch_signals: boolean, } | { "t": "auth", signature: Sig64, } | { "t": "pairing_decision", client: ClientId, approve: boolean, } | { "t": "enroll", code: string, } | { "t": "request_keyframe", session: SessionAddr, } | { "t": "list_sessions" } | { "t": "create_session", 
 /**
  * Empty means the host's default shell.
  */

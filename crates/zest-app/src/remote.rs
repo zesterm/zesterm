@@ -565,6 +565,9 @@ impl RemoteSession {
                                     wake(Wakeup::Exited);
                                     return;
                                 }
+                                HostMessage::Attention { cause, .. } => {
+                                    wake(Wakeup::Attention(addr, cause));
+                                }
                                 HostMessage::Error { message, .. } => {
                                     tracing::warn!(%message, "daemon reported an error");
                                 }
@@ -727,6 +730,17 @@ fn connect_daemon(
     expect_host: Option<zest_proto::HostId>,
     on_pending: Option<&PendingCallback>,
 ) -> Result<DaemonClient, zest_daemon::DaemonError> {
+    // `signals: true` is this build saying it can decode
+    // `HostMessage::Attention`, not a preference — the daemon must never send
+    // that tag to a client that cannot, because an undecodable frame ends the
+    // connection rather than being skipped. This is the session-attaching
+    // door, so it is the one that wants them.
+    let watch = zest_daemon::client::Watch {
+        sessions: false,
+        pairings: false,
+        hosts: false,
+        signals: true,
+    };
     match on_pending {
         Some(notify) => {
             let adapter = |code: &str, expires_in_secs: u32| {
@@ -738,11 +752,13 @@ fn connect_daemon(
                 identity,
                 label,
                 expect_host,
-                false,
+                watch,
                 Some(&adapter),
             )
         }
-        None => DaemonClient::connect(read, write, identity, label, expect_host, false),
+        None => {
+            DaemonClient::connect_watching(read, write, identity, label, expect_host, watch)
+        }
     }
 }
 

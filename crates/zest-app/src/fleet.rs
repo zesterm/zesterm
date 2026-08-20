@@ -616,7 +616,14 @@ impl FleetModel {
             // Hosts too (#262): what this machine can offer — its facts and
             // its own profiles. Honoured on every transport, unlike pairings,
             // because reading a machine's launch targets is the whole point.
-            zest_daemon::client::Watch { sessions: true, pairings: true, hosts: true },
+            zest_daemon::client::Watch {
+                sessions: true,
+                pairings: true,
+                hosts: true,
+                // The fleet watcher attaches to no session, so it can never
+                // be sent one.
+                signals: false,
+            },
         )?;
         let host = client.host();
 
@@ -931,7 +938,13 @@ impl FleetModel {
             // approval queue is not ours to show. The daemon would refuse the
             // flag off-loopback anyway — not sending it is saying so here
             // rather than relying on the far end to say it.
-            zest_daemon::client::Watch { sessions: true, pairings: false, hosts: true },
+            zest_daemon::client::Watch {
+                sessions: true,
+                pairings: false,
+                hosts: true,
+                // Attaches to nothing; see the watcher above.
+                signals: false,
+            },
         )?;
 
         // `list_with_offer`, not `list`: a subscriber's first offer rides this

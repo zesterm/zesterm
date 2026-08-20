@@ -1036,6 +1036,12 @@ fn wake_for(
     move |w| {
         let w = match w {
             Wakeup::Exited => Wakeup::TabExited(*addr.lock()),
+            // Stamped here rather than trusted from the sender: the cell is
+            // what a supervisor rebind moves, so it is the authority on which
+            // session this callback belongs to. For the daemon path this
+            // rewrites the address to itself; for the in-process one it is the
+            // only place the address exists at all.
+            Wakeup::Attention(_, cause) => Wakeup::Attention(*addr.lock(), cause),
             other => other,
         };
         if matches!(w, Wakeup::Redraw) {
@@ -1046,6 +1052,21 @@ fn wake_for(
         }
         let _ = proxy.send_event(w);
     }
+}
+
+/// Whether a signal is *news* to this viewer.
+///
+/// The whole feature in one line: a signal in the tab you are looking at is
+/// not news. And "looking at" needs both halves — the same bell arriving while
+/// zesterm sits behind a browser is precisely the case the dot exists for, so
+/// a rule written on the active tab alone would be silent exactly when it
+/// mattered.
+///
+/// Free, so the rule can be checked without an event loop or a window; the
+/// only reason it is not obvious is that it is easy to write as one condition
+/// and lose the second.
+const fn attention_is_news(is_active: bool, window_focused: bool) -> bool {
+    !(is_active && window_focused)
 }
 
 /// Last-output instants by session, shared with every tab's wake callback.
@@ -1582,6 +1603,14 @@ pub struct App {
     launcher: Option<LauncherState>,
     /// A block's ⋯ menu, while open — one of the mutually exclusive overlays.
     block_menu: Option<BlockMenuState>,
+    /// Which tabs have asked to be noticed since you last looked at them.
+    ///
+    /// **This viewer's own bit, not the host's.** With two devices watching
+    /// one shell there is no answer to who should clear a flag kept over
+    /// there, so the host reports the moment and every client keeps its own
+    /// idea of what it has seen. Keyed by address, so a tab closed and
+    /// reopened does not inherit one.
+    attention: std::collections::HashMap<zest_proto::SessionAddr, zest_proto::AttentionCause>,
     /// The `⋯` rect the block pass drew last frame, and whose block. The menu
     /// hangs off it, so the affordance and its menu come from one computation
     /// and cannot drift apart.
@@ -1881,6 +1910,7 @@ impl App {
             launcher: None,
             block_menu: None,
             block_menu_anchor: None,
+            attention: std::collections::HashMap::new(),
             app_tabs: crate::tabs::AppTabs::default(),
             provenance,
             unknown_keys,
@@ -5012,6 +5042,7 @@ impl App {
                     accent,
                     tab_accent: crate::chrome::model::tab_accent(tab.identity.as_ref(), accent),
                     running,
+                    attention: self.attention.get(&tab.addr).copied(),
                     age,
                     // Dead tabs borrow the connecting style (faint text): not
                     // live, not interactive, still present. A launching tab
@@ -5045,6 +5076,7 @@ impl App {
                 // place, not a shell on a host.
                 tab_accent: crate::chrome::model::AccentChoice::Profile(0),
                 running: false,
+                attention: None,
                 age: String::new(),
                 connecting: false,
                 link: crate::chrome::model::LinkKind::Loopback,
@@ -5062,6 +5094,7 @@ impl App {
                 accent: 0,
                 tab_accent: crate::chrome::model::tab_accent(None, 0),
                 running: false,
+                attention: None,
                 age: String::new(),
                 connecting: false,
                 link: crate::chrome::model::LinkKind::Loopback,
@@ -8355,6 +8388,9 @@ impl App {
         }
         let was_active = self.tabs.is_active(addr);
         let Some(tab) = self.tabs.close(addr) else { return };
+        // The map is keyed by address and a closed tab will never be looked
+        // at, so nothing else would ever take this entry out.
+        self.attention.remove(&addr);
         if already_exited || tab.dead || !tab.local {
             // Dropping detaches (the destructor sends it); a remote session
             // keeps running on its host, which is the point of the fleet.
@@ -8383,6 +8419,35 @@ impl App {
         self.relayout_grid();
     }
 
+    /// A session asked to be noticed.
+    fn note_attention(
+        &mut self,
+        addr: zest_proto::SessionAddr,
+        cause: zest_proto::AttentionCause,
+    ) {
+        let enabled = match cause {
+            zest_proto::AttentionCause::Bell => self.config.tabs.attention_bell,
+            zest_proto::AttentionCause::Notify => self.config.tabs.attention_notify,
+        };
+        if !enabled || !attention_is_news(self.tabs.is_active(addr), self.focused) {
+            return;
+        }
+        // Last cause wins. Attention is not a log: a shell that rings and then
+        // notifies has one thing to show you, and the dot is the same dot.
+        self.attention.insert(addr, cause);
+        // Its own invalidation, because the dot is chrome. A bare redraw
+        // repaints the grid against a cached chrome layout and the dot would
+        // never appear — the argument `PairingChanged` already makes.
+        self.mark_chrome_dirty();
+    }
+
+    /// Forget a tab's unseen signal, because it has now been seen.
+    fn clear_attention(&mut self, addr: zest_proto::SessionAddr) {
+        if self.attention.remove(&addr).is_some() {
+            self.mark_chrome_dirty();
+        }
+    }
+
     /// Housekeeping after the active tab changed.
     fn after_activation(&mut self) {
         // Choosing a session is choosing to look at it: any full-pane screen
@@ -8399,6 +8464,10 @@ impl App {
         // A drag cannot span a tab switch, and half a selection drag leaking
         // into another tab's grid would.
         self.mouse.release();
+        // Looking at it is what "seen" means.
+        if let Some(addr) = self.tabs.active().map(|t| t.addr) {
+            self.clear_attention(addr);
+        }
         let dims = self.current_dims();
         if let Some(tab) = self.tabs.active_mut() {
             // Background tabs are resized lazily: this is the moment a stale
@@ -10185,6 +10254,7 @@ impl ApplicationHandler<Wakeup> for App {
                 }
             }
             Wakeup::Exited => el.exit(),
+            Wakeup::Attention(addr, cause) => self.note_attention(addr, cause),
             // The link died, not the shell. The window stays open showing the
             // last state that was true -- closing it would throw away a session
             // that is still running in a daemon that does not care we went
@@ -10482,6 +10552,14 @@ impl ApplicationHandler<Wakeup> for App {
 
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
+                // Coming back to the window is looking at its active tab —
+                // the other half of `note_attention`'s rule, which counts a
+                // signal as unseen while the window is behind something else.
+                if focused {
+                    if let Some(addr) = self.tabs.active().map(|t| t.addr) {
+                        self.clear_attention(addr);
+                    }
+                }
                 if let Some(s) = self.tabs.active_source() {
                     s.mark_dirty();
                 }
@@ -14529,5 +14607,33 @@ mod pairing_tests {
             left <= zest_mesh::pairing::APPROVAL_TIMEOUT,
             "…and must not outlive the daemon's own window (got {left:?})"
         );
+    }
+}
+
+#[cfg(test)]
+mod attention_tests {
+    use super::attention_is_news;
+
+    #[test]
+    fn a_signal_in_the_tab_you_are_looking_at_is_not_news() {
+        assert!(
+            !attention_is_news(true, true),
+            "the active tab of a focused window is being looked at"
+        );
+    }
+
+    #[test]
+    fn an_unfocused_window_is_not_looking_at_anything() {
+        // The half that is easy to drop, and the one that matters most: the
+        // bell that arrives while zesterm sits behind a browser is exactly
+        // the case the dot exists for. A rule written on the active tab alone
+        // is silent precisely when it is needed.
+        assert!(attention_is_news(true, false), "even the active tab, if nobody is here");
+        assert!(attention_is_news(false, false));
+    }
+
+    #[test]
+    fn a_background_tab_is_always_news() {
+        assert!(attention_is_news(false, true), "you are looking at a different tab");
     }
 }

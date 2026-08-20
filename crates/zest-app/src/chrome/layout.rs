@@ -103,6 +103,9 @@ const TILE_RADIUS: f32 = 5.0;
 const TEXT_PAD: f32 = 8.0;
 const RADIUS: f32 = 6.0;
 const CLOSE: f32 = 16.0;
+/// The attention badge on a chip's glyph tile — small enough to read as a
+/// mark on the icon rather than a second icon beside it.
+const BADGE: f32 = 6.0;
 const NEW_TAB_W: f32 = 28.0;
 const NEW_TAB_H: f32 = 30.0;
 const PILL_H: f32 = 26.0;
@@ -2015,6 +2018,21 @@ fn horizontal(
                 ink,
                 clip,
             );
+            // The attention badge (#383), on the tile's top-right corner.
+            // A badge rather than recolouring the dot: the dot's ink already
+            // carries `LinkKind` degradation, and one mark cannot honestly say
+            // two things — a stalled link on a tab that also rang would have
+            // to pick which fact to tell you.
+            if tab.attention.is_some() {
+                dot(
+                    &mut out.rects,
+                    tile[0] + tile[2],
+                    tile[1],
+                    BADGE * s,
+                    colors.info,
+                    clip,
+                );
+            }
         } else {
             // App tabs carry their own glyph (§11: ⚙ + "Settings") — BMP,
             // reached by ordinary font fallback, unlike PUA icons.
@@ -2480,10 +2498,19 @@ fn vertical(
                 out.hit.push(hit, HitRegion::Tab(tab.addr));
             }
 
-            // 5px state dot: running pulses warn (the clock's 1.6s ease),
-            // the live (active) session is success, an idle one faint.
+            // 5px state dot: attention first, then running (pulsing warn on
+            // the clock's 1.6s ease), the live session success, an idle one
+            // faint. Attention out-ranks the rest because it is the one state
+            // that is asking for you — a session both running and ringing
+            // has already said which of the two it wants you to act on.
+            //
+            // The sidebar recolours where the horizontal chip adds a badge:
+            // the row has one dot and no glyph tile to hang a corner off, and
+            // it carries no `LinkKind` ink to collide with.
             let dot_d = 5.0 * s;
-            let dot_color = if tab.running {
+            let dot_color = if tab.attention.is_some() {
+                colors.info
+            } else if tab.running {
                 let p = model.anim.pulse;
                 LinearRgba([
                     colors.warn.0[0] * p,
@@ -2726,6 +2753,7 @@ mod tests {
             // shows its host.
             tab_accent: AccentChoice::Host(usize::from(n)),
             running: false,
+            attention: None,
             age: "2m".into(),
             connecting: false,
             link: LinkKind::Loopback,
@@ -4234,6 +4262,58 @@ mod tests {
             quiet.texts.iter().all(|t| t.text != "481502"),
             "a resolved request leaves no trace of its code"
         );
+    }
+
+    #[test]
+    fn an_unseen_signal_marks_its_tab_in_both_positions() {
+        // #383. The dot has to survive both layouts, and it reaches them
+        // differently: the chip gets a *badge* on its glyph tile because that
+        // tile's ink already carries `LinkKind` degradation and one mark
+        // cannot honestly say two things, while the sidebar row has one dot
+        // and no link ink to collide with, so it simply recolours.
+        for position in [TabsPosition::Top, TabsPosition::Left] {
+            let mut lit = tab(1, TabOrigin::Local, TabPresence::Online);
+            lit.attention = Some(zest_proto::AttentionCause::Bell);
+            let m = metrics(1200.0, 800.0, 1.0);
+            let info = colors().info;
+
+            let quiet_l =
+                layout(&model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], position),
+                       &colors(), &m, &mut measure);
+            let lit_l = layout(&model(vec![lit], position), &colors(), &m, &mut measure);
+
+            let info_rects = |l: &ChromeLayout| {
+                l.rects.iter().filter(|r| r.fill == info).count()
+            };
+            assert!(
+                info_rects(&lit_l) > info_rects(&quiet_l),
+                "{position:?}: a tab that asked to be noticed draws something in ui.info \
+                 that a quiet one does not"
+            );
+        }
+    }
+
+    #[test]
+    fn a_signal_does_not_move_anything_it_marks() {
+        // The badge hangs off the glyph tile's corner and the sidebar's dot
+        // is recoloured in place, so neither costs a pixel of the title's
+        // budget. A mark that reflowed the row would read as the tab changing
+        // rather than as one asking for you.
+        for position in [TabsPosition::Top, TabsPosition::Left] {
+            let m = metrics(1200.0, 800.0, 1.0);
+            let width_of = |attention| {
+                let mut t = tab(1, TabOrigin::Local, TabPresence::Online);
+                t.attention = attention;
+                let l = layout(&model(vec![t], position), &colors(), &m, &mut measure);
+                l.texts.iter().find(|t| t.text == "tab 1").map(|t| t.max_width)
+                    .expect("the tab draws its title")
+            };
+            assert_eq!(
+                width_of(None),
+                width_of(Some(zest_proto::AttentionCause::Bell)),
+                "{position:?}: the title's budget is the same either way"
+            );
+        }
     }
 
     #[test]
