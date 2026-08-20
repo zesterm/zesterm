@@ -543,6 +543,57 @@ test('another account cannot take over a key that is already enrolled', async ()
   db.close();
 });
 
+test('a pending device claiming a code comes out approved, with a token that works', async () => {
+  // The loop this closes (#372): the conflict branch used to leave `status`
+  // alone, so a pending device claiming a perfectly valid code "succeeded"
+  // into a token that 401'd against the resolve join's `status='approved'`
+  // forever, with nothing anywhere saying why. A device code is mintable only
+  // by a person's session, so the claim carries the same authority as an
+  // approval — and this is also the recovery path for a stuck-pending app:
+  // its owner mints a code in the browser, the app claims it, done.
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  const key = await testKey(7);
+  db.raw
+    .prepare(
+      `INSERT INTO devices (id, user_id, label, kind, status, enrolled_at)
+       VALUES (?, 'user-a', 'Edge', 'browser', 'pending', ?)`,
+    )
+    .run(key.id, NOW - 1_000);
+
+  const { code } = await mint(db, cookie, 'device');
+  const res = await routeApi(
+    daemonPost('/api/enroll/claim', {
+      code,
+      hostId: key.id,
+      label: 'Edge',
+      sig: await signEnrollment({ key, code, label: 'Edge', role: 'client' }),
+    }),
+    env(db),
+    fetch,
+    NOW,
+  );
+  assert.equal(res?.status, 200, 'a valid code claimed by the key it names must enrol');
+  const body = (await res!.json()) as { token: string; device?: { status: string } };
+  assert.equal(body.device?.status, 'approved', 'the claim is the approval');
+  assert.deepEqual(
+    rowOf(db, `SELECT status, approved_by FROM devices WHERE id = ?`, key.id),
+    { status: 'approved', approved_by: null },
+    'approved by dint of the code — the bootstrap rule’s precedent — so approved_by stays NULL',
+  );
+
+  // The whole point, closed in one assertion: the token this claim minted
+  // must actually resolve, or the loop has only changed its label.
+  const probe = await routeApi(
+    new Request(`${ORIGIN}/api/hosts`, { headers: { authorization: `Bearer ${body.token}` } }),
+    env(db),
+    fetch,
+    NOW + 1,
+  );
+  assert.equal(probe?.status, 200, 'the minted token must work, not merely exist');
+  db.close();
+});
+
 test('a stranger’s revoked key answers other_account, never revoked', async () => {
   // The ordering rule in one test: when both causes hold, the foreign account
   // wins. Which account revoked a key — or that anyone did — is a fact about

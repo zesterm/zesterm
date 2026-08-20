@@ -161,7 +161,7 @@ test('a code-enrolled device is born approved: the typed code was the explicit a
   assert.deepEqual(
     rowOf(db, `SELECT status FROM devices WHERE id = ?`, key.id),
     { status: 'approved' },
-    'the schema DEFAULT does this — the claim names no status on purpose',
+    'the schema DEFAULT does this for a fresh key; the conflict branch says it out loud (#372)',
   );
   db.close();
 });
