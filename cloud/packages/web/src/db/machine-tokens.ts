@@ -108,9 +108,14 @@ const RESOLVE_DEVICE = `
  * The principal behind a bearer token, or `null`.
  *
  * Every rejection is the same `null` — expired, revoked, revoked principal,
- * unknown, malformed — for the reason `resolveSession` collapses its answers:
- * "this token existed but its machine was revoked" is a fact worth more to
- * whoever found the token than to the machine that legitimately held it.
+ * unknown, malformed — and the resolve itself keeps that collapse. The one
+ * deliberate crack is [`explainMachineToken`], which runs only on the failure
+ * path and only for a token whose hash matches a real row: there the holder
+ * provably once held a minted credential, and "this token existed but its
+ * machine was revoked" is exactly the fact its owner needs — the original
+ * reasoning here weighed it against a token *thief*, but the token is 48
+ * random bytes, and starving the legitimate holder to deny a guesser
+ * confirmation of a string nobody can guess bought nothing (#371).
  */
 export async function resolveMachineToken(
   db: Db,
@@ -144,4 +149,70 @@ export async function resolveMachineToken(
   }
 
   return { kind, id: hit.principal_id, userId: hit.user_id };
+}
+
+/** Why a presented token no longer works — the holder's next move by name. */
+export type TokenRefusal = 'revoked' | 'expired' | 'pending';
+
+/**
+ * Why `resolveMachineToken` answered `null`, when that is knowable and safe
+ * to say (#371). Runs ONLY on the failure path, so the resolve's happy path
+ * pays nothing; answers `null` for anything that must stay a bare 401 — a
+ * token that never existed (no oracle for guessers) and a disabled account
+ * (the account's standing is not the machine's business).
+ *
+ * A *rotated* token answers `revoked` on purpose: to the machine still
+ * presenting it the credential is dead and re-enrolling is the fix, which is
+ * the same next move an explicit revocation demands.
+ */
+export async function explainMachineToken(
+  db: Db,
+  token: string,
+  now: number,
+): Promise<TokenRefusal | null> {
+  if (!looksLikeMachineToken(token)) return null;
+  const id = await sessionIdOf(token);
+  // `disabled_at` rides the same read: a disabled account's machines get the
+  // bare 401 whatever else is true of the token — the account's standing is
+  // not the machine's business, and the JOIN here is what keeps that rule
+  // from depending on which refusal happens to be checked first.
+  const row = await db
+    .prepare(
+      `SELECT t.user_id, t.principal_kind, t.principal_id, t.expires_at, t.revoked_at,
+              u.disabled_at
+         FROM machine_tokens t JOIN users u ON u.id = t.user_id
+        WHERE t.id = ?`,
+    )
+    .bind(id)
+    .first<{
+      user_id: string;
+      principal_kind: EnrollKind;
+      principal_id: string;
+      expires_at: number;
+      revoked_at: number | null;
+      disabled_at: number | null;
+    }>();
+  if (row === null) return null;
+  if (row.disabled_at !== null) return null;
+  if (row.revoked_at !== null) return 'revoked';
+  if (row.expires_at <= now) return 'expired';
+
+  // The token itself is live, so the resolve's JOIN refused the principal.
+  // Ownership stays in the WHERE, this file's rule, so a row that moved
+  // accounts (impossible today) would answer the bare refusal.
+  if (row.principal_kind === 'host') {
+    const host = await db
+      .prepare(`SELECT revoked_at FROM hosts WHERE id = ? AND user_id = ?`)
+      .bind(row.principal_id, row.user_id)
+      .first<{ revoked_at: number | null }>();
+    return host !== null && host.revoked_at !== null ? 'revoked' : null;
+  }
+  const device = await db
+    .prepare(`SELECT revoked_at, status FROM devices WHERE id = ? AND user_id = ?`)
+    .bind(row.principal_id, row.user_id)
+    .first<{ revoked_at: number | null; status: string }>();
+  if (device === null) return null;
+  if (device.revoked_at !== null) return 'revoked';
+  if (device.status === 'pending') return 'pending';
+  return null;
 }

@@ -33,7 +33,7 @@ import { recordRegistryEvent } from '../db/events.ts';
 import type { Env } from '../env.ts';
 import { json, jsonObject } from '../http.ts';
 import { KEY_LEN } from '../enroll/preimage.ts';
-import { requestPrincipal } from './principal.ts';
+import { requestPrincipal, unauthorized } from './principal.ts';
 
 /**
  * How far an attestation's `iat` may sit from the server clock, either way.
@@ -109,7 +109,7 @@ export async function approveDevice(
   now: number,
 ): Promise<Response> {
   const principal = await requestPrincipal(request, env, now);
-  if (principal === null) return json({ error: 'unauthorized' }, 401);
+  if (principal === null) return unauthorized(request, env, now);
   // A host serves shells; letting its token mint device approvals would make
   // one compromised machine the doorman for every other device.
   if (principal.kind === 'host') return json({ error: 'unauthorized' }, 401);
@@ -228,7 +228,7 @@ export async function listAccountAttestations(
   now: number,
 ): Promise<Response> {
   const principal = await requestPrincipal(request, env, now);
-  if (principal === null) return json({ error: 'unauthorized' }, 401);
+  if (principal === null) return unauthorized(request, env, now);
   if (principal.kind === 'device') return json({ error: 'unauthorized' }, 401);
   const userId = principal.kind === 'user' ? principal.user.id : principal.userId;
 

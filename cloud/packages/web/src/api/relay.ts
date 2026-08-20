@@ -28,11 +28,16 @@ import type { Env } from '../env.ts';
 import { json, jsonObject } from '../http.ts';
 import { KEY_LEN } from '../enroll/preimage.ts';
 import { mintAttachTicket, SIGNING_KEY_LEN } from '../relay/ticket.ts';
-import { requestPrincipal } from './principal.ts';
+import { requestPrincipal, unauthorized } from './principal.ts';
 
 export async function mintRelayTicket(request: Request, env: Env, now: number): Promise<Response> {
   const principal = await requestPrincipal(request, env, now);
-  if (principal === null || principal.kind === 'host') {
+  // Split on purpose: a null principal may deserve the explained 401 (#371),
+  // while a *resolved* host token is a live credential this route refuses by
+  // kind — there is nothing dead to explain, and explaining would leak which
+  // routes a stolen host token cannot use.
+  if (principal === null) return unauthorized(request, env, now);
+  if (principal.kind === 'host') {
     return json({ error: 'unauthorized' }, 401);
   }
   const userId = principal.kind === 'user' ? principal.user.id : principal.userId;

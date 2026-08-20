@@ -34,7 +34,7 @@ import { createMachineToken } from '../db/machine-tokens.ts';
 import { findUser } from '../db/users.ts';
 import { looksLikeEnrollCode } from '../enroll/codes.ts';
 import { KEY_LEN, SIGNATURE_LEN, verifyEnrollment } from '../enroll/preimage.ts';
-import { requestPrincipal } from './principal.ts';
+import { requestPrincipal, unauthorized } from './principal.ts';
 
 /** Exported for `devices.ts`: registration renders into the same screen. */
 export const DEVICE_KINDS: readonly DeviceKind[] = ['browser', 'phone', 'desktop'];
@@ -93,7 +93,7 @@ export function platformOk(platform: string): boolean {
  */
 export async function mintEnrollCode(request: Request, env: Env, now: number): Promise<Response> {
   const principal = await requestPrincipal(request, env, now);
-  if (principal === null) return json({ error: 'unauthorized' }, 401);
+  if (principal === null) return unauthorized(request, env, now);
 
   const body = await jsonObject(request);
   const kind = body?.['kind'];

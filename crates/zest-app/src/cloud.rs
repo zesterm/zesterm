@@ -326,10 +326,57 @@ pub fn forget_app_token(secrets: &dyn SecretStore) -> Result<bool, EnrollError> 
 pub enum CloudError {
     #[error("the account no longer accepts this device's token")]
     SignedOut,
+    /// A 401 that named its cause (#371). Its own variant beside `SignedOut`
+    /// rather than a field on it, so every existing `SignedOut` match keeps
+    /// its exact meaning: a bare 401 — and a detail this build does not know
+    /// (deploy skew) — still reads as it always did.
+    #[error("the account refused this device's credential: {0}")]
+    Refused(MachineRefusal),
     #[error("could not reach the control plane: {0}")]
     Transport(String),
     #[error("the control plane's answer was not usable: {0}")]
     BadAnswer(String),
+}
+
+/// Why the control plane refused this machine's credential, when its 401
+/// said (#371). Each demands a different act, which is the whole point of
+/// carrying it: `Revoked` → restore on the fleet screen (or sign in again),
+/// `Pending` → wait for approval, `Expired` → sign in again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MachineRefusal {
+    Revoked,
+    Pending,
+    Expired,
+}
+
+impl std::fmt::Display for MachineRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            MachineRefusal::Revoked => "revoked",
+            MachineRefusal::Pending => "pending approval",
+            MachineRefusal::Expired => "expired",
+        })
+    }
+}
+
+/// A 401's meaning, read from its body. Bare — or carrying a detail this
+/// build does not know — is `SignedOut`, the deploy-skew pin: an older Worker
+/// sends no detail, and a newer one may send words this binary predates.
+fn refusal_401(body: &str) -> CloudError {
+    #[derive(serde::Deserialize)]
+    struct Refusal {
+        detail: Option<String>,
+    }
+    match serde_json::from_str::<Refusal>(body)
+        .ok()
+        .and_then(|r| r.detail)
+        .as_deref()
+    {
+        Some("revoked") => CloudError::Refused(MachineRefusal::Revoked),
+        Some("pending") => CloudError::Refused(MachineRefusal::Pending),
+        Some("expired") => CloudError::Refused(MachineRefusal::Expired),
+        _ => CloudError::SignedOut,
+    }
 }
 
 /// The two authenticated requests the app makes.
@@ -439,7 +486,7 @@ pub fn fetch_hosts(api: &dyn AccountApi, token: &str) -> Result<AccountHosts, Cl
         .get("/api/hosts", token)
         .map_err(|e| CloudError::Transport(e.to_string()))?;
     if got.status == 401 {
-        return Err(CloudError::SignedOut);
+        return Err(refusal_401(&got.body));
     }
     if !(200..300).contains(&got.status) {
         return Err(CloudError::BadAnswer(format!("{}: {}", got.status, clip(&got.body))));
@@ -496,7 +543,7 @@ pub fn mint_ticket(
         .post("/api/relay/ticket", token, &body)
         .map_err(|e| CloudError::Transport(e.to_string()))?;
     if got.status == 401 {
-        return Err(CloudError::SignedOut);
+        return Err(refusal_401(&got.body));
     }
     if !(200..300).contains(&got.status) {
         return Err(CloudError::BadAnswer(format!("{}: {}", got.status, clip(&got.body))));
@@ -526,7 +573,7 @@ pub fn mint_host_code(api: &dyn AccountApi, token: &str) -> Result<String, Cloud
         .post("/api/enroll/code", token, r#"{"kind":"host"}"#)
         .map_err(|e| CloudError::Transport(e.to_string()))?;
     if got.status == 401 {
-        return Err(CloudError::SignedOut);
+        return Err(refusal_401(&got.body));
     }
     if !(200..300).contains(&got.status) {
         return Err(CloudError::BadAnswer(format!("{}: {}", got.status, clip(&got.body))));
@@ -579,7 +626,7 @@ pub fn fetch_devices(
         .get("/api/devices", token)
         .map_err(|e| CloudError::Transport(e.to_string()))?;
     if got.status == 401 {
-        return Err(CloudError::SignedOut);
+        return Err(refusal_401(&got.body));
     }
     if !(200..300).contains(&got.status) {
         return Err(CloudError::BadAnswer(format!("{}: {}", got.status, clip(&got.body))));
@@ -626,7 +673,7 @@ pub fn fetch_me(api: &dyn AccountApi, token: &str) -> Result<String, CloudError>
     let got =
         api.get("/api/me", token).map_err(|e| CloudError::Transport(e.to_string()))?;
     if got.status == 401 {
-        return Err(CloudError::SignedOut);
+        return Err(refusal_401(&got.body));
     }
     if !(200..300).contains(&got.status) {
         return Err(CloudError::BadAnswer(format!("{}: {}", got.status, clip(&got.body))));
@@ -667,7 +714,7 @@ pub fn approve_device(
         .post(&path, token, &body)
         .map_err(|e| CloudError::Transport(e.to_string()))?;
     if got.status == 401 {
-        return Err(CloudError::SignedOut);
+        return Err(refusal_401(&got.body));
     }
     if !(200..300).contains(&got.status) {
         // The refusal's own word (`bad_signature`, `forbidden`, a named
@@ -709,7 +756,10 @@ pub fn relay_dial(
     // signed-out app must stop the supervisor rather than back off against
     // guaranteed 401s.
     let ticket = mint().map_err(|e| match e {
-        CloudError::SignedOut => RemoteError::SignedOut,
+        // A named refusal is terminal exactly as a bare one: a revoked or
+        // pending machine's dial must stop, not back off against guaranteed
+        // 401s. The header's honest wording is the account watcher's job.
+        CloudError::SignedOut | CloudError::Refused(_) => RemoteError::SignedOut,
         // Transient by classification: `Io` is the shape the redial loop
         // backs off on, which is right for an unreachable control plane.
         other => RemoteError::Io(other.to_string()),
@@ -1169,6 +1219,42 @@ mod tests {
             ),
             "a ticket under a dead token is the same fact"
         );
+    }
+
+    #[test]
+    fn a_401_that_names_its_cause_reaches_the_header_as_that_cause() {
+        // #371's client half. The three details each demand a different act
+        // (restore / wait / sign in again), so they must survive the parse —
+        // and everything else must degrade to the old meaning.
+        for (detail, want) in [
+            ("revoked", MachineRefusal::Revoked),
+            ("pending", MachineRefusal::Pending),
+            ("expired", MachineRefusal::Expired),
+        ] {
+            let api = FakeAccountApi::answering(
+                401,
+                &format!(r#"{{"error":"unauthorized","detail":"{detail}"}}"#),
+            );
+            assert!(
+                matches!(fetch_hosts(&api, "zt1_x"), Err(CloudError::Refused(w)) if w == want),
+                "{detail} must arrive as {want:?}"
+            );
+        }
+
+        // The deploy-skew pins, both directions: a Worker predating #371
+        // sends no detail, and a future one may send a word this binary does
+        // not know. Both are the bare 401's old meaning, never an error.
+        for body in [
+            r#"{"error":"unauthorized"}"#,
+            r#"{"error":"unauthorized","detail":"quarantined"}"#,
+            "not json at all",
+        ] {
+            let api = FakeAccountApi::answering(401, body);
+            assert!(
+                matches!(fetch_hosts(&api, "zt1_x"), Err(CloudError::SignedOut)),
+                "{body:?} must keep the old meaning"
+            );
+        }
     }
 
     #[test]

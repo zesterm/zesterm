@@ -24,7 +24,7 @@ import type { Env } from '../env.ts';
 import { json } from '../http.ts';
 import { KEY_LEN } from '../enroll/preimage.ts';
 import { currentUser } from './session.ts';
-import { requestPrincipal } from './principal.ts';
+import { requestPrincipal, unauthorized } from './principal.ts';
 
 /**
  * `GET /api/hosts` and `GET /api/devices`. Revoked rows are simply not there —
@@ -55,7 +55,7 @@ export async function listRegistry(
   now: number,
 ): Promise<Response> {
   const principal = await requestPrincipal(request, env, now);
-  if (principal === null) return json({ error: 'unauthorized' }, 401);
+  if (principal === null) return unauthorized(request, env, now);
 
   // The owner's opt-in, and nobody else's: a bearer asking gets the ordinary
   // live view, silently — refusing outright would turn a copy-pasted URL into

@@ -17,7 +17,12 @@
 
 import type { Env } from '../env.ts';
 import type { PublicUser } from '../db/types.ts';
-import { resolveMachineToken, type MachinePrincipal } from '../db/machine-tokens.ts';
+import {
+  explainMachineToken,
+  resolveMachineToken,
+  type MachinePrincipal,
+} from '../db/machine-tokens.ts';
+import { json } from '../http.ts';
 import { currentUser } from './session.ts';
 
 export type Principal =
@@ -60,6 +65,27 @@ function asPrincipal(machine: MachinePrincipal): Principal {
   return machine.kind === 'host'
     ? { kind: 'host', id: machine.id, userId: machine.userId }
     : { kind: 'device', id: machine.id, userId: machine.userId };
+}
+
+/**
+ * The 401 a handler answers when `requestPrincipal` said `null` — in one
+ * place, so no handler can forget the rule (#371): the refusal carries a
+ * `detail` naming why ONLY when the presented bearer's hash matches a real
+ * `machine_tokens` row (its holder provably once held a minted credential —
+ * see `explainMachineToken` for the argument and the causes). A cookie
+ * refusal, an unknown token, and a disabled account all stay bare, exactly as
+ * before.
+ */
+export async function unauthorized(request: Request, env: Env, now: number): Promise<Response> {
+  const header = request.headers.get('authorization');
+  if (header !== null) {
+    const token = bearerToken(header);
+    if (token !== null) {
+      const detail = await explainMachineToken(env.DB, token, now);
+      if (detail !== null) return json({ error: 'unauthorized', detail }, 401);
+    }
+  }
+  return json({ error: 'unauthorized' }, 401);
 }
 
 /**

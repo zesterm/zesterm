@@ -291,6 +291,105 @@ test('a bad bearer token never falls back to the cookie', async () => {
   db.close();
 });
 
+test('a dead token’s 401 names its cause — to the holder, and to nobody else', async () => {
+  // #371: revoked / expired / pending each demand a different act from the
+  // machine's owner, and the collapse rendered them all as "not signed in".
+  // The reason is disclosed only when the presented token's hash matches a
+  // real machine_tokens row — its holder provably once held a minted
+  // credential, so "your credential is dead, and this is how" is theirs.
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+
+  const revokedDevice = await enrolled(db, cookie, 'device', 8);
+  await routeApi(post(`/api/devices/${revokedDevice.id}/revoke`, {}, cookie), env(db), fetch, NOW);
+  const revoked = await routeApi(bearer('/api/hosts', revokedDevice.token), env(db), fetch, NOW);
+  assert.equal(revoked?.status, 401);
+  assert.deepEqual(await revoked!.json(), { error: 'unauthorized', detail: 'revoked' });
+
+  const expiring = await enrolled(db, cookie, 'host', 9);
+  const afterExpiry = NOW + MACHINE_TOKEN_TTL_MS + 1;
+  const expired = await routeApi(
+    bearer('/api/enroll/code', expiring.token, { method: 'POST', body: { kind: 'host' } }),
+    env(db),
+    fetch,
+    afterExpiry,
+  );
+  assert.equal(expired?.status, 401);
+  assert.deepEqual(await expired!.json(), { error: 'unauthorized', detail: 'expired' });
+
+  // A token that never existed gets the bare refusal: confirming a guessed
+  // string was once real is worth more to whoever is guessing than to anyone
+  // who legitimately holds nothing.
+  const unknown = await routeApi(bearer('/api/hosts', 'zt1_' + 'a'.repeat(64)), env(db), fetch, NOW);
+  assert.equal(unknown?.status, 401);
+  assert.deepEqual(await unknown!.json(), { error: 'unauthorized' });
+
+  // And a cookie 401 carries nothing: the person signing in again is the
+  // answer there, and no token was presented to explain.
+  const anonymous = await routeApi(
+    new Request(`${ORIGIN}/api/hosts`),
+    env(db),
+    fetch,
+    NOW,
+  );
+  assert.equal(anonymous?.status, 401);
+  assert.deepEqual(await anonymous!.json(), { error: 'unauthorized' });
+  db.close();
+});
+
+test('a rotated-away token says revoked, and a pending device’s token says pending', async () => {
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+
+  // Rotation for real: enrolling the same key again mints a fresh token and
+  // revokes the first. The FIRST token's holder — a daemon that missed the
+  // new one — must hear "revoked", because re-enrolling is its next move.
+  const first = await enrolled(db, cookie, 'device', 8);
+  const second = await enrolled(db, cookie, 'device', 8);
+  assert.equal(first.id, second.id, 'the same key, re-enrolled');
+  assert.notEqual(first.token, second.token);
+
+  const rotated = await routeApi(bearer('/api/hosts', first.token), env(db), fetch, NOW);
+  assert.equal(rotated?.status, 401);
+  assert.deepEqual(
+    await rotated!.json(),
+    { error: 'unauthorized', detail: 'revoked' },
+    'to the machine still presenting it, a rotated-away credential is a dead one',
+  );
+  const fresh = await routeApi(bearer('/api/hosts', second.token), env(db), fetch, NOW);
+  assert.equal(fresh?.status, 200, 'while the rotation’s winner keeps working');
+
+  // Demote the device to pending directly: the LIVE token's 401 must name it.
+  db.raw.prepare(`UPDATE devices SET status = 'pending' WHERE id = ?`).run(first.id);
+  const pending = await routeApi(bearer('/api/hosts', second.token), env(db), fetch, NOW);
+  assert.equal(pending?.status, 401);
+  assert.deepEqual(
+    await pending!.json(),
+    { error: 'unauthorized', detail: 'pending' },
+    'waiting for approval is a different act from signing in again',
+  );
+  db.close();
+});
+
+test('a disabled account’s machines get the bare 401, whatever else is true', async () => {
+  // The docstring's rule, enforced in the same read: the account's standing
+  // is not the machine's business, so neither a live token nor a revoked one
+  // under a disabled account explains anything.
+  const db = testDb();
+  const cookie = await signedIn(db, 'user-a');
+  const live = await enrolled(db, cookie, 'device', 8);
+  const dead = await enrolled(db, cookie, 'host', 9);
+  await routeApi(post(`/api/hosts/${dead.id}/revoke`, {}, cookie), env(db), fetch, NOW);
+  db.raw.prepare(`UPDATE users SET disabled_at = ? WHERE id = 'user-a'`).run(NOW);
+
+  for (const token of [live.token, dead.token]) {
+    const res = await routeApi(bearer('/api/hosts', token), env(db), fetch, NOW);
+    assert.equal(res?.status, 401);
+    assert.deepEqual(await res!.json(), { error: 'unauthorized' });
+  }
+  db.close();
+});
+
 test('restoring the principal revives the token it was still holding', async () => {
   // The JOIN in the other direction — the property the whole recovery surface
   // leans on. Revoke wrote one column on the principal row and nothing on the
