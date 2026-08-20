@@ -758,6 +758,19 @@ pub enum AccountState {
     /// the account's display name is not persisted, so a restart shows
     /// "signed in" until an enrolment or a hosts fetch supplies it again.
     SignedIn { account: Option<String> },
+    /// The account revoked this app (#371): the stored token is refused with
+    /// that cause. Not `SignedOut` — the person did not sign out, and their
+    /// next move is the fleet screen's Revoked section, not another code.
+    Revoked,
+    /// This app's device row is `pending` (#371): the token exists and will
+    /// work the moment another device approves it. Rendering it as
+    /// "not signed in" sent people re-enrolling in circles.
+    PendingApproval,
+    /// The credential store itself could not be read (#371) — a locked
+    /// keychain, a session with no bus. Distinct from `SignedOut` because
+    /// "not signed in" about a fully-enrolled machine is the lie that costs
+    /// the diagnosis; the message names the store's own error.
+    StoreUnreadable(String),
     /// The last enrolment failed; the message is what the header shows
     /// beside the retry affordance.
     Failed(String),
@@ -1196,6 +1209,28 @@ fn enroll_failure(e: &zest_daemon::enroll::EnrollError) -> String {
         EnrollError::Transport(_) => "could not reach the control plane".into(),
         // The store's and the parser's own words are the actionable part.
         other => other.to_string(),
+    }
+}
+
+/// What a credential-store read means for the header — pure, so the `Err`
+/// mapping is testable: for years an unreadable keychain rendered as "not
+/// signed in" (#371), which on a fully-enrolled machine is the lie that costs
+/// the diagnosis. An `Err` from the store is a fact about the *store*, and
+/// the header says so; only a store that answered "nothing there" is signed
+/// out.
+fn probed_account_state(
+    read: Result<Option<String>, zest_daemon::enroll::EnrollError>,
+) -> AccountState {
+    match read {
+        // A stored token is "signed in"; the display name is not persisted,
+        // so it stays unnamed until an enrolment or a hosts fetch supplies
+        // one.
+        Ok(Some(_)) => AccountState::SignedIn { account: None },
+        Ok(None) => AccountState::SignedOut,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read the app's cloud token");
+            AccountState::StoreUnreadable(e.to_string())
+        }
     }
 }
 
@@ -2920,6 +2955,32 @@ impl App {
                             entry: None,
                             error: None,
                         },
+                        // The honest refusals (#371). Each names the person's
+                        // actual next move — the generic "not signed in"
+                        // pointed all three at re-enrolling, which for a
+                        // revoked app can never work (the 409 loop).
+                        AccountState::Revoked => FleetAccountModel {
+                            line: "this app was revoked — restore it on the account's fleet screen"
+                                .into(),
+                            action: FleetAccountAction::SignIn,
+                            second: FleetAccountAction::SignInBrowser,
+                            entry: None,
+                            error: None,
+                        },
+                        AccountState::PendingApproval => FleetAccountModel {
+                            line: "waiting for approval on another device".into(),
+                            action: FleetAccountAction::None,
+                            second: FleetAccountAction::None,
+                            entry: None,
+                            error: None,
+                        },
+                        AccountState::StoreUnreadable(message) => FleetAccountModel {
+                            line: "the credential store could not be read".into(),
+                            action: FleetAccountAction::None,
+                            second: FleetAccountAction::None,
+                            entry: None,
+                            error: Some(message.clone()),
+                        },
                         AccountState::Failed(message) => FleetAccountModel {
                             line: "not signed in".into(),
                             action: FleetAccountAction::SignIn,
@@ -3448,6 +3509,23 @@ impl App {
                     post_account(&update, &proxy, AccountState::SignedOut);
                     Err(AccountError::SignedOut)
                 }
+                Err(crate::cloud::CloudError::Refused(why)) => {
+                    // The 401 named its cause (#371): the header can say the
+                    // person's actual next move instead of "not signed in".
+                    use crate::cloud::MachineRefusal;
+                    post_account(
+                        &update,
+                        &proxy,
+                        match why {
+                            MachineRefusal::Revoked => AccountState::Revoked,
+                            MachineRefusal::Pending => AccountState::PendingApproval,
+                            // An expired token is the one case where signing
+                            // in again is genuinely the whole answer.
+                            MachineRefusal::Expired => AccountState::SignedOut,
+                        },
+                    );
+                    Err(AccountError::SignedOut)
+                }
                 Err(e) => Err(AccountError::Transient(e.to_string())),
             }
         });
@@ -3530,20 +3608,9 @@ impl App {
         let update = Arc::clone(&self.account_update);
         let proxy = self.proxy.clone();
         let spawned = std::thread::Builder::new().name("zest-app-cloud".into()).spawn(move || {
-            let state = match crate::cloud::stored_app_token(&zest_mesh::keystore::OsKeyStore) {
-                // A stored token is "signed in"; the display name is not
-                // persisted, so it stays unnamed until an enrolment or a
-                // hosts fetch supplies one.
-                Ok(Some(_)) => AccountState::SignedIn { account: None },
-                Ok(None) => AccountState::SignedOut,
-                // An unreadable store reads as signed out rather than as an
-                // error state: the person's next move (sign in) is the same,
-                // and enrolling is where the store's failure gets named.
-                Err(e) => {
-                    tracing::warn!(error = %e, "could not read the app's cloud token");
-                    AccountState::SignedOut
-                }
-            };
+            let state = probed_account_state(crate::cloud::stored_app_token(
+                &zest_mesh::keystore::OsKeyStore,
+            ));
             post_account(&update, &proxy, state);
         });
         if let Err(e) = spawned {
@@ -13837,6 +13904,32 @@ mod enroll_tests {
             detail: None,
         });
         assert!(dead.contains("mint a fresh one"), "got {dead:?}");
+    }
+
+    #[test]
+    fn an_unreadable_keychain_is_not_rendered_as_signed_out() {
+        // #371: "not signed in" about a fully-enrolled machine whose keychain
+        // is merely locked is the lie that costs the diagnosis. The store's
+        // failure is a fact about the store, and the state says so.
+        use super::{probed_account_state, AccountState};
+
+        let locked = probed_account_state(Err(zest_daemon::enroll::EnrollError::BadResponse(
+            "the keychain is locked".into(),
+        )));
+        let AccountState::StoreUnreadable(message) = locked else {
+            panic!("a store error must be its own state, got {locked:?}");
+        };
+        assert!(message.contains("keychain is locked"), "the store's own words: {message:?}");
+
+        assert_eq!(
+            probed_account_state(Ok(None)),
+            AccountState::SignedOut,
+            "only a store that answered 'nothing there' is signed out"
+        );
+        assert_eq!(
+            probed_account_state(Ok(Some("zt1_x".into()))),
+            AccountState::SignedIn { account: None }
+        );
     }
 }
 
