@@ -3447,19 +3447,33 @@ mod tests {
         }
     }
 
-    /// Poll until one of the messages matches, or give up.
-    fn poll_until(
+    /// Poll until a message satisfies `stop`, keeping **everything** seen.
+    ///
+    /// Collecting is not tidiness. A negative assertion made against whatever
+    /// happens to be left after a search is an assertion about the search: a
+    /// `find` per batch drops the rest of that batch, so a message arriving
+    /// beside — or before — the one that ends the wait is thrown away, and
+    /// "it never arrived" and "it was discarded" become the same result.
+    ///
+    /// Returns what was seen and whether `stop` ever fired; a caller that
+    /// waited for something and did not get it must say so rather than
+    /// asserting over an empty transcript.
+    fn poll_collecting(
         c: &mut Connection,
-        mut f: impl FnMut(&HostMessage) -> bool,
-    ) -> Option<HostMessage> {
+        mut stop: impl FnMut(&HostMessage) -> bool,
+    ) -> (Vec<HostMessage>, bool) {
+        let mut seen: Vec<HostMessage> = Vec::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while std::time::Instant::now() < deadline {
-            if let Some(m) = c.poll().into_iter().find(&mut f) {
-                return Some(m);
+            let batch = c.poll();
+            let done = batch.iter().any(&mut stop);
+            seen.extend(batch);
+            if done {
+                return (seen, true);
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        None
+        (seen, false)
     }
 
     #[test]
@@ -3482,10 +3496,15 @@ mod tests {
         let addr = registry.list(config().host)[0].addr;
         peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
 
-        let got = poll_until(&mut c, |m| matches!(m, HostMessage::Attention { .. }));
+        let (seen, arrived) =
+            poll_collecting(&mut c, |m| matches!(m, HostMessage::Attention { .. }));
+        assert!(arrived, "a client that asked for signals was never sent the bell: {seen:?}");
         assert!(
-            matches!(got, Some(HostMessage::Attention { cause, .. }) if cause == zest_proto::AttentionCause::Bell),
-            "a client that asked for signals is sent the bell, got {got:?}"
+            seen.iter().any(|m| matches!(
+                m,
+                HostMessage::Attention { cause, .. } if *cause == zest_proto::AttentionCause::Bell
+            )),
+            "and it is the bell it is told about: {seen:?}"
         );
     }
 
@@ -3516,13 +3535,18 @@ mod tests {
         // parsed by now — waiting a fixed time would pass on a machine slow
         // enough that nothing had happened yet, which is the failure mode a
         // negative assertion is most prone to.
-        let ended = poll_until(&mut c, |m| matches!(m, HostMessage::Exited { .. }));
-        assert!(ended.is_some(), "the child never exited, so this proves nothing");
-        // Drain whatever is left, and check the whole conversation.
-        let rest = c.poll();
+        //
+        // And every message is kept, not just the one that ended the wait: an
+        // `Attention` arriving in the same batch as the `Exited` is exactly
+        // what this is looking for, and a search that discarded its batch
+        // would report the hole it was written to catch as a pass.
+        let (mut seen, ended) =
+            poll_collecting(&mut c, |m| matches!(m, HostMessage::Exited { .. }));
+        assert!(ended, "the child never exited, so this proves nothing: {seen:?}");
+        seen.extend(c.poll());
         assert!(
-            !rest.iter().any(|m| matches!(m, HostMessage::Attention { .. })),
-            "an unasked client was sent a signal: {rest:?}"
+            !seen.iter().any(|m| matches!(m, HostMessage::Attention { .. })),
+            "an unasked client was sent a signal: {seen:?}"
         );
     }
 
