@@ -610,13 +610,17 @@ fn on_message(state: &State, tx: &Sender<Outbound>, msg: HostMessage) {
                 r.set_exited(code);
             }
         }
-        HostMessage::Error { session, message } => {
-            if let Some(addr) = session {
-                s.session_error = Some((addr, message.clone()));
+        HostMessage::Error { session, message } => match session {
+            // A refusal naming a session is not the link's state, and `error`
+            // is read *with* `closed` to explain a missing replica -- so a
+            // per-session message left there outlives its request and is
+            // reported later as a link failure that never happened.
+            Some(addr) => {
+                s.session_error = Some((addr, message));
                 s.session_error_gen = s.session_error_gen.wrapping_add(1);
             }
-            s.error = Some(message);
-        }
+            None => s.error = Some(message),
+        },
         _ => {}
     }
     // One notify for every message, rather than one per interesting arm: a
