@@ -355,6 +355,9 @@ fn run<R: Read + Send + 'static, W: Write + Send + 'static>(
                 HostMessage::Attention { session, cause } => {
                     eprintln!("[attach] session {session} asked to be noticed ({cause:?})");
                 }
+                HostMessage::Progress { session, progress } => {
+                    eprintln!("[attach] session {session} progress {progress:?}");
+                }
                 HostMessage::Error { message, .. } => eprintln!("[attach] error: {message}"),
                 HostMessage::Scrollback { .. } => {}
 

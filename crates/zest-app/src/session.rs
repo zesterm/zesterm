@@ -112,6 +112,14 @@ pub enum Wakeup {
     /// and skips. The dot lives in the chrome, which needs its own
     /// invalidation — the same argument `PairingChanged` already makes.
     Attention(zest_proto::SessionAddr, zest_proto::AttentionCause),
+    /// A session's `OSC 9;4` progress moved.
+    ///
+    /// Carries nothing: the value is already on that tab's terminal, where
+    /// the chrome reads it beside the title. Its own variant rather than
+    /// `Redraw` for [`Wakeup::Attention`]'s reason — a background tab's
+    /// redraw reaches a frame that finds nothing to draw and skips, and the
+    /// indicator lives in the chrome.
+    SignalChanged,
 }
 
 pub struct Session {

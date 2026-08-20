@@ -139,7 +139,7 @@ everything shares one atlas (per `docs/CONTRACTS.md`).
 - **Tab chip:** 34px tall, flex-basis 168px, min 104px / max 232px wide, radius `9px 9px 0 0`, padding `0 11px`, 9px gap, `margin-bottom:-1px` so it overlaps the border.
   - Active: fill `ui.bg`, 1px `ui.line` on top/left/right, no bottom border, plus a 2px `ui.accent` inset rule along the top edge.
   - Inactive: transparent fill and border; hover → `ui.selSoft`.
-  - Contents left→right: an 18px rounded glyph tile carrying the **profile's icon** in its **tab colour** on a 12%-alpha wash of it (inactive: `ui.faint`, no wash) — with a 6px `ui.info` **attention badge** on its top-right corner when the session has asked to be noticed and you have not looked yet — the **title only** at 12.5px (`ui.fg` active / `ui.dim` inactive, `flex:1` + ellipsis), and a 16px close affordance (`ui.faint`, hover fill `ui.line`). **No second line** — host and cwd on a 34px chip made every tab look cramped and were unreadable at 9.5px; they live in the tab's `title` tooltip and the vertical sidebar and header, which have room for them. Chips are `flex:0 1 168px; min-width:104px; max-width:232px`.
+  - Contents left→right: an 18px rounded glyph tile carrying the **profile's icon** in its **tab colour** on a 12%-alpha wash of it (inactive: `ui.faint`, no wash) — with a 6px `ui.info` **attention badge** on its top-right corner when the session has asked to be noticed and you have not looked yet, and **ringed** while the session is busy (a spinner for a running command or an indeterminate `OSC 9;4`, an arc for a percentage; `danger` ink when the job says it failed, `warn` when it warns) — the **title only** at 12.5px (`ui.fg` active / `ui.dim` inactive, `flex:1` + ellipsis), and a 16px close affordance (`ui.faint`, hover fill `ui.line`). **No second line** — host and cwd on a 34px chip made every tab look cramped and were unreadable at 9.5px; they live in the tab's `title` tooltip and the vertical sidebar and header, which have room for them. Chips are `flex:0 1 168px; min-width:104px; max-width:232px`.
 - **New tab is a single `+`** — 32×30, borderless, 22px glyph, `ui.dim` ink, `ui.selSoft` fill
   with `ui.accent` ink while its menu is open. It **opens the launcher menu**; there is no
   separate caret and no default-only half. A split button was tried and dropped: two adjacent
@@ -203,7 +203,7 @@ chip, a spacer, and `⌘K`. The launcher is not here — it sits beside the side
 **Sidebar,** top to bottom:
 1. Search row, flush under the header: the search pill (`flex:1`, 30px, radius 7px, `ui.panel`, 1px `ui.line`, `⌘K` in 11px mono + "Search sessions, blocks, hosts" in 12px `ui.faint`) with the **same `+` to its right** — searching and starting a session are the two things you do at the top of a sidebar. Its menu anchors `top:40px; left:0` from the button so it opens rightwards over the pane; right-anchored it runs off the window's left edge.
 3. Host groups, 14px apart, **built from the same tab list the horizontal strip renders** — grouped by the host each tab runs on, so a session launched from a profile appears under that profile's host (`⬢ Ubuntu` under FORGE) and carries the same selection styling. Do not build this list from a separate array or from literal markup: a hardcoded row cannot be selected, and a truncated list cannot show a session the user just started. Group header: 6px status dot + host name (10.5px, 600, `.09em`, uppercase, `ui.dim`) + a mono sub-label (`macOS · LAN 0.3ms`) in 10px `ui.faint`.
-4. Session rows: 7px/8px padding, radius 8px, 9px gap. 5px state dot (**attention `ui.info`** — it outranks the rest, being the one state that is asking for you — then running `warn` pulsing 1.6s, idle `ui.faint`, live `success`), then title 12.5px over a 10.5px mono cwd in `ui.faint`, then age right-aligned in 10px mono. Selected row fill `ui.accentSoft`; hover `ui.selSoft`.
+4. Session rows: 7px/8px padding, radius 8px, 9px gap. 5px state dot, in precedence order: **attention `ui.info`** (the one state that is asking for *you*), **failed `danger`** (the program's own word about itself, which is newer than the block index's), **busy `warn` pulsing 1.6s** (a running block *or* an `OSC 9;4` report — neither implies the other), live `success`, idle `ui.faint`, then title 12.5px over a 10.5px mono cwd in `ui.faint`, then age right-aligned in 10px mono. Selected row fill `ui.accentSoft`; hover `ui.selSoft`.
    **The age's slot is also the close's**: under the pointer the age is replaced by
    the same 16px `×` the horizontal chip carries (`ui.faint`, hover fill `ui.line`),
    and the slot is reserved at the wider of the two either way so the title never
@@ -657,6 +657,30 @@ on failure, and a `notify-send` wrapper all light it without any of them being k
 - `tabs.attention_bell` and `tabs.attention_notify`, both on by default, switch the two
   sources independently: a bell fires on tab-completion in some shells, a notification
   almost never fires by accident.
+
+**A busy tab looks busy, in both positions.** `running` — the shell's word, from
+OSC 133 — had been computed for every tab all along and drawn in exactly one place, the
+sidebar's dot, so the horizontal strip showed nothing at all while a command ran. It now
+rings the chip's glyph tile, and the animation clock is no longer gated to the sidebar.
+
+Beside it, **`OSC 9;4`** is the program's own word about itself: `st` ∈ {0 clear, 1 set,
+2 error, 3 indeterminate, 4 warning} with a percentage. Windows Terminal, WezTerm, ConEmu
+and Ghostty all render it, which is what makes it interoperable rather than invented here.
+
+- **The two are different facts and neither implies the other.** A block is silent under a
+  shell with no integration and under the alternate screen; a program that reports progress
+  may never mint a block. A tab with either is busy; a tab with both draws the more specific
+  one.
+- **The ring is separate from the dot inside the tile**, because that dot is the tab's
+  *identity* — its profile, its host, the link's health — and a mark forced to choose
+  between "which machine is this" and "is it busy" answers the less urgent question half
+  the time.
+- **A ring is two rects, not an arc**: an SDF box cannot draw one, so it is a ring with a
+  bite taken out in the colour of whatever is behind it. That background is a parameter and
+  cannot be defaulted — a chip's differs between its active fill, the strip, and a hover
+  fill, which is exactly why the block header's copy could hardcode one and this one cannot.
+- **Reaching 0 after being busy, and reporting an error, both light the attention dot.**
+  That is "my build finished" for a program that reports progress and never rings.
 
 ---
 

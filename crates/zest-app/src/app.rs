@@ -1531,6 +1531,13 @@ pub struct App {
     anim_epoch: std::time::Instant,
     /// A running spinner is on screen — set by the redraw that drew it.
     anim_spin: bool,
+    /// A tab is showing a progress ring — set by the *chrome* rebuild.
+    ///
+    /// Its own flag rather than sharing `anim_spin`, which the block pass owns
+    /// and rewrites on every redraw: one value written by two passes is one
+    /// pass clearing what the other just set, and the symptom would be a ring
+    /// that turns only while a block header happens to be spinning too.
+    anim_spin_tabs: bool,
     /// A pulsing session dot is on screen — set by the chrome rebuild.
     anim_pulse: bool,
     /// Where the cursor is *drawn*, in cells, when `cursor.trail` is on.
@@ -1890,6 +1897,7 @@ impl App {
             screen: AppScreen::Terminal,
             anim_epoch: std::time::Instant::now(),
             anim_spin: false,
+            anim_spin_tabs: false,
             anim_pulse: false,
             cursor_trail: None,
             scroll_spring: crate::motion::Spring::at(0.0),
@@ -3410,7 +3418,7 @@ impl App {
         if self.scroll_spring.moving() {
             consider(8);
         }
-        if self.anim_spin {
+        if self.anim_spin || self.anim_spin_tabs {
             consider(80);
         }
         if self.anim_pulse {
@@ -4960,7 +4968,7 @@ impl App {
             .map(|tab| {
                 // A brief lock per tab per chrome rebuild — rebuilds are
                 // event-driven, so this is microseconds, not a frame cost.
-                let (title, cwd, running) = {
+                let (title, cwd, running, progress) = {
                     let term = tab.source().terminal();
                     let term = term.lock();
                     let title = term.title().trim().to_string();
@@ -4972,7 +4980,7 @@ impl App {
                         term.cwd().to_string()
                     };
                     let running = term.blocks().last().is_some_and(|b| b.is_running());
-                    (title, cwd, running)
+                    (title, cwd, running, term.progress())
                 };
                 let title = if title.is_empty() { "shell".to_string() } else { title };
                 let origin = match tab.source().origin() {
@@ -5042,6 +5050,7 @@ impl App {
                     accent,
                     tab_accent: crate::chrome::model::tab_accent(tab.identity.as_ref(), accent),
                     running,
+                    progress,
                     attention: self.attention.get(&tab.addr).copied(),
                     age,
                     // Dead tabs borrow the connecting style (faint text): not
@@ -5076,6 +5085,7 @@ impl App {
                 // place, not a shell on a host.
                 tab_accent: crate::chrome::model::AccentChoice::Profile(0),
                 running: false,
+                progress: zest_core::Progress::None,
                 attention: None,
                 age: String::new(),
                 connecting: false,
@@ -5094,6 +5104,7 @@ impl App {
                 accent: 0,
                 tab_accent: crate::chrome::model::tab_accent(None, 0),
                 running: false,
+                progress: zest_core::Progress::None,
                 attention: None,
                 age: String::new(),
                 connecting: false,
@@ -5148,8 +5159,13 @@ impl App {
                 }
             });
 
-        self.anim_pulse = tab_models.iter().any(|t| t.running)
-            && self.config.tabs.position == zest_config::settings::TabsPosition::Left;
+        // Ungated from `TabsPosition::Left` (#385). `running` has been computed
+        // for every tab all along and read at exactly one site — the sidebar's
+        // dot — so the horizontal strip showed nothing at all while a command
+        // ran. The clock is what the chip's ring and the row's dot both turn
+        // on, and neither position has a claim on it.
+        self.anim_pulse = tab_models.iter().any(|t| t.running);
+        self.anim_spin_tabs = tab_models.iter().any(|t| t.progress.is_busy());
 
         // Which chip is lit — exactly one (invariant 9). The Profiles pane
         // wins while its screen is up (its chip sits right after the
@@ -10255,6 +10271,7 @@ impl ApplicationHandler<Wakeup> for App {
             }
             Wakeup::Exited => el.exit(),
             Wakeup::Attention(addr, cause) => self.note_attention(addr, cause),
+            Wakeup::SignalChanged => self.mark_chrome_dirty(),
             // The link died, not the shell. The window stays open showing the
             // last state that was true -- closing it would throw away a session
             // that is still running in a daemon that does not care we went

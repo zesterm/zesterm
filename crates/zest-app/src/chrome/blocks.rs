@@ -260,32 +260,20 @@ pub fn layout_blocks(
             meta("interrupted", colors.text_faint, &mut right, &mut out);
         } else if v.running {
             // The running indicator: a thin warn ring whose gap orbits on the
-            // clock's 0.9s turn — an SDF box cannot draw an arc, but a ring
-            // with a fill-coloured bite out of it reads exactly the same.
+            // clock's 0.9s turn. Shared with the tab chips since #385 — same
+            // picture, and the `fill` argument is why it had to become a
+            // function: a chip's background is not a header's.
             meta(&v.running_label, colors.warn, &mut right, &mut out);
             let d = 8.0 * s;
-            let ring = [right - d, band[1] + (band[3] - d) / 2.0, d, d];
-            out.rects.push(RectInstance {
-                radii: [d / 2.0; 4],
-                border: colors.warn,
-                border_width: 1.5 * s,
-                ..RectInstance::filled(ring, LinearRgba::TRANSPARENT, clip)
-            });
-            let angle = spin * core::f32::consts::TAU;
-            let r = d / 2.0;
-            let (cx, cy) = (ring[0] + r, ring[1] + r);
-            let bite = 3.0 * s;
-            out.rects.push(RectInstance::rounded(
-                [
-                    cx + angle.cos() * r - bite / 2.0,
-                    cy + angle.sin() * r - bite / 2.0,
-                    bite,
-                    bite,
-                ],
-                bite / 2.0,
+            super::layout::ring(
+                &mut out.rects,
+                [right - d, band[1] + (band[3] - d) / 2.0, d, d],
+                colors.warn,
                 fill,
+                spin,
+                1.0,
                 clip,
-            ));
+            );
             right -= d + GAP * s;
         } else {
             let color = if v.failed { colors.danger } else { colors.success };

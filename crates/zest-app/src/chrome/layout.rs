@@ -218,6 +218,71 @@ pub(super) fn accent_color(colors: &ChromeColors, choice: AccentChoice) -> Linea
 
 /// A little status dot, as the SDF pipeline draws circles: a square rect
 /// with radius d/2.
+/// A spinning ring, or an arc of one.
+///
+/// An SDF box cannot draw an arc, so this is a ring with a *bite* taken out of
+/// it in the colour of whatever is behind — which reads exactly the same and
+/// costs two rects. `phase` is where the bite sits, `0.0..1.0` round the
+/// circle; `fraction` is how much of the ring to leave whole, so `1.0` is a
+/// spinner (one small bite, orbiting) and anything less is a progress arc.
+///
+/// **`bg` is not optional and cannot be defaulted.** The bite has to match
+/// what is underneath it, and a tab chip's background differs between its
+/// active fill, the strip, and a hover fill — which is exactly why the block
+/// header's version could hard-code one and this one cannot. Passing the
+/// wrong one draws a coloured notch rather than a gap.
+pub(super) fn ring(
+    rects: &mut Vec<RectInstance>,
+    rect: [f32; 4],
+    ink: LinearRgba,
+    bg: LinearRgba,
+    phase: f32,
+    fraction: f32,
+    clip: [f32; 4],
+) {
+    let d = rect[2].min(rect[3]);
+    let r = d / 2.0;
+    let (cx, cy) = (rect[0] + r, rect[1] + r);
+    rects.push(RectInstance {
+        radii: [d / 2.0; 4],
+        border: ink,
+        border_width: 1.5 * (d / 8.0).max(1.0),
+        ..RectInstance::filled([rect[0], rect[1], d, d], LinearRgba::TRANSPARENT, clip)
+    });
+    // A full ring means "done", and a bite in it would read as still going.
+    if fraction >= 1.0 && phase < 0.0 {
+        return;
+    }
+    // The gap: one bite for a spinner, and for an arc as many as it takes to
+    // erase the part that has not happened yet. Stepping rather than one wide
+    // rect because a rect is a chord, not an arc — at more than a few degrees
+    // it cuts across the ring instead of along it.
+    let bite = (d * 0.4).max(2.0);
+    let missing = (1.0 - fraction).clamp(0.0, 1.0);
+    let steps = if missing <= 0.0 { 1 } else { ((missing * 24.0).ceil() as usize).max(1) };
+    for i in 0..steps {
+        let t = if missing <= 0.0 {
+            phase
+        } else {
+            // Sweep backwards from the top, so a bar fills clockwise the way
+            // every other progress indicator does.
+            fraction + missing * (i as f32 / steps as f32)
+        };
+        let angle = (t - 0.25) * core::f32::consts::TAU;
+        rects.push(RectInstance::rounded(
+            [
+                cx + angle.cos() * r - bite / 2.0,
+                cy + angle.sin() * r - bite / 2.0,
+                bite,
+                bite,
+            ],
+            bite / 2.0,
+            bg,
+            clip,
+        ));
+    }
+}
+
 fn dot(rects: &mut Vec<RectInstance>, cx: f32, cy: f32, d: f32, color: LinearRgba, clip: [f32; 4]) {
     rects.push(RectInstance::rounded([cx - d / 2.0, cy - d / 2.0, d, d], d / 2.0, color, clip));
 }
@@ -1916,6 +1981,16 @@ fn horizontal(
         } else {
             colors.accent
         };
+        // What is actually behind the chip's glyph tile, which the progress
+        // ring's bite has to match to read as a gap rather than a notch.
+        // Three answers, and the same three the fills below produce.
+        let chip_bg = if active {
+            colors.tab_active_bg
+        } else if hovered {
+            colors.tab_hover_bg
+        } else {
+            colors.strip_bg
+        };
         if active {
             // The mock's recipe, translated from CSS: `border: 1px line` with
             // `border-bottom: none`, and `box-shadow: inset 0 2px 0 accent` —
@@ -2018,6 +2093,48 @@ fn horizontal(
                 ink,
                 clip,
             );
+            // What the session says about itself, ringed around the tile.
+            // Separate from the dot inside it rather than replacing it: the
+            // dot is the tab's *identity* (its profile, its host, and the
+            // link's health), and a mark that had to choose between "which
+            // machine is this" and "is it busy" would be answering the less
+            // urgent question half the time.
+            //
+            // Two sources, and neither implies the other: `running` is the
+            // shell's word (OSC 133, so silent under bash and under a TUI),
+            // `progress` is the program's own (OSC 9;4). A tab with either is
+            // busy; a tab with both draws the more specific one.
+            let progress_ink = match tab.progress {
+                zest_core::Progress::At { state: zest_core::ProgressState::Error, .. } => {
+                    Some(colors.danger)
+                }
+                zest_core::Progress::At { state: zest_core::ProgressState::Warning, .. } => {
+                    Some(colors.warn)
+                }
+                zest_core::Progress::At { .. } | zest_core::Progress::Indeterminate => {
+                    Some(chip_accent)
+                }
+                zest_core::Progress::None => tab.running.then_some(colors.warn),
+            };
+            if let Some(ink) = progress_ink {
+                let fraction = match tab.progress {
+                    zest_core::Progress::At { percent, .. } => f32::from(percent) / 100.0,
+                    // A shell-reported command and an indeterminate bar are
+                    // the same fact — busy, no idea how far — and get the
+                    // same spinner.
+                    _ => 1.0,
+                };
+                ring(
+                    &mut out.rects,
+                    [tile[0] - 2.0 * s, tile[1] - 2.0 * s, tile[2] + 4.0 * s, tile[3] + 4.0 * s],
+                    ink,
+                    chip_bg,
+                    model.anim.spin,
+                    fraction,
+                    clip,
+                );
+            }
+
             // The attention badge (#383), on the tile's top-right corner.
             // A badge rather than recolouring the dot: the dot's ink already
             // carries `LinkKind` degradation, and one mark cannot honestly say
@@ -2510,7 +2627,15 @@ fn vertical(
             let dot_d = 5.0 * s;
             let dot_color = if tab.attention.is_some() {
                 colors.info
-            } else if tab.running {
+            } else if matches!(
+                tab.progress,
+                zest_core::Progress::At { state: zest_core::ProgressState::Error, .. }
+            ) {
+                // A job that says it failed says so here, ahead of "running":
+                // the block index may not know it ended, and between the two
+                // the program's own word about itself is the newer one.
+                colors.danger
+            } else if tab.running || tab.progress.is_busy() {
                 let p = model.anim.pulse;
                 LinearRgba([
                     colors.warn.0[0] * p,
@@ -2753,6 +2878,7 @@ mod tests {
             // shows its host.
             tab_accent: AccentChoice::Host(usize::from(n)),
             running: false,
+            progress: zest_core::Progress::None,
             attention: None,
             age: "2m".into(),
             connecting: false,
@@ -4291,6 +4417,79 @@ mod tests {
                  that a quiet one does not"
             );
         }
+    }
+
+    #[test]
+    fn a_busy_tab_says_so_in_both_positions() {
+        // #385's first half, and it is free: `running` has been computed for
+        // every tab since the sidebar's dot was written and read at exactly
+        // one site, so the horizontal strip showed nothing at all while a
+        // command ran.
+        for position in [TabsPosition::Top, TabsPosition::Left] {
+            let m = metrics(1200.0, 800.0, 1.0);
+            let quiet = layout(
+                &model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], position),
+                &colors(),
+                &m,
+                &mut measure,
+            );
+            let mut busy_tab = tab(1, TabOrigin::Local, TabPresence::Online);
+            busy_tab.running = true;
+            let busy = layout(&model(vec![busy_tab], position), &colors(), &m, &mut measure);
+            // Counted by *ink*, not by rect count: the chip adds a ring while
+            // the sidebar recolours the dot it already had, so the two
+            // positions cannot be asserted the same way by shape. `warn` is
+            // the running colour in both (design §2), and the default
+            // `AnimPhase` has the pulse at full.
+            let warn = colors().warn;
+            let warned = |l: &ChromeLayout| {
+                l.rects.iter().filter(|r| r.fill == warn || r.border == warn).count()
+            };
+            assert!(
+                warned(&busy) > warned(&quiet),
+                "{position:?}: a tab running something has to look different from one that is not                  ({} vs {} warn marks)",
+                warned(&busy),
+                warned(&quiet)
+            );
+        }
+    }
+
+    #[test]
+    fn progress_and_a_running_block_are_two_facts_not_one() {
+        // Neither implies the other. `running` is the shell's word (OSC 133,
+        // so silent under bash and under a TUI); `progress` is the program's
+        // own (OSC 9;4). A tab with either is busy, and a tab whose job says
+        // it *failed* must not go on looking like one that is merely running.
+        let m = metrics(1200.0, 800.0, 1.0);
+        let with = |running, progress| {
+            let mut t = tab(1, TabOrigin::Local, TabPresence::Online);
+            t.running = running;
+            t.progress = progress;
+            layout(&model(vec![t], TabsPosition::Left), &colors(), &m, &mut measure)
+        };
+        let inked = |l: &ChromeLayout, c| {
+            l.rects.iter().filter(|r| r.fill == c || r.border == c).count()
+        };
+
+        let idle = with(false, zest_core::Progress::None);
+        let only_progress = with(false, zest_core::Progress::Indeterminate);
+        assert!(
+            inked(&only_progress, colors().warn) > inked(&idle, colors().warn),
+            "a program reporting progress is busy even with no block saying so"
+        );
+        let failed = with(
+            true,
+            zest_core::Progress::At { percent: 80, state: zest_core::ProgressState::Error },
+        );
+        assert!(
+            inked(&failed, colors().danger) > inked(&idle, colors().danger),
+            "and a job that says it failed says so, ahead of the block index              which may not know yet"
+        );
+        assert_eq!(
+            inked(&failed, colors().warn),
+            inked(&idle, colors().warn),
+            "failed is not also 'running': the row has one dot, so the newer              fact has to win outright"
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@ import type { Delta } from "./Delta";
 import type { HostId } from "./HostId";
 import type { HostOffer } from "./HostOffer";
 import type { Nonce32 } from "./Nonce32";
+import type { Progress } from "./Progress";
 import type { Pub32 } from "./Pub32";
 import type { RowPayload } from "./RowPayload";
 import type { Seq } from "./Seq";
@@ -117,4 +118,4 @@ history_clears: number, } | { "t": "update", session: SessionAddr, base: Seq, se
  * scrollback is prepended rather than diffed and no later delta will
  * define these ids.
  */
-attrs: Array<AttrDef>, } | { "t": "exited", session: SessionAddr, code: number | null, } | { "t": "attention", session: SessionAddr, cause: AttentionCause, } | { "t": "error", session: SessionAddr | null, message: string, };
+attrs: Array<AttrDef>, } | { "t": "exited", session: SessionAddr, code: number | null, } | { "t": "attention", session: SessionAddr, cause: AttentionCause, } | { "t": "progress", session: SessionAddr, progress: Progress, } | { "t": "error", session: SessionAddr | null, message: string, };

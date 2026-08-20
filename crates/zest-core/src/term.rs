@@ -48,6 +48,59 @@ pub enum AttentionCause {
     Notify,
 }
 
+/// How a program says a long job is going: ConEmu's `OSC 9;4`.
+///
+/// Windows Terminal, WezTerm, ConEmu and Ghostty all render this already,
+/// which is what makes it the interoperable way for a build to say "I am
+/// busy" rather than something invented here.
+///
+/// **State, unlike [`AttentionCause`], and that is why the two travel
+/// differently even though they arrive through the same escape sequence.** A
+/// client attaching halfway through a build must learn the bar is at 60%, so
+/// this latches and is diffed like the title; attention is a moment and is
+/// only ever reported as one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum Progress {
+    /// `st = 0`, and the state before anything is said. Nothing to show.
+    #[default]
+    None,
+    /// `st = 1` with a percentage, or `st = 4` (warning) / `st = 2` (error),
+    /// which carry one too.
+    At { percent: u8, state: ProgressState },
+    /// `st = 3`: busy, with no idea how far along. The common case — most
+    /// things that know they are slow do not know how slow.
+    Indeterminate,
+}
+
+impl Progress {
+    /// Whether something is running: anything but [`Progress::None`].
+    ///
+    /// Named rather than left to `!matches!(p, None)` at each site, because
+    /// the interesting question everywhere is "is this session busy" and
+    /// spelling it three ways is how one of them comes to mean something else.
+    #[must_use]
+    pub const fn is_busy(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+/// The flavour of a determinate [`Progress`].
+///
+/// Separate from the percentage because `st = 2` and `st = 4` still carry one:
+/// a build that failed at 80% is at 80%, and folding the two would lose either
+/// the number or the fact that it failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ProgressState {
+    /// `st = 1`.
+    Normal,
+    /// `st = 2`.
+    Error,
+    /// `st = 4`.
+    Warning,
+}
+
 /// Things the terminal needs the host to do, which it cannot do itself.
 ///
 /// Returned rather than performed because `zest-core` has no I/O: the host owns
@@ -168,6 +221,8 @@ pub struct TermState {
     /// is that sequence. Free to maintain now, awkward to add later.
     pub(crate) seq: u64,
     pub(crate) title: String,
+    /// The last thing `OSC 9;4` said about how a long job is going.
+    pub(crate) progress: Progress,
     pub(crate) cursor_style: CursorStyle,
     /// Whether a program has set the cursor style with DECSCUSR.
     ///
@@ -282,6 +337,12 @@ impl Terminal {
     #[must_use]
     pub fn title(&self) -> &str {
         &self.state.title
+    }
+
+    /// How a long job in this session is going, as it last said (`OSC 9;4`).
+    #[must_use]
+    pub fn progress(&self) -> Progress {
+        self.state.progress
     }
 
     #[must_use]
@@ -478,6 +539,7 @@ impl TermState {
             damage: Damage::default(),
             seq: 0,
             title: String::new(),
+            progress: Progress::default(),
             cursor_style: CursorStyle::default(),
             default_cursor_style: CursorStyle::default(),
             cursor_style_from_program: false,

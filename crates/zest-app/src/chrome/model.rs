@@ -99,9 +99,15 @@ pub struct TabModel {
     /// The chip's resolved accent choice — [`tab_accent`]'s answer for this
     /// tab's identity and host slot. The 2px rule and the glyph tile take it.
     pub tab_accent: AccentChoice,
-    /// A command is currently running in this session — the sidebar's
-    /// pulsing dot.
+    /// A command is currently running in this session — the pulsing dot.
+    ///
+    /// From OSC 133 blocks, so it is silent under a shell with no integration
+    /// and under the alternate screen. [`Self::progress`] is the other half:
+    /// what the program says about itself rather than what the shell says
+    /// about it, and neither implies the other.
     pub running: bool,
+    /// What a long job in this session last said about itself (`OSC 9;4`).
+    pub progress: zest_core::Progress,
     /// This session asked to be noticed while you were looking elsewhere.
     ///
     /// The cause rides along rather than collapsing to a `bool` because the

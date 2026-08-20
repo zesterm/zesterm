@@ -530,6 +530,33 @@ export interface Attention {
   readonly cause: AttentionCause;
 }
 
+/** The flavour of a determinate {@link Progress}. */
+export type ProgressState = 'normal' | 'error' | 'warning';
+
+/** How a long job is going, as `OSC 9;4` reports it. */
+export type Progress =
+  | { readonly kind: 'none' }
+  | { readonly kind: 'at'; readonly percent: number; readonly state: ProgressState }
+  | { readonly kind: 'indeterminate' };
+
+/**
+ * A long job in this session reported how it is going (#385).
+ *
+ * Behind `watch_signals` like {@link Attention}, and a host message for the
+ * same reason: it describes the session, not the grid.
+ *
+ * **Unlike attention this is state**, and that is why they are two messages
+ * despite arriving through the same escape sequence. The host keeps a
+ * per-subscriber shadow of what it last sent here — so attaching halfway
+ * through a build tells you the bar is at 60% — and keeps no memory at all of
+ * a bell.
+ */
+export interface ProgressMessage {
+  readonly t: 'progress';
+  readonly session: SessionAddr;
+  readonly progress: Progress;
+}
+
 export interface ErrorMessage {
   readonly t: 'error';
   readonly session: SessionAddr | null;
@@ -561,6 +588,7 @@ export type HostMessage =
   | Scrollback
   | Exited
   | Attention
+  | ProgressMessage
   | ErrorMessage
   | UnknownMessage;
 
@@ -587,6 +615,7 @@ export const isSessions = modeled<Sessions>('sessions');
 export const isScrollback = modeled<Scrollback>('scrollback');
 export const isExited = modeled<Exited>('exited');
 export const isAttention = modeled<Attention>('attention');
+export const isProgress = modeled<ProgressMessage>('progress');
 export const isErrorMessage = modeled<ErrorMessage>('error');
 
 /**
@@ -599,6 +628,28 @@ export const isErrorMessage = modeled<ErrorMessage>('error');
  */
 export function parseAttentionCause(v: unknown): AttentionCause {
   return v === 'notify' ? 'notify' : 'bell';
+}
+
+/**
+ * An unreadable progress report reads as `none` rather than throwing.
+ *
+ * The same rule `parseAttentionCause` follows, and here it is also what keeps
+ * a spinner from turning forever: this is *latched* state, so "ignore what you
+ * cannot read" would leave the last good value on screen indefinitely.
+ */
+export function parseProgress(v: unknown): Progress {
+  if (typeof v !== 'object' || v === null) return { kind: 'none' };
+  const o = v as Record<string, unknown>;
+  if (o['kind'] === 'indeterminate') return { kind: 'indeterminate' };
+  if (o['kind'] !== 'at') return { kind: 'none' };
+  const raw = typeof o['percent'] === 'number' ? o['percent'] : 0;
+  const percent = Math.max(0, Math.min(100, Math.trunc(raw)));
+  const state = o['state'];
+  return {
+    kind: 'at',
+    percent,
+    state: state === 'error' || state === 'warning' ? state : 'normal',
+  };
 }
 
 export function parseSessionAddr(v: unknown): SessionAddr {
@@ -723,6 +774,8 @@ export function parseHostMessage(v: unknown): HostMessage {
         session: parseSessionAddr(o['session']),
         cause: parseAttentionCause(o['cause']),
       };
+    case 'progress':
+      return { t, session: parseSessionAddr(o['session']), progress: parseProgress(o['progress']) };
     case 'error':
       return {
         t,

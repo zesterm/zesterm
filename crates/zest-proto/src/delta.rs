@@ -187,6 +187,77 @@ pub enum DeltaOp {
     Modes { bits: u32 },
 }
 
+/// How a long job is going, as `OSC 9;4` reports it.
+///
+/// Mirrors `zest_core::Progress` for [`BlockState`]'s reason: this side
+/// carries a `ts_rs` derive, and `zest-core` has to keep building for `wasm32`
+/// without one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum Progress {
+    /// Nothing to show — cleared, or never reported.
+    #[default]
+    None,
+    /// A percentage, and what flavour of one. `error` and `warning` carry a
+    /// number too: a build that failed at 80% is at 80%.
+    At { percent: u8, state: ProgressState },
+    /// Busy, with no idea how far along.
+    Indeterminate,
+}
+
+/// The flavour of a determinate [`Progress`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum ProgressState {
+    Normal,
+    Error,
+    Warning,
+}
+
+impl From<zest_core::Progress> for Progress {
+    fn from(p: zest_core::Progress) -> Self {
+        match p {
+            zest_core::Progress::None => Self::None,
+            zest_core::Progress::Indeterminate => Self::Indeterminate,
+            zest_core::Progress::At { percent, state } => {
+                Self::At { percent, state: state.into() }
+            }
+        }
+    }
+}
+
+impl From<zest_core::ProgressState> for ProgressState {
+    fn from(s: zest_core::ProgressState) -> Self {
+        match s {
+            zest_core::ProgressState::Normal => Self::Normal,
+            zest_core::ProgressState::Error => Self::Error,
+            zest_core::ProgressState::Warning => Self::Warning,
+        }
+    }
+}
+
+impl From<Progress> for zest_core::Progress {
+    fn from(p: Progress) -> Self {
+        match p {
+            Progress::None => Self::None,
+            Progress::Indeterminate => Self::Indeterminate,
+            Progress::At { percent, state } => Self::At { percent, state: state.into() },
+        }
+    }
+}
+
+impl From<ProgressState> for zest_core::ProgressState {
+    fn from(s: ProgressState) -> Self {
+        match s {
+            ProgressState::Normal => Self::Normal,
+            ProgressState::Error => Self::Error,
+            ProgressState::Warning => Self::Warning,
+        }
+    }
+}
+
 /// How a command ended.
 ///
 /// Mirrors `zest_core::BlockState` rather than reusing it, for the same reason

@@ -345,6 +345,71 @@ fn osc_9_is_a_notification_unless_it_is_progress() {
 }
 
 #[test]
+fn osc_9_4_reports_progress_in_every_state_it_defines() {
+    use zest_core::{Progress, ProgressState};
+    let mut t = Terminal::new(10, 2, 0);
+    assert_eq!(t.progress(), Progress::None, "nothing said, nothing shown");
+
+    t.advance(b"\x1b]9;4;1;60\x07");
+    assert_eq!(t.progress(), Progress::At { percent: 60, state: ProgressState::Normal });
+    t.advance(b"\x1b]9;4;3;0\x07");
+    assert_eq!(t.progress(), Progress::Indeterminate, "busy, no idea how far");
+    // Error and warning carry a percentage too: a build that failed at 80% is
+    // at 80%, and folding the two would lose either the number or the fact.
+    t.advance(b"\x1b]9;4;2;80\x07");
+    assert_eq!(t.progress(), Progress::At { percent: 80, state: ProgressState::Error });
+    t.advance(b"\x1b]9;4;4;10\x07");
+    assert_eq!(t.progress(), Progress::At { percent: 10, state: ProgressState::Warning });
+    t.advance(b"\x1b]9;4;0;0\x07");
+    assert_eq!(t.progress(), Progress::None, "cleared");
+}
+
+#[test]
+fn a_progress_state_that_cannot_be_read_clears_rather_than_lingers() {
+    use zest_core::{Progress, ProgressState};
+    // "Ignore what you do not understand" is right for a one-shot and a leak
+    // for a *latched* value: an unparseable state left as-is would leave a
+    // spinner turning for the rest of the session, and the tab would claim a
+    // job was running long after it finished.
+    let mut t = Terminal::new(10, 2, 0);
+    t.advance(b"\x1b]9;4;3;0\x07");
+    assert_eq!(t.progress(), Progress::Indeterminate);
+    t.advance(b"\x1b]9;4;banana\x07");
+    assert_eq!(t.progress(), Progress::None, "nonsense stops the spinner");
+
+    // A percentage past 100 is clamped, not refused: a script that computes
+    // 103 is still nearly done, and refusing would freeze the bar at whatever
+    // the last good value was — a wrong number held, which is worse than a
+    // right one rounded.
+    t.advance(b"\x1b]9;4;1;140\x07");
+    assert_eq!(t.progress(), Progress::At { percent: 100, state: ProgressState::Normal });
+}
+
+#[test]
+fn finishing_and_failing_both_ask_to_be_noticed() {
+    use zest_core::AttentionCause;
+    // The path that makes "my build finished" work for a program that reports
+    // progress and never rings — which is most of them, on Windows.
+    let mut t = Terminal::new(10, 2, 0);
+    t.advance(b"\x1b]9;4;3;0\x07");
+    assert!(attentions(&mut t).is_empty(), "starting is not news");
+    t.advance(b"\x1b]9;4;1;50\x07");
+    assert!(attentions(&mut t).is_empty(), "nor is progressing");
+    t.advance(b"\x1b]9;4;0;0\x07");
+    assert_eq!(attentions(&mut t), vec![AttentionCause::Notify], "but stopping is");
+
+    // Failing is news whether or not it was busy first.
+    t.advance(b"\x1b]9;4;2;80\x07");
+    assert_eq!(attentions(&mut t), vec![AttentionCause::Notify]);
+
+    // And clearing something that was never busy is not: a shell prompt that
+    // resets progress on every command must not light the dot each time.
+    let mut fresh = Terminal::new(10, 2, 0);
+    fresh.advance(b"\x1b]9;4;0;0\x07");
+    assert!(attentions(&mut fresh).is_empty(), "clearing nothing is not an event");
+}
+
+#[test]
 fn osc_777_asks_only_for_the_notify_verb() {
     use zest_core::AttentionCause;
     // 777 is a family, not a sequence: `notify` is one verb among several

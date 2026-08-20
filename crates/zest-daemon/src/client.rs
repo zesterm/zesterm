@@ -59,6 +59,7 @@ fn discarded(waiting_for: &str, msg: &HostMessage) {
         HostMessage::Scrollback { .. } => "Scrollback",
         HostMessage::Exited { .. } => "Exited",
         HostMessage::Attention { .. } => "Attention",
+        HostMessage::Progress { .. } => "Progress",
         HostMessage::Error { .. } => "Error",
     };
     tracing::warn!(
