@@ -22,8 +22,8 @@ import { component, signal } from 'sigx';
 import type { Dial } from '@zesterm/client';
 import { type DirectoryView, type SessionEntry } from '@zesterm/control';
 
+import { sessionRows, tabIdOf } from '../chrome-model.ts';
 import { runExclusive } from '../busy-guard.ts';
-import { dialFor, type RelayAccess } from '../dial-for.ts';
 import { describeDeviceKey, type DeviceKeyKind } from '../device-key.ts';
 import type { DirectorySource, DirectoryStatus } from '../directory-source.ts';
 
@@ -37,10 +37,21 @@ export const SessionList = component<{
   /** Where the list comes from; see `directory-source.ts`. */
   source: DirectorySource;
   /**
-   * How to reach the relay, where there is one. `null` on loopback, where the
-   * data plane is a `ws://` address and no ticket is involved.
+   * How to reach one machine, by id — `HostSource.dialFor`, handed straight
+   * down.
+   *
+   * **Required, and not a `RelayAccess` this component turns into a dial.**
+   * It used to derive its own from `view.dataPlane` plus an *optional* relay
+   * prop, which meant a caller could build a working-looking list whose every
+   * row was disabled: forgetting the relay and correctly having none (loopback)
+   * are the same call. That is exactly what happened when the hosted path moved
+   * into `Shell` — every session became unclickable and nothing in the build
+   * or the suite objected (#376).
+   *
+   * One place knows how to reach a machine, it is already tested, and being
+   * required makes the compiler the guard that a suite with no DOM cannot be.
    */
-  relay?: RelayAccess | null;
+  dialFor: (hostId: string) => Dial | null;
   /** The heading. The hosted path names the machine; loopback has only one. */
   title?: string;
   /** What "still connecting" is called. Loopback is reaching its sidecar. */
@@ -69,12 +80,16 @@ export const SessionList = component<{
   const creating = signal({ busy: false });
 
   /**
-   * `null` is "not reachable from here", which is what disables a row: a
-   * directory that has not learned its data plane yet, or a relay plane on a
-   * deployment with no relay.
+   * `null` is "not reachable from here", which is what disables the create
+   * button: a machine that is asleep, or a directory that has not yet said
+   * *which* machine it is.
+   *
+   * That second case used to leave the button live, and `Shell`'s handler had
+   * to answer it with an error message. A button that cannot work is better
+   * disabled than apologetic.
    */
   const dialOf = (view: DirectoryView): Dial | null =>
-    dialFor(view.dataPlane, ctx.props.relay ?? null);
+    view.host === null ? null : ctx.props.dialFor(view.host.id);
 
   /**
    * Held until the create *settles*, not until the call returns.
@@ -148,25 +163,30 @@ export const SessionList = component<{
                   {view.connected ? 'no sessions — start one' : 'no sessions to show'}
                 </li>
               ) : (
-                view.sessions.map((s) => {
-                  const dial = dialOf(view);
-                  return (
-                    <li>
-                      <button
-                        class="session-row"
-                        disabled={dial === null}
-                        onClick={() => dial !== null && ctx.props.onOpen?.({ entry: s, dial })}
-                      >
-                        <span class={`state-dot ${s.altScreen ? 'alt' : 'shell'}`} />
-                        <span class="title">{s.title === '' ? 'shell' : s.title}</span>
-                        <span class="meta">
-                          {s.cwd} · {s.cols}×{s.rows}
-                          {s.attached ? ' · attached' : ''}
-                        </span>
-                      </button>
-                    </li>
-                  );
-                })
+                // Which row is clickable, and which machine it dials, are
+                // `sessionRows`' two decisions — pure, and tested, because a
+                // rule living in this markup is one no test here can reach.
+                sessionRows(view.sessions, ctx.props.dialFor).map(({ entry: s, dial }) => (
+                  // The machine AND the session. A session id is unique to its
+                  // own daemon and not across the fleet, so keying on it alone
+                  // would collide the moment this pane showed two machines —
+                  // and `tabIdOf` is the pair every other surface already
+                  // identifies a session by.
+                  <li key={tabIdOf(s.host, s.session)}>
+                    <button
+                      class="session-row"
+                      disabled={dial === null}
+                      onClick={() => dial !== null && ctx.props.onOpen?.({ entry: s, dial })}
+                    >
+                      <span class={`state-dot ${s.altScreen ? 'alt' : 'shell'}`} />
+                      <span class="title">{s.title === '' ? 'shell' : s.title}</span>
+                      <span class="meta">
+                        {s.cwd} · {s.cols}×{s.rows}
+                        {s.attached ? ' · attached' : ''}
+                      </span>
+                    </button>
+                  </li>
+                ))
               )}
             </ul>
             <footer>

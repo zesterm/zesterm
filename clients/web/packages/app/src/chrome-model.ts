@@ -6,7 +6,8 @@
  * stay thin over these functions.
  */
 
-import type { HostFacts } from '@zesterm/control';
+import type { Dial } from '@zesterm/client';
+import type { HostFacts, SessionEntry } from '@zesterm/control';
 
 import type { Tab } from './state/tabs.ts';
 
@@ -129,6 +130,59 @@ export interface LauncherTargetRow {
 }
 
 export type LauncherRow = LauncherGroupRow | LauncherTargetRow;
+
+/**
+ * One row of the fleet pane: a session, and how to reach it.
+ *
+ * `dial === null` is "not reachable from here", which is what disables the
+ * row — a machine that has stopped answering, or one this shell has no route
+ * to at all.
+ *
+ * **Pure, and out of the component on purpose.** Nothing in this workspace
+ * renders a component, so a rule that lives inside one is a rule no test can
+ * reach: `SessionList` derived each row's dial itself from a `DataPlane` plus
+ * an *optional* relay, and when the hosted path moved into `Shell` — which
+ * had no relay to give — every row came out disabled with the build and the
+ * suite both silent (#376). The rule is two decisions worth pinning, and both
+ * are here rather than in markup.
+ */
+export interface SessionRow {
+  readonly entry: SessionEntry;
+  readonly dial: Dial | null;
+}
+
+/**
+ * Sessions → rows, each asking the seam how to reach **the machine the entry
+ * names**.
+ *
+ * Keyed on `entry.host` and never on the machine the pane was opened for: the
+ * rule `openTarget` states one layer up, applied here so a row cannot dial a
+ * machine other than the one it is labelled with. On loopback the two are
+ * always the same value, which is exactly why the distinction has to be
+ * written down rather than left to whichever caller remembers.
+ */
+export function sessionRows(
+  sessions: readonly SessionEntry[],
+  dialFor: (hostId: string) => Dial | null,
+): readonly SessionRow[] {
+  // Once per machine, not once per row. `dialFor` is not a lookup on the
+  // hosted path: it walks a snapshots array that `LiveDirectory` rebuilds on
+  // every call, and mints a fresh dial closure — so a machine with a dozen
+  // sessions paid for a dozen scans on every render of a list whose answer
+  // cannot differ between two rows naming the same machine.
+  //
+  // It also makes the dials reference-stable across the rows of one call,
+  // which is the property a caller comparing them would otherwise not have.
+  const byHost = new Map<string, Dial | null>();
+  return sessions.map((entry) => {
+    let dial = byHost.get(entry.host);
+    if (dial === undefined) {
+      dial = dialFor(entry.host);
+      byHost.set(entry.host, dial);
+    }
+    return { entry, dial };
+  });
+}
 
 /**
  * A machine's facts as one dim line: the parts it actually answered, joined.
