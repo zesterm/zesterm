@@ -1144,3 +1144,57 @@ fn a_listing_and_a_screen_never_disagree_about_one_session() {
 
     registry.close(a.session);
 }
+
+/// A session the daemon does not have is refused at once, not at the deadline.
+///
+/// The daemon has always answered an attach on an unknown session immediately,
+/// with an `Error` naming it. The client recorded that into `Shared::error` --
+/// the link's own state, read alongside `closed` -- and woke nobody, so the
+/// waiter ran its full 20s request deadline and every tool that attaches
+/// reported a session the host had denied in milliseconds only after twenty
+/// seconds of silence.
+///
+/// That silence is the cost, not the wrong answer. From inside an agent loop it
+/// is indistinguishable from a busy session or a slow host, so the agent's
+/// choices are to wait it out or to abandon a session that might be alive --
+/// and it is reachable by the agent's own successful `close_session`. (#347)
+#[test]
+fn a_dead_session_is_refused_at_once_rather_than_at_the_deadline() {
+    let (addr, registry) = serve_daemon();
+    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+
+    let created = tools
+        .call("create_session", &serde_json::json!({ "command": long_lived_cmd(), "cols": COLS, "rows": ROWS }))
+        .expect("create_session");
+    let session = created["session"].as_str().expect("a session id").to_string();
+    tools.call("close_session", &serde_json::json!({ "session": session })).expect("close");
+
+    // The listing half of #347: a closed session leaves it. This holds because
+    // the listing is a question now (#361) -- the daemon's registry no longer
+    // has the session, so nothing has to remember to sweep a cache.
+    let listed = tools.call("sessions", &serde_json::json!({})).expect("sessions");
+    assert!(
+        !listed["sessions"].as_array().expect("array").iter().any(|s| s["id"] == session.as_str()),
+        "a session closed through this server must leave the listing: {listed}"
+    );
+
+    let started = std::time::Instant::now();
+    let err = tools
+        .call("screen", &serde_json::json!({ "session": session }))
+        .expect_err("the daemon does not have this session");
+    let waited = started.elapsed();
+
+    assert!(
+        err.to_string().contains("no session"),
+        "the refusal must say the session is gone, not report whatever the caller \
+         happened to be waiting for: {err}"
+    );
+    assert!(
+        waited < std::time::Duration::from_secs(5),
+        "a refusal the daemon sends immediately must be reported immediately: a silent \
+         wait is indistinguishable from a busy session inside an agent loop, and only \
+         one of those is worth waiting out -- took {waited:?}"
+    );
+
+    registry.close(tools.resolver().resolve(&session).expect("resolve").session);
+}
