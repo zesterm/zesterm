@@ -485,7 +485,11 @@ test('a revoked key cannot re-enrol itself, and the fresh code survives the refu
     NOW + 1,
   );
   assert.equal(res?.status, 409);
-  assert.deepEqual(await res!.json(), { error: 'already_enrolled' });
+  assert.deepEqual(
+    await res!.json(),
+    { error: 'already_enrolled', detail: 'revoked' },
+    'naming the cause is safe — the caller just proved it holds this key — and it is the difference between "restore it" and a dead end (#367)',
+  );
   assert.deepEqual(
     rowOf(db, `SELECT used_at FROM enroll_codes WHERE code = ?`, second.code),
     { used_at: null },
@@ -527,10 +531,56 @@ test('another account cannot take over a key that is already enrolled', async ()
   );
   assert.equal(res?.status, 409);
   assert.deepEqual(
+    await res!.json(),
+    { error: 'already_enrolled', detail: 'other_account' },
+    'the caller holds the key, so which move helps — this detail — is theirs to know',
+  );
+  assert.deepEqual(
     rowOf(db, `SELECT user_id, label FROM hosts WHERE id = ?`, key.id),
     { user_id: 'user-a', label: 'andy-mac' },
     'holding a key is not a claim on somebody else’s row',
   );
+  db.close();
+});
+
+test('a stranger’s revoked key answers other_account, never revoked', async () => {
+  // The ordering rule in one test: when both causes hold, the foreign account
+  // wins. Which account revoked a key — or that anyone did — is a fact about
+  // somebody else's fleet, and `revoked` here would leak it to whoever holds
+  // the key and a code of their own.
+  const db = testDb();
+  const mine = await signedIn(db, 'user-a');
+  const theirs = await signedIn(db, 'user-b');
+  const key = await testKey(7);
+
+  const first = await mint(db, mine, 'host');
+  await routeApi(
+    daemonPost('/api/enroll/claim', {
+      code: first.code,
+      hostId: key.id,
+      label: 'andy-mac',
+      sig: await signEnrollment({ key, code: first.code, label: 'andy-mac' }),
+    }),
+    env(db),
+    fetch,
+    NOW,
+  );
+  await routeApi(post(`/api/hosts/${key.id}/revoke`, {}, mine), env(db), fetch, NOW);
+
+  const second = await mint(db, theirs, 'host');
+  const res = await routeApi(
+    daemonPost('/api/enroll/claim', {
+      code: second.code,
+      hostId: key.id,
+      label: 'not-yours',
+      sig: await signEnrollment({ key, code: second.code, label: 'not-yours' }),
+    }),
+    env(db),
+    fetch,
+    NOW + 1,
+  );
+  assert.equal(res?.status, 409);
+  assert.deepEqual(await res!.json(), { error: 'already_enrolled', detail: 'other_account' });
   db.close();
 });
 

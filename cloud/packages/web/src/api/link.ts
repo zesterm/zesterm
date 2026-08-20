@@ -37,6 +37,7 @@ import { json, jsonObject } from '../http.ts';
 import { KEY_LEN, SIGNATURE_LEN } from '../enroll/preimage.ts';
 import { verifyLinkClaim, verifyLinkRequest } from '../enroll/link-preimage.ts';
 import { DEVICE_KINDS, labelOk, platformOk } from './enroll.ts';
+import { incumbentRefusal } from './incumbent.ts';
 import { currentUser } from './session.ts';
 
 /**
@@ -234,14 +235,12 @@ export async function claimLink(request: Request, env: Env, now: number): Promis
     // here; refusing beats enrolling into an account nobody named.
     return refused();
   }
-  if (incumbent !== null && (incumbent.user_id !== owner || incumbent.revoked_at !== null)) {
-    // The code claim's two-situations-one-answer, verbatim: another account's
-    // key is not this caller's business, and a revoked key that could re-link
-    // itself has un-revoked itself (the owner un-revokes with the restore
-    // route, #365). Checked before the spend, so the refusal leaves the grant
-    // for whoever debugs it rather than burning it.
-    return json({ error: 'already_enrolled' }, 409);
-  }
+  // A revoked key that could re-link itself has un-revoked itself (the owner
+  // un-revokes with the restore route, #365). Checked before the spend, so
+  // the refusal leaves the grant for whoever debugs it rather than burning
+  // it. The `detail` and its safety argument live on `incumbentRefusal`.
+  const refusal = incumbentRefusal(incumbent, owner);
+  if (refusal !== null) return refusal;
 
   if ((await claimLinkGrant(env.DB, grant, id, now)) === null) {
     // Approved a moment ago, gone now: another claim won the race, or the
@@ -259,8 +258,9 @@ export async function claimLink(request: Request, env: Env, now: number): Promis
   if (enrolled === null) {
     // Revoked in the window between the incumbent check and the insert. The
     // grant is spent, which is the safe direction: a refusal that leaves it
-    // alive is a refusal an attacker can retry.
-    return json({ error: 'already_enrolled' }, 409);
+    // alive is a refusal an attacker can retry. `revoked` inline because
+    // `user_id` cannot change in the window.
+    return json({ error: 'already_enrolled', detail: 'revoked' }, 409);
   }
 
   // The credential, the account name to print, and the same envelope the code
