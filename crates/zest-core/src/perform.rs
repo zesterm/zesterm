@@ -858,7 +858,7 @@ impl TermState {
             let from = if row.id == start_line { start_col } else { 0 };
             // A wrapped row is full by definition; only the last row of a
             // logical line has trailing blanks worth dropping.
-            let to = if row.wrapped { row.len() } else { row.trimmed_len() };
+            let to = if row.wrapped() { row.len() } else { row.trimmed_len() };
             for col in from..to {
                 let Some(cell) = row.get(col) else { break };
                 if cell.flags.contains(crate::cell::CellFlags::WIDE_SPACER) {
@@ -870,7 +870,7 @@ impl TermState {
                 }
             }
             // Rows joined by `wrapped` are one command, not two.
-            if !row.wrapped && row.id != end_line {
+            if !row.wrapped() && row.id != end_line {
                 break;
             }
         }

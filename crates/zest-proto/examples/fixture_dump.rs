@@ -443,7 +443,7 @@ fn expect(term: &Terminal) -> Expect {
 
         rows.push(RowExpect {
             line: i64::try_from(row.id).unwrap_or(i64::MAX),
-            wrapped: row.wrapped,
+            wrapped: row.wrapped(),
             text,
             styles,
             marks,

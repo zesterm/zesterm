@@ -511,16 +511,18 @@ you need before you trip on it.
   never caught #291: the harness fed the encoder a constant cursor, so every
   resize test exercised a client with no history — a fixture must assert it
   *reached* the state under test before asserting anything else.
-- **A row overwritten in place keeps a stale `wrapped`, and the next reflow
-  believes it.** `wrapped` is one fact in two places — `Row::wrapped` and
-  `CellFlags::WRAPLINE` — cleared only by `Row::reset`, which a scroll runs and
-  an overwrite does not. Nothing looks wrong until the *next* width change,
-  when reflow rejoins rows that were never one logical line and every block
-  below describes the wrong output — which reads as a resize corrupting the
-  block index, and was chased as one. `erase_in_row` now clears both; rows
-  rewritten with shorter text and *no* erase still are not cleared (harmless —
-  the alt screen is never reflowed), and the real repair is keeping the fact
-  once → #219. (#200)
+- **A row overwritten in place kept a stale `wrapped`, because the fact was
+  kept twice.** `Row::wrapped` beside `CellFlags::WRAPLINE` on the last cell,
+  cleared together only by `Row::reset`, which a scroll runs and an overwrite
+  does not — so a rewrite that replaced the last cell cleared the flag and
+  left the bool, and nothing looked wrong until the *next* width change, when
+  reflow rejoined rows that were never one logical line and every block below
+  described the wrong output — which reads as a resize corrupting the block
+  index, and was chased as one. #200 patched the erase path by hand; #219
+  removed the second copy: the last cell's flag is the only stored form,
+  `Row::wrapped()` derives from it, and an overwrite takes the fact with the
+  cell it lives on. The lesson that survives: a fact stored twice needs every
+  writer to know about both homes, and the writer that doesn't is the bug.
 - **ED 2 and ED 3 differ only in scrollback, pwsh's `cls` emits both, and the
   corpus contains no `3J` at all.** zesterm read the 3 as a repeat of the 2, so
   `cls` kept all history. `Grid::clear_history` + `Keyframe.history_clears` fix
