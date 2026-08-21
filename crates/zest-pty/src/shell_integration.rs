@@ -594,7 +594,6 @@ mod tests {
             "wsl.exe -d Ubuntu -- bash",
             "wsl -d Ubuntu bash",
             "wsl.exe --distribution Ubuntu -u andy -- bash -i",
-            r#""C:\WINDOWS\system32\wsl.exe" --cd C:\dev -d Ubuntu -- bash"#,
             "WSL.EXE -d Ubuntu -- /usr/bin/bash",
             // `--` means everything after is the command, a login-shell
             // spelling included.
@@ -929,6 +928,16 @@ mod tests {
         // exactly, and `.exe` is part of the name.
         assert_eq!(Shell::detect(r#""C:\Program Files\Git\bin\zsh.exe""#), None);
         assert_eq!(Shell::detect(r"C:\Windows\System32\cmd.exe"), None);
+
+        // The launcher walk, from the fully-qualified spelling a Windows
+        // profile actually stores. Here rather than in the walk's own test,
+        // for the same reason as the paths above: only Windows'
+        // `Path::file_name` sees `wsl.exe` inside `C:\WINDOWS\system32\`.
+        assert_eq!(
+            Shell::detect(r#""C:\WINDOWS\system32\wsl.exe" --cd C:\dev -d Ubuntu -- bash"#),
+            Some(Shell::Bash),
+            "the profile-shaped WSL line launches a bash"
+        );
     }
 
     #[test]
