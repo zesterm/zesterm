@@ -30,7 +30,7 @@ use winit::event_loop::EventLoopProxy;
 use zest_mesh::discovery::mdns::MdnsDiscovery;
 use zest_mesh::discovery::{Discovery, Presence};
 use zest_mesh::identity::ClientIdentity;
-use zest_proto::{HostId, SessionInfo};
+use zest_proto::HostId;
 
 use zest_daemon::client::DaemonClient;
 use crate::remote::Dialer;
@@ -142,93 +142,16 @@ impl AccountPoke {
     }
 }
 
-/// What is known about one host's session list.
-#[derive(Debug, Clone, Default)]
-pub enum SessionsState {
-    /// Never asked.
-    #[default]
-    Unknown,
-    /// A listing is on its way.
-    Fetching,
-    Fresh(Vec<SessionInfo>),
-    /// The dial or the listing failed, carrying why.
-    ///
-    /// The message is written and not yet drawn: the fleet card's "could not
-    /// reach" row is #249's next item. Kept rather than dropped because the
-    /// state machine is what this PR is for, and a `Failed` with nothing in it
-    /// would have to be widened again by the commit that renders it.
-    #[allow(dead_code, reason = "the fleet card's failure row reads this (#249)")]
-    Failed(String),
-}
+/// The fleet vocabulary, re-exported where this crate has always named it.
+///
+/// [`zest_fleet::FleetHost`] is what is *known* about a machine and is now
+/// built by consumers outside this crate too — `zest-mcp` fills the same rows
+/// from mDNS and the account listing, without this module's threads, latch or
+/// event-loop proxy. Knowing which machines exist was never the part that had
+/// to stay here; owning a live model of them is.
+pub use zest_fleet::{FleetHost, SessionsState};
 
-/// One row of the fleet, ready for the picker.
-#[derive(Clone)]
-pub struct FleetHost {
-    pub host: HostId,
-    pub label: String,
-    pub presence: Presence,
-    /// This is the machine the window is running on.
-    pub local: bool,
-    /// The best address to dial, when one is known.
-    pub address: Option<String>,
-    /// How the best endpoint reaches the host — loopback, LAN, or tunnel.
-    /// `None` when nothing is advertised (the synthesized local row).
-    pub reachability: Option<zest_mesh::Reachability>,
-    /// The prober's last measured round trip to that address, milliseconds.
-    /// Measured, not `typical_rtt_ms` — the status bar prints this, and an
-    /// honest number is the difference between UI and decoration.
-    pub rtt_ms: Option<f32>,
-    pub sessions: SessionsState,
-    /// The account lists this machine. The durable fact (ROADMAP WS-G:
-    /// enrolment is the spine, discovery decorates) — an enrolled host stays
-    /// in the listing when mDNS has never heard of it.
-    pub enrolled: bool,
-    /// What this machine says it can offer: its os, its arch, its default
-    /// shell, and its own profiles (#262).
-    ///
-    /// **`None` is the ordinary state, not an error.** Every reachable host is
-    /// *asked* since #265, which is what makes this reachable at all — but the
-    /// answer is absent until that host's first listing lands, and stays absent
-    /// for a daemon that predates the field or one nothing can reach. All three
-    /// read the same way on purpose: nobody has told us anything, so nothing is
-    /// drawn. A consumer that treats `None` as "it has no profiles" would show
-    /// an empty group for a machine whose watcher simply has not connected yet.
-    ///
-    /// Not *drawn* anywhere yet — the launcher's host groups and the fleet
-    /// card's `os` row are #249's next items.
-    #[allow(dead_code, reason = "the launcher's host groups and the fleet card read this (#249)")]
-    pub offer: Option<zest_proto::HostOffer>,
-    /// The relay had proof of a parked control link when the listing was
-    /// fetched — so this machine is reachable through the tunnel even when
-    /// nothing on this network has ever heard of it.
-    ///
-    /// Kept beside `presence` rather than folded into it, and that is the
-    /// whole design: `Presence` is `zest_mesh`'s word for what *discovery*
-    /// observed, and minting `Online` there for a machine mDNS never saw would
-    /// send the prober off to dial a LAN address that does not exist. Read
-    /// them together through [`FleetHost::is_online`].
-    pub relay_online: bool,
-}
-
-impl FleetHost {
-    /// Can anything reach this machine right now, by any route?
-    ///
-    /// The one place the rule lives, because it had five callers and every one
-    /// of them spelled it `local || presence == Online` — which is exactly the
-    /// expression that made #237 possible. A card, a sidebar count, a picker
-    /// row and a settings pill must agree, and the way to make them agree is
-    /// to give them one function rather than one convention.
-    ///
-    /// LAN evidence and tunnel evidence are OR'd rather than ranked: they are
-    /// answers to the same question from two mechanisms, and a machine on the
-    /// desk with a parked relay link is reachable twice over. Which route is
-    /// *preferred* is `best_route`'s decision, and it still prefers the LAN.
-    #[must_use]
-    pub fn is_online(&self) -> bool {
-        self.local || self.presence == Presence::Online || self.relay_online
-    }
-}
-
+use crate::route::Dial as _;
 
 /// Which remote hosts should be watched, and which watchers should stop
 /// (#265).

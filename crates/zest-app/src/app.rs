@@ -24,7 +24,7 @@ use crate::chrome::theme::ChromeColors;
 use crate::chrome::Insets;
 use crate::keymap;
 use crate::platform;
-use crate::route::{best_route, HostRoute};
+use crate::route::{best_route, Dial, HostRoute};
 use crate::session::{Session, Wakeup};
 use crate::source::{Origin, SessionSource};
 use crate::tabs::{Tab, TabStrip};

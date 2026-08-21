@@ -61,6 +61,24 @@ const BOUNDARIES: &[Boundary] = &[
         ],
         args: &[],
     },
+    // The fleet vocabulary and the one rule that picks a route. It is a crate
+    // rather than a module *because* of this boundary: the rule lived in
+    // `zest-app`, which carries `winit` and `wgpu`, and `zest-mcp` forbids both
+    // -- so the second consumer could not have it and would have grown a copy.
+    //
+    // What it must never gain is the ability to *act* on its own decision.
+    // `zest-pty` and `zest-daemon` would make it a thing that opens sessions;
+    // `zest-cloud` would drag TLS and the control plane in and make dialling
+    // its business, which is exactly the half deliberately left behind in
+    // `zest-app`'s `Dial` trait. A rule that can dial stops being a rule.
+    Boundary {
+        krate: "zest-fleet",
+        forbidden: &[
+            &["wgpu", "winit", "zest-app", "zest-render-wgpu", "zest-font", "zest-pty", "zest-daemon"],
+            TLS_AND_HTTP,
+        ],
+        args: &[],
+    },
     // Discovery and transport selection decide *how* to reach a host, never
     // what a session is. `zest-core` is reachable from here through the wire
     // types and that is fine; owning a pty or a window is not, because routing

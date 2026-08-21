@@ -18,6 +18,7 @@ members = [
     "crates/zest-config",
     "crates/zest-proto",
     "crates/zest-mesh",
+    "crates/zest-fleet",
     "crates/zest-cloud",
     "crates/zest-daemon",
     "crates/zest-mcp",
@@ -44,6 +45,7 @@ zest-input = { path = "crates/zest-input" }
 zest-config = { path = "crates/zest-config" }
 zest-proto = { path = "crates/zest-proto" }
 zest-mesh = { path = "crates/zest-mesh" }
+zest-fleet = { path = "crates/zest-fleet" }
 zest-cloud = { path = "crates/zest-cloud" }
 zest-daemon = { path = "crates/zest-daemon" }
 zest-mcp = { path = "crates/zest-mcp" }
