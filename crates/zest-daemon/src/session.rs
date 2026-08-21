@@ -832,6 +832,20 @@ mod tests {
         false
     }
 
+    /// "Quiet" needs more than one empty poll: a single `is_none` can land in
+    /// the gap between two updates a still-talking session produces (#280's
+    /// review), so quiet means a run of consecutive empty polls. A genuine
+    /// tail arriving mid-run just restarts the count — the session really is
+    /// quiet soon after — while a session that keeps producing can never
+    /// finish the run and fails by the deadline.
+    fn stays_quiet(mut poll_none: impl FnMut() -> bool) -> bool {
+        let mut streak = 0;
+        wait_for(|| {
+            streak = if poll_none() { streak + 1 } else { 0 };
+            streak >= 5
+        })
+    }
+
     /// A transport that records what the grid looked like when it was resized.
     ///
     /// `PtyTransport` reports no size of its own and the thing under test is an
@@ -1037,12 +1051,12 @@ mod tests {
         let (handle, _, _) = s.attach();
 
         wait_for(|| s.poll(handle).is_some());
-        // Drain whatever is outstanding, then confirm it goes quiet. Quiet is
-        // waited for, not asserted on a single poll: the child's tail can land
-        // between a drain and the next poll (#280), and a session that never
-        // stops producing fails this by exhausting the deadline.
+        // Drain whatever is outstanding, then confirm it goes quiet — a run of
+        // empty polls, not one: the child's tail can land between a drain and
+        // the next poll (#280), and a session that never stops producing can
+        // never finish the run.
         assert!(
-            wait_for(|| s.poll(handle).is_none()),
+            stays_quiet(|| s.poll(handle).is_none()),
             "an idle session kept producing updates"
         );
     }
@@ -1394,8 +1408,8 @@ mod tests {
         wait_for(|| s.has_exited());
         while s.poll(b).is_some() {}
         // The exit report can beat the tail of the output (#80), so quiet is
-        // waited for rather than asserted on a single poll (#280).
-        assert!(wait_for(|| s.poll(a).is_none()), "the fixture is not quiet");
+        // a run of empty polls rather than a single one (#280).
+        assert!(stays_quiet(|| s.poll(a).is_none()), "the fixture is not quiet");
 
         keyframe_everyone(&s.subscribers);
 
