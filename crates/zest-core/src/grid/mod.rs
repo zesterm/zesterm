@@ -651,7 +651,7 @@ impl Grid {
                             // Trailing blanks are padding, not content: storing
                             // them would triple a history of short lines.
                             text: text.trim_end().into(),
-                            wrapped: row.wrapped,
+                            wrapped: row.wrapped(),
                         });
                     }
                 }
@@ -1269,7 +1269,7 @@ impl Grid {
                 // and calls it padding, which would leave the character it
                 // belongs to alone at the end of the line with nothing to be
                 // its second half.
-                let mut end = if row.wrapped { row.len() } else { row.trimmed_len() };
+                let mut end = if row.wrapped() { row.len() } else { row.trimmed_len() };
                 if end < row.len()
                     && row.cells()[end].flags.contains(CellFlags::WIDE_SPACER)
                 {
@@ -1283,7 +1283,7 @@ impl Grid {
                         cells.push(detached);
                     }
                 }
-                if !row.wrapped || i + 1 >= old_rows.len() {
+                if !row.wrapped() || i + 1 >= old_rows.len() {
                     break;
                 }
                 i += 1;
@@ -1296,13 +1296,13 @@ impl Grid {
             for (index, (cell, extra)) in cells.iter().enumerate() {
                 // Never split a wide character across the edge.
                 if cell.flags.contains(CellFlags::WIDE) && col + 1 >= new_cols && new_cols > 1 {
-                    row.wrapped = true;
+                    row.set_wrapped(true);
                     out.push(core::mem::replace(&mut row, Row::new(new_cols, next_id + 1)));
                     next_id += 1;
                     col = 0;
                 }
                 if col >= new_cols {
-                    row.wrapped = true;
+                    row.set_wrapped(true);
                     out.push(core::mem::replace(&mut row, Row::new(new_cols, next_id + 1)));
                     next_id += 1;
                     col = 0;
@@ -1392,25 +1392,13 @@ impl Grid {
                 *c = blank;
             }
         }
-        // An erase reaching the last column destroys the cell that carried
-        // `CellFlags::WRAPLINE`, so the row's own flag has to go with it --
-        // `set_wrapped` writes the two together and everything downstream
-        // believes one or the other. `reflow` believes the flag, and a row
-        // that still claims to continue into the next gets *rejoined* with it
-        // at the next width change: two logical lines become one, the rows
-        // below are dragged up, and every block anchored there names somebody
-        // else's text.
-        //
-        // The path that made this matter rather than theoretical: a ConPTY
-        // resize repaint terminates every row with `ESC[K` and overwrites in
-        // place, never scrolling -- so `Row::reset`, the only other thing that
-        // clears the flag, never runs. (#200)
-        //
-        // A partial erase correctly leaves it: the last cell survived, and so
-        // did the wrap it records.
-        if to >= cols.saturating_sub(1) {
-            r.wrapped = false;
-        }
+        // Nothing more to do about the wrap fact: it lives only on the last
+        // cell (`CellFlags::WRAPLINE`), so an erase reaching the last column
+        // takes it with the cell, and a partial erase correctly leaves it --
+        // the last cell survived, and so did the wrap it records. When the
+        // fact was kept twice this branch had to clear the row's copy by hand
+        // (#200), and the overwrite-without-erase path, which has no hands,
+        // left it stale (#219).
     }
 
     pub fn erase_rows(&mut self, from: usize, to: usize, template: &Cell) {
@@ -1497,12 +1485,7 @@ impl Grid {
     /// Mark the current row as wrapped. Called when output runs past the last
     /// column, so copy and future reflow can tell a wrap from a newline.
     pub fn set_wrapped(&mut self, row: usize, wrapped: bool) {
-        let cols = self.cols;
-        let r = self.row_mut(row);
-        r.wrapped = wrapped;
-        if let Some(last) = r.get_mut(cols - 1) {
-            last.flags.set(CellFlags::WRAPLINE, wrapped);
-        }
+        self.row_mut(row).set_wrapped(wrapped);
     }
 
     /// Lines from the top of scrollback, for the remote protocol's paged fetch.
@@ -1618,7 +1601,7 @@ mod tests {
         // rows.
         let mut t = crate::Terminal::new(10, 6, 500);
         t.advance(b"abcdefghijklmno");
-        assert!(t.grid().row(0).wrapped, "the fixture did not wrap");
+        assert!(t.grid().row(0).wrapped(), "the fixture did not wrap");
 
         t.resize(20, 6);
         assert_eq!(
@@ -1626,7 +1609,7 @@ mod tests {
             "abcdefghijklmno",
             "the two halves were not rejoined"
         );
-        assert!(!t.grid().row(0).wrapped, "the rejoined line is still marked wrapped");
+        assert!(!t.grid().row(0).wrapped(), "the rejoined line is still marked wrapped");
     }
 
     #[test]
@@ -1696,7 +1679,7 @@ mod tests {
         // Truncated, not rewrapped: nothing moved onto a second row.
         assert_eq!(t.grid().rows(), 4);
         assert!(
-            !t.grid().row(0).wrapped,
+            !t.grid().row(0).wrapped(),
             "the alternate screen was rewrapped"
         );
     }
@@ -2488,7 +2471,7 @@ mod tests {
     fn wrapline_is_recorded_on_the_last_cell() {
         let mut g = Grid::new(4, 2, 0);
         g.set_wrapped(0, true);
-        assert!(g.row(0).wrapped);
+        assert!(g.row(0).wrapped());
         assert!(g.cell(0, 3).unwrap().flags.contains(CellFlags::WRAPLINE));
     }
 }

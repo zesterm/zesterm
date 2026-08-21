@@ -226,7 +226,7 @@ impl Grid {
                 }
             }
 
-            pending.push((text, r.wrapped));
+            pending.push((text, r.wrapped()));
         }
 
         for (i, (text, wrapped)) in pending.iter().enumerate() {

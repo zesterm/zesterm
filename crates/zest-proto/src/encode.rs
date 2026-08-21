@@ -153,7 +153,7 @@ impl Encoder {
         RowPayload {
             line: i64::try_from(row.id).unwrap_or(i64::MAX),
             runs,
-            wrapped: row.wrapped,
+            wrapped: row.wrapped(),
         }
     }
 

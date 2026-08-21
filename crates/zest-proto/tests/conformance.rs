@@ -855,7 +855,7 @@ fn a_mid_stream_width_change_leaves_no_reader_holding_the_old_numbering() {
     // (`reconcile_size`).
     term.resize(20, 6);
     assert!(
-        (0..term.grid().total_lines()).any(|i| term.grid().line(i).is_some_and(|r| r.wrapped)),
+        (0..term.grid().total_lines()).any(|i| term.grid().line(i).is_some_and(|r| r.wrapped())),
         "nothing rewrapped, so the reflow renumbered nothing and this proves nothing"
     );
     seq += 1;
