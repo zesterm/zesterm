@@ -118,6 +118,32 @@ fn screenshot_from(
     }
 }
 
+/// Why a `--screenshot` of this screen would lie, or `None` if it will not.
+///
+/// Screenshot mode deliberately never attaches to the daemon (see the
+/// `with_no_daemon` comment in `main`), and the fleet screen is the one
+/// surface whose content the local daemon supplies. A fleet capture therefore
+/// renders the account's roster while describing the machine it runs on as a
+/// remote one — no "this machine" label, no loopback path row, no session
+/// count — a picture that looks complete and is quietly wrong, which is worse
+/// than one that is visibly blank: several were filed as evidence that fleet
+/// work rendered before anyone noticed (#236). Refusing out loud is the
+/// honest answer. `--attach` names a daemon the screenshot *does* open a
+/// session to — the remote session is the subject — so it lifts the refusal.
+fn screenshot_screen_refusal(
+    screen: Option<app::StartScreen>,
+    screenshot: bool,
+    attaches: bool,
+) -> Option<&'static str> {
+    (screenshot && !attaches && screen == Some(app::StartScreen::Fleet)).then_some(
+        "--screenshot cannot capture the fleet screen: screenshot mode never \
+         attaches to the daemon, so the capture would describe this machine \
+         as a remote host — complete-looking, and wrong. Use a real window \
+         for the fleet screen (--screen fleet without --screenshot), or \
+         --attach <host:port> to photograph a fleet seen through that daemon.",
+    )
+}
+
 /// `--screen`'s value, or the message to refuse it with.
 fn screen_from(value: Option<&str>) -> Result<app::StartScreen, String> {
     match value.map(str::trim) {
@@ -458,7 +484,9 @@ fn parse_args(args: &[String]) -> Result<Flags, EarlyExit> {
                      \x20                 Composes with\n\
                      \x20                 --screenshot; screen content is live state, and\n\
                      \x20                 --screenshot already implies --no-daemon, which\n\
-                     \x20                 keeps captures stable\n\
+                     \x20                 keeps captures stable — except fleet, whose\n\
+                     \x20                 content the daemon supplies, so a screenshot of\n\
+                     \x20                 it is refused rather than rendered wrong\n\
                      --screenshot <path>\n\
                      \x20                 render one frame to a PNG and exit, without ever\n\
                      \x20                 showing the window (no screen-capture permission)\n\
@@ -530,6 +558,10 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(2);
         }
     };
+    if let Some(msg) = screenshot_screen_refusal(screen, shot.is_some(), attach_addr.is_some()) {
+        eprintln!("{msg}");
+        return std::process::ExitCode::from(2);
+    }
 
     // Kept, not consumed: a config file save re-runs the cascade, and the flags
     // have to be replayed on top or `--size 20` would vanish the first time the
@@ -613,7 +645,7 @@ fn main() -> std::process::ExitCode {
 mod tests {
     use super::{
         app, join_command, parse_args, parse_delay, parse_size, screen_from, screenshot_from,
-        tabs_position_from, CliLayer, EarlyExit,
+        screenshot_screen_refusal, tabs_position_from, CliLayer, EarlyExit,
     };
     use std::time::Duration;
 
@@ -742,18 +774,77 @@ mod tests {
     }
 
     #[test]
+    fn a_screenshot_of_the_fleet_screen_is_refused_rather_than_rendered_wrong() {
+        use app::StartScreen as S;
+        // Screenshot mode never attaches to the daemon (origin=InProcess, by
+        // design), and the fleet screen is the one surface whose content the
+        // local daemon supplies -- so a fleet capture renders the account's
+        // roster while describing this machine as a remote one, a picture
+        // that looks complete and is quietly wrong. Several such captures
+        // were filed as evidence that fleet work rendered (#236); refusing is
+        // the honest answer.
+        let msg = screenshot_screen_refusal(Some(S::Fleet), true, false)
+            .expect("a fleet screenshot with no daemon session must be refused");
+        assert!(
+            msg.contains("fleet") && msg.contains("attach"),
+            "the refusal names the screen and the missing attach, so the \
+             limit is self-documenting: {msg}"
+        );
+        assert_eq!(
+            screenshot_screen_refusal(Some(S::Fleet), false, false),
+            None,
+            "--screen fleet without --screenshot is an ordinary run that attaches normally"
+        );
+        assert_eq!(
+            screenshot_screen_refusal(Some(S::Fleet), true, true),
+            None,
+            "--attach names a daemon the screenshot does open a session to, so it lifts the refusal"
+        );
+        for design in [S::Themes, S::Settings, S::SettingsMenu, S::Palette, S::Launcher, S::Profiles, S::ProfilesRename] {
+            assert_eq!(
+                screenshot_screen_refusal(Some(design), true, false),
+                None,
+                "pure-design screens need no daemon; {design:?} keeps screenshotting"
+            );
+        }
+        assert_eq!(
+            screenshot_screen_refusal(None, true, false),
+            None,
+            "a plain terminal screenshot is untouched"
+        );
+    }
+
+    #[test]
+    fn a_fleet_screenshot_refusal_fires_before_a_config_load_or_event_loop_exists() {
+        // Not inside `parse_args` -- each flag is individually valid, so the
+        // composition is judged by the explicit `screenshot_screen_refusal`
+        // check `main` runs right after parsing, before a config load and an
+        // event loop exist to unwind. This pins that the parsed flags trip
+        // that check exactly as `main` wires them.
+        let f = parse_args(&v(&["--screen", "fleet", "--screenshot", "out.png"]))
+            .unwrap_or_else(|_| panic!("the flags parse individually; the composition is judged afterwards"));
+        assert!(
+            screenshot_screen_refusal(f.screen, f.shot_path.is_some(), f.attach_addr.is_some())
+                .is_some(),
+            "the parsed flags must trip the refusal exactly as main wires it"
+        );
+    }
+
+    #[test]
     fn a_screen_and_a_screenshot_compose_in_either_order() {
         // Each flag is collected into its own slot and assembled after the
         // loop, so order cannot matter -- but "cannot" is exactly the kind of
         // claim that stops being true when an arm learns to consume an extra
-        // argument, so both orders are pinned.
+        // argument, so both orders are pinned. (themes, not fleet: fleet is
+        // the one screen whose screenshot main refuses -- see
+        // a_screenshot_of_the_fleet_screen_is_refused_rather_than_rendered_wrong.)
         for order in [
-            v(&["--screen", "fleet", "--screenshot", "out.png"]),
-            v(&["--screenshot", "out.png", "--screen", "fleet"]),
-            v(&["--tabs-position", "left", "--screenshot", "out.png", "--screen", "fleet"]),
+            v(&["--screen", "themes", "--screenshot", "out.png"]),
+            v(&["--screenshot", "out.png", "--screen", "themes"]),
+            v(&["--tabs-position", "left", "--screenshot", "out.png", "--screen", "themes"]),
         ] {
             let f = parse_args(&order).unwrap_or_else(|_| panic!("valid together: {order:?}"));
-            assert_eq!(f.screen, Some(app::StartScreen::Fleet));
+            assert_eq!(f.screen, Some(app::StartScreen::Themes));
             assert_eq!(f.shot_path.as_deref(), Some(std::path::Path::new("out.png")));
         }
     }
