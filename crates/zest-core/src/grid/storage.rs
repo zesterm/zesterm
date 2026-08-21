@@ -185,8 +185,11 @@ impl Row {
     /// Grow or shrink to `cols`.
     ///
     /// Does not reflow — growing pads with blanks and shrinking truncates.
-    /// This is the alternate screen's path, which is never reflowed, so the
-    /// wrap fact going with a truncated last cell costs nothing.
+    /// The wrap fact goes with a truncated last cell (and a grow's fresh
+    /// blank last cell reads as unwrapped). This is the alternate screen's
+    /// path, which is never reflowed, so what that can cost is only the
+    /// newline-joining of a copy taken between the resize and the repaint
+    /// every full-screen program answers it with.
     pub fn resize(&mut self, cols: usize, template: &Cell) {
         self.cells.resize(cols, Cell::blank_with(template));
     }
