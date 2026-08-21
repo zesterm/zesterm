@@ -55,6 +55,19 @@ enum Source {
     Vtrec(&'static str),
     /// Literal VT input, for a path no recording reaches.
     Synthetic(&'static [&'static str]),
+    /// Literal VT input with resizes in it, for the one path plain input
+    /// cannot reach: a resize is not bytes on the pty, it is a call the host
+    /// makes, so a fixture containing one has to say where.
+    Script(&'static [Step]),
+}
+
+/// One step of a [`Source::Script`].
+enum Step {
+    Text(&'static str),
+    /// The host resizes mid-stream, delivered the way the daemon delivers it
+    /// (`reconcile_size`): the grid reflows, then every subscriber gets a
+    /// keyframe under the new numbering.
+    Resize(u16, u16),
 }
 
 /// The recordings, at the sizes `conformance.rs` replays them.
@@ -120,6 +133,39 @@ const CORPUS: &[(&str, usize, usize, Source)] = &[
             // A mark on a double-width character: the one place the width rule
             // and the mark offset interact.
             "\u{1b}[32m\u{4e16}\u{301}\u{754c}\u{1b}[0m\r\n",
+        ]),
+    ),
+    (
+        "width-change",
+        40,
+        6,
+        // **No recording in the corpus changes width mid-stream**, which is how
+        // the reflow rule stayed latent (#139): a width change renumbers every
+        // absolute line id, the keyframe after it carries the new numbering,
+        // and everything a client banked — scrollback rows, evicted blocks —
+        // still carries the old one with no mapping on the wire. A client that
+        // keeps that state passes every other fixture here and misjoins rows
+        // into the wrong blocks the first time a real window is dragged
+        // narrower. Hand-built like `combining-marks`, and for the same reason:
+        // the path under test is the plain reflow every host shares, not a
+        // ConPTY restatement gesture, so literal input reaches it directly.
+        //
+        // The shape matters: real banked history and a finished block *before*
+        // the resize (a fixture must reach the state under test — the harness
+        // gap that let #291 escape), a line long enough to rewrap at the new
+        // width so the reflow provably renumbers, and output *after* it so
+        // re-banking under the new numbering is exercised too.
+        Source::Script(&[
+            Step::Text("\u{1b}]7;file:///tmp/w\u{7}\u{1b}]133;A\u{7}$ "),
+            Step::Text("\u{1b}]133;B\u{7}make\u{1b}]133;C\u{7}\r\n"),
+            Step::Text("a line that is long enough to rewrap\r\n"),
+            Step::Text("out 1\r\nout 2\r\nout 3\r\n"),
+            Step::Text("out 4\r\nout 5\r\nout 6\r\n"),
+            Step::Text("\u{1b}]133;D;0\u{7}\u{1b}]133;A\u{7}$ "),
+            Step::Resize(20, 6),
+            Step::Text("\u{1b}]133;B\u{7}ls\u{1b}]133;C\u{7}\r\n"),
+            Step::Text("post 1\r\npost 2\r\npost 3\r\n"),
+            Step::Text("\u{1b}]133;D;0\u{7}"),
         ]),
     ),
     (
@@ -307,9 +353,20 @@ fn replay(
     cov: &mut Coverage,
 ) -> Fixture {
     let addr = SessionAddr { host: FIXTURE_HOST, session: SessionId(1) };
-    let input: Vec<Vec<u8>> = match source {
-        Source::Vtrec(recording) => chunks(recording),
-        Source::Synthetic(s) => s.iter().map(|c| c.as_bytes().to_vec()).collect(),
+    enum Play {
+        Bytes(Vec<u8>),
+        Resize(u16, u16),
+    }
+    let input: Vec<Play> = match source {
+        Source::Vtrec(recording) => chunks(recording).into_iter().map(Play::Bytes).collect(),
+        Source::Synthetic(s) => s.iter().map(|c| Play::Bytes(c.as_bytes().to_vec())).collect(),
+        Source::Script(steps) => steps
+            .iter()
+            .map(|s| match s {
+                Step::Text(t) => Play::Bytes(t.as_bytes().to_vec()),
+                Step::Resize(c, r) => Play::Resize(*c, *r),
+            })
+            .collect(),
     };
 
     let mut term = Terminal::new(cols, rows, 2000);
@@ -325,32 +382,31 @@ fn replay(
     applier.apply_keyframe(&mut client, &k, term.seq());
     cov.see_attrs(&k.attrs);
 
-    // The daemon flattens `encode::Keyframe` into the wire message rather than
-    // sending it, so the fixture carries a real `HostMessage` and not an
-    // envelope invented here. Mirrors `zest-daemon/src/server.rs`.
-    frames.push(Frame {
-        kind: "keyframe",
-        base: None,
-        seq: term.seq(),
-        wire: hex(&zest_proto::frame::encode(&HostMessage::Keyframe {
-            session: addr,
-            seq: Seq(term.seq()),
-            cols: k.cols,
-            rows: k.rows,
-            rows_data: k.rows_data.clone(),
-            attrs: k.attrs.clone(),
-            cursor: k.cursor,
-            modes: k.modes.bits(),
-            blocks: k.blocks.clone(),
-            blocks_from: k.blocks_from,
-            title: k.title.clone(),
-            history_clears: k.history_clears,
-        })
-        .expect("a keyframe frames")),
-        expect: expect(&term),
-    });
+    frames.push(keyframe_frame(addr, &term, &k));
 
-    for (step, chunk) in input.iter().enumerate() {
+    for (step, play) in input.iter().enumerate() {
+        let chunk = match play {
+            Play::Bytes(bytes) => bytes,
+            Play::Resize(cols, rows) => {
+                // A resize reflows the host's grid, renumbering every line id,
+                // and the keyframe below is a subscriber's only account of it —
+                // the wire has no resize op. Through all three participants
+                // like every other frame, so the file still states "the
+                // reference already matches the terminal's truth".
+                cov.width_changes += usize::from(term.grid().cols() != usize::from(*cols));
+                term.resize(usize::from(*cols), usize::from(*rows));
+                let k =
+                    enc.keyframe(term.grid(), cursor(&term), term.modes(), term.title(), term.blocks());
+                view.apply_keyframe(&k);
+                applier.apply_keyframe(&mut client, &k, term.seq());
+                cov.see_attrs(&k.attrs);
+
+                let frame = keyframe_frame(addr, &term, &k);
+                agrees(&view, &frame.expect, name, step);
+                frames.push(frame);
+                continue;
+            }
+        };
         term.advance(chunk);
         let d = enc.delta(term.grid(), cursor(&term), term.modes(), term.title(), term.blocks());
 
@@ -394,11 +450,40 @@ fn replay(
         recording: name.to_string(),
         source: match source {
             Source::Vtrec(_) => "vtrec",
-            Source::Synthetic(_) => "synthetic",
+            Source::Synthetic(_) | Source::Script(_) => "synthetic",
         },
         cols: u16::try_from(cols).unwrap_or(u16::MAX),
         rows: u16::try_from(rows).unwrap_or(u16::MAX),
         frames,
+    }
+}
+
+/// One keyframe as a fixture frame.
+///
+/// The daemon flattens `encode::Keyframe` into the wire message rather than
+/// sending it, so the fixture carries a real `HostMessage` and not an envelope
+/// invented here. Mirrors `zest-daemon/src/server.rs`.
+fn keyframe_frame(addr: SessionAddr, term: &Terminal, k: &zest_proto::encode::Keyframe) -> Frame {
+    Frame {
+        kind: "keyframe",
+        base: None,
+        seq: term.seq(),
+        wire: hex(&zest_proto::frame::encode(&HostMessage::Keyframe {
+            session: addr,
+            seq: Seq(term.seq()),
+            cols: k.cols,
+            rows: k.rows,
+            rows_data: k.rows_data.clone(),
+            attrs: k.attrs.clone(),
+            cursor: k.cursor,
+            modes: k.modes.bits(),
+            blocks: k.blocks.clone(),
+            blocks_from: k.blocks_from,
+            title: k.title.clone(),
+            history_clears: k.history_clears,
+        })
+        .expect("a keyframe frames")),
+        expect: expect(term),
     }
 }
 
@@ -566,6 +651,8 @@ struct Coverage {
     /// which counts wire payloads: the wire proves decode, the expectation
     /// proves application.
     blocks_expected: usize,
+    /// Mid-stream keyframes whose `cols` differ from the grid's before them.
+    width_changes: usize,
     ops: BTreeSet<&'static str>,
 }
 
@@ -633,7 +720,7 @@ impl Coverage {
     fn assert_the_corpus_is_worth_replaying(&self) {
         println!(
             "coverage: {} scrolls, {} sb_push, {} screen switches, {} titles, \
-             {} styled attrs, {} wide runs, {} marks, {} block updates",
+             {} styled attrs, {} wide runs, {} marks, {} block updates, {} width changes",
             self.scrolls,
             self.sb_pushes,
             self.screen_switches,
@@ -641,7 +728,8 @@ impl Coverage {
             self.coloured,
             self.wide,
             self.marks,
-            self.blocks
+            self.blocks,
+            self.width_changes
         );
         println!("ops seen: {:?}", self.ops);
 
@@ -676,6 +764,12 @@ impl Coverage {
             self.blocks_expected > 0,
             "no frame *expects* blocks -- the wire carried them but the expectations \
              would hold no client to applying them, which is the half that matters"
+        );
+        assert!(
+            self.width_changes > 0,
+            "no mid-stream width change -- a reflow renumbers every line id, and a \
+             client that keeps state banked under the old numbering would pass every \
+             fixture here, which is exactly how #139 stayed latent"
         );
     }
 }
@@ -809,6 +903,9 @@ struct Fixture {
     /// path no recording does. Stated so nobody mistakes the second kind for
     /// evidence about what real programs emit.
     source: &'static str,
+    /// The *initial* size. `width-change` shrinks mid-stream via a keyframe
+    /// whose `cols` is smaller — never larger, because a consumer that pads
+    /// rows to this width would truncate a grid that outgrew it.
     cols: u16,
     rows: u16,
     frames: Vec<Frame>,
