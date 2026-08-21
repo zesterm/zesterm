@@ -31,6 +31,7 @@ mod status;
 mod tabs;
 mod tabs_state;
 mod text_field;
+mod themes;
 
 use winit::event_loop::EventLoop;
 
@@ -399,7 +400,10 @@ fn parse_args(args: &[String]) -> Result<Flags, EarlyExit> {
                 break;
             }
             "--themes" => {
-                for t in zest_theme::builtin::all() {
+                // Imported themes too: this flag answers "what can
+                // `--theme` take", and imports are legal there.
+                themes::reload();
+                for t in themes::all() {
                     println!("{:<10} {}", t.id, t.name);
                 }
                 return Err(EarlyExit::Handled);
