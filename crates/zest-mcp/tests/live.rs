@@ -65,8 +65,9 @@ fn serve_daemon() -> (String, Arc<Registry>) {
 /// The same, with the OSC 133 hook injected into whatever shell is spawned.
 ///
 /// Off for every test but one. The hook writes a shim into the config directory
-/// on each spawn and only does anything for zsh and PowerShell, so a test that
-/// spawns `/bin/sh` pays a filesystem write for a marker that will never arrive.
+/// on each spawn and only does anything for zsh, bash and PowerShell, so a test
+/// that spawns `/bin/sh` pays a filesystem write for a marker that will never
+/// arrive.
 fn serve_daemon_with(shell_integration: bool) -> (String, Arc<Registry>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr").to_string();
@@ -612,10 +613,10 @@ fn a_timeout_returns_partial_output_and_leaves_the_command_running() {
 
 /// A shell that emits OSC 133, and a command that exits 3 in it.
 ///
-/// `Shell::detect` knows zsh and PowerShell and nothing else — bash and fish are
-/// unwritten and cmd.exe has no prompt-function mechanism at all — so on a
-/// machine with neither there is no way to test the correlation live and no
-/// point pretending otherwise.
+/// `Shell::detect` knows zsh, bash and PowerShell — fish is unwritten and
+/// cmd.exe has no prompt-function mechanism at all — so on a machine with none
+/// of the three there is no way to test the correlation live and no point
+/// pretending otherwise.
 ///
 /// The command is a *subshell* on unix and a native call on Windows: `exit 3`
 /// would end the shell rather than report a status, and this has to leave the
@@ -630,6 +631,12 @@ fn integrated_shell() -> Option<(String, String)> {
         // correlation rather than as a badly chosen test shell.
         return Some(("powershell.exe -NoLogo -NoProfile".into(), "cmd /c exit 3".into()));
     }
+    // bash is hookable now and deliberately NOT a candidate: on a bash
+    // session this test's `exit` step trips a pre-existing Conn race — a
+    // recovery `RequestKeyframe` orphaned by our own `Detach`, whose refusal
+    // the next attach wears — measured at 12/12 failures on Linux. #409 owns
+    // the race, and adding bash here is its acceptance test. Until then,
+    // hosts with no zsh (ubuntu CI runners) skip, as they always have.
     ["/bin/zsh", "/usr/bin/zsh", "/usr/local/bin/zsh", "/opt/homebrew/bin/zsh"]
         .into_iter()
         .find(|p| std::path::Path::new(p).exists())
@@ -694,10 +701,11 @@ fn wait_for_prompt(tools: &zest_mcp::ToolSet, session: &str, limit: Duration) ->
 fn a_run_against_a_real_shell_returns_the_shells_own_exit_code() {
     let Some((shell, exits_three)) = integrated_shell() else {
         eprintln!(
-            "SKIPPED a_run_against_a_real_shell_returns_the_shells_own_exit_code: no shell \
-             with an OSC 133 hook on this machine. `Shell::detect` knows zsh and PowerShell \
-             only, so bash-only hosts cannot run this. Every other property of the \
-             correlation is covered by tests/replay.rs, which needs no shell."
+            "SKIPPED a_run_against_a_real_shell_returns_the_shells_own_exit_code: no usable \
+             shell with an OSC 133 hook on this machine. bash is hookable but excluded here \
+             until #409's Conn race is fixed; without zsh (unix) or PowerShell (Windows) \
+             this cannot run. Every other property of the correlation is covered by \
+             tests/replay.rs, which needs no shell."
         );
         return;
     };

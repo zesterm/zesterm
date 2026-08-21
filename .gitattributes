@@ -4,6 +4,11 @@
 # regenerates them all 35 show as phantom-modified with an empty diff --
 # inviting either a pointless commit or a reflex `checkout --` that one day
 # discards a real regeneration.
+# The shell-integration scripts are embedded byte-for-byte by include_str! and
+# written into a shim the shell sources -- for bash, a shell on the other side
+# of a WSL boundary. A CRLF checkout on Windows would ship the CR into a Linux
+# bash, which fails every line with `$'\r': command not found`.
+crates/zest-pty/shell-integration/** text eol=lf
 crates/zest-proto/bindings/** text eol=lf
 crates/zest-proto/fixtures/** text eol=lf
 schemas/** text eol=lf

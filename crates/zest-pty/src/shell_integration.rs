@@ -30,15 +30,18 @@
 //!
 //! # Which shells, and why not the others
 //!
-//! zsh and PowerShell. The absences are not an oversight:
+//! zsh, PowerShell, and bash — including a bash on the far side of a WSL
+//! launcher: `wsl.exe -d Ubuntu -- bash` walks to the inner shell, the shim
+//! path crosses as `WSLENV`-translated environment, and `--init-file
+//! $ZESTERM_BASH_INIT` names it (see [`install`]). The absences are not an
+//! oversight:
 //!
-//! - **bash and fish** each have a documented mechanism, and neither can be
-//!   *seen working* on the machines this has been written on. `/bin/bash` on
-//!   macOS is Apple's patched 3.2.57, where the `ENV`-based startup path the
-//!   technique depends on is disabled — which is why Ghostty excludes
-//!   `/bin/bash` on Darwin outright rather than shipping something that silently
-//!   does nothing. Writing them blind is how the attach path nearly shipped
-//!   compiled and unseen.
+//! - **fish** has a documented mechanism and cannot be *seen working* on the
+//!   machines this has been written on. Writing it blind is how the attach
+//!   path nearly shipped compiled and unseen.
+//! - **a bare `wsl.exe`** names no shell, and guessing the distro's default
+//!   would mean hooking a shell we cannot identify. Name the inner shell —
+//!   `wsl.exe -d Ubuntu -- bash` — and it is hooked like any other.
 //! - **`cmd.exe`** has no prompt-function mechanism at all. There is no hook to
 //!   write, so a `cmd` window has no command blocks and never will. Said out
 //!   loud here, and logged at `info` by [`crate::CommandSpec::enable_shell_integration`],
@@ -60,6 +63,8 @@ pub enum Shell {
     Zsh,
     /// PowerShell — Core (`pwsh`) and Windows PowerShell 5.1 alike.
     Pwsh,
+    /// bash — native on unix, and named through a WSL launcher on Windows.
+    Bash,
 }
 
 impl Shell {
@@ -69,22 +74,54 @@ impl Shell {
     /// contain `zsh` — `vim zsh-notes.md` — is not a zsh, and neither is a
     /// login shell spelled `-zsh`, which is why the leading `-` is stripped.
     ///
-    /// The first token is parsed quote-aware rather than split on whitespace:
-    /// Windows' default shell lives at `"C:\Program Files\PowerShell\7\pwsh.exe"`,
-    /// and splitting on whitespace makes its executable `C:\Program` — a name
-    /// that matches nothing, so *every* Windows shell silently went unhooked
-    /// (#83). It is also the seam a launcher-aware pass hangs off later:
-    /// `wsl.exe -d Ubuntu -- bash` needs the shell named *after* the first
-    /// token, which a one-line match has nowhere to grow into.
+    /// Tokens are parsed quote-aware rather than split on whitespace: Windows'
+    /// default shell lives at `"C:\Program Files\PowerShell\7\pwsh.exe"`, and
+    /// splitting on whitespace makes its executable `C:\Program` — a name that
+    /// matches nothing, so *every* Windows shell silently went unhooked (#83).
+    ///
+    /// A WSL launcher is walked to the shell it names: `wsl.exe -d Ubuntu --
+    /// bash` is a bash for injection purposes, because the launcher's own
+    /// flags decide nothing about the prompt. Only bash comes back through
+    /// that path — an inner zsh would need `ZDOTDIR` to cross the boundary,
+    /// which `WSLENV` could carry but nothing here arranges yet — and a bare
+    /// `wsl.exe` names no shell at all, so it is `None` rather than a guess.
     #[must_use]
     pub fn detect(command_line: &str) -> Option<Self> {
-        let name = Path::new(first_token(command_line)?).file_name()?.to_str()?;
+        let tokens: Vec<&str> = tokens(command_line).collect();
+        let first = tokens.first()?;
+        let name = Path::new(first).file_name()?.to_str()?;
+        if is_wsl_launcher(name) {
+            let args = &tokens[1..];
+            let inner = args[wsl_inner_index(args)?];
+            let name = Path::new(inner).file_name()?.to_str()?;
+            let name = name.strip_prefix('-').unwrap_or(name);
+            return (name == "bash").then_some(Self::Bash);
+        }
+        Self::from_executable(name)
+    }
+
+    /// The variant a bare executable name maps to.
+    fn from_executable(name: &str) -> Option<Self> {
         let name = name.strip_prefix('-').unwrap_or(name);
-        // zsh is matched exactly and the PowerShells case-insensitively, which
-        // is not inconsistency but the two filesystems: a `ZSH` next to a `zsh`
-        // on unix is a different file, and `PWSH.EXE` on Windows is not.
+        // zsh and bash are matched exactly and the PowerShells
+        // case-insensitively, which is not inconsistency but the two
+        // filesystems: a `ZSH` next to a `zsh` on unix is a different file,
+        // and `PWSH.EXE` on Windows is not. `bash.exe` — Git Bash — is
+        // deliberately not a bash here: MSYS rewrites unix-looking arguments
+        // before the program sees them, and an `--init-file /mnt/...`-style
+        // path through that machinery is untested territory.
         if name == "zsh" {
             return Some(Self::Zsh);
+        }
+        // And on Windows a *bare* `bash` is the same two binaries wearing no
+        // extension — `CreateProcessW` resolves it to System32's WSL launcher
+        // or a PATH-first Git Bash — so hooking it would hand a Linux bash a
+        // Windows shim path, and `--init-file` *replaces* the startup files:
+        // the user's ~/.bashrc silently stops running, which is losing their
+        // configuration to gain nothing. On Windows, bash is reached by
+        // naming it through the launcher: `wsl.exe -d <distro> -- bash`.
+        if name == "bash" && !cfg!(windows) {
+            return Some(Self::Bash);
         }
         if ["pwsh", "pwsh.exe", "powershell", "powershell.exe"]
             .iter()
@@ -100,23 +137,69 @@ impl Shell {
         match self {
             Self::Zsh => "zsh",
             Self::Pwsh => "pwsh",
+            Self::Bash => "bash",
         }
     }
 }
 
-/// The executable a command line runs, with a quoted path kept whole.
+/// Whether this executable name is the WSL launcher.
+///
+/// Case-insensitive because it is a Windows executable, wherever it is
+/// installed from.
+fn is_wsl_launcher(name: &str) -> bool {
+    name.eq_ignore_ascii_case("wsl") || name.eq_ignore_ascii_case("wsl.exe")
+}
+
+/// Where a WSL launcher's own flags end and its inner command begins.
+///
+/// Takes and indexes the launcher's *arguments* (everything after `wsl.exe`):
+/// flags that take a value consume it, bare flags are skipped, and the first
+/// token that is not a flag is the inner command. An *unknown* flag returns
+/// `None` — it may take a value we would misread as the command, and injecting
+/// into a guess breaks the user's shell where declining merely leaves it
+/// without blocks.
+fn wsl_inner_index(args: &[&str]) -> Option<usize> {
+    let mut i = 0;
+    while let Some(token) = args.get(i) {
+        match token.to_ascii_lowercase().as_str() {
+            // Everything after `--` is the command, flags included -- that is
+            // the marker's whole job.
+            "--" => return (i + 1 < args.len()).then_some(i + 1),
+            "-d" | "--distribution" | "--distribution-id" | "-u" | "--user" | "--cd"
+            | "--shell-type" => i += 2,
+            "--system" | "--exec" | "-e" => i += 1,
+            t if t.starts_with('-') => return None,
+            _ => return Some(i),
+        }
+    }
+    None
+}
+
+/// The tokens of a command line, with a quoted path kept whole.
 ///
 /// Not a shell-grade parser — no escapes, no single quotes, because neither
 /// `CreateProcessW` nor [`crate::CommandSpec`] promises them for the program
-/// name. It only has to keep `"C:\Program Files\..."` in one piece.
-fn first_token(command_line: &str) -> Option<&str> {
-    let line = command_line.trim_start();
-    if let Some(rest) = line.strip_prefix('"') {
-        // An unterminated quote takes the rest of the line, which is what
-        // `CreateProcessW` does with it too.
-        return Some(rest.split('"').next().unwrap_or(rest)).filter(|s| !s.is_empty());
-    }
-    line.split_whitespace().next()
+/// name. It only has to keep `"C:\Program Files\..."` in one piece, and to
+/// walk a WSL launcher's flags to the shell they name without a second,
+/// subtly different parse.
+fn tokens(command_line: &str) -> impl Iterator<Item = &str> {
+    let mut rest = command_line;
+    std::iter::from_fn(move || {
+        let line = rest.trim_start();
+        if let Some(after) = line.strip_prefix('"') {
+            // An unterminated quote takes the rest of the line, which is what
+            // `CreateProcessW` does with it too.
+            let (token, remainder) = match after.find('"') {
+                Some(end) => (&after[..end], &after[end + 1..]),
+                None => (after, ""),
+            };
+            rest = remainder;
+            return Some(token).filter(|t| !t.is_empty());
+        }
+        let end = line.find(char::is_whitespace).unwrap_or(line.len());
+        rest = &line[end..];
+        Some(&line[..end]).filter(|t| !t.is_empty())
+    })
 }
 
 /// The hook script, for a person to load by hand.
@@ -137,6 +220,7 @@ pub fn hook(shell: Shell) -> &'static str {
     match shell {
         Shell::Zsh => include_str!("../shell-integration/zsh/zesterm.zsh"),
         Shell::Pwsh => include_str!("../shell-integration/pwsh/zesterm.ps1"),
+        Shell::Bash => include_str!("../shell-integration/bash/zesterm.bash"),
     }
 }
 
@@ -150,6 +234,19 @@ pub fn hook(shell: Shell) -> &'static str {
 /// [`already_injected`].
 pub const SHIM_PWSH: &str = "zesterm.ps1";
 
+/// The bash shim's file name, and — like [`SHIM_PWSH`] — the marker that says
+/// a command line already carries it. The WSL spelling of the amendment names
+/// [`WSL_SHIM_VAR`] instead of a path, so both are markers.
+pub const SHIM_BASH: &str = "zesterm-shim.bash";
+
+/// The variable that carries the bash shim's path across a WSL boundary.
+///
+/// `WSLENV` translates it (`/p`) into the distro's view of the same file, and
+/// the command line says `--init-file $ZESTERM_BASH_INIT` — unquoted, because
+/// WSL escapes a `"` into a literal character of the filename, and expanded by
+/// the distro's default shell, which is why `--exec` declines injection.
+pub const WSL_SHIM_VAR: &str = "ZESTERM_BASH_INIT";
+
 /// Whether this command line already loads a hook.
 ///
 /// Injecting twice is not merely redundant: every marker is emitted twice, which
@@ -162,9 +259,12 @@ pub const SHIM_PWSH: &str = "zesterm.ps1";
 /// check would inject a second hook into a shell that already had one.
 #[must_use]
 pub fn already_injected(command_line: &str) -> bool {
-    // Both sides lowered, rather than relying on `SHIM_PWSH` happening to be
-    // lowercase already -- renaming the file should not silently disarm this.
-    command_line.to_ascii_lowercase().contains(&SHIM_PWSH.to_ascii_lowercase())
+    // Both sides lowered, rather than relying on the markers happening to be
+    // lowercase already -- renaming one should not silently disarm this.
+    let line = command_line.to_ascii_lowercase();
+    [SHIM_PWSH, SHIM_BASH, WSL_SHIM_VAR]
+        .iter()
+        .any(|marker| line.contains(&marker.to_ascii_lowercase()))
 }
 
 /// What a shell needs at spawn in order to load the hook.
@@ -187,6 +287,7 @@ const ZSH_ZSHENV: &str = include_str!("../shell-integration/zsh/.zshenv");
 const ZSH_ZPROFILE: &str = include_str!("../shell-integration/zsh/.zprofile");
 const ZSH_ZSHRC: &str = include_str!("../shell-integration/zsh/.zshrc");
 const ZSH_ZLOGIN: &str = include_str!("../shell-integration/zsh/.zlogin");
+const BASH_SHIM: &str = include_str!("../shell-integration/bash/zesterm-shim.bash");
 
 /// Write the shim into `dir` and return the environment that activates it.
 ///
@@ -208,6 +309,7 @@ pub fn install(shell: Shell, command_line: &str, dir: &Path) -> io::Result<Injec
     match shell {
         Shell::Zsh => install_zsh(dir),
         Shell::Pwsh => install_pwsh(command_line, dir),
+        Shell::Bash => install_bash(command_line, dir),
     }
 }
 
@@ -313,6 +415,148 @@ fn install_zsh(dir: &Path) -> io::Result<Injection> {
     })
 }
 
+/// bash: source the hook through `--init-file`.
+///
+/// bash has no `ZDOTDIR` analogue; `--init-file` is its one per-invocation
+/// knob, and it *replaces* the interactive startup files, which is why the
+/// shim's first job is to run them itself — user's rc first, hook after, the
+/// same order rule as the zsh shim and for the same reason.
+///
+/// Natively the args name the shim path, quoted. Through a WSL launcher the
+/// path cannot be named directly — the distro sees a different filesystem — so
+/// it crosses as [`WSL_SHIM_VAR`] with `WSLENV` doing the translation, and the
+/// args say `--init-file $ZESTERM_BASH_INIT` for the distro's shell to expand.
+/// This is the "both halves at once" case [`Injection`] was shaped for.
+fn install_bash(command_line: &str, dir: &Path) -> io::Result<Injection> {
+    let all: Vec<&str> = tokens(command_line).collect();
+    let first = all.first().copied().unwrap_or_default();
+    let via_wsl =
+        Path::new(first).file_name().and_then(|n| n.to_str()).is_some_and(is_wsl_launcher);
+
+    let bash_args: &[&str] = if via_wsl {
+        let args = &all[1..];
+        // `detect` found a bash here, so the walk succeeds; guarded anyway
+        // because this function is callable with any line.
+        let Some(inner) = wsl_inner_index(args) else {
+            return Ok(Injection::default());
+        };
+        // `--exec` (and `--shell-type none`) launch the command with no shell
+        // in between, so `$ZESTERM_BASH_INIT` never expands -- bash would
+        // source a file literally named that, *instead of* the user's bashrc.
+        // Losing their configuration is strictly worse than the missing blocks.
+        let launcher = &args[..inner];
+        let exec_mode = launcher
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case("--exec") || f.eq_ignore_ascii_case("-e"))
+            || launcher.windows(2).any(|w| {
+                w[0].eq_ignore_ascii_case("--shell-type") && w[1].eq_ignore_ascii_case("none")
+            });
+        if exec_mode {
+            tracing::info!(
+                command = %command_line,
+                "wsl --exec leaves no shell to expand the shim variable; no command blocks"
+            );
+            return Ok(Injection::default());
+        }
+        &args[inner + 1..]
+    } else {
+        &all[1..]
+    };
+
+    if !bash_accepts_appended_args(bash_args) {
+        tracing::info!(
+            command = %command_line,
+            "this bash already runs or configures its own startup; no command blocks"
+        );
+        return Ok(Injection::default());
+    }
+
+    let shim_dir = dir.join("bash");
+    let shim_path = shim_dir.join(SHIM_BASH);
+    let Some(shim) = shim_path.to_str() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "shell integration directory is not valid UTF-8",
+        ));
+    };
+    if via_wsl && shim.chars().any(char::is_whitespace) {
+        // The WSL spelling rides unquoted (see `WSL_SHIM_VAR`), so a space in
+        // the path would word-split into arguments after expansion.
+        tracing::info!(
+            path = %shim,
+            "the shell-integration path has whitespace, which cannot cross WSL unquoted; \
+             no command blocks"
+        );
+        return Ok(Injection::default());
+    }
+
+    std::fs::create_dir_all(&shim_dir)?;
+    std::fs::write(shim_dir.join("zesterm.bash"), hook(Shell::Bash))?;
+    std::fs::write(&shim_path, BASH_SHIM)?;
+
+    if via_wsl {
+        Ok(Injection {
+            env: vec![
+                (WSL_SHIM_VAR.to_string(), shim.to_string()),
+                (
+                    "WSLENV".to_string(),
+                    wslenv_value(std::env::var("WSLENV").ok().as_deref()),
+                ),
+            ],
+            args: format!(" --init-file ${WSL_SHIM_VAR}"),
+        })
+    } else {
+        Ok(Injection { env: Vec::new(), args: format!(" --init-file \"{shim}\"") })
+    }
+}
+
+/// Whether appending `--init-file` to these bash arguments is safe and useful.
+///
+/// False once bash has been given something to run or told how to start:
+/// `-c` and a bare script path make it non-interactive, where an init file is
+/// never read; `--init-file`/`--rcfile`/`--norc` are the user turning exactly
+/// the knob we would; `--posix` changes the startup files wholesale; and a
+/// login bash (`-l`/`--login`) ignores `--init-file` entirely — injecting
+/// there would report success and do nothing, the silent zero all over again.
+///
+/// And *any* short option declines, `-i` included, whatever it means: bash
+/// recognises multi-character options only **before** single-character ones,
+/// so an appended `--init-file` after a `-i` is not ignored — bash prints
+/// `--: invalid option` and exits, and a tab that dies on open is strictly
+/// worse than the missing blocks this decline costs. Measured, not read:
+/// `bash -i --init-file x` refuses where `bash --init-file x -i` runs.
+fn bash_accepts_appended_args(args: &[&str]) -> bool {
+    for arg in args {
+        match *arg {
+            // What follows is a script path, not options.
+            "--" => return false,
+            a if a.starts_with("--") => {
+                let name = &a[2..];
+                let name = name.split('=').next().unwrap_or(name);
+                if ["init-file", "rcfile", "norc", "posix", "login"].contains(&name) {
+                    return false;
+                }
+            }
+            a if a.starts_with('-') => return false,
+            // A bare word is a script path: non-interactive.
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// The `WSLENV` that ships the shim variable, appended to whatever already
+/// crosses. `WSLENV` is itself inherited, so replacing it would silently strip
+/// entries like Windows Terminal's `WT_SESSION` from every shell in the fleet.
+fn wslenv_value(existing: Option<&str>) -> String {
+    let entry = format!("{WSL_SHIM_VAR}/p");
+    match existing.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(e) if e.split(':').any(|v| v.split('/').next() == Some(WSL_SHIM_VAR)) => e.to_string(),
+        Some(e) => format!("{e}:{entry}"),
+        None => entry,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,8 +573,320 @@ mod tests {
         // ZDOTDIR here would be harmless but wrong, and the same mistake with
         // bash's `--posix` would break the program outright.
         assert_eq!(Shell::detect("vim zsh-notes.md"), None);
-        assert_eq!(Shell::detect("/bin/bash"), None);
         assert_eq!(Shell::detect(""), None);
+    }
+
+    #[test]
+    fn bash_is_recognised_by_its_executable() {
+        // On unix only. A bare `bash` on Windows is System32's WSL launcher
+        // or Git Bash — binaries whose argument handling this module refuses
+        // to guess at — so there the only bash is one named through the
+        // launcher, and hooking these spellings would hand a Linux bash a
+        // Windows shim path in place of its own startup files.
+        #[cfg(not(windows))]
+        for line in ["bash", "/bin/bash", "/usr/bin/bash", "-bash", "/usr/local/bin/bash -i"] {
+            assert_eq!(Shell::detect(line), Some(Shell::Bash), "{line} is a bash");
+        }
+        #[cfg(windows)]
+        for line in ["bash", "/bin/bash", "-bash"] {
+            assert_eq!(Shell::detect(line), None, "{line} is a .exe launcher on Windows");
+        }
+
+        // The argument names a bash; the program is not one.
+        assert_eq!(Shell::detect("vim bash-notes.md"), None);
+        // Git Bash is not a bash here: `.exe` is part of the name, and MSYS
+        // rewrites unix-looking arguments before the program sees them, so an
+        // `--init-file` path through it is untested territory.
+        assert_eq!(Shell::detect("bash.exe"), None);
+        assert_eq!(Shell::detect(r#""C:\Program Files\Git\bin\bash.exe""#), None);
+        // A unix filesystem: `BASH` is a different file from `bash`.
+        assert_eq!(Shell::detect("BASH"), None);
+    }
+
+    #[test]
+    fn a_wsl_launcher_is_walked_to_its_inner_shell() {
+        // The launcher's flags decide nothing about the prompt; the shell they
+        // leave behind does. This is the profile shape that makes WSL blocks
+        // work at all: `wsl.exe -d Ubuntu -- bash`.
+        for line in [
+            "wsl.exe -d Ubuntu -- bash",
+            "wsl -d Ubuntu bash",
+            "wsl.exe --distribution Ubuntu -u andy -- bash -i",
+            "WSL.EXE -d Ubuntu -- /usr/bin/bash",
+            // `--` means everything after is the command, a login-shell
+            // spelling included.
+            "wsl.exe -d Ubuntu -- -bash",
+        ] {
+            assert_eq!(Shell::detect(line), Some(Shell::Bash), "{line} launches a bash");
+        }
+
+        // A bare launcher names no shell, and the distro's default is not
+        // knowable from here. None, never a guess -- the log tells the user
+        // to name it.
+        assert_eq!(Shell::detect("wsl.exe -d Ubuntu"), None);
+        assert_eq!(Shell::detect("wsl.exe"), None);
+        // An inner zsh is real but unhookable today: its ZDOTDIR would need
+        // WSLENV plumbing of its own, and injecting env that never crosses is
+        // a hook that silently does nothing.
+        assert_eq!(Shell::detect("wsl.exe -d Ubuntu -- zsh"), None);
+        // An unknown flag may take a value; walking past it would misread the
+        // value as the command.
+        assert_eq!(Shell::detect("wsl.exe --mystery bash"), None);
+        // A flag with its value missing is a broken line, not a bash.
+        assert_eq!(Shell::detect("wsl.exe -d"), None);
+    }
+
+    #[test]
+    fn a_bash_that_already_runs_something_is_left_alone() {
+        // `-c` and a script path make bash non-interactive, where an init file
+        // is never read; `--rcfile`/`--norc` are the user turning our knob
+        // themselves; a login bash ignores `--init-file` outright, so hooking
+        // it would report success and do nothing. And *any* short option —
+        // the harmless-looking `-i` included — declines, because bash only
+        // recognises long options before short ones: `bash -i --init-file x`
+        // does not ignore the hook, it prints `--: invalid option` and dies,
+        // and a tab that dies on open is strictly worse than no blocks.
+        for args in [
+            &["-c", "ls"][..],
+            &["script.sh"][..],
+            &["--rcfile", "/tmp/rc"][..],
+            &["--init-file", "/tmp/rc"][..],
+            &["--norc"][..],
+            &["--posix"][..],
+            &["-l"][..],
+            &["--login"][..],
+            &["-lic", "ls"][..],
+            &["-s"][..],
+            &["-i"][..],
+            &["--noediting", "-i"][..],
+            &["--", "script.sh"][..],
+        ] {
+            assert!(!bash_accepts_appended_args(args), "{args:?} cannot take an init file");
+        }
+
+        for args in [&[][..], &["--noprofile"][..], &["--noediting"][..]] {
+            assert!(bash_accepts_appended_args(args), "{args:?} drops into an interactive shell");
+        }
+    }
+
+    #[test]
+    fn bash_is_hooked_through_an_init_file() {
+        let dir = std::env::temp_dir().join(format!("zesterm-si-bash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let injection = install(Shell::Bash, "/bin/bash", &dir).expect("install");
+        let shim = dir.join("bash").join(SHIM_BASH);
+        assert!(shim.exists(), "the shim was not written");
+        assert!(dir.join("bash").join("zesterm.bash").exists(), "the hook was not written");
+
+        assert!(
+            injection.env.is_empty(),
+            "a native bash needs no environment: the init file is named on the command line"
+        );
+        assert!(
+            injection.args.contains("--init-file"),
+            "bash has no ZDOTDIR; the init file is its one per-invocation knob: {:?}",
+            injection.args
+        );
+        assert!(
+            injection.args.contains(shim.to_str().expect("utf-8 shim path")),
+            "the amendment does not name the file it was just written to: {:?}",
+            injection.args
+        );
+
+        let amended = format!("/bin/bash{}", injection.args);
+        assert!(
+            already_injected(&amended),
+            "an amended command line must be recognisable, or the daemon injects a second time"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn wsl_bash_is_hooked_through_wslenv_and_the_command_line() {
+        let dir = std::env::temp_dir().join(format!("zesterm-si-wsl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let line = "wsl.exe -d Ubuntu -- bash";
+        let injection = install(Shell::Bash, line, &dir).expect("install");
+        let shim = dir.join("bash").join(SHIM_BASH);
+        assert!(shim.exists(), "the shim was not written");
+
+        // The env half: the Windows path, and the WSLENV entry that makes WSL
+        // itself translate it into the distro's view -- which is what makes a
+        // custom automount root work without us knowing about it.
+        let vars: std::collections::HashMap<_, _> = injection.env.iter().cloned().collect();
+        assert_eq!(
+            vars.get(WSL_SHIM_VAR).map(String::as_str),
+            shim.to_str(),
+            "the variable does not carry the shim"
+        );
+        let wslenv = vars.get("WSLENV").expect("without WSLENV nothing crosses into the distro");
+        assert!(
+            wslenv.ends_with(&format!("{WSL_SHIM_VAR}/p")),
+            "/p is the flag that translates the path: {wslenv:?}"
+        );
+
+        // The args half: the variable's name, unquoted -- WSL escapes a `"`
+        // into a literal character of the filename, so the quoted spelling
+        // opens a file that does not exist.
+        assert_eq!(injection.args, format!(" --init-file ${WSL_SHIM_VAR}"));
+        assert!(
+            already_injected(&format!("{line}{}", injection.args)),
+            "an amended command line must be recognisable, or the daemon injects a second time"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn wslenv_appends_rather_than_clobbers() {
+        // WSLENV is inherited and shared: Windows Terminal, VS Code and the
+        // user's own setup all put entries there, and replacing it strips
+        // theirs from every shell zesterm spawns.
+        assert_eq!(wslenv_value(None), "ZESTERM_BASH_INIT/p");
+        assert_eq!(wslenv_value(Some("")), "ZESTERM_BASH_INIT/p");
+        assert_eq!(
+            wslenv_value(Some("WT_SESSION:WT_PROFILE_ID")),
+            "WT_SESSION:WT_PROFILE_ID:ZESTERM_BASH_INIT/p"
+        );
+        // Already present -- a respawn under an injected daemon -- stays put
+        // rather than growing forever.
+        assert_eq!(
+            wslenv_value(Some("ZESTERM_BASH_INIT/p")),
+            "ZESTERM_BASH_INIT/p",
+            "a second spawn must not append a second entry"
+        );
+    }
+
+    #[test]
+    fn wsl_exec_mode_and_spaced_paths_are_declined() {
+        let dir = std::env::temp_dir().join(format!("zesterm-si-decl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // `--exec` launches the command with no shell in between, so the
+        // variable never expands -- bash would source a file literally named
+        // `$ZESTERM_BASH_INIT` *instead of* the user's bashrc. Declining
+        // loses blocks; injecting loses their configuration.
+        for line in
+            ["wsl.exe --exec bash", "wsl.exe -e bash", "wsl.exe --shell-type none -- bash"]
+        {
+            let injection = install(Shell::Bash, line, &dir).expect("install");
+            assert_eq!(injection, Injection::default(), "{line} has no shell to expand $VAR");
+        }
+
+        // The WSL spelling rides unquoted, so a space in the shim path would
+        // word-split into arguments after expansion.
+        let spaced = std::env::temp_dir().join(format!("zesterm si {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&spaced);
+        let injection = install(Shell::Bash, "wsl.exe -d Ubuntu -- bash", &spaced).expect("install");
+        assert_eq!(
+            injection,
+            Injection::default(),
+            "a spaced path cannot cross WSL unquoted; declining beats a broken rc"
+        );
+        // A *native* bash quotes the path, so the same directory is fine there.
+        let native = install(Shell::Bash, "/bin/bash", &spaced).expect("install");
+        assert!(
+            native.args.contains("--init-file \""),
+            "natively the path is quoted and a space is no obstacle: {:?}",
+            native.args
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&spaced).ok();
+    }
+
+    #[test]
+    fn the_bash_shim_hands_control_back_to_the_users_own_dotfiles() {
+        // Same property as the zsh shim set: `--init-file` *replaces* the
+        // interactive startup files, so the shim must run them itself or the
+        // user's shell silently loses its configuration -- and it must run
+        // them *before* the hook, or a prompt framework's rc clobbers
+        // PROMPT_COMMAND a line after we set it.
+        let etc = BASH_SHIM.find("&& . /etc/bash.bashrc").expect("sources the system rc");
+        let user = BASH_SHIM.find("&& . ~/.bashrc").expect("sources the user's rc");
+        let ours = BASH_SHIM.find(". \"${BASH_SOURCE[0]%/*}/zesterm.bash\"").expect("loads the hook");
+        assert!(etc < user, "bash runs the system rc before the user's; so must the shim");
+        assert!(user < ours, "the hook is loaded before the user's rc");
+    }
+
+    #[test]
+    fn the_bash_hook_chains_prompt_command_and_the_debug_trap() {
+        // The property that makes injection safe to do without asking: a
+        // prompt that silently loses starship or oh-my-bash to a terminal is
+        // a failure nobody suspects the terminal for -- and a DEBUG trap the
+        // user installed is their tooling, not ours to discard.
+        let hook = hook(Shell::Bash);
+        assert!(
+            hook.contains("__zesterm_user_prompt_command=") && hook.contains("(exit \"$ret\")"),
+            "the user's PROMPT_COMMAND must run, and with the exit status it expects to read"
+        );
+        assert!(
+            hook.contains("trap -p DEBUG"),
+            "a pre-existing DEBUG trap must be chained, not replaced"
+        );
+        // And the modern path must be PS0, not the trap: a DEBUG trap never
+        // fires for a top-level compound, so `(exit 3)` would run, finish and
+        // leave no marker at all -- seen live before this line existed.
+        assert!(
+            hook.contains("PS0="),
+            "without PS0 a compound command produces no block on any modern bash"
+        );
+        // The user's own PS0 survives, after ours -- discarding it is the
+        // silent-loss failure the rest of this file exists to avoid.
+        assert!(
+            hook.contains("${__zesterm_hush[$((__zesterm_running=1))]-}'${PS0-}"),
+            "a pre-existing PS0 must be chained, not replaced"
+        );
+    }
+
+    #[test]
+    fn the_bash_hook_is_safe_to_source_twice() {
+        // Someone with `eval "$(zesterm --shell-integration bash)"` in their
+        // rc *and* injection active sources it twice.
+        assert!(hook(Shell::Bash).contains("__zesterm_loaded"));
+    }
+
+    #[test]
+    fn the_bash_hook_reports_the_cwd_before_it_opens_the_block() {
+        // Ordering, not decoration: `133;A` opens a block and stamps it with
+        // the working directory known at that moment. A cwd emitted afterwards
+        // lands on the *next* block, so every path shown is one command stale.
+        // In bash the guarantee is structural: OSC 7 is emitted from
+        // PROMPT_COMMAND, `133;A` lives in PS1, and bash prints PS1 only after
+        // PROMPT_COMMAND has finished.
+        let hook = hook(Shell::Bash);
+        let precmd = &hook[hook.find("__zesterm_precmd() {").expect("has a precmd")..];
+        let precmd = &precmd[..precmd.find("\n}").expect("the function ends")];
+        assert!(precmd.contains("7;file://"), "the cwd is not reported from precmd");
+        assert!(
+            !precmd.contains("133;A"),
+            "A emitted from precmd would land on the line before the prompt"
+        );
+        assert!(
+            hook.contains(r"PS1='\[\e]133;A\a\]'"),
+            "A must open the prompt from inside PS1"
+        );
+    }
+
+    #[test]
+    fn the_posix_hooks_ship_with_unix_line_endings() {
+        // include_str! embeds checkout bytes, and the shim is written into a
+        // file a *Linux* bash sources -- from a Windows-built daemon, across
+        // the WSL boundary. A CRLF checkout fails every line of it with
+        // `$'\r': command not found`, which is why .gitattributes pins this
+        // tree to LF; this test is what notices that rule being lost.
+        for (name, body) in [
+            ("zesterm.bash", hook(Shell::Bash)),
+            ("zesterm-shim.bash", BASH_SHIM),
+            ("zesterm.zsh", hook(Shell::Zsh)),
+            (".zshenv", ZSH_ZSHENV),
+            (".zshrc", ZSH_ZSHRC),
+        ] {
+            assert!(!body.contains('\r'), "{name} carries CR bytes and would fail in a POSIX shell");
+        }
     }
 
     #[test]
@@ -341,21 +897,29 @@ mod tests {
         // `C:\Program`. Every Windows shell went unhooked, and the only trace was
         // a status bar reading `0 blocks`.
         //
-        // Asserted on `first_token` rather than through `detect`, so it runs on
+        // Asserted on `tokens` rather than through `detect`, so it runs on
         // every platform: `detect` finishes the job with `Path::file_name`, which
         // only treats `\` as a separator on Windows, and the quoting half of the
         // bug is not Windows-specific.
+        let first = |line| tokens(line).next();
         assert_eq!(
-            first_token(r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo"#),
+            first(r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo"#),
             Some(r"C:\Program Files\PowerShell\7\pwsh.exe")
         );
-        assert_eq!(first_token("  /bin/zsh -l"), Some("/bin/zsh"));
-        assert_eq!(first_token(r#""/opt/my shells/zsh""#), Some("/opt/my shells/zsh"));
+        assert_eq!(first("  /bin/zsh -l"), Some("/bin/zsh"));
+        assert_eq!(first(r#""/opt/my shells/zsh""#), Some("/opt/my shells/zsh"));
         // An unterminated quote takes the rest, which is what `CreateProcessW`
         // does with it too.
-        assert_eq!(first_token(r#""C:\Program Files\pwsh.exe"#), Some(r"C:\Program Files\pwsh.exe"));
-        assert_eq!(first_token(""), None);
-        assert_eq!(first_token(r#""""#), None);
+        assert_eq!(first(r#""C:\Program Files\pwsh.exe"#), Some(r"C:\Program Files\pwsh.exe"));
+        assert_eq!(first(""), None);
+        assert_eq!(first(r#""""#), None);
+
+        // The walk keeps the same rules past the first token: a quoted launcher
+        // path must not smear into the flags after it.
+        assert_eq!(
+            tokens(r#""C:\WINDOWS\system32\wsl.exe" -d Ubuntu -- bash"#).collect::<Vec<_>>(),
+            vec![r"C:\WINDOWS\system32\wsl.exe", "-d", "Ubuntu", "--", "bash"]
+        );
     }
 
     #[test]
@@ -394,6 +958,16 @@ mod tests {
         // exactly, and `.exe` is part of the name.
         assert_eq!(Shell::detect(r#""C:\Program Files\Git\bin\zsh.exe""#), None);
         assert_eq!(Shell::detect(r"C:\Windows\System32\cmd.exe"), None);
+
+        // The launcher walk, from the fully-qualified spelling a Windows
+        // profile actually stores. Here rather than in the walk's own test,
+        // for the same reason as the paths above: only Windows'
+        // `Path::file_name` sees `wsl.exe` inside `C:\WINDOWS\system32\`.
+        assert_eq!(
+            Shell::detect(r#""C:\WINDOWS\system32\wsl.exe" --cd C:\dev -d Ubuntu -- bash"#),
+            Some(Shell::Bash),
+            "the profile-shaped WSL line launches a bash"
+        );
     }
 
     #[test]

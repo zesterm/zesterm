@@ -422,9 +422,9 @@ impl ToolSet {
     /// The exit code here is the **only unforgeable one in the system**: it
     /// comes from `HostMessage::Exited`, which the daemon reads from the child,
     /// rather than from an OSC 133;D marker any program can print. That is what
-    /// makes this the answer for every shell with no integration — `bash` and
-    /// `fish` have none (`Shell::detect` returns `None` for `/bin/bash`, with a
-    /// test pinning it), which is most Linux hosts rather than an edge case.
+    /// makes this the answer for every shell with no integration — `fish` has
+    /// none, `cmd.exe` never will, and any shell reached through `ssh` or
+    /// `tmux` is out of injection's reach however hookable it is natively.
     ///
     /// # The ordering is the whole trick
     ///
@@ -983,10 +983,11 @@ fn wait_for_block(
     let (anchor, was_finished) = conn
         .with(|s| s.replica(addr).map(|r| block_anchor(r.block_states())))
         .flatten()
-        // A session with no blocks at all — bash and fish emit none — anchors
-        // below the first id there could be, so the first command to finish
-        // answers. Better than refusing: an agent asking "tell me when this
-        // ends" on such a shell is asking a reasonable thing.
+        // A session with no blocks at all — fish and cmd.exe emit none, and a
+        // shell behind ssh is out of injection's reach — anchors below the
+        // first id there could be, so the first command to finish answers.
+        // Better than refusing: an agent asking "tell me when this ends" on
+        // such a shell is asking a reasonable thing.
         .unwrap_or((0, false));
 
     match conn.wait_until(deadline, |s| match s.replica(addr) {
@@ -2191,10 +2192,10 @@ mod tests {
 
     #[test]
     fn a_shell_with_no_blocks_at_all_still_has_something_to_wait_for() {
-        // bash and fish emit no OSC 133 -- `Shell::detect` returns `None` for
-        // `/bin/bash` -- so this is most Linux hosts rather than an edge case.
-        // The wait anchors below the first id there could be, so the first
-        // command to finish answers rather than the tool refusing.
+        // fish emits no OSC 133, cmd.exe never will, and a shell behind ssh
+        // or tmux is out of injection's reach -- sessions with no blocks stay
+        // ordinary. The wait anchors below the first id there could be, so
+        // the first command to finish answers rather than the tool refusing.
         assert_eq!(block_anchor(std::iter::empty()), None);
         assert_eq!(finished_since(std::iter::empty(), 0, false), None);
         assert_eq!(

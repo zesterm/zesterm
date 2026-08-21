@@ -2981,7 +2981,7 @@ impl App {
                 let addr = crate::tabs::placeholder_addr(self.next_placeholder);
                 let cell = Arc::new(parking_lot::Mutex::new(addr));
                 match Session::spawn(
-                    &self.build_spec(),
+                    &self.build_spec(None),
                     PtySize::new(cols, rows),
                     self.config.scrollback,
                     wake_for(&self.proxy, cell, Arc::clone(&self.activity)),
@@ -8171,10 +8171,17 @@ impl App {
         }
     }
 
-    /// What to run in a fresh local shell, per the settings.
-    fn build_spec(&self) -> CommandSpec {
+    /// What to run in a fresh local shell, per the settings — or per `command`
+    /// when a profile names one, which must be decided *here*: integration is
+    /// injected against the command line this returns, so a caller that
+    /// overwrites it afterwards is a caller that hooked the wrong shell (a
+    /// profile-launched WSL tab got a zsh's `ZDOTDIR`, and a pwsh profile had
+    /// its appended `-Command` thrown away).
+    fn build_spec(&self, command: Option<&str>) -> CommandSpec {
         let mut spec = CommandSpec::default_shell();
-        if let Some(shell) = &self.config.shell {
+        if let Some(command) = command {
+            spec.command_line = command.to_string();
+        } else if let Some(shell) = &self.config.shell {
             spec.command_line = shell.clone();
         }
         // The in-process path gets the same hook as the daemon's, or
@@ -8615,10 +8622,7 @@ impl App {
                 self.next_placeholder += 1;
                 let addr = crate::tabs::placeholder_addr(self.next_placeholder);
                 let cell = Arc::new(parking_lot::Mutex::new(addr));
-                let mut spec = self.build_spec();
-                if let Some(c) = &command {
-                    spec.command_line = c.clone();
-                }
+                let mut spec = self.build_spec(command.as_deref());
                 // The profile's starting_directory, resolved by the machine
                 // that spawns — here, this one (§12: the daemon path sends
                 // it over the wire instead).
@@ -10442,7 +10446,7 @@ impl ApplicationHandler<Wakeup> for App {
         let (cols, rows) = insets.grid_dims(metrics, size.width.max(1), size.height.max(1));
 
         let proxy = self.proxy.clone();
-        let spec = self.build_spec();
+        let spec = self.build_spec(None);
         // TERM, COLORTERM and the TERM_PROGRAM pair come from
         // `zest_pty::terminal_env`, which `default_shell` already applied --
         // deliberately in one place, because a child that learns the wrong
