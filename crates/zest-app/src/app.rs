@@ -1860,6 +1860,14 @@ pub struct App {
     /// Pointer position in cells, updated on every move.
     pointer_cell: (usize, usize),
     clipboard: Option<arboard::Clipboard>,
+    /// Why the theme gallery's last clipboard import was refused, shown on
+    /// the import card until a retry succeeds or the screen is reopened.
+    theme_import_error: Option<String>,
+    /// The theme ids the gallery's cards were built from, in card order —
+    /// the `fleet_view` rule: a click's index must resolve against the
+    /// snapshot the hit map was drawn from, not a roster an import or a
+    /// config reload has since reshaped.
+    themes_view: Vec<String>,
     /// Composition state for the input method. See `zest_input::ime`.
     ime: zest_input::Ime,
     selection_bg: zest_core::Rgb,
@@ -1981,10 +1989,13 @@ impl App {
         // unknown-keys category from the keys the cascade kept.
         let zest_config::Resolved { settings, provenance, unknown_keys } = resolved;
         let config = Config::from(&settings);
+        // Imported themes join the roster before the first resolve, or a
+        // window configured onto one flashes the fallback at every launch.
+        crate::themes::reload();
         // `false` because there is no window yet to ask, and guessing light on
         // a dark desktop would flash the wrong theme. `resumed` seeds the real
         // answer and `apply_theme` corrects this the moment it can.
-        let theme = zest_theme::builtin::get(theme_id(&config, false))
+        let theme = crate::themes::get(theme_id(&config, false))
             .unwrap_or_else(zest_theme::builtin::obsidian);
         let resolved = zest_theme::resolve(&theme);
         let palette = to_core_palette(&resolved);
@@ -2076,6 +2087,8 @@ impl App {
             clipboard: arboard::Clipboard::new()
                 .map_err(|e| tracing::warn!(error = %e, "clipboard unavailable"))
                 .ok(),
+            theme_import_error: None,
+            themes_view: Vec::new(),
             ime: zest_input::Ime::new(),
             selection_bg,
             scroll_accum: 0.0,
@@ -3347,12 +3360,12 @@ impl App {
                 Some(ScreenModel::Fleet { account, cards, devices })
             }
             AppScreen::Themes => {
-                let active = if zest_theme::builtin::get(self.effective_theme()).is_some() {
+                let active = if crate::themes::get(self.effective_theme()).is_some() {
                     self.effective_theme().to_string()
                 } else {
                     zest_theme::builtin::DEFAULT_DARK.to_string()
                 };
-                let cards = zest_theme::builtin::all()
+                let cards = crate::themes::all()
                     .into_iter()
                     .map(|t| {
                         let c = |x: zest_theme::Rgba8| [x.r, x.g, x.b];
@@ -3368,8 +3381,16 @@ impl App {
                             zest_theme::ThemeMode::Dark => "dark",
                             zest_theme::ThemeMode::Light => "light",
                         };
-                        let qualifier =
-                            if default { format!("{mode} · default") } else { mode.to_string() };
+                        // "imported" is the qualifier's third fact: it is how
+                        // two cards may honestly share a display name (a
+                        // "Nord" variant beside the built-in Nord).
+                        let qualifier = if default {
+                            format!("{mode} · default")
+                        } else if zest_theme::builtin::get(&t.id).is_none() {
+                            format!("{mode} · imported")
+                        } else {
+                            mode.to_string()
+                        };
                         ThemeCard {
                             active: t.id == active,
                             id: t.id,
@@ -3386,7 +3407,10 @@ impl App {
                         }
                     })
                     .collect();
-                Some(ScreenModel::Themes { cards })
+                Some(ScreenModel::Themes {
+                    cards,
+                    import_error: self.theme_import_error.clone(),
+                })
             }
             // Built in refresh_chrome beside the Settings model — it needs
             // &mut access to the editor state, which &self here cannot give.
@@ -3569,6 +3593,11 @@ impl App {
     /// exactly as over a session's grid.
     fn show_screen(&mut self, screen: AppScreen) {
         self.screen = screen;
+        // A fresh look at the gallery starts with a clean import card — an
+        // error from last week answers a question nobody is asking.
+        if screen == AppScreen::Themes {
+            self.theme_import_error = None;
+        }
         self.picker = None;
         self.palette_ui = None;
         self.launcher = None;
@@ -4769,8 +4798,7 @@ impl App {
                             if ui.fields.get(*i).is_some_and(|f| f.key == key))
                     }) {
                         ui.selected = row;
-                        let roster: Vec<String> =
-                            zest_theme::builtin::all().into_iter().map(|t| t.id).collect();
+                        let roster: Vec<String> = crate::themes::ids();
                         let current = zest_config::ui::value_at(&values, &key)
                             .and_then(serde_json::Value::as_str);
                         ui.menu = Some(MenuState::roster(row, roster, current));
@@ -5009,6 +5037,9 @@ impl App {
         // the cards were built from, not a fresher one.
         self.fleet_view = fleet_hosts.clone();
         self.devices_view = self.fleet.as_ref().map(|f| f.devices()).unwrap_or_default();
+        // Same retention rule for the theme gallery: card index i must mean
+        // the same theme at click time that it meant at draw time.
+        self.themes_view = crate::themes::ids();
         let screen_model = profiles_model
             .map(crate::chrome::model::ScreenModel::Profiles)
             .or_else(|| self.build_screen_model(&fleet_hosts));
@@ -5523,9 +5554,50 @@ impl App {
                 }
             }
             (HitRegion::ThemeCard(i), MouseButton::Left) => {
-                let id = zest_theme::builtin::IDS.get(i).copied();
+                // The retained snapshot, not a fresh `themes::ids()`: the
+                // roster can change between the frame that drew the cards
+                // and the click (an import, a config reload), and index i
+                // must keep meaning the card the user aimed at.
+                let id = self.themes_view.get(i).cloned();
                 if let Some(id) = id {
-                    self.apply_theme_choice(id);
+                    self.apply_theme_choice(&id);
+                }
+            }
+            (HitRegion::ThemeImport, MouseButton::Left) => {
+                // The card's promise: whatever scheme file the clipboard
+                // holds becomes a theme. Parse failures land on the card
+                // itself — a click with feedback nowhere reads as dead UI,
+                // which is exactly what this card spent its life as.
+                let outcome = match self.clipboard.as_mut() {
+                    // No OS clipboard connection at all is a different fact
+                    // from an empty one — the user cannot fix it by copying.
+                    None => Err("the clipboard is unavailable in this session".to_string()),
+                    Some(clipboard) => match clipboard.get_text() {
+                        Ok(text) if !text.trim().is_empty() => {
+                            crate::themes::import_pasted(&text)
+                        }
+                        // Empty and non-text (an image, a file) both land
+                        // here — arboard reports each as "not available",
+                        // and the remedy is the same either way.
+                        _ => Err("the clipboard has no text — copy a scheme file first"
+                            .to_string()),
+                    },
+                };
+                match outcome {
+                    Ok(theme) => {
+                        self.theme_import_error = None;
+                        // Applying is the success feedback: the new card
+                        // appears, ringed active.
+                        self.apply_theme_choice(&theme.id);
+                        // Directly too: a re-import of the *active* theme
+                        // changes no config value, so the reload above
+                        // classifies it as a no-op and would repaint nothing.
+                        self.apply_theme();
+                    }
+                    Err(e) => {
+                        self.theme_import_error = Some(e);
+                        self.mark_chrome_dirty();
+                    }
                 }
             }
             (HitRegion::FleetCard(i), MouseButton::Left) => {
@@ -6075,9 +6147,7 @@ impl App {
             zest_config::ui::Widget::FontList => {
                 self.fonts.as_mut().map(Fonts::installed_families).unwrap_or_default()
             }
-            zest_config::ui::Widget::ThemePicker => {
-                zest_theme::builtin::all().into_iter().map(|t| t.id).collect()
-            }
+            zest_config::ui::Widget::ThemePicker => crate::themes::ids(),
             _ => return false,
         };
         if roster.is_empty() {
@@ -6209,8 +6279,7 @@ impl App {
             .unwrap_or_default();
         let next = self.settings_ui.as_ref().and_then(|ui| {
             let field = ui.fields.get(idx)?;
-            let themes: Vec<String> =
-                zest_theme::builtin::all().into_iter().map(|t| t.id).collect();
+            let themes: Vec<String> = crate::themes::ids();
             crate::settings_ui::adjust(field, &current, dir, &themes, &installed)
         });
         if let Some(value) = next {
@@ -6848,8 +6917,7 @@ impl App {
             .unwrap_or_default();
         let next = self.profiles_ui.as_ref().and_then(|ui| {
             let field = ui.fields.get(idx)?;
-            let themes: Vec<String> =
-                zest_theme::builtin::all().into_iter().map(|t| t.id).collect();
+            let themes: Vec<String> = crate::themes::ids();
             crate::profiles_ui::adjust_profile(field, &current, dir, &themes, &installed)
         });
         if let Some(value) = next {
@@ -6968,9 +7036,7 @@ impl App {
             zest_config::ui::Widget::FontList => {
                 self.fonts.as_mut().map(Fonts::installed_families).unwrap_or_default()
             }
-            zest_config::ui::Widget::ThemePicker => {
-                zest_theme::builtin::all().into_iter().map(|t| t.id).collect()
-            }
+            zest_config::ui::Widget::ThemePicker => crate::themes::ids(),
             _ => return false,
         };
         if roster.is_empty() {
@@ -9721,6 +9787,11 @@ impl App {
     /// a removed key has to fall back through the cascade, and there is no way
     /// to know what it falls back *to* without redoing the merge.
     fn reload_config(&mut self) {
+        // The theme directory rides the same reload: an imported file lands
+        // moments before the `appearance.theme` write that triggers this,
+        // and a hand-edited theme file deserves the same pickup an edited
+        // config.toml gets.
+        crate::themes::reload();
         let load = zest_config::load(&zest_config::Options {
             profile: self.profile.clone(),
             workspace_dir: std::env::current_dir().ok(),
@@ -9844,7 +9915,7 @@ impl App {
 
     /// Re-resolve the theme into the live palette.
     fn apply_theme(&mut self) {
-        let theme = zest_theme::builtin::get(self.effective_theme())
+        let theme = crate::themes::get(self.effective_theme())
             .unwrap_or_else(zest_theme::builtin::obsidian);
         let resolved = zest_theme::resolve(&theme);
         self.chrome_colors = ChromeColors::new(&theme.ui, &theme.effects, self.config.chrome_opacity);

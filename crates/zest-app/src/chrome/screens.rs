@@ -143,8 +143,8 @@ pub fn screen_overlay(
             fleet(account, cards, devices.as_ref(), area, colors, s, measure, out);
             None
         }
-        ScreenModel::Themes { cards } => {
-            themes(cards, area, colors, s, measure, out);
+        ScreenModel::Themes { cards, import_error } => {
+            themes(cards, import_error.as_deref(), area, colors, s, measure, out);
             None
         }
         // Hover matters only here (the Delete button's danger tint); the
@@ -691,6 +691,7 @@ fn fleet(
 
 fn themes(
     cards: &[ThemeCard],
+    import_error: Option<&str>,
     area: [f32; 4],
     colors: &ChromeColors,
     s: f32,
@@ -727,7 +728,9 @@ fn themes(
         let rect = [cx, cy, card_w, card_h];
 
         let Some(card) = cards.get(i) else {
-            // Import target: dashed, and honest about the formats.
+            // Import target: dashed, and honest about the formats. Live
+            // since #147 landed its parsers — clicking imports the scheme
+            // the clipboard holds, so the whole card is one hit region.
             out.rects.push(RectInstance::rounded(
                 rect,
                 CARD_RADIUS * s,
@@ -735,11 +738,12 @@ fn themes(
                 area,
             ));
             dashed_border(&mut out.rects, rect, s, colors.line, area);
+            out.hit.push(rect, HitRegion::ThemeImport);
             let line1 = "Import a scheme";
             let w1 = measure(line1, 12.5 * s, false, 0.0);
             out.texts.push(TextRun {
                 text: line1.into(),
-                pos: [cx + (card_w - w1) / 2.0, cy + card_h / 2.0 - 6.0 * s],
+                pos: [cx + (card_w - w1) / 2.0, cy + card_h / 2.0 - 26.0 * s],
                 max_width: w1 + 2.0,
                 color: colors.text_inactive,
                 clip: area,
@@ -747,15 +751,43 @@ fn themes(
                 bold: false,
                 tracking: 0.0,
             });
-            let line2 = ".itermcolors · Windows Terminal · base16 · Alacritty TOML";
-            let w2 = measure(line2, 11.0 * s, false, 0.0).min(card_w - 16.0 * s);
+            // The design's two-line format list — split, not truncated: a
+            // card advertising "bas…" advertises nothing.
+            for (row, line) in
+                [".itermcolors · Windows Terminal", "base16 / base24 · Alacritty TOML"]
+                    .into_iter()
+                    .enumerate()
+            {
+                let w = measure(line, 11.0 * s, false, 0.0).min(card_w - 16.0 * s);
+                out.texts.push(TextRun {
+                    text: line.into(),
+                    pos: [
+                        cx + ((card_w - w) / 2.0).max(8.0 * s),
+                        cy + card_h / 2.0 + (-6.0 + 16.0 * row as f32) * s,
+                    ],
+                    max_width: w,
+                    color: colors.text_faint,
+                    clip: area,
+                    px: 11.0 * s,
+                    bold: false,
+                    tracking: 0.0,
+                });
+            }
+            // The last line teaches the gesture — or says why the last
+            // attempt was refused, in its place: two messages at once would
+            // fight for a card that only has room to say one thing.
+            let (last, color) = match import_error {
+                Some(e) => (e, colors.danger),
+                None => ("copy a scheme file, then click here", colors.text_faint),
+            };
+            let w3 = measure(last, 10.5 * s, false, 0.0).min(card_w - 16.0 * s);
             out.texts.push(TextRun {
-                text: line2.into(),
-                pos: [cx + ((card_w - w2) / 2.0).max(8.0 * s), cy + card_h / 2.0 + 12.0 * s],
-                max_width: w2,
-                color: colors.text_faint,
+                text: last.into(),
+                pos: [cx + ((card_w - w3) / 2.0).max(8.0 * s), cy + card_h / 2.0 + 30.0 * s],
+                max_width: w3,
+                color,
                 clip: area,
-                px: 11.0 * s,
+                px: 10.5 * s,
                 bold: false,
                 tracking: 0.0,
             });
@@ -923,7 +955,7 @@ mod tests {
         let mut out = ChromeLayout::default();
         let area = [0.0, 46.0, 1200.0, 700.0];
         screen_overlay(
-            &ScreenModel::Themes { cards },
+            &ScreenModel::Themes { cards, import_error: None },
             area,
             &colors(),
             None,
@@ -933,18 +965,23 @@ mod tests {
         );
 
         let mut seen = std::collections::HashSet::new();
+        let mut seen_import = false;
         for x in (0..1200).step_by(4) {
             for y in (46..746).step_by(4) {
                 match out.hit.hit(x as f32, y as f32) {
                     Some(HitRegion::ThemeCard(i)) => {
                         seen.insert(i);
                     }
+                    Some(HitRegion::ThemeImport) => seen_import = true,
                     Some(HitRegion::ScreenPanel) => {}
                     other => panic!("({x},{y}) escaped the screen: {other:?}"),
                 }
             }
         }
         assert_eq!(seen.len(), n, "every theme card must answer as itself");
+        // The dashed card shipped drawn-but-dead for a while; a hit region
+        // is what separates an import target from decoration (#147).
+        assert!(seen_import, "the import card must be clickable");
     }
 
     /// A card carrying `sessions` sessions and hiding `hidden` more.
