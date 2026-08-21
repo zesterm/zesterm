@@ -129,6 +129,7 @@ measures both on a command of your choosing:
 
 ```sh
 cargo run -p zest-mcp --example token_probe -- --cmd "cargo build"
+cargo run -p zest-mcp --example token_probe -- --run "ls -la"   # via a shell, so `output` has blocks
 ```
 
 It spawns rather than replaying a fixture, because the recorded corpus has no

@@ -47,7 +47,7 @@
 //! cargo run -p zest-mcp --example token_probe -- --size 120x30 --cmd "ls -la"
 //! ```
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
 use zest_core::{Modes, Terminal};
@@ -95,6 +95,21 @@ const BYTES_PER_TOKEN_VT: f64 = 2.5;
 /// actually reads at. `--relay` sets 30.
 const DEFAULT_COALESCE_MS: u64 = 16;
 
+/// The framed size of one message, or a stop.
+///
+/// **Never `unwrap_or(0)`.** A failed encode silently subtracts a whole message
+/// from the transport column, and the answer still looks like a measurement --
+/// which is the one way this probe could mislead without anybody noticing.
+fn framed(msg: &HostMessage) -> usize {
+    match zest_proto::frame::encode(msg) {
+        Ok(b) => b.len(),
+        Err(e) => {
+            eprintln!("token_probe: a message would not frame ({e}); the byte counts would be wrong");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn cursor(t: &Terminal) -> CursorState {
     let c = t.cursor();
     CursorState {
@@ -125,6 +140,10 @@ fn main() -> std::process::ExitCode {
              the raw pty stream, the framed deltas, the `screen` tool's text,\n\
              and `output` per command block.\n\
              \n\
+             --cmd \"<program>\"  run a program directly; no shell, no blocks.\n\
+             --run \"<command>\"  type it into a shell, so `output` has blocks\n\
+             to report -- OSC 133 comes from precmd/preexec hooks, which do\n\
+             not fire for `zsh -c`.\n\
              --coalesce-ms <n>  how often a delta is asked for; default \
              {DEFAULT_COALESCE_MS}.\n\
              0 asks after every read, which is the worst case the protocol\n\
@@ -138,13 +157,32 @@ fn main() -> std::process::ExitCode {
     let coalesce = Duration::from_millis(
         flag(&args, "--coalesce-ms").and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_COALESCE_MS),
     );
-    let Some(command) = flag(&args, "--cmd") else {
-        eprintln!("token_probe needs --cmd \"<command>\"; see --help");
-        return std::process::ExitCode::FAILURE;
+    // `--run` drives the *shell*, which is the only way to reach `output`:
+    // OSC 133 comes from a shell's precmd/preexec hooks, and those do not fire
+    // for `zsh -c`. `--cmd` spawns the program directly and measures a session
+    // with no blocks in it at all.
+    let typed = flag(&args, "--run");
+    let command = match (flag(&args, "--cmd"), typed) {
+        (Some(c), None) => c.to_string(),
+        (None, Some(_)) => CommandSpec::default_shell().command_line,
+        (Some(_), Some(_)) => {
+            eprintln!("token_probe: --cmd runs a program, --run types into a shell; pick one");
+            return std::process::ExitCode::FAILURE;
+        }
+        (None, None) => {
+            eprintln!("token_probe needs --cmd \"<program>\" or --run \"<command>\"; see --help");
+            return std::process::ExitCode::FAILURE;
+        }
     };
 
     let mut spec = CommandSpec::default_shell();
-    spec.command_line = command.to_string();
+    spec.command_line = command.clone();
+    // Blocks, where the shell can carry them. Without this `output` is always
+    // "no OSC 133" and the fourth number never gets exercised at all -- which
+    // is how a bug in counting it would survive every run.
+    if let Some(dir) = std::env::var_os("TMPDIR").map(std::path::PathBuf::from) {
+        spec.enable_shell_integration(&dir);
+    }
     let mut pty = match zest_pty::NativePty::spawn(&spec, size) {
         Ok(p) => p,
         Err(e) => {
@@ -154,6 +192,22 @@ fn main() -> std::process::ExitCode {
     };
     let mut reader = pty.take_reader().expect("a reader");
 
+    // Typed as a person would, after the shell has drawn a prompt -- a command
+    // written before the hooks load produces no block, which is the same
+    // failure #363 chases in the live suite.
+    if let Some(line) = typed {
+        let mut writer = pty.writer();
+        let line = line.to_string();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(700));
+            let _ = writer.write_all(format!("{line}\r").as_bytes());
+            let _ = writer.flush();
+            std::thread::sleep(Duration::from_millis(400));
+            let _ = writer.write_all(b"exit\r");
+            let _ = writer.flush();
+        });
+    }
+
     let mut term = Terminal::new(usize::from(size.cols), usize::from(size.rows), HOST_SCROLLBACK);
     let mut enc = Encoder::new();
     let addr = SessionAddr { host: HostId::from_bytes([0x2e; 32]), session: SessionId(1) };
@@ -161,7 +215,7 @@ fn main() -> std::process::ExitCode {
     // Counted as the daemon sends it: a real framed `HostMessage`, not the
     // encoder's inner struct.
     let k = enc.keyframe(term.grid(), cursor(&term), term.modes(), term.title(), term.blocks());
-    let mut delta_bytes = zest_proto::frame::encode(&HostMessage::Keyframe {
+    let mut delta_bytes = framed(&HostMessage::Keyframe {
         session: addr,
         seq: Seq(term.seq()),
         cols: k.cols,
@@ -174,8 +228,7 @@ fn main() -> std::process::ExitCode {
         blocks_from: k.blocks_from,
         title: k.title.clone(),
         history_clears: k.history_clears,
-    })
-    .map_or(0, |b| b.len());
+    });
 
     // The client, so the last two numbers are what a tool would actually
     // return rather than a second reading of the host's grid.
@@ -210,17 +263,21 @@ fn main() -> std::process::ExitCode {
                 // the receiver already holds, so reading it off the host makes
                 // every delta claim to follow one the client never applied.
                 let base = replica.seq();
-                if d.ops.is_empty() && d.attrs.is_empty() {
+                // `blocks` too: `Delta` carries block upserts in their own
+                // field rather than as a `DeltaOp`, so a batch that only marks
+                // a command finished has no ops at all. Skipping those desyncs
+                // the replica's block list and undercounts `output` -- one of
+                // the four numbers this exists to report.
+                if d.ops.is_empty() && d.attrs.is_empty() && d.blocks.is_empty() {
                     continue;
                 }
                 updates += 1;
-                delta_bytes += zest_proto::frame::encode(&HostMessage::Update {
+                delta_bytes += framed(&HostMessage::Update {
                     session: addr,
                     base: Seq(base),
                     seq: Seq(term.seq()),
                     delta: d.clone(),
-                })
-                .map_or(0, |b| b.len());
+                });
                 // A `false` here is `Applied::NeedsKeyframe`: the replica has
                 // fallen behind and everything it reports afterwards describes
                 // a screen the host does not have. That would understate the
@@ -238,8 +295,16 @@ fn main() -> std::process::ExitCode {
             // A signal landing while a read is parked is not the end of the
             // stream, and treating it as one truncates the measurement.
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            // EOF on a Unix pty arrives as `EIO`, not a zero-length read.
-            Err(_) => break,
+            // Anything else is a failure, not an ending. `PtyReader` already
+            // normalizes EOF to `Ok(0)` on both platforms -- the Unix drain
+            // thread turns `EIO` into it and the Windows reader does the same
+            // with `ERROR_BROKEN_PIPE` -- so a real error here means the
+            // measurement is short by an unknown amount, and reporting it
+            // anyway would be reporting a number that is simply wrong.
+            Err(e) => {
+                eprintln!("token_probe: read failed after {pty_bytes} bytes: {e}");
+                return std::process::ExitCode::FAILURE;
+            }
         }
     }
     // The last delta, unconditionally: the loop skips whatever fell inside the
@@ -247,16 +312,15 @@ fn main() -> std::process::ExitCode {
     // up to `coalesce` before the command ended -- which for a fast command is
     // no screen at all.
     let d = enc.delta(term.grid(), cursor(&term), term.modes(), term.title(), term.blocks());
-    if !d.ops.is_empty() || !d.attrs.is_empty() {
+    if !d.ops.is_empty() || !d.attrs.is_empty() || !d.blocks.is_empty() {
         let base = replica.seq();
         updates += 1;
-        delta_bytes += zest_proto::frame::encode(&HostMessage::Update {
+        delta_bytes += framed(&HostMessage::Update {
             session: addr,
             base: Seq(base),
             seq: Seq(term.seq()),
             delta: d.clone(),
-        })
-        .map_or(0, |b| b.len());
+        });
         assert!(replica.apply(&d, base, term.seq()), "the final delta must apply");
     }
     let elapsed = started.elapsed();
@@ -266,7 +330,10 @@ fn main() -> std::process::ExitCode {
     let output_bytes: usize = blocks
         .iter()
         .filter_map(|b| replica.block_rows(b.id))
-        .map(|rows| rows.iter().map(|r| r.len() + 1).sum::<usize>())
+        // `join`, not a sum of lengths plus one each: `output` returns the rows
+        // joined by newlines with none trailing, so counting a separator per row
+        // overstates every block by one.
+        .map(|rows| rows.join("\n").len())
         .sum();
 
     let tok = |bytes: usize, per: f64| (bytes as f64 / per).round() as usize;
