@@ -181,15 +181,15 @@ test('the open block covers the last non-blank row', () => {
 // the old one. These tests replay that shape synthetically — no recording has
 // a resize, which is exactly how the misjoin shipped unnoticed.
 
-function synthRow(line: bigint, text: string): RowPayload {
+function synthRow(line: number, text: string): RowPayload {
   return { line, runs: [{ attr: 0, cells: [...text].length, text, marks: [] }], wrapped: false };
 }
 
 function synthBlock(
   id: number,
-  prompt: bigint,
-  output: bigint | null,
-  end: bigint | null,
+  prompt: number,
+  output: number | null,
+  end: number | null,
 ): BlockPayload {
   return {
     id,
@@ -206,23 +206,23 @@ const CURSOR = { row: 0, col: 0, visible: true, shape: 0 } as const;
 
 test('a width-change keyframe stops old-numbering scrollback reaching live blocks', () => {
   const view = new GridView();
-  view.applyKeyframe({ cols: 10, rows_data: [synthRow(6n, 'old 6')], attrs: [], cursor: CURSOR, modes: 0 });
+  view.applyKeyframe({ cols: 10, rows_data: [synthRow(6, 'old 6')], attrs: [], cursor: CURSOR, modes: 0 });
   // Lines that scrolled out at 10 cols: kept client-side, ids 6..9.
   view.applyDelta({
     blocks: [],
     attrs: [],
-    ops: [6n, 7n, 8n, 9n].map((l) => ({ op: 'sb_push' as const, payload: synthRow(l, `old ${l}`) })),
+    ops: [6, 7, 8, 9].map((l) => ({ op: 'sb_push' as const, payload: synthRow(l, `old ${l}`) })),
   });
 
   // Widening rewraps: the same session now occupies fewer rows, so the live
   // ids come back *lower* than the ids the kept scrollback was recorded under.
   view.applyKeyframe({
     cols: 20,
-    rows_data: [2n, 3n, 4n, 5n].map((l) => synthRow(l, `new ${l}`)),
+    rows_data: [2, 3, 4, 5].map((l) => synthRow(l, `new ${l}`)),
     attrs: [],
     cursor: CURSOR,
     modes: 0,
-    blocks: [synthBlock(0, 0n, 1n, 3n), synthBlock(1, 4n, 5n, null)],
+    blocks: [synthBlock(0, 0, 1, 3), synthBlock(1, 4, 5, null)],
     blocks_from: 0,
   });
 
@@ -237,7 +237,7 @@ test('a width-change keyframe stops old-numbering scrollback reaching live block
   assert.ok(open, 'the resize keyframe carries an open block');
   assert.deepEqual(
     [...open.promptRows, ...open.outputRows].map((r) => r.line),
-    [4n, 5n],
+    [4, 5],
     'the open block must hold exactly its reanchored rows — rows kept under the pre-resize ' +
       'numbering describe other text and must not render inside a live command',
   );
@@ -247,11 +247,11 @@ test('a width-change keyframe drops evicted blocks anchored in the old numbering
   const view = new GridView();
   view.applyKeyframe({
     cols: 10,
-    rows_data: [6n, 7n, 8n, 9n].map((l) => synthRow(l, `old ${l}`)),
+    rows_data: [6, 7, 8, 9].map((l) => synthRow(l, `old ${l}`)),
     attrs: [],
     cursor: CURSOR,
     modes: 0,
-    blocks: [synthBlock(0, 6n, 7n, 9n)],
+    blocks: [synthBlock(0, 6, 7, 9)],
     blocks_from: 0,
   });
 
@@ -260,11 +260,11 @@ test('a width-change keyframe drops evicted blocks anchored in the old numbering
   // now overlap the renumbered live rows.
   view.applyKeyframe({
     cols: 20,
-    rows_data: [2n, 3n, 4n, 5n].map((l) => synthRow(l, `new ${l}`)),
+    rows_data: [2, 3, 4, 5].map((l) => synthRow(l, `new ${l}`)),
     attrs: [],
     cursor: CURSOR,
     modes: 0,
-    blocks: [synthBlock(1, 4n, 5n, null)],
+    blocks: [synthBlock(1, 4, 5, null)],
     blocks_from: 1,
   });
 
@@ -289,28 +289,28 @@ test('a same-width keyframe keeps client-side history', () => {
   const view = new GridView();
   view.applyKeyframe({
     cols: 10,
-    rows_data: [synthRow(4n, 'live')],
+    rows_data: [synthRow(4, 'live')],
     attrs: [],
     cursor: CURSOR,
     modes: 0,
-    blocks: [synthBlock(0, 0n, 1n, 2n)],
+    blocks: [synthBlock(0, 0, 1, 2)],
     blocks_from: 0,
   });
   view.applyDelta({
     blocks: [],
     attrs: [],
-    ops: [{ op: 'sb_push', payload: synthRow(3n, 'scrolled out') }],
+    ops: [{ op: 'sb_push', payload: synthRow(3, 'scrolled out') }],
   });
 
   // Height changes and reconnects re-key nothing: line ids only renumber when
   // the *width* changes, so this keyframe must not cost the phone its history.
   view.applyKeyframe({
     cols: 10,
-    rows_data: [synthRow(4n, 'live'), synthRow(5n, 'grew')],
+    rows_data: [synthRow(4, 'live'), synthRow(5, 'grew')],
     attrs: [],
     cursor: CURSOR,
     modes: 0,
-    blocks: [synthBlock(1, 4n, 5n, null)],
+    blocks: [synthBlock(1, 4, 5, null)],
     blocks_from: 1,
   });
 
@@ -383,21 +383,21 @@ test('a stale open block stops at the next block instead of claiming the session
   const view = new GridView();
   view.applyKeyframe({
     cols: 20,
-    rows_data: [0n, 1n, 2n, 3n].map((l) => synthRow(l, `row ${l}`)),
+    rows_data: [0, 1, 2, 3].map((l) => synthRow(l, `row ${l}`)),
     attrs: [],
     cursor: CURSOR,
     modes: 0,
     blocks: [
       {
         id: 0,
-        prompt_line: 0n,
+        prompt_line: 0,
         output_line: null,
         end_line: null,
         state: { state: 'prompt' },
         command: '',
         cwd: '/',
       },
-      synthBlock(1, 2n, 3n, null),
+      synthBlock(1, 2, 3, null),
     ],
     blocks_from: 0,
   });
@@ -406,12 +406,12 @@ test('a stale open block stops at the next block instead of claiming the session
   assert.equal(slices.length, 2);
   assert.deepEqual(
     [...(slices[0]?.promptRows ?? []), ...(slices[0]?.outputRows ?? [])].map((r) => r.line),
-    [0n, 1n],
+    [0, 1],
     'the stale block is bounded by where the next one starts',
   );
   assert.deepEqual(
     [...(slices[1]?.promptRows ?? []), ...(slices[1]?.outputRows ?? [])].map((r) => r.line),
-    [2n, 3n],
+    [2, 3],
     'the live block keeps its own rows — including the row the user is typing on',
   );
 });
@@ -423,18 +423,18 @@ test('the last block still runs to the bottom', () => {
   const view = new GridView();
   view.applyKeyframe({
     cols: 20,
-    rows_data: [0n, 1n, 2n].map((l) => synthRow(l, `row ${l}`)),
+    rows_data: [0, 1, 2].map((l) => synthRow(l, `row ${l}`)),
     attrs: [],
     cursor: CURSOR,
     modes: 0,
-    blocks: [synthBlock(0, 0n, 1n, null)],
+    blocks: [synthBlock(0, 0, 1, null)],
     blocks_from: 0,
   });
 
   const { slices, tail } = sliceBlocks(view);
   assert.deepEqual(
     (slices[0]?.outputRows ?? []).map((r) => r.line),
-    [1n, 2n],
+    [1, 2],
     'an open final block takes every row below its output line',
   );
   assert.equal(tail.length, 0, 'nothing escapes past the open block');
@@ -450,11 +450,11 @@ test('a height-change keyframe keeps the rows that scrolled out of the viewport'
   const view = new GridView();
   view.applyKeyframe({
     cols: 20,
-    rows_data: [0n, 1n, 2n, 3n].map((l) => synthRow(l, `line ${l}`)),
+    rows_data: [0, 1, 2, 3].map((l) => synthRow(l, `line ${l}`)),
     attrs: [],
     cursor: CURSOR,
     modes: 0,
-    blocks: [synthBlock(0, 0n, 1n, 3n)],
+    blocks: [synthBlock(0, 0, 1, 3)],
     blocks_from: 0,
   });
 
@@ -462,11 +462,11 @@ test('a height-change keyframe keeps the rows that scrolled out of the viewport'
   // history now. Same width, so the ids still mean what they meant.
   view.applyKeyframe({
     cols: 20,
-    rows_data: [4n, 5n, 6n, 7n].map((l) => synthRow(l, `line ${l}`)),
+    rows_data: [4, 5, 6, 7].map((l) => synthRow(l, `line ${l}`)),
     attrs: [],
     cursor: CURSOR,
     modes: 0,
-    blocks: [synthBlock(0, 0n, 1n, 3n)],
+    blocks: [synthBlock(0, 0, 1, 3)],
     blocks_from: 0,
   });
 
@@ -489,22 +489,22 @@ test('a height grow takes its rows back out of scrollback instead of holding the
   // line filed into its block twice, and duplicate keys in the pane's keyed
   // row list. (#247)
   const view = new GridView();
-  const kf = (lines: bigint[]): void =>
+  const kf = (lines: number[]): void =>
     view.applyKeyframe({
       cols: 20,
       rows_data: lines.map((l) => synthRow(l, `line ${l}`)),
       attrs: [],
       cursor: CURSOR,
       modes: 0,
-      blocks: [synthBlock(0, 0n, 1n, 7n)],
+      blocks: [synthBlock(0, 0, 1, 7)],
       blocks_from: 0,
     });
 
-  kf([0n, 1n, 2n, 3n, 4n, 5n, 6n, 7n]);
-  kf([6n, 7n]); // shrunk: 0..5 became history
+  kf([0, 1, 2, 3, 4, 5, 6, 7]);
+  kf([6, 7]); // shrunk: 0..5 became history
   assert.equal(view.scrollback.length, 6, 'the shrink did not bank the displaced rows');
 
-  kf([0n, 1n, 2n, 3n, 4n, 5n, 6n, 7n]); // grown back: the host gave them back
+  kf([0, 1, 2, 3, 4, 5, 6, 7]); // grown back: the host gave them back
 
   assert.deepEqual(
     view.scrollback.map((r) => r.line),
@@ -516,7 +516,7 @@ test('a height grow takes its rows back out of scrollback instead of holding the
   assert.equal(rows.length, 8, `the block rendered ${rows.length} rows for 8 lines`);
   assert.deepEqual(
     rows.map((r) => r.line),
-    [0n, 1n, 2n, 3n, 4n, 5n, 6n, 7n],
+    [0, 1, 2, 3, 4, 5, 6, 7],
     'a line was rendered twice',
   );
 });
@@ -527,7 +527,7 @@ test('dragging the height repeatedly does not accumulate duplicates', () => {
   // dozens of times, which is why this asserts on the shape after several
   // rather than trusting one to generalise. (#247)
   const view = new GridView();
-  const kf = (lines: bigint[]): void =>
+  const kf = (lines: number[]): void =>
     view.applyKeyframe({
       cols: 20,
       rows_data: lines.map((l) => synthRow(l, `line ${l}`)),
@@ -536,14 +536,14 @@ test('dragging the height repeatedly does not accumulate duplicates', () => {
       modes: 0,
     });
 
-  kf([0n, 1n, 2n, 3n]);
+  kf([0, 1, 2, 3]);
   for (let i = 0; i < 5; i++) {
-    kf([2n, 3n]);
-    kf([0n, 1n, 2n, 3n]);
+    kf([2, 3]);
+    kf([0, 1, 2, 3]);
   }
 
   const seen = [...view.scrollback, ...view.rows].filter((r) => r.line !== NO_LINE).map((r) => r.line);
-  assert.deepEqual(seen, [0n, 1n, 2n, 3n], `a drag left ${seen.length} rows for 4 lines`);
+  assert.deepEqual(seen, [0, 1, 2, 3], `a drag left ${seen.length} rows for 4 lines`);
 });
 
 test('a width-change keyframe still discards the rows it cannot renumber', () => {
@@ -553,14 +553,14 @@ test('a width-change keyframe still discards the rows it cannot renumber', () =>
   const view = new GridView();
   view.applyKeyframe({
     cols: 20,
-    rows_data: [0n, 1n, 2n, 3n].map((l) => synthRow(l, `line ${l}`)),
+    rows_data: [0, 1, 2, 3].map((l) => synthRow(l, `line ${l}`)),
     attrs: [],
     cursor: CURSOR,
     modes: 0,
   });
   view.applyKeyframe({
     cols: 10,
-    rows_data: [4n, 5n].map((l) => synthRow(l, `line ${l}`)),
+    rows_data: [4, 5].map((l) => synthRow(l, `line ${l}`)),
     attrs: [],
     cursor: CURSOR,
     modes: 0,

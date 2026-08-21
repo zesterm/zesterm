@@ -17,7 +17,7 @@ import type { AttrDef, Delta, RowPayload } from '../src/wire.ts';
 
 function row(line: number, text: string): RowPayload {
   return {
-    line: BigInt(line),
+    line,
     runs: [{ attr: 0, cells: [...text].length, text, marks: [] }],
     wrapped: false,
   };
@@ -68,7 +68,7 @@ test('attributes arrive before the runs that use them', () => {
         op: 'row',
         row: 0,
         payload: {
-          line: 0n,
+          line: 0,
           runs: [{ attr: 7, cells: 3, text: 'red', marks: [] }],
           wrapped: false,
         },
@@ -108,7 +108,7 @@ test('displacing and taking back cannot both apply to one keyframe', () => {
   // Shrink: rows 0..1 are displaced into scrollback (nothing was held).
   v.applyKeyframe({ cols: 20, rows_data: [row(0, 'a'), row(1, 'b'), row(2, 'c')], attrs: [], cursor, modes: 0 });
   v.applyKeyframe({ cols: 20, rows_data: [row(2, 'c')], attrs: [], cursor, modes: 0 });
-  assert.deepEqual(v.scrollback.map((r) => r.line), [0n, 1n], 'the shrink displaced nothing');
+  assert.deepEqual(v.scrollback.map((r) => r.line), [0, 1], 'the shrink displaced nothing');
 
   // Grow: the keyframe re-names 0..2, so the take-back fires and the
   // displaced set is necessarily empty.
@@ -118,7 +118,7 @@ test('displacing and taking back cannot both apply to one keyframe', () => {
     [],
     'the take-back left a re-delivered line in history',
   );
-  assert.deepEqual(v.rows.map((r) => r.line), [0n, 1n, 2n]);
+  assert.deepEqual(v.rows.map((r) => r.line), [0, 1, 2]);
 });
 
 test('a keyframe that says history was cleared empties scrollback', () => {
@@ -182,7 +182,7 @@ test('a run states its cell count independently of its text', () => {
         op: 'row',
         row: 0,
         payload: {
-          line: 0n,
+          line: 0,
           runs: [
             { attr: 0, cells: 1, text: '世', marks: [] },
             { attr: 0, cells: 1, text: '', marks: [] },
@@ -211,7 +211,7 @@ test('marks land on the right cell after several runs', () => {
         op: 'row',
         row: 0,
         payload: {
-          line: 0n,
+          line: 0,
           runs: [
             { attr: 0, cells: 4, text: 'abcd', marks: [] },
             { attr: 0, cells: 2, text: 'ef', marks: [{ at: 1, marks: '́' }] },
@@ -249,7 +249,7 @@ test('scrollback accumulates client side', () => {
 
 test('an unknown attribute renders default rather than failing', () => {
   const cells = expandRow(
-    { line: 0n, runs: [{ attr: 9999, cells: 2, text: 'hi', marks: [] }], wrapped: false },
+    { line: 0, runs: [{ attr: 9999, cells: 2, text: 'hi', marks: [] }], wrapped: false },
     2,
     NO_ATTRS,
   );

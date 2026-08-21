@@ -26,7 +26,7 @@ import { hexToBytes, loadFixture } from './fixtures.ts';
 function block(id: number, over: Partial<BlockPayload> = {}): BlockPayload {
   return {
     id,
-    prompt_line: BigInt(id * 10),
+    prompt_line: id * 10,
     output_line: null,
     end_line: null,
     state: { state: 'running' },
@@ -167,7 +167,7 @@ test('exit_code null is preserved as null, never coerced to success', () => {
     cwd: '/src',
   });
   assert.deepEqual(parsed.state, { state: 'finished', exit_code: null });
-  assert.equal(parsed.end_line, 4n, 'line ids coerce to bigint at the boundary');
+  assert.equal(parsed.end_line, 4, 'line ids are plain numbers, as the bindings say');
   assert.equal(parsed.started_ms, undefined, 'a host that predates times sends none');
 });
 

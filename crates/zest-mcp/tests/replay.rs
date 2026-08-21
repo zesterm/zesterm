@@ -592,3 +592,137 @@ fn a_run_is_refused_for_every_frame_a_recording_spends_in_an_editor() {
         );
     }
 }
+
+/// Attributes survive the replay, and name the rows the text names.
+///
+/// The whole point of #348: flattened to characters, text an application is
+/// *offering* is identical to text the user committed. These assert against
+/// real recordings rather than a hand-built grid, because what matters is that
+/// the bits arrive over the wire and land on the right cells -- a synthetic
+/// terminal would prove only that the mask works.
+#[test]
+fn a_recorded_session_reports_where_its_attributes_are() {
+    // `git log --color` paints its hashes and refs. Bold is the one it uses,
+    // and it is what a `dim` ghost would look like structurally.
+    let r = replay("git-log");
+    let (spans, omitted) = r.styled_spans(400);
+    assert_eq!(omitted, 0, "a 30-row screen must fit well under the ceiling");
+    assert!(!spans.is_empty(), "a coloured git log carries attributes: {spans:?}");
+    assert!(
+        spans.iter().any(|s| s.names().contains(&"bold")),
+        "git log --color emits bold; got {:?}",
+        spans.iter().map(zest_mcp::StyledSpan::names).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_span_never_names_a_line_the_text_does_not_have() {
+    // The failure this prevents is the worst one available here: an attribute
+    // reported against somebody else's line, which is *more* misleading than
+    // reporting nothing. `screen_text` and `styled_spans` trim through one
+    // function so they cannot disagree; this holds that across real sessions.
+    for name in ["git-log", "vim-macos", "dir-colors", "blocks-zsh", "unicode-wide"] {
+        let r = replay(name);
+        let text = r.screen_text();
+        let lines: Vec<&str> = text.lines().collect();
+        let (spans, _) = r.styled_spans(4_000);
+        for s in &spans {
+            assert!(
+                s.row < lines.len(),
+                "{name}: span names row {} of {} lines: {s:?}",
+                s.row,
+                lines.len()
+            );
+            assert!(s.len > 0, "{name}: an empty span says nothing: {s:?}");
+            assert!(!s.names().is_empty(), "{name}: a span with no attribute: {s:?}");
+        }
+    }
+}
+
+#[test]
+fn layout_bits_are_not_reported_as_styling() {
+    // `WIDE`, `WIDE_SPACER` and `WRAPLINE` share the flags word with the visual
+    // bits. 250 of 274 flagged runs in the vim recording are `WRAPLINE` alone,
+    // so reporting them would bury the signal in exactly the case the caller
+    // most needs it. `unicode-wide` is the one that would show `WIDE` leaking.
+    for name in ["vim-macos", "unicode-wide", "astral", "combining-marks"] {
+        let r = replay(name);
+        let (spans, _) = r.styled_spans(4_000);
+        for s in &spans {
+            assert!(
+                zest_mcp::StyledSpan::VISUAL.contains(s.flags),
+                "{name}: a layout bit reached a span: {s:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_plain_screen_reports_no_spans_at_all() {
+    // The common case -- a shell at a prompt -- must cost nothing, which is
+    // what lets this ride every `screen` call instead of being asked for.
+    let r = replay("basic-echo");
+    let (spans, omitted) = r.styled_spans(400);
+    assert!(spans.is_empty(), "unstyled output must produce no spans: {spans:?}");
+    assert_eq!(omitted, 0);
+}
+
+#[test]
+fn the_recorded_corpus_is_almost_free_of_visual_attributes_and_that_is_the_measurement() {
+    // Not a formality -- it is the number that makes this affordable on every
+    // `screen` call rather than behind a flag. These recordings are rich in
+    // *colour*, which is deliberately not reported; what is left is a handful
+    // of bold runs across five sessions.
+    //
+    // It is also the honest statement of a blind spot: no recording here
+    // contains reverse video at all, so the selection-bar case #348 turns on is
+    // covered by the VT-driven tests in `src/session.rs` and cannot be covered
+    // from a fixture. Same shape as #17.
+    for name in ["git-log", "vim-macos", "dir-colors", "blocks-zsh", "basic-echo"] {
+        let r = replay(name);
+        let (spans, omitted) = r.styled_spans(400);
+        assert_eq!(omitted, 0, "{name}: a recorded screen must not reach the ceiling");
+        assert!(
+            spans.len() <= 8,
+            "{name}: {} spans -- if a recording ever gets rich, re-measure the claim that \
+             this is free rather than quietly paying for it",
+            spans.len()
+        );
+    }
+}
+
+/// The fast blankness test is the slow one, on every recorded row.
+///
+/// `visible_rows` stopped building a `String` per row to decide where the
+/// screen ends (a prompt on an 80x24 grid asks about twenty-two empty rows to
+/// find two full ones). The risk in that swap is not speed, it is *definition*:
+/// a predicate that disagreed with `Row::text().trim().is_empty()` by one row
+/// would move where `screen_text` stops and renumber every `styled` span with
+/// it, silently. So the optimization is held against the thing it replaced,
+/// across every row of every recording rather than the last frame alone.
+#[test]
+fn a_blank_row_is_the_one_the_text_would_have_dropped() {
+    for name in ["git-log", "vim-macos", "dir-colors", "blocks-zsh", "basic-echo", "astral", "combining-marks", "unicode-wide"] {
+        replay_watching(name, |r| {
+            let text = r.screen_text();
+            let lines = text.lines().count();
+            let (spans, _) = r.styled_spans(4_000);
+            for s in &spans {
+                assert!(
+                    s.row < lines,
+                    "{name}: the blankness rule moved -- span names row {} of {lines}",
+                    s.row
+                );
+            }
+            // `screen_text` drops *trailing* blanks only, so the last line it
+            // keeps must itself be non-blank. That is the property the two
+            // predicates have to agree on, and the one a wrong rule breaks.
+            if let Some(last) = text.lines().next_back() {
+                assert!(
+                    !last.trim().is_empty(),
+                    "{name}: a trailing blank row survived, so the rule disagrees with `text()`"
+                );
+            }
+        });
+    }
+}

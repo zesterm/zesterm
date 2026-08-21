@@ -65,20 +65,16 @@ impl RemoteWriter<'_> {
         let grid = self.state.grid_mut();
         let target = grid.row_mut(row);
         target.id = id;
-        // Both the row flag and the cells are copied exactly as the host sent
-        // them, and neither is derived from the other.
-        //
-        // `Grid::set_wrapped` is the tempting call here and is wrong: it sets
-        // `CellFlags::WRAPLINE` on the last cell *from* `row.wrapped`, so on a
-        // host row where the two disagree — which happens, because the parser
-        // sets them at different moments — it would erase a flag that arrived
-        // in the cells. The client's job is to reproduce the host, including
-        // any inconsistency in it, not to normalize on the way in.
-        target.wrapped = wrapped;
         let dst = target.cells_mut();
         for (i, slot) in dst.iter_mut().enumerate() {
             *slot = cells.get(i).copied().unwrap_or_default();
         }
+        // After the cells, which would overwrite the flag; and from the wire's
+        // row-level bit rather than trusting the copied cells, because cells
+        // shorter than the grid are padded with defaults -- a row whose tail
+        // was trimmed or restored from text never carried the cell that holds
+        // `WRAPLINE`, and that cell is the only stored form of the fact (#219).
+        target.set_wrapped(wrapped);
         self.state.touch();
     }
 
@@ -376,6 +372,22 @@ mod tests {
         t.remote().write_row(0, 1, &row_of("XXXXXXXXXX"), false);
         t.remote().write_row(0, 2, &row_of("ab"), false);
         assert_eq!(t.grid().row(0).text().trim_end(), "ab");
+    }
+
+    #[test]
+    fn a_wrapped_row_arriving_short_still_reads_back_wrapped() {
+        // Cells shorter than the grid are padded with defaults, so the cell
+        // that carries `WRAPLINE` may never arrive -- the payload's row-level
+        // bit is what survives, and it must land back on the last cell,
+        // because that cell is the only stored form of the fact (#219).
+        // Losing it here turns one pasted command into two broken fragments
+        // and makes the next reflow break a logical line in half.
+        let mut t = Terminal::new(10, 3, 100);
+        t.remote().write_row(0, 1, &row_of("ab"), true);
+        assert!(t.grid().row(0).wrapped(), "the wire's wrapped bit was lost in the copy");
+
+        t.remote().write_row(0, 1, &row_of("ab"), false);
+        assert!(!t.grid().row(0).wrapped(), "a rewrite must also be able to take the wrap away");
     }
 
     #[test]

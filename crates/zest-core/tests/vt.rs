@@ -60,7 +60,7 @@ fn wrapped_rows_are_marked() {
     let t = run(5, 3, "abcdef");
     // Needed so copying a wrapped line does not insert a newline, and so
     // reflow can rejoin the rows later.
-    assert!(t.grid().row(0).wrapped);
+    assert!(t.grid().row(0).wrapped());
     assert!(t.grid().cell(0, 4).unwrap().flags.contains(CellFlags::WRAPLINE));
 }
 
@@ -1291,7 +1291,7 @@ fn conpty_repaint(t: &Terminal) -> Vec<u8> {
     while r < rows {
         // Collect one logical line, the way the shell printed it.
         let mut text = String::new();
-        while r < rows && t.grid().row(r).wrapped {
+        while r < rows && t.grid().row(r).wrapped() {
             text.push_str(&t.grid().row(r).text());
             r += 1;
         }
@@ -1321,11 +1321,13 @@ fn conpty_repaint(t: &Terminal) -> Vec<u8> {
 
 #[test]
 fn erasing_a_wrapped_row_to_its_end_stops_it_being_wrapped() {
-    // `wrapped` is one fact kept in two places -- the row's own flag and
+    // `wrapped` was one fact kept in two places -- the row's own bool and
     // `CellFlags::WRAPLINE` on its last cell, written together by
-    // `Grid::set_wrapped`. An erase blanks the cells, which clears the second,
-    // and left the first alone: the row went on claiming it continued into the
-    // next one while the cell that said so had been erased.
+    // `Grid::set_wrapped`. An erase blanked the cells, which cleared the
+    // second and left the first alone: the row went on claiming it continued
+    // into the next one while the cell that said so had been erased. #219
+    // removed the bool, so this now holds by construction; the test stays as
+    // the regression guard for the erase path that first paid for the drift.
     //
     // Not a corner. Every row of a ConPTY resize repaint is terminated with
     // `ESC[K` (#205), and the repaint overwrites rows *in place* -- it never
@@ -1336,11 +1338,11 @@ fn erasing_a_wrapped_row_to_its_end_stops_it_being_wrapped() {
     // anchors the reanchor had mapped perfectly correctly. (#200)
     let mut t = Terminal::new(5, 3, 100);
     t.advance(b"abcdefgh");
-    assert!(t.grid().row(0).wrapped, "the fixture did not wrap");
+    assert!(t.grid().row(0).wrapped(), "the fixture did not wrap");
 
     t.advance(b"\x1b[1;1H\x1b[K");
     assert!(
-        !t.grid().row(0).wrapped,
+        !t.grid().row(0).wrapped(),
         "the row was erased to its end and still claims to continue into the next"
     );
 
@@ -1351,6 +1353,37 @@ fn erasing_a_wrapped_row_to_its_end_stops_it_being_wrapped() {
         "\nfgh",
         "reflow rejoined an erased row with the one below it, dragging `fgh` up onto \
          a line it never belonged to"
+    );
+}
+
+#[test]
+fn overwriting_a_wrapped_row_in_full_without_an_erase_stops_it_being_wrapped() {
+    // The sibling of the erase case above, and the reason the fact is now
+    // stored once: a repaint that prints straight across the row -- vim
+    // redrawing a shorter line corner to corner, no `ESC[K` -- replaces the
+    // last cell, which is where `WRAPLINE` lives. When `Row::wrapped` was a
+    // second copy of the fact, nothing on this path touched it, so the row
+    // went on claiming it continued into the next and the following reflow
+    // rejoined two logical lines that were never one. (#219)
+    let mut t = Terminal::new(5, 3, 100);
+    t.advance(b"abcdefgh");
+    assert!(t.grid().row(0).wrapped(), "the fixture did not wrap");
+
+    // Home, then rewrite row 0 corner to corner with plain prints. The fifth
+    // character lands in the last column and defers the wrap, so nothing here
+    // marks the row wrapped again.
+    t.advance(b"\x1b[1;1HVWXYZ");
+    assert!(
+        !t.grid().row(0).wrapped(),
+        "the whole row was overwritten and still claims to continue into the next"
+    );
+
+    // The consequence: without it, this reads "VWXYZfgh" on one line.
+    t.resize(20, 3);
+    assert_eq!(
+        screen(&t),
+        "VWXYZ\nfgh",
+        "reflow rejoined an overwritten row with the one below it"
     );
 }
 

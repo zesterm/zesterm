@@ -136,7 +136,7 @@ impl ProfileIdentity {
 /// (re-)resolve and terminal (re-)seed time only — never per frame, so the
 /// warn fires once per transition instead of once per redraw.
 pub(crate) fn resolve_scheme(scheme: &str) -> Option<zest_theme::ResolvedPalette> {
-    match zest_theme::builtin::get(scheme) {
+    match crate::themes::get(scheme) {
         Some(theme) => Some(zest_theme::resolve(&theme)),
         None => {
             tracing::warn!(scheme, "unknown colour scheme; the tab follows the window palette");

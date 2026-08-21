@@ -11,8 +11,14 @@ export type RowPayload = {
  * Absolute rather than viewport-relative so a selection, a command block,
  * and a scrollback request all name the same thing on every client even as
  * output pushes the viewport along.
+ *
+ * `number`, not the `bigint` ts-rs would derive: `rmp-serde` writes the
+ * narrowest integer that fits, so every realistic id reaches JavaScript
+ * as a plain `number` — and the one id outside ±2^53 a host actually
+ * sends, the `i64::MIN` a blank row is padded with, is a power of two
+ * and therefore exact as a double (#14).
  */
-line: bigint, runs: Array<Run>, 
+line: number, runs: Array<Run>, 
 /**
  * The line continues onto the next one rather than ending.
  *

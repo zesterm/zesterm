@@ -397,7 +397,13 @@ pub enum ScreenModel {
         /// every row of it is the account's data.
         devices: Option<FleetDevicesModel>,
     },
-    Themes { cards: Vec<ThemeCard> },
+    Themes {
+        cards: Vec<ThemeCard>,
+        /// Why the last clipboard import was refused — drawn inside the
+        /// dashed card, in place of its hint line. `None` after a success:
+        /// the new card appearing *is* the success feedback.
+        import_error: Option<String>,
+    },
     /// The Profiles tab's pane: the §12 editor. Boxed because this variant
     /// is an order of magnitude bigger than its siblings and `ScreenModel`
     /// travels by value through the chrome model.

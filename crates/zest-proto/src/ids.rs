@@ -35,9 +35,13 @@ pub struct ClientId(
 );
 
 /// A session, unique within one host.
+///
+/// `ts(type = "number")` for `Seq`'s reason (see `lib.rs`): the wire carries
+/// the narrowest integer that fits, ids are allocated counting up from one,
+/// and a `bigint` binding described a value no host ever sends (#14).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-pub struct SessionId(pub u64);
+pub struct SessionId(#[cfg_attr(feature = "ts", ts(type = "number"))] pub u64);
 
 /// A session anywhere in the mesh.
 ///

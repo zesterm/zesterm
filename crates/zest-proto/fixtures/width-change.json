@@ -1,0 +1,1266 @@
+{
+  "schema": 1,
+  "protocol": 3,
+  "recording": "width-change",
+  "source": "synthetic",
+  "cols": 40,
+  "rows": 6,
+  "frames": [
+    {
+      "kind": "keyframe",
+      "seq": 0,
+      "wire": "520100008ba174a86b65796672616d65a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a373657100a4636f6c7328a4726f777306a9726f77735f646174619683a46c696e6500a472756e7390a777726170706564c283a46c696e6501a472756e7390a777726170706564c283a46c696e6502a472756e7390a777726170706564c283a46c696e6503a472756e7390a777726170706564c283a46c696e6504a472756e7390a777726170706564c283a46c696e6505a472756e7390a777726170706564c2a5617474727390a6637572736f7284a3726f7700a3636f6c00a776697369626c65c3a5736861706500a56d6f64657311ab626c6f636b735f66726f6d00ae686973746f72795f636c6561727300",
+      "expect": {
+        "cursor": {
+          "row": 0,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 17,
+        "alt_screen": false,
+        "title": "",
+        "rows": [
+          {
+            "line": 0,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 5,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 0,
+      "seq": 3,
+      "wire": "6901000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a46261736500a373657103a564656c746183a561747472739184a2696400a26667a744656661756c74a26267a744656661756c74a5666c61677300a36f70739283a26f70a3726f77a3726f7700a77061796c6f616483a46c696e6500a472756e739183a46174747200a563656c6c7301a474657874a124a777726170706564c282a26f70a6637572736f72a6637572736f7284a3726f7700a3636f6c02a776697369626c65c3a5736861706500a6626c6f636b739187a2696400ab70726f6d70745f6c696e6500ab6f75747075745f6c696e65c0a8656e645f6c696e65c0a5737461746581a57374617465a670726f6d7074a7636f6d6d616e64a0a3637764a62f746d702f77",
+      "expect": {
+        "cursor": {
+          "row": 0,
+          "col": 2,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 17,
+        "alt_screen": false,
+        "title": "",
+        "rows": [
+          {
+            "line": 0,
+            "wrapped": false,
+            "text": "$                                       ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 5,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 0,
+            "output_line": null,
+            "end_line": null,
+            "state": {
+              "state": "prompt"
+            },
+            "command": "",
+            "cwd": "/tmp/w"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 3,
+      "seq": 10,
+      "wire": "5101000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a46261736503a37365710aa564656c746183a5617474727390a36f70739283a26f70a3726f77a3726f7700a77061796c6f616483a46c696e6500a472756e739183a46174747200a563656c6c7306a474657874a624206d616b65a777726170706564c282a26f70a6637572736f72a6637572736f7284a3726f7701a3636f6c00a776697369626c65c3a5736861706500a6626c6f636b739187a2696400ab70726f6d70745f6c696e6500ab6f75747075745f6c696e6501a8656e645f6c696e65c0a5737461746581a57374617465a772756e6e696e67a7636f6d6d616e64a46d616b65a3637764a62f746d702f77",
+      "expect": {
+        "cursor": {
+          "row": 1,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 17,
+        "alt_screen": false,
+        "title": "",
+        "rows": [
+          {
+            "line": 0,
+            "wrapped": false,
+            "text": "$ make                                  ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 5,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 0,
+            "output_line": 1,
+            "end_line": null,
+            "state": {
+              "state": "running"
+            },
+            "command": "make",
+            "cwd": "/tmp/w"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 10,
+      "seq": 48,
+      "wire": "1201000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a4626173650aa373657130a564656c746182a5617474727390a36f70739283a26f70a3726f77a3726f7701a77061796c6f616483a46c696e6501a472756e739183a46174747200a563656c6c7324a474657874d92461206c696e652074686174206973206c6f6e6720656e6f75676820746f20726577726170a777726170706564c282a26f70a6637572736f72a6637572736f7284a3726f7702a3636f6c00a776697369626c65c3a5736861706500",
+      "expect": {
+        "cursor": {
+          "row": 2,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 17,
+        "alt_screen": false,
+        "title": "",
+        "rows": [
+          {
+            "line": 0,
+            "wrapped": false,
+            "text": "$ make                                  ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": "a line that is long enough to rewrap    ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 5,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 0,
+            "output_line": 1,
+            "end_line": null,
+            "state": {
+              "state": "running"
+            },
+            "command": "make",
+            "cwd": "/tmp/w"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 48,
+      "seq": 69,
+      "wire": "7a01000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a46261736530a373657145a564656c746182a5617474727390a36f70739483a26f70a3726f77a3726f7702a77061796c6f616483a46c696e6502a472756e739183a46174747200a563656c6c7305a474657874a56f75742031a777726170706564c283a26f70a3726f77a3726f7703a77061796c6f616483a46c696e6503a472756e739183a46174747200a563656c6c7305a474657874a56f75742032a777726170706564c283a26f70a3726f77a3726f7704a77061796c6f616483a46c696e6504a472756e739183a46174747200a563656c6c7305a474657874a56f75742033a777726170706564c282a26f70a6637572736f72a6637572736f7284a3726f7705a3636f6c00a776697369626c65c3a5736861706500",
+      "expect": {
+        "cursor": {
+          "row": 5,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 17,
+        "alt_screen": false,
+        "title": "",
+        "rows": [
+          {
+            "line": 0,
+            "wrapped": false,
+            "text": "$ make                                  ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 1,
+            "wrapped": false,
+            "text": "a line that is long enough to rewrap    ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 2,
+            "wrapped": false,
+            "text": "out 1                                   ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "out 2                                   ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "out 3                                   ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 5,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 0,
+            "output_line": 1,
+            "end_line": null,
+            "state": {
+              "state": "running"
+            },
+            "command": "make",
+            "cwd": "/tmp/w"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 69,
+      "seq": 90,
+      "wire": "8102000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a46261736545a37365715aa564656c746182a5617474727390a36f70739884a26f70a67363726f6c6ca3746f7000a6626f74746f6d05a56c696e65730382a26f70a773625f70757368a77061796c6f616483a46c696e6500a472756e739183a46174747200a563656c6c7306a474657874a624206d616b65a777726170706564c282a26f70a773625f70757368a77061796c6f616483a46c696e6501a472756e739183a46174747200a563656c6c7324a474657874d92461206c696e652074686174206973206c6f6e6720656e6f75676820746f20726577726170a777726170706564c282a26f70a773625f70757368a77061796c6f616483a46c696e6502a472756e739183a46174747200a563656c6c7305a474657874a56f75742031a777726170706564c283a26f70a3726f77a3726f7702a77061796c6f616483a46c696e6505a472756e739183a46174747200a563656c6c7305a474657874a56f75742034a777726170706564c283a26f70a3726f77a3726f7703a77061796c6f616483a46c696e6506a472756e739183a46174747200a563656c6c7305a474657874a56f75742035a777726170706564c283a26f70a3726f77a3726f7704a77061796c6f616483a46c696e6507a472756e739183a46174747200a563656c6c7305a474657874a56f75742036a777726170706564c283a26f70a3726f77a3726f7705a77061796c6f616483a46c696e6508a472756e7390a777726170706564c2",
+      "expect": {
+        "cursor": {
+          "row": 5,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 17,
+        "alt_screen": false,
+        "title": "",
+        "rows": [
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "out 2                                   ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "out 3                                   ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 5,
+            "wrapped": false,
+            "text": "out 4                                   ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 6,
+            "wrapped": false,
+            "text": "out 5                                   ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 7,
+            "wrapped": false,
+            "text": "out 6                                   ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 8,
+            "wrapped": false,
+            "text": "                                        ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 0,
+            "output_line": 1,
+            "end_line": null,
+            "state": {
+              "state": "running"
+            },
+            "command": "make",
+            "cwd": "/tmp/w"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 90,
+      "seq": 94,
+      "wire": "a901000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a4626173655aa37365715ea564656c746183a5617474727390a36f70739283a26f70a3726f77a3726f7705a77061796c6f616483a46c696e6508a472756e739183a46174747200a563656c6c7301a474657874a124a777726170706564c282a26f70a6637572736f72a6637572736f7284a3726f7705a3636f6c02a776697369626c65c3a5736861706500a6626c6f636b739287a2696400ab70726f6d70745f6c696e6500ab6f75747075745f6c696e6501a8656e645f6c696e6507a5737461746582a57374617465a866696e6973686564a9657869745f636f646500a7636f6d6d616e64a46d616b65a3637764a62f746d702f7787a2696401ab70726f6d70745f6c696e6508ab6f75747075745f6c696e65c0a8656e645f6c696e65c0a5737461746581a57374617465a670726f6d7074a7636f6d6d616e64a0a3637764a62f746d702f77",
+      "expect": {
+        "cursor": {
+          "row": 5,
+          "col": 2,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 17,
+        "alt_screen": false,
+        "title": "",
+        "rows": [
+          {
+            "line": 3,
+            "wrapped": false,
+            "text": "out 2                                   ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "out 3                                   ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 5,
+            "wrapped": false,
+            "text": "out 4                                   ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 6,
+            "wrapped": false,
+            "text": "out 5                                   ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 7,
+            "wrapped": false,
+            "text": "out 6                                   ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 8,
+            "wrapped": false,
+            "text": "$                                       ",
+            "styles": [
+              [
+                40,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 0,
+            "output_line": 1,
+            "end_line": 7,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "make",
+            "cwd": "/tmp/w"
+          },
+          {
+            "id": 1,
+            "prompt_line": 8,
+            "output_line": null,
+            "end_line": null,
+            "state": {
+              "state": "prompt"
+            },
+            "command": "",
+            "cwd": "/tmp/w"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "keyframe",
+      "seq": 95,
+      "wire": "c10200008ca174a86b65796672616d65a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a37365715fa4636f6c7314a4726f777306a9726f77735f646174619683a46c696e6504a472756e739183a46174747200a563656c6c7305a474657874a56f75742032a777726170706564c283a46c696e6505a472756e739183a46174747200a563656c6c7305a474657874a56f75742033a777726170706564c283a46c696e6506a472756e739183a46174747200a563656c6c7305a474657874a56f75742034a777726170706564c283a46c696e6507a472756e739183a46174747200a563656c6c7305a474657874a56f75742035a777726170706564c283a46c696e6508a472756e739183a46174747200a563656c6c7305a474657874a56f75742036a777726170706564c283a46c696e6509a472756e739183a46174747200a563656c6c7301a474657874a124a777726170706564c2a561747472739184a2696400a26667a744656661756c74a26267a744656661756c74a5666c61677300a6637572736f7284a3726f7705a3636f6c02a776697369626c65c3a5736861706500a56d6f64657311a6626c6f636b739287a2696400ab70726f6d70745f6c696e6500ab6f75747075745f6c696e6501a8656e645f6c696e6508a5737461746582a57374617465a866696e6973686564a9657869745f636f646500a7636f6d6d616e64a46d616b65a3637764a62f746d702f7787a2696401ab70726f6d70745f6c696e6509ab6f75747075745f6c696e65c0a8656e645f6c696e65c0a5737461746581a57374617465a670726f6d7074a7636f6d6d616e64a0a3637764a62f746d702f77ab626c6f636b735f66726f6d00ae686973746f72795f636c6561727300",
+      "expect": {
+        "cursor": {
+          "row": 5,
+          "col": 2,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 17,
+        "alt_screen": false,
+        "title": "",
+        "rows": [
+          {
+            "line": 4,
+            "wrapped": false,
+            "text": "out 2               ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 5,
+            "wrapped": false,
+            "text": "out 3               ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 6,
+            "wrapped": false,
+            "text": "out 4               ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 7,
+            "wrapped": false,
+            "text": "out 5               ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 8,
+            "wrapped": false,
+            "text": "out 6               ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 9,
+            "wrapped": false,
+            "text": "$                   ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 0,
+            "output_line": 1,
+            "end_line": 8,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "make",
+            "cwd": "/tmp/w"
+          },
+          {
+            "id": 1,
+            "prompt_line": 9,
+            "output_line": null,
+            "end_line": null,
+            "state": {
+              "state": "prompt"
+            },
+            "command": "",
+            "cwd": "/tmp/w"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 95,
+      "seq": 100,
+      "wire": "da01000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a4626173655fa373657164a564656c746183a5617474727390a36f70739584a26f70a67363726f6c6ca3746f7000a6626f74746f6d05a56c696e65730182a26f70a773625f70757368a77061796c6f616483a46c696e6504a472756e739183a46174747200a563656c6c7305a474657874a56f75742032a777726170706564c283a26f70a3726f77a3726f7704a77061796c6f616483a46c696e6509a472756e739183a46174747200a563656c6c7304a474657874a424206c73a777726170706564c283a26f70a3726f77a3726f7705a77061796c6f616483a46c696e650aa472756e7390a777726170706564c282a26f70a6637572736f72a6637572736f7284a3726f7705a3636f6c00a776697369626c65c3a5736861706500a6626c6f636b739187a2696401ab70726f6d70745f6c696e6509ab6f75747075745f6c696e650aa8656e645f6c696e65c0a5737461746581a57374617465a772756e6e696e67a7636f6d6d616e64a26c73a3637764a62f746d702f77",
+      "expect": {
+        "cursor": {
+          "row": 5,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 17,
+        "alt_screen": false,
+        "title": "",
+        "rows": [
+          {
+            "line": 5,
+            "wrapped": false,
+            "text": "out 3               ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 6,
+            "wrapped": false,
+            "text": "out 4               ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 7,
+            "wrapped": false,
+            "text": "out 5               ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 8,
+            "wrapped": false,
+            "text": "out 6               ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 9,
+            "wrapped": false,
+            "text": "$ ls                ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 10,
+            "wrapped": false,
+            "text": "                    ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 0,
+            "output_line": 1,
+            "end_line": 8,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "make",
+            "cwd": "/tmp/w"
+          },
+          {
+            "id": 1,
+            "prompt_line": 9,
+            "output_line": 10,
+            "end_line": null,
+            "state": {
+              "state": "running"
+            },
+            "command": "ls",
+            "cwd": "/tmp/w"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 100,
+      "seq": 124,
+      "wire": "6302000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a46261736564a37365717ca564656c746182a5617474727390a36f70739884a26f70a67363726f6c6ca3746f7000a6626f74746f6d05a56c696e65730382a26f70a773625f70757368a77061796c6f616483a46c696e6505a472756e739183a46174747200a563656c6c7305a474657874a56f75742033a777726170706564c282a26f70a773625f70757368a77061796c6f616483a46c696e6506a472756e739183a46174747200a563656c6c7305a474657874a56f75742034a777726170706564c282a26f70a773625f70757368a77061796c6f616483a46c696e6507a472756e739183a46174747200a563656c6c7305a474657874a56f75742035a777726170706564c283a26f70a3726f77a3726f7702a77061796c6f616483a46c696e650aa472756e739183a46174747200a563656c6c7306a474657874a6706f73742031a777726170706564c283a26f70a3726f77a3726f7703a77061796c6f616483a46c696e650ba472756e739183a46174747200a563656c6c7306a474657874a6706f73742032a777726170706564c283a26f70a3726f77a3726f7704a77061796c6f616483a46c696e650ca472756e739183a46174747200a563656c6c7306a474657874a6706f73742033a777726170706564c283a26f70a3726f77a3726f7705a77061796c6f616483a46c696e650da472756e7390a777726170706564c2",
+      "expect": {
+        "cursor": {
+          "row": 5,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 17,
+        "alt_screen": false,
+        "title": "",
+        "rows": [
+          {
+            "line": 8,
+            "wrapped": false,
+            "text": "out 6               ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 9,
+            "wrapped": false,
+            "text": "$ ls                ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 10,
+            "wrapped": false,
+            "text": "post 1              ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 11,
+            "wrapped": false,
+            "text": "post 2              ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 12,
+            "wrapped": false,
+            "text": "post 3              ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 13,
+            "wrapped": false,
+            "text": "                    ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 0,
+            "output_line": 1,
+            "end_line": 8,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "make",
+            "cwd": "/tmp/w"
+          },
+          {
+            "id": 1,
+            "prompt_line": 9,
+            "output_line": 10,
+            "end_line": null,
+            "state": {
+              "state": "running"
+            },
+            "command": "ls",
+            "cwd": "/tmp/w"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "update",
+      "base": 124,
+      "seq": 125,
+      "wire": "e900000085a174a6757064617465a773657373696f6e82a4686f7374d94032653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265326532653265a773657373696f6e01a4626173657ca37365717da564656c746183a5617474727390a36f707390a6626c6f636b739187a2696401ab70726f6d70745f6c696e6509ab6f75747075745f6c696e650aa8656e645f6c696e650ca5737461746582a57374617465a866696e6973686564a9657869745f636f646500a7636f6d6d616e64a26c73a3637764a62f746d702f77",
+      "expect": {
+        "cursor": {
+          "row": 5,
+          "col": 0,
+          "visible": true,
+          "shape": 0
+        },
+        "modes": 17,
+        "alt_screen": false,
+        "title": "",
+        "rows": [
+          {
+            "line": 8,
+            "wrapped": false,
+            "text": "out 6               ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 9,
+            "wrapped": false,
+            "text": "$ ls                ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 10,
+            "wrapped": false,
+            "text": "post 1              ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 11,
+            "wrapped": false,
+            "text": "post 2              ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 12,
+            "wrapped": false,
+            "text": "post 3              ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          },
+          {
+            "line": 13,
+            "wrapped": false,
+            "text": "                    ",
+            "styles": [
+              [
+                20,
+                "Default",
+                "Default",
+                0
+              ]
+            ]
+          }
+        ],
+        "blocks": [
+          {
+            "id": 0,
+            "prompt_line": 0,
+            "output_line": 1,
+            "end_line": 8,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "make",
+            "cwd": "/tmp/w"
+          },
+          {
+            "id": 1,
+            "prompt_line": 9,
+            "output_line": 10,
+            "end_line": 12,
+            "state": {
+              "state": "finished",
+              "exit_code": 0
+            },
+            "command": "ls",
+            "cwd": "/tmp/w"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -881,3 +881,155 @@ fn a_recorded_conpty_drag_keeps_all_three_participants_agreeing() {
         "the view and the host disagree about where history ends"
     );
 }
+
+/// A mid-stream *width* change, with all three participants along for it.
+///
+/// The drag test above changes only the height; no recording in the corpus
+/// changes width at all, which is how the reflow rule stayed latent (#139): a
+/// width change renumbers every absolute line id (`zest_core` grid reflow), the
+/// keyframe that follows carries the new numbering, and everything a client
+/// banked before it — scrollback rows, in the web client also evicted blocks —
+/// still carries the old one with no mapping on the wire. Hand-built rather
+/// than recorded for the same reason as #314's history-clear tests: the width
+/// path under test here is the plain reflow every host shares, not a specific
+/// ConPTY restatement gesture, so literal input reaches it directly.
+#[test]
+fn a_mid_stream_width_change_leaves_no_reader_holding_the_old_numbering() {
+    let mut term = Terminal::new(40, 6, 2000);
+    let mut enc = Encoder::new();
+    let mut view = GridView::new();
+    let mut client = Terminal::new(40, 6, 2000);
+    let mut applier = Applier::new();
+    let mut seq = 0u64;
+
+    let k = enc.keyframe(term.grid(), cursor(&term), term.modes(), "", term.blocks());
+    view.apply_keyframe(&k);
+    applier.apply_keyframe(&mut client, &k, seq);
+
+    // One finished command and enough output to scroll: the view must hold
+    // *real* banked history and real blocks before the resize, or the drop
+    // rule is never under test — the harness gap that let #291 escape.
+    let before: &[&[u8]] = &[
+        b"\x1b]7;file:///tmp/w\x07\x1b]133;A\x07$ ",
+        b"\x1b]133;B\x07make\x1b]133;C\x07\r\n",
+        b"a line that is long enough to rewrap\r\n",
+        b"out 1\r\nout 2\r\nout 3\r\n",
+        b"out 4\r\nout 5\r\nout 6\r\n",
+        b"\x1b]133;D;0\x07\x1b]133;A\x07$ ",
+    ];
+    let after: &[&[u8]] = &[
+        b"\x1b]133;B\x07ls\x1b]133;C\x07\r\n",
+        b"post 1\r\npost 2\r\npost 3\r\n",
+        b"\x1b]133;D;0\x07",
+    ];
+
+    let step_all = |term: &mut Terminal,
+                        view: &mut GridView,
+                        client: &mut Terminal,
+                        enc: &mut Encoder,
+                        applier: &mut Applier,
+                        seq: &mut u64,
+                        chunk: &[u8],
+                        step: usize| {
+        term.advance(chunk);
+        *seq += 1;
+        let d = enc.delta(term.grid(), cursor(term), term.modes(), "", term.blocks());
+        view.apply_delta(&d);
+        let base = applier.applied();
+        assert_eq!(
+            applier.apply_delta(client, &d, base, *seq),
+            Applied::Ok,
+            "step {step}: a delta did not apply"
+        );
+        assert_eq!(
+            view_text(view),
+            terminal_text(term),
+            "step {step}: the view diverged from the host"
+        );
+        assert_eq!(
+            terminal_text(client),
+            terminal_text(term),
+            "step {step}: the client terminal diverged from the host"
+        );
+        assert_blocks_agree(term, client, view, "width-change", step);
+    };
+
+    for (step, chunk) in before.iter().enumerate() {
+        step_all(&mut term, &mut view, &mut client, &mut enc, &mut applier, &mut seq, chunk, step);
+    }
+
+    // The state under test is *reached*, not assumed: banked history and a
+    // finished block, both of which the reflow is about to renumber out from
+    // under the view.
+    assert!(
+        !view.scrollback.is_empty(),
+        "the view banked no history before the resize, so the drop rule is not under test"
+    );
+    assert!(
+        view.blocks.iter().any(|b| b.end_line.is_some()),
+        "no finished block before the resize, so reanchoring is not under test"
+    );
+    let banked: Vec<i64> = view.scrollback.iter().map(|r| r.line).collect();
+
+    // The width change, delivered the way the daemon delivers one: the host
+    // reflows and every subscriber gets a keyframe under the new numbering
+    // (`reconcile_size`).
+    term.resize(20, 6);
+    assert!(
+        (0..term.grid().total_lines()).any(|i| term.grid().line(i).is_some_and(|r| r.wrapped())),
+        "nothing rewrapped, so the reflow renumbered nothing and this proves nothing"
+    );
+    seq += 1;
+    let k = enc.keyframe(term.grid(), cursor(&term), term.modes(), "", term.blocks());
+    view.apply_keyframe(&k);
+    applier.apply_keyframe(&mut client, &k, seq);
+
+    // The assertion #139 is about: rows banked under the old numbering cannot
+    // be re-anchored, only discarded — kept, they join with the reanchored
+    // blocks and hand pre-resize rows to whatever block now owns those ids.
+    assert!(
+        view.scrollback.is_empty(),
+        "the view kept {banked:?} across a reflow that renumbered them"
+    );
+
+    for (step, chunk) in after.iter().enumerate() {
+        step_all(&mut term, &mut view, &mut client, &mut enc, &mut applier, &mut seq, chunk, step);
+
+        // No line held twice, and nothing under a numbering the host does not
+        // hold — the two shapes the misjoin takes.
+        let mut lines: Vec<i64> = view
+            .scrollback
+            .iter()
+            .chain(view.rows().iter())
+            .map(|r| r.line)
+            .filter(|&l| l != i64::MIN)
+            .collect();
+        let total = lines.len();
+        lines.sort_unstable();
+        lines.dedup();
+        assert_eq!(lines.len(), total, "step {step}: the view holds a line twice");
+    }
+
+    // Everything the view still banks names a line the host's history really
+    // holds under the new numbering. This is the join a Rust consumer makes
+    // (scrollback ++ rows against blocks), and it is exactly what stale
+    // old-numbering rows corrupt.
+    let host_history: std::collections::HashSet<i64> = (0..term.grid().scrollback_len())
+        .map(|i| i64::try_from(term.grid().line(i).unwrap().id).unwrap())
+        .collect();
+    assert!(
+        !view.scrollback.is_empty(),
+        "nothing scrolled after the resize, so the re-bank under the new numbering is untested"
+    );
+    for r in &view.scrollback {
+        assert!(
+            host_history.contains(&r.line),
+            "the view banks line {} and the host's history has no such id",
+            r.line
+        );
+    }
+    assert!(
+        client.grid().scrollback_len() > 0,
+        "the client terminal banked nothing after the resize"
+    );
+}

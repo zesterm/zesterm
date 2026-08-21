@@ -286,24 +286,29 @@ pub fn encode(chord: &Chord, modes: Modes) -> Vec<u8> {
     match base {
         Base::Char(ch) => encode_text(&ch.to_string(), mods.ctrl, mods.alt),
         Base::Named(named) => match named {
-            Named::Enter => vec![b'\r'],
+            // The single-byte keys route through `finish` like text does --
+            // Alt-as-ESC lives there, and arms that returned their byte
+            // directly were how alt+backspace lost its ESC (#350). The CSI
+            // arms below do not: their modifier parameter already carries Alt.
+            Named::Enter => finish(vec![b'\r'], mods.alt),
             Named::Tab => {
-                if mods.shift {
-                    b"\x1b[Z".to_vec() // CBT, back-tab
+                // CBT has no modifier slot, so ctrl+shift+tab used to be
+                // byte-identical to shift+tab. CSI u is the only form with
+                // somewhere to put the Ctrl -- it is what kitty, foot and
+                // ghostty send for these chords even with the protocol off --
+                // and its parameter carries Alt, so no ESC prefix on top.
+                if mods.ctrl {
+                    format!("\x1b[9;{}u", mods.param()).into_bytes()
+                } else if mods.shift {
+                    finish(b"\x1b[Z".to_vec(), mods.alt) // CBT, back-tab
                 } else {
-                    vec![b'\t']
+                    finish(vec![b'\t'], mods.alt)
                 }
             }
             // Backspace is DEL (0x7f), not BS (0x08). Sending 0x08 is a classic
             // mistake that makes readline and most shells misbehave.
-            Named::Backspace => {
-                if mods.ctrl {
-                    vec![0x08]
-                } else {
-                    vec![0x7f]
-                }
-            }
-            Named::Esc => vec![0x1b],
+            Named::Backspace => finish(vec![if mods.ctrl { 0x08 } else { 0x7f }], mods.alt),
+            Named::Esc => finish(vec![0x1b], mods.alt),
 
             Named::Up => with_mods(cursor, b'A', mods),
             Named::Down => with_mods(cursor, b'B', mods),
@@ -533,6 +538,31 @@ mod tests {
         // The chord #345 watched land in a composer as the literal text `[Z`.
         assert_eq!(bytes("shift+tab", PLAIN), b"\x1b[Z");
         assert_eq!(bytes("tab", PLAIN), b"\t");
+    }
+
+    #[test]
+    fn alt_prefixes_the_named_single_byte_keys() {
+        // The same rule as `alt+b`: Alt is a leading ESC. These went out bare
+        // before #350, so alt+backspace deleted one character where readline,
+        // zsh and fish delete a word.
+        assert_eq!(bytes("alt+backspace", PLAIN), vec![0x1b, 0x7f]);
+        assert_eq!(bytes("alt+enter", PLAIN), b"\x1b\r");
+        assert_eq!(bytes("alt+esc", PLAIN), vec![0x1b, 0x1b]);
+        assert_eq!(bytes("alt+tab", PLAIN), b"\x1b\t");
+        assert_eq!(
+            bytes("ctrl+alt+backspace", PLAIN),
+            vec![0x1b, 0x08],
+            "ctrl still flips backspace to BS, and alt prefixes that too"
+        );
+    }
+
+    #[test]
+    fn ctrl_tab_chords_escalate_to_csi_u() {
+        // `\x1b[Z` has no modifier slot, so ctrl+shift+tab used to be
+        // byte-identical to shift+tab and tmux-style tab cycling could not
+        // bind the pair apart. (#350)
+        assert_eq!(bytes("ctrl+tab", PLAIN), b"\x1b[9;5u");
+        assert_eq!(bytes("ctrl+shift+tab", PLAIN), b"\x1b[9;6u");
     }
 
     #[test]

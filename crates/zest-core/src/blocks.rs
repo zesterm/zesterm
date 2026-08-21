@@ -304,10 +304,17 @@ impl BlockIndex {
     /// without bound across a long-lived session, which is precisely the session
     /// that matters most in a fleet — the one that has been running for weeks.
     pub fn evict_before(&mut self, oldest_line: LineId) {
+        // Nothing held means nothing evicted, and a watermark move with no
+        // eviction behind it would be claiming ids on someone else's behalf.
+        let Some(newest) = self.blocks.last().map(|b| b.id.0) else { return };
         self.blocks.retain(|b| b.end_line.is_none_or(|end| end >= oldest_line));
         // Rises: what fell out of scrollback here is not something a client
-        // has to be told to forget.
-        let floor = self.blocks.first().map_or(self.next_id, |b| b.id.0);
+        // has to be told to forget. When eviction takes the last block the
+        // floor stops one past it — not at `next_id`, which sits beyond any
+        // ids `erase_screen` destroyed after `newest` and lowered the
+        // watermark to announce; jumping the gap re-labels those as "evicted,
+        // keep your copy" and the announcement never goes out. (#204)
+        let floor = self.blocks.first().map_or(newest + 1, |b| b.id.0);
         self.authoritative_from = self.authoritative_from.max(floor);
     }
 
@@ -483,5 +490,50 @@ mod tests {
         idx.evict_before(41);
         assert_eq!(idx.blocks().len(), 1, "the finished block should be gone");
         assert!(idx.last().expect("running block").is_running());
+    }
+
+    #[test]
+    fn total_eviction_claims_only_ids_that_had_blocks() {
+        // Destroyed blocks leave a gap between the newest id still held and
+        // `next_id`: `erase_screen` lowered the watermark so the next keyframe
+        // announces them. A total eviction that lifts the floor to `next_id`
+        // jumps that gap, re-labelling "destroyed, still to be announced" as
+        // "evicted, keep your copy" — and every client paints the dead
+        // headers for ever. (#204)
+        let mut idx = index_with_one_finished_block(); // block 0, ends line 40
+        idx.begin_prompt(41, "/home".into());
+        idx.begin_output(42, "ls".into(), None);
+        idx.finish(45, Some(0), None); // block 1
+        idx.begin_prompt(46, "/home".into());
+        idx.begin_output(47, "pwd".into(), None);
+        idx.finish(50, Some(0), None); // block 2
+
+        idx.erase_screen(41); // destroys 1 and 2; the watermark falls to announce it
+        idx.evict_before(41); // evicts block 0 — the last block the host held
+
+        assert!(idx.blocks().is_empty(), "everything was destroyed or evicted");
+        assert_eq!(
+            idx.authoritative_from(),
+            1,
+            "the floor stops one past the newest block eviction actually took — \
+             rising to next_id would swallow the destruction of blocks 1 and 2 \
+             before any keyframe announced it"
+        );
+    }
+
+    #[test]
+    fn evicting_an_already_empty_index_moves_nothing() {
+        // Reachable through the public API even though `Terminal` guards the
+        // call: with nothing held there is nothing evicted, so there is
+        // nothing a watermark move could be describing.
+        let mut idx = index_with_one_finished_block();
+        idx.erase_screen(0); // destroys the only block; the watermark falls to 0
+        idx.evict_before(100);
+        assert_eq!(
+            idx.authoritative_from(),
+            0,
+            "an eviction that took nothing must not lift the floor past a \
+             destruction still waiting to be announced"
+        );
     }
 }

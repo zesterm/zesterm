@@ -49,29 +49,43 @@ use zest_proto::{
 /// otherwise show up as a field silently read as `undefined`.
 const FIXTURE_SCHEMA: u32 = 1;
 
+/// Where one fixture's input comes from.
+enum Source {
+    /// A recording in `zest-core/tests/corpus`, by name.
+    Vtrec(&'static str),
+    /// Literal VT input with resizes in it, for the one path plain input
+    /// cannot reach: a resize is not bytes on the pty, it is a call the host
+    /// makes, so a fixture containing one has to say where.
+    Script(&'static [Step]),
+}
+
+/// One step of a [`Source::Script`].
+enum Step {
+    Text(&'static str),
+    /// The host resizes mid-stream, delivered the way the daemon delivers it
+    /// (`reconcile_size`): the grid reflows, then every subscriber gets a
+    /// keyframe under the new numbering.
+    Resize(u16, u16),
+}
+
 /// The recordings, at the sizes `conformance.rs` replays them.
 ///
 /// Same sizes deliberately — a fixture that diverges from the Rust replay it is
 /// meant to mirror is a second thing to keep in sync for no benefit.
 ///
-/// `combining-marks` and `astral` began life as synthetic sessions, because no
-/// recording then contained a combining mark or anything past the BMP — a
-/// client reading `CellMarks::at` as an offset into the row rather than into
-/// its run, or counting UTF-16 code units, passed every recorded fixture. Both
-/// are real ConPTY recordings now (#17), carrying the same cases the synthetic
-/// input was built to reach; the coverage census below is what holds them to
-/// that, so a re-recording that lost a case fails here rather than passing
-/// hollowed out.
-///
-/// The last element names the recording in `zest-core/tests/corpus`, distinct
-/// from the fixture name because the `-short` exports replay a recording a
-/// second time at another size.
-const CORPUS: &[(&str, usize, usize, &str)] = &[
-    ("basic-echo", 80, 24, "basic-echo"),
-    ("dir-colors", 80, 24, "dir-colors"),
-    ("git-log", 100, 30, "git-log"),
-    ("unicode-wide", 80, 24, "unicode-wide"),
-    ("vim-macos", 80, 24, "vim-macos"),
+/// `combining-marks` is not a recording. **No recording in the corpus contains a
+/// single combining mark**, which is not obvious and is worth stating: the side
+/// table `Run::marks` carries has real coverage in `apply.rs`'s unit tests and
+/// none at all in the five replays, so `conformance.rs` dropping its exclusion
+/// for marks proved less than it appears to. A client reading `at` as an offset
+/// into the row rather than into its run would pass every recorded fixture. The
+/// synthetic session below is the smallest thing that catches it.
+const CORPUS: &[(&str, usize, usize, Source)] = &[
+    ("basic-echo", 80, 24, Source::Vtrec("basic-echo")),
+    ("dir-colors", 80, 24, Source::Vtrec("dir-colors")),
+    ("git-log", 100, 30, Source::Vtrec("git-log")),
+    ("unicode-wide", 80, 24, Source::Vtrec("unicode-wide")),
+    ("vim-macos", 80, 24, Source::Vtrec("vim-macos")),
     // The fixture that holds a TypeScript client to `Delta::blocks`. Without it
     // a client could ignore the field entirely and pass every fixture here — the
     // same gap `combining-marks` exists to close, and for the same reason: the
@@ -83,7 +97,7 @@ const CORPUS: &[(&str, usize, usize, &str)] = &[
     // code, an escaped Windows cwd — is all host-side parsing. Blocks reach a
     // client already parsed, so the wire shape is identical and a second fixture
     // would be a second thing to regenerate for no coverage.
-    ("blocks-zsh", 120, 30, "blocks-zsh"),
+    ("blocks-zsh", 120, 30, Source::Vtrec("blocks-zsh")),
     // The same recordings at a viewport short enough to force heavy scrolling,
     // mirroring `conformance.rs::every_recording_survives_a_short_viewport`.
     //
@@ -92,26 +106,60 @@ const CORPUS: &[(&str, usize, usize, &str)] = &[
     // the ordering invariant — which is the one thing `Delta::scrolls_come_first`
     // exists to protect — had a single fixture standing behind it. A tall
     // viewport hides the bug by never scrolling at all.
-    ("basic-echo-short", 80, 5, "basic-echo"),
-    ("dir-colors-short", 80, 5, "dir-colors"),
-    ("git-log-short", 80, 5, "git-log"),
-    ("unicode-wide-short", 80, 5, "unicode-wide"),
-    ("vim-macos-short", 80, 5, "vim-macos"),
-    // Decomposed Unicode through a real ConPTY: a mark inside a coloured run,
-    // one after the run boundary (the case `CellMarks::at` exists for — the
-    // offset is within the run, not within the row), one riding bold+underline,
-    // and one on a double-width character, where the width rule and the mark
-    // offset interact.
-    ("combining-marks", 40, 6, "combining-marks"),
-    // Astral-plane emoji through a real ConPTY. Every other wide character in
-    // the corpus is CJK — three UTF-8 bytes and one UTF-16 code unit — which
-    // hides the single most JavaScript-specific bug a client can have:
-    // `text.length` counts UTF-16 code units, so one emoji counts as two and
-    // every cell after it shifts left. With an astral character the two wrong
-    // readings even fail differently: `text.length` over-counts the WIDE run,
-    // and the character count under-counts the spacer run that carries no text
-    // at all.
-    ("astral", 40, 6, "astral"),
+    ("basic-echo-short", 80, 5, Source::Vtrec("basic-echo")),
+    ("dir-colors-short", 80, 5, Source::Vtrec("dir-colors")),
+    ("git-log-short", 80, 5, Source::Vtrec("git-log")),
+    ("unicode-wide-short", 80, 5, Source::Vtrec("unicode-wide")),
+    ("vim-macos-short", 80, 5, Source::Vtrec("vim-macos")),
+    // Decomposed Unicode through a real ConPTY (#17), replacing the synthetic
+    // byte list this entry started as: a mark inside a coloured run, one after
+    // the run boundary (the case `CellMarks::at` exists for — the offset is
+    // within the run, not within the row), one riding bold+underline, and one
+    // on a double-width character, where the width rule and the mark offset
+    // interact.
+    ("combining-marks", 40, 6, Source::Vtrec("combining-marks")),
+    (
+        "width-change",
+        40,
+        6,
+        // **No recording in the corpus changes width mid-stream**, which is how
+        // the reflow rule stayed latent (#139): a width change renumbers every
+        // absolute line id, the keyframe after it carries the new numbering,
+        // and everything a client banked — scrollback rows, evicted blocks —
+        // still carries the old one with no mapping on the wire. A client that
+        // keeps that state passes every other fixture here and misjoins rows
+        // into the wrong blocks the first time a real window is dragged
+        // narrower. Hand-built like `combining-marks`, and for the same reason:
+        // the path under test is the plain reflow every host shares, not a
+        // ConPTY restatement gesture, so literal input reaches it directly.
+        //
+        // The shape matters: real banked history and a finished block *before*
+        // the resize (a fixture must reach the state under test — the harness
+        // gap that let #291 escape), a line long enough to rewrap at the new
+        // width so the reflow provably renumbers, and output *after* it so
+        // re-banking under the new numbering is exercised too.
+        Source::Script(&[
+            Step::Text("\u{1b}]7;file:///tmp/w\u{7}\u{1b}]133;A\u{7}$ "),
+            Step::Text("\u{1b}]133;B\u{7}make\u{1b}]133;C\u{7}\r\n"),
+            Step::Text("a line that is long enough to rewrap\r\n"),
+            Step::Text("out 1\r\nout 2\r\nout 3\r\n"),
+            Step::Text("out 4\r\nout 5\r\nout 6\r\n"),
+            Step::Text("\u{1b}]133;D;0\u{7}\u{1b}]133;A\u{7}$ "),
+            Step::Resize(20, 6),
+            Step::Text("\u{1b}]133;B\u{7}ls\u{1b}]133;C\u{7}\r\n"),
+            Step::Text("post 1\r\npost 2\r\npost 3\r\n"),
+            Step::Text("\u{1b}]133;D;0\u{7}"),
+        ]),
+    ),
+    // Astral-plane emoji through a real ConPTY (#17), replacing the synthetic
+    // byte list this entry started as. Every other wide character in the
+    // corpus is CJK — three UTF-8 bytes and one UTF-16 code unit — which hides
+    // the single most JavaScript-specific bug a client can have: `text.length`
+    // counts UTF-16 code units, so one emoji counts as two and every cell
+    // after it shifts left. With an astral character the two wrong readings
+    // even fail differently: `text.length` over-counts the WIDE run, and the
+    // character count under-counts the spacer run that carries no text at all.
+    ("astral", 40, 6, Source::Vtrec("astral")),
     // `scroll-flood` is deliberately *not* exported. Its 115 chunks make a
     // megabyte of golden JSON, and what it adds — SCROLL ordering at a natural
     // viewport — the `-short` exports above already hold a TypeScript client
@@ -276,11 +324,24 @@ fn replay(
     name: &str,
     cols: usize,
     rows: usize,
-    recording: &str,
+    source: &Source,
     cov: &mut Coverage,
 ) -> Fixture {
     let addr = SessionAddr { host: FIXTURE_HOST, session: SessionId(1) };
-    let input: Vec<Vec<u8>> = chunks(recording);
+    enum Play {
+        Bytes(Vec<u8>),
+        Resize(u16, u16),
+    }
+    let input: Vec<Play> = match source {
+        Source::Vtrec(recording) => chunks(recording).into_iter().map(Play::Bytes).collect(),
+        Source::Script(steps) => steps
+            .iter()
+            .map(|s| match s {
+                Step::Text(t) => Play::Bytes(t.as_bytes().to_vec()),
+                Step::Resize(c, r) => Play::Resize(*c, *r),
+            })
+            .collect(),
+    };
 
     let mut term = Terminal::new(cols, rows, 2000);
     let mut enc = Encoder::new();
@@ -295,32 +356,31 @@ fn replay(
     applier.apply_keyframe(&mut client, &k, term.seq());
     cov.see_attrs(&k.attrs);
 
-    // The daemon flattens `encode::Keyframe` into the wire message rather than
-    // sending it, so the fixture carries a real `HostMessage` and not an
-    // envelope invented here. Mirrors `zest-daemon/src/server.rs`.
-    frames.push(Frame {
-        kind: "keyframe",
-        base: None,
-        seq: term.seq(),
-        wire: hex(&zest_proto::frame::encode(&HostMessage::Keyframe {
-            session: addr,
-            seq: Seq(term.seq()),
-            cols: k.cols,
-            rows: k.rows,
-            rows_data: k.rows_data.clone(),
-            attrs: k.attrs.clone(),
-            cursor: k.cursor,
-            modes: k.modes.bits(),
-            blocks: k.blocks.clone(),
-            blocks_from: k.blocks_from,
-            title: k.title.clone(),
-            history_clears: k.history_clears,
-        })
-        .expect("a keyframe frames")),
-        expect: expect(&term),
-    });
+    frames.push(keyframe_frame(addr, &term, &k));
 
-    for (step, chunk) in input.iter().enumerate() {
+    for (step, play) in input.iter().enumerate() {
+        let chunk = match play {
+            Play::Bytes(bytes) => bytes,
+            Play::Resize(cols, rows) => {
+                // A resize reflows the host's grid, renumbering every line id,
+                // and the keyframe below is a subscriber's only account of it —
+                // the wire has no resize op. Through all three participants
+                // like every other frame, so the file still states "the
+                // reference already matches the terminal's truth".
+                cov.width_changes += usize::from(term.grid().cols() != usize::from(*cols));
+                term.resize(usize::from(*cols), usize::from(*rows));
+                let k =
+                    enc.keyframe(term.grid(), cursor(&term), term.modes(), term.title(), term.blocks());
+                view.apply_keyframe(&k);
+                applier.apply_keyframe(&mut client, &k, term.seq());
+                cov.see_attrs(&k.attrs);
+
+                let frame = keyframe_frame(addr, &term, &k);
+                agrees(&view, &frame.expect, name, step);
+                frames.push(frame);
+                continue;
+            }
+        };
         term.advance(chunk);
         let d = enc.delta(term.grid(), cursor(&term), term.modes(), term.title(), term.blocks());
 
@@ -362,10 +422,42 @@ fn replay(
         schema: FIXTURE_SCHEMA,
         protocol: PROTOCOL_VERSION,
         recording: name.to_string(),
-        source: "vtrec",
+        source: match source {
+            Source::Vtrec(_) => "vtrec",
+            Source::Script(_) => "synthetic",
+        },
         cols: u16::try_from(cols).unwrap_or(u16::MAX),
         rows: u16::try_from(rows).unwrap_or(u16::MAX),
         frames,
+    }
+}
+
+/// One keyframe as a fixture frame.
+///
+/// The daemon flattens `encode::Keyframe` into the wire message rather than
+/// sending it, so the fixture carries a real `HostMessage` and not an envelope
+/// invented here. Mirrors `zest-daemon/src/server.rs`.
+fn keyframe_frame(addr: SessionAddr, term: &Terminal, k: &zest_proto::encode::Keyframe) -> Frame {
+    Frame {
+        kind: "keyframe",
+        base: None,
+        seq: term.seq(),
+        wire: hex(&zest_proto::frame::encode(&HostMessage::Keyframe {
+            session: addr,
+            seq: Seq(term.seq()),
+            cols: k.cols,
+            rows: k.rows,
+            rows_data: k.rows_data.clone(),
+            attrs: k.attrs.clone(),
+            cursor: k.cursor,
+            modes: k.modes.bits(),
+            blocks: k.blocks.clone(),
+            blocks_from: k.blocks_from,
+            title: k.title.clone(),
+            history_clears: k.history_clears,
+        })
+        .expect("a keyframe frames")),
+        expect: expect(term),
     }
 }
 
@@ -410,7 +502,7 @@ fn expect(term: &Terminal) -> Expect {
 
         rows.push(RowExpect {
             line: i64::try_from(row.id).unwrap_or(i64::MAX),
-            wrapped: row.wrapped,
+            wrapped: row.wrapped(),
             text,
             styles,
             marks,
@@ -533,6 +625,8 @@ struct Coverage {
     /// which counts wire payloads: the wire proves decode, the expectation
     /// proves application.
     blocks_expected: usize,
+    /// Mid-stream keyframes whose `cols` differ from the grid's before them.
+    width_changes: usize,
     ops: BTreeSet<&'static str>,
 }
 
@@ -600,7 +694,7 @@ impl Coverage {
     fn assert_the_corpus_is_worth_replaying(&self) {
         println!(
             "coverage: {} scrolls, {} sb_push, {} screen switches, {} titles, \
-             {} styled attrs, {} wide runs, {} marks, {} block updates",
+             {} styled attrs, {} wide runs, {} marks, {} block updates, {} width changes",
             self.scrolls,
             self.sb_pushes,
             self.screen_switches,
@@ -608,7 +702,8 @@ impl Coverage {
             self.coloured,
             self.wide,
             self.marks,
-            self.blocks
+            self.blocks,
+            self.width_changes
         );
         println!("ops seen: {:?}", self.ops);
 
@@ -643,6 +738,12 @@ impl Coverage {
             self.blocks_expected > 0,
             "no frame *expects* blocks -- the wire carried them but the expectations \
              would hold no client to applying them, which is the half that matters"
+        );
+        assert!(
+            self.width_changes > 0,
+            "no mid-stream width change -- a reflow renumbers every line id, and a \
+             client that keeps state banked under the old numbering would pass every \
+             fixture here, which is exactly how #139 stayed latent"
         );
     }
 }
@@ -772,11 +873,13 @@ struct Fixture {
     /// impossible to miss in review.
     protocol: u16,
     recording: String,
-    /// `vtrec` for a real recording — all of them, since #17 — with
-    /// `synthetic` reserved for input written to reach a path no recording
-    /// does, stated so nobody mistakes that kind for evidence about what real
-    /// programs emit.
+    /// `vtrec` for a real recording, `synthetic` for input written to reach a
+    /// path no recording does. Stated so nobody mistakes the second kind for
+    /// evidence about what real programs emit.
     source: &'static str,
+    /// The *initial* size. `width-change` shrinks mid-stream via a keyframe
+    /// whose `cols` is smaller — never larger, because a consumer that pads
+    /// rows to this width would truncate a grid that outgrew it.
     cols: u16,
     rows: u16,
     frames: Vec<Frame>,
