@@ -65,6 +65,35 @@ pub enum Off {
     TokenUnreadable,
 }
 
+impl Off {
+    /// The reason and the remedy, for the one INFO line this decision gets.
+    ///
+    /// A daemon that decides never to be reachable has no later log line to
+    /// betray it — unlike a dial that fails, which complains on its own — so
+    /// this sentence is the only trace of the decision, and it has to carry
+    /// both what happened and what to do about it (#244).
+    #[must_use]
+    pub fn explanation(self) -> &'static str {
+        match self {
+            Off::OptedOut => {
+                "--no-relay was given; start without it to dial the account's relay again"
+            }
+            Off::Ephemeral => {
+                "--ephemeral keys die with the process, so no link is parked; \
+                 pass --relay <url> to dial one anyway"
+            }
+            Off::NotEnrolled => {
+                "this daemon holds no cloud token; run --enroll <code> to make \
+                 this machine reachable"
+            }
+            Off::TokenUnreadable => {
+                "the credential store could not be read and no relay origin is \
+                 cached; unlock the store and restart, or pass --relay <url>"
+            }
+        }
+    }
+}
+
 /// What reading the cloud token told us.
 ///
 /// Three states, not a `bool`: a store that could not be read is not a store
@@ -450,6 +479,33 @@ mod tests {
         // that stops existing when the edit-run loop rebuilds.
         let dev = RelayInputs { ephemeral: true, cached: Some("wss://x.example".into()), ..inputs() };
         assert_eq!(choose(&dev), RelayChoice::Off(Off::Ephemeral));
+    }
+
+    #[test]
+    fn every_off_reason_explains_itself_and_names_the_remedy() {
+        // #244: a daemon that decided never to be reachable said so only at
+        // debug, which at the default INFO is indistinguishable from one that
+        // is dialling and failing — and those have different fixes. The
+        // message is built here, not at the log site, so a test can hold every
+        // variant to the same bar: say why, and say what to do about it.
+        for (why, reason, remedy) in [
+            (Off::OptedOut, "--no-relay", "without"),
+            (Off::Ephemeral, "--ephemeral", "--relay"),
+            (Off::NotEnrolled, "no cloud token", "--enroll"),
+            (Off::TokenUnreadable, "credential store", "--relay"),
+        ] {
+            let msg = why.explanation();
+            assert!(
+                msg.contains(reason),
+                "Off::{why:?} must state its reason ({reason:?}), because \"my \
+                 fleet says asleep\" is the question this line answers: {msg:?}"
+            );
+            assert!(
+                msg.contains(remedy),
+                "Off::{why:?} must name its remedy ({remedy:?}) so the line \
+                 reporting the decision also says how to change it: {msg:?}"
+            );
+        }
     }
 
     fn tempdir(name: &str) -> PathBuf {
