@@ -2846,13 +2846,18 @@ mod tests {
     /// The lifetime is the point: anything about *closing* a session is vacuous
     /// against a command that has already exited on its own.
     ///
-    /// `ping` against loopback rather than a shell's sleep: nothing here is
+    /// `ping` against loopback rather than `Start-Sleep`: nothing here is
     /// about a shell, and pwsh's boot on a contended runner is what #285
     /// removed from every assertion budget in this module. `-n 31` is one
-    /// ping a second, ~30 seconds -- the same lifetime `Start-Sleep 30` gave.
+    /// ping a second, ~30 seconds -- the same lifetime `Start-Sleep 30`
+    /// gave. The cmd wrapper exists to spell `>nul`: `Start-Sleep` was
+    /// *silent*, and a dozen tests picked this child for exactly that, so a
+    /// ping line arriving every second would quietly change what they hold
+    /// still. Redirection is a shell's trick -- bare `ping.exe` would take
+    /// `>nul` as one more argument and exit on it.
     fn sleep_cmd() -> String {
         if cfg!(windows) {
-            "ping.exe -n 31 127.0.0.1".into()
+            "cmd.exe /c ping.exe -n 31 127.0.0.1 >nul".into()
         } else {
             "/bin/sleep 30".into()
         }
