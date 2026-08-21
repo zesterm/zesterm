@@ -477,6 +477,25 @@ fn spawn_reader(
                     Ok(0) => break,
                     // A signal is not a dropped link.
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    // Neither is a read timeout elapsing. A transport with a
+                    // read timeout armed returns `WouldBlock` (EAGAIN, which
+                    // macOS spells "Resource temporarily unavailable") or
+                    // `TimedOut` (Winsock) when the peer has merely said
+                    // nothing for a while -- and a session sitting at a quiet
+                    // prompt does exactly that for as long as it likes.
+                    // Mapping it to "closed" tore down a healthy link under a
+                    // long wait (#363); the elapsed timeout is the moment to
+                    // re-check `stopping`, which the loop head does -- the
+                    // daemon's `READ_POLL` lesson (#94, #99) on the client
+                    // side.
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        continue
+                    }
                     Err(e) => {
                         fail(&state, e.to_string());
                         break;

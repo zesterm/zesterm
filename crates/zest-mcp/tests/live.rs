@@ -18,7 +18,7 @@
 
 use std::io::Read;
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use zest_daemon::{serve, Auth, Authenticator, DaemonConfig, Registry};
@@ -124,7 +124,11 @@ fn serve_daemon_with(shell_integration: bool) -> (String, Arc<Registry>) {
 
 fn dial(addr: &str, label: &str) -> Conn {
     let stream = TcpStream::connect(addr).expect("connect");
-    // Any read that waits this long is a hang, and a hung test reports nothing.
+    // Not a hang detector: a session sitting quietly at a prompt keeps this
+    // socket silent for longer than any such bound, and the reader treats the
+    // elapsed timeout as "nothing yet" rather than as the link closing (#363).
+    // It exists so the reader wakes to notice a shutdown instead of parking in
+    // `read` for ever.
     stream.set_read_timeout(Some(Duration::from_secs(20))).expect("read timeout");
     let identity = Arc::new(ClientIdentity::generate().expect("client key"));
     Conn::open(
@@ -135,6 +139,84 @@ fn dial(addr: &str, label: &str) -> Conn {
         None,
     )
     .expect("the loopback path welcomes any client that proves a key")
+}
+
+/// A read half whose next reads can be made to say "the timeout elapsed".
+///
+/// What an armed `SO_RCVTIMEO` produces on a socket whose peer is merely quiet:
+/// EAGAIN ("Resource temporarily unavailable", os error 35) on unix and
+/// WSAETIMEDOUT on Winsock, surfaced by Rust as `WouldBlock` and `TimedOut`.
+/// Injected rather than armed for real, for two reasons: a short real timeout
+/// could fire *during the handshake* on a loaded runner — which is its own
+/// flake — and a long one would cost this test twenty seconds of deliberate
+/// silence. The reader's handling of the error is the subject here, not the
+/// OS's ability to produce it.
+struct QuietSpells {
+    inner: TcpStream,
+    inject: Arc<Mutex<Vec<std::io::ErrorKind>>>,
+}
+
+impl Read for QuietSpells {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if let Some(kind) = self.inject.lock().expect("inject").pop() {
+            return Err(std::io::Error::new(kind, "the socket said nothing before the timeout"));
+        }
+        self.inner.read(buf)
+    }
+}
+
+/// A read timeout elapsing is "nothing yet", never "the link closed".
+///
+/// The macOS shape of #363: `run` waits on a session that is slow to answer,
+/// nothing crosses the socket for the twenty seconds [`dial`] arms, the parked
+/// read returns EAGAIN — and the reader reported the connection closed, so a
+/// healthy wait died as
+/// `Conn(Closed(Some("Resource temporarily unavailable (os error 35)")))`. A
+/// peer that stays up and says nothing is indistinguishable in a *log* from one
+/// that went away, but not to the reader: only `Ok(0)` or a real error means
+/// gone. The same lesson the daemon's `READ_POLL` already records (#94, #99):
+/// an elapsed read timeout is the moment to check for shutdown, not an end of
+/// stream.
+#[test]
+fn a_read_timeout_elapsing_is_nothing_yet_not_a_closed_link() {
+    let (addr, _registry) = serve_daemon();
+    let stream = TcpStream::connect(&addr).expect("connect");
+    stream.set_read_timeout(Some(Duration::from_secs(20))).expect("read timeout");
+    let inject = Arc::new(Mutex::new(Vec::new()));
+    let read =
+        QuietSpells { inner: stream.try_clone().expect("clone"), inject: Arc::clone(&inject) };
+    let identity = Arc::new(ClientIdentity::generate().expect("client key"));
+    let conn = Conn::open(
+        Box::new(read) as Box<dyn Read + Send>,
+        Box::new(stream),
+        &identity,
+        "zest-mcp timeout test",
+        None,
+    )
+    .expect("the loopback path welcomes any client that proves a key");
+
+    conn.list_sessions().expect("precondition: the link answers before any timeout elapses");
+
+    // Both spellings, because the platforms disagree: unix reads surface
+    // `WouldBlock`, Winsock ones `TimedOut`, and handling one of the two would
+    // pass on the CI runner that maps to it while the other keeps flaking.
+    inject
+        .lock()
+        .expect("inject")
+        .extend([std::io::ErrorKind::WouldBlock, std::io::ErrorKind::TimedOut]);
+
+    // A round trip forces the parked read to return and the reader to issue the
+    // next one, which is the read the injection answers. Two asks, because the
+    // reader may consume the injected errors before or after the first reply
+    // depending on scheduling — a link that survives both has survived the
+    // timeouts either way.
+    let after = conn.list_sessions();
+    assert!(
+        after.is_ok(),
+        "a read timeout on a quiet link must read as 'nothing yet', not close it: {after:?}"
+    );
+    let again = conn.list_sessions();
+    assert!(again.is_ok(), "and the link must still answer the next question: {again:?}");
 }
 
 #[test]
@@ -554,20 +636,40 @@ fn integrated_shell() -> Option<(String, String)> {
         .map(|zsh| (zsh.to_string(), "(exit 3)".into()))
 }
 
-/// Wait for the shell to draw its first prompt, on its own budget.
+/// Wait until the session's tail block is an idle prompt — the state `run`'s
+/// anchor accepts — on its own budget.
 ///
 /// Separate from the `run` that follows it, deliberately. #285 is three daemon
 /// tests timing out together because each paid PowerShell's startup inside its
 /// own assertion budget, so every one of them reported as its own subject; here a
 /// shell that never starts fails as a shell that never started, and the
 /// correlation is measured against a shell that is already up.
+///
+/// And not only the *first* prompt: every gap between two commands is the same
+/// wait one step later (#363). `run` gives a session `PROMPT_GRACE` — three
+/// seconds — to show a prompt, which is sized for the question that grace
+/// answers ("does this shell have integration at all?") and not for a loaded
+/// runner drawing its next one: after `clear` destroys every block, a saturated
+/// pwsh can take longer than that to mint the new prompt, and a `run` submitted
+/// into the gap reports `NoBlocks` exactly as a broken hook would. So every
+/// submission below waits for the prompt first, and a shell that never gets
+/// there fails as that, rather than as whatever the next assertion is about.
 fn wait_for_prompt(tools: &zest_mcp::ToolSet, session: &str, limit: Duration) -> bool {
     let give_up = std::time::Instant::now() + limit;
     while std::time::Instant::now() < give_up {
         let v = tools
             .call("blocks", &serde_json::json!({ "session": session }))
             .expect("a session that exists answers `blocks`");
-        if !v["blocks"].as_array().expect("an array").is_empty() {
+        // The tail must be a prompt that has run nothing — `state` alone is not
+        // enough, because a block is `Prompt` before *and* after OSC 133;B, and
+        // only the absence of output says nothing has been submitted. The same
+        // two facts `run::anchor` reads, through the same payload.
+        if v["blocks"]
+            .as_array()
+            .expect("an array")
+            .last()
+            .is_some_and(|tail| tail["state"] == "prompt" && tail.get("output_line").is_none())
+        {
             return true;
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -584,7 +686,8 @@ fn wait_for_prompt(tools: &zest_mcp::ToolSet, session: &str, limit: Duration) ->
 ///
 /// ⚠️ The one test here that waits for a child to **print**, which the module doc
 /// above says nothing does — and #285 is what that rule is protecting. Held to
-/// one test, with the shell's startup on its own budget above, and skipping
+/// one test, with the shell's startup — and every return to a prompt between
+/// commands (#363) — on its own budget via [`wait_for_prompt`], and skipping
 /// loudly where no shell with an integration hook exists rather than asserting
 /// something weaker on those machines.
 #[test]
@@ -654,6 +757,11 @@ fn a_run_against_a_real_shell_returns_the_shells_own_exit_code() {
     // and working directory. Its block is a *new* id, minted by the prompt that
     // followed the first -- the case the correlation must accept alongside the
     // reused id above, and the one an `==` would fail.
+    assert!(
+        wait_for_prompt(&tools, &session, Duration::from_secs(30)),
+        "the shell never drew its prompt again after the first command. Submitting into \
+         that gap races `PROMPT_GRACE` against a loaded machine (#363)"
+    );
     let second = tools
         .call(
             "run",
@@ -693,16 +801,20 @@ fn a_run_against_a_real_shell_returns_the_shells_own_exit_code() {
     // The state is not pinned: what matters is that it does not hang, and the
     // two shells reach it differently -- pwsh emits its `D` from the prompt
     // function, which runs *after* `Clear-Host`.
+    assert!(
+        wait_for_prompt(&tools, &session, Duration::from_secs(30)),
+        "the shell never returned to a prompt after `echo` (#363)"
+    );
     let cleared = tools
         .call(
             "run",
-            &serde_json::json!({ "session": session, "command": "clear", "timeout_ms": 15_000 }),
+            &serde_json::json!({ "session": session, "command": "clear", "timeout_ms": 30_000 }),
         )
         .expect("clearing the screen is a result, not an error");
     assert_eq!(
         cleared["timed_out"], false,
-        "a command whose block was destroyed must be answered at once; 15s here is the \
-         whole deadline spent on a block that went in the first millisecond: {cleared}"
+        "a command whose block was destroyed must be answered at once; the whole deadline \
+         spent here is a wait on a block that went in the first millisecond: {cleared}"
     );
 
     // And a command that takes the shell with it. `exit` emits no `D`, because
@@ -711,6 +823,16 @@ fn a_run_against_a_real_shell_returns_the_shells_own_exit_code() {
     // "running" in a session that ended in the first millisecond. Found by
     // driving the built binary by hand with `echo hi; exit 7`, which no test in
     // this crate would have produced.
+    //
+    // The wait first, and here more than anywhere: `clear` just destroyed every
+    // block, so until the shell mints its next prompt this session has *none*,
+    // and a `run` submitted into that gap has only `PROMPT_GRACE` before it
+    // reports `NoBlocks` -- indistinguishable from a hook that never loaded,
+    // which is #363's Windows-CI shape at exactly this line.
+    assert!(
+        wait_for_prompt(&tools, &session, Duration::from_secs(30)),
+        "the shell never minted a prompt block after `clear` destroyed them all (#363)"
+    );
     let ended = tools
         .call(
             "run",
