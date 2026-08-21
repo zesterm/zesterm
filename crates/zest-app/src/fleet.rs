@@ -1134,19 +1134,12 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     fn discovered(host: HostId, label: &str) -> FleetHost {
-        FleetHost {
-            host,
-            label: label.into(),
-            presence: Presence::Online,
-            local: false,
-            address: Some("192.168.1.9:7717".into()),
-            reachability: Some(zest_mesh::Reachability::Lan),
-            rtt_ms: Some(0.4),
-            sessions: SessionsState::default(),
-            offer: None,
-            enrolled: false,
-            relay_online: false,
-        }
+        // The shared fixture's remote row, re-keyed: these tests mint their
+        // own ids, and merge logic reads the id, never the address.
+        let mut h = zest_fleet::fixture::host(9, label);
+        h.host = host;
+        h.address = Some("192.168.1.9:7717".into());
+        h
     }
 
 

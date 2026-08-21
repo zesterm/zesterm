@@ -571,7 +571,14 @@ pub fn placeholder_addr(n: u64) -> SessionAddr {
 #[must_use]
 #[allow(dead_code, reason = "the picker and persistence skip placeholder tabs, next in #23")]
 pub fn is_placeholder(addr: SessionAddr) -> bool {
-    addr.host == HostId::from_bytes([0; 32])
+    is_placeholder_host(addr.host)
+}
+
+/// The host half of the same fact, for callers holding a `TabOrigin` rather
+/// than an address: an all-zero id is "no id yet", never a machine.
+#[must_use]
+pub fn is_placeholder_host(host: HostId) -> bool {
+    host == HostId::from_bytes([0; 32])
 }
 
 /// The Settings tab's address (design §11): an app tab is a place, not a
