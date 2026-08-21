@@ -82,6 +82,17 @@ impl GridView {
             self.scrollback.clear();
             self.history_clears = k.history_clears;
         }
+        // A width change reflowed the host's grid, and reflow *renumbers* line
+        // ids — so everything this view banked still carries the old numbering
+        // and the wire has no mapping to the new one. Stale rows cannot be
+        // re-anchored, only discarded: joined with the keyframe's reanchored
+        // blocks they hand pre-resize rows to a live command, which misrenders
+        // worse than a shorter history reads. Same rule, same words, as
+        // `grid-view.ts`. (#139)
+        let renumbered = self.cols != 0 && k.cols != self.cols;
+        if renumbered {
+            self.scrollback.clear();
+        }
         // A *height* change scrolls rows out of the viewport and into the
         // host's history, and at an unchanged width their ids still mean what
         // they meant. Replacing `rows` wholesale would throw away rows this
@@ -89,11 +100,9 @@ impl GridView {
         // would go on naming them — rendering as blocks with no rows at all,
         // which reads as every block having vanished. (#200)
         //
-        // Gated on the width for the reason `grid-view.ts` gives at length: a
-        // reflow renumbers every id, so displaced rows cannot be filed under a
-        // numbering the keyframe has just replaced. The *stale-scrollback* half
-        // of that rule is still missing here and is tracked as #139; this adds
-        // only the case where there is nothing to renumber.
+        // Gated on the width for the reason above run forwards: a reflow
+        // renumbers every id, so displaced rows cannot be filed under a
+        // numbering the keyframe has just replaced.
         if self.cols == k.cols && !cleared {
             if let Some(first) = k.rows_data.iter().map(|r| r.line).find(|&l| l != i64::MIN) {
                 let last_held = self.scrollback.last().map(|r| r.line);
@@ -403,6 +412,27 @@ mod tests {
         view.apply_keyframe(&keyframe(10, &[(2, "line 2"), (3, "line 3")]));
 
         assert!(view.scrollback.is_empty(), "old-numbering rows must not survive a reflow");
+    }
+
+    #[test]
+    fn a_width_change_keyframe_drops_history_banked_under_the_old_numbering() {
+        // The stale-scrollback half of the same rule (#139): the test above
+        // proves a reflow keyframe *banks* nothing, but a view that already
+        // holds history is holding ids the reflow just renumbered, and the
+        // wire carries no old-id-to-new-id mapping. Joined with the keyframe's
+        // reanchored blocks those rows land in the wrong block, which
+        // misrenders worse than a shorter history reads.
+        let mut view = GridView::new();
+        view.apply_keyframe(&keyframe(20, &[(0, "line 0"), (1, "line 1"), (2, "line 2")]));
+        view.apply_keyframe(&keyframe(20, &[(3, "line 3"), (4, "line 4"), (5, "line 5")]));
+        assert!(!view.scrollback.is_empty(), "the view banked no history, so this proves nothing");
+
+        view.apply_keyframe(&keyframe(10, &[(0, "l0"), (1, "l1"), (2, "l2")]));
+        assert!(
+            view.scrollback.is_empty(),
+            "history banked before a reflow survived it under the old numbering: {:?}",
+            view.scrollback.iter().map(|r| r.line).collect::<Vec<_>>()
+        );
     }
 
     /// Replay a session and assert the decoder never diverges.
