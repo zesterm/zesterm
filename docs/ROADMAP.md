@@ -39,8 +39,9 @@ adopts the session it lost. A daemon serves other machines over the LAN
 (`--listen-lan`, mDNS discovery, pairing with a matching code) and over the
 relay when away (`--relay`, dial-back, sealed end to end), and a client
 `Terminal` rebuilt from deltas is cell-for-cell identical to the host's at
-every frame of the recorded corpus. Shells emitting OSC 133 (zsh and pwsh get
-it injected, nothing installed) produce **command blocks** — what ran, where,
+every frame of the recorded corpus. Shells emitting OSC 133 (zsh, pwsh and
+bash — WSL included — get it injected, nothing installed) produce **command
+blocks** — what ran, where,
 what it printed, how it ended — that cross the wire, drive copy-output/re-run,
 and give an agent `blocks` instead of a build log. The fleet is visible and
 launchable from one window: every reachable machine's sessions and published
@@ -112,14 +113,16 @@ the history behind them is in closed issues and PRs.
 
 ### Shell integration & blocks
 
-- [ ] **bash, fish and WSL.** bash and fish are deliberately unwritten:
-      neither can be *seen working* on the machines this is built on, and
-      writing them blind is how features ship compiled and unseen. WSL is the
-      next mechanism rather than the next shell: `WSLENV` is the only way a
-      variable crosses into the distro, *and* the inner shell still has to be
-      named on the command line — `Shell::detect` already walks tokens so
-      `wsl.exe -d Ubuntu -- bash` reads as bash. (`cmd.exe` is a permanent no:
-      it has no prompt-function mechanism.)
+- [ ] **fish, and the shells WSL bash left behind** (#405 landed bash, native
+      and through `wsl.exe -d <distro> -- bash`). fish is deliberately
+      unwritten: it cannot be *seen working* on the machines this is built on,
+      and writing it blind is how features ship compiled and unseen. Around
+      WSL, three declined-with-a-log cases could become features: an inner
+      *zsh* (its `ZDOTDIR` would have to ride `WSLENV` like
+      `ZESTERM_BASH_INIT` does), a bare `wsl.exe` (needs the distro's default
+      shell discovered rather than guessed), and Git Bash's `bash.exe` (MSYS
+      rewrites unix-looking arguments; untested against `--init-file`).
+      (`cmd.exe` is a permanent no: it has no prompt-function mechanism.)
 - [ ] **A settings key for shell integration.** Today it is a daemon flag,
       which is not where anyone will look. The shell runs on the *host*, so the
       host decides — closing this means `zest-daemon` reading settings or a new

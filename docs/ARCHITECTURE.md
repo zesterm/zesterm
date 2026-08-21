@@ -1280,10 +1280,10 @@ distinction has to survive into the payload because that is the only place it
 will still be true.
 
 `run_isolated` exists for this reason as much as for compatibility. It also
-happens to be the answer for shells with no integration — `Shell::detect`
-returns `None` for `/bin/bash`, with a test pinning it, so "no blocks" is most
-Linux hosts rather than an edge case — but its *primary* property is that its
-status cannot be forged by the thing it is running.
+happens to be the answer for shells with no integration — fish, `cmd.exe`, and
+any shell reached through `ssh` or `tmux`, which injection structurally cannot
+touch — but its *primary* property is that its status cannot be forged by the
+thing it is running.
 
 ### The anchor is the tail block, not the next id
 

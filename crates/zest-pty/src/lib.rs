@@ -101,10 +101,14 @@ impl CommandSpec {
             // `info`, not `debug`. "Why does the status bar say 0 blocks" needs
             // an answer that a default log setup actually prints -- the silence
             // here is what made PowerShell's absence take a screenshot to
-            // notice (#83). `cmd.exe` is the honest permanent case.
+            // notice (#83). `cmd.exe` is the honest permanent case; a bare
+            // `wsl.exe` is the fixable one, so the fix is spelled out where
+            // the person missing their blocks is already looking.
             tracing::info!(
                 command = %self.command_line,
-                "no shell integration for this shell; it will have no command blocks"
+                "no shell integration for this shell; it will have no command blocks \
+                 (a WSL profile gets them when the command names the inner shell: \
+                 `wsl.exe -d <distro> -- bash`)"
             );
             return;
         };
@@ -452,6 +456,32 @@ mod tests {
         spec.enable_shell_integration(&dir);
 
         assert_eq!(spec.command_line, once, "the hook was injected a second time");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The same double-injection guard, for bash's spellings of the amendment.
+    ///
+    /// Both of them: the native one names the shim file, the WSL one names only
+    /// the variable — a marker the guard has to recognise separately, since the
+    /// path it stands for is not on the line.
+    #[test]
+    fn hooking_bash_amends_the_command_line_once() {
+        let dir = std::env::temp_dir().join(format!("zesterm-si-bash1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        for line in ["/bin/bash", "wsl.exe -d Ubuntu -- bash"] {
+            let mut spec =
+                CommandSpec { command_line: line.into(), cwd: None, env: Vec::new() };
+            spec.enable_shell_integration(&dir);
+            assert!(
+                spec.command_line.contains("--init-file"),
+                "{line} was not hooked at all: {:?}",
+                spec.command_line
+            );
+            let once = spec.command_line.clone();
+            spec.enable_shell_integration(&dir);
+            assert_eq!(spec.command_line, once, "the hook was injected a second time");
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

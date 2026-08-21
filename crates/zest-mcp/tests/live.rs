@@ -65,8 +65,9 @@ fn serve_daemon() -> (String, Arc<Registry>) {
 /// The same, with the OSC 133 hook injected into whatever shell is spawned.
 ///
 /// Off for every test but one. The hook writes a shim into the config directory
-/// on each spawn and only does anything for zsh and PowerShell, so a test that
-/// spawns `/bin/sh` pays a filesystem write for a marker that will never arrive.
+/// on each spawn and only does anything for zsh, bash and PowerShell, so a test
+/// that spawns `/bin/sh` pays a filesystem write for a marker that will never
+/// arrive.
 fn serve_daemon_with(shell_integration: bool) -> (String, Arc<Registry>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr").to_string();
@@ -530,10 +531,10 @@ fn a_timeout_returns_partial_output_and_leaves_the_command_running() {
 
 /// A shell that emits OSC 133, and a command that exits 3 in it.
 ///
-/// `Shell::detect` knows zsh and PowerShell and nothing else — bash and fish are
-/// unwritten and cmd.exe has no prompt-function mechanism at all — so on a
-/// machine with neither there is no way to test the correlation live and no
-/// point pretending otherwise.
+/// `Shell::detect` knows zsh, bash and PowerShell — fish is unwritten and
+/// cmd.exe has no prompt-function mechanism at all — so on a machine with none
+/// of the three there is no way to test the correlation live and no point
+/// pretending otherwise.
 ///
 /// The command is a *subshell* on unix and a native call on Windows: `exit 3`
 /// would end the shell rather than report a status, and this has to leave the
@@ -548,10 +549,14 @@ fn integrated_shell() -> Option<(String, String)> {
         // correlation rather than as a badly chosen test shell.
         return Some(("powershell.exe -NoLogo -NoProfile".into(), "cmd /c exit 3".into()));
     }
-    ["/bin/zsh", "/usr/bin/zsh", "/usr/local/bin/zsh", "/opt/homebrew/bin/zsh"]
+    // zsh candidates before bash's: on the Macs this runs on, zsh is the
+    // default whose configuration realistically exists, and macOS's /bin/bash
+    // is the 3.2 the hook supports by design but no machine here has verified.
+    ["/bin/zsh", "/usr/bin/zsh", "/usr/local/bin/zsh", "/opt/homebrew/bin/zsh", "/bin/bash",
+     "/usr/bin/bash"]
         .into_iter()
         .find(|p| std::path::Path::new(p).exists())
-        .map(|zsh| (zsh.to_string(), "(exit 3)".into()))
+        .map(|shell| (shell.to_string(), "(exit 3)".into()))
 }
 
 /// Wait for the shell to draw its first prompt, on its own budget.
@@ -592,9 +597,9 @@ fn a_run_against_a_real_shell_returns_the_shells_own_exit_code() {
     let Some((shell, exits_three)) = integrated_shell() else {
         eprintln!(
             "SKIPPED a_run_against_a_real_shell_returns_the_shells_own_exit_code: no shell \
-             with an OSC 133 hook on this machine. `Shell::detect` knows zsh and PowerShell \
-             only, so bash-only hosts cannot run this. Every other property of the \
-             correlation is covered by tests/replay.rs, which needs no shell."
+             with an OSC 133 hook on this machine. `Shell::detect` knows zsh, bash and \
+             PowerShell; a host with none of the three cannot run this. Every other property \
+             of the correlation is covered by tests/replay.rs, which needs no shell."
         );
         return;
     };

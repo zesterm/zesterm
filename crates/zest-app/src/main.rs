@@ -444,9 +444,9 @@ fn parse_args(args: &[String]) -> Result<Flags, EarlyExit> {
                     None => {
                         return Err(EarlyExit::Refused(format!(
                             "no shell integration for {name:?}.\n\
-                             zsh and PowerShell (pwsh, powershell) are supported; \
-                             bash and fish are not yet, and cmd.exe has no hook to \
-                             offer — see docs/ROADMAP.md, WS-E."
+                             zsh, bash and PowerShell (pwsh, powershell) are \
+                             supported; fish is not yet, and cmd.exe has no hook \
+                             to offer — see docs/ROADMAP.md."
                         )));
                     }
                 }

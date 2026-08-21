@@ -836,6 +836,55 @@ fn reusing_an_abandoned_prompt_never_swallows_a_command_that_ran() {
 }
 
 #[test]
+fn a_bash_hook_cycle_produces_correct_blocks() {
+    // The byte order bash's hook actually emits, which differs from zsh's in
+    // one place: `133;C` comes from PS0 (or the DEBUG-trap fallback on old
+    // bashes), both of which fire *after* readline has echoed the newline, so
+    // it arrives at column 0 of the output's first line — the `col == 0`
+    // branch of `block_output_start`, where zsh's preexec takes the mid-line
+    // one. `133;D` and OSC 7 come from PROMPT_COMMAND, and `A`/`B` ride
+    // inside PS1, like zsh.
+    let mut t = Terminal::new(40, 12, 100);
+    // Session start: the first precmd has nothing to close, so no `D`.
+    t.advance(b"\x1b]7;file:///home/andy\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    // A command: typed, echoed with its newline, then the trap, then output.
+    t.advance(b"echo hi\r\n\x1b]133;C\x07hi\r\n");
+    t.advance(b"\x1b]133;D;0\x07\x1b]7;file:///home/andy\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    // An empty Enter runs nothing: the guarded trap stays quiet, so this is a
+    // bare re-prompt — the #193 shape the index reuses rather than appends.
+    t.advance(b"\r\n\x1b]7;file:///home/andy\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    // A failing command with no output of its own.
+    t.advance(b"(exit 3)\r\n\x1b]133;C\x07");
+    t.advance(b"\x1b]133;D;3\x07\x1b]7;file:///home/andy\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+
+    let blocks = t.blocks().blocks();
+    assert_eq!(
+        blocks.len(),
+        3,
+        "two commands and a live prompt; the empty Enter must not add a phantom: {blocks:?}"
+    );
+
+    let first = &blocks[0];
+    assert_eq!(first.command, "echo hi", "the command reads back across the newline before C");
+    assert_eq!(first.state, zest_core::BlockState::Finished { exit_code: Some(0) });
+    assert_eq!(first.prompt_line, 0);
+    assert_eq!(first.output_line, Some(1), "C at column 0 is already the first output line");
+    assert_eq!(first.end_line, Some(1), "D after the trailing newline closes on the output");
+    assert_eq!(first.cwd, "/home/andy", "OSC 7 is emitted before A, so the block has its cwd");
+
+    let second = &blocks[1];
+    assert_eq!(second.command, "(exit 3)");
+    assert_eq!(
+        second.state,
+        zest_core::BlockState::Finished { exit_code: Some(3) },
+        "the status D carries is the command's own, not a stand-in"
+    );
+    assert!(second.failed(), "exit 3 must read as failure");
+
+    assert_eq!(blocks[2].state, zest_core::BlockState::Prompt, "the live prompt stays open");
+}
+
+#[test]
 fn block_timestamps_come_from_the_embedder_and_only_from_it() {
     // The parser has no clock (`no_std`): a terminal never told the time
     // produces blocks with no stamps, and one told the time stamps C and D
@@ -2339,6 +2388,71 @@ fn a_real_zsh_session_produces_real_blocks() {
     assert!(
         finished[1].output_line.expect("marked") > finished[1].end_line.expect("finished"),
         "a command that printed nothing owns no output rows"
+    );
+}
+
+#[test]
+fn a_real_bash_session_produces_real_blocks() {
+    // The bash third of the pwsh/zsh pair above, and the only one recorded
+    // across a WSL boundary: a real interactive Ubuntu bash with zesterm's
+    // hook loaded through `--init-file`, driven through a real ConPTY on
+    // Windows. What it holds that the hand-written cycle test cannot: the
+    // markers as they interleave with a real readline echo, and `(exit 3)` —
+    // a top-level *compound*, which a DEBUG trap never fires for and PS0
+    // does, which is the whole reason the hook is written the way it is.
+    //
+    // Recorded neutrally on purpose (see tests/README.md): a fake hostname, a
+    // fake home, a path-only prompt.
+    let bytes =
+        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/corpus/blocks-bash.vtrec"))
+            .expect("blocks fixture");
+    let mut t = Terminal::new(120, 30, 200);
+    for chunk in parse_vtrec(&bytes) {
+        t.advance(&chunk);
+    }
+
+    let blocks = t.blocks().blocks();
+    assert!(blocks.len() >= 3, "expected a block per command, got {}", blocks.len());
+
+    let finished: Vec<_> = blocks.iter().filter(|b| b.end_line.is_some()).collect();
+    assert!(finished.len() >= 3, "three commands ran to completion");
+
+    assert!(!finished[0].failed(), "`echo hello` succeeded");
+    assert!(finished[1].failed(), "`false` did not, and the status says so");
+
+    assert_eq!(
+        finished[0].command, "echo hello",
+        "the command is read back from the cells between B and C"
+    );
+    assert_eq!(finished[1].command, "false");
+
+    // The compound. A `1` here would mean `$?` was read too late; no block at
+    // all would mean the preexec went back to a DEBUG trap.
+    assert_eq!(finished[2].command, "(exit 3)");
+    assert_eq!(
+        finished[2].state,
+        zest_core::BlockState::Finished { exit_code: Some(3) },
+        "the exit code is the subshell's own, not a stand-in"
+    );
+
+    // OSC 7 rode along with the same hook, hostname included.
+    assert_eq!(finished[0].cwd, "/tmp/zestdemo");
+
+    // The boundary bash's dialect actually produces: `133;C` from PS0 arrives
+    // *after* readline echoed the newline — at column 0 of the first output
+    // line, where zsh's preexec fires before it — and both dialects must land
+    // on the same rows or copy-output drifts by one per shell.
+    let out = finished[0].output_line.expect("output began");
+    let row = t.grid().row_of_line(out).expect("still on screen");
+    assert_eq!(t.grid().row(row).text(), "hello", "output_line is the first line of output");
+    assert_eq!(finished[0].end_line, Some(out), "and `hello` is the whole of it");
+
+    // The empty Enter between `(exit 3)` and `exit` must not have minted a
+    // finished block of its own: PS0 does not expand for an empty line.
+    assert!(
+        finished.len() == 3 || finished[3].command == "exit",
+        "an empty Enter produced a phantom block: {:?}",
+        finished[3]
     );
 }
 

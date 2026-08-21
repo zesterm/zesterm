@@ -329,8 +329,8 @@ fn tool_definitions() -> Value {
                  Returns the exit status read from the process itself -- \
                  `exit_code_source: process_exit` -- which, unlike a block's exit code, \
                  no program can forge. Use this to actually run something: it disturbs \
-                 nobody's session, and it works on every shell, including bash and fish, \
-                 which emit no command markers at all. \
+                 nobody's session, and it works on every shell, including fish and \
+                 cmd.exe, which emit no command markers at all. \
                  A timeout does not kill the command: you get `timed_out: true` with the \
                  output so far, and the session stays alive, so a command waiting at a \
                  password prompt can be answered with `input` or stopped with \
