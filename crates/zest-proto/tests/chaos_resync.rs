@@ -32,7 +32,19 @@ use zest_proto::apply::{Applied, Applier};
 use zest_proto::delta::CursorState;
 use zest_proto::encode::Encoder;
 
-const CORPUS: &[&str] = &["basic-echo", "dir-colors", "git-log", "unicode-wide", "vim-macos"];
+const CORPUS: &[&str] = &[
+    "basic-echo",
+    "dir-colors",
+    "git-log",
+    "unicode-wide",
+    "vim-macos",
+    // The #17 recordings: dropping a delta mid-emoji, mid-mark or mid-scroll
+    // is exactly where a resync bug would hide, and nothing above reaches any
+    // of the three.
+    "astral",
+    "combining-marks",
+    "scroll-flood",
+];
 
 /// Deterministic, replayable, and about eight lines. Quality is irrelevant
 /// here — the requirement is a reproducible spread of drop points.

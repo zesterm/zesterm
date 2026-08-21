@@ -208,6 +208,44 @@ the corner the width anchor's fragment rule exists for. The replay asserts
 nothing is destroyed or doubled, allowing only the restater's own fragment
 rows as extras.
 
+### `astral`, `combining-marks`, `scroll-flood` — the #17 blind spots
+
+Three short recordings, each closing a hole the corpus was blind to: nothing
+reached past the BMP (every wide character was CJK — one UTF-16 code unit, so
+a client counting code units passed anyway), no recording carried a combining
+mark, and at natural sizes only `vim-macos` scrolled enough to exercise
+`SCROLL`/`ROW` ordering. `conformance.rs` has a census test that fails if any
+of the three goes missing again.
+
+All three are PowerShell 7 through a real ConPTY, run non-interactively so no
+prompt (and no username, hostname or path) is in the stream. The scripts live
+beside the recordings (`rec-astral.ps1`, `rec-combining-marks.ps1`,
+`rec-scroll-flood.ps1`), so re-recording is one command — with `NO_COLOR`
+cleared first, or PowerShell strips the SGR before the pty ever sees it:
+
+```powershell
+cargo run -p zest-pty --example pty_dump -- `
+  --record crates\zest-core\tests\corpus\astral.vtrec `
+  --cmd "pwsh -NoLogo -NoProfile -File crates\zest-core\tests\corpus\rec-astral.ps1" `
+  --size 40x6
+# combining-marks.vtrec: the same at 40x6; scroll-flood.vtrec at 80x24
+```
+
+The scripts build every interesting codepoint with `[char]::ConvertFromUtf32`
+/ `[char]0x0301` rather than writing it literally — deliberate twice over. For
+`astral`, the fixture assertions want the *output* rows to be the only ones
+carrying the emoji, which an echoed command line would break. For
+`combining-marks`, the marks are explicit codepoints because macOS input
+methods produce NFD and Windows ones do not — the bytes through the pty are
+real, but the decomposed form was chosen, not typed. Content: `astral` is
+`😀🚀 tail`, a coloured `🌟` mixed with CJK, and `a💩b💩c`; `combining-marks`
+is `cafe´ nai¨ve`, a mark inside a red run and one after it, one riding
+bold+underline, and one on a double-width `世`; `scroll-flood` is 120
+numbered lines at 80x24 — write-per-line, so each line tends to arrive as its
+own chunk and the replay sees a `SCROLL` per delta, not one giant leap.
+(`scroll-flood` is corpus-only: exporting its 115 chunks would be a megabyte
+of golden JSON for ordering coverage the `-short` fixtures already provide.)
+
 Worth adding as they become relevant: `vim`, `htop`/`btm`, `tmux`, a `cargo build`,
 and the `@sigx/terminal` showcase example — the last being a useful check that
 zesterm can host the user's own TUI framework correctly.

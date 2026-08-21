@@ -19,20 +19,31 @@
 //! recordings. Two implementations agreeing with each other is not the goal;
 //! both agreeing with the terminal is.
 
-use zest_core::{Modes, Terminal};
+use zest_core::{CellFlags, Modes, Terminal};
 use zest_proto::apply::{Applied, Applier};
 use zest_proto::decode::GridView;
-use zest_proto::delta::{BlockPayload, CursorState};
+use zest_proto::delta::{BlockPayload, CursorState, DeltaOp};
 use zest_proto::encode::Encoder;
 
-const CORPUS: &[&str] = &[
-    "basic-echo",
-    "dir-colors",
-    "git-log",
-    "unicode-wide",
-    "vim-macos",
-    "blocks-zsh",
-    "blocks-pwsh",
+/// Every recording, with the size it was captured at.
+///
+/// The size travels with the name because a `.vtrec` does not carry it: the
+/// output was laid out for the recorded width, and a replay at another one
+/// wraps it somewhere ConPTY never did. The natural-size tests below and the
+/// coverage census both read it from here, so the two cannot drift apart.
+const CORPUS: &[(&str, usize, usize)] = &[
+    ("basic-echo", 80, 24),
+    ("dir-colors", 80, 24),
+    ("git-log", 100, 30),
+    ("unicode-wide", 80, 24),
+    ("vim-macos", 80, 24),
+    ("blocks-zsh", 120, 30),
+    ("blocks-pwsh", 120, 30),
+    // The three #17 recordings, each closing a blind spot the census test
+    // below names: astral-plane emoji, decomposed Unicode, hard scrolling.
+    ("astral", 40, 6),
+    ("combining-marks", 40, 6),
+    ("scroll-flood", 80, 24),
 ];
 
 fn corpus_path(name: &str) -> std::path::PathBuf {
@@ -98,11 +109,36 @@ fn cursor(t: &Terminal) -> CursorState {
 }
 
 /// Rows as plain text, trailing blanks trimmed the way `screen_text` trims them.
+///
+/// Combining marks are re-attached from the side table, because `screen_text`
+/// includes them: concatenating `run.text` alone reads `cafe´` as `cafe` and
+/// the comparison fails on a recording that is being decoded correctly. That
+/// this projection could silently drop every mark and still pass is exactly
+/// blind spot 2 of #17 — no recording carried one until `combining-marks`.
+/// `CellMarks::at` counts *cells* within the run while `text` holds one char
+/// per character-bearing cell, so the walk advances by each char's cell width,
+/// which the run's attribute knows via `WIDE`.
 fn view_text(view: &GridView) -> String {
     view.rows()
         .iter()
         .map(|r| {
-            let line: String = r.runs.iter().map(|run| run.text.as_str()).collect();
+            let mut line = String::new();
+            for run in &r.runs {
+                let wide = view
+                    .attrs
+                    .get(&run.attr)
+                    .is_some_and(|a| a.flags.contains(CellFlags::WIDE));
+                let stride = if wide { 2 } else { 1 };
+                let mut cell: u16 = 0;
+                let mut marks = run.marks.iter().peekable();
+                for ch in run.text.chars() {
+                    line.push(ch);
+                    if marks.peek().is_some_and(|m| m.at == cell) {
+                        line.push_str(&marks.next().expect("just peeked").marks);
+                    }
+                    cell += stride;
+                }
+            }
             line.trim_end().to_string()
         })
         .collect::<Vec<_>>()
@@ -539,7 +575,7 @@ fn blocks_zsh() {
 /// tall viewport can hide the bug entirely by never scrolling at all.
 #[test]
 fn every_recording_survives_a_short_viewport() {
-    for name in CORPUS {
+    for (name, ..) in CORPUS {
         replay(name, 80, 5);
     }
 }
@@ -551,7 +587,7 @@ fn every_recording_survives_a_short_viewport() {
 /// code that does not work.
 #[test]
 fn resyncing_at_every_point_lands_in_the_same_place() {
-    for name in CORPUS {
+    for (name, ..) in CORPUS {
         let all = chunks(name);
         for drop_at in 0..all.len() {
             let mut term = Terminal::new(80, 10, 2000);
@@ -589,7 +625,7 @@ fn resyncing_at_every_point_lands_in_the_same_place() {
 /// against a suite that looks thorough and tests nothing.
 #[test]
 fn the_corpus_contains_real_terminal_output() {
-    for name in CORPUS {
+    for (name, ..) in CORPUS {
         let c = chunks(name);
         let total: usize = c.iter().map(Vec::len).sum();
         assert!(total > 50, "{name}: only {total} bytes of payload");
@@ -602,6 +638,91 @@ fn the_corpus_contains_real_terminal_output() {
             "{name}: no escape sequences, so this exercises nothing"
         );
     }
+}
+
+/// The corpus reaches the three places it was blind to, at its natural sizes.
+///
+/// #17's census: nothing recorded reached past the BMP (every wide character
+/// was CJK, so a client counting UTF-16 code units passed anyway), no recording
+/// carried a combining mark (so `Run::marks` was only ever exercised by
+/// hand-built input), and across the whole corpus at natural sizes there were
+/// six `SCROLL` ops — one recording standing behind the ordering rule
+/// `Delta::scrolls_come_first` protects. `fixture_dump` asserts the same
+/// census over the *fixtures*; this is the recordings' own copy, so replacing
+/// or trimming a recording cannot quietly reopen a hole while every replay
+/// above stays green.
+#[test]
+fn the_corpus_covers_astral_marks_and_scrolling() {
+    let (mut astral, mut marks, mut scrolls) = (0usize, 0usize, 0usize);
+
+    for (name, cols, rows) in CORPUS {
+        let mut term = Terminal::new(*cols, *rows, 2000);
+        let mut enc = Encoder::new();
+        enc.keyframe(term.grid(), cursor(&term), term.modes(), "", term.blocks());
+
+        for chunk in chunks(name) {
+            term.advance(&chunk);
+            let d = enc.delta(term.grid(), cursor(&term), term.modes(), "", term.blocks());
+            for op in &d.ops {
+                match op {
+                    DeltaOp::Scroll { .. } => scrolls += 1,
+                    DeltaOp::Row { payload, .. } => {
+                        for run in &payload.runs {
+                            astral += run.text.chars().filter(|c| *c as u32 > 0xFFFF).count();
+                            marks += run.marks.len();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    assert!(
+        astral > 0,
+        "no recording reaches past the BMP -- a JavaScript client counting UTF-16 \
+         code units instead of code points would pass every replay"
+    );
+    assert!(
+        marks > 0,
+        "no recording carries a combining mark -- the side table `Run::marks` is \
+         only tested by hand-built input"
+    );
+    // Well above the six the corpus held before #17: the floor is meant to fail
+    // when the recording that scrolls hard is dropped, not to wobble with an
+    // incidental one.
+    assert!(
+        scrolls >= 50,
+        "only {scrolls} SCROLL ops at natural sizes -- the scroll/row ordering rule \
+         is back to resting on a single recording"
+    );
+}
+
+/// Astral-plane emoji from a real pwsh through a real ConPTY.
+///
+/// Every wide character the older recordings held is CJK — three UTF-8 bytes
+/// and *one* UTF-16 code unit, so a JavaScript client counting code units
+/// happened to be right. One emoji is where the two readings part ways.
+#[test]
+fn astral() {
+    replay("astral", 40, 6);
+}
+
+/// Decomposed Unicode through a real ConPTY, marks riding SGR runs and a wide
+/// character — the cases `Run::marks` and `CellMarks::at` exist for.
+#[test]
+fn combining_marks() {
+    replay("combining-marks", 40, 6);
+}
+
+/// Hard scrolling at a natural viewport size.
+///
+/// Before this recording, reordering `scroll` after `row` was caught by
+/// `vim-macos` and nothing else at the natural sizes — a single recording
+/// standing behind the one ordering rule `Delta::scrolls_come_first` protects.
+#[test]
+fn scroll_flood() {
+    replay("scroll-flood", 80, 24);
 }
 
 /// A real macOS vim session: alt-screen, truecolour, UTF-8, heavy repaints.

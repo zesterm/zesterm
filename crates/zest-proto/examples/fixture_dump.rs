@@ -49,32 +49,29 @@ use zest_proto::{
 /// otherwise show up as a field silently read as `undefined`.
 const FIXTURE_SCHEMA: u32 = 1;
 
-/// Where one fixture's input comes from.
-enum Source {
-    /// A recording in `zest-core/tests/corpus`, by name.
-    Vtrec(&'static str),
-    /// Literal VT input, for a path no recording reaches.
-    Synthetic(&'static [&'static str]),
-}
-
 /// The recordings, at the sizes `conformance.rs` replays them.
 ///
 /// Same sizes deliberately — a fixture that diverges from the Rust replay it is
 /// meant to mirror is a second thing to keep in sync for no benefit.
 ///
-/// `combining-marks` is not a recording. **No recording in the corpus contains a
-/// single combining mark**, which is not obvious and is worth stating: the side
-/// table `Run::marks` carries has real coverage in `apply.rs`'s unit tests and
-/// none at all in the five replays, so `conformance.rs` dropping its exclusion
-/// for marks proved less than it appears to. A client reading `at` as an offset
-/// into the row rather than into its run would pass every recorded fixture. The
-/// synthetic session below is the smallest thing that catches it.
-const CORPUS: &[(&str, usize, usize, Source)] = &[
-    ("basic-echo", 80, 24, Source::Vtrec("basic-echo")),
-    ("dir-colors", 80, 24, Source::Vtrec("dir-colors")),
-    ("git-log", 100, 30, Source::Vtrec("git-log")),
-    ("unicode-wide", 80, 24, Source::Vtrec("unicode-wide")),
-    ("vim-macos", 80, 24, Source::Vtrec("vim-macos")),
+/// `combining-marks` and `astral` began life as synthetic sessions, because no
+/// recording then contained a combining mark or anything past the BMP — a
+/// client reading `CellMarks::at` as an offset into the row rather than into
+/// its run, or counting UTF-16 code units, passed every recorded fixture. Both
+/// are real ConPTY recordings now (#17), carrying the same cases the synthetic
+/// input was built to reach; the coverage census below is what holds them to
+/// that, so a re-recording that lost a case fails here rather than passing
+/// hollowed out.
+///
+/// The last element names the recording in `zest-core/tests/corpus`, distinct
+/// from the fixture name because the `-short` exports replay a recording a
+/// second time at another size.
+const CORPUS: &[(&str, usize, usize, &str)] = &[
+    ("basic-echo", 80, 24, "basic-echo"),
+    ("dir-colors", 80, 24, "dir-colors"),
+    ("git-log", 100, 30, "git-log"),
+    ("unicode-wide", 80, 24, "unicode-wide"),
+    ("vim-macos", 80, 24, "vim-macos"),
     // The fixture that holds a TypeScript client to `Delta::blocks`. Without it
     // a client could ignore the field entirely and pass every fixture here — the
     // same gap `combining-marks` exists to close, and for the same reason: the
@@ -86,7 +83,7 @@ const CORPUS: &[(&str, usize, usize, Source)] = &[
     // code, an escaped Windows cwd — is all host-side parsing. Blocks reach a
     // client already parsed, so the wire shape is identical and a second fixture
     // would be a second thing to regenerate for no coverage.
-    ("blocks-zsh", 120, 30, Source::Vtrec("blocks-zsh")),
+    ("blocks-zsh", 120, 30, "blocks-zsh"),
     // The same recordings at a viewport short enough to force heavy scrolling,
     // mirroring `conformance.rs::every_recording_survives_a_short_viewport`.
     //
@@ -95,55 +92,31 @@ const CORPUS: &[(&str, usize, usize, Source)] = &[
     // the ordering invariant — which is the one thing `Delta::scrolls_come_first`
     // exists to protect — had a single fixture standing behind it. A tall
     // viewport hides the bug by never scrolling at all.
-    ("basic-echo-short", 80, 5, Source::Vtrec("basic-echo")),
-    ("dir-colors-short", 80, 5, Source::Vtrec("dir-colors")),
-    ("git-log-short", 80, 5, Source::Vtrec("git-log")),
-    ("unicode-wide-short", 80, 5, Source::Vtrec("unicode-wide")),
-    ("vim-macos-short", 80, 5, Source::Vtrec("vim-macos")),
-    (
-        "combining-marks",
-        40,
-        6,
-        Source::Synthetic(&[
-            // Decomposed Unicode in the default attribute. macOS input methods
-            // produce this form by default, so it is the ordinary case rather
-            // than an exotic one.
-            "cafe\u{301} nai\u{308}ve\r\n",
-            // The case `CellMarks::at` exists for: runs split on attribute, and
-            // the offset is within the run, not within the row. A decoder that
-            // reads it as a row offset puts the accent on the wrong letter here
-            // and nowhere else.
-            "\u{1b}[31mred e\u{301}\u{1b}[0m then a\u{300}\r\n",
-            // Marks riding along with flags, so the attribute and the side
-            // table have to survive the same run boundary.
-            "\u{1b}[1;4mbold u\u{308}\u{1b}[0m tail\r\n",
-            // A mark on a double-width character: the one place the width rule
-            // and the mark offset interact.
-            "\u{1b}[32m\u{4e16}\u{301}\u{754c}\u{1b}[0m\r\n",
-        ]),
-    ),
-    (
-        "astral",
-        40,
-        6,
-        // **Nothing in the corpus reaches past the BMP** — every wide character
-        // in `unicode-wide` and `vim-macos` is CJK, which is three UTF-8 bytes
-        // and one UTF-16 code unit. That hides the single most JavaScript-
-        // specific bug a client can have: `text.length` counts UTF-16 code
-        // units, so one emoji counts as two and every cell after it shifts left.
-        // On CJK that mistake is invisible, because there the count happens to
-        // be right.
-        //
-        // With an astral character the two wrong readings even fail
-        // differently, which is what makes this worth a fixture rather than a
-        // comment: `text.length` over-counts the WIDE run, and the character
-        // count under-counts the spacer run that carries no text at all.
-        Source::Synthetic(&[
-            "\u{1F600}\u{1F680} tail\r\n",
-            "\u{1b}[33m\u{1F31F}\u{1b}[0m mixed \u{4e16}\u{754c} ascii\r\n",
-            "a\u{1F4A9}b\u{1F4A9}c\r\n",
-        ]),
-    ),
+    ("basic-echo-short", 80, 5, "basic-echo"),
+    ("dir-colors-short", 80, 5, "dir-colors"),
+    ("git-log-short", 80, 5, "git-log"),
+    ("unicode-wide-short", 80, 5, "unicode-wide"),
+    ("vim-macos-short", 80, 5, "vim-macos"),
+    // Decomposed Unicode through a real ConPTY: a mark inside a coloured run,
+    // one after the run boundary (the case `CellMarks::at` exists for — the
+    // offset is within the run, not within the row), one riding bold+underline,
+    // and one on a double-width character, where the width rule and the mark
+    // offset interact.
+    ("combining-marks", 40, 6, "combining-marks"),
+    // Astral-plane emoji through a real ConPTY. Every other wide character in
+    // the corpus is CJK — three UTF-8 bytes and one UTF-16 code unit — which
+    // hides the single most JavaScript-specific bug a client can have:
+    // `text.length` counts UTF-16 code units, so one emoji counts as two and
+    // every cell after it shifts left. With an astral character the two wrong
+    // readings even fail differently: `text.length` over-counts the WIDE run,
+    // and the character count under-counts the spacer run that carries no text
+    // at all.
+    ("astral", 40, 6, "astral"),
+    // `scroll-flood` is deliberately *not* exported. Its 115 chunks make a
+    // megabyte of golden JSON, and what it adds — SCROLL ordering at a natural
+    // viewport — the `-short` exports above already hold a TypeScript client
+    // to. It earns its keep in `conformance.rs` and `chaos_resync.rs`, where
+    // the replay costs nothing to commit.
 ];
 
 /// Stands in for a real host, so the fixtures are byte-stable.
@@ -303,14 +276,11 @@ fn replay(
     name: &str,
     cols: usize,
     rows: usize,
-    source: &Source,
+    recording: &str,
     cov: &mut Coverage,
 ) -> Fixture {
     let addr = SessionAddr { host: FIXTURE_HOST, session: SessionId(1) };
-    let input: Vec<Vec<u8>> = match source {
-        Source::Vtrec(recording) => chunks(recording),
-        Source::Synthetic(s) => s.iter().map(|c| c.as_bytes().to_vec()).collect(),
-    };
+    let input: Vec<Vec<u8>> = chunks(recording);
 
     let mut term = Terminal::new(cols, rows, 2000);
     let mut enc = Encoder::new();
@@ -392,10 +362,7 @@ fn replay(
         schema: FIXTURE_SCHEMA,
         protocol: PROTOCOL_VERSION,
         recording: name.to_string(),
-        source: match source {
-            Source::Vtrec(_) => "vtrec",
-            Source::Synthetic(_) => "synthetic",
-        },
+        source: "vtrec",
         cols: u16::try_from(cols).unwrap_or(u16::MAX),
         rows: u16::try_from(rows).unwrap_or(u16::MAX),
         frames,
@@ -805,9 +772,10 @@ struct Fixture {
     /// impossible to miss in review.
     protocol: u16,
     recording: String,
-    /// `vtrec` for a real recording, `synthetic` for input written to reach a
-    /// path no recording does. Stated so nobody mistakes the second kind for
-    /// evidence about what real programs emit.
+    /// `vtrec` for a real recording — all of them, since #17 — with
+    /// `synthetic` reserved for input written to reach a path no recording
+    /// does, stated so nobody mistakes that kind for evidence about what real
+    /// programs emit.
     source: &'static str,
     cols: u16,
     rows: u16,
