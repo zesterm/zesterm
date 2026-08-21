@@ -121,21 +121,29 @@ mod imp {
     /// for this reason.
     pub fn bind_private(path: &str) -> Result<UnixListener, DaemonError> {
         let stage = format!("{path}.d");
+        // A stale stage is usually a directory from a crashed daemon, but the
+        // name could in principle be squatted by anything; clear both shapes,
+        // or the mkdir below wedges startup on EEXIST/ENOTDIR.
         let _ = std::fs::remove_dir_all(&stage);
+        let _ = std::fs::remove_file(&stage);
         rustix::fs::mkdir(stage.as_str(), rustix::fs::Mode::from_bits_truncate(0o700))
             .map_err(|e| DaemonError::Transport(format!("{stage}: {e}")))?;
         // A pathological inherited umask can only have *narrowed* the 0700;
         // put the owner bits back so the bind below can proceed. No window
         // opens: the directory was never group- or other-accessible.
         std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| DaemonError::Transport(e.to_string()))?;
+            .map_err(|e| DaemonError::Transport(format!("{stage}: {e}")))?;
 
+        // Every error names the staged path: a socket path within 4 bytes of
+        // SUN_LEN fails *here* rather than at the final path, and the message
+        // has to say which name was too long.
         let staged = format!("{stage}/s");
-        let listener =
-            UnixListener::bind(&staged).map_err(|e| DaemonError::Transport(e.to_string()))?;
+        let listener = UnixListener::bind(&staged)
+            .map_err(|e| DaemonError::Transport(format!("{staged}: {e}")))?;
         std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| DaemonError::Transport(e.to_string()))?;
-        std::fs::rename(&staged, path).map_err(|e| DaemonError::Transport(e.to_string()))?;
+            .map_err(|e| DaemonError::Transport(format!("{staged}: {e}")))?;
+        std::fs::rename(&staged, path)
+            .map_err(|e| DaemonError::Transport(format!("{staged} -> {path}: {e}")))?;
         let _ = std::fs::remove_dir(&stage);
         Ok(listener)
     }
@@ -703,11 +711,19 @@ mod unix_tests {
         // A deliberately permissive umask for the duration of this test: the
         // window this closes only exists when the umask would have allowed
         // something wider, so testing under a restrictive one proves nothing.
-        // Set under the lock and restored before release; only ever this wide
-        // — a *permissive* value is harmless to the binary's other tests
-        // where the restrictive leak of #403 was not.
-        let _serialized = UMASK_LOCK.lock().expect("umask lock");
-        let prev = rustix::process::umask(rustix::fs::Mode::empty());
+        //
+        // A save/restore guard is the very shape #403 bans — it is safe here
+        // only because UMASK_LOCK serializes every umask toucher in this
+        // binary, and Drop (not a trailing statement) is what keeps a failing
+        // assertion from leaking the permissive value to later tests.
+        let _serialized = UMASK_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        struct Restore(rustix::fs::Mode);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                rustix::process::umask(self.0);
+            }
+        }
+        let _restore = Restore(rustix::process::umask(rustix::fs::Mode::empty()));
 
         let registry = std::sync::Arc::new(crate::server::Registry::new());
         let cfg = DaemonConfig {
@@ -741,7 +757,6 @@ mod unix_tests {
         let mode = std::fs::metadata(&p).expect("socket exists").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "socket mode was {mode:o}, not 0600");
 
-        rustix::process::umask(prev);
         let _ = std::fs::remove_file(&p);
         let _ = std::fs::remove_file(format!("{p}.lock"));
     }
@@ -756,7 +771,7 @@ mod unix_tests {
         // and its first write inside fails EACCES. In `cargo test --workspace`
         // the bystander was zest-app's themes::tests, a crate away from the
         // culprit, and the symptom read as CI's temp root breaking.
-        let _serialized = UMASK_LOCK.lock().expect("umask lock");
+        let _serialized = UMASK_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let before = {
             let cur = rustix::process::umask(rustix::fs::Mode::empty());
             rustix::process::umask(cur);
