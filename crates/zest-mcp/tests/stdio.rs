@@ -216,6 +216,21 @@ fn a_harness_can_handshake_list_tools_and_read_a_session() {
         "`keys` is advertised as a list, so one call can send several"
     );
 
+    // `styled` is a *result* field, so it has no schema property to check --
+    // the description is the only place a model can learn it exists, and a
+    // safety signal nothing announces is one nothing reads. (#348)
+    let screen_desc = tools
+        .iter()
+        .find(|t| t["name"] == "screen")
+        .and_then(|t| t["description"].as_str())
+        .expect("`screen` must be offered with a description");
+    for want in ["styled", "dim", "reversed"] {
+        assert!(
+            screen_desc.contains(want),
+            "`screen`'s description must mention `{want}`: {screen_desc}"
+        );
+    }
+
     let hosts = h.call(&serde_json::json!({
         "jsonrpc": "2.0", "id": 3, "method": "tools/call",
         "params": { "name": "hosts", "arguments": {} }

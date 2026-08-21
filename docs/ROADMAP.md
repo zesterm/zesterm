@@ -221,6 +221,19 @@ the history behind them is in closed issues and PRs.
       `:wq` for `nvim` would insert it rather than run it. The table is the
       third copy of one rule, held byte-for-byte against `zest-input` by
       `tests/keys.rs` rather than by review. → #344, #345.
+- [x] **Dim text is not typed text.** `screen` carries `styled` —
+      `{row, col, len, attrs}` — because flattened to characters, text an
+      application is *offering* is identical to text the user committed: a
+      CLI's greyed suggestion read as a pending instruction, one Enter from
+      acting on words nobody wrote. It also recovers a picker's selection when
+      that is drawn by inverting a row rather than printing a marker, which is
+      the difference between navigating a dialog and aiming it. Positions and
+      flag names, never text — attributed runs would restate the screen a
+      second time at 3-5x the tokens, where spans measured 2-23 bytes across
+      the corpus — so the value carries nothing a terminal authored and needs
+      no fence. Always present rather than opt-in, since a signal behind a flag
+      is absent exactly when it was wanted. No colour, and the three layout
+      bits masked out. → #348.
 - [ ] Fleet reach for `zest-mcp`, gated on a host advertising the observer
       attach.
 - [ ] **Tokens per build, measured.** Byte stream vs delta vs block output for
