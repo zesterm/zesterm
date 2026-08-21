@@ -1217,6 +1217,46 @@ of times with `\r`, and the emulator has already collapsed it to one row before
 anything an agent reads looks at it. `blocks` carries no output text at all, so
 fifty commands of history costs less than one screen of a build log.
 
+### Measured, and the two numbers do not behave alike
+
+`examples/token_probe.rs` runs a command on a real pty and reports the stream,
+the deltas, `screen`'s text and `output` per block. The last two come from a
+real `Replica` fed the encoder's own output, so they are what a tool returns
+rather than a second reading of the host's grid.
+
+`seq 1 200000` — 1.49 MB of pty, roughly 596k tokens of it — reaches a model as
+**202 bytes, about 51 tokens**. That is not compression. `screen` answers with
+the final grid, so its size is set by the grid and not by how much was printed;
+the ratio therefore *improves* the noisier the command is, which no compression
+figure does.
+
+The transport number is not a property of the session at all. `zest-proto`
+coalesces on **state** — a subscriber holds an encoder shadow and asks for the
+difference from what it last sent — so the same run costs:
+
+| deltas asked for | bytes | against the stream |
+|---|---|---|
+| 1 (an observer that polled once) | 3,254 | 0.2% |
+| 223 (a client on a 16 ms frame) | 506,671 | 34% |
+| 17,315 (asked after every read) | 11,386,765 | 765% |
+
+The first line reproduces ADR-004's "~3 KB for `cat 1MB`" almost exactly, which
+settles what that figure is: **the single-delta floor**, not a saving every
+client receives. The last line is larger than the byte stream it replaces —
+framing paid thousands of times over on a screen that keeps scrolling.
+
+A `cargo build --workspace` — 338 seconds, 40,306 bytes of pty, ~16k tokens —
+reaches a model as **1,667 bytes, about 417 tokens**: the build's tail, which is
+what somebody asking "did it build" wants. Its transport cost at the same 16 ms
+cadence is 94,618 bytes, *more* than the stream, because a progress bar repaints
+a row that a delta must then describe.
+
+So the two claims must not be quoted interchangeably. ADR-004's is about a
+protocol and moves with how often you look — and on a chatty, low-volume command
+it is a cost rather than a saving. This one is about a *tool result*, is bounded
+by the grid, and does not move at all, which is the property an agent surface
+needs.
+
 ### Two exit codes, and only one of them means anything
 
 This is the part that is cheap to undo by accident, because the two are the same

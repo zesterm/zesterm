@@ -124,8 +124,31 @@ truncates in the **middle**: an error is usually at the end and the command that
 caused it at the beginning.
 
 ADR-004 measures the *transport* half of this (~1 MB of pty bytes against ~3 KB
-of delta for `cat 1MB`). These are the other half, and they are different
-numbers.
+of delta for `cat 1MB`). These are the other half, and `examples/token_probe.rs`
+measures both on a command of your choosing:
+
+```sh
+cargo run -p zest-mcp --example token_probe -- --cmd "cargo build"
+```
+
+It spawns rather than replaying a fixture, because the recorded corpus has no
+build in it — the largest entry is 10 KB of `vim` — and committing build logs
+would pay storage forever for a number that moves with the toolchain. The
+`screen` and `output` figures come from a real `Replica` fed the encoder's own
+output, so they are what a tool returns rather than a second reading of the grid.
+
+**The two numbers behave differently, and that is the point.** `seq 1 200000` is
+1.49 MB of pty — roughly 596k tokens if something scraped the stream — and
+reaches a model as **202 bytes, about 51 tokens**. That figure does not move,
+because `screen` is the final grid: it is bounded by the grid rather than by how
+much was printed, so it gets *better* the noisier the command is.
+
+The transport figure is not a property of the session at all. Deltas coalesce on
+**state**, so the same run costs 3,254 bytes if you poll once, 507 KB on a 16 ms
+frame, and 11.4 MB if you ask after every read — larger than the stream it
+replaces. The first of those reproduces ADR-004's ~3 KB almost exactly, which
+settles what that number is: the single-delta floor, not a saving every client
+receives. Quote them separately.
 
 ## Two things the tool results keep saying
 
