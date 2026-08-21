@@ -16,9 +16,11 @@ id: number,
 /**
  * First line of the prompt (OSC 133;A).
  *
- * `ts(type = "number")` for [`RowPayload::line`]'s reason, on all three
- * line fields — they are compared against it, and two integer types that
- * must agree is a conversion bug waiting to happen.
+ * The integer is pinned to `number` for [`RowPayload::line`]'s reason,
+ * on all three line fields — they are compared against it, and two
+ * integer types that must agree is a conversion bug waiting to happen.
+ * (`output_line`/`end_line` are `number | null`: same integer, plus the
+ * `null` their `Option` really does put on the wire.)
  */
 prompt_line: number, 
 /**
