@@ -236,10 +236,26 @@ the history behind them is in closed issues and PRs.
       bits masked out. → #348.
 - [ ] Fleet reach for `zest-mcp`, gated on a host advertising the observer
       attach.
-- [ ] **Tokens per build, measured.** Byte stream vs delta vs block output for
-      `cargo build`, `npm install`, `pytest`. ADR-004's ~3 KB-per-`cat 1MB`
-      number is *transport* efficiency; text-per-changed-row is *model*
-      efficiency, and the two belong side by side.
+- [x] **Tokens per build, measured.** `cargo run -p zest-mcp --example
+      token_probe -- --cmd "<command>"` runs a command on a real pty and
+      reports four numbers: the raw stream, the framed deltas, `screen`'s text
+      and `output` per block. It spawns rather than replaying, because the
+      corpus has no build in it — its largest recording is 10 KB of vim.
+      The last two come from a real `Replica` fed the encoder's own output, so
+      they are what a tool returns rather than a second reading of the grid.
+      **The two numbers behave differently, which is the finding.** For
+      `seq 1 200000` — 1.49 MB of pty, ~596k tokens — the model-facing answer
+      is 202 bytes, ~51 tokens, and it does not move: `screen` is the final
+      grid, so it is bounded by the grid rather than by how much was printed.
+      The transport figure moves by two orders of magnitude with polling
+      cadence alone, because `zest-proto` coalesces on *state*: one poll is
+      3,254 bytes (reproducing ADR-004's ~3 KB and confirming that figure is
+      the single-delta regime), a 16 ms client is 507 KB, and asking after
+      every read is 11.4 MB — larger than the byte stream it replaces. So
+      ADR-004's number is a floor for an idle observer, not a saving every
+      client receives, and the agent-facing number is the stable one. A
+      `cargo build --workspace` is 40 KB of pty (~16k tokens) against 1,667
+      bytes of `screen` (~417) — the tail, which is what "did it build" wants.
 - [ ] **Provenance.** An author on `Block`, so scrollback records who ran what.
       Needs the daemon to stop forgetting: `welcome()` reads the `ClientId` and
       then `Gate::Served` drops the transcript. Core cannot hold a `ClientId`
