@@ -209,6 +209,85 @@ pub fn best_route(
     None
 }
 
+/// Ready-made hosts for tests — this crate's and every consumer's.
+///
+/// **The default [`fleet`](fixture::fleet) contains two machines that share a
+/// display label**, and that is the whole point. Five times now a lookup keyed
+/// on the label where it meant the [`HostId`] — the launcher's group map, its
+/// provenance lookup, `LinkKind` resolution, a placeholder fallback that could
+/// match the local row, and the accent slot table (#304 has the ledger) — and
+/// every one was invisible in every test, because no test fleet contained a
+/// duplicate. One machine, or several with distinct names, behaves identically
+/// under either keying. Two laptops both called `mac` is not exotic; a test
+/// fleet where that never happens is the reason the bug kept coming back.
+///
+/// So: build fleet tests on [`fixture::fleet`] unless the test is *about*
+/// something else, and a lookup that quietly keys on the label fails loudly
+/// instead of shipping. Hand-rolling a `FleetHost` in a test is how the next
+/// duplicate-label bug stays invisible — go through [`fixture::host`] /
+/// [`fixture::local`] and mutate the row for the fact under test.
+///
+/// Not `#[cfg(test)]`, deliberately: a test-gated item does not exist in the
+/// library consumers compile against, and the consumers' tests (`zest-app`'s
+/// fleet, launcher and presence suites) are exactly who this is for. The crate
+/// is workspace-internal and nothing in a shipping binary calls these, so the
+/// linker drops them.
+pub mod fixture {
+    use super::{FleetHost, SessionsState};
+    use zest_mesh::discovery::Presence;
+    use zest_proto::HostId;
+
+    /// A remote machine, online on the LAN: id `[id; 32]`, an address of its
+    /// own (`10.0.0.<id>:7717`) and a measured rtt. Mutate the returned row
+    /// for anything a test needs to differ.
+    #[must_use]
+    pub fn host(id: u8, label: &str) -> FleetHost {
+        FleetHost {
+            host: HostId::from_bytes([id; 32]),
+            label: label.into(),
+            presence: Presence::Online,
+            local: false,
+            address: Some(format!("10.0.0.{id}:7717")),
+            reachability: Some(zest_mesh::Reachability::Lan),
+            rtt_ms: Some(0.4),
+            sessions: SessionsState::Unknown,
+            offer: None,
+            enrolled: false,
+            relay_online: false,
+        }
+    }
+
+    /// The window's own machine, shaped like the row `snapshot` synthesizes:
+    /// no address (loopback is not dialled by address) and no rtt.
+    #[must_use]
+    pub fn local(id: u8, label: &str) -> FleetHost {
+        FleetHost {
+            host: HostId::from_bytes([id; 32]),
+            label: label.into(),
+            presence: Presence::Online,
+            local: true,
+            address: None,
+            reachability: Some(zest_mesh::Reachability::Loopback),
+            rtt_ms: None,
+            sessions: SessionsState::Unknown,
+            offer: None,
+            enrolled: false,
+            relay_online: false,
+        }
+    }
+
+    /// The default test fleet: the local row (`studio`, id 1) and **two remote
+    /// machines both labelled `mac`** (ids 2 and 3). Anything keyed on the
+    /// label conflates the last two; anything keyed on the id tells them
+    /// apart. A test that resolves "the second mac" reaches for `fleet[2]` —
+    /// the rows are in id order, and a fixture test pins the trap so nobody
+    /// "fixes" it by renaming one.
+    #[must_use]
+    pub fn fleet() -> Vec<FleetHost> {
+        vec![local(1, "studio"), host(2, "mac"), host(3, "mac")]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! The truth table, moved here with the rule it describes.
@@ -223,21 +302,36 @@ mod tests {
     use zest_proto::HostId;
 
     fn host(local: bool, presence: Presence, address: Option<&str>, enrolled: bool) -> FleetHost {
-        FleetHost {
-            host: HostId::from_bytes([if local { 1 } else { 2 }; 32]),
-            label: if local { "studio".into() } else { "forge".into() },
-            presence,
-            local,
-            address: address.map(str::to_string),
-            reachability: None,
-            rtt_ms: None,
-            sessions: SessionsState::Unknown,
-            // Routing reads reachability and enrolment; what a host can offer
-            // says nothing about how to get there.
-            offer: None,
-            enrolled,
-            relay_online: false,
-        }
+        // Routing reads presence, address and enrolment; the shared fixture
+        // supplies the rest of the row so this file never hand-rolls one.
+        let mut h =
+            if local { fixture::local(1, "studio") } else { fixture::host(2, "forge") };
+        h.presence = presence;
+        h.address = address.map(str::to_string);
+        h.reachability = None;
+        h.rtt_ms = None;
+        h.enrolled = enrolled;
+        h
+    }
+
+    #[test]
+    fn the_default_fixture_fleet_keeps_its_duplicate_label() {
+        // The load-bearing assertion of the whole fixture module: the two
+        // `mac` rows ARE the fixture's value (#304 — five label-keyed lookups,
+        // each invisible against a fleet of distinct names). Renaming one to
+        // make some test's expectations tidier would quietly turn every test
+        // built on `fixture::fleet()` back into one that cannot tell label
+        // keying from id keying.
+        let fleet = fixture::fleet();
+        assert_eq!(
+            fleet.iter().filter(|h| !h.local && h.label == "mac").count(),
+            2,
+            "two remote machines share one display label, on purpose"
+        );
+        let (a, b) = (&fleet[1], &fleet[2]);
+        assert_ne!(a.host, b.host, "same label, different machines");
+        assert_ne!(a.address, b.address, "and different addresses — they are both real");
+        assert!(fleet[0].local && fleet.iter().filter(|h| h.local).count() == 1);
     }
 
     const RELAY: Option<&str> = Some("wss://relay.example");

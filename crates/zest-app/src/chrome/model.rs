@@ -61,7 +61,13 @@ pub enum TabPresence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TabOrigin {
     Local,
-    Remote { host_label: String },
+    /// `host` is the machine's identity; `label` is only what to call it.
+    /// Carried together (#304) because the variant used to offer the label
+    /// alone, and every lookup downstream reached for the one field it had —
+    /// two machines may share a display name. The id is all-zero while a
+    /// launch is still connecting (a placeholder address has no id yet), and
+    /// the label is then the only key there is.
+    Remote { host: zest_proto::HostId, label: String },
 }
 
 /// What kind of thing a tab is: a session, or one of the app's own screens.
