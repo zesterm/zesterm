@@ -5524,6 +5524,7 @@ dependencies = [
  "zest-config",
  "zest-core",
  "zest-daemon",
+ "zest-fleet",
  "zest-font",
  "zest-input",
  "zest-mesh",
@@ -5567,6 +5568,7 @@ dependencies = [
  "insta",
  "rustc-hash 2.1.3",
  "serde",
+ "ts-rs",
  "unicode-width",
  "vte",
 ]
@@ -5593,6 +5595,14 @@ dependencies = [
  "zest-mesh",
  "zest-proto",
  "zest-pty",
+]
+
+[[package]]
+name = "zest-fleet"
+version = "0.1.0"
+dependencies = [
+ "zest-mesh",
+ "zest-proto",
 ]
 
 [[package]]

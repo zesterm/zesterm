@@ -30,6 +30,9 @@ zest-cloud.workspace = true
 # The client half of the pairing handshake: this app proves a key like any
 # other client, over the same wire the phone will use.
 zest-mesh.workspace = true
+# The fleet vocabulary and the route rule, which this crate used to own -- see
+# `src/route.rs` for why the pure half left and the sockets stayed.
+zest-fleet.workspace = true
 thiserror = { workspace = true }
 # The remembered tab set (tabs_state.rs): plain JSON in the state dir.
 serde.workspace = true

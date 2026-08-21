@@ -29,7 +29,7 @@ import type { ByteLink, Dial } from './link.ts';
 import { REDIAL_MAX_MS, REDIAL_MIN_MS, type ConnectionState } from './session-client.ts';
 
 export interface ConnectionEvents {
-  onSessions?(sessions: readonly SessionInfo[], created: bigint | null): void;
+  onSessions?(sessions: readonly SessionInfo[], created: number | null): void;
   /**
    * What the machine says it is and can launch (#262), when it has something
    * new to say.

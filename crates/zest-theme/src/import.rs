@@ -228,11 +228,22 @@ pub fn windows_terminal(name: &str, json: &str) -> Result<Theme, ImportError> {
 /// produces a theme where red and orange are swapped.
 pub fn base16(name: &str, source: &str) -> Result<Theme, ImportError> {
     let mut base = [Option::<Rgba8>::None; 24];
+    let mut in_file_name = None;
 
     for line in source.lines() {
         let line = line.trim().trim_start_matches('"');
         let Some((key, value)) = line.split_once(':') else { continue };
         let key = key.trim().trim_matches('"');
+        // `scheme:` (classic) or `name:` (0.11+) is the author's own name for
+        // the theme. It matters most for a paste, which has no filename and
+        // arrives with a placeholder the caller made up.
+        if key == "scheme" || key == "name" {
+            let value = value.trim().trim_end_matches(',').trim_matches(['"', '\'']);
+            if !value.is_empty() {
+                in_file_name = Some(value.to_string());
+            }
+            continue;
+        }
         let Some(hex) = key.strip_prefix("base") else { continue };
         let Ok(idx) = u8::from_str_radix(hex.trim(), 16) else { continue };
         if idx as usize >= base.len() {
@@ -284,6 +295,7 @@ pub fn base16(name: &str, source: &str) -> Result<Theme, ImportError> {
         b
     };
 
+    let name = in_file_name.as_deref().unwrap_or(name);
     Ok(theme_from_scheme(
         &slug(name),
         name,
@@ -559,6 +571,17 @@ base0D: "8fa1b3"
 base0E: "b48ead"
 base0F: "ab7967"
 "#;
+
+    #[test]
+    fn base16_prefers_the_name_the_file_carries() {
+        // A paste has no filename to name the theme after, so the fallback
+        // name the caller passes is a placeholder — the `scheme:` (classic)
+        // or `name:` (0.11+) line in the file is the author's own name and
+        // must win, exactly as Windows Terminal's `"name"` field does.
+        let t = base16("Imported scheme", BASE16).expect("import");
+        assert_eq!(t.name, "Ocean", "the in-file name beats the placeholder");
+        assert_eq!(t.id, "ocean");
+    }
 
     #[test]
     fn base16_uses_the_standard_ansi_mapping() {

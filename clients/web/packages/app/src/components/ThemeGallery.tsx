@@ -6,10 +6,14 @@
  * follows the store's answer, so a click that fell back (unknown id) rings
  * the theme actually applied rather than the one clicked.
  *
- * Deliberately absent: the mock's dashed "Import a scheme" card is #147 —
- * dead UI for an importer that does not exist yet. A nav affordance to reach
- * `/themes` (a palette action, a settings row) is likewise still open; the
- * route is this work item's whole surface.
+ * Deliberately absent: the mock's dashed "Import a scheme" card is #147's
+ * open web half. The parsers exist in Rust (`zest-theme::import`) and the
+ * native gallery's card is live, but this client has no TypeScript port of
+ * them and — theme choice being client-kept — nowhere durable to put an
+ * imported theme's *content* yet. Rendering the card before both exist
+ * would be a dead target. A nav affordance to reach `/themes` (a palette
+ * action, a settings row) is likewise still open; the route is this work
+ * item's whole surface.
  */
 
 import { component, onUnmounted, signal } from 'sigx';

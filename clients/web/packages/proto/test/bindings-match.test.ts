@@ -13,12 +13,13 @@
  *
  * **Direction matters.** A decoder must accept everything a host can send, so
  * the check is `Generated extends Ours`, never the reverse. Ours may be wider —
- * `marks` optional, an `UnknownMessage` fallback — and must never be narrower.
+ * an `UnknownMessage` fallback — and must never be narrower.
  */
 
 import { test } from 'node:test';
 
 import type { AttrDef as GenAttrDef } from '@zest/bindings/AttrDef';
+import type { Color as GenColor } from '@zest/bindings/Color';
 import type { HostOffer as GenHostOffer } from '@zest/bindings/HostOffer';
 import type { HostProfile as GenHostProfile } from '@zest/bindings/HostProfile';
 import type { CellMarks as GenCellMarks } from '@zest/bindings/CellMarks';
@@ -28,6 +29,7 @@ import type { Delta as GenDelta } from '@zest/bindings/Delta';
 import type { RowPayload as GenRowPayload } from '@zest/bindings/RowPayload';
 import type { Run as GenRun } from '@zest/bindings/Run';
 
+import type { Color } from '../src/color.ts';
 import type {
   AttrDef,
   CellMarks,
@@ -43,13 +45,35 @@ import type {
 /** Compiles only if `Generated` is assignable to `Ours`. */
 type Accepts<Generated extends Ours, Ours> = true;
 
-// Exact, no exclusions needed.
+/**
+ * The decoded form of a generated type.
+ *
+ * `Run.marks` is `marks?` in the binding — `skip_serializing_if` means a run
+ * with no marks has no key at all on the wire (#15) — but the parser fills
+ * every such absence with its default (`[]`, `0`, `''`), so what a consumer
+ * holds is the required form. Recursively de-optionalising the generated type
+ * states exactly that relationship; a field the parser leaves absent
+ * (`BlockPayload.started_ms`) still checks, because required is assignable to
+ * optional.
+ */
+type Filled<T> = T extends object ? { [K in keyof T]-?: Filled<T[K]> } : T;
+
+// Exact, no adjustment needed.
 type _Marks = Accepts<GenCellMarks, CellMarks>;
 type _Cursor = Accepts<GenCursorState, CursorState>;
 
 /**
+ * `Color` is generated since #15 — `zest-core` grew a `ts` feature so
+ * `AttrDef.fg`/`bg` stopped reading `unknown` — and `color.ts` remains the
+ * hand-written reader the fixtures exercise. This is the line that keeps the
+ * two describing the same three shapes.
+ */
+type _Color = Accepts<GenColor, Color>;
+type _Attr = Accepts<GenAttrDef, AttrDef>;
+
+/**
  * The host offer (#262) is exact in both directions, and it is worth saying
- * why it needs no exclusion when so much else here does.
+ * why it needs no `Filled` when `Run` does.
  *
  * Every field but `HostProfile.name` is `#[serde(default)]`, so an older peer
  * may omit any of them — but `ts-rs` types them as required, which is the
@@ -60,62 +84,20 @@ type _Cursor = Accepts<GenCursorState, CursorState>;
 type _HostProfile = Accepts<GenHostProfile, HostProfile>;
 type _HostOffer = Accepts<GenHostOffer, HostOffer>;
 
-/**
- * `Run.marks` is excluded, and this is the reason.
- *
- * The field carries `#[serde(skip_serializing_if = "Vec::is_empty")]`, so a run
- * with no marks has no key at all on the wire — but `ts-rs` types it as a
- * non-optional `Array<CellMarks>`. The generated file overstates what arrives.
- * Ours makes it required-after-parsing (the parser substitutes `[]`), which is
- * the honest shape for a decoded value.
- *
- * Fixed by adding `ts(optional)` beside the `skip_serializing_if` in
- * `delta.rs`; tracked as a follow-up.
- */
-type _Run = Accepts<Omit<GenRun, 'marks'>, Omit<Run, 'marks'>>;
-
-/**
- * `RowPayload.line` is `bigint` in both — this package follows the bindings.
- *
- * Worth recording that the bindings and the wire disagree here: `rmp_serde`
- * writes the narrowest integer that fits, so a line id arrives as a plain
- * MessagePack integer and reaches JavaScript as a `number`. `wire.ts` coerces at
- * one boundary so the binding's promise holds for every consumer.
- */
-type _Row = Accepts<GenRowPayload, RowPayload>;
-
-/**
- * `AttrDef.fg` and `bg` are excluded because the bindings say `unknown`.
- *
- * `zest_core::Color` has no `ts` feature and therefore no generated type, so
- * there is nothing here to check against — `color.ts` is hand-written and kept
- * honest by the fixtures instead, which carry all three of its shapes. Giving
- * `Color` a binding is a follow-up; it needs a `ts` feature on `zest-core`.
- */
-type _Attr = Accepts<Omit<GenAttrDef, 'fg' | 'bg'>, Omit<AttrDef, 'fg' | 'bg'>>;
+type _Run = Accepts<Filled<GenRun>, Run>;
+type _Row = Accepts<Filled<GenRowPayload>, RowPayload>;
 
 /**
  * The discriminated unions, which is where a wire change would actually land.
  *
  * `AttrId` is a `number` in the bindings and ours, so `erase.attr` lines up; the
- * `op` tag values must match exactly or this fails to compile.
+ * `op` tag values must match exactly or this fails to compile. Since #14 the
+ * integer story needs no footnote: `Seq`, `SessionId` and every line id are
+ * `number` in the bindings, which is what the wire's narrowest-encoding rule
+ * delivers at runtime.
  */
-type _Op = Accepts<GenDeltaOp, DeltaOp>;
-
-/**
- * `Delta` is checked in halves, because the `fg` gap is nested inside it.
- *
- * `Delta.attrs` is `AttrDef[]`, and `AttrDef.fg` is `unknown`, so a whole-type
- * check would fail for a reason that has nothing to do with `Delta` — and
- * excluding `attrs` outright would silently stop checking the field that
- * actually carries the ops. `ops` is checked here in full; `attrs` is `_Attr`
- * above, with its exclusion stated once.
- */
-type _DeltaOps = Accepts<GenDelta['ops'], Delta['ops']>;
-type _DeltaAttrCount = Accepts<
-  Omit<GenDelta['attrs'][number], 'fg' | 'bg'>,
-  Omit<Delta['attrs'][number], 'fg' | 'bg'>
->;
+type _Op = Accepts<Filled<GenDeltaOp>, DeltaOp>;
+type _Delta = Accepts<Filled<GenDelta>, Delta>;
 
 test('the generated bindings are assignable to the hand-written wire types', () => {
   // Nothing to run: the assertions above are the test, and `tsc --noEmit` is

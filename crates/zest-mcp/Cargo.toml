@@ -50,7 +50,9 @@ zest-daemon = { workspace = true }
 # `CommandSpec` and `PtySize`, so `tests/live.rs` can create a session straight
 # on the registry -- which is what a session opened by the app or by another
 # agent looks like from this connection, and the only way to test a listing
-# that no reply of ours invalidates.
+# that no reply of ours invalidates. `examples/token_probe.rs` uses it to spawn
+# a real command, because what a *build* costs a model has no answer in the
+# recorded corpus -- its largest entry is 10 KB of vim.
 zest-pty = { workspace = true }
 # Not a runtime dependency, deliberately: `zest-input`'s public API takes winit
 # types and this is a headless stdio binary -- the `winit` entry in this crate's

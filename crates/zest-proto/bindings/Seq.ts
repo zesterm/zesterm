@@ -7,5 +7,12 @@
  * decide whether the next update can be a delta or has to be a keyframe. This
  * is the entire resync mechanism, and it is why the sequence counter already
  * exists in `zest-core`.
+ *
+ * `ts(type = "number")`, not the `bigint` a `u64` would derive: `rmp-serde`
+ * writes the narrowest integer that fits, so what actually reaches a
+ * JavaScript decoder is a plain `number` for every value a session can
+ * reach — sequences count up from zero, and 2^53 of them at sixty per
+ * second is several million years. A binding that says `bigint` is wrong at
+ * runtime for every real frame and right only for absurd ones (#14).
  */
-export type Seq = bigint;
+export type Seq = number;

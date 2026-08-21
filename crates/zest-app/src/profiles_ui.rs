@@ -408,11 +408,12 @@ pub fn choice_value(
     }
 }
 
-/// The scheme picker's roster: every builtin theme's normal ANSI row in
-/// index order, read through `zest_theme::resolve` — never re-typed.
+/// The scheme picker's roster: every theme's normal ANSI row in index
+/// order — built-ins and imports alike — read through
+/// `zest_theme::resolve`, never re-typed.
 #[must_use]
 pub fn scheme_swatches() -> Vec<SchemeSwatch> {
-    zest_theme::builtin::all()
+    crate::themes::all()
         .into_iter()
         .map(|theme| {
             let resolved = zest_theme::resolve(&theme);
@@ -497,10 +498,9 @@ pub fn build_preview(
         .meta
         .color_scheme
         .as_deref()
-        .filter(|s| zest_theme::builtin::get(s).is_some())
+        .filter(|s| crate::themes::get(s).is_some())
         .unwrap_or(window_theme);
-    let theme =
-        zest_theme::builtin::get(scheme_id).unwrap_or_else(zest_theme::builtin::obsidian);
+    let theme = crate::themes::get(scheme_id).unwrap_or_else(zest_theme::builtin::obsidian);
     let palette = zest_theme::resolve(&theme);
     ProfilePreviewModel {
         title: display_name.to_string(),

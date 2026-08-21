@@ -97,18 +97,32 @@ export function encodeKey(key: KeyLike, mods: Mods, modes: number): Uint8Array |
   const cursor = (modes & Modes.APP_CURSOR) !== 0 ? '\x1bO' : '\x1b[';
 
   switch (key.key) {
+    // The single-byte keys route through `finish` like text does — Alt-as-ESC
+    // lives there, and arms that returned their byte directly were how
+    // alt+backspace lost its ESC (#350). The CSI arms below do not: their
+    // modifier parameter already carries Alt.
     case 'Enter':
-      return Uint8Array.of(0x0d);
+      return finish(Uint8Array.of(0x0d), mods.alt);
     case 'Tab':
-      return mods.shift
-        ? UTF8.encode('\x1b[Z') // CBT, back-tab
-        : Uint8Array.of(0x09);
+      // CBT has no modifier slot, so ctrl+shift+tab used to be byte-identical
+      // to shift+tab. CSI u is the only form with somewhere to put the Ctrl —
+      // it is what kitty, foot and ghostty send for these chords even with the
+      // protocol off — and its parameter carries Alt, so no ESC prefix on top.
+      if (mods.ctrl) {
+        return UTF8.encode(`\x1b[9;${modifierParam(mods)}u`);
+      }
+      return finish(
+        mods.shift
+          ? UTF8.encode('\x1b[Z') // CBT, back-tab
+          : Uint8Array.of(0x09),
+        mods.alt,
+      );
     // Backspace is DEL (0x7f), not BS (0x08). Sending 0x08 is a classic
     // mistake that makes readline and most shells misbehave.
     case 'Backspace':
-      return Uint8Array.of(mods.ctrl ? 0x08 : 0x7f);
+      return finish(Uint8Array.of(mods.ctrl ? 0x08 : 0x7f), mods.alt);
     case 'Escape':
-      return Uint8Array.of(0x1b);
+      return finish(Uint8Array.of(0x1b), mods.alt);
 
     case 'ArrowUp':
       return withMods(cursor, 'A', mods);

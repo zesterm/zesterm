@@ -109,7 +109,12 @@ title: string,
  * host that predates this simply never announces a clear — which is
  * what every host did before it existed.
  */
-history_clears: number, } | { "t": "update", session: SessionAddr, base: Seq, seq: Seq, delta: Delta, } | { "t": "scrollback", session: SessionAddr, from_line: bigint, rows_data: Array<RowPayload>, 
+history_clears: number, } | { "t": "update", session: SessionAddr, base: Seq, seq: Seq, delta: Delta, } | { "t": "scrollback", session: SessionAddr, 
+/**
+ * A line id — `ts(type = "number")` for
+ * [`RowPayload::line`](crate::delta::RowPayload)'s reason.
+ */
+from_line: number, rows_data: Array<RowPayload>, 
 /**
  * Every attribute these rows name.
  *

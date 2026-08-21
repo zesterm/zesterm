@@ -20,9 +20,9 @@ const NOW = 1_000_000_000_000;
 
 function block(over: Partial<BlockPayload> & { id: number }): BlockPayload {
   return {
-    prompt_line: 0n,
-    output_line: 1n,
-    end_line: 2n,
+    prompt_line: 0,
+    output_line: 1,
+    end_line: 2,
     state: { state: 'finished', exit_code: 0 },
     command: 'echo hi',
     cwd: '~',

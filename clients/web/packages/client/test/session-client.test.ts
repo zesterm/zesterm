@@ -605,7 +605,7 @@ test('a blank placeholder row does not anchor the refetch', async () => {
   // below it.
   const k = keyframeAt(9, 40, 70, ['first real row', 'second']);
   (k['rows_data'] as Array<Record<string, unknown>>).unshift({
-    line: -(2n ** 63n),
+    line: -(2 ** 63),
     runs: [],
     wrapped: false,
   });

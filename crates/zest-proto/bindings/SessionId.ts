@@ -2,5 +2,9 @@
 
 /**
  * A session, unique within one host.
+ *
+ * `ts(type = "number")` for `Seq`'s reason (see `lib.rs`): the wire carries
+ * the narrowest integer that fits, ids are allocated counting up from one,
+ * and a `bigint` binding described a value no host ever sends (#14).
  */
-export type SessionId = bigint;
+export type SessionId = number;

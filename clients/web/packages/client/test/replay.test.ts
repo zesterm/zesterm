@@ -46,7 +46,7 @@ test('blocks-zsh replays through the full client, blocks and all', async () => {
     label: 'replay',
     // The fixture's frames name host 0x2e..; the session addr only matters
     // for what this client *sends*, and the fixture host never answers.
-    session: { host: '2e'.repeat(32), session: 1n },
+    session: { host: '2e'.repeat(32), session: 1 },
     cols: 120,
     rows: 30,
     clock,

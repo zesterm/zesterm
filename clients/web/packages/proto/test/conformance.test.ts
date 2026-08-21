@@ -77,14 +77,14 @@ for (const name of names) {
         view.applyKeyframe(msg);
         assert.equal(
           msg.seq,
-          BigInt(frame.seq),
+          frame.seq,
           `${name} frame ${i}: the keyframe names a different sequence than the fixture`,
         );
       } else {
         assert.ok(isUpdate(msg), `${name} frame ${i}: expected an update, got ${msg.t}`);
         assert.equal(
           msg.base,
-          BigInt(frame.base ?? -1),
+          frame.base ?? -1,
           `${name} frame ${i}: an update must name the state it builds on`,
         );
         view.applyDelta(msg.delta);
@@ -104,7 +104,7 @@ for (const name of names) {
 
         assert.equal(
           viewRow.line,
-          BigInt(wantRow.line),
+          wantRow.line,
           `${name} frame ${i} row ${r}: absolute line id diverged -- selections and command ` +
             `blocks would name different rows on the two machines`,
         );
@@ -143,23 +143,22 @@ for (const name of names) {
       assert.equal(view.title, want.title, `${name} frame ${i}: window title diverged`);
 
       // Blocks against the host's own index, at every frame — the phone's
-      // whole view. Line ids stringified so bigint and number compare on
-      // value; state compared structurally so a null exit code cannot pass
-      // as a zero.
+      // whole view. State compared structurally so a null exit code cannot
+      // pass as a zero.
       const wantBlocks = (want.blocks ?? []).map((b) => ({
         id: b.id,
-        prompt_line: String(b.prompt_line),
-        output_line: b.output_line === null ? null : String(b.output_line),
-        end_line: b.end_line === null ? null : String(b.end_line),
+        prompt_line: b.prompt_line,
+        output_line: b.output_line,
+        end_line: b.end_line,
         state: b.state,
         command: b.command,
         cwd: b.cwd,
       }));
       const gotBlocks = view.blocks.map((b) => ({
         id: b.id,
-        prompt_line: String(b.prompt_line),
-        output_line: b.output_line === null ? null : String(b.output_line),
-        end_line: b.end_line === null ? null : String(b.end_line),
+        prompt_line: b.prompt_line,
+        output_line: b.output_line,
+        end_line: b.end_line,
         state: b.state,
         command: b.command,
         cwd: b.cwd,

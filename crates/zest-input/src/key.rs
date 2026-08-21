@@ -400,24 +400,31 @@ fn encode_legacy(key: &Key, mods: ModifiersState, modes: Modes) -> Option<Vec<u8
 
     let bytes: Vec<u8> = match key {
         Key::Named(named) => match named {
-            NamedKey::Enter => vec![b'\r'],
+            // The single-byte keys route through `finish` like text does --
+            // Alt-as-ESC lives there, and arms that returned their byte
+            // directly were how alt+backspace lost its ESC (#350). The CSI
+            // arms below do not: their modifier parameter already carries Alt.
+            NamedKey::Enter => return finish(vec![b'\r'], alt),
             NamedKey::Tab => {
-                if shift {
+                // CBT has no modifier slot, so ctrl+shift+tab used to be
+                // byte-identical to shift+tab. CSI u is the only form with
+                // somewhere to put the Ctrl -- it is what kitty, foot and
+                // ghostty send for these chords even with the protocol off --
+                // and its parameter carries Alt, so no ESC prefix on top.
+                if ctrl {
+                    return Some(format!("\x1b[9;{}u", modifier_param(mods)).into_bytes());
+                }
+                let base = if shift {
                     b"\x1b[Z".to_vec() // CBT, back-tab
                 } else {
                     vec![b'\t']
-                }
+                };
+                return finish(base, alt);
             }
             // Backspace is DEL (0x7f), not BS (0x08). Sending 0x08 is a classic
             // mistake that makes readline and most shells misbehave.
-            NamedKey::Backspace => {
-                if ctrl {
-                    vec![0x08]
-                } else {
-                    vec![0x7f]
-                }
-            }
-            NamedKey::Escape => vec![0x1b],
+            NamedKey::Backspace => return finish(vec![if ctrl { 0x08 } else { 0x7f }], alt),
+            NamedKey::Escape => return finish(vec![0x1b], alt),
 
             NamedKey::ArrowUp => with_mods(cursor, b'A', mods),
             NamedKey::ArrowDown => with_mods(cursor, b'B', mods),
@@ -684,6 +691,61 @@ mod tests {
         // presses from waking the pty.
         assert_eq!(encode_text("", false, false), None);
         assert_eq!(encode_text("", false, true), None, "even with Alt");
+    }
+
+    #[test]
+    fn alt_reaches_the_named_keys_through_the_escape_prefix() {
+        // Alt-as-ESC is `finish`'s job, and these arms used to return their
+        // byte before reaching it: alt+backspace went out as a bare DEL, so
+        // readline deleted one character where every other terminal deletes a
+        // word. (#350)
+        let plain = Modes::initial();
+        let alt = ModifiersState::ALT;
+        assert_eq!(
+            named(NamedKey::Backspace, alt, EventType::Press, plain).as_deref(),
+            Some("\x1b\x7f"),
+            "alt+backspace is delete-previous-word in readline, zsh and fish"
+        );
+        assert_eq!(named(NamedKey::Enter, alt, EventType::Press, plain).as_deref(), Some("\x1b\r"));
+        assert_eq!(
+            named(NamedKey::Escape, alt, EventType::Press, plain).as_deref(),
+            Some("\x1b\x1b")
+        );
+        assert_eq!(named(NamedKey::Tab, alt, EventType::Press, plain).as_deref(), Some("\x1b\t"));
+        assert_eq!(
+            named(NamedKey::Tab, alt | SHIFT, EventType::Press, plain).as_deref(),
+            Some("\x1b\x1b[Z"),
+            "alt+shift+tab is the ESC-prefixed back-tab"
+        );
+        assert_eq!(
+            named(NamedKey::Backspace, alt | CTRL, EventType::Press, plain).as_deref(),
+            Some("\x1b\x08"),
+            "ctrl still flips backspace to BS, and alt prefixes that too"
+        );
+    }
+
+    #[test]
+    fn ctrl_tab_chords_escalate_to_csi_u() {
+        // `\x1b[Z` has no modifier slot, so ctrl+shift+tab used to be
+        // byte-identical to shift+tab and no application could bind the pair
+        // apart. CSI u is the only form with somewhere to put the Ctrl, and it
+        // is what kitty, foot and ghostty send for these chords even with the
+        // protocol off. (#350)
+        let plain = Modes::initial();
+        assert_eq!(
+            named(NamedKey::Tab, CTRL, EventType::Press, plain).as_deref(),
+            Some("\x1b[9;5u")
+        );
+        assert_eq!(
+            named(NamedKey::Tab, CTRL | SHIFT, EventType::Press, plain).as_deref(),
+            Some("\x1b[9;6u"),
+            "distinguishable from shift+tab's CSI Z"
+        );
+        assert_eq!(
+            named(NamedKey::Tab, CTRL | ModifiersState::ALT, EventType::Press, plain).as_deref(),
+            Some("\x1b[9;7u"),
+            "the parameter already carries Alt, so no ESC prefix on top"
+        );
     }
 
     // --- the Kitty keyboard protocol -------------------------------------

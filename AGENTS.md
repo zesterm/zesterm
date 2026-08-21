@@ -313,14 +313,14 @@ cargo xtask export-web                         # regenerate the web client's sch
 cargo run -p zest-proto --example fixture_dump -- --only vim-macos --print 7
                                                # one fixture frame, decoded, to stdout
 
-zesterm-dev                                    # build both binaries and open a window
+zesterm-dev                                    # build the workspace and open a window
 zesterm-dev --no-build --attach-probe          # probe flags stay in the foreground
 .\scripts\zesterm-dev.ps1                      # the same thing, in PowerShell on Windows
 cargo run --profile fast -p zest-app           # the terminal, quick rebuild
 ./target/fast/zesterm --startup-probe          # time to first paint; fails over 100ms
 ./target/fast/zesterm --screenshot out.png     # one real frame to a PNG; no window is ever shown
 ./target/fast/zesterm --theme paper --screenshot-size 1200x800 --screenshot out.png
-./target/fast/zesterm --screen fleet --screenshot out.png
+./target/fast/zesterm --screen themes --screenshot out.png
                                                # open on a design screen: fleet|themes|settings|
                                                #   settings-menu|palette|launcher|profiles|
                                                #   profiles-rename
@@ -329,6 +329,10 @@ cargo run --profile fast -p zest-app           # the terminal, quick rebuild
                                                #   Profiles with the name entry open — the states a
                                                #   screenshot cannot otherwise reach, because opening
                                                #   them takes a click); works without --screenshot too
+                                               # fleet is the exception: its content comes from the
+                                               #   daemon, which screenshot mode never attaches to, so
+                                               #   --screen fleet --screenshot is refused rather than
+                                               #   rendered describing the local machine wrongly (#236)
 ./target/fast/zesterm --tabs-position left     # tab strip placement override, top|left
 cargo build --release && ./target/release/zesterm   # the shipping build
 cargo run -p zest-app  --example headless      # a terminal with no window
@@ -631,10 +635,13 @@ you need before you trip on it.
   fix is that a listing is a *question* (`Conn::list_sessions`), which is what the
   `sessions: false` comment already argued for and what the code had stopped
   doing. (#360)
-- **`rmp-serde` writes the narrowest integer that fits**, so a `u64` that
-  `ts-rs` types as `bigint` reaches JavaScript as a plain `number` for every
-  realistic value. Normalized at one boundary in
-  `clients/web/packages/proto/src/wire.ts`.
+- **`rmp-serde` writes the narrowest integer that fits**, so a `u64` reaches
+  JavaScript as a plain `number` for every realistic value — the bindings say
+  `number` via `ts(type = "number")` on each such field (#14), and a new wire
+  integer must carry the same attribute or its binding lies. The one value
+  outside ±2^53 a host actually sends, the `i64::MIN` a blank row is padded
+  with, is a power of two and converts exactly (`lineNum` in
+  `clients/web/packages/proto/src/wire.ts`).
 - **A JavaScript client must iterate code points, never `text.length`** —
   UTF-16 code units count an astral-plane emoji as two. **CJK does not catch
   this** (it is BMP), so the corpus refuses to generate without something past

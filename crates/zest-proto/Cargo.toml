@@ -13,7 +13,9 @@ authors.workspace = true
 # by default so the daemon does not carry a codegen dependency into a release
 # build; `cargo test -p zest-proto --features ts` writes the bindings.
 default = []
-ts = ["dep:ts-rs"]
+# `zest-core/ts` rides along so `Color` — which crosses the wire inside
+# `AttrDef` unchanged — generates a real binding instead of `unknown` (#15).
+ts = ["dep:ts-rs", "zest-core/ts"]
 
 # This crate crosses to the browser and the phone, so it holds the same line
 # `zest-core` does: no wgpu, no winit, no tokio, no platform APIs. It is data and
