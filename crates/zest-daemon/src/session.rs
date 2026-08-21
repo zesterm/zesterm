@@ -1037,9 +1037,14 @@ mod tests {
         let (handle, _, _) = s.attach();
 
         wait_for(|| s.poll(handle).is_some());
-        // Drain whatever is outstanding, then confirm it stays quiet.
-        while s.poll(handle).is_some() {}
-        assert!(s.poll(handle).is_none(), "an idle session kept producing updates");
+        // Drain whatever is outstanding, then confirm it goes quiet. Quiet is
+        // waited for, not asserted on a single poll: the child's tail can land
+        // between a drain and the next poll (#280), and a session that never
+        // stops producing fails this by exhausting the deadline.
+        assert!(
+            wait_for(|| s.poll(handle).is_none()),
+            "an idle session kept producing updates"
+        );
     }
 
     /// Run a shell script, on whichever shell this platform has.
@@ -1293,9 +1298,20 @@ mod tests {
         while s.poll(a).is_some() {}
 
         // B attaches late and must still receive full state, not A's leftovers.
-        let (b, _, kb) = s.attach();
+        let (b, kb_seq, kb) = s.attach();
         assert!(!kb.rows_data.is_empty());
-        assert!(s.poll(b).is_none(), "a freshly attached client was owed a delta");
+        // `poll(b).is_none()` was a proxy for that, and it races: the child is
+        // still free to write between the keyframe being built and this poll,
+        // and being owed a delta then is correct behaviour (#280). What can
+        // never be correct is that update building on any base but B's own
+        // keyframe sequence -- an earlier base is A's leftovers.
+        if let Some((base, _, _)) = s.poll(b) {
+            assert_eq!(
+                base, kb_seq,
+                "a freshly attached client's first update must build on its own \
+                 keyframe, not another client's"
+            );
+        }
     }
 
     #[test]
@@ -1376,9 +1392,10 @@ mod tests {
         let (a, _, _) = attach_at(&s, 80, 24);
         let (b, _, _) = attach_at(&s, 80, 24);
         wait_for(|| s.has_exited());
-        while s.poll(a).is_some() {}
         while s.poll(b).is_some() {}
-        assert!(s.poll(a).is_none(), "the fixture is not quiet");
+        // The exit report can beat the tail of the output (#80), so quiet is
+        // waited for rather than asserted on a single poll (#280).
+        assert!(wait_for(|| s.poll(a).is_none()), "the fixture is not quiet");
 
         keyframe_everyone(&s.subscribers);
 
@@ -1404,8 +1421,19 @@ mod tests {
 
         assert!(!s.set_client_size(a, 70, 22), "a resize that does not move the min changed it");
         assert_eq!(s.size(), (60, 20));
-        assert!(s.poll(a).is_none(), "an ungranted resize must not repaint anyone");
-        assert!(s.poll(b).is_none(), "an ungranted resize must not repaint anyone");
+        // A tail delta can still arrive after the exit report (#80), so "owed
+        // nothing" is a proxy that races (#280). The repaint a granted resize
+        // causes is a *keyframe* (reconcile_size marks everyone), and that is
+        // what must not appear here.
+        for (who, h) in [("a", a), ("b", b)] {
+            if let Some((_, _, update)) = s.poll(h) {
+                assert!(
+                    !matches!(update, Update::Keyframe(_)),
+                    "an ungranted resize must not repaint anyone, but client {who} was owed \
+                     a keyframe"
+                );
+            }
+        }
     }
 
     #[test]
