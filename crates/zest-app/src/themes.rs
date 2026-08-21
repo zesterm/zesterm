@@ -95,8 +95,13 @@ fn install(user: &mut Vec<Theme>, dir: &Path, source: &str) -> Result<Theme, Str
 /// Every parseable theme in `dir`, sorted by name for a stable gallery.
 fn load_dir(dir: &Path) -> Vec<Theme> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    // Sorted by file name: read_dir order is unspecified, and "the later
+    // file wins" for a duplicate id is only an actionable rule when "later"
+    // means the same file on every platform and every run.
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
     let mut out: Vec<Theme> = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("toml") {
             continue;
@@ -213,6 +218,26 @@ mod tests {
         let loaded = load_dir(&dir);
         assert_eq!(loaded.len(), 1, "the good theme still loads");
         assert_eq!(loaded[0].id, "campbell");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_duplicate_id_resolves_by_file_name_order() {
+        // read_dir order is unspecified, so the tiebreak has to be one we
+        // impose: last file name in sort order wins, on every platform.
+        let dir = scratch("dup");
+        let mut user = Vec::new();
+        install(&mut user, &dir, WT).expect("import");
+        let red = std::fs::read_to_string(dir.join("campbell.toml")).unwrap();
+        let blue = red.replace("#c50f1f", "#0000ff");
+        std::fs::write(dir.join("a-first.toml"), &blue).unwrap();
+        let loaded = load_dir(&dir);
+        assert_eq!(loaded.len(), 1, "one id, one theme");
+        assert_eq!(
+            loaded[0].ansi.normal.unwrap()[1],
+            zest_theme::Rgba8::rgb(0xc5, 0x0f, 0x1f),
+            "campbell.toml sorts after a-first.toml, so its colours win"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

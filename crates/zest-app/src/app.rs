@@ -1863,6 +1863,11 @@ pub struct App {
     /// Why the theme gallery's last clipboard import was refused, shown on
     /// the import card until a retry succeeds or the screen is reopened.
     theme_import_error: Option<String>,
+    /// The theme ids the gallery's cards were built from, in card order —
+    /// the `fleet_view` rule: a click's index must resolve against the
+    /// snapshot the hit map was drawn from, not a roster an import or a
+    /// config reload has since reshaped.
+    themes_view: Vec<String>,
     /// Composition state for the input method. See `zest_input::ime`.
     ime: zest_input::Ime,
     selection_bg: zest_core::Rgb,
@@ -2083,6 +2088,7 @@ impl App {
                 .map_err(|e| tracing::warn!(error = %e, "clipboard unavailable"))
                 .ok(),
             theme_import_error: None,
+            themes_view: Vec::new(),
             ime: zest_input::Ime::new(),
             selection_bg,
             scroll_accum: 0.0,
@@ -5044,6 +5050,9 @@ impl App {
         // the cards were built from, not a fresher one.
         self.fleet_view = fleet_hosts.clone();
         self.devices_view = self.fleet.as_ref().map(|f| f.devices()).unwrap_or_default();
+        // Same retention rule for the theme gallery: card index i must mean
+        // the same theme at click time that it meant at draw time.
+        self.themes_view = crate::themes::ids();
         let screen_model = profiles_model
             .map(crate::chrome::model::ScreenModel::Profiles)
             .or_else(|| self.build_screen_model(&fleet_hosts));
@@ -5558,10 +5567,11 @@ impl App {
                 }
             }
             (HitRegion::ThemeCard(i), MouseButton::Left) => {
-                // The roster, not builtin::IDS: imported cards sit after the
-                // built-ins, in the same deterministic order the model was
-                // built from.
-                let id = crate::themes::ids().get(i).cloned();
+                // The retained snapshot, not a fresh `themes::ids()`: the
+                // roster can change between the frame that drew the cards
+                // and the click (an import, a config reload), and index i
+                // must keep meaning the card the user aimed at.
+                let id = self.themes_view.get(i).cloned();
                 if let Some(id) = id {
                     self.apply_theme_choice(&id);
                 }
@@ -5571,15 +5581,20 @@ impl App {
                 // holds becomes a theme. Parse failures land on the card
                 // itself — a click with feedback nowhere reads as dead UI,
                 // which is exactly what this card spent its life as.
-                let text = self
-                    .clipboard
-                    .as_mut()
-                    .and_then(|c| c.get_text().ok())
-                    .unwrap_or_default();
-                let outcome = if text.trim().is_empty() {
-                    Err("the clipboard is empty — copy a scheme file first".to_string())
-                } else {
-                    crate::themes::import_pasted(&text)
+                let outcome = match self.clipboard.as_mut() {
+                    // No OS clipboard connection at all is a different fact
+                    // from an empty one — the user cannot fix it by copying.
+                    None => Err("the clipboard is unavailable in this session".to_string()),
+                    Some(clipboard) => match clipboard.get_text() {
+                        Ok(text) if !text.trim().is_empty() => {
+                            crate::themes::import_pasted(&text)
+                        }
+                        // Empty and non-text (an image, a file) both land
+                        // here — arboard reports each as "not available",
+                        // and the remedy is the same either way.
+                        _ => Err("the clipboard has no text — copy a scheme file first"
+                            .to_string()),
+                    },
                 };
                 match outcome {
                     Ok(theme) => {
