@@ -1060,6 +1060,7 @@ impl Connection {
                 let label = self.auth.authenticator().label().to_string();
                 let cell = Arc::clone(&self.enroll_result);
                 let waker = self.waker.clone();
+                let offer = self.config.offer.clone();
                 let spawned = std::thread::Builder::new().name("zest-enroll".into()).spawn(
                     move || {
                         let outcome = crate::enroll::enroll(
@@ -1071,11 +1072,22 @@ impl Connection {
                             seam.secrets.as_ref(),
                         );
                         let msg = match outcome {
-                            Ok(enrolled) => HostMessage::EnrollResult {
-                                ok: true,
-                                account: enrolled.account,
-                                message: String::new(),
-                            },
+                            Ok(enrolled) => {
+                                // The token just landed in the store, so the
+                                // published fact flips with it (#245): the
+                                // generation moves, the watchers wake, and
+                                // every fleet card learns this machine no
+                                // longer needs enrolling — without waiting
+                                // for the account listing to catch up.
+                                if let Some(source) = &offer {
+                                    source.set_account_token(Some(true));
+                                }
+                                HostMessage::EnrollResult {
+                                    ok: true,
+                                    account: enrolled.account,
+                                    message: String::new(),
+                                }
+                            }
                             // Rendered as the CLI renders it — `refusal_text`
                             // is what `--enroll` prints — because the message
                             // is the person's next move and the app shows it
@@ -2139,6 +2151,55 @@ mod tests {
     }
 
     #[test]
+    fn a_successful_enrolment_flips_the_published_token_fact() {
+        // #245: the enrol affordance gates on the daemon's own word
+        // (`HostOffer::has_account_token`), so the moment the token lands in
+        // the store the word must change — and through the offer's
+        // generation, so the watchers wake and every fleet card learns this
+        // machine no longer needs enrolling without waiting for the account
+        // listing to catch up.
+        let source = crate::offer::OfferSource::new(crate::offer::facts("zsh".into()));
+        source.set_account_token(Some(false));
+        let generation_before = source.generation();
+
+        let mut cfg = config();
+        cfg.offer = Some(source.clone());
+        cfg.enroll = Some(crate::EnrollSeam {
+            base_url: "https://control.test".into(),
+            http: Arc::new(FakeControlPlane { asked: Arc::default() }),
+            secrets: Arc::new(zest_mesh::keystore::MemoryKeyStore::new()),
+        });
+        let mut c = Connection::new(
+            cfg,
+            Arc::new(Registry::new()),
+            crate::auth::Auth::Transport(test_authenticator()),
+            "test",
+        );
+        let mut peer = authenticate(&mut c);
+
+        let out = peer.send(&mut c, &ClientMessage::Enroll { code: "GOLDCODE".into() });
+        assert!(out.is_empty(), "the reply comes off the worker: {out:?}");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if !c.take_enroll_result().is_empty() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the enrolment never settled");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            source.snapshot().has_account_token,
+            Some(true),
+            "the published fact must follow the token into the store"
+        );
+        assert!(
+            source.generation() > generation_before,
+            "and move the generation, or no watcher is ever woken to send it"
+        );
+    }
+
+    #[test]
     fn a_refused_claim_reaches_the_app_as_the_persons_next_move() {
         // The seam's error is shown verbatim by the app's card (#227), so what
         // crosses it must already be the sentence to act on. Before #368 this
@@ -2337,6 +2398,7 @@ mod tests {
                     ..Default::default()
                 })
                 .collect(),
+            ..Default::default()
         }
     }
 
@@ -2783,9 +2845,19 @@ mod tests {
     ///
     /// The lifetime is the point: anything about *closing* a session is vacuous
     /// against a command that has already exited on its own.
+    ///
+    /// `ping` against loopback rather than `Start-Sleep`: nothing here is
+    /// about a shell, and pwsh's boot on a contended runner is what #285
+    /// removed from every assertion budget in this module. `-n 31` is one
+    /// ping a second, ~30 seconds -- the same lifetime `Start-Sleep 30`
+    /// gave. The cmd wrapper exists to spell `>nul`: `Start-Sleep` was
+    /// *silent*, and a dozen tests picked this child for exactly that, so a
+    /// ping line arriving every second would quietly change what they hold
+    /// still. Redirection is a shell's trick -- bare `ping.exe` would take
+    /// `>nul` as one more argument and exit on it.
     fn sleep_cmd() -> String {
         if cfg!(windows) {
-            "powershell.exe -NoProfile -Command Start-Sleep 30".into()
+            "cmd.exe /c ping.exe -n 31 127.0.0.1 >nul".into()
         } else {
             "/bin/sleep 30".into()
         }
@@ -2796,11 +2868,17 @@ mod tests {
     /// The delay is the whole point: with a plain `echo` the output is already
     /// in the terminal when `Attach` builds its keyframe, so a test about what
     /// a later poll produces would be asserting on nothing.
+    ///
+    /// On Windows the delay is `ping`'s (`-n 3` = three pings a second
+    /// apart, ~2s), not a shell's sleep: the attach it has to land after is
+    /// a synchronous call microseconds after the create, and the
+    /// `Start-Sleep` that stood here cost a pwsh boot that, on a loaded
+    /// runner, pushed the *exit* past `wait_for`'s deadline -- reported as
+    /// an exit-ordering failure for a child that had not finished starting
+    /// (#285).
     fn delayed_echo_cmd() -> String {
         if cfg!(windows) {
-            "powershell.exe -NoProfile -Command Start-Sleep -Milliseconds 300; \
-             Write-Output probe"
-                .into()
+            "cmd.exe /c ping.exe -n 3 127.0.0.1 >nul & echo probe".into()
         } else {
             "/bin/sh -c 'sleep 0.3; echo probe'".into()
         }
@@ -2815,6 +2893,15 @@ mod tests {
     /// Windows CI in exactly that shape.
     ///
     /// Generous costs nothing: only a run that was going to fail pays for it.
+    ///
+    /// And 30 seconds was outgrown the same way 10 was: three tests waiting
+    /// on PowerShell children hit the deadline together, twice, on PRs that
+    /// touched nothing in this crate (#285). The answer is not a bigger
+    /// number — that buys time again and a real hang then takes longer to
+    /// report — it is that no test here boots PowerShell any more. `cmd.exe`
+    /// (a shell too, but one without a runtime to lift) and `ping.exe` start
+    /// in milliseconds on the same loaded runner that took several
+    /// concurrent pwsh boots past half a minute.
     fn wait_for(mut f: impl FnMut() -> bool) -> bool {
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {

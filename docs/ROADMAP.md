@@ -139,11 +139,10 @@ the history behind them is in closed issues and PRs.
       client is never told about. Nothing checks this, which is why the
       fixtures carry no scrollback expectation: it would pin a divergence
       rather than catch it.
-- [ ] **The corpus has three holes**: no recording contains a combining mark,
-      nothing reaches past the BMP (every wide character is CJK), and at the
-      natural sizes only `vim-macos` scrolls enough to exercise `SCROLL`
-      ordering. Synthetic fixtures cover all three; recorded sessions would be
-      better.
+- [x] **The corpus has three holes** (#17): closed by three ConPTY recordings
+      — `astral`, `combining-marks`, `scroll-flood` — replacing the synthetic
+      fixtures, with a census test in `conformance.rs` so none of the three
+      can silently reopen.
 - [ ] SQLite scrollback. Scrollback is in memory and bounded; a session that
       outlives its window does not yet outlive the daemon.
 - [ ] Local echo prediction for high-latency links (mosh's other trick):

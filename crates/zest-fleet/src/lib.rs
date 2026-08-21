@@ -113,6 +113,28 @@ impl FleetHost {
     pub fn is_online(&self) -> bool {
         self.local || self.presence == Presence::Online || self.relay_online
     }
+
+    /// Does this machine still need enrolling?
+    ///
+    /// Judged by the *daemon's* own word when it gave one
+    /// (`HostOffer::has_account_token`), and by the account table's row only
+    /// when it did not. The two facts share the word "enrolled" and can
+    /// disagree (#245): a host key can be a live row in the account's `hosts`
+    /// table while the daemon on that machine holds no token — post-revoke
+    /// restore, a wiped machine, `--logout` — and gating the enrol affordance
+    /// on the row alone hid the button exactly when it was needed, which is
+    /// what compounded into #246's lockout.
+    #[must_use]
+    pub fn needs_enrollment(&self) -> bool {
+        match self.offer.as_ref().and_then(|o| o.has_account_token) {
+            Some(held) => !held,
+            // The daemon did not say — it predates the field, or its store
+            // could not be read — so the account's row is the only fact
+            // left, which is exactly the old behaviour an old daemon
+            // degrades to.
+            None => !self.enrolled,
+        }
+    }
 }
 
 /// How a client dials the daemon a tab lives on.
@@ -431,6 +453,63 @@ mod tests {
         let empty = host(false, Presence::Online, None, true);
         assert!(matches!(best_route(&empty, None, RELAY, true), Some(HostRoute::Relay { .. })));
         assert_eq!(best_route(&empty, None, None, true), None);
+    }
+
+    #[test]
+    fn an_enrolled_row_with_a_tokenless_daemon_still_needs_enrolling() {
+        // #245: `enrolled` is the account table's fact, and what the enrol
+        // button grants is a machine token for the *daemon* — a host row can
+        // be live while the machine holds nothing (post-revoke restore, a
+        // wiped machine, `--logout`). Hiding the affordance on the row is
+        // what sent someone to the Remove button and into #246's lockout.
+        let mut h = fixture::local(1, "studio");
+        h.enrolled = true;
+        h.offer = Some(zest_proto::HostOffer {
+            has_account_token: Some(false),
+            ..Default::default()
+        });
+        assert!(
+            h.needs_enrollment(),
+            "the daemon says its store holds no token; the account's row must not outvote it"
+        );
+    }
+
+    #[test]
+    fn a_daemon_holding_a_token_needs_no_enrolling_whatever_the_row_says() {
+        // The mirror case: the daemon holds a token and the account listing
+        // has not caught up. Offering the button would mint a one-shot code
+        // for a machine that needs nothing.
+        let mut h = fixture::local(1, "studio");
+        h.enrolled = false;
+        h.offer = Some(zest_proto::HostOffer {
+            has_account_token: Some(true),
+            ..Default::default()
+        });
+        assert!(
+            !h.needs_enrollment(),
+            "the daemon says it holds a token; a stale account listing must not re-offer enrolment"
+        );
+    }
+
+    #[test]
+    fn a_daemon_that_did_not_say_falls_back_to_the_accounts_row() {
+        // `None` is a daemon predating the field, or a credential store that
+        // could not be read — either way the account's row is the only fact
+        // left, which is exactly today's behaviour, so an old daemon
+        // degrades to it rather than to a button that flaps.
+        let mut h = fixture::local(1, "studio");
+
+        h.offer = None;
+        h.enrolled = false;
+        assert!(h.needs_enrollment(), "no offer at all: the row is the only fact");
+        h.enrolled = true;
+        assert!(!h.needs_enrollment());
+
+        h.offer = Some(zest_proto::HostOffer::default());
+        assert!(
+            !h.needs_enrollment(),
+            "an offer whose daemon did not say still falls back to the row"
+        );
     }
 
     #[test]

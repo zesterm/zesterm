@@ -821,6 +821,17 @@ mod tests {
     /// runner busy building the rest of the workspace had not finished
     /// starting (#80). Anything that genuinely needs half a minute here is a
     /// hang, and reports as one.
+    ///
+    /// That closing sentence stopped being true while the children were
+    /// PowerShell: two unrelated PRs each had three tests hit this deadline
+    /// *together*, the whole binary finishing a few seconds past 30 (#285).
+    /// Several pwsh children booting at once on a runner still compiling the
+    /// workspace was being paid inside every assertion budget. The fix is not
+    /// a bigger number — that buys time again and makes a real hang slower to
+    /// report — it is children whose startup is measured in milliseconds:
+    /// `cmd.exe` (still a shell, but one with no runtime to lift) and bare
+    /// `ping`. Nothing these tests assert is about a shell; the child only
+    /// has to put bytes on the pty.
     fn wait_for(mut f: impl FnMut() -> bool) -> bool {
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
@@ -830,6 +841,20 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         false
+    }
+
+    /// "Quiet" needs more than one empty poll: a single `is_none` can land in
+    /// the gap between two updates a still-talking session produces (#280's
+    /// review), so quiet means a run of consecutive empty polls. A genuine
+    /// tail arriving mid-run just restarts the count — the session really is
+    /// quiet soon after — while a session that keeps producing can never
+    /// finish the run and fails by the deadline.
+    fn stays_quiet(mut poll_none: impl FnMut() -> bool) -> bool {
+        let mut streak = 0;
+        wait_for(|| {
+            streak = if poll_none() { streak + 1 } else { 0 };
+            streak >= 5
+        })
     }
 
     /// A transport that records what the grid looked like when it was resized.
@@ -1037,21 +1062,32 @@ mod tests {
         let (handle, _, _) = s.attach();
 
         wait_for(|| s.poll(handle).is_some());
-        // Drain whatever is outstanding, then confirm it stays quiet.
-        while s.poll(handle).is_some() {}
-        assert!(s.poll(handle).is_none(), "an idle session kept producing updates");
+        // Drain whatever is outstanding, then confirm it goes quiet — a run of
+        // empty polls, not one: the child's tail can land between a drain and
+        // the next poll (#280), and a session that never stops producing can
+        // never finish the run.
+        assert!(
+            stays_quiet(|| s.poll(handle).is_none()),
+            "an idle session kept producing updates"
+        );
     }
 
-    /// Run a shell script, on whichever shell this platform has.
+    /// Run a small script: `/bin/sh` on unix, `cmd.exe` on Windows.
     ///
     /// These tests need a child that *writes several times*, which is the only
     /// way to produce a chain of updates rather than one. `/bin/sh` was
     /// hardcoded, so both of them failed on Windows with "The system cannot find
     /// the file specified" -- an error about a path, for a test about sequence
     /// numbers.
-    fn script_cmd(sh: &str, ps: &str) -> CommandSpec {
+    ///
+    /// The Windows arm used to be `powershell.exe`, and pwsh's startup is what
+    /// outgrew #80's deadline (#285) -- see `wait_for` above. Neither caller
+    /// is about a shell; the child only has to put bytes on the pty, which
+    /// `cmd.exe` does without the boot cost. `tests/coalescing.rs` already
+    /// drives its line flood the same way.
+    fn script_cmd(sh: &str, win: &str) -> CommandSpec {
         let command_line = if cfg!(windows) {
-            format!("powershell.exe -NoProfile -Command \"{ps}\"")
+            format!("cmd.exe /c \"{win}\"")
         } else {
             format!("/bin/sh -c \"{sh}\"")
         };
@@ -1081,9 +1117,27 @@ mod tests {
         // (#80). The property survives the collapse, because it is checked per
         // update rather than over the run: each `base` must be the sequence
         // its client was last given, which one update pins as well as five.
+        // The Windows arm writes thirty lines a second apart rather than five
+        // 50ms apart, and the pacing is load-bearing in a way the count is
+        // not: the chain below is read by a subscriber that attaches *after*
+        // the warm-up drain, so a child fast enough to finish inside that gap
+        // leaves it nothing to chain -- a cmd.exe five-liner did exactly
+        // that, and burned the whole deadline to report it. pwsh's slow boot
+        // was masking the race, not avoiding it. A child that is still
+        // writing whenever the second subscriber arrives satisfies `seen >=
+        // 3` from ongoing output alone, with no bet on where the exit lands;
+        // the test drops the session (and with it the child) as soon as it
+        // has its three. `ping -n 2` against loopback is cmd's second of
+        // sleep.
+        // `echo`, not `printf 'line %s\n'`: a backslash in a CommandSpec is
+        // eaten by `split_command_line` before sh ever runs (it escapes the
+        // next character even inside double quotes, where sh would keep it),
+        // so the old format string reached printf as 'line %sn' and the five
+        // lines arrived as one unbroken row. The chain still held, so nothing
+        // noticed (#285).
         let spec = script_cmd(
-            "for i in 1 2 3 4 5; do printf 'line %s\\n' $i; sleep 0.05; done",
-            "1..5 | ForEach-Object { Write-Host \\\"line $_\\\"; Start-Sleep -Milliseconds 50 }",
+            "for i in 1 2 3 4 5; do echo line $i; sleep 0.05; done",
+            "for /L %i in (1,1,30) do @(echo line %i& ping -n 2 127.0.0.1 >nul)",
         );
         let s = Session::spawn(SessionId(5), &spec, PtySize::new(80, 24), 100, |_| {})
             .expect("spawn");
@@ -1235,11 +1289,23 @@ mod tests {
         // client renders history in whatever style it last held.
         // Enough coloured lines to push some off a three-row screen, so there
         // is history that carries a non-default attribute.
-        let spec = script_cmd(
-            "for i in 1 2 3 4 5 6 7 8 9 10; do \
-             printf '\\033[31mline %s\\033[0m\\n' $i; done",
-            "1..10 | ForEach-Object { Write-Host -ForegroundColor Red \\\"line $_\\\" }",
-        );
+        // A literal ESC byte in the command line, on *both* arms. cmd.exe has
+        // no way to spell one but passes one through to `echo` untouched --
+        // being able to spell it is what PowerShell was here for, and pwsh's
+        // startup is what this crate's tests can no longer afford (#285). And
+        // sh must not be asked to spell it either: the `printf '\033[31m...'`
+        // that stood here never printed red, because `split_command_line`
+        // eats a backslash even inside double quotes (where sh would keep
+        // it), so printf's format opened with a literal `033`. The child
+        // printed escape-free text, it still filled history, and the
+        // assertion below on defined attribute ids passed vacuously on every
+        // unix runner -- which is why this test now also proves a coloured
+        // cell got through.
+        let esc = '\u{1b}';
+        let win = format!("for /L %i in (1,1,10) do @echo {esc}[31mline %i{esc}[0m");
+        let sh =
+            format!("for i in 1 2 3 4 5 6 7 8 9 10; do echo '{esc}[31mline '$i'{esc}[0m'; done");
+        let spec = script_cmd(&sh, &win);
         let s = Session::spawn(SessionId(77), &spec, PtySize::new(40, 3), 200, |_| {})
             .expect("spawn");
         // Two waits, both asserted, because "the child never ran" and "the
@@ -1270,6 +1336,19 @@ mod tests {
                 );
             }
         }
+
+        // And the fixture proves it reached the state under test: if the ESC
+        // above were eaten anywhere on the way to the grid, every run would
+        // name the default attribute and the loop above would pass without a
+        // coloured cell ever having existed — a fixture must assert it got
+        // there before asserting anything else (the #291 lesson).
+        assert!(
+            rows.iter().flat_map(|r| &r.runs).any(|run| {
+                attrs.iter().any(|a| a.id == run.attr && a.fg != zest_core::Color::Default)
+            }),
+            "no history run carries a non-default foreground, so the red never \
+             reached the grid and nothing here exercised attribute delivery"
+        );
     }
 
     #[test]
@@ -1293,9 +1372,20 @@ mod tests {
         while s.poll(a).is_some() {}
 
         // B attaches late and must still receive full state, not A's leftovers.
-        let (b, _, kb) = s.attach();
+        let (b, kb_seq, kb) = s.attach();
         assert!(!kb.rows_data.is_empty());
-        assert!(s.poll(b).is_none(), "a freshly attached client was owed a delta");
+        // `poll(b).is_none()` was a proxy for that, and it races: the child is
+        // still free to write between the keyframe being built and this poll,
+        // and being owed a delta then is correct behaviour (#280). What can
+        // never be correct is that update building on any base but B's own
+        // keyframe sequence -- an earlier base is A's leftovers.
+        if let Some((base, _, _)) = s.poll(b) {
+            assert_eq!(
+                base, kb_seq,
+                "a freshly attached client's first update must build on its own \
+                 keyframe, not another client's"
+            );
+        }
     }
 
     #[test]
@@ -1376,9 +1466,10 @@ mod tests {
         let (a, _, _) = attach_at(&s, 80, 24);
         let (b, _, _) = attach_at(&s, 80, 24);
         wait_for(|| s.has_exited());
-        while s.poll(a).is_some() {}
         while s.poll(b).is_some() {}
-        assert!(s.poll(a).is_none(), "the fixture is not quiet");
+        // The exit report can beat the tail of the output (#80), so quiet is
+        // a run of empty polls rather than a single one (#280).
+        assert!(stays_quiet(|| s.poll(a).is_none()), "the fixture is not quiet");
 
         keyframe_everyone(&s.subscribers);
 
@@ -1404,8 +1495,19 @@ mod tests {
 
         assert!(!s.set_client_size(a, 70, 22), "a resize that does not move the min changed it");
         assert_eq!(s.size(), (60, 20));
-        assert!(s.poll(a).is_none(), "an ungranted resize must not repaint anyone");
-        assert!(s.poll(b).is_none(), "an ungranted resize must not repaint anyone");
+        // A tail delta can still arrive after the exit report (#80), so "owed
+        // nothing" is a proxy that races (#280). The repaint a granted resize
+        // causes is a *keyframe* (reconcile_size marks everyone), and that is
+        // what must not appear here.
+        for (who, h) in [("a", a), ("b", b)] {
+            if let Some((_, _, update)) = s.poll(h) {
+                assert!(
+                    !matches!(update, Update::Keyframe(_)),
+                    "an ungranted resize must not repaint anyone, but client {who} was owed \
+                     a keyframe"
+                );
+            }
+        }
     }
 
     #[test]
