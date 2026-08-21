@@ -815,10 +815,12 @@ mod tests {
     }
 
     #[test]
-    fn a_fleet_screenshot_refusal_happens_at_the_parse_boundary_like_its_siblings() {
-        // The same exit-2 path a contradictory --attach/--no-daemon takes:
-        // knowable from the arguments alone, so it must be said before a
-        // config load and an event loop exist to unwind.
+    fn a_fleet_screenshot_refusal_fires_before_a_config_load_or_event_loop_exists() {
+        // Not inside `parse_args` -- each flag is individually valid, so the
+        // composition is judged by the explicit `screenshot_screen_refusal`
+        // check `main` runs right after parsing, before a config load and an
+        // event loop exist to unwind. This pins that the parsed flags trip
+        // that check exactly as `main` wires them.
         let f = parse_args(&v(&["--screen", "fleet", "--screenshot", "out.png"]))
             .unwrap_or_else(|_| panic!("the flags parse individually; the composition is judged afterwards"));
         assert!(
