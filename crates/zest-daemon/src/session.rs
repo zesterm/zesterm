@@ -1129,8 +1129,14 @@ mod tests {
         // the test drops the session (and with it the child) as soon as it
         // has its three. `ping -n 2` against loopback is cmd's second of
         // sleep.
+        // `echo`, not `printf 'line %s\n'`: a backslash in a CommandSpec is
+        // eaten by `split_command_line` before sh ever runs (it escapes the
+        // next character even inside double quotes, where sh would keep it),
+        // so the old format string reached printf as 'line %sn' and the five
+        // lines arrived as one unbroken row. The chain still held, so nothing
+        // noticed (#285).
         let spec = script_cmd(
-            "for i in 1 2 3 4 5; do printf 'line %s\\n' $i; sleep 0.05; done",
+            "for i in 1 2 3 4 5; do echo line $i; sleep 0.05; done",
             "for /L %i in (1,1,30) do @(echo line %i& ping -n 2 127.0.0.1 >nul)",
         );
         let s = Session::spawn(SessionId(5), &spec, PtySize::new(80, 24), 100, |_| {})
@@ -1283,18 +1289,23 @@ mod tests {
         // client renders history in whatever style it last held.
         // Enough coloured lines to push some off a three-row screen, so there
         // is history that carries a non-default attribute.
-        // A literal ESC byte in the command line: cmd.exe has no way to
-        // *spell* one, but it passes one through to `echo` untouched, and the
-        // SGR only has to reach the pty. Being able to spell it is what
-        // PowerShell was here for, and pwsh's startup is what this crate's
-        // tests can no longer afford (#285).
+        // A literal ESC byte in the command line, on *both* arms. cmd.exe has
+        // no way to spell one but passes one through to `echo` untouched --
+        // being able to spell it is what PowerShell was here for, and pwsh's
+        // startup is what this crate's tests can no longer afford (#285). And
+        // sh must not be asked to spell it either: the `printf '\033[31m...'`
+        // that stood here never printed red, because `split_command_line`
+        // eats a backslash even inside double quotes (where sh would keep
+        // it), so printf's format opened with a literal `033`. The child
+        // printed escape-free text, it still filled history, and the
+        // assertion below on defined attribute ids passed vacuously on every
+        // unix runner -- which is why this test now also proves a coloured
+        // cell got through.
         let esc = '\u{1b}';
         let win = format!("for /L %i in (1,1,10) do @echo {esc}[31mline %i{esc}[0m");
-        let spec = script_cmd(
-            "for i in 1 2 3 4 5 6 7 8 9 10; do \
-             printf '\\033[31mline %s\\033[0m\\n' $i; done",
-            &win,
-        );
+        let sh =
+            format!("for i in 1 2 3 4 5 6 7 8 9 10; do echo '{esc}[31mline '$i'{esc}[0m'; done");
+        let spec = script_cmd(&sh, &win);
         let s = Session::spawn(SessionId(77), &spec, PtySize::new(40, 3), 200, |_| {})
             .expect("spawn");
         // Two waits, both asserted, because "the child never ran" and "the
