@@ -73,6 +73,11 @@ pub fn facts(default_shell: String) -> HostOffer {
         os_version: os_version(),
         default_shell,
         profiles: Vec::new(),
+        // Not this function's fact to state: everything here comes from the
+        // machine and its config, and the token comes from the credential
+        // store — [`OfferSource::set_account_token`] is who says it, and
+        // `None` is honestly "the daemon did not say" until then.
+        has_account_token: None,
     }
 }
 
@@ -213,12 +218,53 @@ impl OfferSource {
     /// without it each of those would push an identical profile list to every
     /// attached client on the fleet.
     pub fn set(&self, offer: HostOffer) -> bool {
+        self.update(move |held| *held = offer)
+    }
+
+    /// Re-read the config and publish what changed.
+    pub fn reload(&self, default_shell: String) -> bool {
+        // The read happens before the lock — it is file I/O — and the merge
+        // under it. The token fact is the credential store's, not the config
+        // file's: a reload that reset it to "did not say" would blank the
+        // enrol affordance's gate (#245) every time somebody saved a profile.
+        let fresh = read_config(default_shell);
+        self.update(move |held| {
+            let token = held.has_account_token;
+            *held = fresh;
+            held.has_account_token = token;
+        })
+    }
+
+    /// State whether this machine's daemon holds an account token (#245).
+    ///
+    /// The one field of the offer the credential store owns rather than the
+    /// config: set at startup from a probe of the store, and again when a
+    /// wire enrolment lands a token. Goes through [`Self::update`] on purpose
+    /// — a change moves the generation and wakes the watchers, so the fleet
+    /// card learns the machine no longer needs enrolling without waiting for
+    /// unrelated traffic.
+    pub fn set_account_token(&self, held: Option<bool>) -> bool {
+        self.update(move |offer| offer.has_account_token = held)
+    }
+
+    /// Every write goes through here: mutate under the offer's own lock,
+    /// bump the generation only when the result differs, and wake the
+    /// watchers when it did.
+    ///
+    /// One lock acquisition rather than a `snapshot()`-then-`set()` pair,
+    /// because the writers live on different threads — the config watcher
+    /// reloads while the enrol worker flips the token fact — and a
+    /// read-modify-write across two acquisitions lets either overwrite the
+    /// other's update with the stale half it read.
+    fn update(&self, apply: impl FnOnce(&mut HostOffer)) -> bool {
         {
             let mut held = self.inner.offer.lock().expect("offer mutex");
-            if *held == offer {
+            let mut next = held.clone();
+            apply(&mut next);
+            if *held == next {
                 return false;
             }
-            *held = offer;
+            *held = next;
             self.inner.generation.fetch_add(1, Ordering::AcqRel);
         }
         // Outside the offer lock: a waker runs arbitrary caller code, and
@@ -230,11 +276,6 @@ impl OfferSource {
             wake();
         }
         true
-    }
-
-    /// Re-read the config and publish what changed.
-    pub fn reload(&self, default_shell: String) -> bool {
-        self.set(read_config(default_shell))
     }
 }
 
@@ -323,6 +364,35 @@ mod tests {
         assert!(source.set(facts("pwsh -NoLogo".into())), "a different offer is");
         assert!(source.generation() > first, "and it moves the generation");
         assert_eq!(source.snapshot().default_shell, "pwsh -NoLogo");
+    }
+
+    #[test]
+    fn the_token_fact_survives_a_config_reload() {
+        // The credential store owns `has_account_token` and the config file
+        // owns everything else. Without the merge in `reload`, saving a
+        // profile would blank the fact back to "did not say" — and the enrol
+        // affordance's gate (#245) with it, on every config edit.
+        let source = OfferSource::new(facts("zsh".into()));
+        source.set_account_token(Some(true));
+        source.reload("zsh".into());
+        assert_eq!(
+            source.snapshot().has_account_token,
+            Some(true),
+            "a config edit says nothing about the credential store"
+        );
+    }
+
+    #[test]
+    fn stating_the_token_fact_is_a_change_and_restating_it_is_not() {
+        // It rides the same generation the profiles do, so a change wakes
+        // the watchers and reaches every fleet card — and a restatement must
+        // not, or the startup probe would push an identical offer to the
+        // whole fleet.
+        let source = OfferSource::new(facts("zsh".into()));
+        let first = source.generation();
+        assert!(source.set_account_token(Some(false)), "None → Some(false) is news");
+        assert!(source.generation() > first, "and it must be published");
+        assert!(!source.set_account_token(Some(false)), "saying it twice is not");
     }
 
     #[test]
