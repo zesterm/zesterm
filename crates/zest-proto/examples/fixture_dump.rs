@@ -53,8 +53,6 @@ const FIXTURE_SCHEMA: u32 = 1;
 enum Source {
     /// A recording in `zest-core/tests/corpus`, by name.
     Vtrec(&'static str),
-    /// Literal VT input, for a path no recording reaches.
-    Synthetic(&'static [&'static str]),
     /// Literal VT input with resizes in it, for the one path plain input
     /// cannot reach: a resize is not bytes on the pty, it is a call the host
     /// makes, so a fixture containing one has to say where.
@@ -113,28 +111,13 @@ const CORPUS: &[(&str, usize, usize, Source)] = &[
     ("git-log-short", 80, 5, Source::Vtrec("git-log")),
     ("unicode-wide-short", 80, 5, Source::Vtrec("unicode-wide")),
     ("vim-macos-short", 80, 5, Source::Vtrec("vim-macos")),
-    (
-        "combining-marks",
-        40,
-        6,
-        Source::Synthetic(&[
-            // Decomposed Unicode in the default attribute. macOS input methods
-            // produce this form by default, so it is the ordinary case rather
-            // than an exotic one.
-            "cafe\u{301} nai\u{308}ve\r\n",
-            // The case `CellMarks::at` exists for: runs split on attribute, and
-            // the offset is within the run, not within the row. A decoder that
-            // reads it as a row offset puts the accent on the wrong letter here
-            // and nowhere else.
-            "\u{1b}[31mred e\u{301}\u{1b}[0m then a\u{300}\r\n",
-            // Marks riding along with flags, so the attribute and the side
-            // table have to survive the same run boundary.
-            "\u{1b}[1;4mbold u\u{308}\u{1b}[0m tail\r\n",
-            // A mark on a double-width character: the one place the width rule
-            // and the mark offset interact.
-            "\u{1b}[32m\u{4e16}\u{301}\u{754c}\u{1b}[0m\r\n",
-        ]),
-    ),
+    // Decomposed Unicode through a real ConPTY (#17), replacing the synthetic
+    // byte list this entry started as: a mark inside a coloured run, one after
+    // the run boundary (the case `CellMarks::at` exists for — the offset is
+    // within the run, not within the row), one riding bold+underline, and one
+    // on a double-width character, where the width rule and the mark offset
+    // interact.
+    ("combining-marks", 40, 6, Source::Vtrec("combining-marks")),
     (
         "width-change",
         40,
@@ -168,28 +151,20 @@ const CORPUS: &[(&str, usize, usize, Source)] = &[
             Step::Text("\u{1b}]133;D;0\u{7}"),
         ]),
     ),
-    (
-        "astral",
-        40,
-        6,
-        // **Nothing in the corpus reaches past the BMP** — every wide character
-        // in `unicode-wide` and `vim-macos` is CJK, which is three UTF-8 bytes
-        // and one UTF-16 code unit. That hides the single most JavaScript-
-        // specific bug a client can have: `text.length` counts UTF-16 code
-        // units, so one emoji counts as two and every cell after it shifts left.
-        // On CJK that mistake is invisible, because there the count happens to
-        // be right.
-        //
-        // With an astral character the two wrong readings even fail
-        // differently, which is what makes this worth a fixture rather than a
-        // comment: `text.length` over-counts the WIDE run, and the character
-        // count under-counts the spacer run that carries no text at all.
-        Source::Synthetic(&[
-            "\u{1F600}\u{1F680} tail\r\n",
-            "\u{1b}[33m\u{1F31F}\u{1b}[0m mixed \u{4e16}\u{754c} ascii\r\n",
-            "a\u{1F4A9}b\u{1F4A9}c\r\n",
-        ]),
-    ),
+    // Astral-plane emoji through a real ConPTY (#17), replacing the synthetic
+    // byte list this entry started as. Every other wide character in the
+    // corpus is CJK — three UTF-8 bytes and one UTF-16 code unit — which hides
+    // the single most JavaScript-specific bug a client can have: `text.length`
+    // counts UTF-16 code units, so one emoji counts as two and every cell
+    // after it shifts left. With an astral character the two wrong readings
+    // even fail differently: `text.length` over-counts the WIDE run, and the
+    // character count under-counts the spacer run that carries no text at all.
+    ("astral", 40, 6, Source::Vtrec("astral")),
+    // `scroll-flood` is deliberately *not* exported. Its 115 chunks make a
+    // megabyte of golden JSON, and what it adds — SCROLL ordering at a natural
+    // viewport — the `-short` exports above already hold a TypeScript client
+    // to. It earns its keep in `conformance.rs` and `chaos_resync.rs`, where
+    // the replay costs nothing to commit.
 ];
 
 /// Stands in for a real host, so the fixtures are byte-stable.
@@ -359,7 +334,6 @@ fn replay(
     }
     let input: Vec<Play> = match source {
         Source::Vtrec(recording) => chunks(recording).into_iter().map(Play::Bytes).collect(),
-        Source::Synthetic(s) => s.iter().map(|c| Play::Bytes(c.as_bytes().to_vec())).collect(),
         Source::Script(steps) => steps
             .iter()
             .map(|s| match s {
@@ -450,7 +424,7 @@ fn replay(
         recording: name.to_string(),
         source: match source {
             Source::Vtrec(_) => "vtrec",
-            Source::Synthetic(_) | Source::Script(_) => "synthetic",
+            Source::Script(_) => "synthetic",
         },
         cols: u16::try_from(cols).unwrap_or(u16::MAX),
         rows: u16::try_from(rows).unwrap_or(u16::MAX),
