@@ -579,6 +579,14 @@ you need before you trip on it.
   last slave closes** (instantly if you reap the child first), silently — so
   `UnixPty::spawn` parks its drain thread in `read` *before* forking, which
   removes the deadline rather than shortening it (#54).
+- **`split_command_line` eats a backslash even inside double quotes, where sh
+  would keep it** — so a `CommandSpec` of `sh -c "…printf '\033[31m…\n'…"`
+  hands the shell a script whose escapes read `033` and `n`: no colour, no
+  newline, exit code 0, and nothing anywhere to notice. Two daemon test
+  fixtures were vacuous on unix from the day they were written because of
+  this (#285). Spell no backslashes in a command line — embed the literal
+  byte, ESC included; #408 tracks whether the splitter should learn sh's
+  double-quote rule.
 - **macOS's `/bin/sh` does not pass `SIGINT` on when non-interactive**, so a
   `sh -c 'sleep 30'` test child survives a `^C` a working pty delivered
   correctly. Spawn the binary directly in tests.

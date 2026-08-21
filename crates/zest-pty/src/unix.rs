@@ -570,7 +570,15 @@ fn split_command_line(line: &str) -> Vec<String> {
 
     while let Some(c) = chars.next() {
         match (quote, c) {
-            // Backslash escapes only outside single quotes, matching sh.
+            // Backslash escapes only outside single quotes. That is
+            // *stricter* than sh, which keeps a backslash before an ordinary
+            // character inside double quotes -- so `sh -c "printf '\033...'"`
+            // loses its backslashes here and the child prints literal text,
+            // with exit code 0 and nothing anywhere to notice. Two daemon
+            // test fixtures were vacuous on unix from the day they were
+            // written because of this (#285). Until #408 decides whether this
+            // rule should learn sh's, spell no backslashes in a command line:
+            // embed the literal byte, ESC included.
             (q, '\\') if q != Some('\'') => {
                 if let Some(next) = chars.next() {
                     current.push(next);

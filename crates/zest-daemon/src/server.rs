@@ -2845,9 +2845,19 @@ mod tests {
     ///
     /// The lifetime is the point: anything about *closing* a session is vacuous
     /// against a command that has already exited on its own.
+    ///
+    /// `ping` against loopback rather than `Start-Sleep`: nothing here is
+    /// about a shell, and pwsh's boot on a contended runner is what #285
+    /// removed from every assertion budget in this module. `-n 31` is one
+    /// ping a second, ~30 seconds -- the same lifetime `Start-Sleep 30`
+    /// gave. The cmd wrapper exists to spell `>nul`: `Start-Sleep` was
+    /// *silent*, and a dozen tests picked this child for exactly that, so a
+    /// ping line arriving every second would quietly change what they hold
+    /// still. Redirection is a shell's trick -- bare `ping.exe` would take
+    /// `>nul` as one more argument and exit on it.
     fn sleep_cmd() -> String {
         if cfg!(windows) {
-            "powershell.exe -NoProfile -Command Start-Sleep 30".into()
+            "cmd.exe /c ping.exe -n 31 127.0.0.1 >nul".into()
         } else {
             "/bin/sleep 30".into()
         }
@@ -2858,11 +2868,17 @@ mod tests {
     /// The delay is the whole point: with a plain `echo` the output is already
     /// in the terminal when `Attach` builds its keyframe, so a test about what
     /// a later poll produces would be asserting on nothing.
+    ///
+    /// On Windows the delay is `ping`'s (`-n 3` = three pings a second
+    /// apart, ~2s), not a shell's sleep: the attach it has to land after is
+    /// a synchronous call microseconds after the create, and the
+    /// `Start-Sleep` that stood here cost a pwsh boot that, on a loaded
+    /// runner, pushed the *exit* past `wait_for`'s deadline -- reported as
+    /// an exit-ordering failure for a child that had not finished starting
+    /// (#285).
     fn delayed_echo_cmd() -> String {
         if cfg!(windows) {
-            "powershell.exe -NoProfile -Command Start-Sleep -Milliseconds 300; \
-             Write-Output probe"
-                .into()
+            "cmd.exe /c ping.exe -n 3 127.0.0.1 >nul & echo probe".into()
         } else {
             "/bin/sh -c 'sleep 0.3; echo probe'".into()
         }
@@ -2877,6 +2893,15 @@ mod tests {
     /// Windows CI in exactly that shape.
     ///
     /// Generous costs nothing: only a run that was going to fail pays for it.
+    ///
+    /// And 30 seconds was outgrown the same way 10 was: three tests waiting
+    /// on PowerShell children hit the deadline together, twice, on PRs that
+    /// touched nothing in this crate (#285). The answer is not a bigger
+    /// number — that buys time again and a real hang then takes longer to
+    /// report — it is that no test here boots PowerShell any more. `cmd.exe`
+    /// (a shell too, but one without a runtime to lift) and `ping.exe` start
+    /// in milliseconds on the same loaded runner that took several
+    /// concurrent pwsh boots past half a minute.
     fn wait_for(mut f: impl FnMut() -> bool) -> bool {
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
