@@ -3230,7 +3230,13 @@ impl App {
                             rows.push(("account".into(), "enrolled".into(), 1));
                         }
                         let mut enroll = None;
-                        if h.local && can_enroll_local && !h.enrolled {
+                        // `needs_enrollment`, not `!h.enrolled` (#245): the
+                        // row is the account table's fact and what the button
+                        // grants is a machine token for the *daemon* — an
+                        // enrolled row over a tokenless daemon (post-revoke
+                        // restore, a wiped machine, --logout) is exactly when
+                        // the affordance is needed most.
+                        if h.local && can_enroll_local && h.needs_enrollment() {
                             match &self.local_enroll {
                                 LocalEnroll::Idle => {
                                     enroll = Some(crate::chrome::model::FleetEnroll {
@@ -3246,13 +3252,19 @@ impl App {
                                 }
                                 // The listing has not caught up yet; say what
                                 // happened until its `enrolled` row takes
-                                // over (the poke on settle hurries it).
+                                // over (the poke on settle hurries it). But
+                                // only when that row is not already drawn:
+                                // re-enrolling a machine whose row was live
+                                // all along (#245) would print `account`
+                                // twice for a frame or two.
                                 LocalEnroll::Enrolled { account } => {
-                                    let value = match account {
-                                        Some(a) => format!("enrolled with {a}"),
-                                        None => "enrolled".into(),
-                                    };
-                                    rows.push(("account".into(), value, 1));
+                                    if !h.enrolled {
+                                        let value = match account {
+                                            Some(a) => format!("enrolled with {a}"),
+                                            None => "enrolled".into(),
+                                        };
+                                        rows.push(("account".into(), value, 1));
+                                    }
                                 }
                                 LocalEnroll::Failed(message) => {
                                     rows.push(("account".into(), clip_row(message), 2));

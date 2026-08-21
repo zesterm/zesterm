@@ -445,9 +445,21 @@ fn main() {
         // What this machine tells clients it can offer (#262). Built from its
         // own config here rather than lazily per connection, so the read and
         // the `uname` happen once at start instead of on a serve loop.
-        offer: Some(zest_daemon::offer::OfferSource::from_config(
-            zest_pty::CommandSpec::default_shell().command_line,
-        )),
+        offer: Some({
+            let source = zest_daemon::offer::OfferSource::from_config(
+                zest_pty::CommandSpec::default_shell().command_line,
+            );
+            // The daemon's own word on whether it holds an account token
+            // (#245) — the fact the enrol affordance gates on, as against
+            // the account table's row. `Err` is a locked keychain, *not* a
+            // machine that never enrolled (relay_origin's three-state rule),
+            // so it stays "did not say" rather than claiming either.
+            source.set_account_token(match enroll::stored_token(store.as_ref()) {
+                Ok(token) => Some(token.is_some()),
+                Err(_) => None,
+            });
+            source
+        }),
     };
 
     tracing::info!(

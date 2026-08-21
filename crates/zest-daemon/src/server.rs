@@ -1060,6 +1060,7 @@ impl Connection {
                 let label = self.auth.authenticator().label().to_string();
                 let cell = Arc::clone(&self.enroll_result);
                 let waker = self.waker.clone();
+                let offer = self.config.offer.clone();
                 let spawned = std::thread::Builder::new().name("zest-enroll".into()).spawn(
                     move || {
                         let outcome = crate::enroll::enroll(
@@ -1071,11 +1072,22 @@ impl Connection {
                             seam.secrets.as_ref(),
                         );
                         let msg = match outcome {
-                            Ok(enrolled) => HostMessage::EnrollResult {
-                                ok: true,
-                                account: enrolled.account,
-                                message: String::new(),
-                            },
+                            Ok(enrolled) => {
+                                // The token just landed in the store, so the
+                                // published fact flips with it (#245): the
+                                // generation moves, the watchers wake, and
+                                // every fleet card learns this machine no
+                                // longer needs enrolling — without waiting
+                                // for the account listing to catch up.
+                                if let Some(source) = &offer {
+                                    source.set_account_token(Some(true));
+                                }
+                                HostMessage::EnrollResult {
+                                    ok: true,
+                                    account: enrolled.account,
+                                    message: String::new(),
+                                }
+                            }
                             // Rendered as the CLI renders it — `refusal_text`
                             // is what `--enroll` prints — because the message
                             // is the person's next move and the app shows it
@@ -2139,6 +2151,55 @@ mod tests {
     }
 
     #[test]
+    fn a_successful_enrolment_flips_the_published_token_fact() {
+        // #245: the enrol affordance gates on the daemon's own word
+        // (`HostOffer::has_account_token`), so the moment the token lands in
+        // the store the word must change — and through the offer's
+        // generation, so the watchers wake and every fleet card learns this
+        // machine no longer needs enrolling without waiting for the account
+        // listing to catch up.
+        let source = crate::offer::OfferSource::new(crate::offer::facts("zsh".into()));
+        source.set_account_token(Some(false));
+        let generation_before = source.generation();
+
+        let mut cfg = config();
+        cfg.offer = Some(source.clone());
+        cfg.enroll = Some(crate::EnrollSeam {
+            base_url: "https://control.test".into(),
+            http: Arc::new(FakeControlPlane { asked: Arc::default() }),
+            secrets: Arc::new(zest_mesh::keystore::MemoryKeyStore::new()),
+        });
+        let mut c = Connection::new(
+            cfg,
+            Arc::new(Registry::new()),
+            crate::auth::Auth::Transport(test_authenticator()),
+            "test",
+        );
+        let mut peer = authenticate(&mut c);
+
+        let out = peer.send(&mut c, &ClientMessage::Enroll { code: "GOLDCODE".into() });
+        assert!(out.is_empty(), "the reply comes off the worker: {out:?}");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if !c.take_enroll_result().is_empty() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the enrolment never settled");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            source.snapshot().has_account_token,
+            Some(true),
+            "the published fact must follow the token into the store"
+        );
+        assert!(
+            source.generation() > generation_before,
+            "and move the generation, or no watcher is ever woken to send it"
+        );
+    }
+
+    #[test]
     fn a_refused_claim_reaches_the_app_as_the_persons_next_move() {
         // The seam's error is shown verbatim by the app's card (#227), so what
         // crosses it must already be the sentence to act on. Before #368 this
@@ -2337,6 +2398,7 @@ mod tests {
                     ..Default::default()
                 })
                 .collect(),
+            ..Default::default()
         }
     }
 

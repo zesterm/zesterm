@@ -601,6 +601,23 @@ pub struct HostOffer {
     /// This machine's own launch targets, resolved through its own Defaults.
     #[serde(default)]
     pub profiles: Vec<HostProfile>,
+    /// Whether this machine's daemon holds an account token in its own store.
+    ///
+    /// The daemon's own word, and deliberately not the account table's: a host
+    /// key can be a live row in the account's `hosts` table while the daemon
+    /// on that machine holds no token at all — a re-installed machine, a
+    /// cleared credential store, `--logout` — and the two facts sharing the
+    /// word "enrolled" is how the enrol affordance hid exactly when it was
+    /// needed (#245). Still a fact about the machine, not a capability bit:
+    /// what a client renders from it is the machine's *state*.
+    ///
+    /// Three states on purpose. `None` is "the daemon did not say" — a daemon
+    /// predating this field, or a credential store that could not be read
+    /// (a locked keychain is not a machine that never enrolled) — and a
+    /// client falls back to whatever else it knows. `Some(false)` is a
+    /// positive fact: the store was readable and holds nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_account_token: Option<bool>,
 }
 
 /// One launch target a machine publishes.
