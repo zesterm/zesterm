@@ -5524,6 +5524,7 @@ dependencies = [
  "zest-config",
  "zest-core",
  "zest-daemon",
+ "zest-fleet",
  "zest-font",
  "zest-input",
  "zest-mesh",
@@ -5594,6 +5595,14 @@ dependencies = [
  "zest-mesh",
  "zest-proto",
  "zest-pty",
+]
+
+[[package]]
+name = "zest-fleet"
+version = "0.1.0"
+dependencies = [
+ "zest-mesh",
+ "zest-proto",
 ]
 
 [[package]]

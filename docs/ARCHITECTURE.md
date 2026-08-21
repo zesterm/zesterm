@@ -88,6 +88,7 @@ two reference decoders cell-for-cell equal against recorded sessions.
 | `crates/zest-daemon` | Session ownership and lifecycle; loopback, LAN, WebSocket and relay transports |
 | `crates/zest-mesh` | Ed25519 identity, keystore, mDNS discovery, pairing, trust store |
 | `crates/zest-cloud` | The one crate that owns rustls and HTTP: `TlsDuplex`, enrolment, relay dialling |
+| `crates/zest-fleet` | What a machine in the fleet is, and the one rule that picks how to reach it. Pure; no discovery, no sockets |
 | `crates/zest-mcp` | Terminals as an agent's tools, over MCP on stdio (ADR-015) |
 | `xtask/` | The gates: `check-deps` plus schema / bindings / fixtures / web-export generation and checks |
 | `schemas/` | The generated settings JSON Schema |
