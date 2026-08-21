@@ -871,6 +871,60 @@ fn fleet_host_of<'a>(
     }
 }
 
+/// First-seen accent slots for remote hosts (#273).
+///
+/// Rebuilt per chrome refresh in strip order, so a host keeps its colour for
+/// the life of the window as long as its *key* is stable. The key is the
+/// host id where the tab has a real address — a renamed machine is the same
+/// machine, and two machines sharing a display name are still two machines —
+/// and the display label only for a placeholder (a launch still connecting),
+/// whose address is all-zero and says nothing. Keying placeholders on the id
+/// instead would collapse every in-flight cross-host launch into one slot,
+/// which is the regression #268 declined.
+struct HostSlots {
+    /// Each slot's keys, in first-seen order: the host id once a tab of this
+    /// slot has a real address, and the display label either way — the label
+    /// is a placeholder's only key, and the bridge a settling launch crosses
+    /// without changing colour.
+    entries: Vec<(Option<zest_proto::HostId>, String)>,
+}
+
+impl HostSlots {
+    fn new() -> Self {
+        Self { entries: Vec::new() }
+    }
+
+    /// The slot for this tab's host, minting the next one on first sight.
+    fn slot(&mut self, addr: zest_proto::SessionAddr, host_label: &str) -> usize {
+        if crate::tabs::is_placeholder(addr) {
+            // A launch still connecting has only its label. Matching a slot
+            // that already carries an id is deliberate: a second launch to a
+            // live host should wear that host's colour from the start.
+            if let Some(i) = self.entries.iter().position(|(_, label)| label == host_label) {
+                return i;
+            }
+        } else {
+            if let Some(i) = self.entries.iter().position(|(id, _)| *id == Some(addr.host)) {
+                return i;
+            }
+            // No slot knows this id yet, but one may have been opened by this
+            // tab's own placeholder a refresh ago. Claiming it — and stamping
+            // the id on it — is what keeps a tab's colour across the moment
+            // its launch settles; a sibling launch still in flight keeps
+            // matching the same slot by label above.
+            if let Some(i) =
+                self.entries.iter().position(|(id, label)| id.is_none() && label == host_label)
+            {
+                self.entries[i].0 = Some(addr.host);
+                return i;
+            }
+        }
+        let id = (!crate::tabs::is_placeholder(addr)).then_some(addr.host);
+        self.entries.push((id, host_label.to_string()));
+        self.entries.len() - 1
+    }
+}
+
 /// A tab's machine, as the fleet sees it.
 ///
 /// **Presence is about the machine; `LinkKind` is about our connection to it.**
@@ -5099,7 +5153,7 @@ impl App {
         // Host accent slots: the local machine is always slot 0; remote hosts
         // take the next slots in first-seen strip order, so a host keeps its
         // colour for the life of the window.
-        let mut remote_slots: Vec<String> = Vec::new();
+        let mut remote_slots = HostSlots::new();
 
         let tab_models: Vec<TabModel> = self
             .tabs
@@ -5130,13 +5184,7 @@ impl App {
                 };
                 let (host_label, accent, cwd) = match &origin {
                     TabOrigin::Remote { host_label } => {
-                        let slot = remote_slots
-                            .iter()
-                            .position(|l| l == host_label)
-                            .unwrap_or_else(|| {
-                                remote_slots.push(host_label.clone());
-                                remote_slots.len() - 1
-                            });
+                        let slot = remote_slots.slot(tab.addr, host_label);
                         (host_label.clone(), slot + 1, cwd)
                     }
                     TabOrigin::Local => {
@@ -13131,6 +13179,92 @@ mod next_wake_tests {
             next_wake(None, Some(Duration::from_millis(550))),
             NextWake::After(Duration::from_millis(550))
         );
+    }
+}
+
+#[cfg(test)]
+mod host_slot_tests {
+    use super::HostSlots;
+    use zest_proto::{HostId, SessionAddr, SessionId};
+
+    fn id(b: u8) -> HostId {
+        HostId::from_bytes([b; 32])
+    }
+
+    fn live(host: HostId, n: u64) -> SessionAddr {
+        SessionAddr::new(host, SessionId(n))
+    }
+
+    #[test]
+    fn a_connecting_tab_and_the_live_tab_it_becomes_keep_the_same_accent() {
+        // #273's guard-rail: the table is rebuilt every chrome refresh, so
+        // "the placeholder adopts the id's slot" has to fall out of the keying
+        // rules across two refreshes — one before the launch settles, one
+        // after. If it does not, every successful cross-host launch is a
+        // visible colour flicker at the moment it connects.
+        let alpha = live(id(1), 1);
+        let before = {
+            let mut slots = HostSlots::new();
+            slots.slot(alpha, "alpha");
+            slots.slot(crate::tabs::placeholder_addr(1), "beta")
+        };
+        let after = {
+            let mut slots = HostSlots::new();
+            slots.slot(alpha, "alpha");
+            slots.slot(live(id(2), 7), "beta")
+        };
+        assert_eq!(
+            before, after,
+            "the tab's slot survives its address going from placeholder to real"
+        );
+
+        // And the sibling case inside one refresh: a second launch to the
+        // same host is still a placeholder when the first settles, and the
+        // two must not split — the settled id claims the slot its label
+        // opened, and the label still finds it there.
+        let mut slots = HostSlots::new();
+        let settled = slots.slot(live(id(2), 7), "beta");
+        let sibling = slots.slot(crate::tabs::placeholder_addr(2), "beta");
+        assert_eq!(
+            settled, sibling,
+            "a still-connecting sibling shares the slot of the launch that settled"
+        );
+    }
+
+    #[test]
+    fn renaming_a_host_does_not_reshuffle_other_hosts_accents() {
+        // The headline bug: keyed by label, a renamed machine is a new entry.
+        // A tab's label is captured when the tab opens, so after a rename one
+        // machine's tabs can carry both names at once — two entries for one
+        // host, and every host after it moves down a colour. Keyed by id, a
+        // renamed machine is the same machine.
+        let (a, b) = (live(id(1), 1), live(id(2), 2));
+        let (before_a, before_b) = {
+            let mut slots = HostSlots::new();
+            (slots.slot(a, "alpha"), slots.slot(b, "beta"))
+        };
+        let (old_a, new_a, after_b) = {
+            let mut slots = HostSlots::new();
+            (
+                slots.slot(a, "alpha"),
+                slots.slot(live(id(1), 3), "zulu"),
+                slots.slot(b, "beta"),
+            )
+        };
+        assert_eq!(before_a, old_a, "the renamed host keeps its own slot");
+        assert_eq!(old_a, new_a, "its tab opened under the new name is still the same machine");
+        assert_eq!(before_b, after_b, "and the host after it keeps its colour");
+    }
+
+    #[test]
+    fn two_hosts_sharing_a_label_get_distinct_slots() {
+        // The same bug read the other way: two machines that happen to share
+        // a display name collapsed into one slot. Their ids differ, so their
+        // colours must too.
+        let mut slots = HostSlots::new();
+        let first = slots.slot(live(id(1), 1), "dev");
+        let second = slots.slot(live(id(2), 2), "dev");
+        assert_ne!(first, second, "distinct machines take distinct colours, whatever they are called");
     }
 }
 
