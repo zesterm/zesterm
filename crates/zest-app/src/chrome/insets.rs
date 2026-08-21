@@ -7,6 +7,7 @@
 //! cells — resize, redraw, pointer hit testing and IME placement all ask the
 //! same `Insets` the same question.
 
+use zest_config::settings::TabsPosition;
 use zest_font::CellMetrics;
 
 /// Physical pixels taken from each window edge before the grid begins.
@@ -16,6 +17,17 @@ pub struct Insets {
     pub left: f32,
     pub right: f32,
     pub bottom: f32,
+}
+
+/// What a visible tab strip claims beyond the bare padding: which edge it
+/// occupies, and the logical sizes the settings give it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StripClaim {
+    pub position: TabsPosition,
+    /// `tabs.strip_height`, logical px.
+    pub strip_height: u32,
+    /// `tabs.sidebar_width`, logical px.
+    pub sidebar_width: u32,
 }
 
 impl Insets {
@@ -29,6 +41,45 @@ impl Insets {
     pub fn padding_only(padding: u32, scale: f32) -> Self {
         let p = padding as f32 * scale.max(0.1);
         Self { top: p, left: p, right: p, bottom: p }
+    }
+
+    /// The chrome's whole claim on the window edges: padding everywhere,
+    /// plus the strip's edge when one is shown.
+    ///
+    /// Every edge comes out a whole physical pixel, because the top/left
+    /// insets become the grid's origin and the atlas sampler is `Nearest`
+    /// on a 1:1 assumption — at 125% (the ordinary Windows laptop scale)
+    /// the default strip resolves to 8·1.25 + 46·1.25 = 67.5, and a
+    /// half-pixel origin resamples every glyph between texels, which reads
+    /// as a blurry font. Floored rather than rounded up so the chrome
+    /// never grows: rounding an inset up can cost the grid its last row
+    /// or column in a window sized exactly around it. (#85)
+    #[must_use]
+    pub fn resolved(padding: u32, scale: f32, strip: Option<StripClaim>) -> Self {
+        let mut insets = Self::padding_only(padding, scale);
+        if let Some(claim) = strip {
+            match claim.position {
+                TabsPosition::Top => {
+                    insets.top += claim.strip_height as f32 * scale;
+                }
+                TabsPosition::Left => {
+                    insets.left += claim.sidebar_width as f32 * scale;
+                    // The full-width header over the sidebar + pane row: the
+                    // vertical layout's counterpart of the strip, and it was
+                    // once forgotten here — the grid painted its first two
+                    // rows straight over the session name.
+                    insets.top += super::layout::HEADER_H * scale;
+                }
+            }
+            // Nothing reserves the bottom edge: the status bar is gone
+            // (design §1), so below the grid there is only `window.padding`.
+        }
+        Self {
+            top: insets.top.floor(),
+            left: insets.left.floor(),
+            right: insets.right.floor(),
+            bottom: insets.bottom.floor(),
+        }
     }
 
     /// The grid's rectangle inside a window of `w` × `h` physical pixels,
@@ -186,6 +237,63 @@ mod tests {
         let i = Insets::padding_only(10, 1.0);
         assert_eq!(i.grid_dims(m, 1000, 400), m.grid_size(1000, 400, 10));
         assert_eq!(i.grid_dims(m, 1, 1), m.grid_size(1, 1, 10), "degenerate windows still agree");
+    }
+
+    #[test]
+    fn resolved_insets_are_whole_physical_pixels_at_every_scale() {
+        // 125/150/175% are the ordinary Windows laptop scales, and the
+        // default strip (46) and sidebar (262) both go fractional there —
+        // 46·1.25 = 57.5. The top/left insets are the grid's origin, and a
+        // fractional origin resamples every glyph between texels through the
+        // Nearest atlas sampler: stems snap inconsistently, edges go ragged.
+        // (#85)
+        let strips = [
+            None,
+            // The defaults, and a few awkward custom sizes — odd numbers stay
+            // fractional at every non-integral scale in the table.
+            Some(StripClaim { position: TabsPosition::Top, strip_height: 46, sidebar_width: 262 }),
+            Some(StripClaim { position: TabsPosition::Left, strip_height: 46, sidebar_width: 262 }),
+            Some(StripClaim { position: TabsPosition::Top, strip_height: 33, sidebar_width: 199 }),
+            Some(StripClaim { position: TabsPosition::Left, strip_height: 33, sidebar_width: 199 }),
+        ];
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0] {
+            for padding in [0u32, 5, 8, 13] {
+                for strip in strips {
+                    let i = Insets::resolved(padding, scale, strip);
+                    for (edge, v) in
+                        [("top", i.top), ("left", i.left), ("right", i.right), ("bottom", i.bottom)]
+                    {
+                        assert_eq!(
+                            v,
+                            v.floor(),
+                            "{edge} inset {v} (scale {scale}, padding {padding}, strip \
+                             {strip:?}) must be whole physical px — a fractional inset \
+                             puts the grid on a half-pixel origin"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_fractional_inset_floors_so_the_chrome_never_grows() {
+        // Floor, not round-half-up: an inset rounded upward enlarges the
+        // chrome's claim, and in a window sized exactly around the grid that
+        // is the last row or column gone. 8·1.25 + 46·1.25 = 67.5 → 67.
+        let strip =
+            StripClaim { position: TabsPosition::Top, strip_height: 46, sidebar_width: 262 };
+        let i = Insets::resolved(8, 1.25, Some(strip));
+        assert_eq!(i.top, 67.0, "the half pixel goes to the grid, not the chrome");
+        assert_eq!(i.left, 10.0, "an already-whole product is untouched");
+
+        // The sidebar layout claims two edges, and both must snap: the left
+        // one for the sidebar, the top one for the full-width header.
+        let sidebar =
+            StripClaim { position: TabsPosition::Left, strip_height: 46, sidebar_width: 262 };
+        let i = Insets::resolved(8, 1.25, Some(sidebar));
+        assert_eq!(i.left, 337.0, "10 + 262·1.25 = 337.5 floors to 337");
+        assert_eq!(i.top, 67.0, "10 + HEADER_H·1.25 = 67.5 floors to 67");
     }
 
     #[test]

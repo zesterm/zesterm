@@ -4475,25 +4475,12 @@ impl App {
     /// [`Self::insets`] for callers that know the scale before the window is
     /// stored — the shell-spawn path in `resumed` sizes the grid this way.
     fn insets_at(&self, scale: f32) -> Insets {
-        let mut insets = Insets::padding_only(self.config.padding, scale);
-        if self.strip_shown() {
-            match self.config.tabs.position {
-                zest_config::settings::TabsPosition::Top => {
-                    insets.top += self.config.tabs.strip_height as f32 * scale;
-                }
-                zest_config::settings::TabsPosition::Left => {
-                    insets.left += self.config.tabs.sidebar_width as f32 * scale;
-                    // The full-width header over the sidebar + pane row: the
-                    // vertical layout's counterpart of the strip, and it was
-                    // once forgotten here — the grid painted its first two
-                    // rows straight over the session name.
-                    insets.top += crate::chrome::layout::HEADER_H * scale;
-                }
-            }
-            // Nothing reserves the bottom edge: the status bar is gone
-            // (design §1), so below the grid there is only `window.padding`.
-        }
-        insets
+        let strip = self.strip_shown().then_some(crate::chrome::insets::StripClaim {
+            position: self.config.tabs.position,
+            strip_height: self.config.tabs.strip_height,
+            sidebar_width: self.config.tabs.sidebar_width,
+        });
+        Insets::resolved(self.config.padding, scale, strip)
     }
 
     /// Whether the strip is drawn at all.
