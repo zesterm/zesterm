@@ -8162,11 +8162,10 @@ impl App {
     /// its appended `-Command` thrown away).
     fn build_spec(&self, command: Option<&str>) -> CommandSpec {
         let mut spec = CommandSpec::default_shell();
-        if let Some(shell) = &self.config.shell {
-            spec.command_line = shell.clone();
-        }
         if let Some(command) = command {
             spec.command_line = command.to_string();
+        } else if let Some(shell) = &self.config.shell {
+            spec.command_line = shell.clone();
         }
         // The in-process path gets the same hook as the daemon's, or
         // `--no-daemon` would silently be a terminal without command blocks.

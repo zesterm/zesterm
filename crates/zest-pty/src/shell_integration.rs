@@ -113,7 +113,14 @@ impl Shell {
         if name == "zsh" {
             return Some(Self::Zsh);
         }
-        if name == "bash" {
+        // And on Windows a *bare* `bash` is the same two binaries wearing no
+        // extension — `CreateProcessW` resolves it to System32's WSL launcher
+        // or a PATH-first Git Bash — so hooking it would hand a Linux bash a
+        // Windows shim path, and `--init-file` *replaces* the startup files:
+        // the user's ~/.bashrc silently stops running, which is losing their
+        // configuration to gain nothing. On Windows, bash is reached by
+        // naming it through the launcher: `wsl.exe -d <distro> -- bash`.
+        if name == "bash" && !cfg!(windows) {
             return Some(Self::Bash);
         }
         if ["pwsh", "pwsh.exe", "powershell", "powershell.exe"]
@@ -509,8 +516,15 @@ fn install_bash(command_line: &str, dir: &Path) -> io::Result<Injection> {
 /// `-c` and a bare script path make it non-interactive, where an init file is
 /// never read; `--init-file`/`--rcfile`/`--norc` are the user turning exactly
 /// the knob we would; `--posix` changes the startup files wholesale; and a
-/// login bash (`-l`) ignores `--init-file` entirely — injecting there would
-/// report success and do nothing, which is the silent zero all over again.
+/// login bash (`-l`/`--login`) ignores `--init-file` entirely — injecting
+/// there would report success and do nothing, the silent zero all over again.
+///
+/// And *any* short option declines, `-i` included, whatever it means: bash
+/// recognises multi-character options only **before** single-character ones,
+/// so an appended `--init-file` after a `-i` is not ignored — bash prints
+/// `--: invalid option` and exits, and a tab that dies on open is strictly
+/// worse than the missing blocks this decline costs. Measured, not read:
+/// `bash -i --init-file x` refuses where `bash --init-file x -i` runs.
 fn bash_accepts_appended_args(args: &[&str]) -> bool {
     for arg in args {
         match *arg {
@@ -523,13 +537,7 @@ fn bash_accepts_appended_args(args: &[&str]) -> bool {
                     return false;
                 }
             }
-            a if a.starts_with('-') && a.len() > 1 => {
-                // A short-option cluster: `-lic` is `-l -i -c`. `-s` takes its
-                // script from stdin, which is just as non-interactive.
-                if a[1..].chars().any(|c| matches!(c, 'c' | 'l' | 's')) {
-                    return false;
-                }
-            }
+            a if a.starts_with('-') => return false,
             // A bare word is a script path: non-interactive.
             _ => return false,
         }
@@ -570,8 +578,18 @@ mod tests {
 
     #[test]
     fn bash_is_recognised_by_its_executable() {
+        // On unix only. A bare `bash` on Windows is System32's WSL launcher
+        // or Git Bash — binaries whose argument handling this module refuses
+        // to guess at — so there the only bash is one named through the
+        // launcher, and hooking these spellings would hand a Linux bash a
+        // Windows shim path in place of its own startup files.
+        #[cfg(not(windows))]
         for line in ["bash", "/bin/bash", "/usr/bin/bash", "-bash", "/usr/local/bin/bash -i"] {
             assert_eq!(Shell::detect(line), Some(Shell::Bash), "{line} is a bash");
+        }
+        #[cfg(windows)]
+        for line in ["bash", "/bin/bash", "-bash"] {
+            assert_eq!(Shell::detect(line), None, "{line} is a .exe launcher on Windows");
         }
 
         // The argument names a bash; the program is not one.
@@ -623,7 +641,11 @@ mod tests {
         // `-c` and a script path make bash non-interactive, where an init file
         // is never read; `--rcfile`/`--norc` are the user turning our knob
         // themselves; a login bash ignores `--init-file` outright, so hooking
-        // it would report success and do nothing.
+        // it would report success and do nothing. And *any* short option —
+        // the harmless-looking `-i` included — declines, because bash only
+        // recognises long options before short ones: `bash -i --init-file x`
+        // does not ignore the hook, it prints `--: invalid option` and dies,
+        // and a tab that dies on open is strictly worse than no blocks.
         for args in [
             &["-c", "ls"][..],
             &["script.sh"][..],
@@ -635,12 +657,14 @@ mod tests {
             &["--login"][..],
             &["-lic", "ls"][..],
             &["-s"][..],
+            &["-i"][..],
+            &["--noediting", "-i"][..],
             &["--", "script.sh"][..],
         ] {
             assert!(!bash_accepts_appended_args(args), "{args:?} cannot take an init file");
         }
 
-        for args in [&[][..], &["-i"][..], &["--noprofile"][..], &["--noediting", "-i"][..]] {
+        for args in [&[][..], &["--noprofile"][..], &["--noediting"][..]] {
             assert!(bash_accepts_appended_args(args), "{args:?} drops into an interactive shell");
         }
     }
@@ -809,6 +833,12 @@ mod tests {
         assert!(
             hook.contains("PS0="),
             "without PS0 a compound command produces no block on any modern bash"
+        );
+        // The user's own PS0 survives, after ours -- discarding it is the
+        // silent-loss failure the rest of this file exists to avoid.
+        assert!(
+            hook.contains("${__zesterm_hush[$((__zesterm_running=1))]-}'${PS0-}"),
+            "a pre-existing PS0 must be chained, not replaced"
         );
     }
 

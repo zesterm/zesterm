@@ -469,7 +469,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("zesterm-si-bash1-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
-        for line in ["/bin/bash", "wsl.exe -d Ubuntu -- bash"] {
+        // `/bin/bash` is unix-only: on Windows a bare bash is a `.exe`
+        // launcher `detect` refuses, and the launcher spelling is the bash.
+        #[cfg(windows)]
+        let lines = ["wsl.exe -d Ubuntu -- bash"];
+        #[cfg(not(windows))]
+        let lines = ["/bin/bash", "wsl.exe -d Ubuntu -- bash"];
+        for line in lines {
             let mut spec =
                 CommandSpec { command_line: line.into(), cwd: None, env: Vec::new() };
             spec.enable_shell_integration(&dir);
