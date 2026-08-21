@@ -85,9 +85,16 @@ pub const PROTOCOL_VERSION: u16 = 3;
 /// decide whether the next update can be a delta or has to be a keyframe. This
 /// is the entire resync mechanism, and it is why the sequence counter already
 /// exists in `zest-core`.
+///
+/// `ts(type = "number")`, not the `bigint` a `u64` would derive: `rmp-serde`
+/// writes the narrowest integer that fits, so what actually reaches a
+/// JavaScript decoder is a plain `number` for every value a session can
+/// reach — sequences count up from zero, and 2^53 of them at sixty per
+/// second is several million years. A binding that says `bigint` is wrong at
+/// runtime for every real frame and right only for absurd ones (#14).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-pub struct Seq(pub u64);
+pub struct Seq(#[cfg_attr(feature = "ts", ts(type = "number"))] pub u64);
 
 /// What a client sends.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -270,7 +277,15 @@ pub enum ClientMessage {
     /// Everything up to and including this sequence has been applied.
     Ack { session: SessionAddr, seq: Seq },
     /// Fetch history the client does not hold.
-    RequestScrollback { session: SessionAddr, from_line: i64, count: u32 },
+    ///
+    /// `from_line` is a line id — `ts(type = "number")` for
+    /// [`RowPayload::line`](crate::delta::RowPayload)'s reason.
+    RequestScrollback {
+        session: SessionAddr,
+        #[cfg_attr(feature = "ts", ts(type = "number"))]
+        from_line: i64,
+        count: u32,
+    },
     /// End the session and its child process.
     CloseSession { session: SessionAddr },
 }
@@ -447,6 +462,9 @@ pub enum HostMessage {
     /// Requested history.
     Scrollback {
         session: SessionAddr,
+        /// A line id — `ts(type = "number")` for
+        /// [`RowPayload::line`](crate::delta::RowPayload)'s reason.
+        #[cfg_attr(feature = "ts", ts(type = "number"))]
         from_line: i64,
         rows_data: Vec<RowPayload>,
         /// Every attribute these rows name.

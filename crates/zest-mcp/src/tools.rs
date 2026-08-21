@@ -238,6 +238,7 @@ impl ToolSet {
                     "title": r.title(),
                     "text": untrusted(&r.screen_text()),
                 });
+                styled(r, &mut out);
                 waited.describe(&mut out);
                 Ok(out)
             },
@@ -812,6 +813,50 @@ fn opt_str<'a>(args: &'a Value, field: &'static str) -> Result<Option<&'a str>, 
         Some(_) => Err(ToolError::BadType { field, want: "a string" }),
     }
 }
+
+/// Where the screen is dim, reversed, bold and so on, added to a `screen` result.
+///
+/// **Always, not on request.** The case this answers is an agent mistaking an
+/// application's *offer* for the user's committed input -- a dimmed suggestion
+/// reads as a typed command, and an Enter sent for any other reason accepts it
+/// (#348). A safety signal behind an opt-in flag is one that is absent exactly
+/// when it was needed, because the caller who would have set the flag is the
+/// caller who already suspected. It is affordable for the same reason it is
+/// safe to have on: spans carry positions and flag names, never text, which
+/// measured 2-23 bytes across the recorded fixtures.
+///
+/// Omitted entirely when the screen carries no attributes at all -- the common
+/// case for a shell at a prompt, and a key nobody has to read.
+fn styled(r: &Replica, out: &mut Value) {
+    let (spans, omitted) = r.styled_spans(MAX_STYLED_SPANS);
+    if spans.is_empty() && omitted == 0 {
+        return;
+    }
+    let Some(map) = out.as_object_mut() else { return };
+    map.insert(
+        "styled".into(),
+        Value::Array(
+            spans
+                .iter()
+                .map(|s| json!({ "row": s.row, "col": s.col, "len": s.len, "attrs": s.names() }))
+                .collect(),
+        ),
+    );
+    if omitted > 0 {
+        map.insert("styled_omitted".into(), json!(omitted));
+    }
+}
+
+/// How many attribute spans one `screen` answers with.
+///
+/// Not a caller-supplied bound, unlike `max_lines`: this rides every `screen`
+/// call rather than being asked for, so there is no argument to clamp and the
+/// ceiling only has to stop a pathological screen from dominating the answer.
+/// A syntax-highlighted editor is the case in mind -- colour is not reported,
+/// but a row can still alternate bold. Above this the count comes back as
+/// `styled_omitted` rather than the list quietly ending, for the reason
+/// `omitted_lines` exists.
+const MAX_STYLED_SPANS: usize = 400;
 
 /// What blocks are, and are not, on the alternate screen.
 ///
@@ -1472,6 +1517,82 @@ fn opt_u16(args: &Value, field: &'static str) -> Result<Option<u16>, ToolError> 
             Ok(n) if u32::from(n) <= MAX_DIMENSION => Ok(Some(n)),
             _ => Err(ToolError::BadType { field, want: "at most 1000" }),
         },
+    }
+}
+
+#[cfg(test)]
+mod styled_tests {
+    use super::*;
+    use crate::session::StyledSpan;
+    use zest_core::CellFlags;
+
+    fn span(row: usize, col: usize, len: usize, flags: CellFlags) -> StyledSpan {
+        StyledSpan { row, col, len, flags }
+    }
+
+    /// `styled` shaped into a result, without a session behind it.
+    fn shape(spans: &[StyledSpan], omitted: usize) -> Value {
+        let mut out = json!({ "text": "x" });
+        let map = out.as_object_mut().expect("object");
+        if spans.is_empty() && omitted == 0 {
+            return out;
+        }
+        map.insert(
+            "styled".into(),
+            Value::Array(
+                spans
+                    .iter()
+                    .map(|s| json!({ "row": s.row, "col": s.col, "len": s.len, "attrs": s.names() }))
+                    .collect(),
+            ),
+        );
+        if omitted > 0 {
+            map.insert("styled_omitted".into(), json!(omitted));
+        }
+        out
+    }
+
+    #[test]
+    fn a_plain_screen_carries_no_styled_key_at_all() {
+        // The common case is a shell at a prompt. A key that is always present
+        // and always empty is a key every caller pays to read past.
+        assert!(shape(&[], 0).get("styled").is_none());
+    }
+
+    #[test]
+    fn a_span_carries_positions_and_names_but_never_text() {
+        // The property that lets this sit outside the untrusted fence: there is
+        // nothing in it a hostile program could author. Coordinates and a fixed
+        // vocabulary, which the caller cross-references against the fenced text.
+        let out = shape(&[span(3, 2, 19, CellFlags::DIM)], 0);
+        let first = &out["styled"][0];
+        assert_eq!(first["row"], 3);
+        assert_eq!(first["col"], 2);
+        assert_eq!(first["len"], 19);
+        assert_eq!(first["attrs"], json!(["dim"]));
+        let rendered = out["styled"].to_string();
+        assert!(
+            !rendered.contains('x'),
+            "a span must not restate the screen's characters: {rendered}"
+        );
+    }
+
+    #[test]
+    fn what_the_ceiling_dropped_is_named_rather_than_implied() {
+        let out = shape(&[span(0, 0, 1, CellFlags::BOLD)], 7);
+        assert_eq!(out["styled_omitted"], 7);
+        assert!(
+            shape(&[span(0, 0, 1, CellFlags::BOLD)], 0).get("styled_omitted").is_none(),
+            "nothing dropped means no key, the way `omitted_lines` behaves"
+        );
+    }
+
+    #[test]
+    fn inverse_is_spelled_reverse() {
+        // The word the terminal world uses for how a selection bar is drawn,
+        // and the word #348 is written in. A model reading `inverse` would have
+        // to guess they are the same thing.
+        assert_eq!(span(0, 0, 1, CellFlags::INVERSE).names(), vec!["reverse"]);
     }
 }
 

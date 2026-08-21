@@ -612,7 +612,7 @@ impl TermState {
                 .scrollback_len()
                 .checked_sub(1)
                 .and_then(|i| self.grid.line(i))
-                .is_some_and(|r| r.wrapped);
+                .is_some_and(|r| r.wrapped());
             (self.grid.active_row(0).id, fragment)
         });
         let reindex = self.grid.resize(cols, rows, &template);

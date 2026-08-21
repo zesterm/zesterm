@@ -145,7 +145,7 @@ export const TerminalView = component<{
     dial,
     signer,
     label: 'zesterm-web',
-    session: { host: entry.host, session: BigInt(entry.session) },
+    session: { host: entry.host, session: Number(entry.session) },
     cols: entry.cols,
     rows: entry.rows,
     events: {

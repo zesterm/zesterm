@@ -15,12 +15,18 @@ export type BlockPayload = {
 id: number, 
 /**
  * First line of the prompt (OSC 133;A).
+ *
+ * The integer is pinned to `number` for [`RowPayload::line`]'s reason,
+ * on all three line fields — they are compared against it, and two
+ * integer types that must agree is a conversion bug waiting to happen.
+ * (`output_line`/`end_line` are `number | null`: same integer, plus the
+ * `null` their `Option` really does put on the wire.)
  */
-prompt_line: bigint, 
+prompt_line: number, 
 /**
  * First line of command output (OSC 133;C), once it starts.
  */
-output_line: bigint | null, 
+output_line: number | null, 
 /**
  * Last line, once the command has finished (OSC 133;D).
  *
@@ -28,7 +34,7 @@ output_line: bigint | null,
  * bottom rather than waiting — that is what makes a long build readable
  * while it happens instead of only afterwards.
  */
-end_line: bigint | null, state: BlockState, command: string, cwd: string, 
+end_line: number | null, state: BlockState, command: string, cwd: string, 
 /**
  * Wall clock at OSC 133;C, milliseconds since the Unix epoch. Additive
  * (`serde(default)`), so an old host simply sends blocks without times.
@@ -38,9 +44,12 @@ end_line: bigint | null, state: BlockState, command: string, cwd: string,
  * running block on every tick. `f64` on the TypeScript side would also be
  * tempting and wrong — see the `rmp-serde` integer-width trap; epoch
  * millis stay under 2^53 for the next 285,000 years, so `number` holds.
+ * (`ts(type = "number")`, not `"number | null"`: `skip_serializing_if =
+ * "Option::is_none"` means `None` travels as an absent key, never as
+ * `null` — the binding was overstating the wire, #15's class of bug.)
  */
-started_ms?: number | null, 
+started_ms?: number, 
 /**
  * Wall clock at OSC 133;D, same epoch.
  */
-ended_ms?: number | null, };
+ended_ms?: number, };

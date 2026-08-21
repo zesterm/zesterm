@@ -577,7 +577,11 @@ fn main() {
     // line. → relay_origin.rs.
     match &relay_choice {
         zest_daemon::relay_origin::RelayChoice::Off(why) => {
-            tracing::debug!(?why, "not dialling a relay");
+            // INFO, not debug: the dialling and parked lines nearby are INFO,
+            // and this is the one state with no other trace at all — at the
+            // default level a daemon that decided never to be reachable was
+            // indistinguishable from one dialling and failing (#244).
+            tracing::info!(?why, "not dialling a relay: {}", why.explanation());
         }
         choice => {
             let asking = matches!(choice, zest_daemon::relay_origin::RelayChoice::AskAccount);

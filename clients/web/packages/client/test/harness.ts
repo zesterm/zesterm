@@ -293,7 +293,7 @@ export function gatedSigner(): ClientSigner & {
   };
 }
 
-export const ADDR = { host: '2e'.repeat(32), session: 1n };
+export const ADDR = { host: '2e'.repeat(32), session: 1 };
 
 /** A minimal keyframe wire shape. */
 export function keyframe(seq: number, rows: string[] = ['hello']): Record<string, unknown> {

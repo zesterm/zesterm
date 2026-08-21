@@ -3030,11 +3030,17 @@ mod tests {
         SessionAddr::new(HostId::from_bytes([n; 32]), SessionId(u64::from(n)))
     }
 
+    /// A remote origin whose id matches `addr(n)`'s, the way the app builds
+    /// them; layout never reads the id, but the fixture should not lie.
+    fn remote(n: u8, label: &str) -> TabOrigin {
+        TabOrigin::Remote { host: HostId::from_bytes([n; 32]), label: label.to_string() }
+    }
+
     fn tab(n: u8, origin: TabOrigin, presence: TabPresence) -> TabModel {
         // The detail line carries the host's name exactly as the app composes
         // it, so the words-not-colour tests exercise the real shape.
         let host = match &origin {
-            TabOrigin::Remote { host_label } => host_label.clone(),
+            TabOrigin::Remote { label, .. } => label.clone(),
             TabOrigin::Local => "local".into(),
         };
         TabModel {
@@ -3122,7 +3128,7 @@ mod tests {
         for position in [TabsPosition::Top, TabsPosition::Left] {
             let tabs = vec![
                 tab(1, TabOrigin::Local, TabPresence::Online),
-                tab(2, TabOrigin::Remote { host_label: "alien".into() }, TabPresence::Online),
+                tab(2, remote(2, "alien"), TabPresence::Online),
                 tab(3, TabOrigin::Local, TabPresence::Online),
             ];
             let m = metrics(1200.0, 800.0, 1.0);
@@ -3682,7 +3688,7 @@ mod tests {
         for position in [TabsPosition::Top, TabsPosition::Left] {
             let tabs = vec![tab(
                 2,
-                TabOrigin::Remote { host_label: "alien".into() },
+                remote(2, "alien"),
                 TabPresence::Unreachable,
             )];
             let m = metrics(1200.0, 800.0, 1.0);
@@ -4263,7 +4269,7 @@ mod tests {
         // vertical sidebar and header, which have room for them.
         let tabs = vec![
             tab(1, TabOrigin::Local, TabPresence::Online),
-            tab(2, TabOrigin::Remote { host_label: "alien".into() }, TabPresence::Online),
+            tab(2, remote(2, "alien"), TabPresence::Online),
         ];
         let m = metrics(1200.0, 800.0, 1.0);
         let l = layout(&model(tabs, TabsPosition::Top), &colors(), &m, &mut measure);
@@ -4485,7 +4491,7 @@ mod tests {
         for (link, ink) in [(LinkKind::Stalled, c.warn), (LinkKind::Reconnecting, c.danger)] {
             let mut tabs = vec![
                 tab(1, TabOrigin::Local, TabPresence::Online),
-                tab(2, TabOrigin::Remote { host_label: "alien".into() }, TabPresence::Online),
+                tab(2, remote(2, "alien"), TabPresence::Online),
             ];
             tabs[1].link = link;
             let m = metrics(1200.0, 800.0, 1.0);

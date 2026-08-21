@@ -117,6 +117,47 @@ test('the editing keys match the Rust arms byte for byte', () => {
   assert.deepEqual(encodeKey(k('Escape'), NO_MODS, 0), bytes(0x1b));
 });
 
+test('alt reaches the editing keys through the escape prefix', () => {
+  // Alt-as-ESC is finish()'s job, and these arms used to return their byte
+  // before reaching it: alt+backspace went out as a bare DEL, so readline
+  // deleted one character where every other terminal deletes a word. (#350)
+  const alt = mods({ alt: true });
+  assert.deepEqual(
+    encodeKey(k('Backspace'), alt, 0),
+    bytes(0x1b, 0x7f),
+    'alt+backspace is delete-previous-word in readline, zsh and fish',
+  );
+  assert.deepEqual(encodeKey(k('Enter'), alt, 0), bytes(0x1b, 0x0d));
+  assert.deepEqual(encodeKey(k('Escape'), alt, 0), bytes(0x1b, 0x1b));
+  assert.deepEqual(encodeKey(k('Tab'), alt, 0), bytes(0x1b, 0x09));
+  assert.deepEqual(
+    encodeKey(k('Tab'), mods({ alt: true, shift: true }), 0),
+    seq('\x1b\x1b[Z'),
+    'alt+shift+tab is the ESC-prefixed back-tab',
+  );
+  assert.deepEqual(
+    encodeKey(k('Backspace'), mods({ ctrl: true, alt: true }), 0),
+    bytes(0x1b, 0x08),
+    'ctrl still flips backspace to BS, and alt prefixes that too',
+  );
+});
+
+test('ctrl tab chords escalate to CSI u', () => {
+  // \x1b[Z has no modifier slot, so ctrl+shift+tab used to be byte-identical
+  // to shift+tab and no application could bind the pair apart. (#350)
+  assert.deepEqual(encodeKey(k('Tab'), mods({ ctrl: true }), 0), seq('\x1b[9;5u'));
+  assert.deepEqual(
+    encodeKey(k('Tab'), mods({ ctrl: true, shift: true }), 0),
+    seq('\x1b[9;6u'),
+    "distinguishable from shift+tab's CSI Z",
+  );
+  assert.deepEqual(
+    encodeKey(k('Tab'), mods({ ctrl: true, alt: true }), 0),
+    seq('\x1b[9;7u'),
+    'the parameter already carries Alt, so no ESC prefix on top',
+  );
+});
+
 test('Home and End follow DECCKM like the arrows', () => {
   assert.deepEqual(encodeKey(k('Home'), NO_MODS, 0), seq('\x1b[H'));
   assert.deepEqual(encodeKey(k('End'), NO_MODS, Modes.APP_CURSOR), seq('\x1bOF'));

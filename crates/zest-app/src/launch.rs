@@ -155,19 +155,15 @@ mod tests {
     use zest_mesh::discovery::Presence;
 
     fn host(label: &str, local: bool, address: Option<&str>) -> FleetHost {
-        FleetHost {
-            host: HostId::from_bytes([if local { 1 } else { 2 }; 32]),
-            label: label.to_string(),
-            presence: Presence::Online,
-            local,
-            address: address.map(str::to_string),
-            reachability: None,
-            rtt_ms: None,
-            sessions: crate::fleet::SessionsState::Unknown,
-            offer: None,
-            enrolled: false,
-            relay_online: false,
-        }
+        // The shared fixture builds the row; resolution reads label, locality
+        // and address, so the address stays this file's parameter.
+        let mut h = if local {
+            zest_fleet::fixture::local(1, label)
+        } else {
+            zest_fleet::fixture::host(2, label)
+        };
+        h.address = address.map(str::to_string);
+        h
     }
 
     /// The common case: a LAN fleet, no account. The route rule's own truth

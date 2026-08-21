@@ -442,7 +442,6 @@ pub fn step(actions: &[LauncherAction], from: usize, down: bool) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zest_mesh::discovery::Presence;
 
     /// The digit mapping as *drawn* — read off the rows' own `digit` field.
     /// The test oracle `digit_action_index` is pinned against, so the input
@@ -462,22 +461,13 @@ mod tests {
     }
 
     fn host(id: u8, label: &str, local: bool) -> FleetHost {
-        FleetHost {
-            host: HostId::from_bytes([id; 32]),
-            label: label.into(),
-            presence: Presence::Online,
-            local,
-            address: (!local).then(|| "10.0.0.7:7717".to_string()),
-            reachability: Some(if local {
-                zest_mesh::Reachability::Loopback
-            } else {
-                zest_mesh::Reachability::Lan
-            }),
-            rtt_ms: (!local).then_some(0.4),
-            sessions: crate::fleet::SessionsState::Unknown,
-            offer: None,
-            enrolled: false,
-            relay_online: false,
+        // The shared fixture, so a fleet built here is a fleet built like
+        // every other test's — see `zest_fleet::fixture` for why its default
+        // fleet carries a duplicate label.
+        if local {
+            zest_fleet::fixture::local(id, label)
+        } else {
+            zest_fleet::fixture::host(id, label)
         }
     }
 
@@ -837,11 +827,13 @@ mod tests {
         // exactly this reason — so keying a group on the label alone merges two
         // machines' launch targets under one header, and pressing a row runs a
         // command on whichever of them the map happened to hold. Two laptops
-        // both called `mac` is not exotic.
+        // both called `mac` is not exotic — which is why the shared fixture's
+        // default fleet is built this way, and this test now rides it.
+        let base = zest_fleet::fixture::fleet();
         let fleet = [
-            host(1, "studio", true),
-            offering(host(2, "mac", false), "macos", &[("build", "make")]),
-            offering(host(3, "mac", false), "macos", &[("test", "make test")]),
+            base[0].clone(),
+            offering(base[1].clone(), "macos", &[("build", "make")]),
+            offering(base[2].clone(), "macos", &[("test", "make test")]),
         ];
         let (rows, actions) =
             build_rows(&settings_with(&[("here", "")]), &fleet, "sh", None, String::new());

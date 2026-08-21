@@ -74,7 +74,7 @@ export type Outcome =
 
 /** One grid row as styled runs, ready for a text renderer. */
 export interface PaneRow {
-  readonly line: bigint;
+  readonly line: number;
   readonly spans: readonly Span[];
 }
 

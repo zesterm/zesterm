@@ -7,9 +7,10 @@
  * a command starts, because a client that re-parsed the grid for its own
  * prompts would be the second VT interpretation ADR-004 exists to avoid.
  *
- * All line comparisons are `bigint` against `bigint`. Line ids exceed 2^53 in
- * a long session, which is exactly the session a fleet cares about — coercing
- * to `number` here works in every test and fails in week three.
+ * Line ids are plain `number`s, like everywhere since #14: the wire sends the
+ * narrowest integer, and 2^53 lines is nine quadrillion — no session reaches
+ * it. The decoder (`wire.ts`) refuses an id a double cannot hold exactly, so
+ * a comparison here can never be silently imprecise.
  *
  * Line ids are absolute *between reflows*, not for the life of a session: a
  * width change renumbers every one (`zest_core` grid/mod.rs). This join is

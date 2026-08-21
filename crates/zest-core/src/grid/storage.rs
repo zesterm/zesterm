@@ -49,8 +49,6 @@ pub struct Row {
     extras: Vec<CellExtra>,
     /// Absolute id of this line.
     pub id: LineId,
-    /// True if this row wrapped into the next rather than ending.
-    pub wrapped: bool,
 }
 
 impl Row {
@@ -60,7 +58,27 @@ impl Row {
             cells: alloc::vec![Cell::default(); cols],
             extras: Vec::new(),
             id,
-            wrapped: false,
+        }
+    }
+
+    /// True if this row wrapped into the next rather than ending.
+    ///
+    /// Read from [`CellFlags::WRAPLINE`] on the last cell rather than stored
+    /// beside the cells, deliberately. Kept as a second copy, the two halves
+    /// drifted the moment a row was overwritten in place with no erase — the
+    /// new last cell forgot the wrap while the copy went on claiming it, and
+    /// the next reflow rejoined rows that were never one logical line. The
+    /// cell is self-maintaining: whatever replaces it takes the flag with it.
+    /// (#219; the erase half of the same drift was #200.)
+    #[must_use]
+    pub fn wrapped(&self) -> bool {
+        self.cells.last().is_some_and(|c| c.flags.contains(CellFlags::WRAPLINE))
+    }
+
+    /// Record whether this row continues into the next.
+    pub fn set_wrapped(&mut self, wrapped: bool) {
+        if let Some(last) = self.cells.last_mut() {
+            last.flags.set(CellFlags::WRAPLINE, wrapped);
         }
     }
 
@@ -162,14 +180,16 @@ impl Row {
         self.cells.fill(blank);
         self.extras.clear();
         self.id = id;
-        self.wrapped = false;
     }
 
     /// Grow or shrink to `cols`.
     ///
-    /// M1 does not reflow — growing pads with blanks and shrinking truncates.
-    /// `wrapped` is preserved so reflow can be added later without a data
-    /// migration.
+    /// Does not reflow — growing pads with blanks and shrinking truncates.
+    /// The wrap fact goes with a truncated last cell (and a grow's fresh
+    /// blank last cell reads as unwrapped). This is the alternate screen's
+    /// path, which is never reflowed, so what that can cost is only the
+    /// newline-joining of a copy taken between the resize and the repaint
+    /// every full-screen program answers it with.
     pub fn resize(&mut self, cols: usize, template: &Cell) {
         self.cells.resize(cols, Cell::blank_with(template));
     }
@@ -263,7 +283,11 @@ impl Storage {
             for (i, slot) in dst.iter_mut().enumerate() {
                 *slot = cells.get(i).copied().unwrap_or_default();
             }
-            row.wrapped = *wrapped;
+            // After the cells, which would overwrite the flag; and from the
+            // caller's bool rather than trusting the copied cells, because the
+            // encoder trims trailing blanks -- the cell that carried WRAPLINE
+            // may never have been transmitted.
+            row.set_wrapped(*wrapped);
             out.push(row);
         }
         for i in 0..self.rows.len() {

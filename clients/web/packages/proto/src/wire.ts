@@ -8,13 +8,15 @@
  *
  * # Integers
  *
- * `Seq`, `SessionId` and `RowPayload.line` are `bigint` in the generated
- * bindings, and this file follows the bindings rather than the wire. It is worth
- * knowing that they disagree: `rmp_serde` writes the narrowest encoding that
+ * `Seq`, `SessionId` and the line ids are all `number`, matching the bindings
+ * and the wire alike (#14): `rmp_serde` writes the narrowest encoding that
  * fits, so a `Seq` of 3 arrives as a MessagePack fixint and reaches JavaScript
- * as a plain `number`. Coercing here means one boundary does the work and every
- * consumer sees the type the bindings promised. Tracked upstream — the honest
- * fix is in the Rust attributes, not in a workaround here.
+ * as a plain `number` — and no realistic session pushes any of them past 2^53.
+ * The one deliberate exception is a line id: the encoder pads blank rows with
+ * `i64::MIN`, which MessagePack delivers as a bigint and `lineNum` converts,
+ * exactly, because it is a power of two. Anything else beyond ±2^53 is refused
+ * loudly rather than rounded — a silently imprecise id would file rows into
+ * the wrong block, which is worse than no frame at all.
  */
 
 import { type Color, parseColor } from './color.ts';
@@ -57,10 +59,21 @@ function bool(v: unknown, what: string): boolean {
   return v;
 }
 
-/** A field the bindings type as `bigint`, whatever width the wire used. */
-function big(v: unknown, what: string): bigint {
-  if (typeof v === 'bigint') return v;
-  if (typeof v === 'number' && Number.isInteger(v)) return BigInt(v);
+/**
+ * A line id: a `number`, however wide the wire's encoding was.
+ *
+ * The encoder pads blank rows with `i64::MIN` — the one id outside ±2^53 a
+ * host actually sends — which the MessagePack layer faithfully hands over as a
+ * bigint. It is a power of two, so `Number` holds it exactly; any bigint that
+ * does not survive the round trip is refused rather than rounded, because an
+ * id off by one files rows into the wrong block.
+ */
+function lineNum(v: unknown, what: string): number {
+  if (typeof v === 'number') return v;
+  if (typeof v === 'bigint' && BigInt(Number(v)) === v) return Number(v);
+  if (typeof v === 'bigint') {
+    throw new WireError(`${what}: ${v} does not fit a JavaScript number exactly`);
+  }
   throw new WireError(`${what}: expected an integer, got ${describe(v)}`);
 }
 
@@ -100,7 +113,7 @@ export interface Run {
 }
 
 export interface RowPayload {
-  readonly line: bigint;
+  readonly line: number;
   readonly runs: readonly Run[];
   readonly wrapped: boolean;
 }
@@ -145,18 +158,18 @@ export type BlockState =
 /**
  * One command and its output, as the host has it.
  *
- * Line ids are `bigint` to match `RowPayload.line` — a client compares the two
+ * Line ids are `number` to match `RowPayload.line` — a client compares the two
  * to decide which rows a block covers, and two integer types that must agree
- * is a conversion bug waiting for a session long enough to matter.
+ * is a conversion bug waiting to happen.
  * `end_line: null` means the command is still producing output and must render
  * to the bottom rather than waiting.
  */
 export interface BlockPayload {
   /** Stable for the life of the session; the key an upsert replaces on. */
   readonly id: number;
-  readonly prompt_line: bigint;
-  readonly output_line: bigint | null;
-  readonly end_line: bigint | null;
+  readonly prompt_line: number;
+  readonly output_line: number | null;
+  readonly end_line: number | null;
   readonly state: BlockState;
   readonly command: string;
   readonly cwd: string;
@@ -195,8 +208,8 @@ export function parseAttrDef(v: unknown): AttrDef {
 export function parseRun(v: unknown): Run {
   const o = obj(v, 'Run');
   // `marks` carries `skip_serializing_if = "Vec::is_empty"`, so a run without
-  // any simply has no key. The binding types it non-optional, which is a
-  // generated file overstating the wire.
+  // any simply has no key — `marks?` in the binding since #15. Filled here, so
+  // consumers hold the required form.
   const marks = o['marks'] === undefined ? [] : arr(o['marks'], 'Run.marks').map(parseCellMarks);
   return {
     attr: num(o['attr'], 'Run.attr'),
@@ -214,7 +227,7 @@ function parseCellMarks(v: unknown): CellMarks {
 export function parseRowPayload(v: unknown): RowPayload {
   const o = obj(v, 'RowPayload');
   return {
-    line: big(o['line'], 'RowPayload.line'),
+    line: lineNum(o['line'], 'RowPayload.line'),
     runs: arr(o['runs'], 'RowPayload.runs').map(parseRun),
     wrapped: bool(o['wrapped'], 'RowPayload.wrapped'),
   };
@@ -291,13 +304,13 @@ function parseBlockState(v: unknown): BlockState {
 
 export function parseBlockPayload(v: unknown): BlockPayload {
   const o = obj(v, 'BlockPayload');
-  const optLine = (key: string): bigint | null =>
-    o[key] === null || o[key] === undefined ? null : big(o[key], `BlockPayload.${key}`);
+  const optLine = (key: string): number | null =>
+    o[key] === null || o[key] === undefined ? null : lineNum(o[key], `BlockPayload.${key}`);
   const optMs = (key: string): number | undefined =>
     o[key] === null || o[key] === undefined ? undefined : num(o[key], `BlockPayload.${key}`);
   const payload: BlockPayload = {
     id: num(o['id'], 'BlockPayload.id'),
-    prompt_line: big(o['prompt_line'], 'BlockPayload.prompt_line'),
+    prompt_line: lineNum(o['prompt_line'], 'BlockPayload.prompt_line'),
     output_line: optLine('output_line'),
     end_line: optLine('end_line'),
     state: parseBlockState(o['state']),
@@ -331,13 +344,13 @@ export function parseDelta(v: unknown): Delta {
 
 export interface SessionAddr {
   readonly host: string;
-  readonly session: bigint;
+  readonly session: number;
 }
 
 export interface Keyframe {
   readonly t: 'keyframe';
   readonly session: SessionAddr;
-  readonly seq: bigint;
+  readonly seq: number;
   readonly cols: number;
   readonly rows: number;
   readonly rows_data: readonly RowPayload[];
@@ -370,8 +383,8 @@ export interface Keyframe {
 export interface Update {
   readonly t: 'update';
   readonly session: SessionAddr;
-  readonly base: bigint;
-  readonly seq: bigint;
+  readonly base: number;
+  readonly seq: number;
   readonly delta: Delta;
 }
 
@@ -482,7 +495,7 @@ export interface Sessions {
   readonly t: 'sessions';
   readonly sessions: readonly SessionInfo[];
   /** Set when this listing answers this connection's own `create_session`. */
-  readonly created: bigint | null;
+  readonly created: number | null;
   /**
    * What this machine offers, when there is something new to say (#262).
    *
@@ -499,7 +512,7 @@ export interface Sessions {
 export interface Scrollback {
   readonly t: 'scrollback';
   readonly session: SessionAddr;
-  readonly from_line: bigint;
+  readonly from_line: number;
   readonly rows_data: readonly RowPayload[];
   readonly attrs: readonly AttrDef[];
 }
@@ -654,7 +667,7 @@ export function parseProgress(v: unknown): Progress {
 
 export function parseSessionAddr(v: unknown): SessionAddr {
   const o = obj(v, 'SessionAddr');
-  return { host: str(o['host'], 'SessionAddr.host'), session: big(o['session'], 'SessionAddr.session') };
+  return { host: str(o['host'], 'SessionAddr.host'), session: num(o['session'], 'SessionAddr.session') };
 }
 
 /** Decode one frame body into a host message. */
@@ -667,7 +680,7 @@ export function parseHostMessage(v: unknown): HostMessage {
       return {
         t,
         session: parseSessionAddr(o['session']),
-        seq: big(o['seq'], 'keyframe.seq'),
+        seq: num(o['seq'], 'keyframe.seq'),
         cols: num(o['cols'], 'keyframe.cols'),
         rows: num(o['rows'], 'keyframe.rows'),
         rows_data: arr(o['rows_data'], 'keyframe.rows_data').map(parseRowPayload),
@@ -692,8 +705,8 @@ export function parseHostMessage(v: unknown): HostMessage {
       return {
         t,
         session: parseSessionAddr(o['session']),
-        base: big(o['base'], 'update.base'),
-        seq: big(o['seq'], 'update.seq'),
+        base: num(o['base'], 'update.base'),
+        seq: num(o['seq'], 'update.seq'),
         delta: parseDelta(o['delta']),
       };
     case 'welcome':
@@ -748,7 +761,7 @@ export function parseHostMessage(v: unknown): HostMessage {
         // listing answers the receiver's own create.
         created: o['created'] === undefined || o['created'] === null
           ? null
-          : big(o['created'], 'sessions.created'),
+          : num(o['created'], 'sessions.created'),
         // Same `skip_serializing_if` shape, and absent is the common case:
         // every ordinary session push omits it.
         offer:
@@ -758,7 +771,7 @@ export function parseHostMessage(v: unknown): HostMessage {
       return {
         t,
         session: parseSessionAddr(o['session']),
-        from_line: big(o['from_line'], 'scrollback.from_line'),
+        from_line: lineNum(o['from_line'], 'scrollback.from_line'),
         rows_data: arr(o['rows_data'], 'scrollback.rows_data').map(parseRowPayload),
         attrs: o['attrs'] === undefined ? [] : arr(o['attrs'], 'scrollback.attrs').map(parseAttrDef),
       };

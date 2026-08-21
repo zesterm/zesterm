@@ -112,7 +112,7 @@ class FakeLink implements DirectoryLink {
     this.events.onConnection?.({ phase: 'reconnecting', attempt });
   }
 
-  sessions(infos: readonly SessionInfo[], created: bigint | null = null): void {
+  sessions(infos: readonly SessionInfo[], created: number | null = null): void {
     this.events.onSessions?.(infos, created);
   }
 
@@ -169,7 +169,7 @@ class Links {
   }
 }
 
-function info(session: bigint, title = 'shell'): SessionInfo {
+function info(session: number, title = 'shell'): SessionInfo {
   return {
     addr: { host: MAC.id, session },
     title,
@@ -309,7 +309,7 @@ test('sessions arrive as directory entries, projected the way the sidecar projec
   directory.setHosts([MAC]);
   const link = links.current(MAC.id);
   link.welcome();
-  link.sessions([info(7n, 'vim')]);
+  link.sessions([info(7, 'vim')]);
 
   const status = directory.statusFor(MAC.id);
   assert.equal(status.kind, 'ready');
@@ -326,7 +326,7 @@ test('sessions arrive as directory entries, projected the way the sidecar projec
       altScreen: false,
       attached: false,
     },
-    'a bigint session id reaches the UI as a string, as it does on loopback — the two must agree or a row opens the wrong session',
+    'a wire session id reaches the UI as a string, as it does on loopback — the two must agree or a row opens the wrong session',
   );
   assert.deepEqual(
     view?.dataPlane,
@@ -340,7 +340,7 @@ test('a dropped link takes its session list with it', () => {
   directory.setHosts([MAC]);
   const link = links.current(MAC.id);
   link.welcome();
-  link.sessions([info(7n)]);
+  link.sessions([info(7)]);
   link.drop();
 
   const status = directory.statusFor(MAC.id);
@@ -485,7 +485,7 @@ test('creating a session reuses the watching connection', async () => {
   );
   assert.deepEqual(link.creates, [{ command: '', cwd: '', cols: 120, rows: 32 }]);
 
-  link.sessions([info(9n)], 9n);
+  link.sessions([info(9)], 9);
   const entry = await created;
   assert.equal(entry.session, '9', 'the create resolves from the listing that answers it');
 });
@@ -558,7 +558,7 @@ test('the offer survives every session push that does not carry one', () => {
     ['wsl', 'pwsh'],
   );
 
-  link.sessions([info(1n)]);
+  link.sessions([info(1)]);
   assert.deepEqual(
     directory.snapshots()[0]?.facts?.launchTargets.map((t) => t.name),
     ['wsl', 'pwsh'],

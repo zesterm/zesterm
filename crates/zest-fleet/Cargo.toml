@@ -1,0 +1,19 @@
+[package]
+name = "zest-fleet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "What a machine in the fleet is, and the one rule that picks how to reach it."
+
+[dependencies]
+# What a host *is* on the wire: `HostId`, `SessionInfo`, `HostOffer`. A fleet
+# row is mostly a projection of these, which is why this crate needs nothing of
+# its own to describe one.
+zest-proto.workspace = true
+# `Presence` and `Reachability` -- discovery's words for what it observed. The
+# route rule reads them and never produces them, so this is a vocabulary
+# dependency and not a discovery one: nothing here browses, advertises or dials.
+zest-mesh.workspace = true

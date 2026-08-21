@@ -77,7 +77,7 @@ function headerOf(items: readonly RenderItem[], blockId: number): HeaderItem {
 
 // --- synthetic three-state session -----------------------------------------
 
-function synthRow(line: bigint, text: string): RowPayload {
+function synthRow(line: number, text: string): RowPayload {
   return {
     line,
     runs: [{ attr: 0, cells: [...text].length, text, marks: [] }],
@@ -87,9 +87,9 @@ function synthRow(line: bigint, text: string): RowPayload {
 
 function synthBlock(
   id: number,
-  prompt: bigint,
-  output: bigint | null,
-  end: bigint | null,
+  prompt: number,
+  output: number | null,
+  end: number | null,
   state: BlockState,
   command: string,
   times?: { started: number; ended?: number },
@@ -118,26 +118,26 @@ function threeStateView() {
   return {
     scrollback: [],
     rows: [
-      synthRow(0n, '❯ echo hi'),
-      synthRow(1n, 'hi'),
-      synthRow(2n, '❯ ls -la'),
-      synthRow(3n, 'total 3'),
-      synthRow(4n, 'a.txt'),
-      synthRow(5n, 'b.txt'),
-      synthRow(6n, '❯ sleep 99'),
-      synthRow(7n, 'tick'),
-      synthRow(8n, 'tock'),
+      synthRow(0, '❯ echo hi'),
+      synthRow(1, 'hi'),
+      synthRow(2, '❯ ls -la'),
+      synthRow(3, 'total 3'),
+      synthRow(4, 'a.txt'),
+      synthRow(5, 'b.txt'),
+      synthRow(6, '❯ sleep 99'),
+      synthRow(7, 'tick'),
+      synthRow(8, 'tock'),
     ],
     blocks: [
-      synthBlock(0, 0n, 1n, 1n, { state: 'finished', exit_code: 0 }, 'echo hi', {
+      synthBlock(0, 0, 1, 1, { state: 'finished', exit_code: 0 }, 'echo hi', {
         started: 1000,
         ended: 1410,
       }),
-      synthBlock(1, 2n, 3n, 5n, { state: 'finished', exit_code: 0 }, 'ls -la', {
+      synthBlock(1, 2, 3, 5, { state: 'finished', exit_code: 0 }, 'ls -la', {
         started: 0,
         ended: 51_200,
       }),
-      synthBlock(2, 6n, 7n, null, { state: 'running' }, 'sleep 99', { started: NOW - 4200 }),
+      synthBlock(2, 6, 7, null, { state: 'running' }, 'sleep 99', { started: NOW - 4200 }),
     ],
     cursor: CURSOR,
     attrs: new Map(),
@@ -196,7 +196,7 @@ test('the three-state scenario renders exact header fields per the spec', () => 
   assert.ok(out2, 'the running block renders its output');
   assert.deepEqual(
     out2.rows.map((r) => r.line),
-    [7n, 8n],
+    [7, 8],
     'the open block renders to the bottom while the command runs',
   );
 });
@@ -221,8 +221,8 @@ test('folding drops the output item and the header gains the count', () => {
 test('a block with no output is not foldable, folded set or not', () => {
   const view = {
     scrollback: [],
-    rows: [synthRow(0n, '❯ true')],
-    blocks: [synthBlock(0, 0n, 1n, 0n, { state: 'finished', exit_code: 0 }, 'true')],
+    rows: [synthRow(0, '❯ true')],
+    blocks: [synthBlock(0, 0, 1, 0, { state: 'finished', exit_code: 0 }, 'true')],
     cursor: CURSOR,
     attrs: new Map(),
   };
@@ -237,8 +237,8 @@ test('a block with no output is not foldable, folded set or not', () => {
 test("exit_code null renders 'exit ?' semantics: unknown outcome, never a green rail", () => {
   const view = {
     scrollback: [],
-    rows: [synthRow(0n, '❯ mystery'), synthRow(1n, 'out')],
-    blocks: [synthBlock(0, 0n, 1n, 1n, { state: 'finished', exit_code: null }, 'mystery')],
+    rows: [synthRow(0, '❯ mystery'), synthRow(1, 'out')],
+    blocks: [synthBlock(0, 0, 1, 1, { state: 'finished', exit_code: null }, 'mystery')],
     cursor: CURSOR,
     attrs: new Map(),
   };
@@ -252,9 +252,9 @@ test("exit_code null renders 'exit ?' semantics: unknown outcome, never a green 
 });
 
 test('the interrupted predicate: open and running while the link reconnects', () => {
-  const running = synthBlock(2, 6n, 7n, null, { state: 'running' }, 'sleep 99');
-  const finished = synthBlock(0, 0n, 1n, 1n, { state: 'finished', exit_code: 0 }, 'echo hi');
-  const prompt = synthBlock(3, 9n, null, null, { state: 'prompt' }, '');
+  const running = synthBlock(2, 6, 7, null, { state: 'running' }, 'sleep 99');
+  const finished = synthBlock(0, 0, 1, 1, { state: 'finished', exit_code: 0 }, 'echo hi');
+  const prompt = synthBlock(3, 9, null, null, { state: 'prompt' }, '');
 
   assert.ok(isInterrupted(running, 'reconnecting'), 'the host went away mid-command');
   assert.ok(!isInterrupted(running, 'live'), 'a healthy link interrupts nothing');
@@ -299,10 +299,10 @@ test("a stalled link says 'buffering' and interrupts nothing", () => {
 test('a trailing prompt-state block renders as the prompt line, not a header', () => {
   const view = {
     scrollback: [],
-    rows: [synthRow(0n, '❯ echo hi'), synthRow(1n, 'hi'), synthRow(2n, '❯ ')],
+    rows: [synthRow(0, '❯ echo hi'), synthRow(1, 'hi'), synthRow(2, '❯ ')],
     blocks: [
-      synthBlock(0, 0n, 1n, 1n, { state: 'finished', exit_code: 0 }, 'echo hi'),
-      synthBlock(1, 2n, null, null, { state: 'prompt' }, ''),
+      synthBlock(0, 0, 1, 1, { state: 'finished', exit_code: 0 }, 'echo hi'),
+      synthBlock(1, 2, null, null, { state: 'prompt' }, ''),
     ],
     cursor: CURSOR,
     attrs: new Map(),
@@ -318,7 +318,7 @@ test('a trailing prompt-state block renders as the prompt line, not a header', (
   assert.ok(prompt, 'the prompt line renders as its own item');
   assert.deepEqual(
     prompt.rows.map((r) => r.line),
-    [2n],
+    [2],
     "the prompt item carries the shell's own prompt row, where the caret goes",
   );
 });
@@ -327,15 +327,15 @@ test('mostRecentBlockWithOutput skips a last block that printed nothing', () => 
   const view = {
     scrollback: [],
     rows: [
-      synthRow(0n, '❯ echo hi'),
-      synthRow(1n, 'hi'),
-      synthRow(2n, '❯ true'),
+      synthRow(0, '❯ echo hi'),
+      synthRow(1, 'hi'),
+      synthRow(2, '❯ true'),
     ],
     blocks: [
-      synthBlock(0, 0n, 1n, 1n, { state: 'finished', exit_code: 0 }, 'echo hi'),
+      synthBlock(0, 0, 1, 1, { state: 'finished', exit_code: 0 }, 'echo hi'),
       // `true` prints nothing: end_line before output_line, the wire's shape
       // for a silent command.
-      synthBlock(1, 2n, 3n, 2n, { state: 'finished', exit_code: 0 }, 'true'),
+      synthBlock(1, 2, 3, 2, { state: 'finished', exit_code: 0 }, 'true'),
     ],
     cursor: CURSOR,
     attrs: new Map(),
@@ -356,9 +356,9 @@ test('mostRecentBlockWithOutput skips a last block that printed nothing', () => 
 });
 
 test('atShellPrompt: re-run may type only into a shell that is reading', () => {
-  const finished = synthBlock(0, 0n, 1n, 1n, { state: 'finished', exit_code: 0 }, 'echo hi');
-  const running = synthBlock(1, 2n, 3n, null, { state: 'running' }, 'sleep 99');
-  const prompt = synthBlock(2, 4n, null, null, { state: 'prompt' }, '');
+  const finished = synthBlock(0, 0, 1, 1, { state: 'finished', exit_code: 0 }, 'echo hi');
+  const running = synthBlock(1, 2, 3, null, { state: 'running' }, 'sleep 99');
+  const prompt = synthBlock(2, 4, null, null, { state: 'prompt' }, '');
 
   assert.ok(
     atShellPrompt([finished, prompt]),
@@ -380,9 +380,9 @@ test('copyOutputText rejoins soft-wrapped rows instead of inserting newlines', (
   // line. `wrapped` exists on the wire precisely so this copy has no
   // spurious newline (delta.rs, RowPayload.wrapped).
   const rows: RowPayload[] = [
-    { ...synthRow(0n, 'a long line that '), wrapped: true },
-    synthRow(1n, 'kept going'),
-    synthRow(2n, 'second line'),
+    { ...synthRow(0, 'a long line that '), wrapped: true },
+    synthRow(1, 'kept going'),
+    synthRow(2, 'second line'),
   ];
   assert.equal(
     copyOutputText(rows, new Map()),
@@ -390,13 +390,13 @@ test('copyOutputText rejoins soft-wrapped rows instead of inserting newlines', (
     'a wrapped row continues onto the next — a newline there is text the command never printed',
   );
   assert.equal(
-    copyOutputText([synthRow(0n, 'only')], new Map()),
+    copyOutputText([synthRow(0, 'only')], new Map()),
     'only',
     'a single unwrapped row copies as itself, with no trailing newline',
   );
   assert.equal(
     copyOutputText(
-      [{ ...synthRow(0n, 'cut '), wrapped: true }, synthRow(1n, 'short')],
+      [{ ...synthRow(0, 'cut '), wrapped: true }, synthRow(1, 'short')],
       new Map(),
     ),
     'cut short',
@@ -561,15 +561,15 @@ test('an abandoned prompt renders as rows, never as a card that claims to be run
   const view = {
     scrollback: [],
     rows: [
-      synthRow(0n, '❯ '),
-      synthRow(1n, '❯ echo hi'),
-      synthRow(2n, 'hi'),
-      synthRow(3n, '❯ '),
+      synthRow(0, '❯ '),
+      synthRow(1, '❯ echo hi'),
+      synthRow(2, 'hi'),
+      synthRow(3, '❯ '),
     ],
     blocks: [
-      synthBlock(0, 0n, null, null, { state: 'prompt' }, ''),
-      synthBlock(1, 1n, 2n, 2n, { state: 'finished', exit_code: 0 }, 'echo hi'),
-      synthBlock(2, 3n, null, null, { state: 'prompt' }, ''),
+      synthBlock(0, 0, null, null, { state: 'prompt' }, ''),
+      synthBlock(1, 1, 2, 2, { state: 'finished', exit_code: 0 }, 'echo hi'),
+      synthBlock(2, 3, null, null, { state: 'prompt' }, ''),
     ],
     cursor: CURSOR,
     attrs: new Map(),
@@ -585,13 +585,13 @@ test('an abandoned prompt renders as rows, never as a card that claims to be run
   const rendered = items
     .flatMap((i) => (i.kind === 'rows' || i.kind === 'prompt' || i.kind === 'output' ? i.rows : []))
     .map((r) => r.line);
-  assert.ok(rendered.includes(0n), "the abandoned prompt's row is still drawn, as text");
+  assert.ok(rendered.includes(0), "the abandoned prompt's row is still drawn, as text");
 
   const trailing = items[items.length - 1];
   assert.equal(trailing?.kind, 'prompt', 'the live prompt is still the prompt line');
   assert.deepEqual(
     trailing?.kind === 'prompt' ? trailing.rows.map((r) => r.line) : null,
-    [3n],
+    [3],
     'and it holds the row the caret is on',
   );
 });
@@ -610,13 +610,13 @@ test('the prompt line stops at the caret, not at the bottom of the grid', () => 
   const view = {
     scrollback: [],
     rows: [
-      synthRow(0n, '❯ '),
-      synthRow(1n, ''),
-      synthRow(2n, ''),
-      synthRow(3n, ''),
-      synthRow(4n, ''),
+      synthRow(0, '❯ '),
+      synthRow(1, ''),
+      synthRow(2, ''),
+      synthRow(3, ''),
+      synthRow(4, ''),
     ],
-    blocks: [synthBlock(0, 0n, null, null, { state: 'prompt' }, '')],
+    blocks: [synthBlock(0, 0, null, null, { state: 'prompt' }, '')],
     // Where the caret actually is: on the prompt row, at the end of '❯ '.
     cursor: { row: 0, col: 2, visible: true, shape: 0 },
     attrs: new Map(),
@@ -627,7 +627,7 @@ test('the prompt line stops at the caret, not at the bottom of the grid', () => 
   assert.equal(prompt?.kind, 'prompt');
   assert.deepEqual(
     prompt?.kind === 'prompt' ? prompt.rows.map((r) => r.line) : null,
-    [0n],
+    [0],
     'the four blank rows below the caret are viewport, not prompt',
   );
 });
@@ -640,12 +640,12 @@ test('a prompt spanning several rows keeps every row up to the caret', () => {
   const view = {
     scrollback: [],
     rows: [
-      synthRow(0n, 'user@host ~/dev'),
-      synthRow(1n, '❯ '),
-      synthRow(2n, ''),
-      synthRow(3n, ''),
+      synthRow(0, 'user@host ~/dev'),
+      synthRow(1, '❯ '),
+      synthRow(2, ''),
+      synthRow(3, ''),
     ],
-    blocks: [synthBlock(0, 0n, null, null, { state: 'prompt' }, '')],
+    blocks: [synthBlock(0, 0, null, null, { state: 'prompt' }, '')],
     cursor: { row: 1, col: 2, visible: true, shape: 0 },
     attrs: new Map(),
   };
@@ -654,7 +654,7 @@ test('a prompt spanning several rows keeps every row up to the caret', () => {
   const prompt = items[items.length - 1];
   assert.deepEqual(
     prompt?.kind === 'prompt' ? prompt.rows.map((r) => r.line) : null,
-    [0n, 1n],
+    [0, 1],
     'both prompt rows survive; only the tail below the caret is dropped',
   );
 });
@@ -667,15 +667,15 @@ test('a caret that is not on one of the prompt rows trims nothing', () => {
   // that merely falls between two of our rows is exactly that case.
   const view = {
     scrollback: [],
-    rows: [synthRow(10n, '❯ one'), synthRow(11n, 'uncached'), synthRow(12n, '❯ two')],
-    blocks: [synthBlock(0, 10n, null, null, { state: 'prompt' }, '')],
+    rows: [synthRow(10, '❯ one'), synthRow(11, 'uncached'), synthRow(12, '❯ two')],
+    blocks: [synthBlock(0, 10, null, null, { state: 'prompt' }, '')],
     cursor: { row: 1, col: 0, visible: true, shape: 0 },
     attrs: new Map(),
   };
 
   // The slice the model sees holds 10 and 12 only — 11 is not the prompt's.
   const trimmed = paneModel(
-    { ...view, rows: [synthRow(10n, '❯ one'), synthRow(12n, '❯ two')] },
+    { ...view, rows: [synthRow(10, '❯ one'), synthRow(12, '❯ two')] },
     new Set(),
     'live',
     NOW,
@@ -683,7 +683,7 @@ test('a caret that is not on one of the prompt rows trims nothing', () => {
   const prompt = trimmed[trimmed.length - 1];
   assert.deepEqual(
     prompt?.kind === 'prompt' ? prompt.rows.map((r) => r.line) : null,
-    [10n, 12n],
+    [10, 12],
     'the caret names no row here, so nothing is dropped',
   );
 });

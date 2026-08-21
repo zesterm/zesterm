@@ -22,9 +22,10 @@ is reported rather than gated.
 | `zest-render-wgpu` | ✅ pipelines, atlas, offscreen resolve, selection |
 | `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema — **every declared setting is consumed** (a test keeps `NOT_YET_WIRED` empty) |
 | `zest-input` | ✅ keys + SGR mouse + selection + IME + Kitty CSI u (flags 1, 2, 8), Rust and TypeScript — ⬜ Kitty flags 4/16, keypad |
-| `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), restore-on-launch — runs on Windows *and* macOS (Metal, transparent titlebar), springs + smooth scroll + reduce_motion, cursor shapes (config *and* DECSCUSR) with a spring trail, **tabs that say what is happening in them** — close and detach in both positions, a busy ring from OSC 133 *or* OSC 9;4, and an attention dot from BEL / OSC 9 / OSC 777 that names no program — ⬜ Snap Layouts, polish |
+| `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), restore-on-launch — runs on Windows *and* macOS (Metal, transparent titlebar), springs + smooth scroll + reduce_motion, cursor shapes (config *and* DECSCUSR) with a spring trail, **tabs that say what is happening in them** — close and detach in both positions, a busy ring from OSC 133 *or* OSC 9;4, and an attention dot from BEL / OSC 9 / OSC 777 that names no program, imported colour schemes as first-class themes (the gallery's import card pastes any of the 4 formats into the user theme dir) — ⬜ Snap Layouts, polish |
 | `zest-proto` | ✅ protocol 3, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, sealing, cell-for-cell conformance, chaos-resync, command blocks |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store, sealed channel |
+| `zest-fleet` | ✅ what a machine in the fleet is, and the one rule that picks how to reach it — pure, so every client shares the decision rather than a copy of it |
 | `zest-cloud` | ✅ `TlsDuplex`, one connection as two independently owned halves, a one-request HTTP POST over it, `Endpoint` — consumed by `--enroll` and by `--relay`'s per-pipe dial-back |
 | `zest-daemon` | ✅ session ownership *and* lifecycle, protocol loop, loopback / LAN / WebSocket / relay transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing, publishes its own profiles, reports what a child exited with |
 | `zest-mcp` | ✅ reads, drives and runs terminals over MCP on stdio; `run` correlates a command in the user's own shell and `run_isolated` carries the unforgeable exit code; `screen` and `blocks` wait instead of the caller sleeping; `input` takes named keys and a paste, each its own keystroke; `sessions` asks the host rather than serving a cache, so a title, cwd and `alt_screen` describe the session now — ⬜ fleet reach |
@@ -221,12 +222,41 @@ the history behind them is in closed issues and PRs.
       `:wq` for `nvim` would insert it rather than run it. The table is the
       third copy of one rule, held byte-for-byte against `zest-input` by
       `tests/keys.rs` rather than by review. → #344, #345.
+- [x] **Dim text is not typed text.** `screen` carries `styled` —
+      `{row, col, len, attrs}` — because flattened to characters, text an
+      application is *offering* is identical to text the user committed: a
+      CLI's greyed suggestion read as a pending instruction, one Enter from
+      acting on words nobody wrote. It also recovers a picker's selection when
+      that is drawn by inverting a row rather than printing a marker, which is
+      the difference between navigating a dialog and aiming it. Positions and
+      flag names, never text — attributed runs would restate the screen a
+      second time at 3-5x the tokens, where spans measured 2-23 bytes across
+      the corpus — so the value carries nothing a terminal authored and needs
+      no fence. Always present rather than opt-in, since a signal behind a flag
+      is absent exactly when it was wanted. No colour, and the three layout
+      bits masked out. → #348.
 - [ ] Fleet reach for `zest-mcp`, gated on a host advertising the observer
       attach.
-- [ ] **Tokens per build, measured.** Byte stream vs delta vs block output for
-      `cargo build`, `npm install`, `pytest`. ADR-004's ~3 KB-per-`cat 1MB`
-      number is *transport* efficiency; text-per-changed-row is *model*
-      efficiency, and the two belong side by side.
+- [x] **Tokens per build, measured.** `cargo run -p zest-mcp --example
+      token_probe -- --cmd "<command>"` runs a command on a real pty and
+      reports four numbers: the raw stream, the framed deltas, `screen`'s text
+      and `output` per block. It spawns rather than replaying, because the
+      corpus has no build in it — its largest recording is 10 KB of vim.
+      The last two come from a real `Replica` fed the encoder's own output, so
+      they are what a tool returns rather than a second reading of the grid.
+      **The two numbers behave differently, which is the finding.** For
+      `seq 1 200000` — 1.49 MB of pty, ~596k tokens — the model-facing answer
+      is 202 bytes, ~51 tokens, and it does not move: `screen` is the final
+      grid, so it is bounded by the grid rather than by how much was printed.
+      The transport figure moves by two orders of magnitude with polling
+      cadence alone, because `zest-proto` coalesces on *state*: one poll is
+      3,254 bytes (reproducing ADR-004's ~3 KB and confirming that figure is
+      the single-delta regime), a 16 ms client is 507 KB, and asking after
+      every read is 11.4 MB — larger than the byte stream it replaces. So
+      ADR-004's number is a floor for an idle observer, not a saving every
+      client receives, and the agent-facing number is the stable one. A
+      `cargo build --workspace` is 40 KB of pty (~16k tokens) against 1,667
+      bytes of `screen` (~417) — the tail, which is what "did it build" wants.
 - [ ] **Provenance.** An author on `Block`, so scrollback records who ran what.
       Needs the daemon to stop forgetting: `welcome()` reads the `ClientId` and
       then `Gate::Served` drops the transcript. Core cannot hold a `ClientId`

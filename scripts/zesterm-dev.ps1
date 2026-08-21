@@ -12,11 +12,23 @@
 #
 # Two things this exists to get right, both of which have cost time already:
 #
-# 1. **It builds the daemon too.** The window is a client of `zest-daemon`
+# 1. **It builds the whole workspace.** The window is a client of `zest-daemon`
 #    (ADR-007) and finds it as a sibling of its own binary, so building only
 #    `zest-app` leaves a new window talking to yesterday's daemon. That failure
 #    is invisible -- everything connects and works, just not the code you
-#    changed.
+#    changed. Then `zest-mcp` repeated it from the other side: another client
+#    of the same daemon, found at a fixed path by an MCP config, absent from
+#    the list this script named -- so a run right after #349 landed opened a
+#    current window against the previous day's MCP server, and the change
+#    under test was the one thing not running (#358). Hence the workspace
+#    rather than a list: a list only names the clients somebody remembered.
+#
+#    Windows write-locks a running binary, so this now fails outright when an
+#    agent session is holding `zest-mcp.exe` open, rather than skipping it.
+#    That is the trade taken deliberately -- a build that silently omits the
+#    binary under test is the bug above, and `os error 5` names the file to
+#    kill. Renaming the exe aside also frees the path; Windows permits that
+#    while the process runs.
 #
 # 2. **A failed build never opens a window.** Launching the previous binary
 #    after a compile error is how you spend ten minutes testing a change that
@@ -66,11 +78,11 @@ $dir = if ($profileName -eq 'dev') { 'debug' } else { $profileName }
 $bin = Join-Path $repo "target\$dir\zesterm.exe"
 
 if ($build) {
-    # Both binaries, and quietly: the point is a window, not a build log. A
+    # The workspace, and quietly: the point is a window, not a build log. A
     # failure still prints, because cargo writes errors to stderr.
     Push-Location $repo
     try {
-        cargo build -q --profile $profileName -p zest-app -p zest-daemon
+        cargo build -q --profile $profileName --workspace
     } finally {
         Pop-Location
     }

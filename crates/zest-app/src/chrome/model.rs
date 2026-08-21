@@ -61,7 +61,13 @@ pub enum TabPresence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TabOrigin {
     Local,
-    Remote { host_label: String },
+    /// `host` is the machine's identity; `label` is only what to call it.
+    /// Carried together (#304) because the variant used to offer the label
+    /// alone, and every lookup downstream reached for the one field it had —
+    /// two machines may share a display name. The id is all-zero while a
+    /// launch is still connecting (a placeholder address has no id yet), and
+    /// the label is then the only key there is.
+    Remote { host: zest_proto::HostId, label: String },
 }
 
 /// What kind of thing a tab is: a session, or one of the app's own screens.
@@ -397,7 +403,13 @@ pub enum ScreenModel {
         /// every row of it is the account's data.
         devices: Option<FleetDevicesModel>,
     },
-    Themes { cards: Vec<ThemeCard> },
+    Themes {
+        cards: Vec<ThemeCard>,
+        /// Why the last clipboard import was refused — drawn inside the
+        /// dashed card, in place of its hint line. `None` after a success:
+        /// the new card appearing *is* the success feedback.
+        import_error: Option<String>,
+    },
     /// The Profiles tab's pane: the §12 editor. Boxed because this variant
     /// is an order of magnitude bigger than its siblings and `ScreenModel`
     /// travels by value through the chrome model.

@@ -24,7 +24,7 @@ use crate::chrome::theme::ChromeColors;
 use crate::chrome::Insets;
 use crate::keymap;
 use crate::platform;
-use crate::route::{best_route, HostRoute};
+use crate::route::{best_route, Dial, HostRoute};
 use crate::session::{Session, Wakeup};
 use crate::source::{Origin, SessionSource};
 use crate::tabs::{Tab, TabStrip};
@@ -840,10 +840,10 @@ fn presence_of(host: &crate::fleet::FleetHost) -> TabPresence {
 
 /// The fleet row a tab's shell actually runs on.
 ///
-/// **By id, not by display label.** `TabOrigin::Remote` carries only a name and
-/// two machines may share one — the keying bug #268 fixed in the launcher's
-/// group map and again in its provenance lookup. A tab knows its `SessionAddr`,
-/// so it knows the host id it is attached to.
+/// **By id, not by display label.** Two machines may share one — the keying
+/// bug #268 fixed in the launcher's group map and again in its provenance
+/// lookup. `TabOrigin::Remote` carries the id beside the label since #304,
+/// so the origin alone answers this.
 ///
 /// One lookup, because there were two and they disagreed: `presence` was
 /// resolved by id here while `LinkKind` a few lines away still matched on the
@@ -851,23 +851,76 @@ fn presence_of(host: &crate::fleet::FleetHost) -> TabPresence {
 /// host B's route — contradictory chrome about one machine, which is worse than
 /// either fact being missing.
 ///
-/// A placeholder address (a launch still connecting) has no real id and falls
-/// back to the label, case-insensitively like every other label match here.
+/// A placeholder id (a launch still connecting) falls back to the label,
+/// case-insensitively like every other label match here.
 fn fleet_host_of<'a>(
-    addr: zest_proto::SessionAddr,
     origin: &TabOrigin,
     fleet: &'a [crate::fleet::FleetHost],
 ) -> Option<&'a crate::fleet::FleetHost> {
-    let TabOrigin::Remote { host_label } = origin else { return None };
-    if crate::tabs::is_placeholder(addr) {
+    let TabOrigin::Remote { host, label } = origin else { return None };
+    if crate::tabs::is_placeholder_host(*host) {
         // `!h.local` is not belt-and-braces: the origin is already `Remote`, so
         // a local match is definitionally wrong — and it is the *worst* wrong
         // answer available, since the local row is loopback and `Online`. A
         // connecting tab to a machine that happens to share this one's display
         // name would read as reaching the desk it is sitting on.
-        fleet.iter().find(|h| !h.local && h.label.eq_ignore_ascii_case(host_label))
+        fleet.iter().find(|h| !h.local && h.label.eq_ignore_ascii_case(label))
     } else {
-        fleet.iter().find(|h| h.host == addr.host)
+        fleet.iter().find(|h| h.host == *host)
+    }
+}
+
+/// First-seen accent slots for remote hosts (#273).
+///
+/// Rebuilt per chrome refresh in strip order, so a host keeps its colour for
+/// the life of the window as long as its *key* is stable. The key is the
+/// host id where the tab has a real address — a renamed machine is the same
+/// machine, and two machines sharing a display name are still two machines —
+/// and the display label only for a placeholder (a launch still connecting),
+/// whose address is all-zero and says nothing. Keying placeholders on the id
+/// instead would collapse every in-flight cross-host launch into one slot,
+/// which is the regression #268 declined.
+struct HostSlots {
+    /// Each slot's keys, in first-seen order: the host id once a tab of this
+    /// slot has a real address, and the display label either way — the label
+    /// is a placeholder's only key, and the bridge a settling launch crosses
+    /// without changing colour.
+    entries: Vec<(Option<zest_proto::HostId>, String)>,
+}
+
+impl HostSlots {
+    fn new() -> Self {
+        Self { entries: Vec::new() }
+    }
+
+    /// The slot for this tab's host, minting the next one on first sight.
+    fn slot(&mut self, addr: zest_proto::SessionAddr, host_label: &str) -> usize {
+        if crate::tabs::is_placeholder(addr) {
+            // A launch still connecting has only its label. Matching a slot
+            // that already carries an id is deliberate: a second launch to a
+            // live host should wear that host's colour from the start.
+            if let Some(i) = self.entries.iter().position(|(_, label)| label == host_label) {
+                return i;
+            }
+        } else {
+            if let Some(i) = self.entries.iter().position(|(id, _)| *id == Some(addr.host)) {
+                return i;
+            }
+            // No slot knows this id yet, but one may have been opened by this
+            // tab's own placeholder a refresh ago. Claiming it — and stamping
+            // the id on it — is what keeps a tab's colour across the moment
+            // its launch settles; a sibling launch still in flight keeps
+            // matching the same slot by label above.
+            if let Some(i) =
+                self.entries.iter().position(|(id, label)| id.is_none() && label == host_label)
+            {
+                self.entries[i].0 = Some(addr.host);
+                return i;
+            }
+        }
+        let id = (!crate::tabs::is_placeholder(addr)).then_some(addr.host);
+        self.entries.push((id, host_label.to_string()));
+        self.entries.len() - 1
     }
 }
 
@@ -877,11 +930,7 @@ fn fleet_host_of<'a>(
 /// A daemon that is up while our socket is down is `Online` and
 /// `Reconnecting`, and saying both is the point — collapsing them would lose
 /// exactly the distinction that tells you whether to wait or to go and look.
-fn tab_presence(
-    addr: zest_proto::SessionAddr,
-    origin: &TabOrigin,
-    fleet: &[crate::fleet::FleetHost],
-) -> TabPresence {
+fn tab_presence(origin: &TabOrigin, fleet: &[crate::fleet::FleetHost]) -> TabPresence {
     if matches!(origin, TabOrigin::Local) {
         // The window's own machine: we are talking to it, and a broken socket
         // to it is a link fact, not a presence one.
@@ -890,7 +939,7 @@ fn tab_presence(
     // A host the fleet has nothing to say about — no discovery record, no
     // account row — is `Unseen` rather than `Online`: we are attached to it, so
     // it was reachable, but nothing here can vouch that it still is.
-    fleet_host_of(addr, origin, fleet).map_or(TabPresence::Unseen, presence_of)
+    fleet_host_of(origin, fleet).map_or(TabPresence::Unseen, presence_of)
 }
 
 /// The host dropdown's row for "no pin at all" (#297).
@@ -1860,6 +1909,14 @@ pub struct App {
     /// Pointer position in cells, updated on every move.
     pointer_cell: (usize, usize),
     clipboard: Option<arboard::Clipboard>,
+    /// Why the theme gallery's last clipboard import was refused, shown on
+    /// the import card until a retry succeeds or the screen is reopened.
+    theme_import_error: Option<String>,
+    /// The theme ids the gallery's cards were built from, in card order —
+    /// the `fleet_view` rule: a click's index must resolve against the
+    /// snapshot the hit map was drawn from, not a roster an import or a
+    /// config reload has since reshaped.
+    themes_view: Vec<String>,
     /// Composition state for the input method. See `zest_input::ime`.
     ime: zest_input::Ime,
     selection_bg: zest_core::Rgb,
@@ -1981,10 +2038,13 @@ impl App {
         // unknown-keys category from the keys the cascade kept.
         let zest_config::Resolved { settings, provenance, unknown_keys } = resolved;
         let config = Config::from(&settings);
+        // Imported themes join the roster before the first resolve, or a
+        // window configured onto one flashes the fallback at every launch.
+        crate::themes::reload();
         // `false` because there is no window yet to ask, and guessing light on
         // a dark desktop would flash the wrong theme. `resumed` seeds the real
         // answer and `apply_theme` corrects this the moment it can.
-        let theme = zest_theme::builtin::get(theme_id(&config, false))
+        let theme = crate::themes::get(theme_id(&config, false))
             .unwrap_or_else(zest_theme::builtin::obsidian);
         let resolved = zest_theme::resolve(&theme);
         let palette = to_core_palette(&resolved);
@@ -2076,6 +2136,8 @@ impl App {
             clipboard: arboard::Clipboard::new()
                 .map_err(|e| tracing::warn!(error = %e, "clipboard unavailable"))
                 .ok(),
+            theme_import_error: None,
+            themes_view: Vec::new(),
             ime: zest_input::Ime::new(),
             selection_bg,
             scroll_accum: 0.0,
@@ -3359,12 +3421,12 @@ impl App {
                 Some(ScreenModel::Fleet { account, cards, devices })
             }
             AppScreen::Themes => {
-                let active = if zest_theme::builtin::get(self.effective_theme()).is_some() {
+                let active = if crate::themes::get(self.effective_theme()).is_some() {
                     self.effective_theme().to_string()
                 } else {
                     zest_theme::builtin::DEFAULT_DARK.to_string()
                 };
-                let cards = zest_theme::builtin::all()
+                let cards = crate::themes::all()
                     .into_iter()
                     .map(|t| {
                         let c = |x: zest_theme::Rgba8| [x.r, x.g, x.b];
@@ -3380,8 +3442,16 @@ impl App {
                             zest_theme::ThemeMode::Dark => "dark",
                             zest_theme::ThemeMode::Light => "light",
                         };
-                        let qualifier =
-                            if default { format!("{mode} · default") } else { mode.to_string() };
+                        // "imported" is the qualifier's third fact: it is how
+                        // two cards may honestly share a display name (a
+                        // "Nord" variant beside the built-in Nord).
+                        let qualifier = if default {
+                            format!("{mode} · default")
+                        } else if zest_theme::builtin::get(&t.id).is_none() {
+                            format!("{mode} · imported")
+                        } else {
+                            mode.to_string()
+                        };
                         ThemeCard {
                             active: t.id == active,
                             id: t.id,
@@ -3398,7 +3468,10 @@ impl App {
                         }
                     })
                     .collect();
-                Some(ScreenModel::Themes { cards })
+                Some(ScreenModel::Themes {
+                    cards,
+                    import_error: self.theme_import_error.clone(),
+                })
             }
             // Built in refresh_chrome beside the Settings model — it needs
             // &mut access to the editor state, which &self here cannot give.
@@ -3581,6 +3654,11 @@ impl App {
     /// exactly as over a session's grid.
     fn show_screen(&mut self, screen: AppScreen) {
         self.screen = screen;
+        // A fresh look at the gallery starts with a clean import card — an
+        // error from last week answers a question nobody is asking.
+        if screen == AppScreen::Themes {
+            self.theme_import_error = None;
+        }
         self.picker = None;
         self.palette_ui = None;
         self.launcher = None;
@@ -4487,25 +4565,12 @@ impl App {
     /// [`Self::insets`] for callers that know the scale before the window is
     /// stored — the shell-spawn path in `resumed` sizes the grid this way.
     fn insets_at(&self, scale: f32) -> Insets {
-        let mut insets = Insets::padding_only(self.config.padding, scale);
-        if self.strip_shown() {
-            match self.config.tabs.position {
-                zest_config::settings::TabsPosition::Top => {
-                    insets.top += self.config.tabs.strip_height as f32 * scale;
-                }
-                zest_config::settings::TabsPosition::Left => {
-                    insets.left += self.config.tabs.sidebar_width as f32 * scale;
-                    // The full-width header over the sidebar + pane row: the
-                    // vertical layout's counterpart of the strip, and it was
-                    // once forgotten here — the grid painted its first two
-                    // rows straight over the session name.
-                    insets.top += crate::chrome::layout::HEADER_H * scale;
-                }
-            }
-            // Nothing reserves the bottom edge: the status bar is gone
-            // (design §1), so below the grid there is only `window.padding`.
-        }
-        insets
+        let strip = self.strip_shown().then_some(crate::chrome::insets::StripClaim {
+            position: self.config.tabs.position,
+            strip_height: self.config.tabs.strip_height,
+            sidebar_width: self.config.tabs.sidebar_width,
+        });
+        Insets::resolved(self.config.padding, scale, strip)
     }
 
     /// Whether the strip is drawn at all.
@@ -4794,8 +4859,7 @@ impl App {
                             if ui.fields.get(*i).is_some_and(|f| f.key == key))
                     }) {
                         ui.selected = row;
-                        let roster: Vec<String> =
-                            zest_theme::builtin::all().into_iter().map(|t| t.id).collect();
+                        let roster: Vec<String> = crate::themes::ids();
                         let current = zest_config::ui::value_at(&values, &key)
                             .and_then(serde_json::Value::as_str);
                         ui.menu = Some(MenuState::roster(row, roster, current));
@@ -5034,6 +5098,9 @@ impl App {
         // the cards were built from, not a fresher one.
         self.fleet_view = fleet_hosts.clone();
         self.devices_view = self.fleet.as_ref().map(|f| f.devices()).unwrap_or_default();
+        // Same retention rule for the theme gallery: card index i must mean
+        // the same theme at click time that it meant at draw time.
+        self.themes_view = crate::themes::ids();
         let screen_model = profiles_model
             .map(crate::chrome::model::ScreenModel::Profiles)
             .or_else(|| self.build_screen_model(&fleet_hosts));
@@ -5093,7 +5160,7 @@ impl App {
         // Host accent slots: the local machine is always slot 0; remote hosts
         // take the next slots in first-seen strip order, so a host keeps its
         // colour for the life of the window.
-        let mut remote_slots: Vec<String> = Vec::new();
+        let mut remote_slots = HostSlots::new();
 
         let tab_models: Vec<TabModel> = self
             .tabs
@@ -5118,20 +5185,17 @@ impl App {
                 let title = if title.is_empty() { "shell".to_string() } else { title };
                 let origin = match tab.source().origin() {
                     Origin::Daemon { host, local: false } => {
-                        TabOrigin::Remote { host_label: host }
+                        // The id is the tab's own address's — all-zero while a
+                        // launch is still connecting, which is exactly what
+                        // the variant's placeholder fallback is for (#304).
+                        TabOrigin::Remote { host: tab.addr.host, label: host }
                     }
                     _ => TabOrigin::Local,
                 };
                 let (host_label, accent, cwd) = match &origin {
-                    TabOrigin::Remote { host_label } => {
-                        let slot = remote_slots
-                            .iter()
-                            .position(|l| l == host_label)
-                            .unwrap_or_else(|| {
-                                remote_slots.push(host_label.clone());
-                                remote_slots.len() - 1
-                            });
-                        (host_label.clone(), slot + 1, cwd)
+                    TabOrigin::Remote { label, .. } => {
+                        let slot = remote_slots.slot(tab.addr, label);
+                        (label.clone(), slot + 1, cwd)
                     }
                     TabOrigin::Local => {
                         (local_label.clone(), 0, crate::status::shorten_home(&cwd))
@@ -5155,7 +5219,7 @@ impl App {
                     // The same lookup `presence` uses. These were two, matching
                     // differently, so with duplicate labels a tab could report
                     // one machine's presence beside another's route (#297).
-                    let host = fleet_host_of(tab.addr, &origin, &fleet_hosts);
+                    let host = fleet_host_of(&origin, &fleet_hosts);
                     match host.and_then(|h| h.reachability) {
                         Some(zest_mesh::Reachability::Cloud) => {
                             crate::chrome::model::LinkKind::Tunnel
@@ -5178,7 +5242,7 @@ impl App {
                     // stopped answering read exactly like one on a healthy
                     // machine — the chip's "· unreachable" was drawn by code
                     // nothing could reach.
-                    presence: tab_presence(tab.addr, &origin, &fleet_hosts),
+                    presence: tab_presence(&origin, &fleet_hosts),
                     origin,
                     accent,
                     tab_accent: crate::chrome::model::tab_accent(tab.identity.as_ref(), accent),
@@ -5548,9 +5612,50 @@ impl App {
                 }
             }
             (HitRegion::ThemeCard(i), MouseButton::Left) => {
-                let id = zest_theme::builtin::IDS.get(i).copied();
+                // The retained snapshot, not a fresh `themes::ids()`: the
+                // roster can change between the frame that drew the cards
+                // and the click (an import, a config reload), and index i
+                // must keep meaning the card the user aimed at.
+                let id = self.themes_view.get(i).cloned();
                 if let Some(id) = id {
-                    self.apply_theme_choice(id);
+                    self.apply_theme_choice(&id);
+                }
+            }
+            (HitRegion::ThemeImport, MouseButton::Left) => {
+                // The card's promise: whatever scheme file the clipboard
+                // holds becomes a theme. Parse failures land on the card
+                // itself — a click with feedback nowhere reads as dead UI,
+                // which is exactly what this card spent its life as.
+                let outcome = match self.clipboard.as_mut() {
+                    // No OS clipboard connection at all is a different fact
+                    // from an empty one — the user cannot fix it by copying.
+                    None => Err("the clipboard is unavailable in this session".to_string()),
+                    Some(clipboard) => match clipboard.get_text() {
+                        Ok(text) if !text.trim().is_empty() => {
+                            crate::themes::import_pasted(&text)
+                        }
+                        // Empty and non-text (an image, a file) both land
+                        // here — arboard reports each as "not available",
+                        // and the remedy is the same either way.
+                        _ => Err("the clipboard has no text — copy a scheme file first"
+                            .to_string()),
+                    },
+                };
+                match outcome {
+                    Ok(theme) => {
+                        self.theme_import_error = None;
+                        // Applying is the success feedback: the new card
+                        // appears, ringed active.
+                        self.apply_theme_choice(&theme.id);
+                        // Directly too: a re-import of the *active* theme
+                        // changes no config value, so the reload above
+                        // classifies it as a no-op and would repaint nothing.
+                        self.apply_theme();
+                    }
+                    Err(e) => {
+                        self.theme_import_error = Some(e);
+                        self.mark_chrome_dirty();
+                    }
                 }
             }
             (HitRegion::FleetCard(i), MouseButton::Left) => {
@@ -6100,9 +6205,7 @@ impl App {
             zest_config::ui::Widget::FontList => {
                 self.fonts.as_mut().map(Fonts::installed_families).unwrap_or_default()
             }
-            zest_config::ui::Widget::ThemePicker => {
-                zest_theme::builtin::all().into_iter().map(|t| t.id).collect()
-            }
+            zest_config::ui::Widget::ThemePicker => crate::themes::ids(),
             _ => return false,
         };
         if roster.is_empty() {
@@ -6234,8 +6337,7 @@ impl App {
             .unwrap_or_default();
         let next = self.settings_ui.as_ref().and_then(|ui| {
             let field = ui.fields.get(idx)?;
-            let themes: Vec<String> =
-                zest_theme::builtin::all().into_iter().map(|t| t.id).collect();
+            let themes: Vec<String> = crate::themes::ids();
             crate::settings_ui::adjust(field, &current, dir, &themes, &installed)
         });
         if let Some(value) = next {
@@ -6873,8 +6975,7 @@ impl App {
             .unwrap_or_default();
         let next = self.profiles_ui.as_ref().and_then(|ui| {
             let field = ui.fields.get(idx)?;
-            let themes: Vec<String> =
-                zest_theme::builtin::all().into_iter().map(|t| t.id).collect();
+            let themes: Vec<String> = crate::themes::ids();
             crate::profiles_ui::adjust_profile(field, &current, dir, &themes, &installed)
         });
         if let Some(value) = next {
@@ -6993,9 +7094,7 @@ impl App {
             zest_config::ui::Widget::FontList => {
                 self.fonts.as_mut().map(Fonts::installed_families).unwrap_or_default()
             }
-            zest_config::ui::Widget::ThemePicker => {
-                zest_theme::builtin::all().into_iter().map(|t| t.id).collect()
-            }
+            zest_config::ui::Widget::ThemePicker => crate::themes::ids(),
             _ => return false,
         };
         if roster.is_empty() {
@@ -9746,6 +9845,11 @@ impl App {
     /// a removed key has to fall back through the cascade, and there is no way
     /// to know what it falls back *to* without redoing the merge.
     fn reload_config(&mut self) {
+        // The theme directory rides the same reload: an imported file lands
+        // moments before the `appearance.theme` write that triggers this,
+        // and a hand-edited theme file deserves the same pickup an edited
+        // config.toml gets.
+        crate::themes::reload();
         let load = zest_config::load(&zest_config::Options {
             profile: self.profile.clone(),
             workspace_dir: std::env::current_dir().ok(),
@@ -9869,7 +9973,7 @@ impl App {
 
     /// Re-resolve the theme into the live palette.
     fn apply_theme(&mut self) {
-        let theme = zest_theme::builtin::get(self.effective_theme())
+        let theme = crate::themes::get(self.effective_theme())
             .unwrap_or_else(zest_theme::builtin::obsidian);
         let resolved = zest_theme::resolve(&theme);
         self.chrome_colors = ChromeColors::new(&theme.ui, &theme.effects, self.config.chrome_opacity);
@@ -13089,6 +13193,92 @@ mod next_wake_tests {
 }
 
 #[cfg(test)]
+mod host_slot_tests {
+    use super::HostSlots;
+    use zest_proto::{HostId, SessionAddr, SessionId};
+
+    fn id(b: u8) -> HostId {
+        HostId::from_bytes([b; 32])
+    }
+
+    fn live(host: HostId, n: u64) -> SessionAddr {
+        SessionAddr::new(host, SessionId(n))
+    }
+
+    #[test]
+    fn a_connecting_tab_and_the_live_tab_it_becomes_keep_the_same_accent() {
+        // #273's guard-rail: the table is rebuilt every chrome refresh, so
+        // "the placeholder adopts the id's slot" has to fall out of the keying
+        // rules across two refreshes — one before the launch settles, one
+        // after. If it does not, every successful cross-host launch is a
+        // visible colour flicker at the moment it connects.
+        let alpha = live(id(1), 1);
+        let before = {
+            let mut slots = HostSlots::new();
+            slots.slot(alpha, "alpha");
+            slots.slot(crate::tabs::placeholder_addr(1), "beta")
+        };
+        let after = {
+            let mut slots = HostSlots::new();
+            slots.slot(alpha, "alpha");
+            slots.slot(live(id(2), 7), "beta")
+        };
+        assert_eq!(
+            before, after,
+            "the tab's slot survives its address going from placeholder to real"
+        );
+
+        // And the sibling case inside one refresh: a second launch to the
+        // same host is still a placeholder when the first settles, and the
+        // two must not split — the settled id claims the slot its label
+        // opened, and the label still finds it there.
+        let mut slots = HostSlots::new();
+        let settled = slots.slot(live(id(2), 7), "beta");
+        let sibling = slots.slot(crate::tabs::placeholder_addr(2), "beta");
+        assert_eq!(
+            settled, sibling,
+            "a still-connecting sibling shares the slot of the launch that settled"
+        );
+    }
+
+    #[test]
+    fn renaming_a_host_does_not_reshuffle_other_hosts_accents() {
+        // The headline bug: keyed by label, a renamed machine is a new entry.
+        // A tab's label is captured when the tab opens, so after a rename one
+        // machine's tabs can carry both names at once — two entries for one
+        // host, and every host after it moves down a colour. Keyed by id, a
+        // renamed machine is the same machine.
+        let (a, b) = (live(id(1), 1), live(id(2), 2));
+        let (before_a, before_b) = {
+            let mut slots = HostSlots::new();
+            (slots.slot(a, "alpha"), slots.slot(b, "beta"))
+        };
+        let (old_a, new_a, after_b) = {
+            let mut slots = HostSlots::new();
+            (
+                slots.slot(a, "alpha"),
+                slots.slot(live(id(1), 3), "zulu"),
+                slots.slot(b, "beta"),
+            )
+        };
+        assert_eq!(before_a, old_a, "the renamed host keeps its own slot");
+        assert_eq!(old_a, new_a, "its tab opened under the new name is still the same machine");
+        assert_eq!(before_b, after_b, "and the host after it keeps its colour");
+    }
+
+    #[test]
+    fn two_hosts_sharing_a_label_get_distinct_slots() {
+        // The same bug read the other way: two machines that happen to share
+        // a display name collapsed into one slot. Their ids differ, so their
+        // colours must too.
+        let mut slots = HostSlots::new();
+        let first = slots.slot(live(id(1), 1), "dev");
+        let second = slots.slot(live(id(2), 2), "dev");
+        assert_ne!(first, second, "distinct machines take distinct colours, whatever they are called");
+    }
+}
+
+#[cfg(test)]
 mod pane_cover_tests {
     use super::{pane_is_covered, AppScreen};
 
@@ -14489,38 +14679,28 @@ mod run_on_host_tests {
 #[cfg(test)]
 mod presence_tests {
     use super::{presence_of, tab_presence, TabOrigin, TabPresence};
-    use crate::fleet::{FleetHost, SessionsState};
+    use crate::fleet::FleetHost;
     use zest_mesh::discovery::Presence;
-    use zest_proto::{HostId, SessionAddr, SessionId};
+    use zest_proto::HostId;
 
     fn host(id: u8, label: &str, presence: Presence) -> FleetHost {
-        FleetHost {
-            host: HostId::from_bytes([id; 32]),
-            label: label.into(),
-            presence,
-            local: false,
-            address: Some("10.0.0.7:7717".into()),
-            reachability: Some(zest_mesh::Reachability::Lan),
-            rtt_ms: Some(0.4),
-            sessions: SessionsState::Unknown,
-            offer: None,
-            enrolled: false,
-            relay_online: false,
-        }
+        let mut h = zest_fleet::fixture::host(id, label);
+        h.presence = presence;
+        h
     }
 
-    fn addr(id: u8) -> SessionAddr {
-        SessionAddr::new(HostId::from_bytes([id; 32]), SessionId(1))
+    /// A settled remote tab's origin: id `[id; 32]`, matching the fixture's.
+    fn remote(id: u8, label: &str) -> TabOrigin {
+        TabOrigin::Remote { host: HostId::from_bytes([id; 32]), label: label.to_string() }
     }
 
-    fn remote(label: &str) -> TabOrigin {
-        TabOrigin::Remote { host_label: label.to_string() }
+    /// A launch still connecting: no id yet, only a name.
+    fn connecting(label: &str) -> TabOrigin {
+        TabOrigin::Remote { host: HostId::from_bytes([0; 32]), label: label.to_string() }
     }
 
     fn with_local(rest: Vec<FleetHost>) -> Vec<FleetHost> {
-        let mut local = host(1, "studio", Presence::Online);
-        local.local = true;
-        let mut all = vec![local];
+        let mut all = vec![zest_fleet::fixture::local(1, "studio")];
         all.extend(rest);
         all
     }
@@ -14631,10 +14811,10 @@ mod presence_tests {
         // a live mDNS record) read exactly like one on a healthy machine until
         // you typed into it.
         let fleet = [host(2, "forge", Presence::Unreachable)];
-        assert_eq!(tab_presence(addr(2), &remote("forge"), &fleet), TabPresence::Unreachable);
+        assert_eq!(tab_presence(&remote(2, "forge"), &fleet), TabPresence::Unreachable);
 
         let fleet = [host(2, "forge", Presence::Away)];
-        assert_eq!(tab_presence(addr(2), &remote("forge"), &fleet), TabPresence::Away);
+        assert_eq!(tab_presence(&remote(2, "forge"), &fleet), TabPresence::Away);
     }
 
     #[test]
@@ -14647,25 +14827,24 @@ mod presence_tests {
         relayed.address = None;
         relayed.relay_online = true;
         assert_eq!(presence_of(&relayed), TabPresence::Online);
-        assert_eq!(tab_presence(addr(2), &remote("pi"), &[relayed]), TabPresence::Online);
+        assert_eq!(tab_presence(&remote(2, "pi"), &[relayed]), TabPresence::Online);
     }
 
     #[test]
     fn a_tab_resolves_its_machine_by_id_not_by_display_name() {
         // Two machines may share a label — the keying bug #268 fixed twice, in
-        // the launcher's group map and again in its provenance lookup. A tab
-        // knows its `SessionAddr`, so it knows which machine it is actually
-        // attached to.
-        let fleet = [
-            host(2, "mac", Presence::Online),
-            host(3, "mac", Presence::Unreachable),
-        ];
+        // the launcher's group map and again in its provenance lookup. A tab's
+        // origin carries the id of the machine it is actually attached to.
+        // The default fixture fleet IS the trap: both remotes are called
+        // `mac`, so a lookup that slid back to the label cannot pass here.
+        let mut fleet = zest_fleet::fixture::fleet();
+        fleet[2].presence = Presence::Unreachable;
         assert_eq!(
-            tab_presence(addr(3), &remote("mac"), &fleet),
+            tab_presence(&remote(3, "mac"), &fleet),
             TabPresence::Unreachable,
             "the tab on the refusing machine says so, whatever the other one called itself"
         );
-        assert_eq!(tab_presence(addr(2), &remote("mac"), &fleet), TabPresence::Online);
+        assert_eq!(tab_presence(&remote(2, "mac"), &fleet), TabPresence::Online);
     }
 
     #[test]
@@ -14674,10 +14853,9 @@ mod presence_tests {
         // under `connecting` anyway, so the worst case is a dot that catches up
         // when the dial settles — but reading the *wrong* machine's presence
         // would be worse than reading none.
-        let placeholder = crate::tabs::placeholder_addr(1);
         let fleet = [host(2, "forge", Presence::Unreachable)];
         assert_eq!(
-            tab_presence(placeholder, &remote("forge"), &fleet),
+            tab_presence(&connecting("forge"), &fleet),
             TabPresence::Unreachable,
             "matched by label, since there is no id to match by"
         );
@@ -14687,18 +14865,16 @@ mod presence_tests {
         // available, since the local row is loopback and `Online`: a tab
         // connecting to a machine that happens to share this one's display name
         // would read as reaching the desk it is sitting on.
-        let mut local = host(1, "twin", Presence::Online);
-        local.local = true;
-        let fleet = [local, host(2, "twin", Presence::Unreachable)];
+        let fleet = [
+            zest_fleet::fixture::local(1, "twin"),
+            host(2, "twin", Presence::Unreachable),
+        ];
         assert_eq!(
-            super::fleet_host_of(placeholder, &remote("twin"), &fleet).map(|h| h.host),
+            super::fleet_host_of(&connecting("twin"), &fleet).map(|h| h.host),
             Some(HostId::from_bytes([2; 32])),
             "the remote twin, not the one under our hands"
         );
-        assert_eq!(
-            tab_presence(placeholder, &remote("twin"), &fleet),
-            TabPresence::Unreachable
-        );
+        assert_eq!(tab_presence(&connecting("twin"), &fleet), TabPresence::Unreachable);
     }
 
     #[test]
@@ -14707,25 +14883,24 @@ mod presence_tests {
         // These were two lookups matching differently: `presence` by id,
         // `LinkKind` by exact label. With duplicate labels a tab could report
         // host A's presence beside host B's route — contradictory chrome about
-        // one machine, which is worse than either fact being missing.
-        let mut lan = host(2, "mac", Presence::Online);
-        lan.reachability = Some(zest_mesh::Reachability::Lan);
-        let mut tunnelled = host(3, "mac", Presence::Unreachable);
-        tunnelled.reachability = Some(zest_mesh::Reachability::Cloud);
-        let fleet = [lan, tunnelled];
+        // one machine, which is worse than either fact being missing. The
+        // default fixture fleet supplies the duplicate labels.
+        let mut fleet = zest_fleet::fixture::fleet();
+        fleet[2].presence = Presence::Unreachable;
+        fleet[2].reachability = Some(zest_mesh::Reachability::Cloud);
 
-        let found = fleet_host_of(addr(3), &remote("mac"), &fleet).expect("the second mac");
+        let found = fleet_host_of(&remote(3, "mac"), &fleet).expect("the second mac");
         assert_eq!(found.host, HostId::from_bytes([3; 32]), "by id, not by name");
         assert_eq!(
             found.reachability,
             Some(zest_mesh::Reachability::Cloud),
             "so the route and the presence describe one machine"
         );
-        assert_eq!(tab_presence(addr(3), &remote("mac"), &fleet), TabPresence::Unreachable);
+        assert_eq!(tab_presence(&remote(3, "mac"), &fleet), TabPresence::Unreachable);
 
         // A local tab has no fleet row to resolve: its link is loopback by
         // construction and its presence is Online.
-        assert!(fleet_host_of(addr(1), &TabOrigin::Local, &fleet).is_none());
+        assert!(fleet_host_of(&TabOrigin::Local, &fleet).is_none());
     }
 
     #[test]
@@ -14735,7 +14910,7 @@ mod presence_tests {
         // `Reconnecting`, and saying both is the point — collapsing them would
         // lose exactly the distinction that tells you whether to wait or to go
         // and look.
-        assert_eq!(tab_presence(addr(1), &TabOrigin::Local, &[]), TabPresence::Online);
+        assert_eq!(tab_presence(&TabOrigin::Local, &[]), TabPresence::Online);
     }
 
     #[test]
@@ -14743,7 +14918,7 @@ mod presence_tests {
         // We are attached to it, so it was reachable once — but no discovery
         // record and no account row means nothing here can say it still is,
         // and `Online` would be a claim rather than an observation.
-        assert_eq!(tab_presence(addr(9), &remote("ghost"), &[]), TabPresence::Unseen);
+        assert_eq!(tab_presence(&remote(9, "ghost"), &[]), TabPresence::Unseen);
     }
 }
 

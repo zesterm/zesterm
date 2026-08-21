@@ -125,6 +125,11 @@ pub enum HitRegion {
     Pane(bool),
     /// One theme card of the gallery; clicking applies that theme.
     ThemeCard(usize),
+    /// The gallery's dashed import card; clicking imports the scheme the
+    /// clipboard holds (#147). Clipboard rather than a file dialog: every
+    /// supported format is a text file, and paste is the one gesture that
+    /// works identically on all three platforms with no new dependency.
+    ThemeImport,
     /// One host card of the fleet view; clicking opens a fresh shell on
     /// that machine. Pushed only for cards with a live route.
     FleetCard(usize),
@@ -358,6 +363,7 @@ pub fn wheel_target(hit: Option<HitRegion>, pane_focus_right: Option<bool>) -> W
         | R::ConfirmCancel
         | R::ScreenPanel
         | R::ThemeCard(_)
+        | R::ThemeImport
         | R::FleetCard(_)
         | R::FleetSession(_, _)
         | R::FleetApproveDevice(_)
