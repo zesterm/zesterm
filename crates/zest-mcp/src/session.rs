@@ -47,6 +47,35 @@ fn cursor_of(term: &Terminal) -> CursorState {
 /// followed sessions is not a memory story.
 const REPLICA_SCROLLBACK: usize = 2_000;
 
+/// Whether a row would contribute nothing to [`Replica::screen_text`].
+///
+/// Exactly `row.text().trim().is_empty()`, without building the string. That
+/// equivalence is the whole contract and `a_blank_row_is_the_one_the_text_would
+/// _have_dropped` holds it against every recording -- an optimization that
+/// redefined "blank" would silently move where `screen_text` stops, and take
+/// every `styled` row number with it.
+///
+/// Worth avoiding because the scan runs from the bottom and a terminal is
+/// mostly empty: a prompt on an 80x24 screen is two rows of content and
+/// twenty-two of nothing, and `Row::text` allocates a `String` the width of the
+/// row for each one it is asked about.
+///
+/// Not `trimmed_len() == 0`, which is the tempting one-liner and is a different
+/// predicate: it counts a cell with a non-default background as content, so a
+/// row of coloured spaces would keep the screen alive where `text()` returns
+/// `""`. That difference is invisible until something paints a full-width bar.
+fn row_is_blank(row: &zest_core::Row) -> bool {
+    let cells = row.cells();
+    let end = row.trimmed_len().min(cells.len());
+    cells[..end].iter().all(|c| {
+        // Skipped by `text()` -- the second half of a wide character carries no
+        // character of its own.
+        c.flags.contains(CellFlags::WIDE_SPACER)
+            || (c.ch.is_whitespace()
+                && row.extra(c).is_none_or(|e| e.zerowidth.iter().all(|m| m.is_whitespace())))
+    })
+}
+
 /// The span walk, over a grid rather than a replica.
 ///
 /// Free so a test can drive it with a real VT stream: the recorded corpus is
@@ -271,9 +300,7 @@ impl Replica {
     /// symptom would be an attribute reported against somebody else's line.
     fn visible_rows(&self) -> usize {
         let grid = self.term.grid();
-        (0..grid.rows())
-            .rposition(|i| !grid.row(i).text().trim().is_empty())
-            .map_or(0, |i| i + 1)
+        (0..grid.rows()).rposition(|i| !row_is_blank(grid.row(i))).map_or(0, |i| i + 1)
     }
 
     /// The visible screen as text, one row per line.
@@ -516,6 +543,48 @@ mod tests {
             .rposition(|i| !term.grid().row(i).text().trim().is_empty())
             .map_or(0, |i| i + 1);
         spans_of(term.grid(), visible, 4_000).0
+    }
+
+    /// Every row of a terminal fed `bytes`, both ways.
+    fn blankness_agrees(cols: usize, rows: usize, bytes: &str) {
+        let mut term = Terminal::new(cols, rows, 100);
+        term.advance(bytes.as_bytes());
+        for i in 0..term.grid().rows() {
+            let row = term.grid().row(i);
+            assert_eq!(
+                row_is_blank(row),
+                row.text().trim().is_empty(),
+                "row {i} of {bytes:?}: the fast rule and `text().trim()` disagree"
+            );
+        }
+    }
+
+    #[test]
+    fn the_fast_blankness_rule_is_the_slow_one() {
+        // `visible_rows` stopped allocating a `String` per row to find where the
+        // screen ends. The risk in that is definition, not speed: a rule that
+        // disagreed by one row would move where `screen_text` stops and
+        // renumber every span with it.
+        blankness_agrees(20, 4, "one\r\ntwo");
+        blankness_agrees(20, 4, "   \r\n\t\r\nx");
+        blankness_agrees(20, 4, "\u{4e16}\u{754c}\r\ntail");
+        blankness_agrees(20, 4, "e\u{301}\r\nnext");
+        blankness_agrees(20, 4, "");
+    }
+
+    #[test]
+    fn a_row_of_coloured_spaces_is_still_blank() {
+        // The tempting one-liner for the rule above is `trimmed_len() == 0`, and
+        // it is a *different* predicate: `trimmed_len` counts a cell with a
+        // non-default background as content, so a full-width coloured bar would
+        // keep the screen alive where `text()` returns "". Nothing looks wrong
+        // until something paints one.
+        let mut term = Terminal::new(20, 3, 100);
+        term.advance(b"real\r\n\x1b[41m          \x1b[0m");
+        let bar = term.grid().row(1);
+        assert!(bar.trimmed_len() > 0, "the coloured cells are content by that measure");
+        assert!(bar.text().trim().is_empty(), "...but carry no text");
+        assert!(row_is_blank(bar), "so the screen must not be kept alive by them");
     }
 
     #[test]

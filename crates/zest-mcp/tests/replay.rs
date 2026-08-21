@@ -690,3 +690,39 @@ fn the_recorded_corpus_is_almost_free_of_visual_attributes_and_that_is_the_measu
         );
     }
 }
+
+/// The fast blankness test is the slow one, on every recorded row.
+///
+/// `visible_rows` stopped building a `String` per row to decide where the
+/// screen ends (a prompt on an 80x24 grid asks about twenty-two empty rows to
+/// find two full ones). The risk in that swap is not speed, it is *definition*:
+/// a predicate that disagreed with `Row::text().trim().is_empty()` by one row
+/// would move where `screen_text` stops and renumber every `styled` span with
+/// it, silently. So the optimization is held against the thing it replaced,
+/// across every row of every recording rather than the last frame alone.
+#[test]
+fn a_blank_row_is_the_one_the_text_would_have_dropped() {
+    for name in ["git-log", "vim-macos", "dir-colors", "blocks-zsh", "basic-echo", "astral", "combining-marks", "unicode-wide"] {
+        replay_watching(name, |r| {
+            let text = r.screen_text();
+            let lines = text.lines().count();
+            let (spans, _) = r.styled_spans(4_000);
+            for s in &spans {
+                assert!(
+                    s.row < lines,
+                    "{name}: the blankness rule moved -- span names row {} of {lines}",
+                    s.row
+                );
+            }
+            // `screen_text` drops *trailing* blanks only, so the last line it
+            // keeps must itself be non-blank. That is the property the two
+            // predicates have to agree on, and the one a wrong rule breaks.
+            if let Some(last) = text.lines().next_back() {
+                assert!(
+                    !last.trim().is_empty(),
+                    "{name}: a trailing blank row survived, so the rule disagrees with `text()`"
+                );
+            }
+        });
+    }
+}
