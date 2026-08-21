@@ -84,6 +84,10 @@ impl NamedColor {
 /// Fits in 4 bytes so that [`crate::Cell`] can stay at 16.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+// No `ts(export)`: the binding is written into `crates/zest-proto/bindings/`
+// as a dependency of `AttrDef`, which is the type that actually crosses the
+// wire. An export test here would write a second copy under this crate.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Color {
     /// The theme's default foreground/background, depending on which slot this
     /// occupies. Kept distinct from `Indexed(7)`/`Indexed(0)` on purpose: a cell

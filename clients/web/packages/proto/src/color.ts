@@ -1,11 +1,11 @@
 /**
- * `zest_core::Color`, hand-written because `ts-rs` does not generate it.
+ * `zest_core::Color`: the hand-written reader, and its type.
  *
- * `AttrDef.fg` and `AttrDef.bg` are typed `unknown` in the committed bindings —
- * `Color` lives in `zest-core`, which has no `ts` feature, so there is no
- * `Color.ts` to import. This file is the gap, and the fixtures are what keep it
- * honest: real sessions carry all three shapes, so a wrong reading fails the
- * corpus rather than lurking.
+ * Since #15 the bindings carry a generated `Color.ts` (`zest-core`'s `ts`
+ * feature), and `bindings-match.test.ts` pins this file's `Color` to it — so a
+ * shape that moves fails the typecheck. The fixtures keep the *parsing* honest:
+ * real sessions carry all three shapes, so a wrong reading fails the corpus
+ * rather than lurking.
  *
  * The shapes are serde's default externally-tagged enum encoding:
  *

@@ -629,10 +629,13 @@ you need before you trip on it.
   fix is that a listing is a *question* (`Conn::list_sessions`), which is what the
   `sessions: false` comment already argued for and what the code had stopped
   doing. (#360)
-- **`rmp-serde` writes the narrowest integer that fits**, so a `u64` that
-  `ts-rs` types as `bigint` reaches JavaScript as a plain `number` for every
-  realistic value. Normalized at one boundary in
-  `clients/web/packages/proto/src/wire.ts`.
+- **`rmp-serde` writes the narrowest integer that fits**, so a `u64` reaches
+  JavaScript as a plain `number` for every realistic value — the bindings say
+  `number` via `ts(type = "number")` on each such field (#14), and a new wire
+  integer must carry the same attribute or its binding lies. The one value
+  outside ±2^53 a host actually sends, the `i64::MIN` a blank row is padded
+  with, is a power of two and converts exactly (`lineNum` in
+  `clients/web/packages/proto/src/wire.ts`).
 - **A JavaScript client must iterate code points, never `text.length`** —
   UTF-16 code units count an astral-plane emoji as two. **CJK does not catch
   this** (it is BMP), so the corpus refuses to generate without something past

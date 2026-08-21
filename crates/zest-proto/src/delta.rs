@@ -38,9 +38,7 @@ pub struct AttrDef {
     /// session can render under a dark theme on the desktop and a light one on
     /// the phone at the same time. Resolving host-side would make the theme a
     /// property of the session. → ADR-002.
-    #[cfg_attr(feature = "ts", ts(type = "unknown"))]
     pub fg: Color,
-    #[cfg_attr(feature = "ts", ts(type = "unknown"))]
     pub bg: Color,
     /// Bold, italic, underline, inverse and the rest, as raw bits.
     ///
@@ -93,7 +91,14 @@ pub struct Run {
     /// Additive, so a peer that predates it decodes fine and simply renders
     /// `e` where `é` was intended — which is what every peer did before this
     /// existed.
+    ///
+    /// `ts(optional)` because `skip_serializing_if` means a run with no marks
+    /// has no key at all on the wire — the common case, permanently, not just
+    /// for old peers — and a required field in the binding sent a decoder
+    /// reading `undefined` where it believed an array (#15). The `ts(as)`
+    /// detour exists only because `optional` insists on an `Option`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<CellMarks>>", optional))]
     pub marks: Vec<CellMarks>,
 }
 
@@ -116,6 +121,13 @@ pub struct RowPayload {
     /// Absolute rather than viewport-relative so a selection, a command block,
     /// and a scrollback request all name the same thing on every client even as
     /// output pushes the viewport along.
+    ///
+    /// `number`, not the `bigint` ts-rs would derive: `rmp-serde` writes the
+    /// narrowest integer that fits, so every realistic id reaches JavaScript
+    /// as a plain `number` — and the one id outside ±2^53 a host actually
+    /// sends, the `i64::MIN` a blank row is padded with, is a power of two
+    /// and therefore exact as a double (#14).
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub line: i64,
     pub runs: Vec<Run>,
     /// The line continues onto the next one rather than ending.
@@ -290,14 +302,21 @@ pub struct BlockPayload {
     /// Stable for the life of the session; the key an upsert replaces on.
     pub id: u32,
     /// First line of the prompt (OSC 133;A).
+    ///
+    /// `ts(type = "number")` for [`RowPayload::line`]'s reason, on all three
+    /// line fields — they are compared against it, and two integer types that
+    /// must agree is a conversion bug waiting to happen.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub prompt_line: i64,
     /// First line of command output (OSC 133;C), once it starts.
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub output_line: Option<i64>,
     /// Last line, once the command has finished (OSC 133;D).
     ///
     /// `None` while it runs, and a client must render such a block to the
     /// bottom rather than waiting — that is what makes a long build readable
     /// while it happens instead of only afterwards.
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub end_line: Option<i64>,
     pub state: BlockState,
     pub command: String,
@@ -310,12 +329,15 @@ pub struct BlockPayload {
     /// running block on every tick. `f64` on the TypeScript side would also be
     /// tempting and wrong — see the `rmp-serde` integer-width trap; epoch
     /// millis stay under 2^53 for the next 285,000 years, so `number` holds.
+    /// (`ts(type = "number")`, not `"number | null"`: `skip_serializing_if =
+    /// "Option::is_none"` means `None` travels as an absent key, never as
+    /// `null` — the binding was overstating the wire, #15's class of bug.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(type = "number | null", optional))]
+    #[cfg_attr(feature = "ts", ts(type = "number", optional))]
     pub started_ms: Option<u64>,
     /// Wall clock at OSC 133;D, same epoch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(type = "number | null", optional))]
+    #[cfg_attr(feature = "ts", ts(type = "number", optional))]
     pub ended_ms: Option<u64>,
 }
 

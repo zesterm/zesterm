@@ -24,8 +24,14 @@
 import type { AttrDef, BlockPayload, CursorState, Delta, RowPayload } from './wire.ts';
 import { Modes } from './flags.ts';
 
-/** `i64::MIN`, the line id `decode.rs` gives a row that has no content yet. */
-export const NO_LINE = -(2n ** 63n);
+/**
+ * `i64::MIN`, the line id `decode.rs` gives a row that has no content yet.
+ *
+ * A plain `number`, and exactly so: -(2^63) is a power of two, which a double
+ * holds without rounding — so `===` against a decoded pad row is reliable
+ * even though the value sits far outside `Number.MIN_SAFE_INTEGER`.
+ */
+export const NO_LINE = -(2 ** 63);
 
 const BLANK_ROW: RowPayload = { line: NO_LINE, runs: [], wrapped: false };
 

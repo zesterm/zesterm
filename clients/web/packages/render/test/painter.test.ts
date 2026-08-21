@@ -137,7 +137,7 @@ function run(attr: number, cells: number, text: string, marks: readonly CellMark
 }
 
 function row(...runs: Run[]): RowPayload {
-  return { line: 0n, runs, wrapped: false };
+  return { line: 0, runs, wrapped: false };
 }
 
 function attrMap(defs: readonly AttrDef[]): ReadonlyMap<number, AttrDef> {

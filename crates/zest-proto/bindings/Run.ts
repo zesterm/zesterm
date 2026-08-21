@@ -26,5 +26,11 @@ cells: number, text: string,
  * Additive, so a peer that predates it decodes fine and simply renders
  * `e` where `é` was intended — which is what every peer did before this
  * existed.
+ *
+ * `ts(optional)` because `skip_serializing_if` means a run with no marks
+ * has no key at all on the wire — the common case, permanently, not just
+ * for old peers — and a required field in the binding sent a decoder
+ * reading `undefined` where it believed an array (#15). The `ts(as)`
+ * detour exists only because `optional` insists on an `Option`.
  */
-marks: Array<CellMarks>, };
+marks?: Array<CellMarks>, };

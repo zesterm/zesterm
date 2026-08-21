@@ -10,8 +10,8 @@
  *
  * # Integers
  *
- * `SessionId` and `Seq` accept `bigint` (what `wire.ts` hands out) and
- * `number` alike; the encoder writes the narrowest form either way, which is
+ * `SessionId` and `Seq` accept `number` (what `wire.ts` hands out, #14) and
+ * `bigint` alike; the encoder writes the narrowest form either way, which is
  * exactly what the host's own encoder does.
  */
 
@@ -19,7 +19,11 @@ import { encodeFrame } from './frame.ts';
 import { encode } from './msgpack-encode.ts';
 import type { SessionAddr } from './wire.ts';
 
-/** Accepts what `wire.ts` produces (`bigint`) and what callers type (`number`). */
+/**
+ * `number` is what `wire.ts` produces and callers type; `bigint` stays
+ * accepted because the encoder genuinely handles the full 64-bit range, and a
+ * caller replaying a captured value should not have to narrow it first.
+ */
 export type IntLike = number | bigint;
 
 export type ClientMessage =
@@ -120,7 +124,7 @@ export type ClientMessage =
     }
   | { readonly t: 'close_session'; readonly session: SessionAddrLike };
 
-/** `wire.ts`'s `SessionAddr` (bigint session) or a caller's plain-number one. */
+/** `wire.ts`'s `SessionAddr` (plain-number session), or one a caller built. */
 export interface SessionAddrLike {
   readonly host: string;
   readonly session: IntLike;
