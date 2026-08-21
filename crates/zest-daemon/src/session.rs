@@ -828,9 +828,10 @@ mod tests {
     /// Several pwsh children booting at once on a runner still compiling the
     /// workspace was being paid inside every assertion budget. The fix is not
     /// a bigger number — that buys time again and makes a real hang slower to
-    /// report — it is children that are not shells: `cmd.exe` starts in
-    /// milliseconds under the same load, and nothing in these tests is
-    /// *about* a shell.
+    /// report — it is children whose startup is measured in milliseconds:
+    /// `cmd.exe` (still a shell, but one with no runtime to lift) and bare
+    /// `ping`. Nothing these tests assert is about a shell; the child only
+    /// has to put bytes on the pty.
     fn wait_for(mut f: impl FnMut() -> bool) -> bool {
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {

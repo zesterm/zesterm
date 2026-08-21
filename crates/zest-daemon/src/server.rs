@@ -2893,9 +2893,10 @@ mod tests {
     /// on PowerShell children hit the deadline together, twice, on PRs that
     /// touched nothing in this crate (#285). The answer is not a bigger
     /// number — that buys time again and a real hang then takes longer to
-    /// report — it is that no test here spawns a shell any more. `cmd.exe`
-    /// and `ping.exe` start in milliseconds on the same loaded runner that
-    /// took several concurrent pwsh boots past half a minute.
+    /// report — it is that no test here boots PowerShell any more. `cmd.exe`
+    /// (a shell too, but one without a runtime to lift) and `ping.exe` start
+    /// in milliseconds on the same loaded runner that took several
+    /// concurrent pwsh boots past half a minute.
     fn wait_for(mut f: impl FnMut() -> bool) -> bool {
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
