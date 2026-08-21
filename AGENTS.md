@@ -772,6 +772,18 @@ you need before you trip on it.
   prompt, and it refuses to prompt unless stdin is a **terminal** — a pipe gets
   `no stdin to prompt on`, and the browser sees a handshake that never
   completes.
+- **umask is process-global, and the victims of leaking one are a crate away
+  from the culprit.** A scoped save/restore umask guard around the socket bind
+  was safe by a comment ("before any other thread exists") that a test binary
+  falsified: zest-app's tests run ~22 in-process daemons on libtest's pool, two
+  overlapping guards race their save/restore, and the process is left at
+  `0o177` forever. Every directory any thread creates after that is born
+  without owner-x, so the first *write* into it fails EACCES — which surfaced
+  as all of `themes::tests` failing at once on unix CI and read as the
+  runner's temp root breaking. Never reach for umask where threads exist;
+  `mkdir(2)`'s explicit mode is race-free (a umask can only narrow it), which
+  is how `bind_private` (`zest-daemon/src/local.rs`) keeps the socket 0600
+  from birth: bind in a 0700 staging dir, chmod, rename into place. (#403)
 
 ### App UI
 
