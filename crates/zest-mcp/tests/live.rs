@@ -829,10 +829,27 @@ fn a_run_against_a_real_shell_returns_the_shells_own_exit_code() {
     // and a `run` submitted into that gap has only `PROMPT_GRACE` before it
     // reports `NoBlocks` -- indistinguishable from a hook that never loaded,
     // which is #363's Windows-CI shape at exactly this line.
-    assert!(
-        wait_for_prompt(&tools, &session, Duration::from_secs(30)),
-        "the shell never minted a prompt block after `clear` destroyed them all (#363)"
-    );
+    //
+    // And waiting alone is not enough, which a 30s wait here proved on the same
+    // runner: the prompt drawn after `clear` can itself be destroyed. pwsh's
+    // `Clear-Host` goes through the console API, so ConPTY mints the erase
+    // sequence on its own renderer thread -- and it can land *after* the `D`/`A`
+    // the prompt function has already written, taking the freshly pushed prompt
+    // block with it. The shell then sits at a perfectly good prompt over an
+    // empty block index, and nothing mints another block until something is
+    // typed. An empty Enter is that something: pwsh brackets even an empty line
+    // with `C`/`D` and pushes a fresh prompt, and zsh's bare `A` pushes into an
+    // empty index too, so the nudge converges on both shells.
+    if !wait_for_prompt(&tools, &session, Duration::from_secs(5)) {
+        tools
+            .call("input", &serde_json::json!({ "session": session, "keys": ["enter"] }))
+            .expect("an empty Enter re-mints a prompt block");
+        assert!(
+            wait_for_prompt(&tools, &session, Duration::from_secs(30)),
+            "the shell never minted a prompt block after `clear` destroyed them all, even \
+             after an empty Enter re-prompted it (#363)"
+        );
+    }
     let ended = tools
         .call(
             "run",
