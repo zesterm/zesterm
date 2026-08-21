@@ -62,10 +62,12 @@ are projected: `SessionInfo` → `SessionEntry`, `HostOffer` → `HostFacts`,
 (`sessionEntryOf`, `hostFactsOf`) whose parameter is **structural** rather than
 imported.
 
-Two reasons, and the second is the one that bites. A dependency added for one
-argument's type is a dependency every actors host then carries — including a
-Bun sidecar that has no business knowing what msgpack is. And `SessionId` is a
-`bigint` on the wire, which JSON cannot carry at all.
+The reason: a dependency added for one argument's type is a dependency every
+actors host then carries — including a Bun sidecar that has no business
+knowing what msgpack is. (`SessionId` used to be the second reason, when its
+binding said `bigint` — JSON cannot carry one. Since #14 it decodes as a plain
+`number`; the id still crosses the actor wire as a string because that is what
+this frozen seam already says, and the UI only compares and displays it.)
 
 They are renamed rather than sharing a name because one name for two
 representations is how a `snake_case` field ends up read off a `camelCase`

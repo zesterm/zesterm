@@ -149,15 +149,16 @@ Two gates, catching different things:
 
 ## Things worth knowing before changing anything
 
-- **The bindings and the wire disagree about integers.** `ts-rs` types `Seq`,
-  `SessionId` and `RowPayload.line` as `bigint`, but `rmp_serde` writes the
-  narrowest encoding that fits, so they arrive as plain MessagePack integers and
-  reach JavaScript as `number`. This package follows the bindings and coerces at
-  one boundary, in `wire.ts`. The honest fix is in the Rust attributes; it is
-  filed.
-- **`Color` is hand-written.** `zest_core::Color` has no `ts` feature, so
-  `AttrDef.fg` and `bg` are `unknown` in the bindings and `color.ts` fills the
-  gap. Nothing type-checks it — the fixtures do, because real sessions carry all
+- **Wire integers are plain `number`s.** `rmp_serde` writes the narrowest
+  encoding that fits, so `Seq`, `SessionId` and the line ids arrive as ordinary
+  MessagePack integers, and since #14 the bindings say `number` to match. The
+  one id outside ±2^53 a host actually sends — the `i64::MIN` a blank row is
+  padded with — is a power of two and converts exactly; anything else that big
+  is refused by `wire.ts` rather than rounded.
+- **`Color` is generated, `color.ts` is the reader.** Since #15 `zest-core`
+  has a `ts` feature and `AttrDef.fg`/`bg` import a real `Color.ts`;
+  `bindings-match.test.ts` pins `color.ts`'s hand-written type to it, and the
+  fixtures still exercise the parsing, because real sessions carry all
   three of its shapes.
 - **The bit tables are hand-written too**, and the recordings *cannot* check
   them: they compare `flags` as raw integers, so a table mapping `ITALIC` to the

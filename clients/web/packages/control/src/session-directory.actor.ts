@@ -20,9 +20,10 @@
 import { defineActor } from '@sigx/actors';
 
 /**
- * `SessionInfo`, projected to plain JSON. `SessionId` is a `bigint` in the
- * proto package; the actor wire is `@sigx/serialize` JSON and the UI only
- * compares and displays ids, so a string is honest and portable.
+ * `SessionInfo`, projected to plain JSON. The id stays a string even though
+ * `SessionId` decodes as a plain `number` since #14: the actor wire already
+ * says string — a frozen seam — and the UI only compares and displays ids,
+ * so nothing is gained by moving it.
  */
 export interface SessionEntry {
   readonly host: string;
@@ -53,7 +54,7 @@ export interface SessionEntry {
  * sites rather than here.
  */
 export function sessionEntryOf(info: {
-  readonly addr: { readonly host: string; readonly session: bigint };
+  readonly addr: { readonly host: string; readonly session: number };
   readonly title: string;
   readonly cwd: string;
   readonly cols: number;
@@ -63,8 +64,8 @@ export function sessionEntryOf(info: {
 }): SessionEntry {
   return {
     host: info.addr.host,
-    // A `bigint` on the wire; a string here, for the reason `SessionEntry`
-    // gives — the actor wire is JSON and the UI only compares and displays.
+    // A number off the wire; a string here, for the reason `SessionEntry`
+    // gives — the actor wire said string before #14 and it is a frozen seam.
     session: info.addr.session.toString(),
     title: info.title,
     cwd: info.cwd,

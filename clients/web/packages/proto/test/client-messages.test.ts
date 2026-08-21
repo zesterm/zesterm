@@ -16,7 +16,7 @@ import { type ClientMessage, encodeClientMessage } from '../src/wire-client.ts';
 import { hexToBytes, loadClientMessages } from './fixtures.ts';
 
 const HOST = '2e'.repeat(32);
-const SESSION = { host: HOST, session: 7n };
+const SESSION = { host: HOST, session: 7 };
 
 /** The same canonical values `fixture_dump.rs`'s `write_client_messages` uses. */
 const CANONICAL: Record<string, ClientMessage> = {
@@ -47,7 +47,7 @@ const CANONICAL: Record<string, ClientMessage> = {
   detach: { t: 'detach', session: SESSION },
   input: { t: 'input', session: SESSION, bytes: Uint8Array.of(0x1b, 0x5b, 0x41, 0x80, 0xff) },
   resize: { t: 'resize', session: SESSION, cols: 80, rows: 24 },
-  ack: { t: 'ack', session: SESSION, seq: 4294967296n },
+  ack: { t: 'ack', session: SESSION, seq: 4294967296 },
   request_scrollback: { t: 'request_scrollback', session: SESSION, from_line: -1200, count: 500 },
   close_session: { t: 'close_session', session: SESSION },
 };

@@ -129,7 +129,7 @@ export class SessionClient {
   #dialSeq = 0;
 
   /** The last sequence applied — the truth `Update.base` is checked against. */
-  #appliedSeq = -1n;
+  #appliedSeq = -1;
   /** Set after a bad base until the healing keyframe lands, so a burst of
    * stale updates asks once instead of once per update. */
   #awaitingKeyframe = false;
@@ -145,7 +145,7 @@ export class SessionClient {
   /** The numbering an outstanding scrollback request belongs to, if any. */
   #scrollbackAsk: number | null = null;
 
-  #pendingAck: bigint | null = null;
+  #pendingAck: number | null = null;
   #lastAckAt = 0;
   #ackTimer: TimerHandle | null = null;
 
@@ -201,7 +201,7 @@ export class SessionClient {
     }
   }
 
-  requestScrollback(fromLine: bigint, count: number): void {
+  requestScrollback(fromLine: number, count: number): void {
     if (!this.#connected) return;
     this.#send({
       t: 'request_scrollback',
@@ -471,7 +471,7 @@ export class SessionClient {
     // the session. Anchoring on one computes a wildly negative `from`, clamps
     // to zero, and fetches the *oldest* page in the history — leaving exactly
     // the gap under the viewport this whole method exists to avoid.
-    const first = this.grid.rows.find((r) => r.line >= 0n)?.line;
+    const first = this.grid.rows.find((r) => r.line >= 0)?.line;
     if (first === undefined) return;
     // The same history needs MORE rows at a narrower width, so asking for the
     // count we held would fetch a fraction of it — measured: 29 rows kept at
@@ -486,9 +486,9 @@ export class SessionClient {
     // not fail — it is silently clamped, and the rows that go missing are the
     // ones nearest the screen, which are the ones being asked for.
     const count = Math.min(Math.ceil(hadScrollback * growth), SCROLLBACK_PAGE);
-    const from = first - BigInt(count);
+    const from = first - count;
     this.#scrollbackAsk = this.#numbering;
-    this.requestScrollback(from < 0n ? 0n : from, count);
+    this.requestScrollback(from < 0 ? 0 : from, count);
   }
 
   #afterWelcome(): void {
@@ -511,7 +511,7 @@ export class SessionClient {
    * A trailing timer covers a stream that goes quiet right after a delta —
    * the host should not wait a whole next-delta for its ack.
    */
-  #queueAck(seq: bigint): void {
+  #queueAck(seq: number): void {
     this.#pendingAck = seq;
     const now = this.#clock.now();
     if (now - this.#lastAckAt >= ACK_INTERVAL_MS) {

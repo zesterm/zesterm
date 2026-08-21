@@ -18,12 +18,19 @@ bitflags.workspace = true
 rustc-hash.workspace = true
 serde = { workspace = true, optional = true }
 
+ts-rs = { workspace = true, optional = true }
+
 [features]
 default = ["std"]
 std = []
 # Enables serialization of grid snapshots and deltas -- required by the M3
 # daemon and the web/mobile clients, not by the native app.
 serde = ["dep:serde", "bitflags/serde"]
+# TypeScript bindings for the types `zest-proto` puts on the wire as-is
+# (today: `Color`). Off by default and never on in a shipping build, same as
+# `zest-proto`'s `ts` feature, which is what turns this on. The wasm32 gate
+# builds with --no-default-features, so ts-rs never reaches that target.
+ts = ["dep:ts-rs"]
 
 [dev-dependencies]
 insta.workspace = true
