@@ -98,30 +98,54 @@ mod imp {
         }
     }
 
-    /// A scoped umask, so a file is created with the mode it needs from birth.
+    /// Bind the socket so it is never reachable by another user, even briefly.
     ///
-    /// Process-wide and therefore not thread-safe in general; used here only
-    /// during `bind`, on the thread that starts the daemon, before any other
-    /// thread exists that could create a file.
-    pub struct Umask(rustix::fs::Mode);
+    /// The module header rests on the socket's mode: `Auth::Transport` means
+    /// the permission *is* the authorization, so the socket must be 0600 from
+    /// birth rather than 0600 shortly after birth.
+    ///
+    /// The obvious tool — a scoped umask around `bind` — is banned here, and
+    /// was #403: umask is process-global, so two threads binding at once (the
+    /// zest-app test binary runs ~22 daemons on libtest's pool) race their
+    /// save/restore and can leave the whole process restricted, after which
+    /// every directory any *other* thread creates is born without owner-x and
+    /// the first write inside it fails EACCES — in a crate far from this one.
+    ///
+    /// `mkdir(2)`'s explicit mode needs no global state: a umask can only
+    /// remove bits from the requested 0700, never widen it, so the staging
+    /// directory is private from birth. The socket binds inside it, is
+    /// tightened to 0600 (chmod does not consult the umask), and is renamed
+    /// into place — binding is to the inode, so the listener never notices,
+    /// and the socket appears at the public path already 0600. The `.d/s`
+    /// suffix spends 4 bytes of SUN_LEN (~104); test paths stay short partly
+    /// for this reason.
+    pub fn bind_private(path: &str) -> Result<UnixListener, DaemonError> {
+        let stage = format!("{path}.d");
+        // A stale stage is usually a directory from a crashed daemon, but the
+        // name could in principle be squatted by anything; clear both shapes,
+        // or the mkdir below wedges startup on EEXIST/ENOTDIR.
+        let _ = std::fs::remove_dir_all(&stage);
+        let _ = std::fs::remove_file(&stage);
+        rustix::fs::mkdir(stage.as_str(), rustix::fs::Mode::from_bits_truncate(0o700))
+            .map_err(|e| DaemonError::Transport(format!("{stage}: {e}")))?;
+        // A pathological inherited umask can only have *narrowed* the 0700;
+        // put the owner bits back so the bind below can proceed. No window
+        // opens: the directory was never group- or other-accessible.
+        std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| DaemonError::Transport(format!("{stage}: {e}")))?;
 
-    impl Umask {
-        /// `mask` is a `RawMode`, not a `u16`.
-        ///
-        /// It was a `u16`, which is `mode_t` on macOS and compiled there
-        /// happily. On Linux `mode_t` is 32 bits, so the whole workspace failed
-        /// to build — a type error in permission handling, from a literal that
-        /// is `0o177` on both.
-        pub fn restrict(mask: rustix::fs::RawMode) -> Self {
-            let mode = rustix::fs::Mode::from_bits_truncate(mask);
-            Self(rustix::process::umask(mode))
-        }
-    }
-
-    impl Drop for Umask {
-        fn drop(&mut self) {
-            rustix::process::umask(self.0);
-        }
+        // Every error names the staged path: a socket path within 4 bytes of
+        // SUN_LEN fails *here* rather than at the final path, and the message
+        // has to say which name was too long.
+        let staged = format!("{stage}/s");
+        let listener = UnixListener::bind(&staged)
+            .map_err(|e| DaemonError::Transport(format!("{staged}: {e}")))?;
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| DaemonError::Transport(format!("{staged}: {e}")))?;
+        std::fs::rename(&staged, path)
+            .map_err(|e| DaemonError::Transport(format!("{staged} -> {path}: {e}")))?;
+        let _ = std::fs::remove_dir(&stage);
+        Ok(listener)
     }
 
     /// Claim a socket path without serving it.
@@ -162,23 +186,7 @@ mod imp {
 
         let _ = std::fs::remove_file(path);
 
-        // Bind inside a tightened umask rather than chmod-ing afterwards.
-        //
-        // `bind` applies the process umask, so between it and a later
-        // `set_permissions` the socket is briefly whatever the umask allowed --
-        // and on a permissive umask that window is a connectable shell. The
-        // whole justification in this module's header rests on that permission,
-        // so it must not have a gap.
-        let listener = {
-            let _umask = Umask::restrict(0o177);
-            UnixListener::bind(path).map_err(|e| DaemonError::Transport(e.to_string()))?
-        };
-
-        // Belt and braces: assert the mode actually landed. A umask cannot add
-        // permissions, only remove them, so this should be a no-op -- but the
-        // cost of being wrong here is a shell.
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| DaemonError::Transport(e.to_string()))?;
+        let listener = bind_private(path)?;
 
         tracing::info!(path, "listening");
         for stream in listener.incoming() {
@@ -658,6 +666,12 @@ mod unix_tests {
         format!("/tmp/zt-{}-{}.sock", name, std::process::id())
     }
 
+    /// Held by every test that reads or writes the process umask. It is one
+    /// value per process — the very fact #403 was about — so the two tests
+    /// below must not interleave, or the reader observes the setter's value
+    /// and fails on a truth about the harness rather than the code.
+    static UMASK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn two_daemons_cannot_both_claim_one_socket() {
         // The split-brain this prevents: without the lock, the second daemon
@@ -697,7 +711,19 @@ mod unix_tests {
         // A deliberately permissive umask for the duration of this test: the
         // window this closes only exists when the umask would have allowed
         // something wider, so testing under a restrictive one proves nothing.
-        let _permissive = imp::Umask::restrict(0o000);
+        //
+        // A save/restore guard is the very shape #403 bans — it is safe here
+        // only because UMASK_LOCK serializes every umask toucher in this
+        // binary, and Drop (not a trailing statement) is what keeps a failing
+        // assertion from leaking the permissive value to later tests.
+        let _serialized = UMASK_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        struct Restore(rustix::fs::Mode);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                rustix::process::umask(self.0);
+            }
+        }
+        let _restore = Restore(rustix::process::umask(rustix::fs::Mode::empty()));
 
         let registry = std::sync::Arc::new(crate::server::Registry::new());
         let cfg = DaemonConfig {
@@ -733,5 +759,73 @@ mod unix_tests {
 
         let _ = std::fs::remove_file(&p);
         let _ = std::fs::remove_file(format!("{p}.lock"));
+    }
+
+    #[test]
+    fn binding_never_mutates_the_umask_other_threads_read() {
+        // The #403 shape: umask is process-global, so a bind that saves and
+        // restores it races another bind doing the same -- B saves A's
+        // restricted value as "previous" and restores *that*, leaving the
+        // whole process restricted forever. The victims are bystanders: any
+        // thread creating a directory afterwards gets one without owner-x,
+        // and its first write inside fails EACCES. In `cargo test --workspace`
+        // the bystander was zest-app's themes::tests, a crate away from the
+        // culprit, and the symptom read as CI's temp root breaking.
+        let _serialized = UMASK_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = {
+            let cur = rustix::process::umask(rustix::fs::Mode::empty());
+            rustix::process::umask(cur);
+            cur
+        };
+
+        // Concurrent binders, like the ~22 daemon harnesses the zest-app test
+        // binary runs on libtest's thread pool.
+        let binders: Vec<_> = (0..4)
+            .map(|t| {
+                std::thread::spawn(move || {
+                    for i in 0..64 {
+                        let p = path(&format!("um{t}x{i}"));
+                        let _ = std::fs::remove_file(&p);
+                        let listener =
+                            imp::bind_private(&p).expect("a private bind on a fresh path");
+                        drop(listener);
+                        let _ = std::fs::remove_file(&p);
+                    }
+                })
+            })
+            .collect();
+
+        // The bystander: a thread that just wants a scratch directory, as any
+        // test (or the daemon's own audit/session code) might.
+        let bystander = std::thread::spawn(|| {
+            let dir = std::env::temp_dir()
+                .join(format!("zesterm-umask-bystander-{}", std::process::id()));
+            for _ in 0..256 {
+                let _ = std::fs::remove_dir_all(&dir);
+                std::fs::create_dir_all(&dir).expect("bystander scratch dir");
+                std::fs::write(dir.join("probe"), b"x").expect(
+                    "a write into a directory this thread just created: EACCES here means \
+                     a concurrent bind leaked a restrictive umask into the whole process",
+                );
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+
+        for b in binders {
+            b.join().expect("binder thread");
+        }
+        let bystander = bystander.join();
+
+        let after = {
+            let cur = rustix::process::umask(rustix::fs::Mode::empty());
+            rustix::process::umask(cur);
+            cur
+        };
+        assert_eq!(
+            after, before,
+            "binding sockets changed the process umask, so every later file and \
+             directory in this process is born with the wrong mode"
+        );
+        bystander.expect("bystander thread");
     }
 }
