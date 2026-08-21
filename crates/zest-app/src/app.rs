@@ -3291,6 +3291,25 @@ impl App {
                         if h.enrolled {
                             rows.push(("account".into(), "enrolled".into(), 1));
                         }
+                        // A freshly-settled enrolment's own word, drawn until
+                        // the account listing's `enrolled` row takes over
+                        // (the poke on settle hurries it). Outside the
+                        // button's gate below on purpose: success flips the
+                        // daemon's `has_account_token` first, which closes
+                        // that gate before the listing catches up — and the
+                        // feedback must not vanish in the window between the
+                        // two. Skipped when the listing's row is already
+                        // drawn, or re-enrolling a machine whose row was
+                        // live all along (#245) would print `account` twice.
+                        if h.local && !h.enrolled {
+                            if let LocalEnroll::Enrolled { account } = &self.local_enroll {
+                                let value = match account {
+                                    Some(a) => format!("enrolled with {a}"),
+                                    None => "enrolled".into(),
+                                };
+                                rows.push(("account".into(), value, 1));
+                            }
+                        }
                         let mut enroll = None;
                         // `needs_enrollment`, not `!h.enrolled` (#245): the
                         // row is the account table's fact and what the button
@@ -3312,22 +3331,8 @@ impl App {
                                         clickable: false,
                                     });
                                 }
-                                // The listing has not caught up yet; say what
-                                // happened until its `enrolled` row takes
-                                // over (the poke on settle hurries it). But
-                                // only when that row is not already drawn:
-                                // re-enrolling a machine whose row was live
-                                // all along (#245) would print `account`
-                                // twice for a frame or two.
-                                LocalEnroll::Enrolled { account } => {
-                                    if !h.enrolled {
-                                        let value = match account {
-                                            Some(a) => format!("enrolled with {a}"),
-                                            None => "enrolled".into(),
-                                        };
-                                        rows.push(("account".into(), value, 1));
-                                    }
-                                }
+                                // Drawn above, outside this gate.
+                                LocalEnroll::Enrolled { .. } => {}
                                 LocalEnroll::Failed(message) => {
                                     rows.push(("account".into(), clip_row(message), 2));
                                     enroll = Some(crate::chrome::model::FleetEnroll {

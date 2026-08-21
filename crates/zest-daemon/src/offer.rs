@@ -218,12 +218,53 @@ impl OfferSource {
     /// without it each of those would push an identical profile list to every
     /// attached client on the fleet.
     pub fn set(&self, offer: HostOffer) -> bool {
+        self.update(move |held| *held = offer)
+    }
+
+    /// Re-read the config and publish what changed.
+    pub fn reload(&self, default_shell: String) -> bool {
+        // The read happens before the lock — it is file I/O — and the merge
+        // under it. The token fact is the credential store's, not the config
+        // file's: a reload that reset it to "did not say" would blank the
+        // enrol affordance's gate (#245) every time somebody saved a profile.
+        let fresh = read_config(default_shell);
+        self.update(move |held| {
+            let token = held.has_account_token;
+            *held = fresh;
+            held.has_account_token = token;
+        })
+    }
+
+    /// State whether this machine's daemon holds an account token (#245).
+    ///
+    /// The one field of the offer the credential store owns rather than the
+    /// config: set at startup from a probe of the store, and again when a
+    /// wire enrolment lands a token. Goes through [`Self::update`] on purpose
+    /// — a change moves the generation and wakes the watchers, so the fleet
+    /// card learns the machine no longer needs enrolling without waiting for
+    /// unrelated traffic.
+    pub fn set_account_token(&self, held: Option<bool>) -> bool {
+        self.update(move |offer| offer.has_account_token = held)
+    }
+
+    /// Every write goes through here: mutate under the offer's own lock,
+    /// bump the generation only when the result differs, and wake the
+    /// watchers when it did.
+    ///
+    /// One lock acquisition rather than a `snapshot()`-then-`set()` pair,
+    /// because the writers live on different threads — the config watcher
+    /// reloads while the enrol worker flips the token fact — and a
+    /// read-modify-write across two acquisitions lets either overwrite the
+    /// other's update with the stale half it read.
+    fn update(&self, apply: impl FnOnce(&mut HostOffer)) -> bool {
         {
             let mut held = self.inner.offer.lock().expect("offer mutex");
-            if *held == offer {
+            let mut next = held.clone();
+            apply(&mut next);
+            if *held == next {
                 return false;
             }
-            *held = offer;
+            *held = next;
             self.inner.generation.fetch_add(1, Ordering::AcqRel);
         }
         // Outside the offer lock: a waker runs arbitrary caller code, and
@@ -235,30 +276,6 @@ impl OfferSource {
             wake();
         }
         true
-    }
-
-    /// Re-read the config and publish what changed.
-    pub fn reload(&self, default_shell: String) -> bool {
-        let mut offer = read_config(default_shell);
-        // The token fact is the credential store's, not the config file's:
-        // a reload that reset it to "did not say" would blank the enrol
-        // affordance's gate (#245) every time somebody saved a profile.
-        offer.has_account_token = self.snapshot().has_account_token;
-        self.set(offer)
-    }
-
-    /// State whether this machine's daemon holds an account token (#245).
-    ///
-    /// The one field of the offer the credential store owns rather than the
-    /// config: set at startup from a probe of the store, and again when a
-    /// wire enrolment lands a token. Goes through [`Self::set`] on purpose —
-    /// a change moves the generation and wakes the watchers, so the fleet
-    /// card learns the machine no longer needs enrolling without waiting for
-    /// unrelated traffic.
-    pub fn set_account_token(&self, held: Option<bool>) -> bool {
-        let mut offer = self.snapshot();
-        offer.has_account_token = held;
-        self.set(offer)
     }
 }
 
