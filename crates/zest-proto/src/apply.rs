@@ -823,6 +823,85 @@ mod tests {
     }
 
     #[test]
+    fn a_command_run_after_total_eviction_reaches_a_fresh_client() {
+        // Issue #204's checklist item. Losing the last block lifts the
+        // watermark to where the next block will appear, and the two must not
+        // cross: a floor above a live block's id would tell every client the
+        // block sits in un-vouched-for territory.
+        let mut host = Terminal::new(20, 3, 4);
+        host.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07one\x1b]133;C\x07\r\nout\r\n\x1b]133;D;0\x07");
+        for _ in 0..20 {
+            host.advance(b"filler\r\n");
+        }
+        assert!(host.blocks().blocks().is_empty(), "every block fell out of scrollback");
+
+        host.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07two\x1b]133;C\x07\r\nout2\r\n\x1b]133;D;0\x07");
+        let live = host.blocks().last().expect("the new command has a block").id.0;
+        assert!(
+            host.blocks().authoritative_from() <= live,
+            "the watermark left by total eviction must not overshoot the next real block"
+        );
+
+        let mut enc = Encoder::new();
+        let k = enc.keyframe(host.grid(), cursor(), host.modes(), "", host.blocks());
+        let mut client = Terminal::new(20, 3, 100);
+        let mut app = Applier::new();
+        app.apply_keyframe(&mut client, &k, 1);
+        assert_eq!(
+            client.blocks().blocks().iter().map(|b| b.id.0).collect::<Vec<_>>(),
+            [live],
+            "a client attaching after the session's whole history was evicted \
+             still sees the command that ran afterwards"
+        );
+    }
+
+    #[test]
+    fn eviction_cannot_disguise_a_clear_as_history_falling_away() {
+        // The overshoot #204 is about. `cls` destroys the on-screen blocks and
+        // lowers the watermark so the next keyframe announces it; if the
+        // scrollback then evicts the last surviving block before the encoder
+        // looks, the floor used to jump to `next_id` — over the destroyed ids —
+        // and the announcement never went out. Every attached client kept
+        // painting headers for commands whose rows no longer exist.
+        let mut host = Terminal::new(20, 4, 4);
+        // Block 0, pushed wholly into scrollback by the filler...
+        host.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07old\x1b]133;C\x07\r\nout\r\n\x1b]133;D;0\x07");
+        host.advance(b"f1\r\nf2\r\nf3\r\n");
+        // ...and blocks 1 and 2 on the live screen.
+        host.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07one\x1b]133;C\x07\r\n\x1b]133;D;0\x07");
+        host.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07two\x1b]133;C\x07\r\n\x1b]133;D;0\x07");
+        assert_eq!(host.blocks().blocks().len(), 3, "three commands ran");
+
+        let mut enc = Encoder::new();
+        let k = enc.keyframe(host.grid(), cursor(), host.modes(), "", host.blocks());
+        let mut client = Terminal::new(20, 4, 100);
+        let mut app = Applier::new();
+        app.apply_keyframe(&mut client, &k, 1);
+        assert_eq!(client.blocks().blocks().len(), 3, "the client holds all three");
+
+        // One burst, before the encoder looks again: the clear destroys blocks
+        // 1 and 2, and the output after it scrolls block 0 out entirely.
+        host.advance(b"\x1b[2J\x1b[H");
+        for _ in 0..12 {
+            host.advance(b"x\r\n");
+        }
+        assert!(host.blocks().blocks().is_empty(), "destroyed and evicted, nothing left");
+
+        assert!(
+            enc.blocks_need_keyframe(host.blocks()),
+            "the destroyed blocks still need announcing — eviction emptying the \
+             index afterwards must not disguise them as evicted"
+        );
+        let k = enc.keyframe(host.grid(), cursor(), host.modes(), "", host.blocks());
+        app.apply_keyframe(&mut client, &k, 2);
+        assert_eq!(
+            client.blocks().blocks().iter().map(|b| b.id.0).collect::<Vec<_>>(),
+            [0],
+            "the destroyed blocks go; the merely-evicted one stays with the client"
+        );
+    }
+
+    #[test]
     fn eviction_alone_never_forces_a_keyframe() {
         // The distinction the predicate has to make. Blocks falling off the
         // oldest end are deliberately silent -- a client configured to keep
