@@ -54,9 +54,18 @@ pub enum Action {
     /// `tabs.position` through the settings path, so the file stays the one
     /// source of truth.
     ToggleTabLayout,
-    /// Split the active tab right (⌘D); on an already-split tab, moves the
-    /// keyboard to the other pane.
+    /// Split the active tab right (⌘D): one more pane, on the window's own
+    /// host. No cap — two panes was the design's picture, not a rule (#436).
     SplitRight,
+    /// Split right onto a machine of your choosing (⌘H): opens the fleet
+    /// picker carrying the split, so a host row creates the pane there and
+    /// a session row attaches that session as the pane.
+    SplitRightOnHost,
+    /// Move the keyboard one pane left (⌘U) / right (⌘J), wrapping. Not
+    /// the arrows: vim and tmux read Ctrl+Shift+Arrow, which is what the
+    /// Desktop chord is on Windows — and `]`/`[` are already the tabs'.
+    FocusPaneLeft,
+    FocusPaneRight,
 }
 
 /// The modifier half of a chord, as *policy* rather than bitmask.
@@ -312,6 +321,12 @@ pub static BINDINGS: &[Binding] = &[
     // the physical chord.
     b(Mods::Desktop, ChordKey::Char("E"), Action::ToggleTabLayout, "⇧E", "Toggle vertical tabs", Category::Tabs),
     b(Mods::Desktop, ChordKey::Char("d"), Action::SplitRight, "D", "Split right", Category::Tabs),
+    // H for host. Not ⌘⇧D: a shifted letter collapses onto its unshifted
+    // twin's Ctrl+Shift form on Windows (see ⌘B above), so the "on a host"
+    // spelling needs a letter of its own.
+    b(Mods::Desktop, ChordKey::Char("h"), Action::SplitRightOnHost, "H", "Split right on a host…", Category::Fleet),
+    b(Mods::Desktop, ChordKey::Char("j"), Action::FocusPaneRight, "J", "Next pane", Category::Tabs),
+    b(Mods::Desktop, ChordKey::Char("u"), Action::FocusPaneLeft, "U", "Previous pane", Category::Tabs),
 ];
 
 /// The platform-spelled chord of `action`'s first binding — what the title

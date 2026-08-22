@@ -152,16 +152,17 @@ pub const PANE_MARGIN: f32 = 8.0;
 pub const PANE_HEADER: f32 = 28.0;
 pub const PANE_RADIUS: f32 = 10.0;
 
-/// The two pane frames of a split tab, inside the grid area.
+/// The `n` pane frames of a split tab, left to right inside the grid area:
+/// equal columns, a margin around each (#436). `n == 0` is treated as one
+/// frame rather than dividing by zero — a caller a frame behind a pane close
+/// still gets a rectangle to draw in.
 #[must_use]
-pub fn pane_frames(area: [f32; 4], s: f32) -> ([f32; 4], [f32; 4]) {
+pub fn pane_frames(area: [f32; 4], s: f32, n: usize) -> Vec<[f32; 4]> {
+    let n = n.max(1);
     let m = PANE_MARGIN * s;
-    let w = ((area[2] - 4.0 * m) / 2.0).max(0.0);
+    let w = ((area[2] - 2.0 * m * n as f32) / n as f32).max(0.0);
     let h = (area[3] - 2.0 * m).max(0.0);
-    (
-        [area[0] + m, area[1] + m, w, h],
-        [area[0] + 3.0 * m + w, area[1] + m, w, h],
-    )
+    (0..n).map(|i| [area[0] + m + i as f32 * (w + 2.0 * m), area[1] + m, w, h]).collect()
 }
 
 /// Where a pane's grid actually lives: inside the frame, below the header.
@@ -572,7 +573,7 @@ fn caption_cluster(
 /// The split tab's frames and headers (design screen 5): focused pane gets
 /// the accent border and the word "focused"; the other, hairline and dim.
 fn panes_overlay(
-    panes: &[super::model::PaneModel; 2],
+    panes: &[super::model::PaneModel],
     area: [f32; 4],
     colors: &ChromeColors,
     m: &ChromeMetrics,
@@ -580,9 +581,8 @@ fn panes_overlay(
     out: &mut ChromeLayout,
 ) {
     let s = m.scale;
-    let frames = pane_frames(area, s);
-    for (right, (pane, frame)) in [(false, (&panes[0], frames.0)), (true, (&panes[1], frames.1))]
-    {
+    let frames = pane_frames(area, s, panes.len());
+    for (i, (pane, frame)) in panes.iter().zip(frames).enumerate() {
         let header_h = PANE_HEADER * s;
         // Header band first, then the frame's border over everything, so the
         // rounded corners stay crisp where the band meets them.
@@ -611,9 +611,9 @@ fn panes_overlay(
         // the focused pane's body stays the grid's, so only its header
         // answers as chrome.
         if pane.focused {
-            out.hit.push(header, HitRegion::Pane(right));
+            out.hit.push(header, HitRegion::Pane(i));
         } else {
-            out.hit.push(frame, HitRegion::Pane(right));
+            out.hit.push(frame, HitRegion::Pane(i));
         }
 
         let mut x = frame[0] + 10.0 * s;
@@ -3243,21 +3243,21 @@ mod tests {
             focused,
             accent: 0,
         };
-        model.panes = Some([pane(true), pane(false)]);
+        model.panes = Some(vec![pane(true), pane(false)]);
         let l = layout(&model, &colors(), &m, &mut measure);
 
         // Deep inside the right (unfocused) pane's body, well clear of both
         // its header and the frame's border.
-        let (_, right) = pane_frames(model.grid_area, m.scale);
+        let right = pane_frames(model.grid_area, m.scale, 2)[1];
         let body = pane_body(right, m.scale);
         let (x, y) = (body[0] + body[2] / 2.0, body[1] + body[3] / 2.0);
         assert_eq!(
             l.hit.hit(x, y),
-            Some(HitRegion::Pane(true)),
+            Some(HitRegion::Pane(1)),
             "the unfocused pane claims its whole frame — that is the click-to-focus target"
         );
         assert_ne!(
-            super::super::hit::wheel_target(l.hit.hit(x, y), Some(false)),
+            super::super::hit::wheel_target(l.hit.hit(x, y), Some(0)),
             super::super::hit::WheelTarget::Strip,
             "a wheel in the middle of a terminal must never scroll the tab strip"
         );
@@ -3769,19 +3769,20 @@ mod tests {
         let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
         let m = metrics(1200.0, 800.0, 1.0);
         let mut mo = model(tabs, TabsPosition::Top);
-        mo.panes = Some([
+        mo.panes = Some(vec![
             PaneModel { host: "studio".into(), sub: "~/dev".into(), focused: true, accent: 0 },
             PaneModel { host: "forge".into(), sub: "C:\\src".into(), focused: false, accent: 2 },
         ]);
         let l = layout(&mo, &colors(), &m, &mut measure);
 
         let area = mo.grid_area;
-        let (lf, rf) = pane_frames(area, 1.0);
+        let frames = pane_frames(area, 1.0, 2);
+        let (lf, rf) = (frames[0], frames[1]);
         let lb = pane_body(lf, 1.0);
         // Middle of the unfocused (right) pane: chrome, and it says which.
         assert_eq!(
             l.hit.hit(rf[0] + rf[2] / 2.0, rf[1] + rf[3] / 2.0),
-            Some(HitRegion::Pane(true)),
+            Some(HitRegion::Pane(1)),
             "the unfocused pane is one click from the keyboard"
         );
         // Middle of the focused pane's body: nobody's chrome — the grid's.
@@ -3793,13 +3794,54 @@ mod tests {
         // Its header still answers, so focus can bounce back by header too.
         assert_eq!(
             l.hit.hit(lf[0] + lf[2] / 2.0, lf[1] + 14.0),
-            Some(HitRegion::Pane(false)),
+            Some(HitRegion::Pane(0)),
             "the focused header is still chrome"
         );
         assert!(
             l.texts.iter().any(|t| t.text == "focused"),
             "the focused pane says so in words"
         );
+    }
+
+    #[test]
+    fn any_number_of_panes_tile_the_grid_area_and_each_is_a_click_target() {
+        // #436: two was the design's shape, not a limit. Every pane gets an
+        // equal column, the frames never overlap or leave the area, and each
+        // unfocused one is reachable by a click that names its index.
+        use crate::chrome::model::PaneModel;
+        let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
+        let m = metrics(1600.0, 800.0, 1.0);
+        for n in 1..=5 {
+            let mut mo = model(tabs.clone(), TabsPosition::Top);
+            mo.panes = Some(
+                (0..n)
+                    .map(|i| PaneModel {
+                        host: format!("host{i}"),
+                        sub: String::new(),
+                        focused: i == 2 % n,
+                        accent: i,
+                    })
+                    .collect(),
+            );
+            let l = layout(&mo, &colors(), &m, &mut measure);
+            let area = mo.grid_area;
+            let frames = pane_frames(area, 1.0, n);
+            assert_eq!(frames.len(), n, "one frame per pane");
+            for (i, f) in frames.iter().enumerate() {
+                assert!(f[0] >= area[0] && f[0] + f[2] <= area[0] + area[2] + 0.01, "pane {i} of {n} stays inside the grid area");
+                if i > 0 {
+                    let prev = frames[i - 1];
+                    assert!(f[0] >= prev[0] + prev[2], "pane {i} of {n} does not overlap its left neighbour");
+                }
+                assert!((f[2] - frames[0][2]).abs() < 0.01, "pane {i} of {n} is the same width as the first");
+                let hit = l.hit.hit(f[0] + f[2] / 2.0, f[1] + f[3] / 2.0);
+                if i == 2 % n {
+                    assert_eq!(hit, None, "the focused pane's body belongs to the terminal");
+                } else {
+                    assert_eq!(hit, Some(HitRegion::Pane(i)), "pane {i} of {n} is one click from the keyboard");
+                }
+            }
+        }
     }
 
     #[test]
