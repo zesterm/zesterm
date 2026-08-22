@@ -2,7 +2,17 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      viewport-fit=cover: the page reaches under the iPad's rounded corners
+      and home indicator, and the chrome pads itself with env(safe-area-inset-*).
+      interactive-widget=resizes-content: Chrome on Android shrinks the layout
+      viewport for the soft keyboard instead of overlaying it; Safari ignores
+      the token and visual-viewport.ts covers it there.
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <title>zesterm</title>
 
     <!--

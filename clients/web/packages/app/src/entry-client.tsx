@@ -24,6 +24,7 @@ import { MONO_FAMILY } from './chrome-model.ts';
 import { deviceKey } from './device-key.ts';
 import { routerPlugin } from './routes.tsx';
 import { initThemeStore } from './state/theme.ts';
+import { watchVisualViewport } from './visual-viewport.ts';
 import './style.css';
 
 // The grid's font constant, mirrored into a CSS variable so the chrome's mono
@@ -38,6 +39,10 @@ document.documentElement.style.setProperty('--zt-mono', MONO_FAMILY);
 // here because this is the one place that may hand it the real DOM.
 const store = initThemeStore(document.documentElement, window.localStorage);
 const theme = store.theme;
+
+// The soft keyboard, on the platforms that overlay it rather than resize for
+// it (iOS Safari). Writes --zt-vv-height/--zt-vv-top, which .shell reads.
+watchVisualViewport(window, document.documentElement);
 
 const socketUrl =
   (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/_sigx/socket';

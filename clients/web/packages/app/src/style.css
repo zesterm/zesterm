@@ -237,6 +237,10 @@ body {
   color: transparent;
   caret-color: transparent;
   overflow: hidden;
+  /* iOS zooms the page to any focused input whose text is under 16px, and
+     an invisible textarea inherits 12.5px — the whole terminal jumped on
+     every tap. The box is 1px either way; only the threshold matters. */
+  font-size: 16px;
 }
 
 /* --- blocks pane (#151, design §3–§4) ------------------------------------
@@ -586,6 +590,14 @@ body {
 .shell {
   display: flex;
   flex-direction: column;
+  /* The visual viewport, not the layout one. iOS Safari does not shrink the
+     layout viewport for the soft keyboard; it pushes the page up and the
+     prompt line disappears under the keys. visual-viewport.ts writes these
+     two while the keyboard is up and clears them after, so with no keyboard
+     the rule is the `height: 100%` above, unchanged. The .term-wrap
+     ResizeObserver then refits the grid on its own. */
+  height: var(--zt-vv-height, 100%);
+  transform: translateY(var(--zt-vv-top, 0px));
 }
 
 /* --- page frame (design §7–§8, §12: fleet, themes, launch targets) --------

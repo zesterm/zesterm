@@ -402,6 +402,16 @@ export const TerminalView = component<{
             // next tick instead of fighting the browser's own focus handling.
             setTimeout(() => inputEl?.focus(), 0);
           }}
+          onClick={() => {
+            // A second, SYNCHRONOUS focus, for touch. iOS/iPadOS Safari opens
+            // the soft keyboard only for a focus() that runs inside the user
+            // gesture's own task — the deferred one above takes focus and
+            // shows nothing, and a tap does not reliably synthesise mousedown
+            // at all. So on an iPad the terminal was readable and untypeable
+            // (#421). `click` is the gesture task on every browser; no
+            // preventDefault, so selection keeps working with a mouse.
+            inputEl?.focus();
+          }}
         >
           {/* The header row this used to carry belongs to the tab chrome now
               (the chip owns the title via onTitle); connection state keeps a
@@ -431,6 +441,12 @@ export const TerminalView = component<{
             class="term-input"
             ref={(el: HTMLTextAreaElement) => {
               inputEl = el;
+              // Safari-only attribute, absent from the JSX typings. An
+              // autocorrect replacement arrives as deleteContentBackward +
+              // insertText against a textarea that onInput already emptied,
+              // so the deletion is never forwarded and the shell keeps the
+              // word it corrected away. Off is the honest setting.
+              el.setAttribute('autocorrect', 'off');
             }}
             autoComplete="off"
             autocapitalize="off"
