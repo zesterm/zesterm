@@ -269,7 +269,10 @@ the history behind them is in closed issues and PRs.
       `PairingDecision` and enrol an arbitrary remote key, unattended. Worth
       closing while a general local gate is not: a prompt-injected
       *cooperating* agent has only the tools it was given.
-- [ ] Per-block consent and redaction, fleet-wide block search, the agent pane.
+- [ ] Per-block consent and redaction, in `zest-core`, masking the delta so
+      every client sees one masked truth — ADR-015's amendment records why a
+      prompt-boundary filter is rejected. Plus fleet-wide block search and the
+      agent pane.
 
 **Deliberately not built:** no chat sidebar; no agent loop of our own
 (harnesses improve monthly and a terminal shipping an inferior one ages badly —

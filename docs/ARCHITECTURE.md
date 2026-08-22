@@ -1426,3 +1426,27 @@ shipping an inferior one ages badly. Be the substrate.
 because the caller is a model and an argument that can lift a ceiling is not a
 ceiling. Zero means zero for both — reading it as "unbounded" is the reading
 that once let `max_lines: 0` switch truncation off entirely.
+
+**Amended (#63): redaction belongs in core, and the prompt-boundary filter is
+rejected before anyone builds it.** Consent and redaction are still open work
+(roadmap § Agents), but their placement was argued when this workstream was
+first staged and is worth recording before the obvious version gets built: a
+filter on the way out, where `zest-mcp` assembles a tool result. That shape
+protects exactly one consumer — the moment two paths reach the same session,
+one of them is unfiltered, and many paths reaching the same session is what
+this system *is*: the window, the phone, the browser and the agent all read
+the same deltas. A `Redactor` over the grid in `zest-core` masks the *delta*,
+so every client sees one masked truth — the same shape of argument that keeps
+the live palette in core (ADR-002) and the block index host-side rather than
+in each reader. The unit of consent is the `Block`: the largest thing a person
+can actually read before deciding, and the smallest thing that is meaningful
+on its own.
+
+And redaction is wanted for a reason ADR-004 must not be read as covering.
+"Clients never interpret VT" structurally eliminates escape-sequence injection
+into client *parsers*; it says nothing about a consumer that reads the text
+**for meaning** — a build log can carry instructions addressed to a model.
+The no-call-outstanding rule above keeps such text from manufacturing a turn;
+redaction in core bounds what a steered agent can be made to leak, because an
+agent cannot exfiltrate what no client was ever shown. Two mitigations, aimed
+at the two halves of one hazard.
