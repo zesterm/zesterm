@@ -764,7 +764,11 @@ impl TermState {
                 None => (None, rest),
                 Some(slash) => {
                     let authority = &rest[..slash];
-                    ((!authority.is_empty()).then(|| authority.to_string()), &rest[slash..])
+                    // `String::from`, not `.to_string()`: the latter needs
+                    // `alloc::string::ToString` in scope, which only the std
+                    // prelude provides — the wasm32 no_std build is the one
+                    // that notices.
+                    ((!authority.is_empty()).then(|| String::from(authority)), &rest[slash..])
                 }
             },
         };
