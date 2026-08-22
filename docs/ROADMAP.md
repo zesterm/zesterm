@@ -157,14 +157,19 @@ the value, and the exit chip selects its failed block. Both design-doc
 stances (§no-status-bar, never-overlay-live-prompt) are annotated rather than
 broken.
 
-- [ ] **The prompt becomes the chips (3b).** Compact-PS1 mode in the injected
-      hooks — opt-in `prompt.compact_ps1`, the daemon reading its host's own
-      setting at spawn, PS1 collapsing to a blank line + `❯` so the cwd lives
-      only in the chip; skipped when p10k/starship own PS1. A cwd-chip cd
-      navigator (recent block cwds, `cd` sent through the ordinary input path
-      only at a live prompt); exit-chip *reveal* (scroll math across wrapped
-      lines) where 3a only selects; web-side `prompt.widgets` filtering once
-      a browser has somewhere to read it from.
+The prompt became the chips with #426: opt-in `prompt.compact_ps1` (read by
+the daemon at spawn — the shell runs on the host, so the host decides — and
+declined when p10k/starship/oh-my-posh own PS1) collapses PS1 to a blank
+line + `❯`, the blank row being exactly the chip layout's preferred home; the
+cwd chip opens a recent-directories menu on the block-menu chassis (`cd`
+typed through the ordinary input path, single-quote wrapping, gated on the
+live prompt at build *and* click); and the exit chip reveals its failed block
+via `Grid::scroll_to_line`, which lives in the grid because wrapping makes
+row count and line-id distance disagree.
+
+- [ ] **Web-side `prompt.widgets` filtering**, once a browser has somewhere
+      to read another machine's display preference from — or a decision that
+      chips shown in the browser are simply all of them.
 - [ ] **Per-block context history.** `BlockPayload.context` snapshot stamped
       at OSC 133;C — "that failing build ran on branch X" — for humans and
       for `blocks` over MCP.

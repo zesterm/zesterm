@@ -93,9 +93,31 @@ __zesterm_fact() {
 # `%{...%}` tells zsh the enclosed bytes occupy no columns. Without it zsh
 # believes the prompt is wider than it is and mis-positions the cursor on every
 # redraw -- which looks like a rendering bug and is not one.
+#
+# Compact mode (ZESTERM_COMPACT_PS1, from the `prompt.compact_ps1` setting):
+# the prompt *is* the chips, so PS1 collapses to a blank line -- the chips'
+# guaranteed home -- and `❯ `. Only when nothing else owns PS1: a framework
+# (p10k, starship, oh-my-posh) rebuilds it in its own precmd, which runs
+# before this re-wrap, and clobbering their work is a fight the user picked
+# a *framework* for, not this setting. The newline comes *before* the `A`
+# marker on purpose: the block then anchors on the `❯` row, and the blank
+# line above it is exactly the row the chip layout prefers -- left-aligned,
+# the Warp shape -- rather than a wasted row inside the block.
 __zesterm_wrap_prompt() {
+    if [[ -n ${ZESTERM_COMPACT_PS1-} ]] && ! __zesterm_ps1_owned; then
+        PS1=$'\n%{\e]133;A\a%}❯ %{\e]133;B\a%}'
+        return
+    fi
     [[ $PS1 == *'133;A'* ]] && return
     PS1=$'%{\e]133;A\a%}'$PS1$'%{\e]133;B\a%}'
+}
+
+# Whether a prompt framework owns PS1. Best effort, erring toward "owned":
+# a framework we fail to detect overwrites our compact PS1 next precmd
+# anyway, so a miss degrades to the framework winning -- the safe direction.
+__zesterm_ps1_owned() {
+    (( ${+functions[p10k]} )) && return 0
+    [[ -n ${STARSHIP_SHELL-} || -n ${POSH_THEME-} ]]
 }
 
 # Appended, so they run *after* whatever the user's rc registered. A prompt

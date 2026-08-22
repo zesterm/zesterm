@@ -736,6 +736,27 @@ impl Grid {
         self.display_offset = 0;
     }
 
+    /// Scroll the viewport so the row bearing `line` is visible, at the top
+    /// where the scrollback allows. Returns whether the line was found —
+    /// evicted history is a `false`, never a scroll to somewhere wrong.
+    ///
+    /// Lives here rather than in a client because only the grid can do this
+    /// arithmetic: wrapping means row count and line-id distance disagree,
+    /// so a caller working from ids alone lands a screenful off exactly when
+    /// the history is interesting enough to be revisiting.
+    pub fn scroll_to_line(&mut self, line: LineId) -> bool {
+        let Some(index) = (0..self.storage.len()).find(|&i| self.storage.row(i).id == line)
+        else {
+            return false;
+        };
+        // `index` at the viewport's top row means an offset of
+        // `len - rows - index`; a line already inside the bottom screen
+        // saturates to 0, which is "scrolled to bottom" and still shows it.
+        let want = self.storage.len().saturating_sub(self.rows).saturating_sub(index);
+        self.display_offset = want.min(self.scrollback_len);
+        true
+    }
+
     // --- resize ----------------------------------------------------------
 
     /// Resize the viewport.
@@ -1573,6 +1594,39 @@ mod eviction_tests {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn scroll_to_line_finds_history_and_declines_what_is_gone() {
+        // 4 rows visible, 30 printed: most of the session is scrollback.
+        let mut t = crate::Terminal::new(20, 4, 500);
+        for i in 0..30 {
+            t.advance(format!("line {i}\r\n").as_bytes());
+        }
+        let target = t
+            .grid()
+            .line(3)
+            .map(|r| r.id)
+            .expect("thirty printed lines put index 3 in scrollback");
+
+        assert!(t.scroll_to_line(target), "a held line must be found");
+        assert_eq!(
+            t.grid().row(0).text().trim_end(),
+            "line 3",
+            "the revealed line lands at the top of the viewport"
+        );
+
+        // A line that never existed: no scroll, and an honest false — a
+        // reveal that lands somewhere wrong is worse than none.
+        let offset = t.grid().display_offset();
+        assert!(!t.scroll_to_line(9_999_999), "an unknown line must decline");
+        assert_eq!(t.grid().display_offset(), offset, "a decline must not move the view");
+
+        // A line already on the live screen saturates to bottom, which shows it.
+        t.scroll_to_bottom();
+        let visible = t.grid().line_id_at(1).expect("a visible row");
+        assert!(t.scroll_to_line(visible));
+        assert_eq!(t.grid().display_offset(), 0, "a visible line needs no scrolling back");
+    }
 
     #[test]
     fn narrowing_and_widening_restores_the_text() {

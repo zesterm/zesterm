@@ -240,6 +240,13 @@
     "Prompt": {
       "description": "The context chips beside the live prompt: which show, in what order.",
       "properties": {
+        "compact_ps1": {
+          "default": false,
+          "description": "Let the chips *be* the prompt: new shells get a PS1 of just `❯`, on\nits own line, so the cwd and branch live only in the chips above it.\n\nOff by default — it rewrites something people curate. The injected\nintegration honours it only when nothing else owns PS1: a prompt\nframework (powerlevel10k, starship, oh-my-posh) rebuilds PS1 on every\nprompt, and a fight the user did not pick is worse than a long\nprompt. Existing sessions keep the prompt they started with; the\nshell reads this once, at spawn, on the machine that runs it.",
+          "type": "boolean",
+          "x_zest_group": "Prompt",
+          "x_zest_widget": "toggle"
+        },
         "widgets": {
           "default": [
             "cwd",
@@ -647,6 +654,7 @@
     "prompt": {
       "$ref": "#/$defs/Prompt",
       "default": {
+        "compact_ps1": false,
         "widgets": [
           "cwd",
           "git",

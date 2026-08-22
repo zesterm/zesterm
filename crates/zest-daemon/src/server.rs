@@ -1252,6 +1252,16 @@ impl Connection {
                 // something that is not a shell at all.
                 if self.config.shell_integration {
                     spec.enable_shell_integration(&shell_integration_dir());
+                    // The shell runs on *this* machine, so this machine's
+                    // settings decide its prompt (the ROADMAP's rule for
+                    // every shell-integration switch). Read at spawn, like
+                    // the offer reads profiles on demand: a session keeps
+                    // the prompt it started with, which is also what the
+                    // setting's `Restart` invalidation class promises.
+                    let load = zest_config::load(&zest_config::Options::default());
+                    if load.resolved.settings.prompt.compact_ps1 {
+                        spec.env.push(("ZESTERM_COMPACT_PS1".into(), "1".into()));
+                    }
                 }
                 match self.registry.create(&spec, PtySize::new(cols, rows), 10_000) {
                     Ok(created) => {

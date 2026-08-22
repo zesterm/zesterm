@@ -235,6 +235,17 @@
     "restartHint": false
   },
   {
+    "key": "prompt.compact_ps1",
+    "group": "Prompt",
+    "widget": "toggle",
+    "description": "Let the chips *be* the prompt: new shells get a PS1 of just `❯`, on\nits own line, so the cwd and branch live only in the chips above it.\n\nOff by default — it rewrites something people curate. The injected\nintegration honours it only when nothing else owns PS1: a prompt\nframework (powerlevel10k, starship, oh-my-posh) rebuilds PS1 on every\nprompt, and a fight the user did not pick is worse than a long\nprompt. Existing sessions keep the prompt they started with; the\nshell reads this once, at spawn, on the machine that runs it.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": false,
+    "restartHint": false
+  },
+  {
     "key": "prompt.widgets",
     "group": "Prompt",
     "widget": "tag-list",
