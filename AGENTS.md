@@ -822,12 +822,19 @@ you need before you trip on it.
   that does not parse must *block* the exit; a buffer whose profile vanished
   must be *dropped*, or it writes into whatever the editor fell back to. (#272;
   the Settings tab has the same shape and is not fixed yet.)
-- **iOS opens the soft keyboard only for a `focus()` that runs inside the
-  gesture's own task.** The web client focused its hidden textarea off a
+- **iOS opens the soft keyboard only for a focus *change* that runs inside
+  the gesture's own task — and `focus()` on the element that already holds
+  focus is not a change.** The web client focused its hidden textarea off a
   `setTimeout` from `mousedown` — which took focus, showed no keyboard, and on
   an iPad left a terminal that could be read and not typed into, with no
-  error anywhere. A synchronous `focus()` in the `click` handler is the fix
-  (`TerminalView.tsx`), beside the deferred one that protects mouse selection.
+  error anywhere. A synchronous `focus()` in the `click` handler was the
+  first fix (#421) and opened nothing either: the textarea is focused at
+  mount, so the tap changed no focus. `blur()` then `focus()` in the same
+  task is the re-open (`soft-keyboard.ts`, #428) — for a *touch* only, a
+  mouse click on a focused terminal must not flash focus-out at vim. And
+  `document.activeElement` does not say whether the keyboard is up: iOS's
+  own dismiss key hides it without blurring. The visual viewport does
+  (`visual-viewport.ts` writes `kbd-up`), and a ⌨ toggle reads that.
   Two neighbours: an input under 16px makes iOS zoom the page on focus, and
   iPadOS Safari reports `navigator.platform === 'MacIntel'` — right for chord
   conventions with a hardware keyboard, wrong as a touch test; detect touch

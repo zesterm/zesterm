@@ -230,6 +230,13 @@ row count and line-id distance disagree.
       digit (only the digit: the program decides what it means). Touch
       only, or where the key bar is on; a mouse click on output still means
       "focus". `optionOf` in `blocks-pane-model.ts`, #421.
+- [x] **Part 4 — it opens on the device.** Part 1's synchronous `focus()`
+      was a no-op on a real iPad: the textarea is focused at mount, and iOS
+      opens the keyboard only for a focus *change* in the gesture. A touch on
+      a focused terminal now blurs and refocuses, ⌨ reads keyboard-up from
+      the visual viewport rather than `activeElement` (iOS's dismiss key does
+      not blur), and the bar is 44px over the keyboard instead of ~90
+      (`soft-keyboard.ts`, #428).
 - [ ] Browser device enrollment: non-extractable Ed25519 key, approved via the
       desktop modal with a matching code.
 - [ ] Bun single-file sidecar hosting `@sigx/actors`, spawned as a child of the

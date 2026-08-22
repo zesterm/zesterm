@@ -54,6 +54,7 @@ import {
   type CapId,
   type LatchState,
 } from '../keybar-model.ts';
+import { applyFocusAction, kbdCapAction, keyboardUp, tapTerminalAction } from '../soft-keyboard.ts';
 import { GridPane, type GridPaneHooks } from './GridPane.tsx';
 import { BlocksPane } from './BlocksPane.tsx';
 import { KeyBar } from './KeyBar.tsx';
@@ -112,6 +113,12 @@ export const TerminalView = component<{
   // Ctrl is a promise about the next key into THIS session, and it applies
   // whether that key comes from a cap or from the soft keyboard.
   const bar = signal<{ latch: LatchState }>({ latch: NO_LATCH });
+
+  // The pointer that started the current gesture, from `pointerdown` — the
+  // one event with a trustworthy `pointerType` on every browser (a `click`
+  // is a PointerEvent only on some). A touch and a mouse want different
+  // things from a tap on the terminal (see onClick on the wrap).
+  let lastPointer = '';
 
   const status = signal<{ state: ConnectionState; exited: number | null | false }>({
     state: { phase: 'connecting' },
@@ -367,13 +374,16 @@ export const TerminalView = component<{
 
   const onCap = (id: CapId): void => {
     if (id === 'kbd') {
-      // The one cap about focus rather than bytes. Blurring the textarea is
-      // how a soft keyboard is dismissed; focusing it inside this click —
-      // the gesture's own task — is what brings it back (see onClick on the
-      // wrap). The cap itself never took focus (KeyBar cancels pointerdown),
-      // so activeElement still says which way to go.
-      if (document.activeElement === inputEl) inputEl?.blur();
-      else inputEl?.focus();
+      // The one cap about focus rather than bytes. Which way to go is the
+      // visual viewport's to say, never activeElement's: iOS's own dismiss
+      // key hides the keyboard without blurring, and the textarea is focused
+      // from mount on — read that way the cap blurred a hidden keyboard on
+      // its first tap and did nothing on the second (#428). Inside this
+      // click, the gesture's own task, so the focus change counts.
+      applyFocusAction(
+        inputEl,
+        kbdCapAction({ keyboardUp: keyboardUp(), active: document.activeElement === inputEl }),
+      );
       return;
     }
     const r = tapCap(id, bar.latch, client.grid.modes);
@@ -467,21 +477,35 @@ export const TerminalView = component<{
           ref={(el: HTMLElement) => {
             wrapEl = el;
           }}
+          onPointerDown={(e: PointerEvent) => {
+            lastPointer = e.pointerType;
+          }}
           onMouseDown={() => {
             // Clicking anywhere in the terminal focuses the hidden input —
             // preventDefault would break future selection, so focus rides the
             // next tick instead of fighting the browser's own focus handling.
+            // Not on touch: a focus that lands outside the gesture takes
+            // focus and opens no keyboard, and then the click below has no
+            // focus change left to make (#428).
+            if (lastPointer === 'touch') return;
             setTimeout(() => inputEl?.focus(), 0);
           }}
           onClick={() => {
-            // A second, SYNCHRONOUS focus, for touch. iOS/iPadOS Safari opens
-            // the soft keyboard only for a focus() that runs inside the user
-            // gesture's own task — the deferred one above takes focus and
-            // shows nothing, and a tap does not reliably synthesise mousedown
-            // at all. So on an iPad the terminal was readable and untypeable
-            // (#421). `click` is the gesture task on every browser; no
-            // preventDefault, so selection keeps working with a mouse.
-            inputEl?.focus();
+            // The SYNCHRONOUS focus, for touch. iOS/iPadOS opens the soft
+            // keyboard only for a focus *change* that runs inside the user
+            // gesture's own task — and the textarea is focused from mount
+            // on, so a plain focus() here changed nothing and opened nothing
+            // (#428, after #421 tried exactly that). A touch on a focused
+            // terminal blurs and refocuses instead; a mouse click leaves a
+            // focused terminal alone. `click` is the gesture task on every
+            // browser; no preventDefault, so selection keeps working.
+            applyFocusAction(
+              inputEl,
+              tapTerminalAction({
+                active: document.activeElement === inputEl,
+                touch: lastPointer === 'touch',
+              }),
+            );
           }}
         >
           {/* The header row this used to carry belongs to the tab chrome now

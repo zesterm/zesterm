@@ -53,7 +53,15 @@ test('an unmeasurable viewport clears rather than writing 0px', () => {
 test('the watcher mirrors the viewport onto the root and removes what it cleared', () => {
   const props = new Map<string, string>();
   let writes = 0;
+  const classes = new Set<string>();
+  const upSeen: boolean[] = [];
   const root = {
+    classList: {
+      toggle: (c: string, on: boolean) => {
+        if (on) classes.add(c);
+        else classes.delete(c);
+      },
+    },
     style: {
       setProperty: (n: string, v: string) => {
         writes++;
@@ -74,14 +82,17 @@ test('the watcher mirrors the viewport onto the root and removes what it cleared
   };
   const win = { visualViewport: vv as never, innerHeight: 1024 };
 
-  const stop = watchVisualViewport(win, root);
+  const stop = watchVisualViewport(win, root, (up) => upSeen.push(up));
   assert.equal(props.size, 0, 'no keyboard at mount: nothing written');
+  assert.deepEqual(upSeen, [], 'keyboard down at mount is not a change to report');
   assert.equal(writes, 0, 'and no removeProperty of something never set — a style write per event is a style invalidation per event');
 
   vv.height = 612;
   listeners.get('resize')?.();
   assert.equal(props.get('--zt-vv-height'), '612px');
   assert.equal(writes, 2);
+  assert.ok(classes.has('kbd-up'), 'the stylesheet reads keyboard-up as a root class (#428)');
+  assert.deepEqual(upSeen, [true], 'the ⌨ cap reads keyboard-up from here, not from activeElement');
 
   // A pan while the keyboard is up fires `scroll` on every frame with the
   // same geometry; none of those may reach the DOM.
@@ -93,12 +104,15 @@ test('the watcher mirrors the viewport onto the root and removes what it cleared
   listeners.get('scroll')?.();
   assert.equal(props.get('--zt-vv-top'), '40px');
   assert.equal(writes, 3, 'only the property that changed is written');
+  assert.deepEqual(upSeen, [true], 'a pan is not a keyboard change');
 
   vv.height = 1024;
   vv.offsetTop = 0;
   listeners.get('resize')?.();
   assert.equal(props.size, 0, 'keyboard dismissed: both properties removed, so 100% applies again');
   assert.equal(writes, 5);
+  assert.ok(!classes.has('kbd-up'));
+  assert.deepEqual(upSeen, [true, false]);
 
   stop();
   assert.equal(listeners.size, 0);

@@ -34,6 +34,15 @@ export interface ShellVars {
 export const NO_SHELL_VARS: ShellVars = { '--zt-vv-height': null, '--zt-vv-top': null };
 
 /**
+ * "The keyboard is taking space" is the same fact as "the vars are set":
+ * the one decision, read by the key bar's ⌨ cap and by the stylesheet (as
+ * the `kbd-up` root class) as well as by the shell's height (#428).
+ */
+export function keyboardUpFor(vars: ShellVars): boolean {
+  return vars['--zt-vv-height'] !== null;
+}
+
+/**
  * Sub-pixel jitter: a visual viewport that is 0.5px shorter than the layout
  * one is not a keyboard, and a rule that fires on it would re-lay out the
  * shell (and resize every pty) on scroll-bar and rubber-band noise.
@@ -73,15 +82,26 @@ export interface WindowLike {
  * as the page) but a test can. A browser with no `visualViewport` gets the
  * stylesheet's behaviour and nothing else.
  */
-export function watchVisualViewport(win: WindowLike, root: HTMLElement): () => void {
+export function watchVisualViewport(
+  win: WindowLike,
+  root: HTMLElement,
+  onKeyboard?: (up: boolean) => void,
+): () => void {
   const vv = win.visualViewport;
   if (vv === null) return () => {};
   // What was last written. `scroll` fires on every frame of a pan while
   // the keyboard is up, and a style write per frame — even of the same
   // value — is a style invalidation per frame; only a change reaches the DOM.
   let applied: ShellVars = NO_SHELL_VARS;
+  let up = false;
   const apply = (): void => {
     const vars = shellVarsFor(vv, win.innerHeight);
+    const nowUp = keyboardUpFor(vars);
+    if (nowUp !== up) {
+      up = nowUp;
+      root.classList.toggle('kbd-up', up);
+      onKeyboard?.(up);
+    }
     for (const name of Object.keys(vars) as (keyof ShellVars)[]) {
       const value = vars[name];
       if (value === applied[name]) continue;

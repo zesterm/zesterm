@@ -48,6 +48,18 @@ test('the hidden textarea is 16px, the threshold under which iOS zooms to a focu
   );
 });
 
+test('the key bar is no taller than a finger needs, and drops the home-indicator inset over a keyboard', () => {
+  const cap = /\.key-cap\s*\{[^}]*height:\s*(\d+)px/.exec(css);
+  assert.ok(
+    cap !== null && Number(cap[1]) <= 36,
+    'a 44px cap plus padding plus inset ate ~90px of a phone screen already halved by the keyboard (#428)',
+  );
+  assert.ok(
+    /:root\.kbd-up \.key-bar\s*\{[^}]*padding-bottom:\s*4px/.test(css),
+    'with the keyboard up the bar sits above the keys, not the home indicator — the inset is dead space there',
+  );
+});
+
 test('the shell reads the visual-viewport variables with the stylesheet height as fallback', () => {
   assert.ok(
     /\.shell\s*\{[^}]*height:\s*var\(--zt-vv-height,\s*100%\)/.test(css),

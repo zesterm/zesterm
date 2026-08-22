@@ -1907,17 +1907,22 @@ body {
 
 /* --- key bar (#421, design screen 10 on the web) ---------------------------
 
-   The keys a soft keyboard has not got, in a row under the terminal. Caps
-   are 44px tall — the design's floor for anything a finger hits — and the
+   The keys a soft keyboard has not got, in a row under the terminal. The
    row scrolls sideways rather than wrapping, so the terminal above keeps a
-   predictable height. The bottom padding reaches under the home indicator
-   (viewport-fit=cover), never the caps themselves. */
+   predictable height — and it is as short as a finger allows: 36px caps
+   with 4px around them, 44px in all, because every pixel here comes out
+   of a phone screen already halved by the keyboard (#428; the phone
+   design's 44px floor is for list rows, and iOS's own accessory keys are
+   shorter than its rows too). The bottom padding reaches under the home
+   indicator (viewport-fit=cover) only while there is one under the bar:
+   with the keyboard up the shell is sized to the visual viewport and the
+   bar sits above the keys, so the inset would be dead space. */
 
 .key-bar {
   display: flex;
   flex: none;
-  gap: 6px;
-  padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px));
+  gap: 4px;
+  padding: 4px 8px calc(4px + env(safe-area-inset-bottom, 0px));
   overflow-x: auto;
   overscroll-behavior-x: contain;
   border-top: 1px solid var(--zt-line);
@@ -1934,17 +1939,22 @@ body {
   display: none;
 }
 
+/* `kbd-up` is written by visual-viewport.ts when the keyboard takes space. */
+:root.kbd-up .key-bar {
+  padding-bottom: 4px;
+}
+
 .key-cap {
   flex: none;
-  min-width: 44px;
-  height: 44px;
-  padding: 0 12px;
+  min-width: 40px;
+  height: 36px;
+  padding: 0 10px;
   border: 1px solid var(--zt-line);
-  border-radius: 9px;
+  border-radius: 7px;
   background: var(--zt-panel);
   color: var(--zt-dim);
   font-family: var(--zt-mono, ui-monospace, monospace);
-  font-size: 13px;
+  font-size: 12px;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
 }
