@@ -210,11 +210,19 @@ pub fn rerun_bytes(block: &Block) -> Option<Vec<u8>> {
 /// Single quotes are the one wrapping posix shells and PowerShell both read
 /// literally, so one spelling serves whatever is on the far end — *except*
 /// for a path containing a single quote, whose escape the two families
-/// spell differently. Those return `None`, and the menu excludes them
-/// upstream: a `cd` that lands somewhere wrong is worse than a row missing.
+/// spell differently. Those return `None`, and so does one carrying any
+/// control byte: these bytes are *typed*, and a CR or LF inside the path is
+/// an Enter mid-string — a command injection wearing a directory's name.
+/// OSC 7 percent-decodes, so `%0D` in a hostile title is exactly how such a
+/// path arrives. The menu excludes both upstream by asking this function
+/// (one copy of the rule): a `cd` that lands somewhere wrong, or runs
+/// something, is worse than a row missing.
 #[must_use]
 pub fn cd_bytes(path: &str) -> Option<Vec<u8>> {
-    if path.is_empty() || path.contains('\'') {
+    if path.is_empty()
+        || path.contains('\'')
+        || path.chars().any(|c| c.is_control())
+    {
         return None;
     }
     // CR, not LF: a pty expects the carriage return a keyboard produces.
@@ -260,6 +268,11 @@ mod tests {
             "a quoted quote is spelled differently per shell; declining beats guessing"
         );
         assert!(cd_bytes("").is_none());
+        assert!(
+            cd_bytes("/tmp/x\rrm -rf ~\r").is_none(),
+            "a control byte in a typed path is an Enter mid-string — an injection, not a cd"
+        );
+        assert!(cd_bytes("/tmp/a\nb").is_none(), "LF is the same injection in a longer coat");
     }
 
     #[test]

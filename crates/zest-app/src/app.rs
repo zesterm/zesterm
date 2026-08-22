@@ -2708,12 +2708,12 @@ impl App {
             let term = term.lock();
             let mut out: Vec<String> = Vec::new();
             for b in term.blocks().blocks().iter().rev() {
-                // A path holding a single quote is excluded rather than
-                // escaped: `cd 'p'` is the one spelling posix shells and
-                // PowerShell both read literally, and escaping a quote two
-                // different ways on a guess about the far shell is how a cd
-                // lands somewhere wrong. See `block_actions::cd_bytes`.
-                if b.cwd.is_empty() || b.cwd == chip_cwd || b.cwd.contains('\'') {
+                // What the menu offers is exactly what `cd_bytes` will type
+                // — asked of the same function, so the quoting rule and the
+                // control-byte rejection have one home and the menu cannot
+                // render a row the click then refuses (or, worse, one a
+                // regression would type).
+                if b.cwd == chip_cwd || block_actions::cd_bytes(&b.cwd).is_none() {
                     continue;
                 }
                 if !out.contains(&b.cwd) {
