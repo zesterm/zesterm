@@ -8,7 +8,12 @@ import assert from 'node:assert/strict';
 
 import { createHost, memoryStorage, type Host } from '@sigx/actors/host';
 
-import { LOCAL_DIRECTORY_KEY, SessionDirectory, type SessionEntry } from '../src/index.ts';
+import {
+  LOCAL_DIRECTORY_KEY,
+  SessionDirectory,
+  sessionEntryOf,
+  type SessionEntry,
+} from '../src/index.ts';
 
 /** Timers quiet enough that a test process exits when it is done. */
 const quiet = { sweepIntervalMs: 60_000, reminderTickMs: 60_000, callTimeoutMs: 0 };
@@ -33,6 +38,8 @@ function entry(session: string, title: string): SessionEntry {
     rows: 30,
     altScreen: false,
     attached: true,
+    busy: false,
+    context: null,
   };
 }
 
@@ -96,4 +103,43 @@ test('a dropped daemon link empties the list rather than serving it stale', asyn
   } finally {
     await host.stop();
   }
+});
+
+test('the projection carries context and busy, labels intact', () => {
+  // The #299 lesson, applied at the actor seam: a field the projection drops
+  // is a field every UI reads as blank while the wire carries it perfectly.
+  const entry = sessionEntryOf({
+    addr: { host: '2e'.repeat(32), session: 3 },
+    title: 'zsh',
+    cwd: '/home/andy/dev',
+    cols: 120,
+    rows: 30,
+    alt_screen: false,
+    attached: true,
+    busy: true,
+    context: {
+      git: { branch: 'main', detached: false, dirty: null },
+      facts: [{ key: 'venv', value: 'ml', source: 'shell_report' }],
+      revision: 4,
+    },
+  });
+  assert.equal(entry.busy, true);
+  assert.equal(entry.context?.git?.branch, 'main');
+  assert.equal(entry.context?.git?.dirty, null, 'unknown dirty stays unknown across the seam');
+  assert.deepEqual(entry.context?.facts, [{ key: 'venv', value: 'ml', source: 'shell_report' }]);
+  assert.equal(entry.context?.revision, 4);
+});
+
+test('a listing without context projects to "did not say", not to a crash', () => {
+  const entry = sessionEntryOf({
+    addr: { host: '2e'.repeat(32), session: 4 },
+    title: 'zsh',
+    cwd: '',
+    cols: 80,
+    rows: 24,
+    alt_screen: false,
+    attached: false,
+  });
+  assert.equal(entry.context, null);
+  assert.equal(entry.busy, false);
 });

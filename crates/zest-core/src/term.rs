@@ -154,6 +154,18 @@ pub enum TermEvent {
     /// host still drops it. Announced destruction, as opposed to eviction,
     /// which stays silent on purpose (`docs/CONTRACTS.md`). (#314)
     HistoryCleared,
+    /// The shell reported a new working directory (OSC 7 or OSC 633 `P;Cwd=`).
+    ///
+    /// Emitted on *change*, not per report — OSC 7 arrives on every prompt,
+    /// and a daemon that re-probed the same directory a thousand times a
+    /// session would be answering a question nobody asked again. `host` is the
+    /// authority part of the OSC 7 URL when the shell sent one: [`TermState`]
+    /// keeps only the path (a cwd that blanks itself the moment you ssh
+    /// somewhere is worse than one that is occasionally another machine's),
+    /// but a *probe* of that path must not run against the local filesystem
+    /// when the path lives elsewhere, and the host part is the only thing that
+    /// says so.
+    CwdChanged { host: Option<String>, path: String },
 }
 
 /// Damage accumulated since the last frame.
@@ -262,6 +274,14 @@ pub struct TermState {
     /// prompt marker that consumes it, and because the daemon reports it in
     /// `SessionInfo` for a session nobody is attached to.
     pub(crate) cwd: String,
+    /// The authority part of the last OSC 7 URL, when the shell sent one.
+    ///
+    /// Held beside [`Self::cwd`] rather than only riding
+    /// [`TermEvent::CwdChanged`] because an event is a moment and this is
+    /// state: whoever starts caring after the `cd` (an attach, a listing)
+    /// reads it here. `None` for a bare-path OSC 7 and for OSC 633 `P;Cwd=`,
+    /// whose dialect has no host at all.
+    pub(crate) cwd_host: Option<String>,
     /// Where the typed command starts, recorded at OSC 133;B.
     ///
     /// Transient parser state, not part of the index: `B` says "the prompt ends
@@ -449,6 +469,17 @@ impl Terminal {
         &self.state.cwd
     }
 
+    /// The machine [`Self::cwd`] is on, when the shell's OSC 7 named one.
+    ///
+    /// `None` means the shell sent no authority part, which every local hook
+    /// does — it does *not* mean "this machine", it means "nobody said
+    /// otherwise". A consumer probing the path against the local filesystem
+    /// should treat `Some` of anything it cannot recognise as "elsewhere".
+    #[must_use]
+    pub fn cwd_host(&self) -> Option<&str> {
+        self.state.cwd_host.as_deref()
+    }
+
     #[must_use]
     pub fn selection(&self) -> Option<crate::Selection> {
         self.state.selection
@@ -548,6 +579,7 @@ impl TermState {
             next_hyperlink_id: 0,
             blocks: BlockIndex::new(),
             cwd: String::new(),
+            cwd_host: None,
             prompt_end: None,
             pending_command: None,
             now_ms: None,

@@ -34,6 +34,7 @@ pub mod attest_sync;
 pub mod audit;
 pub mod client;
 pub mod auth;
+pub mod context;
 pub mod enroll;
 pub mod history;
 pub mod lan;

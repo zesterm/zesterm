@@ -57,6 +57,8 @@ function entry(over: Partial<SessionEntry>): SessionEntry {
     rows: 32,
     altScreen: false,
     attached: false,
+    busy: false,
+    context: null,
     ...over,
   };
 }

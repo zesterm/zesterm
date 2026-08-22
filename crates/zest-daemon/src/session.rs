@@ -138,12 +138,20 @@ impl Session {
     /// `wake` fires when there is something new to send. It is called on the
     /// *transition* to dirty, not per byte, so a flood is one wakeup rather
     /// than millions.
+    ///
+    /// `listing_changed` fires when a fact a *listing* reports moved — cwd,
+    /// title, busy, the alt screen — and only then: `wake` fires per output
+    /// burst, and routing listings through it would push the session list on
+    /// every printed byte. Separate callbacks because the two have different
+    /// audiences (subscribers of this session; watchers of the whole list)
+    /// and different rates, and the registry debounces the second.
     pub fn spawn(
         id: SessionId,
         cmd: &CommandSpec,
         size: PtySize,
         scrollback: usize,
         wake: impl Fn(SessionId) + Send + Sync + 'static,
+        listing_changed: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self, DaemonError> {
         let mut pty = zest_pty::NativePty::spawn(cmd, size)
             .map_err(|e| DaemonError::Spawn(e.to_string()))?;
@@ -176,6 +184,11 @@ impl Session {
                 .name(format!("zest-daemon-session-{}", id.0))
                 .spawn(move || {
                     let mut buf = vec![0u8; PARSE_CHUNK];
+                    // What a listing last knew about this session, so a flip
+                    // is announced once at the transition. A fresh session is
+                    // not busy and not on the alt screen, matching below.
+                    let mut listed_busy = false;
+                    let mut listed_alt = false;
                     loop {
                         // `Err(_) => break` here treated a signal as the end of the
                         // stream, which closes a healthy peer or ends a live shell.
@@ -184,15 +197,26 @@ impl Session {
                             Ok(n) => n,
                         };
 
-                        let events = {
+                        let (events, busy, alt) = {
                             let Ok(mut term) = terminal.lock() else { break };
                             // The parser has no clock (`no_std`); the reader
                             // is where wall time and bytes meet, so blocks
                             // get their start/end stamps from here.
                             term.set_now_ms(unix_ms());
                             term.advance(&buf[..n]);
-                            term.take_events()
+                            // Read under the same lock the parse ran under:
+                            // these are what `Registry::list` reports, and a
+                            // flip must be *noticed* here or the listing stays
+                            // whatever it said last until something unrelated
+                            // moves the generation (the staleness of #416).
+                            let busy = term.blocks().last().is_some_and(|b| b.is_running());
+                            let alt = term.modes().contains(Modes::ALT_SCREEN);
+                            (term.take_events(), busy, alt)
                         };
+
+                        let mut listing_moved = busy != listed_busy || alt != listed_alt;
+                        listed_busy = busy;
+                        listed_alt = alt;
 
                         for event in events {
                             match event {
@@ -207,6 +231,14 @@ impl Session {
                                     if let Ok(mut slot) = title.lock() {
                                         *slot = t;
                                     }
+                                    listing_moved = true;
+                                }
+                                // Already recorded in the terminal's state;
+                                // what is left to do is tell the listing's
+                                // watchers, since a `cd` changes what a
+                                // listing reads and nothing else would say so.
+                                TermEvent::CwdChanged { .. } => {
+                                    listing_moved = true;
                                 }
                                 // The repaint that answered a grow has closed
                                 // and the grid gave back the rows the shrink
@@ -239,6 +271,9 @@ impl Session {
                             }
                         }
 
+                        if listing_moved {
+                            listing_changed();
+                        }
                         wake(id);
                         wake_subscribers(&subscribers);
                         std::thread::yield_now();
@@ -715,6 +750,23 @@ impl Session {
         self.terminal.lock().map(|t| t.cwd().to_string()).unwrap_or_default()
     }
 
+    /// The machine [`Self::cwd`] is on, when the shell's OSC 7 named one.
+    ///
+    /// `Some` of anything means the path is not this machine's to probe.
+    #[must_use]
+    pub fn cwd_host(&self) -> Option<String> {
+        self.terminal.lock().ok().and_then(|t| t.cwd_host().map(str::to_string))
+    }
+
+    /// Whether a command is running, by the tail block's word.
+    #[must_use]
+    pub fn busy(&self) -> bool {
+        self.terminal
+            .lock()
+            .map(|t| t.blocks().last().is_some_and(|b| b.is_running()))
+            .unwrap_or(false)
+    }
+
     #[must_use]
     pub fn alt_screen(&self) -> bool {
         self.terminal
@@ -804,7 +856,7 @@ mod tests {
     }
 
     fn session(text: &str) -> Session {
-        Session::spawn(SessionId(1), &echo(text), PtySize::new(80, 24), 100, |_| {})
+        Session::spawn(SessionId(1), &echo(text), PtySize::new(80, 24), 100, |_| {}, || {})
             .expect("spawn")
     }
 
@@ -966,6 +1018,7 @@ mod tests {
             PtySize::new(80, 24),
             100,
             |_| {},
+            || {},
         )
         .expect("spawn");
         let (a, _, _) = s.attach();
@@ -999,6 +1052,7 @@ mod tests {
             PtySize::new(80, 24),
             100,
             |_| {},
+            || {},
         )
         .expect("spawn");
         let (a, _, _) = s.attach();
@@ -1139,7 +1193,7 @@ mod tests {
             "for i in 1 2 3 4 5; do echo line $i; sleep 0.05; done",
             "for /L %i in (1,1,30) do @(echo line %i& ping -n 2 127.0.0.1 >nul)",
         );
-        let s = Session::spawn(SessionId(5), &spec, PtySize::new(80, 24), 100, |_| {})
+        let s = Session::spawn(SessionId(5), &spec, PtySize::new(80, 24), 100, |_| {}, || {})
             .expect("spawn");
 
         // A throwaway subscriber first, and it is what makes a single update
@@ -1306,7 +1360,7 @@ mod tests {
         let sh =
             format!("for i in 1 2 3 4 5 6 7 8 9 10; do echo '{esc}[31mline '$i'{esc}[0m'; done");
         let spec = script_cmd(&sh, &win);
-        let s = Session::spawn(SessionId(77), &spec, PtySize::new(40, 3), 200, |_| {})
+        let s = Session::spawn(SessionId(77), &spec, PtySize::new(40, 3), 200, |_| {}, || {})
             .expect("spawn");
         // Two waits, both asserted, because "the child never ran" and "the
         // child ran and produced no history" are different failures and only

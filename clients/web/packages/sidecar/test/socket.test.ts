@@ -75,6 +75,8 @@ test('a socketTransport client reads the directory a feed write updated', async 
           rows: 24,
           altScreen: false,
           attached: false,
+          busy: false,
+          context: null,
         },
       ],
       null,

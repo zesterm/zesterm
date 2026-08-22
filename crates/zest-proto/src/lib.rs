@@ -568,6 +568,101 @@ pub struct SessionInfo {
     pub alt_screen: bool,
     /// Whether a client is currently attached.
     pub attached: bool,
+    /// What the session is standing in — branch, venv, kube context — computed
+    /// by the daemon that owns it, so every client (and every agent) renders
+    /// the same chips without running anything in the user's shell.
+    ///
+    /// `#[serde(default)]` for the `HostOffer.os` reason: a required field an
+    /// older daemon omits fails the whole `Sessions` decode, which
+    /// `DaemonClient::recv` maps to a transport error, which costs the client
+    /// its connection. `None` is "the daemon did not say", never "no context".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub context: Option<SessionContext>,
+    /// A command is running in this session right now.
+    ///
+    /// The tail block's word, so the ⌘K picker and the fleet cards can say it
+    /// for a session this window is not attached to — which they structurally
+    /// could not before: the listing carried nothing, and nothing pushed it on
+    /// a block transition anyway. False from a shell emitting no markers, like
+    /// every other blocks-derived fact.
+    #[serde(default)]
+    pub busy: bool,
+}
+
+/// Where the session is standing, as its own daemon sees it.
+///
+/// Everything here is *display*. A chip, a picker row, an agent's situational
+/// awareness — never a gate: half of it comes from the filesystem as of a
+/// debounce window ago, and the other half will come from shell-emitted
+/// escapes anything that can print can forge (ADR-015's line, applied to
+/// context instead of exit codes). Each fact says which half it is.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct SessionContext {
+    /// The repository the cwd is inside, when it is inside one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub git: Option<GitContext>,
+    /// Everything else, as labeled strings: `venv`, `kube`, `node`, …
+    ///
+    /// The `HostOffer` philosophy — facts, deliberately, not a capability
+    /// matrix. A client meeting a key it does not know shows one chip fewer;
+    /// adding a fact is never a protocol change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub facts: Vec<ContextFact>,
+    /// Bumped by the producing daemon whenever this context changes, so a
+    /// client can skip rebuilding chrome for a listing push that moved for
+    /// some other reason. Monotonic per session, not wall time.
+    ///
+    /// `ts(type = "number")` for the #14 reason: `rmp-serde` writes the
+    /// narrowest integer that fits, so this reaches JavaScript as a plain
+    /// `number` for every count a daemon will ever reach.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub revision: u64,
+}
+
+/// Git, structured, because three clients render its parts differently.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct GitContext {
+    /// The branch name, or the short hash when detached.
+    pub branch: String,
+    pub detached: bool,
+    /// Whether the tree has uncommitted changes.
+    ///
+    /// `None` until something actually asks git — answering honestly means a
+    /// subprocess, and the probe that ships first runs none. An `Option`
+    /// because "clean" and "unknown" rendering the same chip is exactly the
+    /// dash-pretending-to-be-a-fact the `HostOffer` fields warn about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub dirty: Option<bool>,
+}
+
+/// One labeled thing true about the session's surroundings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ContextFact {
+    /// `venv`, `conda`, `kube`, `node`, `python`, `rust`, `ssh_host`, …
+    pub key: String,
+    pub value: String,
+    /// Who said so — and therefore how far it can be trusted.
+    pub source: ContextSource,
+}
+
+/// Who produced a [`ContextFact`], carried per fact rather than documented,
+/// because the distinction has to survive into every payload an agent reads —
+/// a tool description is not where a trust boundary lives (ADR-015).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum ContextSource {
+    /// The daemon read it off the filesystem itself.
+    DaemonProbe,
+    /// The shell (or anything that can print an escape) reported it.
+    ShellReport,
 }
 
 /// What a machine can offer a client: what it *is*, and what it can launch.

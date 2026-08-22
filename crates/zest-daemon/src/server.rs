@@ -125,18 +125,118 @@ const SCROLLBACK_PAGE: usize = 500;
 ///
 /// Shared between connections, because the point of the daemon is that a session
 /// is not owned by whoever happens to be looking at it.
-#[derive(Default)]
 pub struct Registry {
     sessions: Mutex<HashMap<u64, Arc<Session>>>,
     next_id: Mutex<u64>,
-    /// Bumped whenever a listing would read differently: create, close,
-    /// collection, attach, detach. What lets a watching connection answer
-    /// "did anything change?" without diffing two listings.
+    /// The generation counter and its watchers, shared out so a session's
+    /// reader thread and the context engine's watchers can announce a changed
+    /// listing without holding a reference back to the registry.
+    pulse: Arc<Pulse>,
+    /// What every session is standing in — branch, kube context, pins —
+    /// probed lazily per listing and cached per cwd.
+    context: crate::context::ContextEngine,
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        let pulse = Arc::new(Pulse::default());
+        let for_context = Arc::clone(&pulse);
+        Self {
+            sessions: Mutex::default(),
+            next_id: Mutex::default(),
+            context: crate::context::ContextEngine::new(Arc::new(move || {
+                for_context.touch_coalesced();
+            })),
+            pulse,
+        }
+    }
+}
+
+/// "The listing changed", as a thing that can be shared.
+///
+/// Bumped whenever a listing would read differently. Create, close, collect,
+/// attach and detach bump it directly; the facts that flutter — cwd, title,
+/// busy, a context probe landing — go through [`Self::touch_coalesced`], which
+/// bounds how often a chatty session can wake every watching connection.
+#[derive(Default)]
+pub struct Pulse {
     generation: std::sync::atomic::AtomicU64,
     /// Wakers for connections that asked to watch the session list
     /// (`Hello.watch_sessions`), keyed by a token so `Drop` can unregister.
     watchers: Mutex<HashMap<u64, Arc<dyn Fn() + Send + Sync>>>,
     next_watcher: Mutex<u64>,
+    coalesce: Mutex<Coalesce>,
+}
+
+#[derive(Default)]
+struct Coalesce {
+    last: Option<std::time::Instant>,
+    /// A trailing-edge bump is already scheduled; further reports until it
+    /// fires are covered by it.
+    armed: bool,
+}
+
+/// The floor between coalesced bumps. Low enough that a `cd`'s new branch
+/// shows up as typed, high enough that a title-spamming script costs watchers
+/// four wakeups a second instead of thousands.
+const COALESCE_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
+
+impl Pulse {
+    fn touch(&self) {
+        self.generation.fetch_add(1, std::sync::atomic::Ordering::Release);
+        for waker in self.watchers.lock().expect("watchers lock").values() {
+            waker();
+        }
+    }
+
+    /// Bump now if the window has passed, else schedule one trailing bump.
+    ///
+    /// Trailing-edge on purpose: a leading-only debounce that swallows the
+    /// tail would leave the *last* change of a burst unannounced — a listing
+    /// that is wrong until something unrelated moves, which is the staleness
+    /// this exists to end, reintroduced with extra machinery.
+    pub fn touch_coalesced(self: &Arc<Self>) {
+        let wait = {
+            let mut c = self.coalesce.lock().expect("coalesce lock");
+            if c.armed {
+                return;
+            }
+            let now = std::time::Instant::now();
+            match c.last {
+                Some(last) if now.duration_since(last) < COALESCE_WINDOW => {
+                    c.armed = true;
+                    Some(COALESCE_WINDOW - now.duration_since(last))
+                }
+                _ => {
+                    c.last = Some(now);
+                    None
+                }
+            }
+        };
+        match wait {
+            None => self.touch(),
+            Some(wait) => {
+                let pulse = Arc::clone(self);
+                let spawned = std::thread::Builder::new()
+                    .name("zest-daemon-pulse".into())
+                    .spawn(move || {
+                        std::thread::sleep(wait);
+                        {
+                            let mut c = pulse.coalesce.lock().expect("coalesce lock");
+                            c.armed = false;
+                            c.last = Some(std::time::Instant::now());
+                        }
+                        pulse.touch();
+                    });
+                if spawned.is_err() {
+                    // No thread means no trailing bump coming: disarm and bump
+                    // now, late being better than never.
+                    self.coalesce.lock().expect("coalesce lock").armed = false;
+                    self.touch();
+                }
+            }
+        }
+    }
 }
 
 impl Registry {
@@ -157,7 +257,10 @@ impl Registry {
             *next += 1;
             SessionId(*next)
         };
-        let session = Arc::new(Session::spawn(id, cmd, size, scrollback, |_| {})?);
+        let pulse = Arc::clone(&self.pulse);
+        let session = Arc::new(Session::spawn(id, cmd, size, scrollback, |_| {}, move || {
+            pulse.touch_coalesced();
+        })?);
         self.sessions.lock().expect("registry lock").insert(id.0, Arc::clone(&session));
         self.touch();
         Ok(session)
@@ -168,30 +271,27 @@ impl Registry {
     /// Called *after* the change is visible in `sessions`, so a woken
     /// connection that lists immediately sees the new truth.
     pub fn touch(&self) {
-        self.generation.fetch_add(1, std::sync::atomic::Ordering::Release);
-        for waker in self.watchers.lock().expect("watchers lock").values() {
-            waker();
-        }
+        self.pulse.touch();
     }
 
     #[must_use]
     pub fn generation(&self) -> u64 {
-        self.generation.load(std::sync::atomic::Ordering::Acquire)
+        self.pulse.generation.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Register a waker to run whenever the listing changes.
     pub fn watch(&self, waker: Arc<dyn Fn() + Send + Sync>) -> u64 {
         let token = {
-            let mut next = self.next_watcher.lock().expect("watcher id lock");
+            let mut next = self.pulse.next_watcher.lock().expect("watcher id lock");
             *next += 1;
             *next
         };
-        self.watchers.lock().expect("watchers lock").insert(token, waker);
+        self.pulse.watchers.lock().expect("watchers lock").insert(token, waker);
         token
     }
 
     pub fn unwatch(&self, token: u64) {
-        self.watchers.lock().expect("watchers lock").remove(&token);
+        self.pulse.watchers.lock().expect("watchers lock").remove(&token);
     }
 
     #[must_use]
@@ -207,14 +307,18 @@ impl Registry {
             .values()
             .map(|s| {
                 let (cols, rows) = s.size();
+                let cwd = s.cwd();
+                let context = self.context.context_for(&cwd, s.cwd_host().as_deref());
                 SessionInfo {
                     addr: SessionAddr::new(host, s.id),
                     title: s.title(),
-                    cwd: s.cwd(),
+                    cwd,
                     cols,
                     rows,
                     alt_screen: s.alt_screen(),
                     attached: s.attached(),
+                    context,
+                    busy: s.busy(),
                 }
             })
             .collect();
@@ -3133,6 +3237,59 @@ mod tests {
         );
         assert!(matches!(&out[..], [HostMessage::Sessions { sessions, .. }] if sessions.len() == 1));
         assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn a_listing_carries_the_context_its_reported_cwd_probes_to() {
+        // `SessionInfo.context` asserted by *value*, from the listing side —
+        // an `Option` on the wire hides a missing producer (#299), and every
+        // probe unit test can pass while `Registry::list` forgets to ask.
+        let root = std::env::temp_dir().join(format!("zest-ctx-listing-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".git")).expect("mkdir");
+        std::fs::write(root.join(".git").join("HEAD"), "ref: refs/heads/ctx-branch\n")
+            .expect("write HEAD");
+
+        let (mut c, registry) = conn();
+        let mut peer = authenticate(&mut c);
+        let generation_before = registry.generation();
+
+        // The escape bytes are embedded literally: a backslash spelling
+        // reaches the child as text on unix (#285).
+        let osc = format!("\u{1b}]7;file://{}\u{7}", root.display());
+        let command = if cfg!(windows) {
+            format!("cmd.exe /c echo {osc}")
+        } else {
+            format!("/bin/echo {osc}")
+        };
+        peer.send(
+            &mut c,
+            &ClientMessage::CreateSession { command, cwd: String::new(), cols: 80, rows: 24 },
+        );
+
+        let host = config().host;
+        assert!(
+            wait_for(|| registry.list(host).first().is_some_and(|s| !s.cwd.is_empty())),
+            "the child's OSC 7 never reached the listing, so nothing after this is about context"
+        );
+
+        let sessions = registry.list(host);
+        let info = sessions.first().expect("the session is still listed");
+        let ctx = info.context.as_ref().expect("a cwd inside a repository must produce context");
+        let git = ctx.git.as_ref().expect("the repository's branch");
+        assert_eq!(git.branch, "ctx-branch", "the branch is the HEAD's word, from the daemon");
+        assert!(!git.detached);
+        assert_eq!(git.dirty, None, "no subprocess ran, so nothing may claim clean or dirty");
+        assert!(!info.busy, "no OSC 133 ran a command; echo's output is not busyness");
+
+        // The other half of #416: a `cd` must *push*. Create bumped the
+        // generation once; the cwd change must move it again on its own, or
+        // watchers show the old directory until something unrelated moves.
+        assert!(
+            wait_for(|| registry.generation() >= generation_before + 2),
+            "the cwd change never bumped the generation, so watchers stay stale"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -75,12 +75,11 @@ the history behind them is in closed issues and PRs.
       notification *text* `OSC 9`/`OSC 777` supply, which is off the wire until
       something renders it, because a field nothing reads is indistinguishable
       from one nothing can fill.
-- [ ] `SessionInfo` says nothing about whether a session is busy, so the ⌘K
-      picker and the fleet cards cannot show it for a session this window is not
-      attached to. It needs a field *and* a new `Registry::touch` site with a
-      debounce: the listing is never pushed on a block transition today, which is
-      also why a watcher's `title` and `cwd` go stale until something unrelated
-      moves the generation.
+- [ ] Render `SessionInfo.busy` in the ⌘K picker and the fleet cards. The
+      field and the push behind it landed with #416 (`Registry`'s coalesced
+      pulse also ends the stale-`title`/`cwd` watcher problem); what remains
+      is the client-side dot/spinner on rows for sessions this window is not
+      attached to.
 
 ### Input
 
@@ -136,6 +135,34 @@ the history behind them is in closed issues and PRs.
       documents having no fix, kitty tracks it as their #6330. It wants
       detecting and reporting rather than looking like a shell that emits no
       markers.
+
+### Prompt context widgets
+
+The data spine landed with #416: the daemon computes a `SessionContext` per
+session (git branch/detached from a HEAD read, kube current-context, version
+pins — file reads only, cached per cwd, invalidated by `notify` watchers) and
+publishes it on `SessionInfo` beside `busy`, so every client and `zest-mcp
+sessions` see identical facts, each labeled `daemon_probe` or `shell_report`.
+What remains, in landable slices:
+
+- [ ] **Shell-reported facts.** New OSC 633 `P;Key=Value` keys (`Venv`,
+      `Conda`, `AwsProfile`, `NvmBin`) emitted by the injected zsh/bash/pwsh
+      hooks — parameter expansion only, a changed-value cache so an unchanged
+      prompt emits nothing. Needs a conformance fixture *containing* context
+      OSCs; the corpus has none.
+- [ ] **The Warp look.** A `chrome/prompt_chips.rs` chip row above the live
+      prompt block, compact-PS1 mode in the shell integration (the cwd lives
+      only in the chip), a cwd-chip cd navigator, exit-chip scroll-to-failure;
+      web chips on the BlocksPane prompt item; `prompt.widgets` (tag-list) and
+      `prompt.compact_ps1` settings. Reconciles two design-doc stances
+      (§no-status-bar, never-overlay-live-prompt) in the same PR.
+- [ ] **Per-block context history.** `BlockPayload.context` snapshot stamped
+      at OSC 133;C — "that failing build ran on branch X" — for humans and
+      for `blocks` over MCP.
+- [ ] **Depth.** Async cached probes (`git status --porcelain -uno` for
+      dirty/change counts, keyed by HEAD+index mtime, timeout-capped; real
+      runtime versions), branch/kube switcher chips, a transport/latency chip
+      from the client's own link.
 
 ### Protocol & daemon
 
