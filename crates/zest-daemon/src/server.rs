@@ -314,7 +314,11 @@ impl Registry {
             .map(|s| {
                 let (cols, rows) = s.size();
                 let cwd = s.cwd();
-                let context = self.context.context_for(&cwd, s.cwd_host().as_deref());
+                let context = crate::context::with_shell_facts(
+                    self.context.context_for(&cwd, s.cwd_host().as_deref()),
+                    s.shell_facts(),
+                    s.facts_rev(),
+                );
                 SessionInfo {
                     addr: SessionAddr::new(host, s.id),
                     title: s.title(),
@@ -3296,6 +3300,56 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_listing_carries_what_the_shell_reported_labeled_as_the_shells_word() {
+        // The #418 half of the context: facts the daemon cannot probe because
+        // the child's env is frozen at spawn, reported by the hooks over
+        // OSC 633 `P;Venv=` -- asserted by value from the listing side, with
+        // the label that makes them display-only (#299, ADR-015).
+        let (mut c, registry) = conn();
+        let mut peer = authenticate(&mut c);
+
+        let osc = "\u{1b}]633;P;Venv=ml\u{7}\u{1b}]633;P;AwsProfile=staging\u{7}";
+        let command = if cfg!(windows) {
+            format!("cmd.exe /c echo {osc}")
+        } else {
+            format!("/bin/echo {osc}")
+        };
+        peer.send(
+            &mut c,
+            &ClientMessage::CreateSession { command, cwd: String::new(), cols: 80, rows: 24 },
+        );
+
+        let host = config().host;
+        assert!(
+            wait_for(|| {
+                registry
+                    .list(host)
+                    .first()
+                    .and_then(|s| s.context.as_ref())
+                    .is_some_and(|ctx| !ctx.facts.is_empty())
+            }),
+            "the child's 633 facts never reached the listing"
+        );
+
+        let sessions = registry.list(host);
+        let ctx = sessions
+            .first()
+            .and_then(|s| s.context.as_ref())
+            .expect("a session with reported facts has a context, cwd or none");
+        let venv = ctx.facts.iter().find(|f| f.key == "venv").expect("the venv fact");
+        assert_eq!(venv.value, "ml");
+        assert!(
+            matches!(venv.source, zest_proto::ContextSource::ShellReport),
+            "the shell said it, and the payload has to say the shell said it"
+        );
+        assert!(
+            ctx.facts.iter().any(|f| f.key == "aws_profile" && f.value == "staging"),
+            "every reported fact rides, not just the first"
+        );
+        assert!(ctx.revision >= 1, "a fact arriving is a revision moving");
     }
 
     #[test]

@@ -83,6 +83,29 @@ __zesterm_wrap_prompt() {
     PS1='\[\e]133;A\a\]'${PS1-}'\[\e]133;B\a\]'
 }
 
+# One 633 property, sent only when its value changed since last sent. An
+# empty value is sent too -- once -- because a deactivated venv must take its
+# chip with it; an empty value that was *never* non-empty sends nothing,
+# since an unset cache and an empty one compare equal on purpose. The value
+# is escaped the way the 633 dialect asks (`\xNN`): `\` first or the escapes
+# escape themselves, then `;` (the OSC field separator), then the control
+# bytes that would end or garble the sequence. `eval` for the indirection
+# because bash 3.2 has `${!name}` for reads but nothing portable for the
+# write; the variable name is ours, never user input.
+__zesterm_fact() {
+    local value=$2 cached
+    value=${value//\\/\\x5c}
+    value=${value//;/\\x3b}
+    value=${value//$'\033'/\\x1b}
+    value=${value//$'\007'/\\x07}
+    value=${value//$'\n'/\\x0a}
+    eval "cached=\${$3-}"
+    if [ "$cached" != "$value" ]; then
+        eval "$3=\$value"
+        __zesterm_osc "633;P;$1=$value"
+    fi
+}
+
 __zesterm_precmd() {
     # First, and before anything else can clobber it: the status of whatever
     # just ran. A shell that reports no status at all is fine -- the terminal
@@ -102,6 +125,16 @@ __zesterm_precmd() {
     encoded=${encoded// /%20}
     encoded=${encoded//$'\n'/%0A}
     __zesterm_osc "7;file://${HOSTNAME-}${encoded}"
+
+    # Environment facts the terminal cannot see on its own: the child's env
+    # is frozen at spawn on the daemon's side, so an activated venv exists
+    # only in here. Parameter expansion and one builtin print per *changed*
+    # value -- never a fork, and an unchanged prompt emits nothing.
+    local venv=${VIRTUAL_ENV-}
+    __zesterm_fact Venv "${venv##*/}" __zesterm_last_venv
+    __zesterm_fact Conda "${CONDA_DEFAULT_ENV-}" __zesterm_last_conda
+    __zesterm_fact AwsProfile "${AWS_PROFILE-}" __zesterm_last_aws
+    __zesterm_fact NvmBin "${NVM_BIN-}" __zesterm_last_nvm
 
     # The user's own PROMPT_COMMAND, with the exit status it expects to read.
     # starship and oh-my-bash both live here and both consult `$?`; run with
