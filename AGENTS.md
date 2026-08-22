@@ -822,6 +822,18 @@ you need before you trip on it.
   that does not parse must *block* the exit; a buffer whose profile vanished
   must be *dropped*, or it writes into whatever the editor fell back to. (#272;
   the Settings tab has the same shape and is not fixed yet.)
+- **iOS opens the soft keyboard only for a `focus()` that runs inside the
+  gesture's own task.** The web client focused its hidden textarea off a
+  `setTimeout` from `mousedown` — which took focus, showed no keyboard, and on
+  an iPad left a terminal that could be read and not typed into, with no
+  error anywhere. A synchronous `focus()` in the `click` handler is the fix
+  (`TerminalView.tsx`), beside the deferred one that protects mouse selection.
+  Two neighbours: an input under 16px makes iOS zoom the page on focus, and
+  iPadOS Safari reports `navigator.platform === 'MacIntel'` — right for chord
+  conventions with a hardware keyboard, wrong as a touch test; detect touch
+  with `maxTouchPoints` / `(pointer: coarse)`. And the layout viewport does
+  not shrink for the keyboard there: `visual-viewport.ts` sizes the shell to
+  the visual one. (#421)
 
 ### The dev harness on this box
 

@@ -40,3 +40,17 @@ test('the icon rail collapses the sidebar footer to its dot', () => {
     "an '● N hosts' sentence wraps out of the 48px rail — only the dot fits (design: host dots only)",
   );
 });
+
+test('the hidden textarea is 16px, the threshold under which iOS zooms to a focused input', () => {
+  assert.ok(
+    /\.term-input\s*\{[^}]*font-size:\s*16px/.test(css),
+    'below 16px every tap on the terminal zooms the whole page on an iPad (#421)',
+  );
+});
+
+test('the shell reads the visual-viewport variables with the stylesheet height as fallback', () => {
+  assert.ok(
+    /\.shell\s*\{[^}]*height:\s*var\(--zt-vv-height,\s*100%\)/.test(css),
+    'visual-viewport.ts sizes the shell to what is on screen while a soft keyboard is up; without the fallback a cleared variable leaves the shell with no height at all',
+  );
+});

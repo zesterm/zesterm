@@ -197,6 +197,18 @@ What remains, in landable slices:
       `/api/devices` and the revoke routes), including recovery: revoked rows
       stay visible in a Revoked section and `POST /api/{hosts,devices}/:id/restore`
       puts one back — the machine's stored token simply resolves again. #365.
+- [x] **The browser client under a finger, part 1 — the keyboard opens.** On
+      an iPad the hidden textarea took focus off a deferred call, which iOS
+      answers with no keyboard; a synchronous focus in the tap's own task
+      fixes it, the textarea is 16px so the page stops zooming, and
+      `visual-viewport.ts` sizes the shell to the *visual* viewport so the
+      prompt stays above the keys. #421.
+- [ ] **Part 2 — the key bar.** The phone design's cap row (`esc` `tab`
+      `ctrl` arrows `^C` …) in the web client, shown on coarse-pointer
+      devices, with sticky Ctrl/Alt applied to the next soft-keyboard key
+      through `@zesterm/input`'s `Mods`. #421.
+- [ ] **Part 3 — tap to answer.** Numbered option rows of a running block
+      (an agent CLI's question) become tappable and type their digit. #421.
 - [ ] Browser device enrollment: non-extractable Ed25519 key, approved via the
       desktop modal with a matching code.
 - [ ] Bun single-file sidecar hosting `@sigx/actors`, spawned as a child of the
