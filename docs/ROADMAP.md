@@ -140,7 +140,7 @@ session (git branch/detached from a HEAD read, kube current-context, version
 pins — file reads only, cached per cwd, invalidated by `notify` watchers) and
 publishes it on `SessionInfo` beside `busy`, so every client and `zest-mcp
 sessions` see identical facts, each labeled `daemon_probe` or `shell_report`.
-The shell-reported half landed with #418: the injected hooks emit `Venv`,
+The shell-reported half landed with #418 (PR #419): the injected hooks emit `Venv`,
 `Conda`, `AwsProfile` and `NvmBin` over OSC 633 `P;Key=Value` — parameter
 expansion only, a changed-value cache so an unchanged prompt emits nothing,
 an empty value taking the chip down — and the listing folds them in as

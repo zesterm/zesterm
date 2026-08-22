@@ -89,9 +89,10 @@ __zesterm_wrap_prompt() {
 # since an unset cache and an empty one compare equal on purpose. The value
 # is escaped the way the 633 dialect asks (`\xNN`): `\` first or the escapes
 # escape themselves, then `;` (the OSC field separator), then the control
-# bytes that would end or garble the sequence. `eval` for the indirection
-# because bash 3.2 has `${!name}` for reads but nothing portable for the
-# write; the variable name is ours, never user input.
+# bytes that would end or garble the sequence. `${!name-}` and `printf -v`
+# for the indirection -- both are bash 3.2 -- because the value comes from
+# the environment, and an `eval` that is only safe by careful escaping is a
+# review burden no prompt hook is worth.
 __zesterm_fact() {
     local value=$2 cached
     value=${value//\\/\\x5c}
@@ -99,9 +100,9 @@ __zesterm_fact() {
     value=${value//$'\033'/\\x1b}
     value=${value//$'\007'/\\x07}
     value=${value//$'\n'/\\x0a}
-    eval "cached=\${$3-}"
+    cached=${!3-}
     if [ "$cached" != "$value" ]; then
-        eval "$3=\$value"
+        printf -v "$3" '%s' "$value"
         __zesterm_osc "633;P;$1=$value"
     fi
 }
