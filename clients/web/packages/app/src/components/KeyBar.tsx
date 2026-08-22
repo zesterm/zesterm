@@ -31,6 +31,7 @@ export const KeyBar = component<{
               key={cap.id}
               class={`key-cap${state === 'off' ? '' : ` ${state}`}${cap.id === 'kbd' ? ' kbd' : ''}`}
               title={cap.title}
+              aria-label={cap.title}
               aria-pressed={cap.id === 'ctrl' || cap.id === 'alt' ? state !== 'off' : undefined}
               onPointerDown={(e: PointerEvent) => e.preventDefault()}
               onClick={() => ctx.props.onCap(cap.id)}

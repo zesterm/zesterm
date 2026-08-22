@@ -89,6 +89,16 @@ test('a locked Ctrl stays across keys until tapped off', () => {
   assert.equal(b.next.ctrl, 'locked');
 });
 
+test('consuming a latch that spends nothing hands back the same state object', () => {
+  // TerminalView decides "did the latch change" by identity, so a fresh
+  // copy per keystroke would re-render the bar on every key typed.
+  assert.equal(consume(NO_LATCH).next, NO_LATCH);
+  const locked = tapModifier(tapModifier(NO_LATCH, 'alt'), 'alt');
+  assert.equal(consume(locked).next, locked, 'a lock is not spent, so nothing changed');
+  const once = tapModifier(NO_LATCH, 'ctrl');
+  assert.notEqual(consume(once).next, once, 'a once IS spent');
+});
+
 test('the latch also modifies the next key from the soft keyboard itself', () => {
   // The bar latches; the letter comes from a real keydown. This is how ^L,
   // ^R and ^D — none of which have a cap — are reached on a tablet. The

@@ -46,8 +46,13 @@ export function tapModifier(state: LatchState, which: StickyModifier): LatchStat
  * must not spend a `once`.
  */
 export function consume(state: LatchState): { readonly mods: Mods; readonly next: LatchState } {
+  const m = mods({ ctrl: state.ctrl !== 'off', alt: state.alt !== 'off' });
+  // The same object back when nothing was spent: the view compares by
+  // identity to decide whether the latch signal changed, and a fresh copy
+  // per keystroke would re-render the bar on every key typed.
+  if (state.ctrl !== 'once' && state.alt !== 'once') return { mods: m, next: state };
   return {
-    mods: mods({ ctrl: state.ctrl !== 'off', alt: state.alt !== 'off' }),
+    mods: m,
     next: {
       ctrl: state.ctrl === 'once' ? 'off' : state.ctrl,
       alt: state.alt === 'once' ? 'off' : state.alt,
