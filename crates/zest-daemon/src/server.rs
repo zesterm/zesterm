@@ -3306,7 +3306,11 @@ mod tests {
         let git = ctx.git.as_ref().expect("the repository's branch");
         assert_eq!(git.branch, "ctx-branch", "the branch is the HEAD's word, from the daemon");
         assert!(!git.detached);
-        assert_eq!(git.dirty, None, "no subprocess ran, so nothing may claim clean or dirty");
+        assert_eq!(
+            git.dirty,
+            None,
+            "a hand-built .git is not a repository git will answer for, so dirty stays unknown"
+        );
         assert!(!info.busy, "no OSC 133 ran a command; echo's output is not busyness");
 
         // The other half of #416: a `cd` must *push*. Create bumped the

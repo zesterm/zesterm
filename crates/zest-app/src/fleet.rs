@@ -917,6 +917,25 @@ impl FleetModel {
         sessions.iter().find(|s| s.addr == addr).and_then(|s| s.context.clone())
     }
 
+    /// One host's link, cloned out on its own for the link chip (#432): how
+    /// this window reaches it, and the last measured round trip. `None` for
+    /// an unknown host — and for the window's own machine the chip's caller
+    /// declines loopback anyway, because "local 0.0 ms" is noise wearing a
+    /// number.
+    #[must_use]
+    pub fn link_of(
+        &self,
+        host: zest_proto::HostId,
+    ) -> Option<(zest_mesh::Reachability, Option<f32>)> {
+        let state = self.inner.state.lock();
+        if state.local.as_ref().is_some_and(|(h, _)| *h == host) {
+            return Some((zest_mesh::Reachability::Loopback, None));
+        }
+        let record = state.discovery.as_ref()?.records().into_iter().find(|r| r.peer.host == host)?;
+        let reach = record.peer.best_endpoint().map(|e| e.reachability)?;
+        Some((reach, state.rtt.get(&host).copied()))
+    }
+
     /// The fleet as of now: the window's own host first, then the roster in
     /// its stable order (the roster is a BTreeMap precisely so listings do
     /// not reshuffle between polls).

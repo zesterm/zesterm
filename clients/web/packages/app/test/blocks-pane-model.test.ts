@@ -834,3 +834,12 @@ test('a block with a stamped context shows its branch, and one without shows not
   );
   assert.equal(headers[1]?.branch, '', 'no stamp is no branch, never a dash pretending');
 });
+
+test('the git chip label grows a star and a count in the order the probe answers', () => {
+  const git = (dirty: boolean | null, changed: number | null) =>
+    promptChips('', { git: { branch: 'main', dirty, changed }, facts: [] })[0]?.label;
+  assert.equal(git(null, null), 'main', 'before the probe: the branch alone');
+  assert.equal(git(true, null), 'main*', 'dirty known, count not yet');
+  assert.equal(git(true, 3), 'main* ±3', 'the count joins the star');
+  assert.equal(git(false, null), 'main', 'clean wears no star and no count');
+});

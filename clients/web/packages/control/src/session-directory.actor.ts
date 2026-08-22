@@ -61,6 +61,8 @@ export interface EntryGit {
   readonly detached: boolean;
   /** `null` until something actually asks git — unknown, not clean. */
   readonly dirty: boolean | null;
+  /** How many files say so, when dirty (#432); `null` when clean or unknown. */
+  readonly changed: number | null;
 }
 
 export interface EntryFact {
@@ -97,7 +99,12 @@ export function sessionEntryOf(info: {
   readonly attached: boolean;
   readonly busy?: boolean;
   readonly context?: {
-    readonly git: { readonly branch: string; readonly detached: boolean; readonly dirty: boolean | null } | null;
+    readonly git: {
+      readonly branch: string;
+      readonly detached: boolean;
+      readonly dirty: boolean | null;
+      readonly changed?: number | null;
+    } | null;
     readonly facts: readonly { readonly key: string; readonly value: string; readonly source: 'daemon_probe' | 'shell_report' }[];
     readonly revision: number;
   } | null;
@@ -125,6 +132,7 @@ export function sessionEntryOf(info: {
                     branch: info.context.git.branch,
                     detached: info.context.git.detached,
                     dirty: info.context.git.dirty,
+                    changed: info.context.git.changed ?? null,
                   },
             facts: info.context.facts.map((f) => ({
               key: f.key,

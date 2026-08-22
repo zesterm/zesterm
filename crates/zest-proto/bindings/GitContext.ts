@@ -12,8 +12,15 @@ branch: string, detached: boolean,
  * Whether the tree has uncommitted changes.
  *
  * `None` until something actually asks git — answering honestly means a
- * subprocess, and the probe that ships first runs none. An `Option`
- * because "clean" and "unknown" rendering the same chip is exactly the
- * dash-pretending-to-be-a-fact the `HostOffer` fields warn about.
+ * subprocess, and the background probe's first answer lands a beat
+ * after the branch (#432). An `Option` because "clean" and "unknown"
+ * rendering the same chip is exactly the dash-pretending-to-be-a-fact
+ * the `HostOffer` fields warn about.
  */
-dirty?: boolean, };
+dirty?: boolean, 
+/**
+ * How many files say so (`git status --porcelain -uno` lines), when
+ * the tree is dirty. `None` when clean or unknown — a `0` beside
+ * `dirty: true` would be two fields disagreeing in public.
+ */
+changed?: number, };

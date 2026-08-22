@@ -175,10 +175,21 @@ with `BlockContext { branch, venv, kube }` (core carries it like `cwd`;
 `BlockPayload.context` rides additively), so "that failing build ran on
 branch X" survives into scrollback — the branch shows in both clients'
 block headers, and `blocks` over MCP returns the snapshot per block.
-- [ ] **Depth.** Async cached probes (`git status --porcelain -uno` for
-      dirty/change counts, keyed by HEAD+index mtime, timeout-capped; real
-      runtime versions), branch/kube switcher chips, a transport/latency chip
-      from the client's own link.
+The dirty flag and the link chip landed with #432: `git status --porcelain
+-uno` on a bounded background thread (TTL re-ask on listing pulls, HEAD
+watcher invalidation, failures stretching the cadence), feeding
+`GitContext.dirty`/`changed` so the git chip reads `main`, then `main*`,
+then `main* ±3` in the order the answers arrive; and the `link` widget
+(off the default list) shows `lan 0.4 ms` / `relay 62 ms` from the app's
+own fleet model, loopback deliberately silent.
+
+- [ ] **Switcher chips** (branch, kube): a remote session's branch list
+      needs a wire request the protocol does not have, and a local-only
+      switcher that silently no-ops on remote tabs is a half-feature —
+      design the request first.
+- [ ] **Real runtime versions** (`node --version` and kin), cached per
+      binary path: the pins say what was asked for; only a subprocess knows
+      what answers.
 
 ### Protocol & daemon
 
