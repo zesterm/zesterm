@@ -42,7 +42,6 @@ import {
   paneModel,
   promptChips,
   type HeaderItem,
-  type PaneRow,
   type RenderItem,
 } from '../src/blocks-pane-model.ts';
 
@@ -778,12 +777,11 @@ test('only the running block’s rows carry an option; finished output is histor
     attrs: new Map(),
   };
   const items = paneModel(view, new Set(), 'live', NOW);
-  const outputs = items.filter((i) => i.kind === 'output');
+  const outputs = items.filter(
+    (i): i is Extract<RenderItem, { kind: 'output' }> => i.kind === 'output',
+  );
   assert.equal(outputs.length, 2);
-  const [old, live] = outputs as [
-    { kind: 'output'; rows: PaneRow[] },
-    { kind: 'output'; rows: PaneRow[] },
-  ];
+  const [old, live] = outputs as [(typeof outputs)[number], (typeof outputs)[number]];
   assert.deepEqual(
     old.rows.map((r) => r.option),
     [null],
