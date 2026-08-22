@@ -123,9 +123,6 @@ the history behind them is in closed issues and PRs.
       shell discovered rather than guessed), and Git Bash's `bash.exe` (MSYS
       rewrites unix-looking arguments; untested against `--init-file`).
       (`cmd.exe` is a permanent no: it has no prompt-function mechanism.)
-      And #409: `run`'s `exit` step against a bash session trips a Conn race
-      older than the hook, so `tests/live.rs` keeps bash off its candidate
-      list until that lands.
 - [ ] **A settings key for shell integration.** Today it is a daemon flag,
       which is not where anyone will look. The shell runs on the *host*, so the
       host decides — closing this means `zest-daemon` reading settings or a new
