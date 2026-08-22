@@ -9532,14 +9532,18 @@ impl App {
                     value: cwd.clone(),
                     label: crate::status::shorten_home(&cwd),
                 }),
-                "git" => context.as_ref().and_then(|c| c.git.as_ref()).map(|g| Chip {
-                    kind: ChipKind::Git,
-                    value: g.branch.clone(),
-                    label: if g.dirty == Some(true) {
-                        format!("{}*", g.branch)
-                    } else {
-                        g.branch.clone()
-                    },
+                "git" => context.as_ref().and_then(|c| c.git.as_ref()).map(|g| {
+                    // `main`, then `main*` once the probe answers dirty,
+                    // then `main* ±3` once it counts — arriving in that
+                    // order, which is the honest one (#432).
+                    let mut label = g.branch.clone();
+                    if g.dirty == Some(true) {
+                        label.push('*');
+                        if let Some(n) = g.changed {
+                            label.push_str(&format!(" ±{n}"));
+                        }
+                    }
+                    Chip { kind: ChipKind::Git, value: g.branch.clone(), label }
                 }),
                 "venv" => fact("venv").map(|v| Chip {
                     kind: ChipKind::Venv,
@@ -9571,6 +9575,25 @@ impl App {
                     value: v.to_string(),
                     label: format!("ssh {v}"),
                 }),
+                // The link, this window's own fact (#432): shown only when
+                // there is a link worth naming — loopback would be a "local
+                // 0.0 ms" chip, noise wearing a number.
+                "link" => self.fleet.as_ref().and_then(|f| f.link_of(addr.host)).and_then(
+                    |(reach, rtt)| {
+                        let name = match reach {
+                            zest_mesh::Reachability::Loopback => return None,
+                            zest_mesh::Reachability::Lan => "lan",
+                            zest_mesh::Reachability::Cloud => "relay",
+                        };
+                        let label = match rtt {
+                            Some(ms) => {
+                                format!("{name} {}", crate::chrome::layout::format_ms(ms))
+                            }
+                            None => name.to_string(),
+                        };
+                        Some(Chip { kind: ChipKind::Link, value: label.clone(), label })
+                    },
+                ),
                 // Only a *failure* earns a chip, and only when the most
                 // recently finished block is the failure: an exit 1 three
                 // commands behind a success is history, and the blocks

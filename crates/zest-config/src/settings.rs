@@ -636,7 +636,7 @@ pub struct Motion {
 #[serde(default)]
 pub struct Prompt {
     /// Which chips show, in this order. Known names: `cwd`, `git`, `venv`,
-    /// `conda`, `kube`, `aws`, `node`, `ssh`, `exit`. An unknown name shows
+    /// `conda`, `kube`, `aws`, `node`, `ssh`, `exit`, `link`. An unknown name shows
     /// nothing rather than erroring, so a list written for a newer zesterm
     /// still loads. Empty turns the chips off entirely.
     ///

@@ -170,7 +170,11 @@ const CHIP_NAMES: ReadonlyMap<string, string> = new Map([
 export function promptChips(
   cwd: string,
   context: {
-    readonly git: { readonly branch: string; readonly dirty: boolean | null } | null;
+    readonly git: {
+      readonly branch: string;
+      readonly dirty: boolean | null;
+      readonly changed?: number | null;
+    } | null;
     readonly facts: readonly { readonly key: string; readonly value: string }[];
   } | null,
 ): PromptChip[] {
@@ -180,7 +184,14 @@ export function promptChips(
   }
   if (context !== null) {
     if (context.git !== null) {
-      const label = context.git.dirty === true ? `${context.git.branch}*` : context.git.branch;
+      // `main`, then `main*` once the probe answers dirty, then `main* ±3`
+      // once it counts — arriving in that order, the honest one (#432).
+      let label = context.git.branch;
+      if (context.git.dirty === true) {
+        label += '*';
+        const changed = context.git.changed ?? null;
+        if (changed !== null) label += ` ±${changed}`;
+      }
       chips.push({ key: 'git', label, value: context.git.branch });
     }
     for (const f of context.facts) {

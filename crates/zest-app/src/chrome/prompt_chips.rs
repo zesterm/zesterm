@@ -36,6 +36,9 @@ pub enum ChipKind {
     Node,
     Ssh,
     Exit,
+    /// How this window reaches the session's machine, and how fast (#432).
+    /// Client-computed: it is a fact about *this* link, not the session.
+    Link,
 }
 
 /// One chip, resolved to what it says.
@@ -97,6 +100,7 @@ fn chip_tint(kind: ChipKind, colors: &ChromeColors) -> LinearRgba {
         ChipKind::Venv | ChipKind::Conda | ChipKind::Node => colors.info,
         ChipKind::Kube | ChipKind::Aws | ChipKind::Ssh => colors.warn,
         ChipKind::Exit => colors.danger,
+        ChipKind::Link => colors.text_faint,
     }
 }
 

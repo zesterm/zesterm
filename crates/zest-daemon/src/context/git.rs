@@ -52,11 +52,11 @@ fn parse_head(text: &str) -> Option<GitContext> {
     let text = text.trim();
     if let Some(reference) = text.strip_prefix("ref: ") {
         let branch = reference.strip_prefix("refs/heads/").unwrap_or(reference).to_string();
-        return Some(GitContext { branch, detached: false, dirty: None });
+        return Some(GitContext { branch, detached: false, dirty: None, changed: None });
     }
     // Detached: a bare hash. Eight characters names it without noise.
     if text.len() >= 8 && text.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Some(GitContext { branch: text[..8].to_string(), detached: true, dirty: None });
+        return Some(GitContext { branch: text[..8].to_string(), detached: true, dirty: None, changed: None });
     }
     None
 }

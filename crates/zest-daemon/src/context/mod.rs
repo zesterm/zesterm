@@ -4,10 +4,11 @@
 //! client — the window, a browser on another continent, an agent over MCP —
 //! renders the same chips without any of them running a command in the user's
 //! shell. Everything here is *display* (`SessionContext`'s doc has the trust
-//! argument); everything here is also *cheap*: file reads on a per-cwd cache,
-//! invalidated by `notify` watchers, and never a subprocess. The facts that
-//! need one (`dirty`, real runtime versions) stay unreported until an async
-//! probe exists, because an honest `None` beats a stalled listing.
+//! argument); everything here is also *cheap where it counts*: file reads on
+//! a per-cwd cache, invalidated by `notify` watchers. The one fact that
+//! needs a subprocess — `dirty` (#432) — runs on its own background thread,
+//! bounded in time and output, and lands late: an ask answers with what is
+//! known now, because an honest `None` beats a stalled listing.
 //!
 //! Lazy on purpose: nothing is probed until a listing asks
 //! ([`ContextEngine::context_for`]), so a daemon whose clients never look pays
@@ -55,6 +56,26 @@ struct State {
     repos: HashMap<PathBuf, RepoWatch>,
     next_repo: u64,
     kube: Option<KubeState>,
+    /// The subprocess-backed half (#432): dirty state per repository, keyed
+    /// like the watchers by the resolved HEAD path.
+    dirty: HashMap<PathBuf, DirtyState>,
+}
+
+/// What `git status` last said about one repository, and whether it is
+/// being asked again right now.
+struct DirtyState {
+    /// `None` until the first run answers; then whether the tree is dirty
+    /// and how many files say so.
+    answer: Option<(bool, u32)>,
+    /// When the answer landed (or the ask failed), for the TTL.
+    refreshed: std::time::Instant,
+    /// A refresh thread is in flight; asks meanwhile serve the stale answer
+    /// rather than stacking a second subprocess on the first.
+    running: bool,
+    /// Consecutive failures. `git` missing from PATH is permanent for the
+    /// daemon's lifetime in practice, and forking a failure per listing is
+    /// the fan noise the whole design avoids — the TTL stretches with this.
+    failures: u32,
 }
 
 /// What one directory probed to.
@@ -127,6 +148,13 @@ impl ContextEngine {
             }
             state.by_cwd.insert(cwd.to_string(), probed);
         }
+        // Before borrowing the probe result: the dirty ask mutates `state`
+        // (marks a refresh in flight) and only reads the head path.
+        let head = state.by_cwd.get(cwd).and_then(|p| p.head.clone());
+        let dirty = match head {
+            Some(head) => self.ensure_dirty(&mut state, &head, cwd),
+            None => None,
+        };
         let probed = state.by_cwd.get(cwd).expect("just inserted");
 
         let mut facts = probed.pins.clone();
@@ -137,7 +165,57 @@ impl ContextEngine {
                 source: ContextSource::DaemonProbe,
             });
         }
-        Some(SessionContext { git: probed.git.clone(), facts, revision })
+        let git = probed.git.clone().map(|mut g| {
+            if let Some((is_dirty, changed)) = dirty {
+                g.dirty = Some(is_dirty);
+                g.changed = is_dirty.then_some(changed);
+            }
+            g
+        });
+        Some(SessionContext { git, facts, revision })
+    }
+
+    /// The last `git status` answer for this repository, refreshing it in
+    /// the background when it is stale (#432).
+    ///
+    /// Never a subprocess on this thread: a listing's ask returns whatever
+    /// is known *now* — `None` before the first run answers — and the
+    /// refresh lands late, bumps the revision, and the next push carries it.
+    /// The star arriving a beat after the branch is the honest order.
+    fn ensure_dirty(
+        &self,
+        state: &mut State,
+        head: &Path,
+        cwd: &str,
+    ) -> Option<(bool, u32)> {
+        const TTL: std::time::Duration = std::time::Duration::from_secs(10);
+        let now = std::time::Instant::now();
+        let entry = state.dirty.entry(head.to_path_buf()).or_insert(DirtyState {
+            answer: None,
+            // Backdated so a fresh entry is immediately stale and asks once.
+            refreshed: now - TTL * 2,
+            running: false,
+            failures: 0,
+        });
+        // Failures stretch the TTL: one miss retries on the normal cadence,
+        // a machine with no `git` settles at minutes, never a fork per ask.
+        let ttl = TTL * (1 + entry.failures.min(30));
+        if !entry.running && now.duration_since(entry.refreshed) >= ttl {
+            entry.running = true;
+            let inner = Arc::clone(&self.inner);
+            let head = head.to_path_buf();
+            let cwd = cwd.to_string();
+            let spawned = std::thread::Builder::new()
+                .name("zest-daemon-git-status".into())
+                .spawn(move || {
+                    let answer = git_dirty(&cwd);
+                    inner.dirty_refreshed(&head, answer);
+                });
+            if spawned.is_err() {
+                entry.running = false;
+            }
+        }
+        entry.answer
     }
 
     /// Probe one directory, and make sure its repository is being watched.
@@ -203,14 +281,48 @@ impl ContextEngine {
 }
 
 impl Inner {
-    /// A repository's HEAD moved: forget what was probed through it.
+    /// A repository's HEAD moved: forget what was probed through it, and
+    /// make the dirty answer stale — a checkout changes both.
     fn head_changed(&self, head: &Path) {
         {
             let mut state = self.state.lock().expect("context lock");
             state.by_cwd.retain(|_, p| p.head.as_deref() != Some(head));
+            if let Some(d) = state.dirty.get_mut(head) {
+                d.refreshed = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+            }
         }
         self.revision.fetch_add(1, Ordering::Release);
         (self.on_change)();
+    }
+
+    /// A background `git status` came back (#432).
+    ///
+    /// Announces only when the *answer* moved: the TTL re-asks every few
+    /// seconds, and a push per identical answer would be the coalesced
+    /// pulse's budget spent saying nothing.
+    fn dirty_refreshed(&self, head: &Path, answer: Option<(bool, u32)>) {
+        let announce = {
+            let mut state = self.state.lock().expect("context lock");
+            let Some(d) = state.dirty.get_mut(head) else { return };
+            d.running = false;
+            d.refreshed = std::time::Instant::now();
+            match answer {
+                Some(a) => {
+                    let moved = d.answer != Some(a);
+                    d.answer = Some(a);
+                    d.failures = 0;
+                    moved
+                }
+                None => {
+                    d.failures = d.failures.saturating_add(1);
+                    false
+                }
+            }
+        };
+        if announce {
+            self.revision.fetch_add(1, Ordering::Release);
+            (self.on_change)();
+        }
     }
 
     fn kube_changed(&self, path: &Path) {
@@ -331,6 +443,64 @@ fn pin_facts(dir: &Path) -> Vec<ContextFact> {
     facts
 }
 
+/// Ask git whether the tree at `cwd` is dirty, bounded in time and output.
+///
+/// Runs on its own named thread, never a caller's. The two bounds cover the
+/// two ways a subprocess goes wrong at once: a drain thread keeps reading
+/// (capped) so a chatty status cannot deadlock against a full pipe while we
+/// wait, and a poll-with-deadline kills a git that hangs — a killed or
+/// failed run is `None`, "no answer", never a guess. `-uno` on purpose:
+/// untracked enumeration is the expensive half of `git status` and the
+/// dirty question is about tracked files.
+fn git_dirty(cwd: &str) -> Option<(bool, u32)> {
+    use std::io::Read as _;
+    use std::process::{Command, Stdio};
+
+    const DEADLINE: std::time::Duration = std::time::Duration::from_millis(1500);
+    const CAP: u64 = 256 * 1024;
+
+    let mut child = Command::new("git")
+        .args(["-C", cwd, "status", "--porcelain", "-uno"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let stdout = child.stdout.take()?;
+    let drain = std::thread::Builder::new()
+        .name("zest-daemon-git-drain".into())
+        .spawn(move || {
+            let mut out = Vec::new();
+            let _ = stdout.take(CAP).read_to_end(&mut out);
+            out
+        })
+        .ok()?;
+
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if started.elapsed() < DEADLINE => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let out = drain.join().ok()?;
+    let status = status?;
+    if !status.success() {
+        return None;
+    }
+    let changed =
+        u32::try_from(out.split(|&b| b == b'\n').filter(|l| !l.is_empty()).count()).unwrap_or(u32::MAX);
+    Some((changed > 0, changed))
+}
+
 /// `$KUBECONFIG`'s first entry, else `~/.kube/config`.
 fn kubeconfig_path() -> Option<PathBuf> {
     if let Ok(env) = std::env::var("KUBECONFIG") {
@@ -399,7 +569,11 @@ mod tests {
         let ctx = engine.context_for(env!("CARGO_MANIFEST_DIR"), None).expect("a context");
         let git = ctx.git.expect("this test runs inside zesterm's own checkout");
         assert!(!git.branch.is_empty());
-        assert_eq!(git.dirty, None, "no subprocess ran, so nothing may claim clean or dirty");
+        assert_eq!(
+            git.dirty,
+            None,
+            "the first ask answers before the background probe -- unknown, not a guess"
+        );
     }
 
     #[test]
@@ -529,6 +703,58 @@ mod tests {
             merged.facts.iter().all(|f| f.key != "node"),
             "a chip that prints a whole path is worse than no chip"
         );
+    }
+
+    #[test]
+    fn the_dirty_answer_lands_late_counts_files_and_moves_the_revision() {
+        // #432, against a real repository: the first ask answers before the
+        // probe (honestly unknown), the background run lands, and the next
+        // ask carries dirty + the file count with a moved revision. Skipped
+        // where `git` is absent — a test that shells out cannot pretend.
+        let root = std::env::temp_dir().join(format!("zest-ctx-dirty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(&root).args(args).output()
+        };
+        let Ok(out) = git(&["init", "-q"]) else {
+            eprintln!("skipping: no git on PATH");
+            return;
+        };
+        assert!(out.status.success(), "git init failed: {out:?}");
+        std::fs::write(root.join("f.txt"), "hello\n").expect("write");
+        // Staged counts as dirty, and needs no commit identity configured.
+        assert!(git(&["add", "f.txt"]).expect("git add").status.success());
+
+        let (engine, _) = engine();
+        let cwd = root.to_string_lossy().to_string();
+        let first = engine.context_for(&cwd, None).expect("a context");
+        assert_eq!(
+            first.git.as_ref().expect("a repo").dirty,
+            None,
+            "the first ask must answer before the probe — unknown, not a guess"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let now = engine.context_for(&cwd, None).expect("a context");
+            let g = now.git.as_ref().expect("a repo");
+            if g.dirty == Some(true) {
+                assert_eq!(g.changed, Some(1), "one staged file is one file");
+                assert!(
+                    now.revision > first.revision,
+                    "an answer landing must move the revision or clients skip the star"
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the probe never answered; the background refresh is not refreshing"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

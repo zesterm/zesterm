@@ -511,6 +511,11 @@ export interface GitContext {
   readonly detached: boolean;
   /** `null` until something actually asks git — unknown, not clean. */
   readonly dirty: boolean | null;
+  /**
+   * How many files say so, when dirty (#432). `null` when clean or unknown
+   * — a `0` beside `dirty: true` would be two fields disagreeing in public.
+   */
+  readonly changed: number | null;
 }
 
 export interface ContextFact {
@@ -939,6 +944,10 @@ function parseGitContext(v: unknown): GitContext {
     detached: bool(o['detached'], 'GitContext.detached'),
     dirty:
       o['dirty'] === undefined || o['dirty'] === null ? null : bool(o['dirty'], 'GitContext.dirty'),
+    changed:
+      o['changed'] === undefined || o['changed'] === null
+        ? null
+        : num(o['changed'], 'GitContext.changed'),
   };
 }
 
