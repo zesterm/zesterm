@@ -205,6 +205,15 @@ impl ToolSet {
                 // what tells an agent to read `screen` instead of `blocks`.
                 "alt_screen": s.alt_screen,
                 "attached": s.attached,
+                "busy": s.busy,
+                // Passed through whole so each fact keeps its `source` label:
+                // `daemon_probe` is the filesystem's word, `shell_report` is
+                // whatever the shell (or anything that can print) claimed —
+                // orientation, never a gate. The distinction has to reach the
+                // payload an agent reads, not sit in a tool description
+                // (ADR-015). Saves an agent running `git branch` in the
+                // user's live shell just to find out where it is.
+                "context": s.context,
             })).collect::<Vec<_>>()
         }))
     }

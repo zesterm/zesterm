@@ -739,7 +739,10 @@ impl TermState {
             b'P' => {
                 if let Some(rest) = params.get(2).and_then(|b| core::str::from_utf8(b).ok()) {
                     if let Some(path) = rest.strip_prefix("Cwd=") {
-                        self.cwd = unescape_vscode(path);
+                        // The 633 dialect has no authority part at all, so
+                        // `None` here means exactly what it means for a bare
+                        // OSC 7 path: nobody said elsewhere.
+                        self.set_cwd(None, unescape_vscode(path));
                     }
                 }
             }
@@ -750,14 +753,41 @@ impl TermState {
     /// `OSC 7 ; file://<host>/<path>`.
     fn osc_cwd(&mut self, params: &[&[u8]]) {
         let Some(url) = params.get(1).and_then(|b| core::str::from_utf8(b).ok()) else { return };
-        // The host part is deliberately discarded rather than compared against
-        // this machine's name: over ssh it names the *remote* host, and a cwd
-        // that silently blanks itself the moment you ssh somewhere is worse
-        // than one that is occasionally another machine's path.
-        let path = url.strip_prefix("file://").map_or(url, |rest| {
-            rest.find('/').map_or(rest, |slash| &rest[slash..])
-        });
-        self.cwd = percent_decode(path);
+        // The host part never blanks the *path*: over ssh it names the remote
+        // host, and a cwd that silently empties itself the moment you ssh
+        // somewhere is worse than one that is occasionally another machine's.
+        // It is kept beside the path instead, so a consumer probing the local
+        // filesystem can decline to (`TermEvent::CwdChanged`).
+        let (host, path) = match url.strip_prefix("file://") {
+            None => (None, url),
+            Some(rest) => match rest.find('/') {
+                None => (None, rest),
+                Some(slash) => {
+                    let authority = &rest[..slash];
+                    // `String::from`, not `.to_string()`: the latter needs
+                    // `alloc::string::ToString` in scope, which only the std
+                    // prelude provides — the wasm32 no_std build is the one
+                    // that notices.
+                    ((!authority.is_empty()).then(|| String::from(authority)), &rest[slash..])
+                }
+            },
+        };
+        self.set_cwd(host, percent_decode(path));
+    }
+
+    /// Record a reported cwd, announcing it only when it actually moved.
+    ///
+    /// OSC 7 arrives on every prompt, so "changed" is the event and "reported
+    /// again" is nothing — a consumer re-probing the same directory per prompt
+    /// would be the subprocess-per-prompt cost the shell hooks are written to
+    /// avoid, moved one layer down.
+    fn set_cwd(&mut self, host: Option<String>, path: String) {
+        if self.cwd == path && self.cwd_host == host {
+            return;
+        }
+        self.cwd = path.clone();
+        self.cwd_host = host.clone();
+        self.events.push(TermEvent::CwdChanged { host, path });
     }
 
     /// The line a marker names, in the **primary** grid's numbering.

@@ -35,6 +35,40 @@ export interface SessionEntry {
   /** What the phone's blocks-first view switches on. */
   readonly altScreen: boolean;
   readonly attached: boolean;
+  /** A command is running right now, by the tail block's word. */
+  readonly busy: boolean;
+  /**
+   * Where the session stands — branch, kube context, pins — as its own
+   * daemon computed it. `null` is "the daemon did not say" (an older daemon,
+   * or a shell that never reported a cwd), never "no context". Display only:
+   * each fact's `source` says whether the filesystem or the shell claimed
+   * it, and nothing may gate behavior on either.
+   */
+  readonly context: EntryContext | null;
+}
+
+/** `SessionContext`, projected — the `SessionInfo` → `SessionEntry` rename rule. */
+export interface EntryContext {
+  readonly git: EntryGit | null;
+  readonly facts: readonly EntryFact[];
+  /** Moves when the context does, so a UI can skip unchanged rebuilds. */
+  readonly revision: number;
+}
+
+export interface EntryGit {
+  /** The branch name, or the short hash when detached. */
+  readonly branch: string;
+  readonly detached: boolean;
+  /** `null` until something actually asks git — unknown, not clean. */
+  readonly dirty: boolean | null;
+}
+
+export interface EntryFact {
+  /** `venv`, `kube`, `node`, `ssh_host`, … — an unknown key is one chip fewer. */
+  readonly key: string;
+  readonly value: string;
+  /** Who said so, and therefore how far it can be trusted. */
+  readonly source: 'daemon_probe' | 'shell_report';
 }
 
 /**
@@ -61,6 +95,12 @@ export function sessionEntryOf(info: {
   readonly rows: number;
   readonly alt_screen: boolean;
   readonly attached: boolean;
+  readonly busy?: boolean;
+  readonly context?: {
+    readonly git: { readonly branch: string; readonly detached: boolean; readonly dirty: boolean | null } | null;
+    readonly facts: readonly { readonly key: string; readonly value: string; readonly source: 'daemon_probe' | 'shell_report' }[];
+    readonly revision: number;
+  } | null;
 }): SessionEntry {
   return {
     host: info.addr.host,
@@ -73,6 +113,26 @@ export function sessionEntryOf(info: {
     rows: info.rows,
     altScreen: info.alt_screen,
     attached: info.attached,
+    busy: info.busy ?? false,
+    context:
+      info.context == null
+        ? null
+        : {
+            git:
+              info.context.git == null
+                ? null
+                : {
+                    branch: info.context.git.branch,
+                    detached: info.context.git.detached,
+                    dirty: info.context.git.dirty,
+                  },
+            facts: info.context.facts.map((f) => ({
+              key: f.key,
+              value: f.value,
+              source: f.source,
+            })),
+            revision: info.context.revision,
+          },
   };
 }
 

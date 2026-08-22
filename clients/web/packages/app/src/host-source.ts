@@ -204,6 +204,8 @@ export function localHostSource(
         rows: spec.rows,
         altScreen: false,
         attached: false,
+        busy: false,
+        context: null,
       }));
     },
   };

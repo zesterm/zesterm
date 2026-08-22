@@ -31,6 +31,8 @@ const entry = (host: string, session: string): SessionEntry => ({
   rows: 24,
   altScreen: false,
   attached: false,
+  busy: false,
+  context: null,
 });
 
 const facts = (...names: string[]): HostFacts => ({

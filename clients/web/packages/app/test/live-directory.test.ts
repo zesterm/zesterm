@@ -178,6 +178,8 @@ function info(session: number, title = 'shell'): SessionInfo {
     rows: 32,
     alt_screen: false,
     attached: false,
+    busy: false,
+    context: null,
   };
 }
 
@@ -325,6 +327,8 @@ test('sessions arrive as directory entries, projected the way the sidecar projec
       rows: 32,
       altScreen: false,
       attached: false,
+      busy: false,
+      context: null,
     },
     'a wire session id reaches the UI as a string, as it does on loopback — the two must agree or a row opens the wrong session',
   );

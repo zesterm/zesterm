@@ -469,6 +469,8 @@ const sess = (host: string, session: string): SessionEntry => ({
   rows: 24,
   altScreen: false,
   attached: false,
+  busy: false,
+  context: null,
 });
 
 const DIAL = (() => {}) as unknown as Dial;

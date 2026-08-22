@@ -1192,6 +1192,8 @@ mod tests {
                 rows: 24,
                 alt_screen: false,
                 attached: false,
+                context: None,
+                busy: false,
             }]
         };
         let offer = || Some(zest_proto::HostOffer { os: "linux".into(), ..Default::default() });

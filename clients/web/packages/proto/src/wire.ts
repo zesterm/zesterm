@@ -459,7 +459,45 @@ export interface SessionInfo {
   /** What the phone's blocks-first view switches on. */
   readonly alt_screen: boolean;
   readonly attached: boolean;
+  /**
+   * What the session is standing in — branch, kube context, pins — computed
+   * by the daemon that owns it. `null` from a daemon that predates the field:
+   * "did not say", never "no context".
+   */
+  readonly context: SessionContext | null;
+  /** A command is running right now, by the tail block's word. */
+  readonly busy: boolean;
 }
+
+/**
+ * Where a session stands, as its daemon sees it. Display only — half of it
+ * is the filesystem as of a debounce window ago, half is shell-emitted
+ * escapes anything that can print can forge; each fact's `source` says which.
+ */
+export interface SessionContext {
+  readonly git: GitContext | null;
+  readonly facts: readonly ContextFact[];
+  /** Moves when the context does, so chrome can skip unchanged rebuilds. */
+  readonly revision: number;
+}
+
+export interface GitContext {
+  /** The branch name, or the short hash when detached. */
+  readonly branch: string;
+  readonly detached: boolean;
+  /** `null` until something actually asks git — unknown, not clean. */
+  readonly dirty: boolean | null;
+}
+
+export interface ContextFact {
+  /** `venv`, `kube`, `node`, `ssh_host`, … — an unknown key is one chip fewer. */
+  readonly key: string;
+  readonly value: string;
+  readonly source: ContextSource;
+}
+
+/** Who said so, and therefore how far it can be trusted. */
+export type ContextSource = 'daemon_probe' | 'shell_report';
 
 /** One launch target a machine publishes (#262). */
 export interface HostProfile {
@@ -849,5 +887,46 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     rows: num(o['rows'], 'SessionInfo.rows'),
     alt_screen: bool(o['alt_screen'], 'SessionInfo.alt_screen'),
     attached: bool(o['attached'], 'SessionInfo.attached'),
+    // Absent from an older daemon (`skip_serializing_if`), and that must
+    // decode as "did not say" rather than fail the whole Sessions push —
+    // the HostOffer rule.
+    context:
+      o['context'] === undefined || o['context'] === null
+        ? null
+        : parseSessionContext(o['context']),
+    busy: o['busy'] === undefined ? false : bool(o['busy'], 'SessionInfo.busy'),
+  };
+}
+
+function parseSessionContext(v: unknown): SessionContext {
+  const o = obj(v, 'SessionContext');
+  return {
+    git: o['git'] === undefined || o['git'] === null ? null : parseGitContext(o['git']),
+    facts:
+      o['facts'] === undefined ? [] : arr(o['facts'], 'SessionContext.facts').map(parseContextFact),
+    revision: o['revision'] === undefined ? 0 : num(o['revision'], 'SessionContext.revision'),
+  };
+}
+
+function parseGitContext(v: unknown): GitContext {
+  const o = obj(v, 'GitContext');
+  return {
+    branch: str(o['branch'], 'GitContext.branch'),
+    detached: bool(o['detached'], 'GitContext.detached'),
+    dirty:
+      o['dirty'] === undefined || o['dirty'] === null ? null : bool(o['dirty'], 'GitContext.dirty'),
+  };
+}
+
+function parseContextFact(v: unknown): ContextFact {
+  const o = obj(v, 'ContextFact');
+  const source = str(o['source'], 'ContextFact.source');
+  return {
+    key: str(o['key'], 'ContextFact.key'),
+    value: str(o['value'], 'ContextFact.value'),
+    // `source` is a trust label, so an unknown spelling (a newer daemon's
+    // third variant) degrades to the *least* trusted reading rather than
+    // failing the whole Sessions push — wrong in the safe direction.
+    source: source === 'daemon_probe' ? 'daemon_probe' : 'shell_report',
   };
 }
