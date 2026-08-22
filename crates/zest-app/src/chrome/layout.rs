@@ -159,7 +159,11 @@ pub const PANE_RADIUS: f32 = 10.0;
 #[must_use]
 pub fn pane_frames(area: [f32; 4], s: f32, n: usize) -> Vec<[f32; 4]> {
     let n = n.max(1);
-    let m = PANE_MARGIN * s;
+    // The margin gives way before the frames do: past the width where n
+    // margins no longer fit, a fixed margin would march the later frames off
+    // the right edge — hit regions nobody can reach, behind chrome nobody
+    // can see. Bounded by the share of the width, every frame stays inside.
+    let m = (PANE_MARGIN * s).min(area[2] / (2.0 * n as f32)).max(0.0);
     let w = ((area[2] - 2.0 * m * n as f32) / n as f32).max(0.0);
     let h = (area[3] - 2.0 * m).max(0.0);
     (0..n).map(|i| [area[0] + m + i as f32 * (w + 2.0 * m), area[1] + m, w, h]).collect()
@@ -3840,6 +3844,26 @@ mod tests {
                 } else {
                     assert_eq!(hit, Some(HitRegion::Pane(i)), "pane {i} of {n} is one click from the keyboard");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn too_many_panes_for_the_width_still_stay_inside_the_area() {
+        // Unbounded panes make this reachable: forty columns in 200px is
+        // more margin than width, and the frames must give up margin rather
+        // than walk off the right edge.
+        let area = [10.0, 20.0, 200.0, 100.0];
+        for n in [1, 7, 40, 200] {
+            let frames = pane_frames(area, 2.0, n);
+            assert_eq!(frames.len(), n);
+            for (i, f) in frames.iter().enumerate() {
+                assert!(f[0] >= area[0] - 0.01, "pane {i} of {n} starts inside the area");
+                assert!(
+                    f[0] + f[2] <= area[0] + area[2] + 0.01,
+                    "pane {i} of {n} ends inside the area"
+                );
+                assert!(f[2] >= 0.0 && f[3] >= 0.0, "pane {i} of {n} has a non-negative size");
             }
         }
     }
