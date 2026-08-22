@@ -273,12 +273,14 @@ impl crate::source::SessionSource for PendingSession {
 pub struct Tab {
     pub addr: SessionAddr,
     session: TabSession,
-    /// A second pane, split right (design screen 5). Two panes is the
-    /// design's shape; a tree is a later one, and boxed so an unsplit tab —
-    /// every tab, most of the time — pays a pointer.
-    pub split: Option<Box<SplitPane>>,
-    /// Which pane owns the keyboard: `false` = left/primary, `true` = right.
-    pub focus_right: bool,
+    /// The panes split right of the primary, left to right (design screen
+    /// 5, generalised — #436). Any number, on any host: a pane is a session
+    /// like the tab's own, and a session is addressed `(HostId, SessionId)`
+    /// wherever it runs. An unsplit tab — every tab, most of the time —
+    /// pays an empty `Vec`, which allocates nothing.
+    pub panes: Vec<SplitPane>,
+    /// Which pane owns the keyboard: `0` is the primary, `i` is `panes[i-1]`.
+    pub focus: usize,
     /// The session runs on this machine (loopback daemon or in-process).
     /// Decides close semantics: closing a local tab kills; a remote one
     /// detaches.
@@ -307,32 +309,86 @@ pub struct Tab {
     pending_input: Option<Vec<u8>>,
 }
 
-/// The right-hand pane of a split tab: a session with the little state a
-/// pane needs, and none of a tab's (a pane is not a hit target in the strip,
+/// One extra pane of a split tab: a session with the little state a pane
+/// needs, and none of a tab's (a pane is not a hit target in the strip,
 /// does not persist, and cannot be dragged).
 pub struct SplitPane {
     pub addr: SessionAddr,
     session: TabSession,
     pub local: bool,
     pub dead: bool,
+    /// A worker is still dialling this pane's host — the same treatment a
+    /// connecting tab gets (#175), because a pane on a cold host must cost a
+    /// placeholder and never a frozen event loop.
+    pub connecting: bool,
     pub sized: (u16, u16),
 }
 
 impl SplitPane {
     pub fn daemon(remote: RemoteSession, local: bool, sized: (u16, u16)) -> Self {
-        Self { addr: remote.addr(), session: TabSession::Daemon(remote), local, dead: false, sized }
+        Self {
+            addr: remote.addr(),
+            session: TabSession::Daemon(remote),
+            local,
+            dead: false,
+            connecting: false,
+            sized,
+        }
     }
 
     pub fn in_process(session: Session, addr: SessionAddr, sized: (u16, u16)) -> Self {
-        Self { addr, session: TabSession::InProcess(session), local: true, dead: false, sized }
+        Self {
+            addr,
+            session: TabSession::InProcess(session),
+            local: true,
+            dead: false,
+            connecting: false,
+            sized,
+        }
+    }
+
+    /// A pane whose session a worker is still opening, under a placeholder
+    /// address; settled by [`SplitPane::resolve_live`] /
+    /// [`SplitPane::resolve_failed`].
+    pub fn connecting(addr: SessionAddr, pending: PendingSession, sized: (u16, u16)) -> Self {
+        Self {
+            addr,
+            session: TabSession::Pending(pending),
+            // Remote until proven otherwise: closing a connecting pane must
+            // never kill anything, because there is nothing of ours to kill.
+            local: false,
+            dead: false,
+            connecting: true,
+            sized,
+        }
+    }
+
+    /// The worker's session arrived: swap it in under the same frame.
+    pub fn resolve_live(&mut self, remote: RemoteSession, local: bool) {
+        self.addr = remote.addr();
+        self.session = TabSession::Daemon(remote);
+        self.local = local;
+        self.connecting = false;
+    }
+
+    /// The worker gave up: the pane stays, dead, carrying the error.
+    pub fn resolve_failed(&mut self, error: &str) {
+        self.connecting = false;
+        self.dead = true;
+        if let TabSession::Pending(p) = &self.session {
+            p.show_error(error);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_for_test(addr: SessionAddr) -> Self {
+        Self::connecting(addr, PendingSession::blank(), (80, 24))
     }
 
     pub fn source(&self) -> &dyn SessionSource {
         match &self.session {
             TabSession::Daemon(r) => r,
             TabSession::InProcess(s) => s,
-            // Never constructed for a pane; renders honestly if promotion
-            // ever puts one here.
             TabSession::Pending(p) => p,
         }
     }
@@ -342,8 +398,8 @@ impl SplitPane {
         match self.session {
             TabSession::Daemon(r) => r.kill(),
             TabSession::InProcess(s) => drop(s),
-            // Panes are never pending — only tabs launch through a worker —
-            // but a pane promoted from one would still have nothing to kill.
+            // Nothing exists to kill; a session the worker later delivers
+            // for a closed pane is dropped by the resolution path.
             TabSession::Pending(p) => drop(p),
         }
     }
@@ -354,8 +410,8 @@ impl Tab {
         Self {
             addr: remote.addr(),
             session: TabSession::Daemon(remote),
-            split: None,
-            focus_right: false,
+            panes: Vec::new(),
+            focus: 0,
             local,
             dead: false,
             connecting: false,
@@ -374,8 +430,8 @@ impl Tab {
         Self {
             addr,
             session: TabSession::Pending(pending),
-            split: None,
-            focus_right: false,
+            panes: Vec::new(),
+            focus: 0,
             // Remote until proven otherwise: closing a connecting tab must
             // never kill anything, because there is nothing of ours to kill.
             local: false,
@@ -440,8 +496,8 @@ impl Tab {
         Self {
             addr,
             session: TabSession::Pending(PendingSession::blank()),
-            split: None,
-            focus_right: false,
+            panes: Vec::new(),
+            focus: 0,
             local: false,
             dead: false,
             connecting: true,
@@ -462,8 +518,8 @@ impl Tab {
         Self {
             addr,
             session: TabSession::InProcess(session),
-            split: None,
-            focus_right: false,
+            panes: Vec::new(),
+            focus: 0,
             local: true,
             dead: false,
             connecting: false,
@@ -485,45 +541,88 @@ impl Tab {
     /// The pane the keyboard belongs to — what input, selection, IME and the
     /// status bar all act on. The primary pane unless a split holds focus.
     pub fn focused_source(&self) -> &dyn SessionSource {
-        match (&self.split, self.focus_right) {
-            (Some(split), true) => split.source(),
-            _ => self.source(),
-        }
+        self.pane_source(self.focus)
     }
 
     /// The focused pane's session address.
     #[must_use]
     pub fn focused_addr(&self) -> SessionAddr {
-        match (&self.split, self.focus_right) {
-            (Some(split), true) => split.addr,
-            _ => self.addr,
+        self.pane_addr(self.focus)
+    }
+
+    /// More than one pane.
+    #[must_use]
+    pub fn is_split(&self) -> bool {
+        !self.panes.is_empty()
+    }
+
+    /// Panes, the primary included.
+    #[must_use]
+    pub fn pane_count(&self) -> usize {
+        1 + self.panes.len()
+    }
+
+    /// Pane `i`'s terminal; `0` is the primary. Out of range clamps to the
+    /// primary rather than panicking — a stale hit region or a focus index
+    /// a frame behind a pane close must draw something, never crash.
+    pub fn pane_source(&self, i: usize) -> &dyn SessionSource {
+        match i.checked_sub(1).and_then(|j| self.panes.get(j)) {
+            Some(pane) => pane.source(),
+            None => self.source(),
         }
+    }
+
+    #[must_use]
+    pub fn pane_addr(&self, i: usize) -> SessionAddr {
+        i.checked_sub(1).and_then(|j| self.panes.get(j)).map_or(self.addr, |p| p.addr)
+    }
+
+    #[must_use]
+    pub fn pane_dead(&self, i: usize) -> bool {
+        i.checked_sub(1).and_then(|j| self.panes.get(j)).map_or(self.dead, |p| p.dead)
+    }
+
+    /// Move the keyboard to pane `i`; `false` when nothing changed.
+    pub fn focus_pane(&mut self, i: usize) -> bool {
+        if i >= self.pane_count() || i == self.focus {
+            return false;
+        }
+        self.focus = i;
+        true
+    }
+
+    /// Move the keyboard one pane right (`+1`) or left (`-1`), wrapping —
+    /// so the chord stays useful however many panes there are.
+    pub fn cycle_focus(&mut self, delta: isize) -> bool {
+        let n = self.pane_count();
+        if n < 2 {
+            return false;
+        }
+        let next = (self.focus as isize + delta).rem_euclid(n as isize) as usize;
+        self.focus_pane(next)
     }
 
     /// Close the focused pane of a split tab; `false` when there is no
     /// split, in which case closing means the whole tab.
     ///
-    /// Closing the *left* pane promotes the right one into the tab, so the
-    /// tab keeps its identity in the strip while the surviving shell keeps
+    /// Closing the *primary* promotes the next pane into the tab, so the
+    /// tab keeps its identity in the strip while the surviving shells keep
     /// running — the alternative (the tab vanishing while a pane lives) is
-    /// how sessions get orphaned.
+    /// how sessions get orphaned. Otherwise the keyboard lands on the pane
+    /// to the left of the one that closed, which is where the eye already is.
     pub fn close_focused_pane(&mut self) -> bool {
-        let Some(split) = self.split.take() else { return false };
-        if self.focus_right {
-            self.focus_right = false;
-            if split.local {
-                split.kill();
-            }
-            // A remote pane's drop detaches, exactly like a remote tab.
-        } else {
-            let old_addr = self.addr;
+        if self.panes.is_empty() {
+            return false;
+        }
+        if self.focus == 0 {
+            let next = self.panes.remove(0);
             let was_local = self.local;
-            let old = core::mem::replace(&mut self.session, split.session);
-            self.addr = split.addr;
-            self.local = split.local;
-            self.dead = split.dead;
-            self.sized = split.sized;
-            let _ = old_addr;
+            let old = core::mem::replace(&mut self.session, next.session);
+            self.addr = next.addr;
+            self.local = next.local;
+            self.dead = next.dead;
+            self.connecting = next.connecting;
+            self.sized = next.sized;
             if was_local {
                 match old {
                     TabSession::Daemon(r) => r.kill(),
@@ -531,6 +630,26 @@ impl Tab {
                     TabSession::Pending(p) => drop(p),
                 }
             }
+        } else {
+            let pane = self.panes.remove(self.focus - 1);
+            self.focus -= 1;
+            if pane.local {
+                pane.kill();
+            }
+            // A remote pane's drop detaches, exactly like a remote tab.
+        }
+        true
+    }
+
+    /// Drop the pane holding `addr` because its shell has ended — nothing
+    /// to kill; the keyboard stays with its pane, or moves one left when
+    /// that pane was the one that went. `false` when no split pane holds it
+    /// (the primary's exit is the tab's, not a pane's).
+    pub fn remove_gone_pane(&mut self, addr: SessionAddr) -> bool {
+        let Some(j) = self.panes.iter().position(|p| p.addr == addr) else { return false };
+        drop(self.panes.remove(j));
+        if self.focus > j {
+            self.focus -= 1;
         }
         true
     }
@@ -541,9 +660,9 @@ impl Tab {
     /// `Session` drop regardless, which is also what a dead tab needs. A
     /// split pane follows its tab's fate: local panes die, remote detach.
     pub fn kill(self) {
-        if let Some(split) = self.split {
-            if split.local {
-                split.kill();
+        for pane in self.panes {
+            if pane.local {
+                pane.kill();
             }
         }
         match self.session {
@@ -747,9 +866,9 @@ impl TabStrip {
         }
     }
 
-    /// The tab holding `addr` as its *split* pane, if any.
-    pub fn find_split_owner(&mut self, addr: SessionAddr) -> Option<&mut Tab> {
-        self.tabs.iter_mut().find(|t| t.split.as_ref().is_some_and(|s| s.addr == addr))
+    /// The tab holding `addr` as one of its *split* panes, if any.
+    pub fn find_pane_owner(&mut self, addr: SessionAddr) -> Option<&mut Tab> {
+        self.tabs.iter_mut().find(|t| t.panes.iter().any(|p| p.addr == addr))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Tab> {
@@ -956,6 +1075,104 @@ impl TabStrip {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #436: panes are a list, not a pair. These pin the shape that every
+    // hit region, wakeup and render pass now indexes into.
+
+    fn split_tab(n: usize) -> Tab {
+        let mut tab = Tab::pending_for_test(placeholder_addr(1));
+        for i in 0..n {
+            tab.panes.push(SplitPane::pending_for_test(placeholder_addr(i as u64 + 2)));
+        }
+        tab
+    }
+
+    #[test]
+    fn any_number_of_panes_and_the_focus_wraps_both_ways() {
+        let mut tab = split_tab(4);
+        assert_eq!(tab.pane_count(), 5, "the primary plus four — no cap at two");
+        assert_eq!(tab.focused_addr(), placeholder_addr(1), "the primary starts focused");
+        for i in 1..5 {
+            assert!(tab.cycle_focus(1));
+            assert_eq!(tab.focused_addr(), placeholder_addr(i as u64 + 1), "→ walks right");
+        }
+        assert!(tab.cycle_focus(1));
+        assert_eq!(tab.focus, 0, "past the last pane wraps to the primary");
+        assert!(tab.cycle_focus(-1));
+        assert_eq!(tab.focus, 4, "← from the primary wraps to the last pane");
+        assert!(tab.focus_pane(2), "a click names a pane by index");
+        assert!(!tab.focus_pane(2), "refocusing the focused pane is not a change");
+        assert!(!tab.focus_pane(9), "an index past the panes is ignored, never a panic");
+        assert_eq!(tab.focus, 2);
+    }
+
+    #[test]
+    fn an_unsplit_tab_has_nothing_to_cycle_or_close() {
+        let mut tab = split_tab(0);
+        assert!(!tab.is_split());
+        assert!(!tab.cycle_focus(1), "one pane: the chord does nothing");
+        assert!(!tab.close_focused_pane(), "no pane to close: ⌘W means the tab");
+    }
+
+    #[test]
+    fn closing_a_middle_pane_moves_the_keyboard_one_left() {
+        let mut tab = split_tab(3);
+        tab.focus_pane(2);
+        assert!(tab.close_focused_pane());
+        assert_eq!(tab.pane_count(), 3);
+        assert_eq!(tab.focus, 1, "the keyboard lands on the left neighbour");
+        assert_eq!(
+            tab.panes.iter().map(|p| p.addr).collect::<Vec<_>>(),
+            vec![placeholder_addr(2), placeholder_addr(4)],
+            "exactly the focused pane went"
+        );
+    }
+
+    #[test]
+    fn closing_the_primary_promotes_the_next_pane_into_the_tab() {
+        // The tab keeps its slot in the strip while its surviving shells keep
+        // running — the alternative is how sessions get orphaned.
+        let mut tab = split_tab(2);
+        assert!(tab.close_focused_pane());
+        assert_eq!(tab.addr, placeholder_addr(2), "the first pane is the tab now");
+        assert_eq!(tab.pane_count(), 2);
+        assert_eq!(tab.focus, 0);
+        assert_eq!(tab.panes[0].addr, placeholder_addr(3));
+        assert!(tab.connecting, "the promoted pane's state comes with it");
+    }
+
+    #[test]
+    fn a_pane_whose_shell_ended_leaves_without_moving_the_keyboard_off_its_pane() {
+        let mut tab = split_tab(3);
+        tab.focus_pane(3);
+        assert!(tab.remove_gone_pane(placeholder_addr(2)), "the first pane's shell exited");
+        assert_eq!(tab.focus, 2, "the focused pane is the same pane, one index left");
+        assert_eq!(tab.focused_addr(), placeholder_addr(4));
+        assert!(!tab.remove_gone_pane(placeholder_addr(1)), "the primary's exit is the tab's");
+        assert!(!tab.remove_gone_pane(placeholder_addr(99)), "an unknown address is nobody's");
+        tab.focus_pane(1);
+        assert!(tab.remove_gone_pane(placeholder_addr(3)), "the focused pane itself goes");
+        assert_eq!(tab.focus, 0, "the keyboard falls one left");
+        assert!(!tab.pane_dead(0));
+    }
+
+    #[test]
+    fn a_stale_index_reads_as_the_primary_rather_than_panicking() {
+        let tab = split_tab(1);
+        assert_eq!(tab.pane_addr(7), tab.addr, "a hit region a frame behind a close");
+        assert_eq!(tab.pane_dead(7), tab.dead);
+    }
+
+    #[test]
+    fn the_strip_finds_the_tab_that_owns_a_pane() {
+        let mut strip = TabStrip::default();
+        strip.push(split_tab(0));
+        let mut owner = split_tab(2);
+        owner.addr = placeholder_addr(10);
+        strip.push(owner);
+        assert_eq!(strip.find_pane_owner(placeholder_addr(3)).map(|t| t.addr), Some(placeholder_addr(10)));
+        assert!(strip.find_pane_owner(placeholder_addr(10)).is_none(), "a tab's own address is not a pane's");
+    }
 
     // TabStrip's only nontrivial logic is keeping `active` pointing at the
     // same tab across removals — exactly the off-by-one that shows up as

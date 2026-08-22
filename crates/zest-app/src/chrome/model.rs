@@ -963,8 +963,9 @@ pub struct ChromeModel {
     pub sidebar: Option<SidebarModel>,
     /// A full-pane screen over the grid area (fleet, themes); Esc returns.
     pub screen: Option<ScreenModel>,
-    /// The split tab's two pane headers, left then right; `None` unsplit.
-    pub panes: Option<[PaneModel; 2]>,
+    /// The split tab's pane headers, left to right (the primary first);
+    /// `None` unsplit.
+    pub panes: Option<Vec<PaneModel>>,
     /// Animation phases for this rebuild.
     pub anim: AnimPhase,
     /// Where the grid area is, physical pixels — the rectangle a screen

@@ -124,10 +124,11 @@ pub enum HitRegion {
     /// A full-pane screen's ground (fleet, themes) — swallows what its
     /// cards do not claim; Esc is the way back.
     ScreenPanel,
-    /// One pane of a split tab (`true` = right); clicking moves the keyboard
-    /// there. Pushed only over the *unfocused* pane's frame and both
-    /// headers — clicks inside the focused pane's body stay the grid's.
-    Pane(bool),
+    /// One pane of a split tab, by index left to right (`0` is the
+    /// primary); clicking moves the keyboard there. Pushed only over an
+    /// *unfocused* pane's frame and every header — clicks inside the
+    /// focused pane's body stay the grid's.
+    Pane(usize),
     /// One theme card of the gallery; clicking applies that theme.
     ThemeCard(usize),
     /// The gallery's dashed import card; clicking imports the scheme the
@@ -276,9 +277,9 @@ pub enum WheelTarget {
 
 /// Which surface owns a wheel event that landed on `hit`.
 ///
-/// `pane_focus_right` is `Some(focus_right)` while the active tab is split,
-/// `None` otherwise — a `Pane` region means different things either side of
-/// the focus, and the region alone cannot say which.
+/// `pane_focus` is `Some(index)` of the focused pane while the active tab
+/// is split, `None` otherwise — a `Pane` region means different things
+/// either side of the focus, and the region alone cannot say which.
 ///
 /// **Deliberately exhaustive — there is no `_` arm, and adding one re-opens
 /// the hole this closes.** A catch-all is what made block headers, the
@@ -289,7 +290,7 @@ pub enum WheelTarget {
 /// region added is an `error[E0004]` in this file — which is the file whose
 /// enum you are already editing. (#256.)
 #[must_use]
-pub fn wheel_target(hit: Option<HitRegion>, pane_focus_right: Option<bool>) -> WheelTarget {
+pub fn wheel_target(hit: Option<HitRegion>, pane_focus: Option<usize>) -> WheelTarget {
     use HitRegion as R;
     let Some(hit) = hit else {
         // Nothing in the chrome is under the pointer, so the pointer is on
@@ -307,8 +308,8 @@ pub fn wheel_target(hit: Option<HitRegion>, pane_focus_right: Option<bool>) -> W
         // `focused_view_rect`, so falling through there would scroll the pane
         // the pointer is not over — a different wrong answer, not a fix.
         // Routing per pane is a feature; doing nothing is the honest interim.
-        R::Pane(right) => {
-            if pane_focus_right == Some(right) {
+        R::Pane(i) => {
+            if pane_focus == Some(i) {
                 WheelTarget::Grid
             } else {
                 WheelTarget::Swallow
@@ -507,7 +508,7 @@ mod tests {
         // whole frame of the unfocused one, so the region alone cannot say
         // which side it means — the focus does.
         assert_eq!(
-            wheel_target(Some(HitRegion::Pane(false)), Some(false)),
+            wheel_target(Some(HitRegion::Pane(0)), Some(0)),
             WheelTarget::Grid,
             "the focused pane's own header band belongs to that pane"
         );
@@ -516,12 +517,12 @@ mod tests {
         // pointer is *not* over. Doing nothing is the honest interim, and it
         // still beats scrolling the tab strip, which is what it did.
         assert_eq!(
-            wheel_target(Some(HitRegion::Pane(true)), Some(false)),
+            wheel_target(Some(HitRegion::Pane(1)), Some(0)),
             WheelTarget::Swallow,
             "the unfocused pane is not routed per pane yet"
         );
         assert_eq!(
-            wheel_target(Some(HitRegion::Pane(true)), None),
+            wheel_target(Some(HitRegion::Pane(1)), None),
             WheelTarget::Swallow,
             "a Pane region with no split is stale chrome; it must not reach the strip"
         );

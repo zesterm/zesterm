@@ -325,6 +325,9 @@ enum Pending {
     /// is a worker dial — so this is armed on the tab and written when it
     /// settles, never at click time.
     Command(String),
+    /// ⌘H: the next machine or session picked becomes a pane of the active
+    /// tab rather than a tab of its own (#436).
+    Split,
 }
 
 /// The command palette's transient state while it is open, and the action
@@ -3021,21 +3024,28 @@ impl App {
             Action::OpenProfiles => self.open_profiles_tab(),
             Action::ToggleTabLayout => self.toggle_tab_layout(),
             Action::SplitRight => self.split_right(),
+            Action::SplitRightOnHost => self.arm_pending(Pending::Split),
+            Action::FocusPaneLeft => self.cycle_pane_focus(-1),
+            Action::FocusPaneRight => self.cycle_pane_focus(1),
         }
     }
 
-    /// ⌘D: give the active tab a second pane on the same host; on a tab that
-    /// already has one, move the keyboard to the other pane instead — the
-    /// chord stays useful after the split.
+    /// ⌘U / ⌘J: the keyboard moves one pane over, wrapping.
+    fn cycle_pane_focus(&mut self, delta: isize) {
+        if self.tabs.active_mut().is_some_and(|t| t.cycle_focus(delta)) {
+            self.mark_chrome_dirty();
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        }
+    }
+
+    /// ⌘D: give the active tab one more pane, on the window's own host. Any
+    /// number of times — two panes was design screen 5's picture, not a cap
+    /// (#436). Moving the keyboard between panes is ⌘U / ⌘J, and a pane on
+    /// a *different* host is ⌘H, which routes through the fleet picker.
     fn split_right(&mut self) {
         if self.tabs.active().is_none() {
-            return;
-        }
-        if self.tabs.active().is_some_and(|t| t.split.is_some()) {
-            if let Some(tab) = self.tabs.active_mut() {
-                tab.focus_right = !tab.focus_right;
-            }
-            self.mark_chrome_dirty();
             return;
         }
 
@@ -3113,9 +3123,15 @@ impl App {
             }
         };
 
+        self.adopt_pane(pane);
+    }
+
+    /// Append a pane to the active tab and give it the keyboard; every pane
+    /// is then re-fitted, because one more column narrows all the others.
+    fn adopt_pane(&mut self, pane: crate::tabs::SplitPane) {
         if let Some(tab) = self.tabs.active_mut() {
-            tab.split = Some(Box::new(pane));
-            tab.focus_right = true;
+            tab.panes.push(pane);
+            tab.focus = tab.pane_count() - 1;
         }
         self.resize_split_panes();
         self.mark_chrome_dirty();
@@ -3124,19 +3140,109 @@ impl App {
         }
     }
 
-    /// Cols/rows that fit one pane of a split, from the current window.
+    /// Cols/rows the *next* pane of the active tab will get, from the
+    /// current window: the tab's panes plus one, equal columns.
     fn split_pane_dims(&self) -> (u16, u16) {
         let geometry = self.window.as_ref().zip(self.fonts.as_ref());
         let Some((window, fonts)) = geometry else { return (80, 24) };
         let scale = window.scale_factor() as f32;
         let size = window.inner_size();
         let area = self.insets_at(scale).grid_rect(size.width, size.height);
-        let (_, right) = crate::chrome::layout::pane_frames(area, scale);
-        let body = crate::chrome::layout::pane_body(right, scale);
+        let n = self.tabs.active().map_or(1, Tab::pane_count) + 1;
+        let frames = crate::chrome::layout::pane_frames(area, scale, n);
+        let body = crate::chrome::layout::pane_body(frames[n - 1], scale);
         let cm = fonts.cell_metrics();
         let cols = ((body[2] / cm.cell_w as f32) as u16).max(2);
         let rows = ((body[3] / cm.cell_h as f32) as u16).max(2);
         (cols, rows)
+    }
+
+    /// ⌘H's landing, and the picker's when it carries a split: a pane on
+    /// `route`, either a fresh shell (`attach: None`) or an existing session
+    /// attached as a pane (#436). The pane goes up NOW under a placeholder,
+    /// in the connecting treatment a profile launch gets (#175), and a
+    /// worker dials — a cold host must cost a placeholder, never a frozen
+    /// event loop.
+    fn spawn_pane_worker(
+        &mut self,
+        route: HostRoute,
+        attach: Option<zest_proto::SessionAddr>,
+        expect_host: Option<zest_proto::HostId>,
+        host_label: String,
+    ) {
+        if self.tabs.active().is_none() {
+            return;
+        }
+        let local = route.is_local();
+        let identity = if local { self.client_identity.clone() } else { self.remote_identity() };
+        let Some(identity) = identity else {
+            tracing::warn!("no identity to dial with; cannot open the pane");
+            return;
+        };
+
+        let (cols, rows) = self.split_pane_dims();
+        let seed = self.palette_for(self.tabs.active().and_then(|t| t.identity.as_ref()));
+        let provenance = match attach {
+            Some(addr) => format!("Attaching \u{b7} {addr} on {host_label}"),
+            None => format!("New pane \u{b7} shell on {host_label}"),
+        };
+        let pending = crate::tabs::PendingSession::new(
+            cols,
+            rows,
+            seed.clone(),
+            &host_label,
+            &provenance,
+            &host_label,
+        );
+        self.next_placeholder += 1;
+        let placeholder = crate::tabs::placeholder_addr(self.next_placeholder);
+        self.adopt_pane(crate::tabs::SplitPane::connecting(placeholder, pending, (cols, rows)));
+
+        let cell = Arc::new(parking_lot::Mutex::new(placeholder));
+        let wake = wake_for(&self.proxy, Arc::clone(&cell), Arc::clone(&self.activity));
+        let proxy = self.proxy.clone();
+        let outcomes = Arc::clone(&self.pending_launches);
+        let scrollback = self.config.scrollback;
+        let command =
+            if local { self.config.shell.clone().unwrap_or_default() } else { String::new() };
+        let on_pending = (!local).then(|| self.pairing_notifier(host_label.clone()));
+        let pairing = Arc::clone(&self.pairing);
+        let spawned = std::thread::Builder::new().name("zest-pane-open".into()).spawn(move || {
+            let opts = crate::remote::AttachOptions {
+                identity: &identity,
+                label: "zesterm",
+                command: &command,
+                cwd: "",
+                cols,
+                rows,
+                scrollback,
+                adopt: false,
+                local,
+                expect_host,
+                on_pending,
+            };
+            let result = match attach {
+                Some(addr) => {
+                    crate::remote::RemoteSession::attach_existing(route.dialer(), addr, &opts, wake)
+                }
+                None => crate::remote::RemoteSession::create_and_attach(route.dialer(), &opts, wake),
+            };
+            clear_pairing(&pairing, &proxy);
+            let outcome = result.map_err(|e| e.to_string()).inspect(|session| {
+                *cell.lock() = session.addr();
+                session.terminal().lock().set_palette(seed);
+            });
+            outcomes.lock().push((placeholder, outcome));
+            let _ = proxy.send_event(Wakeup::TabsChanged);
+        });
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "could not start the pane worker");
+            if let Some(tab) = self.tabs.find_pane_owner(placeholder) {
+                if let Some(pane) = tab.panes.iter_mut().find(|p| p.addr == placeholder) {
+                    pane.resolve_failed("no thread for the pane worker");
+                }
+            }
+        }
     }
 
     /// The rectangle the focused terminal is drawn in: the grid area, or the
@@ -3148,9 +3254,9 @@ impl App {
         let size = window.inner_size();
         let area = self.insets_at(scale).grid_rect(size.width, size.height);
         let tab = self.tabs.active()?;
-        let frame = if tab.split.is_some() {
-            let (l, r) = crate::chrome::layout::pane_frames(area, scale);
-            crate::chrome::layout::pane_body(if tab.focus_right { r } else { l }, scale)
+        let frame = if tab.is_split() {
+            let frames = crate::chrome::layout::pane_frames(area, scale, tab.pane_count());
+            crate::chrome::layout::pane_body(frames[tab.focus.min(frames.len() - 1)], scale)
         } else {
             area
         };
@@ -3168,14 +3274,15 @@ impl App {
         Some(crate::chrome::insets::letterbox(frame, cols, rows, m))
     }
 
-    /// Resize both panes of a split tab to their body rectangles.
+    /// Resize every pane of the active split tab to its body rectangle —
+    /// only the ones whose size actually changed, so a settle or a focus
+    /// change costs no resize round-trips.
     fn resize_split_panes(&mut self) {
         let geometry = self.window.as_ref().zip(self.fonts.as_ref());
         let Some((window, fonts)) = geometry else { return };
         let scale = window.scale_factor() as f32;
         let size = window.inner_size();
         let area = self.insets_at(scale).grid_rect(size.width, size.height);
-        let (left, right) = crate::chrome::layout::pane_frames(area, scale);
         let cm = fonts.cell_metrics();
         let dims = |body: [f32; 4]| {
             (
@@ -3183,18 +3290,21 @@ impl App {
                 ((body[3] / cm.cell_h as f32) as u16).max(2),
             )
         };
-        let (ld, rd) = (
-            dims(crate::chrome::layout::pane_body(left, scale)),
-            dims(crate::chrome::layout::pane_body(right, scale)),
-        );
-        if let Some(tab) = self.tabs.active_mut() {
-            if tab.split.is_some() {
-                tab.source().resize(ld.0, ld.1);
-                tab.sized = ld;
-                if let Some(split) = tab.split.as_mut() {
-                    split.source().resize(rd.0, rd.1);
-                    split.sized = rd;
-                }
+        let Some(tab) = self.tabs.active_mut() else { return };
+        if !tab.is_split() {
+            return;
+        }
+        let frames = crate::chrome::layout::pane_frames(area, scale, tab.pane_count());
+        let fit: Vec<(u16, u16)> =
+            frames.iter().map(|f| dims(crate::chrome::layout::pane_body(*f, scale))).collect();
+        if tab.sized != fit[0] {
+            tab.source().resize(fit[0].0, fit[0].1);
+            tab.sized = fit[0];
+        }
+        for (pane, d) in tab.panes.iter_mut().zip(&fit[1..]) {
+            if pane.sized != *d {
+                pane.source().resize(d.0, d.1);
+                pane.sized = *d;
             }
         }
     }
@@ -3603,10 +3713,12 @@ impl App {
     fn build_panes_model(
         &self,
         fleet_hosts: &[crate::fleet::FleetHost],
-    ) -> Option<[crate::chrome::model::PaneModel; 2]> {
+    ) -> Option<Vec<crate::chrome::model::PaneModel>> {
         use crate::chrome::model::PaneModel;
         let tab = self.tabs.active()?;
-        let split = tab.split.as_ref()?;
+        if !tab.is_split() {
+            return None;
+        }
         let describe = |source: &dyn crate::source::SessionSource| {
             let (host, accent, remote) = match source.origin() {
                 Origin::Daemon { host, local: false } => (host, 1, true),
@@ -3649,12 +3761,14 @@ impl App {
             };
             (host, sub, accent)
         };
-        let (lh, ls, la) = describe(tab.source());
-        let (rh, rs, ra) = describe(split.source());
-        Some([
-            PaneModel { host: lh, sub: ls, focused: !tab.focus_right, accent: la },
-            PaneModel { host: rh, sub: rs, focused: tab.focus_right, accent: ra },
-        ])
+        Some(
+            (0..tab.pane_count())
+                .map(|i| {
+                    let (host, sub, accent) = describe(tab.pane_source(i));
+                    PaneModel { host, sub, focused: i == tab.focus, accent }
+                })
+                .collect(),
+        )
     }
 
     /// The animation phases right now, from the shared clock. One clock, so
@@ -5731,12 +5845,9 @@ impl App {
             }
             // The screen's ground swallows; its cards claim their own.
             (HitRegion::ScreenPanel, _) => {}
-            (HitRegion::Pane(right), MouseButton::Left) => {
-                if let Some(tab) = self.tabs.active_mut() {
-                    if tab.split.is_some() && tab.focus_right != right {
-                        tab.focus_right = right;
-                        self.mark_chrome_dirty();
-                    }
+            (HitRegion::Pane(i), MouseButton::Left) => {
+                if self.tabs.active_mut().is_some_and(|t| t.focus_pane(i)) {
+                    self.mark_chrome_dirty();
                 }
             }
             (HitRegion::ThemeCard(i), MouseButton::Left) => {
@@ -8002,6 +8113,13 @@ impl App {
             PickerAction::Attach { addr, route } => {
                 self.picker = None;
                 self.screen = AppScreen::Terminal;
+                if matches!(pending, Some(Pending::Split)) {
+                    let expect = (!route.is_local()).then_some(addr.host);
+                    let label = self.host_label_for(addr.host, &route);
+                    self.spawn_pane_worker(route, Some(addr), expect, label);
+                    self.mark_chrome_dirty();
+                    return;
+                }
                 // A session that already exists on the chosen machine is the
                 // cheaper half of "run on host…": attach, then write.
                 let run = match &pending {
@@ -8022,6 +8140,13 @@ impl App {
             PickerAction::Create { host, route } => {
                 self.picker = None;
                 self.screen = AppScreen::Terminal;
+                if matches!(pending, Some(Pending::Split)) {
+                    let expect = (!route.is_local()).then_some(host);
+                    let label = self.host_label_for(host, &route);
+                    self.spawn_pane_worker(route, None, expect, label);
+                    self.mark_chrome_dirty();
+                    return;
+                }
                 // The ask_host flow (design §12): the picker was opened to
                 // choose this profile's host, and this row is the choice.
                 if let Some(Pending::Profile(name)) = &pending {
@@ -8059,6 +8184,20 @@ impl App {
             }
         }
         self.mark_chrome_dirty();
+    }
+
+    /// The fleet's display name for `host`, falling back to the address being
+    /// dialled — which still says *where* a pane is headed.
+    fn host_label_for(&self, host: zest_proto::HostId, route: &HostRoute) -> String {
+        self.fleet
+            .as_ref()
+            .map(|f| f.snapshot())
+            .and_then(|hosts| hosts.iter().find(|e| e.host == host).map(|e| e.label.clone()))
+            .unwrap_or_else(|| match route {
+                HostRoute::Tcp(a) => a.clone(),
+                HostRoute::LocalSocket(_) => "local".to_string(),
+                HostRoute::Relay { .. } => "the host".to_string(),
+            })
     }
 
     /// Re-open the picker holding something for the next machine to carry.
@@ -9098,15 +9237,22 @@ impl App {
             self.clear_attention(addr);
         }
         let dims = self.current_dims();
+        // A split tab's panes are sized by their columns, never the whole
+        // grid; `resize_split_panes` knows the columns and skips the panes
+        // that already fit.
+        let split = self.tabs.active().is_some_and(Tab::is_split);
+        if split {
+            self.resize_split_panes();
+        }
         if let Some(tab) = self.tabs.active_mut() {
             // Background tabs are resized lazily: this is the moment a stale
             // one catches up (RemoteSession::resize also requests the
             // keyframe that makes the new shape true).
-            if tab.sized != dims {
+            if !split && tab.sized != dims {
                 tab.source().resize(dims.0, dims.1);
                 tab.sized = dims;
             }
-            tab.source().mark_dirty();
+            tab.focused_source().mark_dirty();
         }
         self.mark_chrome_dirty();
         self.persist_tabs();
@@ -9324,10 +9470,7 @@ impl App {
             return Vec::new();
         }
         let Some(tab) = self.tabs.active() else { return Vec::new() };
-        let pane_dead = match (&tab.split, tab.focus_right) {
-            (Some(split), true) => split.dead,
-            _ => tab.dead,
-        };
+        let pane_dead = tab.pane_dead(tab.focus);
         let term = tab.focused_source().terminal();
         let term = term.lock();
         // The alt screen is a separate grid whose ids restart at zero; a
@@ -9981,11 +10124,8 @@ impl App {
             // `None` while a screen owns the pane: the terminal is then not
             // built at all, rather than built and painted over. The outer
             // `Option` also keeps the terminal lock untaken in that case.
-            let split = (!pane_is_covered(self.screen, self.tabs.settings_active())).then(|| {
-                self.tabs.active().and_then(|t| {
-                    t.split.as_ref().map(|p| (p.source(), t.focus_right))
-                })
-            });
+            let split = (!pane_is_covered(self.screen, self.tabs.settings_active()))
+                .then(|| self.tabs.active().filter(|t| t.is_split()).map(Tab::pane_count));
             match split {
                 None => {
                     // A screen replaces the terminal; drawing it underneath
@@ -10002,106 +10142,81 @@ impl App {
                         &chrome,
                     );
                 }
-                Some(Some((right_source, focus_right))) => {
-                    // Two panes, two grids, one build — the slice the
-                    // renderer took from day one finally gets its second
-                    // element (CONTRACTS, "cheap now" #3).
+                Some(Some(n)) => {
+                    // N panes, N grids, one build — the slice the renderer
+                    // took from day one (CONTRACTS, "cheap now" #3) finally
+                    // carries as many elements as the tab has panes (#436).
                     let scale =
                         self.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
-                    let (lf, rf) = crate::chrome::layout::pane_frames(area, scale);
-                    let (lb, rb) = (
-                        crate::chrome::layout::pane_body(lf, scale),
-                        crate::chrome::layout::pane_body(rf, scale),
-                    );
-                    // Kept for the block rail's gutter: `lb`/`rb` are shadowed
-                    // by their letterboxed selves below, and the difference
-                    // between the two *is* the free space beside the grid.
-                    let (lb_body, rb_body) = (lb, rb);
+                    let frames = crate::chrome::layout::pane_frames(area, scale, n);
+                    // Kept for the block rail's gutter: the letterboxed rect
+                    // sits inside the body, and the difference between the
+                    // two *is* the free space beside the grid.
+                    let bodies: Vec<[f32; 4]> =
+                        frames.iter().map(|f| crate::chrome::layout::pane_body(*f, scale)).collect();
                     let active_tab =
                         self.tabs.active().expect("split implies an active tab");
-                    let left_source = active_tab.source();
                     // Per pane, not per tab: a pane may later carry its own
                     // profile, so each viewport derives its own selection and
-                    // opacity — today both read the tab's identity.
-                    let left_identity = active_tab.identity.as_ref();
-                    let right_identity = active_tab.identity.as_ref();
-                    let term_l = left_source.terminal().lock();
-                    let term_r = right_source.terminal().lock();
+                    // opacity — today every pane reads the tab's identity.
+                    let identity = active_tab.identity.as_ref();
+                    let terms: Vec<_> =
+                        (0..n).map(|i| active_tab.pane_source(i).terminal().lock()).collect();
                     // Each pane letterboxes its own grid (#215); the focused
                     // one must come out equal to `focused_view_rect`, which is
                     // the rectangle the pointer and IME believe.
-                    let lb = crate::chrome::insets::letterbox(
-                        lb,
-                        term_l.grid().cols(),
-                        term_l.grid().rows(),
-                        metrics,
-                    );
-                    let rb = crate::chrome::insets::letterbox(
-                        rb,
-                        term_r.grid().cols(),
-                        term_r.grid().rows(),
-                        metrics,
-                    );
+                    let rects: Vec<[f32; 4]> = bodies
+                        .iter()
+                        .zip(&terms)
+                        .map(|(b, t)| {
+                            crate::chrome::insets::letterbox(
+                                *b,
+                                t.grid().cols(),
+                                t.grid().rows(),
+                                metrics,
+                            )
+                        })
+                        .collect();
                     let preedit = self.ime.preedit().map(|p| {
                         zest_render_wgpu::Preedit { text: &p.text, cursor: p.cursor }
                     });
-                    let left_focused = !focus_right;
                     // Per pane, and each looks up its *own* address: the panes
-                    // select independently, so reading `focused_addr` twice
-                    // would light the same block in both.
-                    let split = active_tab.split.as_ref().expect("split implies a pane");
-                    let bands_l = Self::block_bands(
-                        &band_colors,
-                        &term_l,
-                        selected_blocks.get(&active_tab.addr).copied(),
-                        active_tab.dead,
-                    );
-                    let bands_r = Self::block_bands(
-                        &band_colors,
-                        &term_r,
-                        selected_blocks.get(&split.addr).copied(),
-                        split.dead,
-                    );
-                    let viewports = [
-                        Viewport {
-                            rect: lb,
-                            grid: term_l.grid(),
-                            palette: term_l.palette(),
-                            scroll_px,
-                            focused: self.focused && left_focused,
-                            opacity: pane_opacity(self.config.opacity, left_identity),
-                            blocks: &bands_l,
-                            gutter: lb[0] - lb_body[0],
-                            selection: term_l.selection(),
-                            selection_bg: pane_selection_bg(self.selection_bg, left_identity),
-                            preedit: if left_focused { preedit } else { None },
-                            cursor_on: caret_on,
-                            features: &self.config.features,
-                            ligatures: self.config.ligatures,
-                            cursor_shape: term_l.cursor_style().shape,
-                            cursor_offset: if left_focused { cursor_offset_px } else { [0.0, 0.0] },
-                            row_map: if left_focused { fold_map.as_deref() } else { None },
-                        },
-                        Viewport {
-                            rect: rb,
-                            grid: term_r.grid(),
-                            palette: term_r.palette(),
-                            scroll_px,
-                            focused: self.focused && focus_right,
-                            opacity: pane_opacity(self.config.opacity, right_identity),
-                            blocks: &bands_r,
-                            gutter: rb[0] - rb_body[0],
-                            selection: term_r.selection(),
-                            selection_bg: pane_selection_bg(self.selection_bg, right_identity),
-                            preedit: if focus_right { preedit } else { None },
-                            cursor_on: caret_on,
-                            features: &self.config.features,
-                            ligatures: self.config.ligatures,
-                            cursor_shape: term_r.cursor_style().shape,
-                            cursor_offset: if focus_right { cursor_offset_px } else { [0.0, 0.0] },
-                            row_map: if focus_right { fold_map.as_deref() } else { None },
-                        },
-                    ];
+                    // select independently, so reading `focused_addr` for all
+                    // would light the same block in every one.
+                    let bands: Vec<Vec<zest_render_wgpu::BlockBand>> = (0..n)
+                        .map(|i| {
+                            Self::block_bands(
+                                &band_colors,
+                                &terms[i],
+                                selected_blocks.get(&active_tab.pane_addr(i)).copied(),
+                                active_tab.pane_dead(i),
+                            )
+                        })
+                        .collect();
+                    let viewports: Vec<Viewport> = (0..n)
+                        .map(|i| {
+                            let focused = i == active_tab.focus;
+                            Viewport {
+                                rect: rects[i],
+                                grid: terms[i].grid(),
+                                palette: terms[i].palette(),
+                                scroll_px,
+                                focused: self.focused && focused,
+                                opacity: pane_opacity(self.config.opacity, identity),
+                                blocks: &bands[i],
+                                gutter: rects[i][0] - bodies[i][0],
+                                selection: terms[i].selection(),
+                                selection_bg: pane_selection_bg(self.selection_bg, identity),
+                                preedit: if focused { preedit } else { None },
+                                cursor_on: caret_on,
+                                features: &self.config.features,
+                                ligatures: self.config.ligatures,
+                                cursor_shape: terms[i].cursor_style().shape,
+                                cursor_offset: if focused { cursor_offset_px } else { [0.0, 0.0] },
+                                row_map: if focused { fold_map.as_deref() } else { None },
+                            }
+                        })
+                        .collect();
                     self.scene.build(
                         &gpu.device,
                         &gpu.queue,
@@ -10429,8 +10544,8 @@ impl App {
             // second seed_palette call would repeat the scheme resolve (and
             // its unknown-scheme warn) for the same answer.
             let seed = seed_palette(&self.palette, tab.identity.as_ref());
-            if let Some(split) = &tab.split {
-                self.seed_terminal(&mut split.source().terminal().lock(), seed.clone());
+            for pane in &tab.panes {
+                self.seed_terminal(&mut pane.source().terminal().lock(), seed.clone());
             }
             self.seed_terminal(&mut tab.source().terminal().lock(), seed);
         }
@@ -10649,7 +10764,7 @@ impl App {
             // Only the visible grid follows a drag live; background tabs
             // catch up on activation, so a resize costs one message rather
             // than one per tab per frame. A split tab resizes both panes.
-            if self.tabs.active().is_some_and(|t| t.split.is_some()) {
+            if self.tabs.active().is_some_and(Tab::is_split) {
                 self.resize_split_panes();
             } else if let Some(tab) = self.tabs.active_mut() {
                 tab.source().resize(dims.0, dims.1);
@@ -11211,6 +11326,7 @@ impl ApplicationHandler<Wakeup> for App {
                 // marks it dead carrying the error) rather than pushing.
                 let settled: Vec<_> = self.pending_launches.lock().drain(..).collect();
                 let dims = self.current_dims();
+                let mut settled_pane = false;
                 for (placeholder, outcome) in settled {
                     match outcome {
                         Ok(session) => match self.tabs.find_mut(placeholder) {
@@ -11226,17 +11342,48 @@ impl ApplicationHandler<Wakeup> for App {
                                 }
                                 tab.source().mark_dirty();
                             }
-                            // Closed while dialling: dropping detaches, the
-                            // shell stays on its host for the picker to find.
-                            None => drop(session),
+                            // A pane's dial (#436): same swap, in its frame.
+                            // The fit is re-run below — panes are sized by
+                            // their column, not the grid.
+                            None => match self.tabs.find_pane_owner(placeholder) {
+                                Some(tab) => {
+                                    let local = matches!(
+                                        crate::source::SessionSource::origin(&session),
+                                        Origin::Daemon { local: true, .. }
+                                    );
+                                    if let Some(pane) =
+                                        tab.panes.iter_mut().find(|p| p.addr == placeholder)
+                                    {
+                                        pane.resolve_live(session, local);
+                                        pane.source().mark_dirty();
+                                    }
+                                    settled_pane = true;
+                                }
+                                // Closed while dialling: dropping detaches,
+                                // the shell stays on its host for the picker
+                                // to find.
+                                None => drop(session),
+                            },
                         },
                         Err(error) => {
                             tracing::warn!(%placeholder, error, "profile launch failed");
                             if let Some(tab) = self.tabs.find_mut(placeholder) {
                                 tab.resolve_failed(&error);
+                            } else if let Some(tab) = self.tabs.find_pane_owner(placeholder) {
+                                if let Some(pane) =
+                                    tab.panes.iter_mut().find(|p| p.addr == placeholder)
+                                {
+                                    pane.resolve_failed(&error);
+                                }
                             }
                         }
                     }
+                }
+                if settled_pane {
+                    // The window may have resized while the dial was in
+                    // flight, and `sized` still says what the placeholder was
+                    // told, so only a pane whose column moved pays a resize.
+                    self.resize_split_panes();
                 }
                 if pushed {
                     // A worker-opened tab takes the keyboard, so this is an
@@ -11328,9 +11475,7 @@ impl ApplicationHandler<Wakeup> for App {
             Wakeup::TabExited(addr) => {
                 // A split pane's shell ending collapses the pane, never the
                 // tab it lived in.
-                if let Some(tab) = self.tabs.find_split_owner(addr) {
-                    tab.focus_right = false;
-                    tab.split = None;
+                if self.tabs.find_pane_owner(addr).is_some_and(|t| t.remove_gone_pane(addr)) {
                     self.relayout_grid();
                     self.mark_chrome_dirty();
                     return;
@@ -11352,11 +11497,11 @@ impl ApplicationHandler<Wakeup> for App {
                 self.pairing.lock().take();
                 if let Some(tab) = self.tabs.find_mut(addr) {
                     tab.dead = true;
-                } else if let Some(tab) = self.tabs.find_split_owner(addr) {
+                } else if let Some(tab) = self.tabs.find_pane_owner(addr) {
                     // The pane stays put showing its last state, like a dead
                     // tab does — vanishing mid-glance is worse.
-                    if let Some(split) = tab.split.as_mut() {
-                        split.dead = true;
+                    if let Some(pane) = tab.panes.iter_mut().find(|p| p.addr == addr) {
+                        pane.dead = true;
                     }
                 }
                 self.mark_chrome_dirty();
@@ -12789,8 +12934,7 @@ impl ApplicationHandler<Wakeup> for App {
                 // any full-pane screen — a region nobody had classified fell
                 // to the catch-all, and the terminal simply stopped scrolling.
                 let hit = self.chrome_hit(self.pointer_pos.0, self.pointer_pos.1);
-                let pane_focus =
-                    self.tabs.active().and_then(|t| t.split.is_some().then_some(t.focus_right));
+                let pane_focus = self.tabs.active().and_then(|t| t.is_split().then_some(t.focus));
                 match hit::wheel_target(hit, pane_focus) {
                     WheelTarget::Swallow => return,
                     // An open dropdown scrolls its *own* list, not the rows
@@ -15103,6 +15247,9 @@ mod run_on_host_tests {
             Pending::Command("nightly".into()),
             "same string, different intent"
         );
+        // And the third rider (#436) carries nothing but its intent: a host
+        // row with it becomes a pane of the active tab, never a tab.
+        assert_ne!(Pending::Split, Pending::Command(String::new()));
     }
 }
 

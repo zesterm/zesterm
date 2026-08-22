@@ -22,7 +22,7 @@ is reported rather than gated.
 | `zest-render-wgpu` | ✅ pipelines, atlas, offscreen resolve, selection |
 | `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema — **every declared setting is consumed** (a test keeps `NOT_YET_WIRED` empty) |
 | `zest-input` | ✅ keys + SGR mouse + selection + IME + Kitty CSI u (flags 1, 2, 8), Rust and TypeScript — ⬜ Kitty flags 4/16, keypad |
-| `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), restore-on-launch — runs on Windows *and* macOS (Metal, transparent titlebar), springs + smooth scroll + reduce_motion, cursor shapes (config *and* DECSCUSR) with a spring trail, **tabs that say what is happening in them** — close and detach in both positions, a busy ring from OSC 133 *or* OSC 9;4, and an attention dot from BEL / OSC 9 / OSC 777 that names no program, imported colour schemes as first-class themes (the gallery's import card pastes any of the 4 formats into the user theme dir) — ⬜ Snap Layouts, polish |
+| `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), **split panes — any number, on any host** (⌘D splits on the window's host, ⌘H splits through the picker onto a machine or an existing session, ⌘U/⌘J move the keyboard; #436), restore-on-launch — runs on Windows *and* macOS (Metal, transparent titlebar), springs + smooth scroll + reduce_motion, cursor shapes (config *and* DECSCUSR) with a spring trail, **tabs that say what is happening in them** — close and detach in both positions, a busy ring from OSC 133 *or* OSC 9;4, and an attention dot from BEL / OSC 9 / OSC 777 that names no program, imported colour schemes as first-class themes (the gallery's import card pastes any of the 4 formats into the user theme dir) — ⬜ Snap Layouts, polish |
 | `zest-proto` | ✅ protocol 3, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, sealing, cell-for-cell conformance, chaos-resync, command blocks |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store, sealed channel |
 | `zest-fleet` | ✅ what a machine in the fleet is, and the one rule that picks how to reach it — pure, so every client shares the decision rather than a copy of it |
@@ -75,6 +75,11 @@ the history behind them is in closed issues and PRs.
       notification *text* `OSC 9`/`OSC 777` supply, which is off the wire until
       something renders it, because a field nothing reads is indistinguishable
       from one nothing can fill.
+- [ ] Panes after #436: they tile as equal columns only — no drag-to-resize,
+      no rows, no tree — and a pane does not persist across a restart (the
+      tab does, as its primary). Per-pane scroll wheel routing is still the
+      focused pane's (`hit::wheel_target` swallows the rest), and a pane on a
+      relayed host has no dial hint for restore, like a relayed tab.
 - [ ] Render `SessionInfo.busy` in the ⌘K picker and the fleet cards. The
       field and the push behind it landed with #416 (`Registry`'s coalesced
       pulse also ends the stale-`title`/`cwd` watcher problem); what remains
