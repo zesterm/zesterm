@@ -569,9 +569,10 @@ pub fn placeholder_addr(n: u64) -> SessionAddr {
     // them in any real session, so a collision here is a bug in whatever
     // minted `n`, not bad luck — and a release build that hit one would
     // silently activate or close the wrong tab (every hit region keys on the
-    // address), which is why this is not a `debug_assert`. Zero is legal: it
-    // is the "no id yet" address a wakeup carries until `wake_for` stamps
-    // the real one.
+    // address), which is why this is not a `debug_assert`. Zero is legal but
+    // reserved: it is the "no id yet" address a wakeup carries until
+    // `wake_for` stamps the real one, so the ids minted for placeholder tabs
+    // count up from 1.
     assert!(
         n < u64::MAX - 1,
         "placeholder ids must never reach the app-tab sentinels"
@@ -772,7 +773,7 @@ impl TabStrip {
     /// the Settings tab holds the keyboard `active` still names the session
     /// underneath, which is the tab a restore should lead with.
     #[must_use]
-    pub fn persistable(&self) -> (usize, Vec<&Tab>) {
+    pub(crate) fn persistable(&self) -> (usize, Vec<&Tab>) {
         let mut tabs = Vec::new();
         let mut active = 0;
         for (i, tab) in self.tabs.iter().enumerate() {
