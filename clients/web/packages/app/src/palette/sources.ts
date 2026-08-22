@@ -31,6 +31,7 @@ export type ItemTone = 'success' | 'danger' | 'warn' | 'faint';
 
 export type PaletteAction =
   | { readonly kind: 'layout-toggle' }
+  | { readonly kind: 'keybar-toggle' }
   | { readonly kind: 'set-theme'; readonly themeId: string };
 
 export type PaletteItem =
@@ -196,6 +197,12 @@ export function actionItems(): readonly PaletteItem[] {
       text: 'Toggle tab layout',
       provenance: '',
     },
+    {
+      kind: 'action',
+      action: { kind: 'keybar-toggle' },
+      text: 'Toggle key bar',
+      provenance: 'esc · tab · ctrl · arrows',
+    },
     ...builtinThemes.map(
       (t): PaletteItem => ({
         kind: 'action',
@@ -214,6 +221,7 @@ export type RunTarget =
   | { readonly kind: 'open-session'; readonly hostId: string; readonly sessionId: string }
   | { readonly kind: 'create-session'; readonly hostId: string }
   | { readonly kind: 'layout-toggle' }
+  | { readonly kind: 'keybar-toggle' }
   | { readonly kind: 'set-theme'; readonly themeId: string };
 
 /**
@@ -239,6 +247,8 @@ export function runTargetOf(item: PaletteItem, activeTabId: string | null): RunT
     case 'action':
       return item.action.kind === 'layout-toggle'
         ? { kind: 'layout-toggle' }
-        : { kind: 'set-theme', themeId: item.action.themeId };
+        : item.action.kind === 'keybar-toggle'
+          ? { kind: 'keybar-toggle' }
+          : { kind: 'set-theme', themeId: item.action.themeId };
   }
 }

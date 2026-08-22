@@ -46,8 +46,17 @@ import {
   type RenderItem,
 } from '../blocks-pane-model.ts';
 import type { LinkState } from '../state/tabs.ts';
+import {
+  consume,
+  mergeMods,
+  NO_LATCH,
+  tapCap,
+  type CapId,
+  type LatchState,
+} from '../keybar-model.ts';
 import { GridPane, type GridPaneHooks } from './GridPane.tsx';
 import { BlocksPane } from './BlocksPane.tsx';
+import { KeyBar } from './KeyBar.tsx';
 
 /**
  * Module-scoped so folds survive leaving a session and coming back within one
@@ -90,8 +99,19 @@ export const TerminalView = component<{
   onLink?: (link: LinkState) => void;
   /** The palette's seam; called with null on unmount so the shell's map stays honest. */
   register?: (hooks: TerminalHooks | null) => void;
+  /**
+   * Show the key-cap row under the pane — the keys a soft keyboard has not
+   * got. The shell decides (device default, overridable from the palette);
+   * this view only draws it and feeds its taps into the same encoder.
+   */
+  keyBar?: boolean;
 }>((ctx) => {
   const { entry, dial, signer, theme } = ctx.props;
+
+  // The key bar's sticky modifiers. Per view rather than per bar: a latched
+  // Ctrl is a promise about the next key into THIS session, and it applies
+  // whether that key comes from a cap or from the soft keyboard.
+  const bar = signal<{ latch: LatchState }>({ latch: NO_LATCH });
 
   const status = signal<{ state: ConnectionState; exited: number | null | false }>({
     state: { phase: 'connecting' },
@@ -299,7 +319,12 @@ export const TerminalView = component<{
     // Mid-composition keydowns are the IME's business ('Process' keys and
     // the like); encoding them would type fragments the commit then repeats.
     if (e.isComposing) return;
-    const mods = modsOf(e);
+    // A Ctrl or Alt latched on the key bar rides the next real key too —
+    // this is how ^L, ^R and ^D, which have no cap, are typed on a tablet.
+    // Spent only below, once bytes exist: a bare Shift press or a key the
+    // encoder declines must not use up the latch.
+    const { mods: latched, next: latchAfter } = consume(bar.latch);
+    const mods = mergeMods(modsOf(e), latched);
     // The shell's chords run BEFORE the browser split — chords.ts pins that
     // ordering. Only the two block actions are claimed here; the rest of the
     // table (palette, split, tabs) is the app shell's to wire when the
@@ -318,11 +343,28 @@ export const TerminalView = component<{
     if (belongsToBrowser(e, mods, platform)) return;
     const bytes = encodeKey(e, mods, client.grid.modes);
     if (bytes === null) return;
+    if (latchAfter !== bar.latch) bar.latch = latchAfter;
     // preventDefault on a handled key also suppresses the textarea's own
     // `input` event, which is the coordination that keeps ordinary typing
     // from arriving twice — once encoded, once as composed text.
     e.preventDefault();
     client.input(bytes);
+  };
+
+  const onCap = (id: CapId): void => {
+    if (id === 'kbd') {
+      // The one cap about focus rather than bytes. Blurring the textarea is
+      // how a soft keyboard is dismissed; focusing it inside this click —
+      // the gesture's own task — is what brings it back (see onClick on the
+      // wrap). The cap itself never took focus (KeyBar cancels pointerdown),
+      // so activeElement still says which way to go.
+      if (document.activeElement === inputEl) inputEl?.blur();
+      else inputEl?.focus();
+      return;
+    }
+    const r = tapCap(id, bar.latch, client.grid.modes);
+    bar.latch = r.next;
+    if (r.bytes !== null) client.input(r.bytes);
   };
 
   /**
@@ -476,6 +518,7 @@ export const TerminalView = component<{
             onBlur={() => sendFocus(false)}
           />
         </div>
+        {ctx.props.keyBar === true ? <KeyBar latch={bar.latch} onCap={onCap} /> : null}
       </div>
     );
   };
