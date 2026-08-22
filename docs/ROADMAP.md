@@ -170,9 +170,11 @@ row count and line-id distance disagree.
 - [ ] **Web-side `prompt.widgets` filtering**, once a browser has somewhere
       to read another machine's display preference from — or a decision that
       chips shown in the browser are simply all of them.
-- [ ] **Per-block context history.** `BlockPayload.context` snapshot stamped
-      at OSC 133;C — "that failing build ran on branch X" — for humans and
-      for `blocks` over MCP.
+Per-block context landed with #429: the daemon stamps each starting command
+with `BlockContext { branch, venv, kube }` (core carries it like `cwd`;
+`BlockPayload.context` rides additively), so "that failing build ran on
+branch X" survives into scrollback — the branch shows in both clients'
+block headers, and `blocks` over MCP returns the snapshot per block.
 - [ ] **Depth.** Async cached probes (`git status --porcelain -uno` for
       dirty/change counts, keyed by HEAD+index mtime, timeout-capped; real
       runtime versions), branch/kube switcher chips, a transport/latency chip

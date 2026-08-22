@@ -74,6 +74,44 @@ pub struct Block {
     /// duration a header prints; computed by readers, never stored, so a
     /// running block's payload does not change every tick.
     pub ended_ms: Option<u64>,
+    /// Where the command ran — branch, venv, cluster — as of the moment it
+    /// started (#429).
+    ///
+    /// Caller-supplied, the [`Self::started_ms`] pattern: this crate has no
+    /// filesystem and no daemon, so whoever feeds bytes stamps the facts and
+    /// this just carries them, exactly as it carries `cwd`. `None` when the
+    /// embedder never stamped one — a shell with no integration, or a host
+    /// predating the field.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub context: Option<BlockContext>,
+}
+
+/// The surroundings a command ran in, stamped at its start.
+///
+/// Compact on purpose — the three facts that change what a block's outcome
+/// *means* — and plain strings with empty meaning unsaid, the `HostOffer`
+/// convention: a reader shows what is filled and one row fewer for what is
+/// not. Display only, like every context fact: half of what feeds this is
+/// shell-reported and forgeable, and nothing may gate behavior on it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BlockContext {
+    /// The branch name, or the short hash when detached. Empty when unknown.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub branch: String,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub venv: String,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub kube: String,
+}
+
+impl BlockContext {
+    /// Whether anything at all is said — an all-empty snapshot is `None`'s
+    /// job, not an empty something's.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.branch.is_empty() && self.venv.is_empty() && self.kube.is_empty()
+    }
 }
 
 impl Block {
@@ -201,8 +239,21 @@ impl BlockIndex {
             cwd,
             started_ms: None,
             ended_ms: None,
+            context: None,
         });
         id
+    }
+
+    /// Stamp where a block's command is running (#429). The embedder's verb,
+    /// like `now_ms` is the embedder's clock; the parser never calls it.
+    ///
+    /// An empty snapshot stores `None`: "nothing was known" and "nothing was
+    /// stamped" must read the same, or an all-empty payload rides the wire
+    /// pretending to be a fact.
+    pub fn set_context(&mut self, id: BlockId, context: BlockContext) {
+        if let Some(b) = self.blocks.iter_mut().find(|b| b.id == id) {
+            b.context = (!context.is_empty()).then_some(context);
+        }
     }
 
     /// A command was submitted and output begins (OSC 133;C).

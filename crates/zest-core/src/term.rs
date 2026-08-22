@@ -488,6 +488,19 @@ impl Terminal {
     /// machine: a remote `Terminal` has these applied into it from the wire, so
     /// `SessionSource::terminal().lock().blocks()` answers at both ends of the
     /// mesh.
+    /// Stamp where a block's command runs (#429) — the embedder's verb, on
+    /// the same footing as [`Self::set_now_ms`]: the facts come from outside
+    /// this crate, and a stamp is a change a subscriber must hear about, so
+    /// it touches the sequence like any other mutation.
+    pub fn set_block_context(
+        &mut self,
+        id: crate::blocks::BlockId,
+        context: crate::blocks::BlockContext,
+    ) {
+        self.state.blocks.set_context(id, context);
+        self.state.touch();
+    }
+
     #[must_use]
     pub fn blocks(&self) -> &BlockIndex {
         &self.state.blocks

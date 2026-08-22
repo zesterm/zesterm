@@ -159,6 +159,23 @@ impl Session {
         wake: impl Fn(SessionId) + Send + Sync + 'static,
         listing_changed: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self, DaemonError> {
+        Self::spawn_with_context(id, cmd, size, scrollback, wake, listing_changed, None)
+    }
+
+    /// [`Self::spawn`], with the context engine that stamps each starting
+    /// block with where it ran (#429). `None` — every test's choice — means
+    /// blocks simply carry no snapshot, which is also what a daemon does for
+    /// a shell with no integration.
+    #[allow(clippy::too_many_arguments, reason = "one real caller; spawn() wraps it for the rest")]
+    pub fn spawn_with_context(
+        id: SessionId,
+        cmd: &CommandSpec,
+        size: PtySize,
+        scrollback: usize,
+        wake: impl Fn(SessionId) + Send + Sync + 'static,
+        listing_changed: impl Fn() + Send + Sync + 'static,
+        context: Option<std::sync::Arc<crate::context::ContextEngine>>,
+    ) -> Result<Self, DaemonError> {
         let mut pty = zest_pty::NativePty::spawn(cmd, size)
             .map_err(|e| DaemonError::Spawn(e.to_string()))?;
         let mut reader = pty.take_reader().expect("a fresh pty always has a reader");
@@ -186,6 +203,7 @@ impl Session {
             let title = Arc::clone(&title);
             let facts_rev = Arc::clone(&facts_rev);
             let subscribers = Arc::clone(&subscribers);
+            let context = context.clone();
             let mut reply = pty.writer();
 
             std::thread::Builder::new()
@@ -197,6 +215,10 @@ impl Session {
                     // not busy and not on the alt screen, matching below.
                     let mut listed_busy = false;
                     let mut listed_alt = false;
+                    // The last block asked about a context stamp, so a block
+                    // that probed to nothing is asked exactly once rather
+                    // than per read burst for as long as it runs.
+                    let mut stamp_asked: Option<u32> = None;
                     loop {
                         // `Err(_) => break` here treated a signal as the end of the
                         // stream, which closes a healthy peer or ends a live shell.
@@ -205,7 +227,7 @@ impl Session {
                             Ok(n) => n,
                         };
 
-                        let (events, busy, alt) = {
+                        let (events, busy, alt, to_stamp) = {
                             let Ok(mut term) = terminal.lock() else { break };
                             // The parser has no clock (`no_std`); the reader
                             // is where wall time and bytes meet, so blocks
@@ -219,8 +241,50 @@ impl Session {
                             // moves the generation (the staleness of #416).
                             let busy = term.blocks().last().is_some_and(|b| b.is_running());
                             let alt = term.modes().contains(Modes::ALT_SCREEN);
-                            (term.take_events(), busy, alt)
+                            // A block that just started running gets stamped
+                            // with where it ran (#429). Gathered under this
+                            // lock, probed *outside* it: the engine reads the
+                            // filesystem, and a cache miss under the terminal
+                            // lock would stall the parse for a disk's answer.
+                            let to_stamp = context.as_ref().and_then(|_| {
+                                let tail = term.blocks().last()?;
+                                if !tail.is_running()
+                                    || tail.context.is_some()
+                                    || stamp_asked == Some(tail.id.0)
+                                {
+                                    return None;
+                                }
+                                let venv = term
+                                    .shell_facts()
+                                    .get("venv")
+                                    .cloned()
+                                    .unwrap_or_default();
+                                Some((
+                                    tail.id,
+                                    term.cwd().to_string(),
+                                    term.cwd_host().map(str::to_string),
+                                    venv,
+                                ))
+                            });
+                            (term.take_events(), busy, alt, to_stamp)
                         };
+
+                        if let (Some(engine), Some((block, cwd, host, venv))) =
+                            (context.as_ref(), to_stamp)
+                        {
+                            stamp_asked = Some(block.0);
+                            let snap = crate::context::block_snapshot(
+                                engine,
+                                &cwd,
+                                host.as_deref(),
+                                &venv,
+                            );
+                            if !snap.is_empty() {
+                                if let Ok(mut term) = terminal.lock() {
+                                    term.set_block_context(block, snap);
+                                }
+                            }
+                        }
 
                         let mut listing_moved = busy != listed_busy || alt != listed_alt;
                         listed_busy = busy;

@@ -812,3 +812,25 @@ test('the prompt line and a prompt-state block never offer options', () => {
     }
   }
 });
+
+// --- per-block context (#429) ---------------------------------------------
+
+test('a block with a stamped context shows its branch, and one without shows nothing', () => {
+  const view = threeStateView();
+  const stamped = {
+    ...view,
+    blocks: [
+      { ...view.blocks[0]!, context: { branch: 'release/1.2', venv: 'ml', kube: '' } },
+      view.blocks[1]!,
+      view.blocks[2]!,
+    ],
+  };
+  const items = paneModel(stamped, new Set(), 'live', NOW);
+  const headers = items.filter((i): i is HeaderItem => i.kind === 'header');
+  assert.equal(
+    headers[0]?.branch,
+    'release/1.2',
+    'the branch the command ran on survives into the header — that is what decides whether an old failure still matters',
+  );
+  assert.equal(headers[1]?.branch, '', 'no stamp is no branch, never a dash pretending');
+});

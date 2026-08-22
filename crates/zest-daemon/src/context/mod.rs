@@ -275,6 +275,31 @@ fn node_version_in(path: &str) -> Option<String> {
         .map(String::from)
 }
 
+/// The compact snapshot a starting command gets stamped with (#429): the
+/// three facts that change what the block's outcome *means*, drawn from the
+/// engine's cached probe (branch, kube) and the shell's own report (venv).
+/// All display — the same trust posture as everything here.
+#[must_use]
+pub fn block_snapshot(
+    engine: &ContextEngine,
+    cwd: &str,
+    host: Option<&str>,
+    venv: &str,
+) -> zest_core::blocks::BlockContext {
+    let ctx = engine.context_for(cwd, host);
+    let branch = ctx
+        .as_ref()
+        .and_then(|c| c.git.as_ref())
+        .map(|g| g.branch.clone())
+        .unwrap_or_default();
+    let kube = ctx
+        .as_ref()
+        .and_then(|c| c.facts.iter().find(|f| f.key == "kube"))
+        .map(|f| f.value.clone())
+        .unwrap_or_default();
+    zest_core::blocks::BlockContext { branch, venv: venv.to_string(), kube }
+}
+
 /// Version pins found walking up from `dir` — the *asked-for* runtime, which
 /// a file states, as opposed to the *installed* one, which only a subprocess
 /// knows and which therefore waits for the async probe.

@@ -35,6 +35,9 @@ pub struct BlockView {
     pub no_output: bool,
     pub command: String,
     pub cwd: String,
+    /// The branch the command ran on (#429), with `*` when known-dirty.
+    /// Empty when the host never stamped a context.
+    pub branch: String,
     /// "51.2s" — pre-formatted; empty when the host sent no stamps.
     pub duration: String,
     /// "exit 0" / "exit 1"; empty while running (the ring says it instead).
@@ -289,6 +292,11 @@ pub fn layout_blocks(
             meta(&lines, colors.text_faint, &mut right, &mut out);
         }
         meta(&v.cwd, colors.text_faint, &mut right, &mut out);
+        // Where it ran (#429), left of the cwd: the branch is what decides
+        // whether a failure three screens up still matters, so it earns its
+        // tint where the rest of the meta stays faint. Empty when the host
+        // never stamped one, and then it takes no room at all.
+        meta(&v.branch, colors.success, &mut right, &mut out);
 
         // The command, in the room that remains.
         let cmd_x = chev_x + 16.0 * s;
@@ -355,6 +363,7 @@ mod tests {
             no_output: false,
             command: "cargo build".into(),
             cwd: "~/dev".into(),
+            branch: String::new(),
             duration: "51.2s".into(),
             exit_label: "exit 0".into(),
             running_label: String::new(),

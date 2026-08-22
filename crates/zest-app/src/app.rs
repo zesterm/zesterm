@@ -9417,6 +9417,7 @@ impl App {
                 };
                 Some(crate::chrome::blocks::BlockView {
                     id: b.id.0,
+                    branch: b.context.as_ref().map(|c| c.branch.clone()).unwrap_or_default(),
                     rows,
                     // A block still "running" in a session whose host went
                     // away is not running anywhere; the rail says so.

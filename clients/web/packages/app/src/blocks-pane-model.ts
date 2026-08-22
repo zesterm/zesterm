@@ -114,6 +114,12 @@ export interface HeaderItem {
   readonly chevron: '▾' | '▸' | null;
   readonly command: string;
   readonly cwd: string;
+  /**
+   * The branch the command ran on (#429) — the fact that decides whether a
+   * failure three screens up still matters. Empty when the host never
+   * stamped a context.
+   */
+  readonly branch: string;
   /** Empty while running, or when the host never stamped the timestamps. */
   readonly durationText: string;
   readonly outcome: Outcome;
@@ -449,6 +455,7 @@ function headerOf(
     chevron: foldable ? (folded ? '▸' : '▾') : null,
     command: b.command,
     cwd: b.cwd,
+    branch: b.context === undefined ? '' : b.context.branch,
     durationText:
       b.state.state === 'finished' && b.started_ms !== undefined && b.ended_ms !== undefined
         ? formatDuration(b.ended_ms - b.started_ms)

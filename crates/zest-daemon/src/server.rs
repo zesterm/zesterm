@@ -134,7 +134,7 @@ pub struct Registry {
     pulse: Arc<Pulse>,
     /// What every session is standing in — branch, kube context, pins —
     /// probed lazily per listing and cached per cwd.
-    context: crate::context::ContextEngine,
+    context: std::sync::Arc<crate::context::ContextEngine>,
 }
 
 impl Default for Registry {
@@ -144,9 +144,9 @@ impl Default for Registry {
         Self {
             sessions: Mutex::default(),
             next_id: Mutex::default(),
-            context: crate::context::ContextEngine::new(Arc::new(move || {
+            context: std::sync::Arc::new(crate::context::ContextEngine::new(Arc::new(move || {
                 for_context.touch_coalesced();
-            })),
+            }))),
             pulse,
         }
     }
@@ -264,9 +264,17 @@ impl Registry {
             SessionId(*next)
         };
         let pulse = Arc::clone(&self.pulse);
-        let session = Arc::new(Session::spawn(id, cmd, size, scrollback, |_| {}, move || {
-            pulse.touch_coalesced();
-        })?);
+        let session = Arc::new(Session::spawn_with_context(
+            id,
+            cmd,
+            size,
+            scrollback,
+            |_| {},
+            move || {
+                pulse.touch_coalesced();
+            },
+            Some(std::sync::Arc::clone(&self.context)),
+        )?);
         self.sessions.lock().expect("registry lock").insert(id.0, Arc::clone(&session));
         self.touch();
         Ok(session)
@@ -3360,6 +3368,61 @@ mod tests {
             "every reported fact rides, not just the first"
         );
         assert!(ctx.revision >= 1, "a fact arriving is a revision moving");
+    }
+
+    #[test]
+    fn a_block_remembers_where_it_ran() {
+        // #429, by value from the wire side (#299's rule): a command that
+        // starts running gets stamped with branch and venv, and the stamp
+        // must reach an attaching client's keyframe — every layer between
+        // (core field, daemon stamping, payload conversion, encoder diff)
+        // can be individually right while the chain is broken.
+        let root = std::env::temp_dir().join(format!("zest-blk-ctx-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".git")).expect("mkdir");
+        std::fs::write(root.join(".git").join("HEAD"), "ref: refs/heads/blk-branch\n")
+            .expect("write HEAD");
+
+        let (mut c, registry) = conn();
+        let mut peer = authenticate(&mut c);
+        let osc = format!(
+            "\u{1b}]7;file://{}\u{7}\u{1b}]633;P;Venv=ml\u{7}\u{1b}]133;A\u{7}$ \u{1b}]133;B\u{7}make\u{1b}]133;C\u{7}",
+            root.display()
+        );
+        let command = if cfg!(windows) {
+            format!("cmd.exe /c echo {osc}")
+        } else {
+            format!("/bin/echo {osc}")
+        };
+        peer.send(
+            &mut c,
+            &ClientMessage::CreateSession { command, cwd: String::new(), cols: 80, rows: 24 },
+        );
+
+        let host = config().host;
+        // Busy flips in the same reader pass that stamps, and the stamp runs
+        // first — so a listing that says busy vouches for the stamp too.
+        assert!(
+            wait_for(|| registry.list(host).first().is_some_and(|s| s.busy)),
+            "the 133;C never made the session busy, so nothing after this is about the stamp"
+        );
+
+        let addr = registry.list(host)[0].addr;
+        let out = peer
+            .send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
+        let Some(HostMessage::Keyframe { blocks, .. }) =
+            out.iter().find(|m| matches!(m, HostMessage::Keyframe { .. }))
+        else {
+            panic!("attach did not answer with a keyframe: {out:?}");
+        };
+        let block = blocks
+            .iter()
+            .find(|b| matches!(b.state, zest_proto::delta::BlockState::Running))
+            .expect("the running block rides the keyframe");
+        let ctx = block.context.as_ref().expect("a started command carries its context");
+        assert_eq!(ctx.branch, "blk-branch", "the branch is the HEAD's word at start time");
+        assert_eq!(ctx.venv, "ml", "the venv is the shell's word, carried along");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -392,6 +392,12 @@ body {
   color: var(--zt-faint);
 }
 
+/* Where the command ran (#429): the branch earns its tint where the rest of
+   the meta stays faint, because it decides whether a failure still matters. */
+.block-header .branch {
+  color: var(--zt-success);
+}
+
 .block-header .outcome.ok {
   color: var(--zt-success);
 }

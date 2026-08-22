@@ -341,6 +341,30 @@ pub struct BlockPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(type = "number", optional))]
     pub ended_ms: Option<u64>,
+    /// Where the command ran — branch, venv, cluster — as of its start
+    /// (#429). Additive like `started_ms`, and stamped exactly once, so
+    /// `diff_blocks` resends the block once when the stamp lands and never
+    /// per tick. Absent from an old host, a shell with no integration, or a
+    /// command started before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub context: Option<BlockContextPayload>,
+}
+
+/// [`zest_core::blocks::BlockContext`], on the wire. Mirrored for the reason
+/// `BlockState` is: this side carries the `ts_rs` derive, and `zest-core`
+/// has to keep building for `wasm32` without one. Empty strings mean unsaid
+/// — the `HostOffer` convention, so a reader shows one row fewer rather
+/// than a dash pretending to be a fact.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct BlockContextPayload {
+    #[serde(default)]
+    pub branch: String,
+    #[serde(default)]
+    pub venv: String,
+    #[serde(default)]
+    pub kube: String,
 }
 
 impl BlockPayload {
@@ -367,6 +391,11 @@ impl BlockPayload {
             cwd: b.cwd.clone(),
             started_ms: b.started_ms,
             ended_ms: b.ended_ms,
+            context: b.context.as_ref().map(|c| BlockContextPayload {
+                branch: c.branch.clone(),
+                venv: c.venv.clone(),
+                kube: c.kube.clone(),
+            }),
         }
     }
 
@@ -390,6 +419,11 @@ impl BlockPayload {
             cwd: self.cwd.clone(),
             started_ms: self.started_ms,
             ended_ms: self.ended_ms,
+            context: self.context.as_ref().map(|c| zest_core::blocks::BlockContext {
+                branch: c.branch.clone(),
+                venv: c.venv.clone(),
+                kube: c.kube.clone(),
+            }),
         }
     }
 }
@@ -472,6 +506,37 @@ impl Delta {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_blocks_context_survives_the_round_trip_and_its_absence_does_too() {
+        // #429: the applier is one of the three readers (#313), and a field
+        // it drops is a replica quietly poorer than its host.
+        let mut b = zest_core::Block {
+            id: zest_core::BlockId(7),
+            prompt_line: 10,
+            output_line: Some(11),
+            end_line: None,
+            state: zest_core::BlockState::Running,
+            command: "make".into(),
+            cwd: "/tmp".into(),
+            started_ms: Some(1),
+            ended_ms: None,
+            context: Some(zest_core::BlockContext {
+                branch: "main".into(),
+                venv: "ml".into(),
+                kube: String::new(),
+            }),
+        };
+        let back = BlockPayload::from_block(&b).to_block();
+        assert_eq!(back.context, b.context, "the stamp must survive both conversions whole");
+
+        b.context = None;
+        assert_eq!(
+            BlockPayload::from_block(&b).to_block().context,
+            None,
+            "no stamp stays no stamp — never an empty something"
+        );
+    }
 
     fn row(line: i64) -> RowPayload {
         RowPayload {
