@@ -500,15 +500,33 @@ struct LauncherState {
 /// A block's open ⋯ menu (design §3), and the action list parallel to its
 /// drawn rows — built in one `block_menu::build_rows` pass, so index `n` means
 /// the same thing in both by construction, exactly as the launcher's does.
+///
+/// The cwd chip's menu (#426) rides the same chassis: one state slot, one
+/// overlay renderer, one set of key and click arms — the alternative was a
+/// second copy of all three that could each drift alone.
 struct BlockMenuState {
-    /// The block it acts on. Opening the menu also *selects* that block, so
-    /// the accent rail and the menu can never name different ones.
-    block: u32,
+    /// What the menu is about: a block's ⋯, or the cwd chip's recents.
+    menu: OpenMenu,
     /// What the panel hangs off, physical px: the `⋯` rect the block pass drew
     /// for a left click, or a zero-size rect at the pointer for a right click.
     anchor: [f32; 4],
     selected: usize,
     actions: Vec<crate::block_menu::BlockMenuAction>,
+    /// The cwd-chip menu's recents, indexed by `BlockMenuAction::CdTo`.
+    /// Empty for a block's menu.
+    cwds: Vec<String>,
+    /// The cwd the chip showed when its menu opened, for `CopyPath`.
+    chip_cwd: String,
+}
+
+/// Which menu [`BlockMenuState`] is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenMenu {
+    /// A block's ⋯. Opening it also *selects* that block, so the accent rail
+    /// and the menu can never name different ones.
+    Block(u32),
+    /// The cwd chip's recent-directories menu.
+    CwdChip,
 }
 
 /// Which full-pane screen the window shows in place of the grid.
@@ -2666,17 +2684,97 @@ impl App {
         self.palette_ui = None;
         self.launcher = None;
         self.set_selected_block(Some(id));
-        self.block_menu =
-            Some(BlockMenuState { block: id, anchor, selected: 0, actions: Vec::new() });
+        self.block_menu = Some(BlockMenuState {
+            menu: OpenMenu::Block(id),
+            anchor,
+            selected: 0,
+            actions: Vec::new(),
+            cwds: Vec::new(),
+            chip_cwd: String::new(),
+        });
+        self.mark_chrome_dirty();
+    }
+
+    /// Open the cwd chip's menu: where this shell has recently been, plus a
+    /// copy row. The recents come from the session's own blocks — the honest
+    /// source needing no new wire message: they are where commands actually
+    /// ran, which is precisely what "recent" should mean here.
+    fn open_cwd_chip_menu(&mut self, chip_cwd: String, anchor: [f32; 4]) {
+        self.picker = None;
+        self.palette_ui = None;
+        self.launcher = None;
+        let cwds = self.tabs.active().map_or_else(Vec::new, |tab| {
+            let term = tab.focused_source().terminal();
+            let term = term.lock();
+            let mut out: Vec<String> = Vec::new();
+            for b in term.blocks().blocks().iter().rev() {
+                // What the menu offers is exactly what `cd_bytes` will type
+                // — asked of the same function, so the quoting rule and the
+                // control-byte rejection have one home and the menu cannot
+                // render a row the click then refuses (or, worse, one a
+                // regression would type).
+                if b.cwd == chip_cwd || block_actions::cd_bytes(&b.cwd).is_none() {
+                    continue;
+                }
+                if !out.contains(&b.cwd) {
+                    out.push(b.cwd.clone());
+                }
+                if out.len() >= 8 {
+                    break;
+                }
+            }
+            out
+        });
+        self.block_menu = Some(BlockMenuState {
+            menu: OpenMenu::CwdChip,
+            anchor,
+            selected: 0,
+            actions: Vec::new(),
+            cwds,
+            chip_cwd,
+        });
         self.mark_chrome_dirty();
     }
 
     /// Act on a block menu row. Every action closes the menu: the user chose.
     fn run_block_menu_action(&mut self, action: crate::block_menu::BlockMenuAction) {
         use crate::block_menu::BlockMenuAction as A;
-        let Some(id) = self.block_menu.as_ref().map(|m| m.block) else { return };
-        self.block_menu = None;
+        let Some(state) = self.block_menu.take() else { return };
         self.mark_chrome_dirty();
+
+        // The chip menu's verbs first: they have no block to fetch, and the
+        // block path below would decline them for exactly that reason.
+        match action {
+            A::CopyPath => {
+                if !state.chip_cwd.is_empty() {
+                    self.set_clipboard(state.chip_cwd);
+                }
+                return;
+            }
+            A::CdTo(i) => {
+                let Some(bytes) = state.cwds.get(i).and_then(|p| block_actions::cd_bytes(p))
+                else {
+                    return;
+                };
+                let Some(session) = self.tabs.active_source() else { return };
+                // Re-checked at the click, not only at build: the menu can
+                // sit open across a state change, and `enabled` a frame ago
+                // is not a licence to type into a program now running.
+                if !block_actions::at_shell_prompt(&session.terminal().lock()) {
+                    return;
+                }
+                session.write(bytes);
+                // To the bottom, as typing would: the prompt about to move
+                // is not something to watch from the scrollback.
+                session.terminal().lock().scroll_to_bottom();
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+                return;
+            }
+            _ => {}
+        }
+        let OpenMenu::Block(id) = state.menu else { return };
 
         // Everything that reads the block does so under one short lock and
         // hands back plain data, so the clipboard and tab calls below — all of
@@ -2690,6 +2788,10 @@ impl App {
 
         match action {
             A::None => {}
+            // Handled before the block fetch above; unreachable here, and an
+            // arm rather than a `_` so the next verb added is a compile
+            // error in this match too.
+            A::CdTo(_) | A::CopyPath => {}
             A::Fold => self.toggle_fold(id),
             A::CopyOutput => {
                 let text = {
@@ -4706,23 +4808,30 @@ impl App {
         });
 
         // Rebuilt every pass, like the launcher's: output can arrive under an
-        // open menu and turn "Copy output" from faint to live.
-        let block_menu_rows = self.block_menu.as_ref().and_then(|m| {
-            let tab = self.tabs.active()?;
-            let folded = self
-                .folded_blocks
-                .get(&tab.focused_addr())
-                .is_some_and(|f| f.contains(&m.block));
-            let term = tab.focused_source().terminal();
-            let term = term.lock();
-            let block = term.blocks().get(zest_core::BlockId(m.block))?.clone();
-            Some(crate::block_menu::build_rows(
-                &term,
-                &block,
-                folded,
-                &keymap::chord_for(keymap::Action::CopyBlockOutput),
-                &keymap::chord_for(keymap::Action::RerunLastCommand),
-            ))
+        // open menu and turn "Copy output" from faint to live — or, on the
+        // chip menu, a command finishing turns the cd rows live.
+        let block_menu_rows = self.block_menu.as_ref().and_then(|m| match m.menu {
+            OpenMenu::Block(id) => {
+                let tab = self.tabs.active()?;
+                let folded =
+                    self.folded_blocks.get(&tab.focused_addr()).is_some_and(|f| f.contains(&id));
+                let term = tab.focused_source().terminal();
+                let term = term.lock();
+                let block = term.blocks().get(zest_core::BlockId(id))?.clone();
+                Some(crate::block_menu::build_rows(
+                    &term,
+                    &block,
+                    folded,
+                    &keymap::chord_for(keymap::Action::CopyBlockOutput),
+                    &keymap::chord_for(keymap::Action::RerunLastCommand),
+                ))
+            }
+            OpenMenu::CwdChip => {
+                let tab = self.tabs.active()?;
+                let term = tab.focused_source().terminal();
+                let at_prompt = block_actions::at_shell_prompt(&term.lock());
+                Some(crate::block_menu::cwd_rows(&m.cwds, &m.chip_cwd, at_prompt))
+            }
         });
         let block_menu_model = block_menu_rows.map(|(rows, actions)| {
             let state = self.block_menu.as_mut().expect("is_some gated the build");
@@ -5791,26 +5900,46 @@ impl App {
                 let at = [self.pointer_pos.0 as f32, self.pointer_pos.1 as f32, 0.0, 0.0];
                 self.open_block_menu(id, at);
             }
-            // A chip click copies what it shows — the value, not the label:
-            // the whole path, the bare branch. The exit chip *selects* its
-            // failed block instead (accent rail; ⌘⇧O/⌘⇧R now act on it):
-            // there is nothing to copy about a failure, there is somewhere
-            // to look. The value is re-read from the view this frame drew,
-            // never from the region — one computation.
+            // A chip click acts on what it shows, re-read from the view this
+            // frame drew, never from the region — one computation. Most kinds
+            // copy their value (silently, like the block menu's copy rows);
+            // the two that can do better, do: the cwd chip opens its
+            // recent-directories menu, and the exit chip selects its failed
+            // block *and scrolls it into view* — there is nothing to copy
+            // about a failure, there is somewhere to look.
             (HitRegion::PromptChip(kind), MouseButton::Left) => {
+                use crate::chrome::prompt_chips::ChipKind;
                 let chip = self
                     .prompt_chips_view
                     .as_ref()
                     .and_then(|v| v.chips.iter().find(|c| c.kind == kind))
                     .cloned();
                 if let Some(chip) = chip {
-                    if kind == crate::chrome::prompt_chips::ChipKind::Exit {
-                        if let Ok(id) = chip.value.parse::<u32>() {
-                            self.set_selected_block(Some(id));
+                    match kind {
+                        ChipKind::Cwd => {
+                            let at =
+                                [self.pointer_pos.0 as f32, self.pointer_pos.1 as f32, 0.0, 0.0];
+                            self.open_cwd_chip_menu(chip.value, at);
                         }
-                    } else {
-                        // Silent, like the block menu's copy actions.
-                        self.set_clipboard(chip.value);
+                        ChipKind::Exit => {
+                            if let Ok(id) = chip.value.parse::<u32>() {
+                                self.set_selected_block(Some(id));
+                                if let Some(session) = self.tabs.active_source() {
+                                    let mut term = session.terminal().lock();
+                                    if let Some(line) = term
+                                        .blocks()
+                                        .get(zest_core::BlockId(id))
+                                        .map(|b| b.prompt_line)
+                                    {
+                                        term.scroll_to_line(line);
+                                    }
+                                }
+                                if let Some(w) = self.window.as_ref() {
+                                    w.request_redraw();
+                                }
+                            }
+                        }
+                        _ => self.set_clipboard(chip.value),
                     }
                 }
             }
@@ -9210,7 +9339,10 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64);
         let selected = self.selected_block.get(&tab.focused_addr()).copied();
-        let menu_block = self.block_menu.as_ref().map(|m| m.block);
+        let menu_block = self.block_menu.as_ref().and_then(|m| match m.menu {
+            OpenMenu::Block(id) => Some(id),
+            OpenMenu::CwdChip => None,
+        });
 
         let views = term
             .blocks()

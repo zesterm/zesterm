@@ -126,6 +126,8 @@ pub const KEYS: &[(&str, Invalidation)] = &[
     // The chip row is rebuilt per frame from the listing; a changed filter
     // only needs the next repaint.
     ("prompt.widgets", Invalidation::Free),
+    // Read once at spawn, by the shell, on the host that runs it.
+    ("prompt.compact_ps1", Invalidation::Restart),
 ];
 
 /// Which keys changed between two settings trees.

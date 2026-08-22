@@ -205,6 +205,42 @@ pub fn rerun_bytes(block: &Block) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// The bytes that would `cd` the shell to `path` (#426).
+///
+/// Single quotes are the one wrapping posix shells and PowerShell both read
+/// literally, so one spelling serves whatever is on the far end — *except*
+/// for a path containing a single quote, whose escape the two families
+/// spell differently. Those return `None`, and so does one carrying any
+/// control byte: these bytes are *typed*, and a CR or LF inside the path is
+/// an Enter mid-string — a command injection wearing a directory's name.
+/// OSC 7 percent-decodes, so `%0D` in a hostile title is exactly how such a
+/// path arrives. The menu excludes both upstream by asking this function
+/// (one copy of the rule): a `cd` that lands somewhere wrong, or runs
+/// something, is worse than a row missing.
+#[must_use]
+pub fn cd_bytes(path: &str) -> Option<Vec<u8>> {
+    if path.is_empty()
+        || path.contains('\'')
+        || path.chars().any(|c| c.is_control())
+    {
+        return None;
+    }
+    // CR, not LF: a pty expects the carriage return a keyboard produces.
+    let mut bytes = format!("cd '{path}'").into_bytes();
+    bytes.push(b'\r');
+    Some(bytes)
+}
+
+/// Whether the shell is the thing reading: primary screen, trailing block an
+/// open prompt. The web client's `atShellPrompt`, whose doc has the reason —
+/// during a running command typed bytes land in that command's stdin, and in
+/// the alt screen they land in a full-screen program's document.
+#[must_use]
+pub fn at_shell_prompt(term: &Terminal) -> bool {
+    !term.in_alt_screen()
+        && term.blocks().last().is_some_and(|b| b.output_line.is_none())
+}
+
 /// The newest line the grid holds, for a block that has not ended.
 ///
 /// Active space: "what has this command printed so far" is a question about the
@@ -219,6 +255,35 @@ fn last_line(term: &Terminal) -> LineId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cd_bytes_wraps_once_and_declines_the_path_it_cannot_quote_portably() {
+        assert_eq!(
+            cd_bytes("/Users/andy/My Code").as_deref(),
+            Some(b"cd '/Users/andy/My Code'\r".as_slice()),
+            "single quotes are the one wrapping both shell families read literally"
+        );
+        assert!(
+            cd_bytes("/Users/andy's stuff").is_none(),
+            "a quoted quote is spelled differently per shell; declining beats guessing"
+        );
+        assert!(cd_bytes("").is_none());
+        assert!(
+            cd_bytes("/tmp/x\rrm -rf ~\r").is_none(),
+            "a control byte in a typed path is an Enter mid-string — an injection, not a cd"
+        );
+        assert!(cd_bytes("/tmp/a\nb").is_none(), "LF is the same injection in a longer coat");
+    }
+
+    #[test]
+    fn at_shell_prompt_is_the_trailing_open_prompt_and_nothing_else() {
+        let mut t = Terminal::new(40, 8, 200);
+        assert!(!at_shell_prompt(&t), "no markers means no prompt anyone can vouch for");
+        t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+        assert!(at_shell_prompt(&t), "an open trailing prompt is the one green state");
+        t.advance(b"make\x1b]133;C\x07\r\n");
+        assert!(!at_shell_prompt(&t), "typed bytes now land in make's stdin");
+    }
 
     /// A session with one finished command and one still running.
     fn session() -> Terminal {

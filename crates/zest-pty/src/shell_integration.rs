@@ -925,6 +925,55 @@ mod tests {
     }
 
     #[test]
+    fn every_hook_offers_compact_ps1_with_the_newline_before_the_a_marker() {
+        // Compact mode (#426): the env switch, and the ordering the chip
+        // layout depends on — the newline comes BEFORE `133;A`, so the block
+        // anchors on the `❯` row and the blank line above is the chips'
+        // preferred home rather than a wasted row inside the block.
+        for shell in [Shell::Zsh, Shell::Bash, Shell::Pwsh] {
+            let hook = hook(shell);
+            assert!(
+                hook.contains("ZESTERM_COMPACT_PS1"),
+                "{shell:?} does not honour the compact switch"
+            );
+        }
+        // The posix compact PS1s spell it in one string each; assert the
+        // order inside that string, not across the whole file.
+        assert!(
+            hook(Shell::Zsh).contains(r"PS1=$'\n%{\e]133;A\a%}❯ "),
+            "zsh compact PS1 must put the blank line before the A marker"
+        );
+        assert!(
+            hook(Shell::Bash).contains(r"PS1='\n\[\e]133;A\a\]❯ "),
+            "bash compact PS1 must put the blank line before the A marker"
+        );
+        // pwsh builds the prompt as code: the newline append must come
+        // before the `A` emission.
+        let pwsh = hook(Shell::Pwsh);
+        let nl = pwsh.find("if ($env:ZESTERM_COMPACT_PS1) { $out += \"`n\" }").expect("the blank row");
+        let a = pwsh.find("$out += __zesterm_osc '133;A'").expect("the A marker");
+        assert!(nl < a, "pwsh must append the blank row before it emits A");
+    }
+
+    #[test]
+    fn the_posix_compact_prompts_yield_to_a_framework() {
+        // A framework rebuilds PS1 in its own hook; compact must not fight
+        // it. The guard is a function both posix hooks carry and consult.
+        for shell in [Shell::Zsh, Shell::Bash] {
+            let hook = hook(shell);
+            assert!(hook.contains("__zesterm_ps1_owned"), "{shell:?} has no ownership guard");
+            assert!(
+                hook.contains("STARSHIP_SHELL") && hook.contains("POSH_THEME"),
+                "{shell:?} misses a framework the guard exists for"
+            );
+        }
+        assert!(
+            hook(Shell::Zsh).contains("functions[p10k]"),
+            "p10k is zsh's own and its detection lives there"
+        );
+    }
+
+    #[test]
     fn the_posix_hooks_ship_with_unix_line_endings() {
         // include_str! embeds checkout bytes, and the shim is written into a
         // file a *Linux* bash sources -- from a Windows-built daemon, across

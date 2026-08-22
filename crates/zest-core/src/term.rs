@@ -462,6 +462,22 @@ impl Terminal {
         self.state.damage.mark_full();
     }
 
+    /// Scroll so the primary grid's row bearing `line` is visible.
+    ///
+    /// Declines on the alt screen rather than scrolling underneath it: the
+    /// ids would name rows in the wrong numbering space (`block_line`'s
+    /// argument), and a full-screen program owns the display anyway.
+    pub fn scroll_to_line(&mut self, line: LineId) -> bool {
+        if self.state.alt_grid.is_some() {
+            return false;
+        }
+        let found = self.state.grid.scroll_to_line(line);
+        if found {
+            self.state.damage.mark_full();
+        }
+        found
+    }
+
     /// The command blocks the shell has reported.
     ///
     /// Empty unless the shell emits OSC 133 — which is what shell integration

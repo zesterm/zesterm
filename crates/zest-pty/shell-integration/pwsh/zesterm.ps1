@@ -168,6 +168,9 @@ function Global:prompt {
     $out += __zesterm_fact 'Conda' ([string] $env:CONDA_DEFAULT_ENV)
     $out += __zesterm_fact 'AwsProfile' ([string] $env:AWS_PROFILE)
 
+    # Compact mode's blank row comes before `A`, so the block anchors on the
+    # `❯` row and the line above is the chip layout's preferred home.
+    if ($env:ZESTERM_COMPACT_PS1) { $out += "`n" }
     $out += __zesterm_osc '133;A'
 
     # Put `$?` and $LASTEXITCODE back exactly as the command left them. A prompt
@@ -176,9 +179,20 @@ function Global:prompt {
     $global:LASTEXITCODE = $code
     if (-not $ok) { Write-Error 'zesterm' -ErrorAction Ignore }
 
-    # `-join` because a prompt function may emit several strings; the host
-    # concatenates them and so must we.
-    $out += -join $Global:__zesterm.OriginalPrompt.Invoke()
+    # Compact mode (`prompt.compact_ps1`): the chips are the prompt, so the
+    # chained prompt is skipped for a bare `❯ `. Unlike the posix hooks
+    # there is no framework check here: oh-my-posh installs by *replacing*
+    # `function prompt`, which is the function this one chained at load —
+    # OriginalPrompt IS the framework, and not invoking it is precisely what
+    # the setting asks for.
+    if ($env:ZESTERM_COMPACT_PS1) {
+        $out += '❯ '
+    }
+    else {
+        # `-join` because a prompt function may emit several strings; the
+        # host concatenates them and so must we.
+        $out += -join $Global:__zesterm.OriginalPrompt.Invoke()
+    }
 
     # `B` marks where the *typed* command begins, so it belongs at the very end
     # of the prompt string rather than anywhere else.

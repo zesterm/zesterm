@@ -78,7 +78,18 @@ __zesterm_capture_prompt_command
 # `\[...\]` tells bash the enclosed bytes occupy no columns. Without it bash
 # believes the prompt is wider than it is and mis-positions the cursor on
 # every redraw -- which looks like a rendering bug and is not one.
+# Compact mode mirrors the zsh hook exactly, framework skip included; the
+# newline before `A` is what hands the blank row to the chip layout rather
+# than to the block.
+__zesterm_ps1_owned() {
+    [ -n "${STARSHIP_SHELL-}" ] || [ -n "${POSH_THEME-}" ]
+}
+
 __zesterm_wrap_prompt() {
+    if [ -n "${ZESTERM_COMPACT_PS1-}" ] && ! __zesterm_ps1_owned; then
+        PS1='\n\[\e]133;A\a\]❯ \[\e]133;B\a\]'
+        return
+    fi
     case ${PS1-} in *'133;A'*) return ;; esac
     PS1='\[\e]133;A\a\]'${PS1-}'\[\e]133;B\a\]'
 }
