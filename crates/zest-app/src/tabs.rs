@@ -564,6 +564,19 @@ impl Tab {
 /// tabs stay distinct hit regions.
 #[must_use]
 pub fn placeholder_addr(n: u64) -> SessionAddr {
+    // The top two ids on the all-zero host are the app tabs' sentinels
+    // ([`settings_addr`], [`profiles_tab_addr`]); the counter cannot reach
+    // them in any real session, so a collision here is a bug in whatever
+    // minted `n`, not bad luck — and a release build that hit one would
+    // silently activate or close the wrong tab (every hit region keys on the
+    // address), which is why this is not a `debug_assert`. Zero is legal but
+    // reserved: it is the "no id yet" address a wakeup carries until
+    // `wake_for` stamps the real one, so the ids minted for placeholder tabs
+    // count up from 1.
+    assert!(
+        n < u64::MAX - 1,
+        "placeholder ids must never reach the app-tab sentinels"
+    );
     SessionAddr::new(HostId::from_bytes([0; 32]), SessionId(n))
 }
 
@@ -745,6 +758,34 @@ impl TabStrip {
 
     pub fn find_mut(&mut self, addr: SessionAddr) -> Option<&mut Tab> {
         self.tabs.iter_mut().find(|t| t.addr == addr)
+    }
+
+    /// The tabs worth remembering, and the active index *within that
+    /// filtered list* — the filter and the remap live together because the
+    /// remap is only correct against exactly this filter's survivors.
+    ///
+    /// Placeholders (in-process ptys) die with the window and cannot be
+    /// reattached; dead sessions have nothing to reattach to. The app tabs
+    /// never appear at all — they are not `Tab`s, and their sentinel
+    /// addresses are placeholders besides, so both facts exclude them. When
+    /// the active tab is itself filtered out the index stays 0, so a restore
+    /// leads with a real session rather than an out-of-range index; while
+    /// the Settings tab holds the keyboard `active` still names the session
+    /// underneath, which is the tab a restore should lead with.
+    #[must_use]
+    pub(crate) fn persistable(&self) -> (usize, Vec<&Tab>) {
+        let mut tabs = Vec::new();
+        let mut active = 0;
+        for (i, tab) in self.tabs.iter().enumerate() {
+            if is_placeholder(tab.addr) || tab.dead {
+                continue;
+            }
+            if i == self.active {
+                active = tabs.len();
+            }
+            tabs.push(tab);
+        }
+        (active, tabs)
     }
 
     /// Re-resolve every profile-launched tab's identity against a reloaded
@@ -1361,6 +1402,134 @@ mod tests {
     }
 
     #[test]
+    fn a_new_tab_takes_the_keyboard_from_settings_but_a_background_one_does_not() {
+        // One decision with two answers: push() is something the user just
+        // asked for, so it takes the keyboard from the Settings tab like it
+        // does from any session; push_background() is a restore or a
+        // background attach, and a launch that yanked the keyboard out of
+        // Settings once per remembered tab would make the screen unusable
+        // exactly while tabs restore.
+        let mut strip = TabStrip::default();
+        strip.push(fake(1));
+        strip.open_settings();
+        assert!(strip.settings_active(), "sanity: settings holds the keyboard");
+
+        strip.push(fake(2));
+        assert!(
+            !strip.settings_active(),
+            "a new tab the user asked for takes the keyboard from the Settings tab"
+        );
+        assert_eq!(strip.active().expect("active").addr, placeholder_addr(2));
+        assert!(
+            strip.settings_open(),
+            "the Settings tab stays open in place — it lost the keyboard, not its chip"
+        );
+
+        assert!(strip.activate_addr(settings_addr()), "the chip takes it back");
+        strip.push_background(fake(3));
+        assert!(
+            strip.settings_active(),
+            "a background arrival must not steal the keyboard from the Settings tab"
+        );
+        assert_eq!(
+            strip.display_active(),
+            strip.len(),
+            "…and the settings chip is still the lit one"
+        );
+        for addr in [placeholder_addr(1), placeholder_addr(2), placeholder_addr(3)] {
+            strip.close(addr).expect("tab exists").kill();
+        }
+    }
+
+    #[test]
+    fn persist_skips_filtered_tabs_and_remaps_the_active_index() {
+        // `persistable`'s remap is the arithmetic `persist_tabs` writes to
+        // disk: a filtered tab sitting before the active session must not
+        // inflate the saved index, or the restore lights a neighbour of the
+        // tab the user was looking at.
+        let mut strip = TabStrip::default();
+        strip.push(fake(1)); // a placeholder: the in-process fallback, dies with the window
+        strip.push(real(2));
+        strip.push(real(3));
+        strip.activate(2);
+        let (active, tabs) = strip.persistable();
+        assert_eq!(tabs.len(), 2, "placeholder tabs never persist");
+        assert_eq!(
+            active, 1,
+            "the saved index counts persisted tabs only — the placeholder \
+             before the active session must not inflate it"
+        );
+
+        // The Settings tab holding the keyboard changes nothing: it is not
+        // a `Tab`, and `active` still names the session underneath, which
+        // is what the restore should lead with (Settings itself costs
+        // nothing to reopen and means nothing to reattach).
+        strip.open_settings();
+        let (active, tabs) = strip.persistable();
+        assert_eq!(
+            (active, tabs.len()),
+            (1, 2),
+            "an open, active Settings tab is invisible to persistence"
+        );
+        strip.close_settings();
+
+        // A dead session has nothing left to reattach to, and the remap
+        // must hold as the filter tightens.
+        strip.find_mut(real_addr(2)).expect("tab 2 exists").dead = true;
+        let (active, tabs) = strip.persistable();
+        assert_eq!(tabs.len(), 1, "dead sessions never persist");
+        assert_eq!(active, 0, "…and the remap tracks the tightened filter");
+
+        // The active tab is itself filtered out: lead with a real session
+        // rather than an out-of-range index.
+        strip.activate(0);
+        let (active, _) = strip.persistable();
+        assert_eq!(active, 0, "an active tab that does not persist saves as index 0");
+
+        for addr in [placeholder_addr(1), real_addr(2), real_addr(3)] {
+            strip.close(addr).expect("tab exists").kill();
+        }
+    }
+
+    #[test]
+    fn the_app_tab_sentinels_are_placeholders_no_counter_reaches() {
+        // Persistence has exactly one address filter, `is_placeholder` — so
+        // the app tabs' sentinels must be placeholders for a
+        // sentinel-addressed tab that ever leaked into the strip to stay
+        // out of tabs.json. The Profiles half is pinned in
+        // the_profiles_chip_address_is_a_placeholder_no_session_reaches;
+        // this is the Settings half, plus the boundary ids the guard in
+        // `placeholder_addr` admits — the proof has to hold at the
+        // boundary, not just for small counters.
+        assert!(
+            is_placeholder(settings_addr()),
+            "the Settings sentinel must read as a placeholder, or persistence could save it"
+        );
+        for n in [0, 1, 1000, u64::MAX - 2] {
+            assert_ne!(
+                placeholder_addr(n),
+                settings_addr(),
+                "a placeholder tab must never hit-test as the Settings tab"
+            );
+            assert_ne!(
+                placeholder_addr(n),
+                profiles_tab_addr(),
+                "a placeholder tab must never hit-test as the Profiles chip"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "app-tab sentinels")]
+    fn a_placeholder_id_at_a_sentinel_fails_fast() {
+        // A collision would silently activate or close the wrong tab in a
+        // release build — every hit region keys on the address — so the
+        // guard is an assert!, not a debug_assert!, and this pins that it
+        // stays one.
+        let _ = placeholder_addr(u64::MAX - 1);
+    }
+
+    #[test]
     fn next_and_prev_wrap() {
         let mut strip = TabStrip::default();
         for n in 1..=3 {
@@ -1404,5 +1573,21 @@ mod tests {
             }
         }
         panic!("spawn a trivial child, after 10 attempts: {last:?}")
+    }
+
+    /// A non-placeholder address, for tabs that should survive the
+    /// persistence filter. Any non-zero host works; a real one is a key
+    /// fingerprint, which a test has no way (and no need) to mint.
+    fn real_addr(n: u64) -> SessionAddr {
+        SessionAddr::new(HostId::from_bytes([9; 32]), SessionId(n))
+    }
+
+    /// A [`fake`] tab wearing a non-placeholder address, so `persistable`
+    /// keeps it — a placeholder-addressed tab would be filtered for the
+    /// wrong reason and the remap under test would never run.
+    fn real(n: u64) -> Tab {
+        let mut tab = fake(n);
+        tab.addr = real_addr(n);
+        tab
     }
 }

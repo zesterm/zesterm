@@ -6057,25 +6057,20 @@ impl App {
         if !self.config.tabs.restore {
             return;
         }
-        let mut tabs = Vec::new();
-        let mut active = 0;
-        for (i, tab) in self.tabs.iter().enumerate() {
-            // Placeholders (in-process ptys) die with the window and cannot
-            // be reattached; dead sessions have nothing to reattach to.
-            if crate::tabs::is_placeholder(tab.addr) || tab.dead {
-                continue;
-            }
-            if i == self.tabs.active_index() {
-                active = tabs.len();
-            }
-            let title = tab.source().terminal().lock().title().trim().to_string();
-            tabs.push(crate::tabs_state::SavedTab {
+        // Which tabs, and which of them leads the restore, is the strip's
+        // call (`persistable` keeps the filter and the active-index remap
+        // together, under test); this side only adds what needs a terminal
+        // lock to read.
+        let (active, tabs) = self.tabs.persistable();
+        let tabs = tabs
+            .into_iter()
+            .map(|tab| crate::tabs_state::SavedTab {
                 addr: tab.addr,
                 local: tab.local,
                 dial_hint: tab.dial_hint.clone(),
-                title,
-            });
-        }
+                title: tab.source().terminal().lock().title().trim().to_string(),
+            })
+            .collect();
         crate::tabs_state::save(&crate::tabs_state::SavedTabs::new(active, tabs));
     }
 
