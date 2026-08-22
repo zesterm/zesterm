@@ -23,6 +23,7 @@ import { fetchBootstrap } from './bootstrap.ts';
 import { MONO_FAMILY } from './chrome-model.ts';
 import { deviceKey } from './device-key.ts';
 import { routerPlugin } from './routes.tsx';
+import { setKeyboardUp } from './soft-keyboard.ts';
 import { initThemeStore } from './state/theme.ts';
 import { watchVisualViewport } from './visual-viewport.ts';
 import './style.css';
@@ -42,7 +43,7 @@ const theme = store.theme;
 
 // The soft keyboard, on the platforms that overlay it rather than resize for
 // it (iOS Safari). Writes --zt-vv-height/--zt-vv-top, which .shell reads.
-watchVisualViewport(window, document.documentElement);
+watchVisualViewport(window, document.documentElement, setKeyboardUp);
 
 const socketUrl =
   (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/_sigx/socket';
