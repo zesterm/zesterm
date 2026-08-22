@@ -26,7 +26,22 @@
 //! read, because a command that prints and exits sends nothing more and the
 //! carried frames would wait for a read that never comes. Both halves of #54;
 //! carrying them without draining them is not half a fix.
+//!
+//! # The connection knows which sessions it wants
+//!
+//! A `Detach` is answered by nothing, and the reader recovers a refused delta
+//! on its own by asking for a keyframe -- so a tool call that detaches while a
+//! delta is mid-apply can put `Detach, RequestKeyframe` on the wire, and the
+//! daemon's answer to the orphan is an `Error` naming the session, which the
+//! *next* attach then wears as its own refusal (#409). Nothing on the wire can
+//! say which replies are still wanted, so [`Shared::wanted`] says it here: a
+//! keyframe, a recovery, or a per-session error is acted on only while the
+//! session is in that set. The obvious cheaper fix -- drop the replica before
+//! sending `Detach` -- is the trap: a recovery that preceded the detach is
+//! answered with a keyframe, which then mints a replica for a session nothing
+//! is subscribed to, and the next tool call waits on it forever.
 
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -66,6 +81,13 @@ pub struct Shared {
     pub offer: Option<HostOffer>,
     /// Sessions this connection is attached to.
     pub replicas: Vec<Replica>,
+    /// Sessions this connection *wants* to be attached to: entered by
+    /// [`Conn::attach`] before its `Attach` is sent, left by [`Conn::detach`]
+    /// before its `Detach` is. Distinct from `replicas`, which says what the
+    /// host has *delivered*: the gap between the two is exactly where a reply
+    /// to a message this connection no longer cares about arrives, and the
+    /// reader consults this set to ignore it. See the module doc.
+    pub wanted: HashSet<SessionAddr>,
     /// Set when the reader stops, so a tool reports a dead link rather than
     /// waiting out a deadline against a connection that has gone.
     pub closed: bool,
@@ -330,11 +352,22 @@ impl Conn {
         // is all of them but `sessions` and `hosts` -- took twenty seconds to
         // report a session the daemon had already denied in milliseconds. The
         // agent's own successful `close_session` is enough to reach it. (#347)
-        let seen = self.with(|s| s.session_error_gen);
+        //
+        // Wanted *before* the `Attach` is sent, under the same lock as the
+        // snapshot: the reader stores a refusal only for a wanted session, so
+        // inserting after the send would let the daemon's immediate `Error`
+        // arrive into a set that does not yet name it, and the refusal would be
+        // dropped -- #347 undone by #409.
+        let seen = {
+            let (lock, _) = &*self.state;
+            let mut s = lock.lock().expect("state");
+            s.wanted.insert(session);
+            s.session_error_gen
+        };
         self.send(ClientMessage::Attach { session, cols, rows, observe });
-        self.wait_for(|s| {
-            if let Some(v) = s.replica(session).map(|_| ()) {
-                return Some(Ok(v));
+        let waited = self.wait_for(|s| {
+            if s.replica(session).is_some() {
+                return Some(Ok(()));
             }
             match &s.session_error {
                 Some((addr, msg)) if *addr == session && s.session_error_gen != seen => {
@@ -342,15 +375,39 @@ impl Conn {
                 }
                 _ => None,
             }
-        })?
+        });
+        // Two layers, one answer: the predicate's verdict is the session's own
+        // (attached, or refused by name), `wait_for`'s is the link's (closed,
+        // or out of time). Either failure unwants the session below.
+        let answered: Result<(), ConnError> = match waited {
+            Ok(verdict) => verdict,
+            Err(link) => Err(link),
+        };
+        if answered.is_err() {
+            // A session the host denied, or never answered for, is not one this
+            // connection wants: leaving it in the set would make the next
+            // attempt's refusal count as addressed to nobody in particular.
+            let (lock, _) = &*self.state;
+            lock.lock().expect("state").wanted.remove(&session);
+        }
+        answered
     }
 
     /// Stop watching. The session keeps running -- this is not `CloseSession`.
     pub fn detach(&self, session: SessionAddr) {
-        self.send(ClientMessage::Detach { session });
+        // Unwanted and replica-less *before* the `Detach` is queued, and the
+        // queueing happens under the same lock the reader applies deltas
+        // under. Either the reader went first and its recovery
+        // `RequestKeyframe` precedes this `Detach` on the wire -- the daemon
+        // answers it with a keyframe, which arrives unwanted and is dropped --
+        // or this went first and the reader finds the session unwanted and
+        // asks for nothing. Neither order can produce the orphaned `Error` the
+        // next attach used to wear (#409).
         let (lock, cv) = &*self.state;
         let mut s = lock.lock().expect("state");
+        s.wanted.remove(&session);
         s.replicas.retain(|r| r.addr != session);
+        self.send(ClientMessage::Detach { session });
         cv.notify_all();
     }
 
@@ -603,6 +660,14 @@ fn on_message(state: &State, tx: &Sender<Outbound>, msg: HostMessage) {
                 title: title.clone(),
                 history_clears,
             };
+            if !s.wanted.contains(&session) {
+                // The answer to a recovery that preceded our own `Detach` on
+                // the wire. Minting a replica from it would describe a session
+                // nothing is subscribed to, and the next tool call would wait
+                // on it until its deadline (#409).
+                tracing::debug!(%session, "a keyframe for a session this connection detached; dropped");
+                return finish(s, cv);
+            }
             match s.replica_mut(session) {
                 Some(r) => {
                     r.reset(&k, seq.0);
@@ -622,7 +687,11 @@ fn on_message(state: &State, tx: &Sender<Outbound>, msg: HostMessage) {
                 // Nothing to apply and nothing to recover.
                 None => false,
             };
-            if diverged {
+            // `wanted` rather than the replica's presence, although a replica
+            // implies it: the rule is "recover only what is wanted", and the
+            // check that states the rule is the one that survives a refactor
+            // of how replicas come and go.
+            if diverged && s.wanted.contains(&session) {
                 // Deliberately not a reattach: `RequestKeyframe` recovers
                 // without tearing down the subscriber, which would also drop
                 // and re-cast this connection's size vote -- and re-casting it
@@ -643,17 +712,154 @@ fn on_message(state: &State, tx: &Sender<Outbound>, msg: HostMessage) {
             // is read *with* `closed` to explain a missing replica -- so a
             // per-session message left there outlives its request and is
             // reported later as a link failure that never happened.
-            Some(addr) => {
+            // ...and a refusal naming a session this connection no longer
+            // wants is addressed to nobody: stored, it is the refusal the next
+            // attach wears (#409). After `attach`/`detach` keep `wanted` in
+            // step with the wire nothing can produce one, so this is the rule
+            // stated at the arm that would otherwise break it.
+            Some(addr) if s.wanted.contains(&addr) => {
                 s.session_error = Some((addr, message));
                 s.session_error_gen = s.session_error_gen.wrapping_add(1);
+            }
+            Some(addr) => {
+                tracing::debug!(session = %addr, %message, "an error for a session this connection detached; dropped");
             }
             None => s.error = Some(message),
         },
         _ => {}
     }
-    // One notify for every message, rather than one per interesting arm: a
-    // waiter's predicate decides what it cares about, and a missed wake is a
-    // tool that hangs until its deadline for no reason.
+    finish(s, cv);
+}
+
+/// Release the state and wake every waiter.
+///
+/// One notify for every message, rather than one per interesting arm: a
+/// waiter's predicate decides what it cares about, and a missed wake is a
+/// tool that hangs until its deadline for no reason. A function rather than
+/// the tail of `on_message` so an arm that returns early cannot skip it.
+fn finish(s: std::sync::MutexGuard<'_, Shared>, cv: &Condvar) {
     drop(s);
     cv.notify_all();
+}
+
+#[cfg(test)]
+mod tests {
+    //! The reader's arms, fed an exact message order with no daemon and no
+    //! handshake. `tests/live.rs` proves the same three rules against a real
+    //! daemon with the real wire order; these pin each rule on its own so a
+    //! failure names the arm rather than the race.
+
+    use super::*;
+    use zest_core::Terminal;
+    use zest_proto::{Delta, Encoder, Seq, SessionId};
+
+    fn addr(n: u64) -> SessionAddr {
+        SessionAddr { host: HostId::from_bytes([0x2e; 32]), session: SessionId(n) }
+    }
+
+    fn state(wanted: &[SessionAddr]) -> State {
+        Arc::new((
+            Mutex::new(Shared { wanted: wanted.iter().copied().collect(), ..Shared::default() }),
+            Condvar::new(),
+        ))
+    }
+
+    /// A real keyframe of a small terminal, the shape a daemon sends on attach.
+    fn keyframe(session: SessionAddr) -> HostMessage {
+        let term = Terminal::new(10, 3, 10);
+        let k = Encoder::new().keyframe(
+            term.grid(),
+            zest_proto::CursorState::default(),
+            term.modes(),
+            "",
+            term.blocks(),
+        );
+        HostMessage::Keyframe {
+            session,
+            seq: Seq(1),
+            cols: k.cols,
+            rows: k.rows,
+            rows_data: k.rows_data,
+            attrs: k.attrs,
+            cursor: k.cursor,
+            modes: k.modes.bits(),
+            blocks: k.blocks,
+            blocks_from: k.blocks_from,
+            title: k.title,
+            history_clears: k.history_clears,
+        }
+    }
+
+    /// An update whose base names a sequence the replica never held -- the
+    /// one shape `Replica::apply` refuses.
+    fn divergent_update(session: SessionAddr) -> HostMessage {
+        HostMessage::Update { session, base: Seq(99), seq: Seq(100), delta: Delta::default() }
+    }
+
+    #[test]
+    fn a_keyframe_for_an_unwanted_session_mints_no_replica() {
+        let wanted = addr(1);
+        let detached = addr(2);
+        let st = state(&[wanted]);
+        let (tx, _rx) = crossbeam_channel::unbounded();
+
+        on_message(&st, &tx, keyframe(detached));
+        on_message(&st, &tx, keyframe(wanted));
+
+        let s = st.0.lock().expect("state");
+        assert!(
+            s.replica(detached).is_none(),
+            "a keyframe answering a recovery sent before our Detach must not resurrect the \
+             session as a ghost replica nothing is subscribed to (#409)"
+        );
+        assert!(s.replica(wanted).is_some(), "...while a wanted session's keyframe still builds one");
+    }
+
+    #[test]
+    fn a_refused_delta_asks_for_a_keyframe_only_while_the_session_is_wanted() {
+        let session = addr(1);
+        let st = state(&[session]);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        on_message(&st, &tx, keyframe(session));
+
+        on_message(&st, &tx, divergent_update(session));
+        assert!(
+            matches!(rx.try_recv(), Ok(Outbound::Msg(m)) if matches!(*m, ClientMessage::RequestKeyframe { session: s } if s == session)),
+            "precondition: a refused delta on a wanted session recovers with a RequestKeyframe"
+        );
+
+        // Unwanted now, replica still present -- the state `detach` is about to
+        // leave is never this, but the rule is about intent, not presence.
+        st.0.lock().expect("state").wanted.remove(&session);
+        on_message(&st, &tx, divergent_update(session));
+        assert!(
+            rx.try_recv().is_err(),
+            "a recovery for a session this connection is leaving would be answered by the \
+             daemon after our Detach, with an Error the next attach wears (#409)"
+        );
+    }
+
+    #[test]
+    fn an_error_naming_an_unwanted_session_is_not_stored() {
+        let wanted = addr(1);
+        let detached = addr(2);
+        let st = state(&[wanted]);
+        let (tx, _rx) = crossbeam_channel::unbounded();
+
+        on_message(
+            &st,
+            &tx,
+            HostMessage::Error { session: Some(detached), message: "not attached to that session".into() },
+        );
+        {
+            let s = st.0.lock().expect("state");
+            assert_eq!(s.session_error_gen, 0, "a refusal addressed to nobody must not bump the generation the next attach watches (#409)");
+            assert!(s.session_error.is_none());
+        }
+
+        on_message(&st, &tx, HostMessage::Error { session: Some(wanted), message: "no such session".into() });
+        let s = st.0.lock().expect("state");
+        assert_eq!(s.session_error_gen, 1, "...while a refusal of a wanted session is the answer #347 waits for");
+        assert_eq!(s.session_error.as_ref().map(|(a, _)| *a), Some(wanted));
+    }
 }

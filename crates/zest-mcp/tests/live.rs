@@ -345,6 +345,87 @@ fn detaching_leaves_the_session_running() {
     registry.close(created.session);
 }
 
+/// A recovery our own `Detach` orphaned is not worn by the next attach.
+///
+/// The reader answers a refused delta with `RequestKeyframe` on its own, and
+/// `attached_with` detaches the moment a tool call ends -- so `Detach,
+/// RequestKeyframe` is a wire order any busy session can produce. The daemon
+/// answers the orphan with an `Error` naming the session, and that used to
+/// land in `session_error` after the next attach had taken its #347 snapshot:
+/// `run`'s `exit` step against bash failed 12/12 on Linux with
+/// `Refused("not attached to that session")` for an attach the daemon was
+/// answering with a keyframe a frame later. (#409)
+///
+/// The fix is that the orphan is never sent: a recovery goes out only while
+/// the session is wanted, and `detach` unwants it under the lock the reader
+/// recovers under, so the only order the client can now produce is
+/// `RequestKeyframe, Detach` -- which the daemon answers with a keyframe, not
+/// an error. That order is what this puts on the wire, then attaches again
+/// while the recovery's keyframe is still in flight, and asserts the attach is
+/// answered and nothing was ever recorded as a refusal. The orphaned order
+/// itself is not replayed here on purpose: once the session is wanted again an
+/// attach cannot tell the orphan's refusal from its own, by design, and the
+/// rule that keeps it off the wire is pinned where it lives --
+/// `conn::tests::a_refused_delta_asks_for_a_keyframe_only_while_the_session_is
+/// _wanted` -- and end to end by the bash run in
+/// `a_run_against_a_real_shell_returns_the_shells_own_exit_code`, which is
+/// this issue's 12/12 failure on Linux.
+#[test]
+fn a_recovery_orphaned_by_our_own_detach_is_not_worn_by_the_next_attach() {
+    let (addr, registry) = serve_daemon();
+    let conn = dial(&addr, "zest-mcp test");
+
+    let created = conn.create_session(&long_lived_cmd(), "", COLS, ROWS).expect("create");
+    conn.attach(created, COLS, ROWS, true).expect("the first attach");
+    conn.send(zest_proto::ClientMessage::RequestKeyframe { session: created });
+    conn.detach(created);
+
+    let again = conn.attach(created, COLS, ROWS, true);
+    assert!(again.is_ok(), "the attach is answered by a keyframe, and nothing else was sent: {again:?}");
+    conn.list_sessions().expect("the fence: every reply to the above has been read");
+    assert!(conn.with(|s| s.replica(created).is_some()), "...and the attach's replica is still there");
+    assert!(
+        conn.with(|s| s.session_error.is_none()),
+        "nothing this connection sent can be refused, so nothing may be recorded as a refusal \
+         for a later attach to wear"
+    );
+
+    registry.close(created.session);
+}
+
+/// A keyframe answering a recovery sent *before* our `Detach` mints no replica.
+///
+/// The other order the race produces, and the one that makes the obvious fix
+/// for the test above -- drop the replica before sending `Detach` -- wrong on
+/// its own: the daemon answers a still-attached recovery with a keyframe, which
+/// arrives after the detach and used to resurrect the session as a replica
+/// nothing is subscribed to. The next tool call saw it, skipped its attach, and
+/// waited on it until its deadline -- a hang where today's bug is a refusal.
+/// (#409)
+///
+/// The `list_sessions` round-trip is a fence, not a subject: the daemon answers
+/// in order, so by the time the listing is back every reply to what was sent
+/// before it has been read.
+#[test]
+fn a_keyframe_answering_a_pre_detach_recovery_mints_no_ghost_replica() {
+    let (addr, registry) = serve_daemon();
+    let conn = dial(&addr, "zest-mcp test");
+
+    let created = conn.create_session(&long_lived_cmd(), "", COLS, ROWS).expect("create");
+    conn.attach(created, COLS, ROWS, true).expect("attach");
+    conn.send(zest_proto::ClientMessage::RequestKeyframe { session: created });
+    conn.detach(created);
+    conn.list_sessions().expect("the fence");
+
+    assert!(
+        conn.with(|s| s.replica(created).is_none()),
+        "a keyframe for a session this connection has detached must be dropped, or the \
+         next tool call finds a replica no delta will ever feed and waits on it"
+    );
+
+    registry.close(created.session);
+}
+
 #[test]
 fn the_tools_answer_over_a_real_connection() {
     // The dispatch layer against a real daemon: what an agent would actually
@@ -631,16 +712,18 @@ fn integrated_shell() -> Option<(String, String)> {
         // correlation rather than as a badly chosen test shell.
         return Some(("powershell.exe -NoLogo -NoProfile".into(), "cmd /c exit 3".into()));
     }
-    // bash is hookable now and deliberately NOT a candidate: on a bash
-    // session this test's `exit` step trips a pre-existing Conn race — a
-    // recovery `RequestKeyframe` orphaned by our own `Detach`, whose refusal
-    // the next attach wears — measured at 12/12 failures on Linux. #409 owns
-    // the race, and adding bash here is its acceptance test. Until then,
-    // hosts with no zsh (ubuntu CI runners) skip, as they always have.
-    ["/bin/zsh", "/usr/bin/zsh", "/usr/local/bin/zsh", "/opt/homebrew/bin/zsh"]
+    // zsh first where it exists, bash where it does not: the two shells reuse
+    // and mint block ids differently (`tools::block_anchor`'s reason to exist),
+    // so which one a machine runs is part of what CI covers. bash is what
+    // ubuntu-latest has, and it was kept off this list until #409: on a bash
+    // session the `exit` step tripped a Conn race -- a recovery `RequestKeyframe`
+    // orphaned by our own `Detach`, whose refusal the next attach wore -- at
+    // 12/12 on Linux. `a_recovery_orphaned_by_our_own_detach_is_not_worn_by_the
+    // _next_attach` pins the race; this is its acceptance.
+    ["/bin/zsh", "/usr/bin/zsh", "/usr/local/bin/zsh", "/opt/homebrew/bin/zsh", "/bin/bash"]
         .into_iter()
         .find(|p| std::path::Path::new(p).exists())
-        .map(|zsh| (zsh.to_string(), "(exit 3)".into()))
+        .map(|shell| (shell.to_string(), "(exit 3)".into()))
 }
 
 /// Wait until the session's tail block is an idle prompt — the state `run`'s
@@ -702,9 +785,8 @@ fn a_run_against_a_real_shell_returns_the_shells_own_exit_code() {
     let Some((shell, exits_three)) = integrated_shell() else {
         eprintln!(
             "SKIPPED a_run_against_a_real_shell_returns_the_shells_own_exit_code: no usable \
-             shell with an OSC 133 hook on this machine. bash is hookable but excluded here \
-             until #409's Conn race is fixed; without zsh (unix) or PowerShell (Windows) \
-             this cannot run. Every other property of the correlation is covered by \
+             shell with an OSC 133 hook on this machine; without zsh or bash (unix) or \
+             PowerShell (Windows) this cannot run. Every other property of the correlation is covered by \
              tests/replay.rs, which needs no shell."
         );
         return;

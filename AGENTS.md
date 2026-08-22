@@ -643,6 +643,21 @@ you need before you trip on it.
   fix is that a listing is a *question* (`Conn::list_sessions`), which is what the
   `sessions: false` comment already argued for and what the code had stopped
   doing. (#360)
+- **A `Detach` is answered by nothing, and a reader that recovers on its own
+  can race it.** `zest-mcp`'s reader answers a refused delta with
+  `RequestKeyframe` by itself, and every tool call detaches when it ends — so
+  `Detach, RequestKeyframe` was a wire order any busy session could produce,
+  the daemon refused the orphan by name, and the *next* attach wore that
+  refusal as its own (#347's guard cannot tell them apart, by design). `run`'s
+  `exit` step against bash failed 12/12 on Linux with an error about a message
+  nobody had sent. The fix that looks obvious — drop the replica before sending
+  `Detach` — is the trap: a recovery that *preceded* the detach is answered
+  with a keyframe, which then mints a replica for a session nothing is
+  subscribed to, and the next tool call waits on it to its deadline, a hang
+  where the bug was a refusal. Intent is client-side state
+  (`Shared::wanted`): a keyframe, a recovery or a per-session error counts only
+  while the session is in the set, and `detach` leaves the set under the same
+  lock the reader recovers under, so the orphan is never sent. (#409)
 - **`rmp-serde` writes the narrowest integer that fits**, so a `u64` reaches
   JavaScript as a plain `number` for every realistic value — the bindings say
   `number` via `ts(type = "number")` on each such field (#14), and a new wire
