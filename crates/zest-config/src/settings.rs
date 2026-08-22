@@ -649,12 +649,15 @@ pub struct Prompt {
     /// Let the chips *be* the prompt: new shells get a PS1 of just `❯`, on
     /// its own line, so the cwd and branch live only in the chips above it.
     ///
-    /// Off by default — it rewrites something people curate. The injected
-    /// integration honours it only when nothing else owns PS1: a prompt
-    /// framework (powerlevel10k, starship, oh-my-posh) rebuilds PS1 on every
-    /// prompt, and a fight the user did not pick is worse than a long
-    /// prompt. Existing sessions keep the prompt they started with; the
-    /// shell reads this once, at spawn, on the machine that runs it.
+    /// On by default (#435): the chips are the product's prompt, and off by
+    /// default they were invisible to exactly the people they were built
+    /// for. The blast radius is only the default-PS1 crowd — the injected
+    /// integration declines whenever a framework owns PS1 (powerlevel10k,
+    /// starship, oh-my-posh rebuild it every prompt, and a fight the user
+    /// did not pick is worse than a long prompt), and anyone attached to
+    /// their stock PS1 turns this off. Existing sessions keep the prompt
+    /// they started with; the shell reads this once, at spawn, on the
+    /// machine that runs it.
     #[schemars(extend("x_zest_group" = "Prompt", "x_zest_widget" = "toggle"))]
     pub compact_ps1: bool,
 }
@@ -667,7 +670,7 @@ impl Default for Prompt {
             // failure. `kube`/`aws` stay opt-in — a chip that is noise for
             // most people is how the whole row gets turned off.
             widgets: ["cwd", "git", "venv", "exit"].map(String::from).to_vec(),
-            compact_ps1: false,
+            compact_ps1: true,
         }
     }
 }

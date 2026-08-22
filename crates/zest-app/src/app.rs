@@ -8361,6 +8361,12 @@ impl App {
         if let Some(dir) = zest_config::paths::config_dir() {
             spec.enable_shell_integration(&dir.join("shell-integration"));
         }
+        // The daemon's spawn makes the same read (#426); an in-process
+        // session diverging from a daemon-backed one over which prompt it
+        // got would be the two paths quietly disagreeing about the product.
+        if self.settings.prompt.compact_ps1 {
+            spec.env.push(("ZESTERM_COMPACT_PS1".into(), "1".into()));
+        }
         let injected: Vec<String> =
             spec.env[injected_from..].iter().map(|(k, _)| k.clone()).collect();
         apply_shell_settings(&mut spec, &self.config, &injected);

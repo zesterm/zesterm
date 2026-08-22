@@ -157,7 +157,8 @@ the value, and the exit chip selects its failed block. Both design-doc
 stances (§no-status-bar, never-overlay-live-prompt) are annotated rather than
 broken.
 
-The prompt became the chips with #426: opt-in `prompt.compact_ps1` (read by
+The prompt became the chips with #426 — and the default with #435 (the
+framework guard is what makes that safe; a curated PS1 is never touched): opt-in `prompt.compact_ps1` (read by
 the daemon at spawn — the shell runs on the host, so the host decides — and
 declined when p10k/starship/oh-my-posh own PS1) collapses PS1 to a blank
 line + `❯`, the blank row being exactly the chip layout's preferred home; the

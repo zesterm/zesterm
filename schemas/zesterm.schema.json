@@ -241,8 +241,8 @@
       "description": "The context chips beside the live prompt: which show, in what order.",
       "properties": {
         "compact_ps1": {
-          "default": false,
-          "description": "Let the chips *be* the prompt: new shells get a PS1 of just `❯`, on\nits own line, so the cwd and branch live only in the chips above it.\n\nOff by default — it rewrites something people curate. The injected\nintegration honours it only when nothing else owns PS1: a prompt\nframework (powerlevel10k, starship, oh-my-posh) rebuilds PS1 on every\nprompt, and a fight the user did not pick is worse than a long\nprompt. Existing sessions keep the prompt they started with; the\nshell reads this once, at spawn, on the machine that runs it.",
+          "default": true,
+          "description": "Let the chips *be* the prompt: new shells get a PS1 of just `❯`, on\nits own line, so the cwd and branch live only in the chips above it.\n\nOn by default (#435): the chips are the product's prompt, and off by\ndefault they were invisible to exactly the people they were built\nfor. The blast radius is only the default-PS1 crowd — the injected\nintegration declines whenever a framework owns PS1 (powerlevel10k,\nstarship, oh-my-posh rebuild it every prompt, and a fight the user\ndid not pick is worse than a long prompt), and anyone attached to\ntheir stock PS1 turns this off. Existing sessions keep the prompt\nthey started with; the shell reads this once, at spawn, on the\nmachine that runs it.",
           "type": "boolean",
           "x_zest_group": "Prompt",
           "x_zest_widget": "toggle"
@@ -654,7 +654,7 @@
     "prompt": {
       "$ref": "#/$defs/Prompt",
       "default": {
-        "compact_ps1": false,
+        "compact_ps1": true,
         "widgets": [
           "cwd",
           "git",
