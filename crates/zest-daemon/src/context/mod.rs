@@ -101,7 +101,6 @@ impl ContextEngine {
         if cwd.is_empty() {
             return None;
         }
-        let revision = self.inner.revision.load(Ordering::Acquire);
         if let Some(host) = host {
             return Some(SessionContext {
                 git: None,
@@ -110,11 +109,16 @@ impl ContextEngine {
                     value: host.to_string(),
                     source: ContextSource::ShellReport,
                 }],
-                revision,
+                revision: self.inner.revision.load(Ordering::Acquire),
             });
         }
 
         let mut state = self.inner.state.lock().expect("context lock");
+        // Read *under* the state lock: loaded earlier, an invalidation racing
+        // in between would pair freshly-probed facts with the revision from
+        // before it — and a client comparing revisions would skip rebuilding
+        // chrome for data that did change.
+        let revision = self.inner.revision.load(Ordering::Acquire);
         self.ensure_kube(&mut state);
         if !state.by_cwd.contains_key(cwd) {
             let probed = self.probe(&mut state, Path::new(cwd));
@@ -158,6 +162,11 @@ impl ContextEngine {
                 state.repos.iter().min_by_key(|(_, w)| w.order).map(|(p, _)| p.clone())
             {
                 state.repos.remove(&oldest);
+                // Its cache entries go with it: an entry with no watcher is
+                // not "stale until the next change", it is stale forever —
+                // nothing would ever invalidate it. Dropping them degrades
+                // the evicted repo to probe-on-list, as the cap promises.
+                state.by_cwd.retain(|_, p| p.head.as_deref() != Some(oldest.as_path()));
             }
         }
         let inner = Arc::clone(&self.inner);
@@ -171,20 +180,24 @@ impl ContextEngine {
     }
 
     /// Read the kube context once and keep it fresh off its own watcher.
+    ///
+    /// Until the kubeconfig *exists* nothing is stored, so every listing
+    /// retries with one `stat` — a config created after the daemon started
+    /// shows up on the next ask instead of never. Watching only a file that
+    /// exists also matters for its own sake: `Watcher::new` creates the
+    /// parent directory, and a daemon conjuring `~/.kube` out of nothing is
+    /// a side effect nobody asked a *listing* for.
     fn ensure_kube(&self, state: &mut State) {
         if state.kube.is_some() {
             return;
         }
-        let path = kubeconfig_path();
-        let current = path.as_deref().and_then(kube_current_context);
-        // Watch only a file that exists: `Watcher::new` creates the parent
-        // directory, and a daemon conjuring `~/.kube` out of nothing is a
-        // side effect nobody asked a *listing* for.
-        let watcher = path.filter(|p| p.exists()).and_then(|p| {
+        let Some(path) = kubeconfig_path().filter(|p| p.exists()) else { return };
+        let current = kube_current_context(&path);
+        let watcher = {
             let inner = Arc::clone(&self.inner);
-            let path = p.clone();
-            zest_config::Watcher::new(&p, move || inner.kube_changed(&path)).ok()
-        });
+            let for_change = path.clone();
+            zest_config::Watcher::new(&path, move || inner.kube_changed(&for_change)).ok()
+        };
         state.kube = Some(KubeState { current, _watcher: watcher });
     }
 }

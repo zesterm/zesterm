@@ -230,8 +230,14 @@ impl Pulse {
                     });
                 if spawned.is_err() {
                     // No thread means no trailing bump coming: disarm and bump
-                    // now, late being better than never.
-                    self.coalesce.lock().expect("coalesce lock").armed = false;
+                    // now, late being better than never — and stamp `last`, or
+                    // this immediate bump does not count against the window
+                    // and the next report within it bumps again.
+                    {
+                        let mut c = self.coalesce.lock().expect("coalesce lock");
+                        c.armed = false;
+                        c.last = Some(std::time::Instant::now());
+                    }
                     self.touch();
                 }
             }
