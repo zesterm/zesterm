@@ -41,6 +41,7 @@ import {
   linkOf,
   mostRecentBlockWithOutput,
   paneModel,
+  promptChips,
   type LinkHealth,
   type RenderItem,
 } from '../blocks-pane-model.ts';
@@ -126,7 +127,16 @@ export const TerminalView = component<{
     new Set([...foldedFor(folds, entry.host, entry.session)].map(Number));
 
   const recomputeModel = (): void => {
-    pane.items = paneModel(client.grid, foldedIds(), pane.link);
+    // `entry` is re-read here on purpose: the directory replaces the whole
+    // entry on a listing push, and the chips must follow the freshest
+    // context the next recompute sees rather than the one mount captured.
+    pane.items = paneModel(
+      client.grid,
+      foldedIds(),
+      pane.link,
+      undefined,
+      promptChips(entry.cwd, entry.context),
+    );
   };
 
   const scheduleModel = (): void => {
@@ -251,6 +261,11 @@ export const TerminalView = component<{
     // unhandled rejection in the console for a copy that simply didn't take
     // helps nobody, and there is no toast surface yet to say more.
     navigator.clipboard.writeText(text).catch(() => {});
+  };
+
+  const copyChip = (value: string): void => {
+    // Same silence as copyOutput, same reason.
+    navigator.clipboard.writeText(value).catch(() => {});
   };
 
   const runCommand = (command: string): void => {
@@ -435,6 +450,7 @@ export const TerminalView = component<{
               onToggleFold={onToggleFold}
               onCopyOutput={copyOutput}
               onReRun={reRun}
+              onCopyChip={copyChip}
             />
           )}
           <textarea

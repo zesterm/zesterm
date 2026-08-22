@@ -10,6 +10,11 @@
 //! is underneath, painted over): the command comes back from the block index
 //! in a compact, state-coloured form. The live prompt — a block still in
 //! `Prompt` state — is never overlaid; that is where the user is typing.
+//! Stated precisely, the rule protects **typed text and the caret**: the
+//! prompt's context chips ([`super::prompt_chips`]) do sit beside the live
+//! prompt, on the blank row above it or in the empty right margin, and hide
+//! before typing can reach them — which honours the rule rather than
+//! excepting it.
 
 use zest_render_wgpu::{border_sides, LinearRgba, RectInstance};
 

@@ -1720,6 +1720,11 @@ pub struct App {
     /// Hit regions of the per-frame block headers, consulted where the
     /// cached chrome layout says nothing. Rebuilt every redraw.
     block_hits: crate::chrome::hit::ChromeHitMap,
+    /// The live prompt's chips as this frame drew them, and their hit map.
+    /// A click resolves its value against exactly what was drawn — the same
+    /// one-computation rule the block chrome follows.
+    prompt_chips_view: Option<crate::chrome::prompt_chips::PromptChipsView>,
+    chip_hits: crate::chrome::hit::ChromeHitMap,
     /// Folded blocks, per session — a view preference, never on the wire:
     /// two clients watching one session may disagree.
     folded_blocks: std::collections::HashMap<
@@ -2073,6 +2078,8 @@ impl App {
             last_anim: None,
             link_down: false,
             block_hits: crate::chrome::hit::ChromeHitMap::default(),
+            prompt_chips_view: None,
+            chip_hits: crate::chrome::hit::ChromeHitMap::default(),
             folded_blocks: std::collections::HashMap::new(),
             selected_block: std::collections::HashMap::new(),
             activity: ActivityMap::default(),
@@ -5464,6 +5471,7 @@ impl App {
         self.chrome_layout
             .as_ref()
             .and_then(|l| l.hit.hit(x as f32, y as f32))
+            .or_else(|| self.chip_hits.hit(x as f32, y as f32))
             .or_else(|| self.block_hits.hit(x as f32, y as f32))
     }
 
@@ -5783,6 +5791,33 @@ impl App {
                 let at = [self.pointer_pos.0 as f32, self.pointer_pos.1 as f32, 0.0, 0.0];
                 self.open_block_menu(id, at);
             }
+            // A chip click copies what it shows — the value, not the label:
+            // the whole path, the bare branch. The exit chip *selects* its
+            // failed block instead (accent rail; ⌘⇧O/⌘⇧R now act on it):
+            // there is nothing to copy about a failure, there is somewhere
+            // to look. The value is re-read from the view this frame drew,
+            // never from the region — one computation.
+            (HitRegion::PromptChip(kind), MouseButton::Left) => {
+                let chip = self
+                    .prompt_chips_view
+                    .as_ref()
+                    .and_then(|v| v.chips.iter().find(|c| c.kind == kind))
+                    .cloned();
+                if let Some(chip) = chip {
+                    if kind == crate::chrome::prompt_chips::ChipKind::Exit {
+                        if let Ok(id) = chip.value.parse::<u32>() {
+                            self.set_selected_block(Some(id));
+                        }
+                    } else {
+                        // Silent, like the block menu's copy actions.
+                        self.set_clipboard(chip.value);
+                    }
+                }
+            }
+            // Anything else on a chip swallows, like the block chrome below:
+            // the pill paints over prompt rows, and that text must not be
+            // selectable through it.
+            (HitRegion::PromptChip(_), _) => {}
             // Anything else on the block's chrome swallows: the band paints
             // over the prompt rows, and that text must not be selectable
             // through it — which is the reason it has a hit region at all.
@@ -9289,6 +9324,152 @@ impl App {
         kept
     }
 
+    /// The live prompt's context chips (#420), extracted for this frame.
+    ///
+    /// Anchored to the tail block still at `Prompt` — the one
+    /// [`Self::build_block_views`] deliberately skips — and filled from the
+    /// session's own daemon's word (`SessionInfo.context`, off the fleet
+    /// listing), so this window and a phone looking at the same session show
+    /// the same chips. An in-process session has no daemon to ask; it falls
+    /// back to what its own terminal parsed (cwd, shell facts), which are
+    /// the same facts one layer earlier.
+    fn build_prompt_chips(&self) -> Option<crate::chrome::prompt_chips::PromptChipsView> {
+        use crate::chrome::prompt_chips::{Chip, ChipKind, PromptChipsView};
+
+        let widgets = &self.settings.prompt.widgets;
+        if widgets.is_empty() || pane_is_covered(self.screen, self.tabs.settings_active()) {
+            return None;
+        }
+        let tab = self.tabs.active()?;
+        let addr = tab.focused_addr();
+        let context = self.fleet.as_ref().and_then(|f| f.session_context(addr));
+
+        let term = tab.focused_source().terminal();
+        let term = term.lock();
+        if term.in_alt_screen() {
+            return None;
+        }
+        let tail = term.blocks().last()?;
+        if tail.output_line.is_some() {
+            return None;
+        }
+        let grid = term.grid();
+        // Through the fold view when one is active, for the same reason the
+        // headers go through it: the chips must sit on rows the renderer
+        // actually draws.
+        let folded = self.folded_blocks.get(&addr);
+        let fold_map = folded.and_then(|f| block_actions::fold_row_map(&term, f));
+        let prompt_row = match &fold_map {
+            Some(map) => map.iter().position(|&i| {
+                i != usize::MAX && grid.line(i).is_some_and(|r| r.id == tail.prompt_line)
+            })?,
+            None => grid.row_of_line(tail.prompt_line)?,
+        };
+
+        let occupied = grid
+            .row(prompt_row)
+            .cells()
+            .iter()
+            .rposition(|c| !c.is_blank())
+            .map_or(0, |i| i + 1);
+        // The caret counts as occupied: the collision rule protects where
+        // the user is about to type, not only what they already have.
+        let caret = if grid.cursor.row == prompt_row { grid.cursor.col + 1 } else { 0 };
+        let row_above_blank = prompt_row > 0
+            && grid.row(prompt_row - 1).cells().iter().all(zest_core::Cell::is_blank);
+
+        let cwd = if term.cwd().is_empty() { tail.cwd.clone() } else { term.cwd().to_string() };
+        let shell_facts = term.shell_facts();
+        let fact = |key: &str| -> Option<&str> {
+            match &context {
+                Some(ctx) => {
+                    ctx.facts.iter().find(|f| f.key == key).map(|f| f.value.as_str())
+                }
+                // The in-process fallback: the window is the host, so its
+                // own parse *is* the daemon-grade source for shell facts.
+                None => shell_facts.get(key).map(String::as_str),
+            }
+        };
+
+        let mut chips = Vec::new();
+        for name in widgets {
+            let chip = match name.as_str() {
+                "cwd" if !cwd.is_empty() => Some(Chip {
+                    kind: ChipKind::Cwd,
+                    value: cwd.clone(),
+                    label: crate::status::shorten_home(&cwd),
+                }),
+                "git" => context.as_ref().and_then(|c| c.git.as_ref()).map(|g| Chip {
+                    kind: ChipKind::Git,
+                    value: g.branch.clone(),
+                    label: if g.dirty == Some(true) {
+                        format!("{}*", g.branch)
+                    } else {
+                        g.branch.clone()
+                    },
+                }),
+                "venv" => fact("venv").map(|v| Chip {
+                    kind: ChipKind::Venv,
+                    value: v.to_string(),
+                    label: format!("venv {v}"),
+                }),
+                "conda" => fact("conda").map(|v| Chip {
+                    kind: ChipKind::Conda,
+                    value: v.to_string(),
+                    label: format!("conda {v}"),
+                }),
+                "kube" => fact("kube").map(|v| Chip {
+                    kind: ChipKind::Kube,
+                    value: v.to_string(),
+                    label: format!("kube {v}"),
+                }),
+                "aws" => fact("aws_profile").map(|v| Chip {
+                    kind: ChipKind::Aws,
+                    value: v.to_string(),
+                    label: format!("aws {v}"),
+                }),
+                "node" => fact("node").map(|v| Chip {
+                    kind: ChipKind::Node,
+                    value: v.to_string(),
+                    label: format!("node {v}"),
+                }),
+                "ssh" => fact("ssh_host").map(|v| Chip {
+                    kind: ChipKind::Ssh,
+                    value: v.to_string(),
+                    label: format!("ssh {v}"),
+                }),
+                // Only a *failure* earns a chip, and only when the most
+                // recently finished block is the failure: an exit 1 three
+                // commands behind a success is history, and the blocks
+                // already tell it. Two steps, not one `find_map` — a
+                // `find_map` that skips a successful tail would walk on and
+                // resurrect exactly that old failure.
+                "exit" => term
+                    .blocks()
+                    .blocks()
+                    .iter()
+                    .rev()
+                    .find(|b| matches!(b.state, zest_core::BlockState::Finished { .. }))
+                    .and_then(|b| match b.state {
+                        zest_core::BlockState::Finished { exit_code } => {
+                            exit_code.filter(|&c| c != 0).map(|code| Chip {
+                                kind: ChipKind::Exit,
+                                value: b.id.0.to_string(),
+                                label: format!("exit {code}"),
+                            })
+                        }
+                        _ => None,
+                    }),
+                _ => None,
+            };
+            chips.extend(chip);
+        }
+        if chips.is_empty() {
+            return None;
+        }
+        Some(PromptChipsView { prompt_row, row_above_blank, occupied_cols: occupied.max(caret), chips })
+    }
+
     /// Pointer pixels to a grid cell, clamped into the viewport — through
     /// the focused pane's rectangle when the tab is split.
     fn cell_at(&self, x: f64, y: f64) -> (usize, usize) {
@@ -9358,6 +9539,7 @@ impl App {
         // while the menu still claimed to be about it.
         self.prune_selected_block();
         let block_views = self.build_block_views();
+        self.prompt_chips_view = self.build_prompt_chips();
         self.anim_spin = block_views.iter().any(|v| v.running);
         let anim = self.anim_phase();
         let caret_on = anim.caret_on;
@@ -9518,6 +9700,53 @@ impl App {
             // over from a previous frame would hang the menu off a header
             // that has since scrolled away.
             self.block_menu_anchor = block_chrome.menu_anchor;
+
+            // The live prompt's chips, over the block chrome — they never
+            // share rows with a header (headers skip the live prompt), so
+            // the order only decides who wins a bug.
+            let chip_chrome = match self.prompt_chips_view.as_ref() {
+                Some(view) => {
+                    let mut measure = |t: &str, px: f32, bold: bool, tr: f32| {
+                        zest_render_wgpu::measure_ui_run(
+                            fonts,
+                            t,
+                            zest_font::Style::new(bold, false),
+                            px,
+                            tr,
+                        )
+                    };
+                    crate::chrome::prompt_chips::layout_prompt_chips(
+                        view,
+                        area,
+                        metrics.cell_w as f32,
+                        metrics.cell_h as f32,
+                        scale,
+                        &self.chrome_colors,
+                        self.chrome_hover,
+                        &mut measure,
+                    )
+                }
+                None => crate::chrome::prompt_chips::ChipChrome::default(),
+            };
+            chrome.rects.extend_from_slice(&chip_chrome.rects);
+            for run in &chip_chrome.texts {
+                zest_render_wgpu::emit_ui_run(
+                    &gpu.device,
+                    &gpu.queue,
+                    &mut gpu.renderer.atlas,
+                    fonts,
+                    &run.text,
+                    zest_font::Style::new(run.bold, false),
+                    run.px,
+                    run.tracking,
+                    run.pos,
+                    run.color,
+                    run.clip,
+                    run.max_width,
+                    &mut chrome.glyphs,
+                );
+            }
+            self.chip_hits = chip_chrome.hit;
         }
 
         // The overlay layer last: its panels must cover every glyph above.
@@ -9831,6 +10060,7 @@ impl App {
             .chrome_layout
             .as_ref()
             .and_then(|l| l.hit.hit(x, y))
+            .or_else(|| self.chip_hits.hit(x, y))
             .or_else(|| self.block_hits.hit(x, y));
         if over != self.chrome_hover {
             self.chrome_hover = over;

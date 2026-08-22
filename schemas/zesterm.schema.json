@@ -237,6 +237,27 @@
       },
       "type": "object"
     },
+    "Prompt": {
+      "description": "The context chips beside the live prompt: which show, in what order.",
+      "properties": {
+        "widgets": {
+          "default": [
+            "cwd",
+            "git",
+            "venv",
+            "exit"
+          ],
+          "description": "Which chips show, in this order. Known names: `cwd`, `git`, `venv`,\n`conda`, `kube`, `aws`, `node`, `ssh`, `exit`. An unknown name shows\nnothing rather than erroring, so a list written for a newer zesterm\nstill loads. Empty turns the chips off entirely.\n\nThis chooses what this window *shows*; what is *true* is computed by\neach session's own daemon and shipped on the listing, which is what\nlets a browser render the same chips for a machine on the other side\nof the relay.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x_zest_group": "Prompt",
+          "x_zest_widget": "tag-list"
+        }
+      },
+      "type": "object"
+    },
     "Scrolling": {
       "properties": {
         "lines_per_notch": {
@@ -622,6 +643,18 @@
       "additionalProperties": true,
       "description": "Named overrides, selected at launch.\n\nA profile is the whole settings tree again, partially specified. The\n`k8s-prod` profile with a red theme is a genuinely useful safety feature,\nnot a toy.\n\nSchematized as free-form objects: a profile is the settings tree again,\npartially specified, and a schema that said so would be recursive. The\nsettings UI edits profiles through the same generated form as the root.",
       "type": "object"
+    },
+    "prompt": {
+      "$ref": "#/$defs/Prompt",
+      "default": {
+        "widgets": [
+          "cwd",
+          "git",
+          "venv",
+          "exit"
+        ]
+      },
+      "description": "The prompt's context chips."
     },
     "schema_version": {
       "default": 1,

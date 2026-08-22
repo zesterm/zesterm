@@ -179,12 +179,15 @@ everything shares one atlas (per `docs/CONTRACTS.md`).
 
 **Tab data in the mock:** `zsh · studio · ~/dev/zesterm` (dot `#5fd17f`), `zestd — logs · crate · /var/log` (`#5fc4e0`), `build ×2 · studio + forge · split` (`#b07cff`).
 
-**No status bar.** There deliberately isn't one: cwd and git branch are in the prompt line, the
-block count is the blocks themselves, the theme is a Settings row, and host and link health are
-carried by the tab's colour and icon, the vertical header's host chip, the fleet view and the
-palette. A 28px strip restating all of it is a second source of truth for facts already on
-screen. The one thing it did own alone was **link degradation**, which instead surfaces where it
-matters: the affected tab and its pane (see *Loading / degraded states*).
+**No status bar.** There deliberately isn't one: cwd and git branch live at the prompt (since
+#420 as its context chips — see *Prompt line* in §3), the block count is the blocks themselves,
+the theme is a Settings row, and host and link health are carried by the tab's colour and icon,
+the vertical header's host chip, the fleet view and the palette. A 28px strip restating all of
+it is a second source of truth for facts already on screen. The one thing it did own alone was
+**link degradation**, which instead surfaces where it matters: the affected tab and its pane
+(see *Loading / degraded states*). The prompt chips are not this bar returned: they are
+per-prompt content — anchored to the live prompt's rows, scrolling with them, claiming no
+inset — not a persistent strip restating what is elsewhere.
 
 ### 2. Desktop — vertical tabs
 
@@ -272,7 +275,12 @@ colours applied per run. Collapsed when folded.
 
 **Prompt line:** `4px 30px 18px`, 8px gap — user segment in `magenta`, `/` in `ui.faint`,
 cwd in `ui.accent`, `⎇ main*` in `success`, `❯` in `ui.faint`, then an 8×16 `ui.accent`
-block cursor blinking on a 1.1s step-end cycle.
+block cursor blinking on a 1.1s step-end cycle. Since #420 the context also renders as
+**chips** above the prompt row (`.prompt-chips`): cwd in `accent`, branch in `success`,
+venv/conda/node in `info`, kube/aws/ssh in `warn` — the session's own daemon's word, so a
+remote session shows the same chips. The PS1-styled spellings in the mock remain what a
+shell prints; once compact-PS1 mode lands the chips are the only copy and the prompt
+collapses to `❯`.
 
 **Exact mock content** (worth keeping — it is real output and exercises every state):
 block 1 `cargo build --workspace`, exit 0, 51.2s, three `Compiling` lines + a green

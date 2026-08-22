@@ -235,6 +235,22 @@
     "restartHint": false
   },
   {
+    "key": "prompt.widgets",
+    "group": "Prompt",
+    "widget": "tag-list",
+    "description": "Which chips show, in this order. Known names: `cwd`, `git`, `venv`,\n`conda`, `kube`, `aws`, `node`, `ssh`, `exit`. An unknown name shows\nnothing rather than erroring, so a list written for a newer zesterm\nstill loads. Empty turns the chips off entirely.\n\nThis chooses what this window *shows*; what is *true* is computed by\neach session's own daemon and shipped on the listing, which is what\nlets a browser render the same chips for a machine on the other side\nof the relay.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": [
+      "cwd",
+      "git",
+      "venv",
+      "exit"
+    ],
+    "restartHint": false
+  },
+  {
     "key": "scrolling.lines_per_notch",
     "group": "Scrolling",
     "widget": "number",

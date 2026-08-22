@@ -74,6 +74,8 @@ export const BlocksPane = component<{
   onToggleFold: (blockId: number) => void;
   onCopyOutput: () => void;
   onReRun: () => void;
+  /** A prompt chip was clicked; the value is what it copies. */
+  onCopyChip: (value: string) => void;
 }>((ctx) => {
   let paneEl: HTMLElement | null = null;
 
@@ -220,6 +222,20 @@ export const BlocksPane = component<{
         case 'prompt':
           out.push(
             <div class="prompt-line" key="prompt">
+              {item.chips.length > 0 ? (
+                <span class="chips prompt-chips">
+                  {item.chips.map((c) => (
+                    <button
+                      class={`chip chip-${c.key}`}
+                      key={c.key}
+                      title={c.value}
+                      onClick={() => ctx.props.onCopyChip(c.value)}
+                    >
+                      {c.label}
+                    </button>
+                  ))}
+                </span>
+              ) : null}
               {item.rows.map((r, idx) => (
                 <span class="prompt-row" key={String(r.line)}>
                   {r.spans.map((s) => spanEl(s, palette))}

@@ -42,6 +42,8 @@ pub struct Settings {
     pub cursor: Cursor,
     /// Animation, and how much of it.
     pub motion: Motion,
+    /// The prompt's context chips.
+    pub prompt: Prompt,
     /// Named overrides, selected at launch.
     ///
     /// A profile is the whole settings tree again, partially specified. The
@@ -68,6 +70,7 @@ impl Default for Settings {
             scrolling: Scrolling::default(),
             cursor: Cursor::default(),
             motion: Motion::default(),
+            prompt: Prompt::default(),
             profiles: std::collections::BTreeMap::new(),
         }
     }
@@ -626,6 +629,35 @@ pub struct Motion {
     #[schemars(range(min = 0.1, max = 2.0))]
     #[schemars(extend("x_zest_group" = "Motion", "x_zest_widget" = "number"))]
     pub spring_damping: f32,
+}
+
+/// The context chips beside the live prompt: which show, in what order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Prompt {
+    /// Which chips show, in this order. Known names: `cwd`, `git`, `venv`,
+    /// `conda`, `kube`, `aws`, `node`, `ssh`, `exit`. An unknown name shows
+    /// nothing rather than erroring, so a list written for a newer zesterm
+    /// still loads. Empty turns the chips off entirely.
+    ///
+    /// This chooses what this window *shows*; what is *true* is computed by
+    /// each session's own daemon and shipped on the listing, which is what
+    /// lets a browser render the same chips for a machine on the other side
+    /// of the relay.
+    #[schemars(extend("x_zest_group" = "Prompt", "x_zest_widget" = "tag-list"))]
+    pub widgets: Vec<String>,
+}
+
+impl Default for Prompt {
+    fn default() -> Self {
+        Self {
+            // `cwd` and `git` are the two everyone crams into PS1; `venv` is
+            // the one people forget they are in; `exit` only shows on
+            // failure. `kube`/`aws` stay opt-in — a chip that is noise for
+            // most people is how the whole row gets turned off.
+            widgets: ["cwd", "git", "venv", "exit"].map(String::from).to_vec(),
+        }
+    }
 }
 
 impl Default for Motion {

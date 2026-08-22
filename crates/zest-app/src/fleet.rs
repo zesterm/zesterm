@@ -901,6 +901,22 @@ impl FleetModel {
         self.inner.dirty.swap(false, Ordering::AcqRel)
     }
 
+    /// One session's context, cloned out on its own.
+    ///
+    /// The chip row asks per frame, and [`Self::snapshot`] per frame would
+    /// clone every listing in the fleet to answer for one row. Stale entries
+    /// answer `None` like absent ones: a chip describing a machine the
+    /// watcher lost is a chip lying with confidence.
+    #[must_use]
+    pub fn session_context(
+        &self,
+        addr: zest_proto::SessionAddr,
+    ) -> Option<zest_proto::SessionContext> {
+        let state = self.inner.state.lock();
+        let SessionsState::Fresh(sessions) = state.sessions.get(&addr.host)? else { return None };
+        sessions.iter().find(|s| s.addr == addr).and_then(|s| s.context.clone())
+    }
+
     /// The fleet as of now: the window's own host first, then the roster in
     /// its stable order (the roster is a BTreeMap precisely so listings do
     /// not reshuffle between polls).

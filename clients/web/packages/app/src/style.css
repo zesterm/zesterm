@@ -415,6 +415,35 @@ body {
   padding: 4px 30px 18px;
 }
 
+/* The live prompt's context chips (#420): always visible, unlike the
+   header's hover-revealed actions — context is for glancing, actions are
+   for reaching. Tinted per kind so the row reads at a glance. */
+.prompt-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.prompt-chips .chip-git {
+  background: color-mix(in oklab, var(--zt-success) 18%, transparent);
+  color: var(--zt-success);
+}
+
+.prompt-chips .chip-venv,
+.prompt-chips .chip-conda,
+.prompt-chips .chip-node {
+  background: color-mix(in oklab, var(--zt-info) 18%, transparent);
+  color: var(--zt-info);
+}
+
+.prompt-chips .chip-kube,
+.prompt-chips .chip-aws,
+.prompt-chips .chip-ssh {
+  background: color-mix(in oklab, var(--zt-warn) 18%, transparent);
+  color: var(--zt-warn);
+}
+
 .prompt-line .prompt-row {
   display: block;
   white-space: pre-wrap;

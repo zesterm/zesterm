@@ -123,6 +123,9 @@ pub const KEYS: &[(&str, Invalidation)] = &[
     ("motion.smooth_scroll", Invalidation::Free),
     ("motion.spring_response", Invalidation::Free),
     ("motion.spring_damping", Invalidation::Free),
+    // The chip row is rebuilt per frame from the listing; a changed filter
+    // only needs the next repaint.
+    ("prompt.widgets", Invalidation::Free),
 ];
 
 /// Which keys changed between two settings trees.
