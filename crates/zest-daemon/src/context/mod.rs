@@ -288,6 +288,12 @@ impl Inner {
             let mut state = self.state.lock().expect("context lock");
             state.by_cwd.retain(|_, p| p.head.as_deref() != Some(head));
             if let Some(d) = state.dirty.get_mut(head) {
+                // The *answer* goes too, not just the freshness: a checkout
+                // changes what dirty means, and serving the old branch's
+                // count under the new branch's name until the refresh lands
+                // is a chip lying with confidence. Unknown is the honest
+                // interim; the backdate makes the next ask re-run at once.
+                d.answer = None;
                 d.refreshed = std::time::Instant::now() - std::time::Duration::from_secs(3600);
             }
         }
@@ -467,15 +473,27 @@ fn git_dirty(cwd: &str) -> Option<(bool, u32)> {
         .spawn()
         .ok()?;
 
-    let stdout = child.stdout.take()?;
-    let drain = std::thread::Builder::new()
+    // Every early exit past the spawn must reap the child, or the failure
+    // path leaks a subprocess exactly when the machine is under the pressure
+    // that caused the failure.
+    let reap = |mut child: std::process::Child| {
+        let _ = child.kill();
+        let _ = child.wait();
+        None
+    };
+    let Some(stdout) = child.stdout.take() else {
+        return reap(child);
+    };
+    let drain = match std::thread::Builder::new()
         .name("zest-daemon-git-drain".into())
         .spawn(move || {
             let mut out = Vec::new();
             let _ = stdout.take(CAP).read_to_end(&mut out);
             out
-        })
-        .ok()?;
+        }) {
+        Ok(drain) => drain,
+        Err(_) => return reap(child),
+    };
 
     let started = std::time::Instant::now();
     let status = loop {
