@@ -76,6 +76,12 @@ export const BlocksPane = component<{
   onReRun: () => void;
   /** A prompt chip was clicked; the value is what it copies. */
   onCopyChip: (value: string) => void;
+  /**
+   * A tap on a numbered option row of the running command. `pointerType`
+   * is the click's (`'touch'`, `'mouse'`, … or '' where the browser gives
+   * none) so the owner can keep a mouse click meaning "focus", not "type 1".
+   */
+  onChooseOption: (digit: string, pointerType: string) => void;
 }>((ctx) => {
   let paneEl: HTMLElement | null = null;
 
@@ -111,13 +117,34 @@ export const BlocksPane = component<{
     return style === undefined ? <span>{s.text}</span> : <span style={style}>{s.text}</span>;
   };
 
-  const rowEl = (row: PaneRow, palette: TerminalPalette) => (
-    <div class="pane-row" key={String(row.line)}>
-      {row.spans.length === 0
+  const rowEl = (row: PaneRow, palette: TerminalPalette) => {
+    const body =
+      row.spans.length === 0
         ? ' ' // an empty row still occupies its line
-        : row.spans.map((s) => spanEl(s, palette))}
-    </div>
-  );
+        : row.spans.map((s) => spanEl(s, palette));
+    if (row.option === null) {
+      return (
+        <div class="pane-row" key={String(row.line)}>
+          {body}
+        </div>
+      );
+    }
+    // A numbered option of the running command: tappable (#421). Clicks
+    // are PointerEvents in every current browser; the cast only names it.
+    const digit = row.option;
+    return (
+      <div
+        class="pane-row is-option"
+        key={String(row.line)}
+        role="button"
+        onClick={(e: MouseEvent) =>
+          ctx.props.onChooseOption(digit, (e as PointerEvent).pointerType ?? '')
+        }
+      >
+        {body}
+      </div>
+    );
+  };
 
   const outcomeEl = (o: Outcome) => {
     switch (o.kind) {
