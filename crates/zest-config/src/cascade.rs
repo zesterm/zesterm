@@ -162,6 +162,7 @@ fn is_mergeable(path: &str) -> bool {
             | "scrolling"
             | "cursor"
             | "motion"
+            | "prompt"
     )
 }
 

@@ -39,6 +39,7 @@ import {
   linkOf,
   mostRecentBlockWithOutput,
   paneModel,
+  promptChips,
   type HeaderItem,
   type RenderItem,
 } from '../src/blocks-pane-model.ts';
@@ -686,4 +687,55 @@ test('a caret that is not on one of the prompt rows trims nothing', () => {
     [10, 12],
     'the caret names no row here, so nothing is dropped',
   );
+});
+
+// --- the live prompt's context chips (#420) -------------------------------
+
+test('promptChips orders cwd, git, then facts, and skips what it does not know', () => {
+  const chips = promptChips('/Users/andy/dev/zesterm', {
+    git: { branch: 'main', dirty: null },
+    facts: [
+      { key: 'venv', value: 'ml' },
+      { key: 'kube', value: 'prod-eu' },
+      { key: 'telemetry_blob', value: 'x' },
+    ],
+  });
+  assert.deepEqual(
+    chips.map((c) => [c.key, c.label]),
+    [
+      ['cwd', '~/dev/zesterm'],
+      ['git', 'main'],
+      ['venv', 'venv ml'],
+      ['kube', 'kube prod-eu'],
+    ],
+    'an unknown fact key is one chip fewer, never an error',
+  );
+  assert.equal(chips[0]?.value, '/Users/andy/dev/zesterm', 'a click copies the whole path');
+});
+
+test('promptChips marks dirty with a star and leaves unknown-dirty unmarked', () => {
+  const dirty = promptChips('', {
+    git: { branch: 'main', dirty: true },
+    facts: [],
+  });
+  assert.equal(dirty[0]?.label, 'main*');
+  const unknown = promptChips('', {
+    git: { branch: 'main', dirty: null },
+    facts: [],
+  });
+  assert.equal(
+    unknown[0]?.label,
+    'main',
+    'no subprocess ran, so nothing may claim clean or dirty — the star only means known-dirty',
+  );
+});
+
+test('promptChips shortens only the home spellings it can be sure of', () => {
+  assert.equal(promptChips('/home/andy/dev', null)[0]?.label, '~/dev');
+  assert.equal(
+    promptChips('C:\\Users\\andy\\dev', null)[0]?.label,
+    'C:\\Users\\andy\\dev',
+    'another platform\'s home is unknowable from here; a wrong ~ is worse than a long path',
+  );
+  assert.equal(promptChips('', null).length, 0, 'no cwd, no chip — never an empty chip');
 });

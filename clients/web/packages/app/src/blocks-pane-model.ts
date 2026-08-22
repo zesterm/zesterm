@@ -102,8 +102,76 @@ export type RenderItem =
   | HeaderItem
   | { readonly kind: 'output'; readonly blockId: number; readonly rows: readonly PaneRow[] }
   /** The live shell prompt awaiting input; the view appends the blinking caret. */
-  | { readonly kind: 'prompt'; readonly rows: readonly PaneRow[] }
+  | { readonly kind: 'prompt'; readonly rows: readonly PaneRow[]; readonly chips: readonly PromptChip[] }
   | { readonly kind: 'overlay'; readonly link: 'stalled' | 'reconnecting'; readonly text: string };
+
+/**
+ * One context chip on the live prompt (#420): where the session stands, by
+ * its own daemon's word, so the phone shows the same chips the desktop does.
+ * Display only — the facts behind these carry a trust label and nothing may
+ * gate behavior on one; a chip is a thing to read and copy.
+ */
+export interface PromptChip {
+  /** Identity and css-class suffix: `cwd`, `git`, `venv`, … */
+  readonly key: string;
+  readonly label: string;
+  /** What a click copies — the whole path, the bare branch. */
+  readonly value: string;
+}
+
+/** Fact keys worth a chip, and the shorter name the chip wears. */
+const CHIP_NAMES: ReadonlyMap<string, string> = new Map([
+  ['venv', 'venv'],
+  ['conda', 'conda'],
+  ['kube', 'kube'],
+  ['aws_profile', 'aws'],
+  ['node', 'node'],
+  ['ssh_host', 'ssh'],
+]);
+
+/**
+ * Chips for a session's context, in a fixed order (cwd, git, then facts as
+ * the daemon sent them). Structural parameter for the `sessionEntryOf`
+ * reason: the shape is `SessionEntry.context`'s, and a drift fails at the
+ * call site rather than here. An unknown fact key is one chip fewer, never
+ * an error — the `HostOffer` rule.
+ */
+export function promptChips(
+  cwd: string,
+  context: {
+    readonly git: { readonly branch: string; readonly dirty: boolean | null } | null;
+    readonly facts: readonly { readonly key: string; readonly value: string }[];
+  } | null,
+): PromptChip[] {
+  const chips: PromptChip[] = [];
+  if (cwd !== '') {
+    chips.push({ key: 'cwd', label: shortenHome(cwd), value: cwd });
+  }
+  if (context !== null) {
+    if (context.git !== null) {
+      const label = context.git.dirty === true ? `${context.git.branch}*` : context.git.branch;
+      chips.push({ key: 'git', label, value: context.git.branch });
+    }
+    for (const f of context.facts) {
+      const name = CHIP_NAMES.get(f.key);
+      if (name === undefined) continue;
+      chips.push({ key: name, label: `${name} ${f.value}`, value: f.value });
+    }
+  }
+  return chips;
+}
+
+/**
+ * `~` for the *viewer-agnostic* prefixes only. The web client cannot know
+ * another machine's home, so it shortens just the two spellings the daemons
+ * themselves report under, and a path that matches neither passes through —
+ * a wrong `~` is worse than a long path.
+ */
+function shortenHome(path: string): string {
+  const m = /^(\/(?:Users|home)\/[^/]+)(\/.*)?$/.exec(path);
+  if (m === null) return path;
+  return `~${m[2] ?? ''}`;
+}
 
 /** The slice of `GridView` the model reads — structural, so tests hand-build it. */
 export interface PaneView {
@@ -226,6 +294,7 @@ export function paneModel(
   folds: ReadonlySet<number>,
   link: LinkHealth,
   nowMs: number = Date.now(),
+  chips: readonly PromptChip[] = [],
 ): RenderItem[] {
   const layout = sliceBlocks(view);
   const items: RenderItem[] = [];
@@ -247,6 +316,7 @@ export function paneModel(
       items.push({
         kind: 'prompt',
         rows: toPaneRows(upToCaret([...slice.promptRows, ...slice.outputRows], view), view.attrs),
+        chips,
       });
       continue;
     }

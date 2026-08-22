@@ -16,6 +16,7 @@ pub mod hit;
 #[allow(dead_code, reason = "consumed by the redraw and input paths one commit later")]
 pub mod screens;
 pub mod profiles_screen;
+pub mod prompt_chips;
 pub mod settings_screen;
 pub mod insets;
 #[allow(dead_code, reason = "consumed by the redraw and input paths one commit later")]

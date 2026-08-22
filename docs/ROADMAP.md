@@ -149,12 +149,22 @@ session listing, not the delta stream, so the conformance corpus is not
 involved — it becomes so when a block *snapshot* carries them, below.)
 What remains, in landable slices:
 
-- [ ] **The Warp look.** A `chrome/prompt_chips.rs` chip row above the live
-      prompt block, compact-PS1 mode in the shell integration (the cwd lives
-      only in the chip), a cwd-chip cd navigator, exit-chip scroll-to-failure;
-      web chips on the BlocksPane prompt item; `prompt.widgets` (tag-list) and
-      `prompt.compact_ps1` settings. Reconciles two design-doc stances
-      (§no-status-bar, never-overlay-live-prompt) in the same PR.
+The chips themselves landed with #420: `chrome/prompt_chips.rs` draws them on
+the blank row above the live prompt (right-margin fallback that hides before
+typing reaches it), the web BlocksPane renders the same set on its prompt
+item, `prompt.widgets` (tag-list) picks which show natively, a click copies
+the value, and the exit chip selects its failed block. Both design-doc
+stances (§no-status-bar, never-overlay-live-prompt) are annotated rather than
+broken.
+
+- [ ] **The prompt becomes the chips (3b).** Compact-PS1 mode in the injected
+      hooks — opt-in `prompt.compact_ps1`, the daemon reading its host's own
+      setting at spawn, PS1 collapsing to a blank line + `❯` so the cwd lives
+      only in the chip; skipped when p10k/starship own PS1. A cwd-chip cd
+      navigator (recent block cwds, `cd` sent through the ordinary input path
+      only at a live prompt); exit-chip *reveal* (scroll math across wrapped
+      lines) where 3a only selects; web-side `prompt.widgets` filtering once
+      a browser has somewhere to read it from.
 - [ ] **Per-block context history.** `BlockPayload.context` snapshot stamped
       at OSC 133;C — "that failing build ran on branch X" — for humans and
       for `blocks` over MCP.

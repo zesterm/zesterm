@@ -104,6 +104,11 @@ pub enum HitRegion {
     BlockRail(u32),
     /// The `⋯` affordance in a block's header; clicking opens its menu.
     BlockMenu(u32),
+    /// One of the live prompt's context chips (#420). Carries the kind, not
+    /// the value: at most one chip of each kind exists per prompt, so the
+    /// click re-finds its value in the view the app extracted this frame —
+    /// one computation, nothing to drift.
+    PromptChip(super::prompt_chips::ChipKind),
     /// One row of the open block menu, by index into the model's rows.
     ///
     /// A bare index, not `(block, row)`: the open menu already knows its
@@ -295,9 +300,8 @@ pub fn wheel_target(hit: Option<HitRegion>, pane_focus_right: Option<bool>) -> W
         // Inside the grid area, drawn over the session's own rows. Headers
         // ride the scrollback and their band spans the full grid width, so
         // this arm is most of the pane on a shell with integration loaded.
-        R::BlockHeader(_) | R::BlockFold(_) | R::BlockRail(_) | R::BlockMenu(_) => {
-            WheelTarget::Grid
-        }
+        R::BlockHeader(_) | R::BlockFold(_) | R::BlockRail(_) | R::BlockMenu(_)
+        | R::PromptChip(_) => WheelTarget::Grid,
         // The focused pane's header band is that pane's; the unfocused pane's
         // *whole frame* is in the map, and the wheel's tail resolves against
         // `focused_view_rect`, so falling through there would scroll the pane
