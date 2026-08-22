@@ -743,6 +743,8 @@ impl TermState {
                         // `None` here means exactly what it means for a bare
                         // OSC 7 path: nobody said elsewhere.
                         self.set_cwd(None, unescape_vscode(path));
+                    } else if let Some((key, value)) = rest.split_once('=') {
+                        self.set_shell_fact(key, unescape_vscode(value));
                     }
                 }
             }
@@ -773,6 +775,36 @@ impl TermState {
             },
         };
         self.set_cwd(host, percent_decode(path));
+    }
+
+    /// A shell-reported environment fact (`633;P;Venv=…` and kin).
+    ///
+    /// The OSC property is canonicalised to the wire's fact key here, so the
+    /// hooks, this parser and every consumer spell one name. Unknown
+    /// properties fall through untouched — the `P;` namespace is VS Code's to
+    /// mint, and treating a new one as a fact would turn somebody else's
+    /// extension into a chip. An empty value *removes* the fact: a
+    /// deactivated venv must take its chip with it, and "empty chip" and "no
+    /// chip" rendering the same is a coincidence, not a contract.
+    fn set_shell_fact(&mut self, key: &str, value: String) {
+        let key = match key {
+            "Venv" => "venv",
+            "Conda" => "conda",
+            "AwsProfile" => "aws_profile",
+            "NvmBin" => "nvm_bin",
+            _ => return,
+        };
+        let changed = if value.is_empty() {
+            self.shell_facts.remove(key).is_some()
+        } else if self.shell_facts.get(key) == Some(&value) {
+            false
+        } else {
+            self.shell_facts.insert(String::from(key), value);
+            true
+        };
+        if changed {
+            self.events.push(TermEvent::ShellFactsChanged);
+        }
     }
 
     /// Record a reported cwd, announcing it only when it actually moved.

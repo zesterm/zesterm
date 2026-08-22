@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use zest_core::{ChangeSource, Modes, Terminal, TermEvent};
@@ -130,6 +130,12 @@ pub struct Session {
     /// re-doing settled work, not about avoiding a stall.
     exit_code: Arc<Mutex<Option<i32>>>,
     title: Arc<Mutex<String>>,
+    /// Bumped whenever the terminal's shell-reported facts change, so
+    /// `SessionContext.revision` moves when a venv is activated — the context
+    /// engine's own revision only knows about filesystem invalidations, and a
+    /// revision that holds still while the facts move is a client skipping a
+    /// chrome rebuild it needed.
+    facts_rev: Arc<AtomicU64>,
 }
 
 impl Session {
@@ -165,6 +171,7 @@ impl Session {
         let terminal = Arc::new(Mutex::new(term));
         let exited = Arc::new(AtomicBool::new(false));
         let title = Arc::new(Mutex::new(String::new()));
+        let facts_rev = Arc::new(AtomicU64::new(0));
 
         let subscribers: Arc<Mutex<HashMap<u64, Subscriber>>> = Arc::default();
         // Shared because two things now report the child leaving: the reader
@@ -177,6 +184,7 @@ impl Session {
             let terminal = Arc::clone(&terminal);
             let exited = Arc::clone(&exited);
             let title = Arc::clone(&title);
+            let facts_rev = Arc::clone(&facts_rev);
             let subscribers = Arc::clone(&subscribers);
             let mut reply = pty.writer();
 
@@ -238,6 +246,14 @@ impl Session {
                                 // watchers, since a `cd` changes what a
                                 // listing reads and nothing else would say so.
                                 TermEvent::CwdChanged { .. } => {
+                                    listing_moved = true;
+                                }
+                                // Same shape as the cwd: the facts live in
+                                // the terminal, the listing reads them there,
+                                // and the revision bump is what keeps a
+                                // client from skipping the rebuild.
+                                TermEvent::ShellFactsChanged => {
+                                    facts_rev.fetch_add(1, Ordering::Release);
                                     listing_moved = true;
                                 }
                                 // The repaint that answered a grow has closed
@@ -316,6 +332,7 @@ impl Session {
             ever_attached: Arc::new(AtomicBool::new(false)),
             exit_code: Arc::new(Mutex::new(None)),
             title,
+            facts_rev,
         })
     }
 
@@ -758,6 +775,25 @@ impl Session {
         self.terminal.lock().ok().and_then(|t| t.cwd_host().map(str::to_string))
     }
 
+    /// Shell-reported environment facts (`venv`, `conda`, …), from OSC 633.
+    ///
+    /// Forgeable by anything that can print; the listing labels them
+    /// `ShellReport` for exactly that reason.
+    #[must_use]
+    pub fn shell_facts(&self) -> Vec<(String, String)> {
+        self.terminal
+            .lock()
+            .map(|t| t.shell_facts().iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default()
+    }
+
+    /// How many times the shell facts have changed, for the revision a
+    /// listing reports. Monotonic per session.
+    #[must_use]
+    pub fn facts_rev(&self) -> u64 {
+        self.facts_rev.load(Ordering::Acquire)
+    }
+
     /// Whether a command is running, by the tail block's word.
     #[must_use]
     pub fn busy(&self) -> bool {
@@ -973,6 +1009,7 @@ mod tests {
             ever_attached: Arc::new(AtomicBool::new(false)),
             exit_code: Arc::new(Mutex::new(None)),
             title: Arc::new(Mutex::new(String::new())),
+            facts_rev: Arc::new(AtomicU64::new(0)),
         };
 
         s.resize(40, 12);

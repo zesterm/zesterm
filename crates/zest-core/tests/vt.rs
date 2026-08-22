@@ -2272,6 +2272,81 @@ fn osc_633_indexes_the_same_blocks_as_133() {
 }
 
 #[test]
+fn shell_facts_arrive_canonicalised_and_leave_when_cleared() {
+    // `633;P;Venv=` and kin (#418): the OSC property is the hooks' spelling,
+    // the map key is the wire's, and an empty value removes the fact -- a
+    // deactivated venv must take its chip with it.
+    let t = run(
+        40,
+        4,
+        "\x1b]633;P;Venv=ml\x07\x1b]633;P;AwsProfile=staging\x07\x1b]633;P;NvmBin=/Users/andy/.nvm/versions/node/v20.11.0/bin\x07",
+    );
+    assert_eq!(t.shell_facts().get("venv").map(String::as_str), Some("ml"));
+    assert_eq!(t.shell_facts().get("aws_profile").map(String::as_str), Some("staging"));
+    assert_eq!(
+        t.shell_facts().get("nvm_bin").map(String::as_str),
+        Some("/Users/andy/.nvm/versions/node/v20.11.0/bin"),
+        "the path is stored whole; deriving a version from it is the consumer's policy"
+    );
+
+    let mut t = t;
+    t.advance(b"\x1b]633;P;Venv=\x07");
+    assert!(
+        t.shell_facts().get("venv").is_none(),
+        "an empty value removes the fact rather than storing an empty chip"
+    );
+    assert_eq!(t.shell_facts().len(), 2, "clearing one fact leaves the others alone");
+}
+
+#[test]
+fn a_shell_fact_is_announced_on_change_and_only_then() {
+    // The hooks resend per prompt when their cache is cold, and the parser is
+    // the second line of the same defence: identical reports are nothing.
+    let mut t = run(40, 4, "\x1b]633;P;Venv=ml\x07");
+    assert!(
+        t.take_events().iter().any(|e| matches!(e, zest_core::TermEvent::ShellFactsChanged)),
+        "the first report is a change"
+    );
+    t.advance(b"\x1b]633;P;Venv=ml\x07");
+    assert!(
+        !t.take_events().iter().any(|e| matches!(e, zest_core::TermEvent::ShellFactsChanged)),
+        "an identical report is not a change and must not wake anyone"
+    );
+    t.advance(b"\x1b]633;P;Venv=\x07");
+    assert!(
+        t.take_events().iter().any(|e| matches!(e, zest_core::TermEvent::ShellFactsChanged)),
+        "a clear is a change -- the chip has to come down"
+    );
+    t.advance(b"\x1b]633;P;Venv=\x07");
+    assert!(
+        !t.take_events().iter().any(|e| matches!(e, zest_core::TermEvent::ShellFactsChanged)),
+        "clearing what is already clear is nothing"
+    );
+}
+
+#[test]
+fn an_unknown_633_property_is_not_a_fact() {
+    // The `P;` namespace is VS Code's to mint. A property this parser has
+    // never heard of must fall through untouched, or somebody else's
+    // extension becomes a chip with their internals in it.
+    let t = run(40, 4, "\x1b]633;P;IsWindows=True\x07\x1b]633;P;Prompt=$ \x07");
+    assert!(t.shell_facts().is_empty(), "unknown properties are ignored, not collected");
+}
+
+#[test]
+fn a_shell_fact_value_is_unescaped_like_the_command_it_travels_with() {
+    // The zsh/bash hooks escape `;` and `\` the 633 way, because a value
+    // carrying a raw `;` would be split by the OSC parser into a param the
+    // fact never sees.
+    let t = run(40, 4, "\x1b]633;P;Venv=a\\x3bb\\x5cc\x07");
+    assert_eq!(
+        t.shell_facts().get("venv").map(String::as_str),
+        Some("a;b\\c"),
+        "the dialect's own escaping must be undone"
+    );
+}
+
+#[test]
 fn a_vscode_cwd_is_unescaped_like_the_command_it_travels_with() {
     // `633;P` carries the same `\xNN` escaping as `633;E`, and reading it
     // literally is wrong on exactly the platform where it matters: VS Code's own

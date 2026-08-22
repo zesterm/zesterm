@@ -39,6 +39,9 @@ $Global:__zesterm = @{
     # calculation in the prompt for why the *previous* value is the interesting
     # one.
     LastExit         = $null
+    # Last-sent value per 633 fact property, so an unchanged prompt emits
+    # nothing and a cleared value is sent exactly once.
+    Facts            = @{}
 }
 
 # PowerShell has no `printf`, and `Write-Host` appends a newline. Returning the
@@ -58,6 +61,16 @@ function Global:__zesterm_escape([string] $value) {
                 ForEach-Object { '\x{0:x2}' -f $_ }
             )
         })
+}
+
+# One 633 property, sent only when its value changed since last sent. An empty
+# value is sent too -- once -- because a deactivated venv must take its chip
+# with it; an empty value that was never non-empty sends nothing, because the
+# hashtable's missing key and '' compare equal below on purpose.
+function Global:__zesterm_fact([string] $key, [string] $value) {
+    if ([string] $Global:__zesterm.Facts[$key] -eq $value) { return '' }
+    $Global:__zesterm.Facts[$key] = $value
+    __zesterm_osc "633;P;$key=$(__zesterm_escape $value)"
 }
 
 # PSReadLine is what knows a command was *submitted*, which is where `C` and the
@@ -144,6 +157,16 @@ function Global:prompt {
     if ($pwd.Provider.Name -eq 'FileSystem') {
         $out += __zesterm_osc "633;P;Cwd=$(__zesterm_escape $pwd.ProviderPath)"
     }
+
+    # Environment facts the terminal cannot see on its own: the child's env is
+    # frozen at spawn on the daemon's side, so an activated venv exists only in
+    # here. Each is sent only when it changed. No NvmBin arm -- `$NVM_BIN` is
+    # unix nvm's export; nvm-windows sets nothing comparable.
+    $venv = ''
+    if ($env:VIRTUAL_ENV) { $venv = Split-Path -Leaf $env:VIRTUAL_ENV }
+    $out += __zesterm_fact 'Venv' $venv
+    $out += __zesterm_fact 'Conda' ([string] $env:CONDA_DEFAULT_ENV)
+    $out += __zesterm_fact 'AwsProfile' ([string] $env:AWS_PROFILE)
 
     $out += __zesterm_osc '133;A'
 

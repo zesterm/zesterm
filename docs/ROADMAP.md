@@ -140,13 +140,15 @@ session (git branch/detached from a HEAD read, kube current-context, version
 pins — file reads only, cached per cwd, invalidated by `notify` watchers) and
 publishes it on `SessionInfo` beside `busy`, so every client and `zest-mcp
 sessions` see identical facts, each labeled `daemon_probe` or `shell_report`.
+The shell-reported half landed with #418 (PR #419): the injected hooks emit `Venv`,
+`Conda`, `AwsProfile` and `NvmBin` over OSC 633 `P;Key=Value` — parameter
+expansion only, a changed-value cache so an unchanged prompt emits nothing,
+an empty value taking the chip down — and the listing folds them in as
+`shell_report`, the active node replacing the `.nvmrc` pin. (These ride the
+session listing, not the delta stream, so the conformance corpus is not
+involved — it becomes so when a block *snapshot* carries them, below.)
 What remains, in landable slices:
 
-- [ ] **Shell-reported facts.** New OSC 633 `P;Key=Value` keys (`Venv`,
-      `Conda`, `AwsProfile`, `NvmBin`) emitted by the injected zsh/bash/pwsh
-      hooks — parameter expansion only, a changed-value cache so an unchanged
-      prompt emits nothing. Needs a conformance fixture *containing* context
-      OSCs; the corpus has none.
 - [ ] **The Warp look.** A `chrome/prompt_chips.rs` chip row above the live
       prompt block, compact-PS1 mode in the shell integration (the cwd lives
       only in the chip), a cwd-chip cd navigator, exit-chip scroll-to-failure;

@@ -225,6 +225,56 @@ impl Inner {
     }
 }
 
+/// Fold the shell's own reports (OSC 633 `P;Venv=` and kin) into a probed
+/// context, labeled [`ContextSource::ShellReport`] because anything that can
+/// print can forge them.
+///
+/// A shell fact *replaces* a probed fact of the same key: `nvm_bin` names the
+/// node that is actually on the shell's `PATH`, where the probe's `.nvmrc`
+/// pin only names the one that was asked for — and both are display, so the
+/// livelier one wins and the label still says who spoke. `facts_rev` is added
+/// into the revision so a venv activation moves it even though the engine's
+/// own counter only knows about filesystem invalidations; both counters are
+/// monotonic, so the sum is too.
+pub fn with_shell_facts(
+    context: Option<SessionContext>,
+    shell: Vec<(String, String)>,
+    facts_rev: u64,
+) -> Option<SessionContext> {
+    if shell.is_empty() && context.is_none() {
+        return None;
+    }
+    let mut ctx = context.unwrap_or_default();
+    // Unconditionally, not only when facts exist: a deactivated venv leaves
+    // the map *empty* while bumping the counter, and a revision that holds
+    // still there is a client keeping the chip that was just removed.
+    ctx.revision += facts_rev;
+    for (key, value) in shell {
+        let (key, value) = match key.as_str() {
+            "nvm_bin" => match node_version_in(&value) {
+                Some(version) => (String::from("node"), version),
+                // A path with no version component is not worth a chip that
+                // prints a whole path.
+                None => continue,
+            },
+            _ => (key, value),
+        };
+        ctx.facts.retain(|f| f.key != key);
+        ctx.facts.push(ContextFact { key, value, source: ContextSource::ShellReport });
+    }
+    Some(ctx)
+}
+
+/// The `v20.11.0` inside an `$NVM_BIN`-style path, on either separator.
+fn node_version_in(path: &str) -> Option<String> {
+    path.split(['/', '\\'])
+        .find(|part| {
+            let mut chars = part.chars();
+            chars.next() == Some('v') && chars.next().is_some_and(|c| c.is_ascii_digit())
+        })
+        .map(String::from)
+}
+
 /// Version pins found walking up from `dir` — the *asked-for* runtime, which
 /// a file states, as opposed to the *installed* one, which only a subprocess
 /// knows and which therefore waits for the async probe.
@@ -385,6 +435,75 @@ mod tests {
         assert!(facts.iter().all(|f| matches!(f.source, ContextSource::DaemonProbe)));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn shell_facts_fold_in_labeled_and_nvm_becomes_node() {
+        let probed = SessionContext {
+            git: None,
+            facts: vec![ContextFact {
+                key: "node".into(),
+                value: "20.11.1".into(),
+                source: ContextSource::DaemonProbe,
+            }],
+            revision: 5,
+        };
+        let merged = with_shell_facts(
+            Some(probed),
+            vec![
+                ("venv".into(), "ml".into()),
+                ("nvm_bin".into(), "/Users/andy/.nvm/versions/node/v22.1.0/bin".into()),
+            ],
+            3,
+        )
+        .expect("facts to merge");
+
+        assert_eq!(merged.revision, 8, "both counters move the revision; neither may hide");
+        let venv = merged.facts.iter().find(|f| f.key == "venv").expect("the venv fact");
+        assert_eq!(venv.value, "ml");
+        assert!(matches!(venv.source, ContextSource::ShellReport));
+
+        let node: Vec<_> = merged.facts.iter().filter(|f| f.key == "node").collect();
+        assert_eq!(node.len(), 1, "the shell's active node replaces the pin, not joins it");
+        assert_eq!(node[0].value, "v22.1.0", "the version, never the whole path");
+        assert!(
+            matches!(node[0].source, ContextSource::ShellReport),
+            "the replacement keeps the label of who actually spoke"
+        );
+    }
+
+    #[test]
+    fn shell_facts_alone_are_a_context_and_none_plus_none_is_none() {
+        // A session with no cwd report can still have an activated venv; and
+        // a session with neither must stay `None` rather than becoming an
+        // empty something.
+        let alone = with_shell_facts(None, vec![("venv".into(), "ml".into())], 1)
+            .expect("facts alone are worth a context");
+        assert_eq!(alone.facts.len(), 1);
+        assert_eq!(alone.revision, 1);
+
+        assert!(with_shell_facts(None, Vec::new(), 0).is_none());
+    }
+
+    #[test]
+    fn a_cleared_fact_still_moves_the_revision() {
+        // Deactivating the venv empties the shell's map while bumping its
+        // counter. A revision that holds still here is a client keeping the
+        // chip that was just removed.
+        let probed = SessionContext { git: None, facts: Vec::new(), revision: 5 };
+        let merged = with_shell_facts(Some(probed), Vec::new(), 2).expect("context survives");
+        assert_eq!(merged.revision, 7);
+    }
+
+    #[test]
+    fn an_nvm_path_without_a_version_is_no_fact_at_all() {
+        let merged =
+            with_shell_facts(None, vec![("nvm_bin".into(), "/usr/local/bin".into())], 1)
+                .expect("the revision alone still makes a context");
+        assert!(
+            merged.facts.iter().all(|f| f.key != "node"),
+            "a chip that prints a whole path is worse than no chip"
+        );
     }
 
     #[test]

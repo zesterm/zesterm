@@ -872,6 +872,59 @@ mod tests {
     }
 
     #[test]
+    fn every_hook_reports_the_env_facts_and_none_of_them_forks_for_it() {
+        // The facts (#418) exist because the daemon cannot see the child's
+        // live env -- so each hook must emit them, from the same place it
+        // reports the cwd, through a changed-value cache. What is asserted
+        // is the contract the parser and the per-prompt budget rest on: the
+        // three property spellings, the cache function, and -- for the posix
+        // hooks -- no command substitution in the fact path, because
+        // `$(basename …)` at every prompt is the fork the whole design
+        // avoids.
+        for shell in [Shell::Zsh, Shell::Bash, Shell::Pwsh] {
+            let hook = hook(shell);
+            for key in ["Venv", "Conda", "AwsProfile"] {
+                assert!(hook.contains(key), "{shell:?} does not report {key}");
+            }
+            assert!(hook.contains("__zesterm_fact"), "{shell:?} has no changed-value cache");
+        }
+        for shell in [Shell::Zsh, Shell::Bash] {
+            let hook = hook(shell);
+            assert!(hook.contains("NvmBin"), "{shell:?} skips the active node");
+            let fact = &hook[hook.find("__zesterm_fact()").expect("the cache function")..];
+            let fact = &fact[..fact.find("\n}").expect("the function ends")];
+            assert!(
+                !fact.contains("$(") && !fact.contains('`'),
+                "{shell:?}'s fact path forks, which is a subprocess per prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn the_fact_values_are_escaped_before_they_ride_the_osc() {
+        // A venv named `a;b` would otherwise be split by the OSC parser into
+        // a param the fact never sees -- the same reason `633;E` escapes.
+        // pwsh routes through `__zesterm_escape`, which already covers it;
+        // the posix hooks carry their own expansions, backslash first or the
+        // escapes escape themselves.
+        for shell in [Shell::Zsh, Shell::Bash] {
+            let hook = hook(shell);
+            let fact = &hook[hook.find("__zesterm_fact()").expect("the cache function")..];
+            let fact = &fact[..fact.find("\n}").expect("the function ends")];
+            let backslash = fact.find(r"\\x5c").expect("backslashes are escaped");
+            let semicolon = fact.find(r"\\x3b").expect("semicolons are escaped");
+            assert!(
+                backslash < semicolon,
+                "{shell:?} must escape the escape character before using it"
+            );
+        }
+        let pwsh = hook(Shell::Pwsh);
+        let fact = &pwsh[pwsh.find("function Global:__zesterm_fact").expect("the cache fn")..];
+        let fact = &fact[..fact.find("\n}").expect("the function ends")];
+        assert!(fact.contains("__zesterm_escape"), "pwsh facts must ride the shared escaper");
+    }
+
+    #[test]
     fn the_posix_hooks_ship_with_unix_line_endings() {
         // include_str! embeds checkout bytes, and the shim is written into a
         // file a *Linux* bash sources -- from a Windows-built daemon, across

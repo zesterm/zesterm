@@ -3,6 +3,7 @@
 //! Bytes in, grid mutations out. No I/O, no rendering, no allocation on the
 //! steady-state path.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -166,6 +167,15 @@ pub enum TermEvent {
     /// when the path lives elsewhere, and the host part is the only thing that
     /// says so.
     CwdChanged { host: Option<String>, path: String },
+    /// A shell-reported environment fact changed (OSC 633 `P;Venv=` and kin).
+    ///
+    /// Like [`Self::CwdChanged`], emitted on *change* only — the hooks resend
+    /// per prompt, and a consumer re-reading identical facts a thousand times
+    /// a session is the cost the hooks' own changed-value cache exists to
+    /// avoid, moved one layer down. Carries no payload: the facts are state
+    /// ([`Terminal::shell_facts`]), and whoever starts caring later — an
+    /// attach, a listing — reads them there.
+    ShellFactsChanged,
 }
 
 /// Damage accumulated since the last frame.
@@ -282,6 +292,15 @@ pub struct TermState {
     /// reads it here. `None` for a bare-path OSC 7 and for OSC 633 `P;Cwd=`,
     /// whose dialect has no host at all.
     pub(crate) cwd_host: Option<String>,
+    /// Shell-reported environment facts, from OSC 633 `P;Venv=` and kin.
+    ///
+    /// Keyed by the canonical fact name (`venv`, `conda`, …), not the OSC
+    /// property, so every consumer spells one name. A `BTreeMap` for the
+    /// deterministic order a listing wants — chips that reshuffle between
+    /// polls are the fleet-listing sort bug in miniature. Held as state for
+    /// the [`Self::cwd`] reason: the daemon reports it for a session nobody
+    /// is attached to.
+    pub(crate) shell_facts: BTreeMap<String, String>,
     /// Where the typed command starts, recorded at OSC 133;B.
     ///
     /// Transient parser state, not part of the index: `B` says "the prompt ends
@@ -480,6 +499,17 @@ impl Terminal {
         self.state.cwd_host.as_deref()
     }
 
+    /// Shell-reported environment facts (`venv`, `conda`, …), from OSC 633.
+    ///
+    /// Anything that can print can forge these — a consumer putting them on a
+    /// wire labels them accordingly (`ContextSource::ShellReport`), and
+    /// nothing may gate behavior on one. Empty until the shell integration
+    /// reports something, like [`Self::cwd`].
+    #[must_use]
+    pub fn shell_facts(&self) -> &BTreeMap<String, String> {
+        &self.state.shell_facts
+    }
+
     #[must_use]
     pub fn selection(&self) -> Option<crate::Selection> {
         self.state.selection
@@ -580,6 +610,7 @@ impl TermState {
             blocks: BlockIndex::new(),
             cwd: String::new(),
             cwd_host: None,
+            shell_facts: BTreeMap::new(),
             prompt_end: None,
             pending_command: None,
             now_ms: None,

@@ -46,6 +46,15 @@ __zesterm_precmd() {
     encoded=${encoded//$'\n'/%0A}
     __zesterm_osc "7;file://${HOST}${encoded}"
 
+    # Environment facts the terminal cannot see on its own: the child's env is
+    # frozen at spawn on the daemon's side, so an activated venv exists only in
+    # here. Parameter expansion and one builtin print per *changed* value --
+    # never a fork, and an unchanged prompt emits nothing.
+    __zesterm_fact Venv "${${VIRTUAL_ENV-}:t}" __zesterm_last_venv
+    __zesterm_fact Conda "${CONDA_DEFAULT_ENV-}" __zesterm_last_conda
+    __zesterm_fact AwsProfile "${AWS_PROFILE-}" __zesterm_last_aws
+    __zesterm_fact NvmBin "${NVM_BIN-}" __zesterm_last_nvm
+
     # Re-wrap on every prompt, not once at load. A prompt framework --
     # oh-my-posh, starship, powerlevel10k -- rebuilds PS1 in its own precmd, and
     # a wrapper applied once at startup is gone by the first prompt.
@@ -55,6 +64,26 @@ __zesterm_precmd() {
 __zesterm_preexec() {
     __zesterm_running=1
     __zesterm_osc "133;C"
+}
+
+# One 633 property, sent only when its value changed since last sent. An
+# empty value is sent too -- once -- because a deactivated venv must take its
+# chip with it; an empty value that was *never* non-empty sends nothing,
+# since an unset cache and an empty one compare equal on purpose. The value
+# is escaped the way the 633 dialect asks (`\xNN`): `\` first or the escapes
+# escape themselves, then `;` (the OSC field separator), then the control
+# bytes that would end or garble the sequence.
+__zesterm_fact() {
+    local value=$2
+    value=${value//\\/\\x5c}
+    value=${value//;/\\x3b}
+    value=${value//$'\e'/\\x1b}
+    value=${value//$'\a'/\\x07}
+    value=${value//$'\n'/\\x0a}
+    if [[ ${(P)3-} != $value ]]; then
+        typeset -g $3=$value
+        __zesterm_osc "633;P;$1=$value"
+    fi
 }
 
 # `A` marks where the prompt begins and `B` where the typed command does, so
