@@ -76,6 +76,31 @@ export type Outcome =
 export interface PaneRow {
   readonly line: number;
   readonly spans: readonly Span[];
+  /**
+   * The digit a tap on this row should type, when the row is a numbered
+   * option of the RUNNING command — an agent CLI's question, a menu. Null
+   * everywhere else: a finished block's "1. foo" is history, and a prompt
+   * is never running. `optionOf` decides the shape; `paneModel` decides
+   * which rows are eligible. (#421)
+   */
+  readonly option: string | null;
+}
+
+/**
+ * The option number a row of output offers, or null.
+ *
+ * A heuristic, so it is narrow on purpose: an optional selection marker
+ * (`❯`, `>`, `›`), one or two digits, a `.` or `)`, whitespace, then
+ * text. That is how Claude Code's questions and permission prompts, and
+ * most numbered menus, render their choices — and a tap types exactly the
+ * digit, never an Enter: the program decides what a digit means, and
+ * guessing a CR into a running command's stdin is the one thing this
+ * must not do. Rows that merely start with a number ("1 file changed",
+ * "2024-01-01") do not match.
+ */
+export function optionOf(text: string): string | null {
+  const m = /^\s*(?:[❯>›]\s*)?(\d{1,2})[.)]\s+\S/.exec(text);
+  return m === null ? null : (m[1] as string);
 }
 
 export interface HeaderItem {
@@ -344,7 +369,11 @@ export function paneModel(
       const rows =
         b.command === '' ? [...slice.promptRows, ...slice.outputRows] : slice.outputRows;
       if (rows.length > 0) {
-        items.push({ kind: 'output', blockId: b.id, rows: toPaneRows(rows, view.attrs) });
+        // Only the open, running block offers options: its output is what
+        // the command is showing right now, and a tap on a numbered row
+        // answers it. Everything finished is history.
+        const live = slice.open && b.state.state === 'running';
+        items.push({ kind: 'output', blockId: b.id, rows: toPaneRows(rows, view.attrs, live) });
       }
     }
   }
@@ -470,6 +499,14 @@ function spansOf(row: RowPayload, attrs: ReadonlyMap<number, AttrDef>): readonly
 function toPaneRows(
   rows: readonly RowPayload[],
   attrs: ReadonlyMap<number, AttrDef>,
+  options = false,
 ): PaneRow[] {
-  return rows.map((r) => ({ line: r.line, spans: spansOf(r, attrs) }));
+  return rows.map((r) => {
+    const spans = spansOf(r, attrs);
+    return {
+      line: r.line,
+      spans,
+      option: options ? optionOf(spans.map((s) => s.text).join('')) : null,
+    };
+  });
 }

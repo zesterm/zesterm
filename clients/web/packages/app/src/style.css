@@ -270,6 +270,22 @@ body {
   margin: 0 18px 12px;
 }
 
+/* A numbered option of the running command (#421): tappable, and it says
+   so with a hairline on the left — the accent, because it is a thing you
+   can do, kept faint so a long menu does not turn into a wall of rails. */
+.pane-row.is-option {
+  margin-left: -8px;
+  padding-left: 6px;
+  border-left: 2px solid var(--zt-accent-soft);
+  border-radius: 0 4px 4px 0;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.pane-row.is-option:active {
+  background: var(--zt-accent-soft);
+}
+
 .block {
   margin: 0 18px 12px;
 }

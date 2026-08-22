@@ -38,9 +38,11 @@ import {
   isInterrupted,
   linkOf,
   mostRecentBlockWithOutput,
+  optionOf,
   paneModel,
   promptChips,
   type HeaderItem,
+  type PaneRow,
   type RenderItem,
 } from '../src/blocks-pane-model.ts';
 
@@ -738,4 +740,77 @@ test('promptChips shortens only the home spellings it can be sure of', () => {
     'another platform\'s home is unknowable from here; a wrong ~ is worse than a long path',
   );
   assert.equal(promptChips('', null).length, 0, 'no cwd, no chip — never an empty chip');
+});
+
+// --- tap to answer (#421) ----------------------------------------------------
+
+test('optionOf reads a numbered option and nothing that merely starts with a number', () => {
+  // Claude Code's question and permission prompts, as they render.
+  assert.equal(optionOf('❯ 1. Yes'), '1');
+  assert.equal(optionOf('  2. No, and tell Claude what to do differently'), '2');
+  assert.equal(optionOf('> 3) Something else'), '3');
+  assert.equal(optionOf('12. twelfth'), '12');
+  // Not options: a diffstat, a date, a bare marker, a version, a long id.
+  assert.equal(optionOf('1 file changed, 2 insertions(+)'), null);
+  assert.equal(optionOf('2024-01-01 build ok'), null);
+  assert.equal(optionOf('1.'), null, 'a marker with no text after it');
+  assert.equal(optionOf('1.2.3'), null);
+  assert.equal(optionOf('123. too many digits for a menu'), null);
+  assert.equal(optionOf(''), null);
+});
+
+test('only the running block’s rows carry an option; finished output is history', () => {
+  const view = {
+    scrollback: [],
+    rows: [
+      synthRow(0, '❯ ./menu'),
+      synthRow(1, '1. old choice'),
+      synthRow(2, '❯ claude'),
+      synthRow(3, 'Do you want to proceed?'),
+      synthRow(4, '❯ 1. Yes'),
+      synthRow(5, '  2. No'),
+    ],
+    blocks: [
+      synthBlock(0, 0, 1, 1, { state: 'finished', exit_code: 0 }, './menu'),
+      synthBlock(1, 2, 3, null, { state: 'running' }, 'claude'),
+    ],
+    cursor: CURSOR,
+    attrs: new Map(),
+  };
+  const items = paneModel(view, new Set(), 'live', NOW);
+  const outputs = items.filter((i) => i.kind === 'output');
+  assert.equal(outputs.length, 2);
+  const [old, live] = outputs as [
+    { kind: 'output'; rows: PaneRow[] },
+    { kind: 'output'; rows: PaneRow[] },
+  ];
+  assert.deepEqual(
+    old.rows.map((r) => r.option),
+    [null],
+    'a finished block’s "1. …" is output that was, and a tap there must type nothing',
+  );
+  assert.deepEqual(
+    live.rows.map((r) => r.option),
+    [null, '1', '2'],
+    'the running command is showing a question; its numbered rows answer it',
+  );
+});
+
+test('the prompt line and a prompt-state block never offer options', () => {
+  const view = {
+    scrollback: [],
+    rows: [synthRow(0, '1. looks like an option but is the prompt')],
+    blocks: [synthBlock(0, 0, null, null, { state: 'prompt' }, '')],
+    cursor: CURSOR,
+    attrs: new Map(),
+  };
+  const items = paneModel(view, new Set(), 'live', NOW);
+  for (const item of items) {
+    if (item.kind === 'prompt' || item.kind === 'rows') {
+      assert.ok(
+        item.rows.every((r) => r.option === null),
+        'nothing is running, so nothing can be answered',
+      );
+    }
+  }
 });

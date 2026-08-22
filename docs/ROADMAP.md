@@ -220,8 +220,11 @@ broken.
       palette. Caps feed `encodeKey` a synthesised key, so DECCKM and
       kitty come for free; sticky Ctrl/Alt latch once or lock and ride the
       next soft-keyboard key too. `keybar-model.ts`, #421.
-- [ ] **Part 3 — tap to answer.** Numbered option rows of a running block
-      (an agent CLI's question) become tappable and type their digit. #421.
+- [x] **Part 3 — tap to answer.** Numbered option rows of the running
+      block — an agent CLI's question, a menu — are tappable and type their
+      digit (only the digit: the program decides what it means). Touch
+      only, or where the key bar is on; a mouse click on output still means
+      "focus". `optionOf` in `blocks-pane-model.ts`, #421.
 - [ ] Browser device enrollment: non-extractable Ed25519 key, approved via the
       desktop modal with a matching code.
 - [ ] Bun single-file sidecar hosting `@sigx/actors`, spawned as a child of the

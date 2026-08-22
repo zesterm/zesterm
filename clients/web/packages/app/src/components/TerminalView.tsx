@@ -309,6 +309,20 @@ export const TerminalView = component<{
     runCommand(target.block.command);
   };
 
+  /**
+   * Type the digit of a tapped option row — an agent CLI's question
+   * answered under a finger. Only on touch, or where the key bar says this
+   * is a touch session: with a mouse a click on output means "focus the
+   * terminal", and turning it into a keystroke would type into whatever is
+   * running whenever its output happened to look like a list. The digit
+   * alone, never a CR — the program decides what a digit means.
+   */
+  const chooseOption = (digit: string, pointerType: string): void => {
+    if (pointerType !== 'touch' && ctx.props.keyBar !== true) return;
+    const bytes = encodeComposedText(digit);
+    if (bytes !== null) client.input(bytes);
+  };
+
   const onToggleFold = (blockId: number): void => {
     folds = toggle(folds, entry.host, entry.session, String(blockId));
     // Immediate, not rAF-batched: a click deserves a same-tick response.
@@ -493,6 +507,7 @@ export const TerminalView = component<{
               onCopyOutput={copyOutput}
               onReRun={reRun}
               onCopyChip={copyChip}
+              onChooseOption={chooseOption}
             />
           )}
           <textarea
