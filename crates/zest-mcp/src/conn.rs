@@ -39,7 +39,7 @@
 //! session is in that set. The obvious cheaper fix -- drop the replica before
 //! sending `Detach` -- is the trap: a recovery that preceded the detach is
 //! answered with a keyframe, which then mints a replica for a session nothing
-//! is subscribed to, and the next tool call waits on it for ever.
+//! is subscribed to, and the next tool call waits on it forever.
 
 use std::collections::HashSet;
 use std::io::{Read, Write};
@@ -365,19 +365,24 @@ impl Conn {
             s.session_error_gen
         };
         self.send(ClientMessage::Attach { session, cols, rows, observe });
-        let answered = self
-            .wait_for(|s| {
-                if let Some(v) = s.replica(session).map(|_| ()) {
-                    return Some(Ok(v));
+        let waited = self.wait_for(|s| {
+            if s.replica(session).is_some() {
+                return Some(Ok(()));
+            }
+            match &s.session_error {
+                Some((addr, msg)) if *addr == session && s.session_error_gen != seen => {
+                    Some(Err(ConnError::Refused(msg.clone())))
                 }
-                match &s.session_error {
-                    Some((addr, msg)) if *addr == session && s.session_error_gen != seen => {
-                        Some(Err(ConnError::Refused(msg.clone())))
-                    }
-                    _ => None,
-                }
-            })
-            .and_then(|r| r);
+                _ => None,
+            }
+        });
+        // Two layers, one answer: the predicate's verdict is the session's own
+        // (attached, or refused by name), `wait_for`'s is the link's (closed,
+        // or out of time). Either failure unwants the session below.
+        let answered: Result<(), ConnError> = match waited {
+            Ok(verdict) => verdict,
+            Err(link) => Err(link),
+        };
         if answered.is_err() {
             // A session the host denied, or never answered for, is not one this
             // connection wants: leaving it in the set would make the next
