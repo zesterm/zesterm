@@ -2347,6 +2347,30 @@ fn a_shell_fact_value_is_unescaped_like_the_command_it_travels_with() {
 }
 
 #[test]
+fn a_block_carries_the_context_its_embedder_stamped() {
+    // #429: core carries the stamp like it carries `cwd` — set by whoever
+    // feeds bytes, never invented by the parser, and an all-empty stamp is
+    // `None`, not an empty something pretending to be a fact.
+    let mut t = run(40, 4, "\x1b]133;A\x07$ \x1b]133;B\x07make\x1b]133;C\x07");
+    let id = t.blocks().last().expect("a running block").id;
+    assert!(t.blocks().last().expect("it").context.is_none(), "the parser stamps nothing");
+
+    t.set_block_context(
+        id,
+        zest_core::BlockContext { branch: "main".into(), venv: "ml".into(), kube: String::new() },
+    );
+    let ctx = t.blocks().last().expect("it").context.as_ref().expect("the stamp landed");
+    assert_eq!(ctx.branch, "main");
+    assert_eq!(ctx.venv, "ml");
+
+    t.set_block_context(id, zest_core::BlockContext::default());
+    assert!(
+        t.blocks().last().expect("it").context.is_none(),
+        "an all-empty stamp must store None, or an empty payload rides the wire as a fact"
+    );
+}
+
+#[test]
 fn a_vscode_cwd_is_unescaped_like_the_command_it_travels_with() {
     // `633;P` carries the same `\xNN` escaping as `633;E`, and reading it
     // literally is wrong on exactly the platform where it matters: VS Code's own

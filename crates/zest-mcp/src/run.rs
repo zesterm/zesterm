@@ -319,6 +319,7 @@ mod tests {
             cwd: "/tmp".into(),
             started_ms: None,
             ended_ms: None,
+            context: None,
         }
     }
 

@@ -1425,6 +1425,11 @@ fn block_json(b: &BlockPayload) -> Value {
         "prompt_line": b.prompt_line,
         "started_ms": b.started_ms,
         "ended_ms": b.ended_ms,
+        // Where the command ran, as of its start (#429): branch, venv, kube,
+        // empty strings meaning unsaid. Saves an agent asking "was that
+        // failure on my branch?" by running git in the user's live shell —
+        // and like every context fact it is display, never a gate.
+        "context": b.context,
     });
     let obj = v.as_object_mut().expect("json! built an object");
     for (key, line) in [("output_line", b.output_line), ("end_line", b.end_line)] {
@@ -1815,6 +1820,7 @@ mod tests {
             cwd: "/repo".into(),
             started_ms: Some(1),
             ended_ms: None,
+            context: None,
         }
     }
 
@@ -1951,6 +1957,7 @@ mod tests {
             cwd: "/".into(),
             started_ms: None,
             ended_ms: None,
+            context: None,
         };
         let v = block_json(&b);
         assert_eq!(v["state"], "finished");
@@ -1976,6 +1983,7 @@ mod tests {
             cwd: "/".into(),
             started_ms: Some(1),
             ended_ms: None,
+            context: None,
         };
         let v = block_json(&b);
         assert_eq!(v["state"], "running");
@@ -2012,6 +2020,7 @@ mod tests {
             cwd: "/".into(),
             started_ms: None,
             ended_ms: None,
+            context: None,
         };
         let v = block_json(&b);
         assert_eq!(v["output_line"], 6);
@@ -2037,6 +2046,7 @@ mod tests {
             cwd: "/".into(),
             started_ms: None,
             ended_ms: None,
+            context: None,
         };
         let v = block_json(&b);
         assert_eq!(v["state"], "prompt");

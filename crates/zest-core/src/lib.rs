@@ -36,7 +36,7 @@ pub mod subscribe;
 pub mod term;
 
 pub use apply::RemoteWriter;
-pub use blocks::{Block, BlockId, BlockIndex, BlockState};
+pub use blocks::{Block, BlockContext, BlockId, BlockIndex, BlockState};
 pub use cell::{Cell, CellFlags};
 pub use color::{Color, NamedColor};
 pub use grid::{Cursor, Grid, LineId, Row, ScrollRegion};

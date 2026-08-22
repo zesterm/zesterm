@@ -32,8 +32,8 @@ describes only the current shape.
 | `ClientHandshake`, `Challenge`, `Transcript`, `auth_transcript` | `crates/zest-mesh/src/pairing.rs` | **frozen** at v3 — the transcript layout is signed bytes; a golden pins it | `zest-daemon`, `zest-app`, `clients/web`, `cloud/` |
 | `DaemonClient` | `crates/zest-daemon/src/client.rs` | **frozen** — a second local client (`zest-mcp`) built on it. `Watch` grew `signals` and `connect_with` now takes a `Watch` rather than a bare `watch_sessions` flag (#383): both consumers are in this repository and moved in the same PR, and the alternative was a fourth constructor differing from `connect_watching` by one argument | `zest-app`, `zest-mcp` |
 | `find_or_spawn`, `Attached`, `DaemonStartError`, `resolve_daemon_binary` | `crates/zest-daemon/src/spawn.rs` | **frozen** — same second consumer | `zest-app`, `zest-mcp` |
-| `Block`, `BlockIndex`, `BlockState` | `crates/zest-core/src/blocks.rs` | **frozen** | `zest-app`, `zest-daemon`, `zest-mcp`, `clients/web` |
-| `BlockPayload`, `BlockState` (wire) | `crates/zest-proto/src/delta.rs` | **frozen** | `zest-daemon`, `zest-app`, `zest-mcp`, `clients/web` |
+| `Block`, `BlockIndex`, `BlockState` | `crates/zest-core/src/blocks.rs` | **frozen**, additively extended: `Block.context` (`BlockContext`, embedder-stamped, #429) | `zest-app`, `zest-daemon`, `zest-mcp`, `clients/web` |
+| `BlockPayload`, `BlockState` (wire) | `crates/zest-proto/src/delta.rs` | **frozen**, additively extended: `context` (`BlockContextPayload`, `#[serde(default)]`, #429) | `zest-daemon`, `zest-app`, `zest-mcp`, `clients/web` |
 | `ChangeSource`, `Update`, `update_for` | `crates/zest-core/src/subscribe.rs` | **frozen** | `zest-daemon` |
 | `SessionSource`, `Origin` | `crates/zest-app/src/source.rs` | **frozen** — the seam between the app's chrome/input half and its session half | `zest-app` |
 | `Peer`, `Endpoint`, `Reachability`, `Discovery` | `crates/zest-mesh/` | **frozen** | `zest-daemon`, `zest-app` |

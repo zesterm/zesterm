@@ -180,6 +180,18 @@ export interface BlockPayload {
    */
   readonly started_ms?: number;
   readonly ended_ms?: number;
+  /**
+   * Where the command ran — branch, venv, cluster — as of its start (#429).
+   * Empty strings mean unsaid; absent means the host never stamped one.
+   * Display only, like every context fact.
+   */
+  readonly context?: BlockContextPayload;
+}
+
+export interface BlockContextPayload {
+  readonly branch: string;
+  readonly venv: string;
+  readonly kube: string;
 }
 
 export interface Delta {
@@ -302,6 +314,13 @@ function parseBlockState(v: unknown): BlockState {
   }
 }
 
+function parseBlockContext(v: unknown): BlockContextPayload {
+  const o = obj(v, 'BlockContextPayload');
+  const opt = (key: string): string =>
+    o[key] === undefined ? '' : str(o[key], `BlockContextPayload.${key}`);
+  return { branch: opt('branch'), venv: opt('venv'), kube: opt('kube') };
+}
+
 export function parseBlockPayload(v: unknown): BlockPayload {
   const o = obj(v, 'BlockPayload');
   const optLine = (key: string): number | null =>
@@ -320,10 +339,15 @@ export function parseBlockPayload(v: unknown): BlockPayload {
   // `exactOptionalPropertyTypes`: absent means absent, not `undefined`-valued.
   const started = optMs('started_ms');
   const ended = optMs('ended_ms');
+  const context =
+    o['context'] === undefined || o['context'] === null
+      ? undefined
+      : parseBlockContext(o['context']);
   return {
     ...payload,
     ...(started === undefined ? {} : { started_ms: started }),
     ...(ended === undefined ? {} : { ended_ms: ended }),
+    ...(context === undefined ? {} : { context }),
   };
 }
 
