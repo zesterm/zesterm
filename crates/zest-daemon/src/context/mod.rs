@@ -67,8 +67,11 @@ struct DirtyState {
     /// `None` until the first run answers; then whether the tree is dirty
     /// and how many files say so.
     answer: Option<(bool, u32)>,
-    /// When the answer landed (or the ask failed), for the TTL.
-    refreshed: std::time::Instant,
+    /// When the answer landed (or the ask failed), for the TTL. `None` is
+    /// "never, or invalidated" — modelled as absence rather than a backdated
+    /// instant, because `Instant` subtraction underflows on Windows, where
+    /// the clock is time-since-boot and a test can run in its first hour.
+    refreshed: Option<std::time::Instant>,
     /// A refresh thread is in flight; asks meanwhile serve the stale answer
     /// rather than stacking a second subprocess on the first.
     running: bool,
@@ -192,15 +195,15 @@ impl ContextEngine {
         let now = std::time::Instant::now();
         let entry = state.dirty.entry(head.to_path_buf()).or_insert(DirtyState {
             answer: None,
-            // Backdated so a fresh entry is immediately stale and asks once.
-            refreshed: now - TTL * 2,
+            refreshed: None,
             running: false,
             failures: 0,
         });
         // Failures stretch the TTL: one miss retries on the normal cadence,
         // a machine with no `git` settles at minutes, never a fork per ask.
         let ttl = TTL * (1 + entry.failures.min(30));
-        if !entry.running && now.duration_since(entry.refreshed) >= ttl {
+        let stale = entry.refreshed.is_none_or(|at| now.duration_since(at) >= ttl);
+        if !entry.running && stale {
             entry.running = true;
             let inner = Arc::clone(&self.inner);
             let head = head.to_path_buf();
@@ -292,9 +295,10 @@ impl Inner {
                 // changes what dirty means, and serving the old branch's
                 // count under the new branch's name until the refresh lands
                 // is a chip lying with confidence. Unknown is the honest
-                // interim; the backdate makes the next ask re-run at once.
+                // interim, and `None` freshness makes the next ask re-run
+                // at once.
                 d.answer = None;
-                d.refreshed = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+                d.refreshed = None;
             }
         }
         self.revision.fetch_add(1, Ordering::Release);
@@ -311,7 +315,7 @@ impl Inner {
             let mut state = self.state.lock().expect("context lock");
             let Some(d) = state.dirty.get_mut(head) else { return };
             d.running = false;
-            d.refreshed = std::time::Instant::now();
+            d.refreshed = Some(std::time::Instant::now());
             match answer {
                 Some(a) => {
                     let moved = d.answer != Some(a);
