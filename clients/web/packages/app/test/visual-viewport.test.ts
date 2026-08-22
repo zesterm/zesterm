@@ -52,10 +52,17 @@ test('an unmeasurable viewport clears rather than writing 0px', () => {
 
 test('the watcher mirrors the viewport onto the root and removes what it cleared', () => {
   const props = new Map<string, string>();
+  let writes = 0;
   const root = {
     style: {
-      setProperty: (n: string, v: string) => void props.set(n, v),
-      removeProperty: (n: string) => void props.delete(n),
+      setProperty: (n: string, v: string) => {
+        writes++;
+        props.set(n, v);
+      },
+      removeProperty: (n: string) => {
+        writes++;
+        props.delete(n);
+      },
     },
   } as unknown as HTMLElement;
   const listeners = new Map<string, () => void>();
@@ -69,14 +76,29 @@ test('the watcher mirrors the viewport onto the root and removes what it cleared
 
   const stop = watchVisualViewport(win, root);
   assert.equal(props.size, 0, 'no keyboard at mount: nothing written');
+  assert.equal(writes, 0, 'and no removeProperty of something never set — a style write per event is a style invalidation per event');
 
   vv.height = 612;
   listeners.get('resize')?.();
   assert.equal(props.get('--zt-vv-height'), '612px');
+  assert.equal(writes, 2);
+
+  // A pan while the keyboard is up fires `scroll` on every frame with the
+  // same geometry; none of those may reach the DOM.
+  listeners.get('scroll')?.();
+  listeners.get('scroll')?.();
+  assert.equal(writes, 2, 'unchanged values are not rewritten');
+
+  vv.offsetTop = 40;
+  listeners.get('scroll')?.();
+  assert.equal(props.get('--zt-vv-top'), '40px');
+  assert.equal(writes, 3, 'only the property that changed is written');
 
   vv.height = 1024;
+  vv.offsetTop = 0;
   listeners.get('resize')?.();
   assert.equal(props.size, 0, 'keyboard dismissed: both properties removed, so 100% applies again');
+  assert.equal(writes, 5);
 
   stop();
   assert.equal(listeners.size, 0);

@@ -76,12 +76,19 @@ export interface WindowLike {
 export function watchVisualViewport(win: WindowLike, root: HTMLElement): () => void {
   const vv = win.visualViewport;
   if (vv === null) return () => {};
+  // What was last written. `scroll` fires on every frame of a pan while
+  // the keyboard is up, and a style write per frame — even of the same
+  // value — is a style invalidation per frame; only a change reaches the DOM.
+  let applied: ShellVars = NO_SHELL_VARS;
   const apply = (): void => {
     const vars = shellVarsFor(vv, win.innerHeight);
-    for (const [name, value] of Object.entries(vars)) {
+    for (const name of Object.keys(vars) as (keyof ShellVars)[]) {
+      const value = vars[name];
+      if (value === applied[name]) continue;
       if (value === null) root.style.removeProperty(name);
       else root.style.setProperty(name, value);
     }
+    applied = vars;
   };
   // Both: the keyboard opening fires `resize`, and iOS's push-up of the page
   // afterwards fires `scroll` with a new offsetTop and the same height.
