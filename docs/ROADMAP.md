@@ -213,10 +213,13 @@ broken.
       fixes it, the textarea is 16px so the page stops zooming, and
       `visual-viewport.ts` sizes the shell to the *visual* viewport so the
       prompt stays above the keys. #421.
-- [ ] **Part 2 — the key bar.** The phone design's cap row (`esc` `tab`
-      `ctrl` arrows `^C` …) in the web client, shown on coarse-pointer
-      devices, with sticky Ctrl/Alt applied to the next soft-keyboard key
-      through `@zesterm/input`'s `Mods`. #421.
+- [x] **Part 2 — the key bar.** The phone design's cap row (`esc` `tab`
+      `ctrl` `alt` arrows `⏎` `^C` `/ - | ~` `⌨`) under every
+      terminal, on by default where the keyboard is on the glass
+      (`maxTouchPoints`, never the platform string) and toggled from the
+      palette. Caps feed `encodeKey` a synthesised key, so DECCKM and
+      kitty come for free; sticky Ctrl/Alt latch once or lock and ride the
+      next soft-keyboard key too. `keybar-model.ts`, #421.
 - [ ] **Part 3 — tap to answer.** Numbered option rows of a running block
       (an agent CLI's question) become tappable and type their digit. #421.
 - [ ] Browser device enrollment: non-extractable Ed25519 key, approved via the

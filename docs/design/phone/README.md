@@ -104,7 +104,10 @@ Blocks-first makes this genuinely deferrable: the alt-screen grid is the
   over the data plane, with a haptic and a confirm. The client never
   re-evaluates anything; it replays keystrokes, and the shell decides.
 - **Sticky Ctrl** in the key bar: latches, modifies the next key through
-  `@zesterm/input`'s `mods`, releases. Same for ⌥.
+  `@zesterm/input`'s `mods`, releases. Same for ⌥. The web client's
+  `keybar-model.ts` is the reference implementation of this bar (#421):
+  same caps, and a second tap locks the modifier — reuse it rather than
+  re-deriving the latch.
 - **`❯ run…`**: a text field whose submit is `Input` of the line + `'\r'` —
   the composed-text path that sidesteps per-key encoding entirely, which on a
   phone (IME world) is the *primary* input path, not the fallback.

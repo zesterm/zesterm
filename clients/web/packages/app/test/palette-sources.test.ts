@@ -228,4 +228,12 @@ test('⏎ resolves per row kind, and a block only types into the ACTIVE tab', ()
     ),
     { kind: 'layout-toggle' },
   );
+  assert.deepEqual(
+    runTargetOf(
+      { kind: 'action', action: { kind: 'keybar-toggle' }, text: '', provenance: '' },
+      null,
+    ),
+    { kind: 'keybar-toggle' },
+    'the key bar is reachable from the palette, so an iPad with a hardware keyboard can turn it off',
+  );
 });

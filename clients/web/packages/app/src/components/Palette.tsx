@@ -89,7 +89,7 @@ export const Palette = component<{
       <div
         class="palette-scrim"
         onKeyDown={onKeyDown}
-        onMouseDown={(e: MouseEvent) => {
+        onPointerDown={(e: PointerEvent) => {
           // Scrim click dismisses; a click inside the panel must not — the
           // guard is target identity, not bubbling, so nothing in the panel
           // needs to stop propagation.
@@ -102,7 +102,7 @@ export const Palette = component<{
         <div class="palette" role="dialog" aria-modal="true" aria-label="command palette">
           <div
             class="palette-query"
-            onMouseDown={(e: MouseEvent) => {
+            onPointerDown={(e: PointerEvent) => {
               e.preventDefault();
               inputEl?.focus();
             }}
@@ -143,7 +143,7 @@ export const Palette = component<{
                       ref={(el: HTMLElement) => {
                         if (isSel) selectedEl = el;
                       }}
-                      onMouseDown={(e: MouseEvent) => e.preventDefault() /* the chip focus rule */}
+                      onPointerDown={(e: PointerEvent) => e.preventDefault() /* the chip focus rule */}
                       onClick={() => ctx.props.onRun(item)}
                     >
                       <span class={`p-glyph${item.kind === 'block' ? ` ${item.tone}` : ''}`}>

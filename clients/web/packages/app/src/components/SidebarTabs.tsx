@@ -53,7 +53,7 @@ export const VerticalHeader = component<{
           action, which is a no-op until the palette work item lands. */}
       <button
         class="kbd-pill"
-        onMouseDown={(e: MouseEvent) => e.preventDefault() /* chrome never steals the terminal's focus (see TabStrip) */}
+        onPointerDown={(e: PointerEvent) => e.preventDefault() /* chrome never steals the terminal's focus (see TabStrip) */}
         onClick={() => ctx.props.onPalette()}
       >
         ⌘K
@@ -84,7 +84,7 @@ export const SidebarTabs = component<{
       <div class="search-row">
         <button
           class="search-pill"
-          onMouseDown={(e: MouseEvent) => e.preventDefault() /* chrome never steals the terminal's focus (see TabStrip) */}
+          onPointerDown={(e: PointerEvent) => e.preventDefault() /* chrome never steals the terminal's focus (see TabStrip) */}
           onClick={() => ctx.props.onPalette()}
         >
           <span class="search-key">⌘K</span>
@@ -96,7 +96,7 @@ export const SidebarTabs = component<{
           <button
             class={`tab-new in-sidebar${ctx.props.launcherOpen ? ' open' : ''}`}
             title="new session"
-            onMouseDown={(e: MouseEvent) => e.preventDefault()}
+            onPointerDown={(e: PointerEvent) => e.preventDefault()}
             onClick={() => ctx.props.onLauncherToggle()}
           >
             +
@@ -128,7 +128,7 @@ export const SidebarTabs = component<{
                 key={t.id}
                 class={`side-row${t.id === ctx.props.activeId ? ' selected' : ''}`}
                 title={chipTooltip(t, ctx.props.hostLabels[t.hostId])}
-                onMouseDown={(e: MouseEvent) => {
+                onPointerDown={(e: PointerEvent) => {
                   // A click on the ALREADY-selected row must not blur the
                   // terminal textarea — no remount would refocus it, and
                   // typing silently stops reaching the shell (see TabStrip).
@@ -157,7 +157,7 @@ export const SidebarTabs = component<{
         <button
           class="hosts-link"
           title={`${groups.length} host${groups.length === 1 ? '' : 's'}`}
-          onMouseDown={(e: MouseEvent) => e.preventDefault()}
+          onPointerDown={(e: PointerEvent) => e.preventDefault()}
           onClick={() => ctx.props.onHosts()}
         >
           <span class="hosts-dot">●</span>

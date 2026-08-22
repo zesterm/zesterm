@@ -1888,3 +1888,68 @@ body {
     justify-content: center;
   }
 }
+
+/* --- key bar (#421, design screen 10 on the web) ---------------------------
+
+   The keys a soft keyboard has not got, in a row under the terminal. Caps
+   are 44px tall — the design's floor for anything a finger hits — and the
+   row scrolls sideways rather than wrapping, so the terminal above keeps a
+   predictable height. The bottom padding reaches under the home indicator
+   (viewport-fit=cover), never the caps themselves. */
+
+.key-bar {
+  display: flex;
+  flex: none;
+  gap: 6px;
+  padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px));
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  border-top: 1px solid var(--zt-line);
+  background: var(--zt-bg);
+  scrollbar-width: none;
+  /* The row is a control, not content: a pan must scroll the caps, never
+     select the terminal text under them. */
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: pan-x;
+}
+
+.key-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.key-cap {
+  flex: none;
+  min-width: 44px;
+  height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--zt-line);
+  border-radius: 9px;
+  background: var(--zt-panel);
+  color: var(--zt-dim);
+  font-family: var(--zt-mono, ui-monospace, monospace);
+  font-size: 13px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.key-cap:active {
+  color: var(--zt-fg);
+}
+
+/* The two sticky modifiers: `once` outlines, `locked` fills — a latch that
+   is about to spend itself and one that will not should not look alike. */
+.key-cap.once {
+  border-color: var(--zt-accent);
+  color: var(--zt-accent);
+}
+
+.key-cap.locked {
+  border-color: var(--zt-accent);
+  background: var(--zt-accent-soft);
+  color: var(--zt-accent);
+}
+
+.key-cap.kbd {
+  margin-left: auto;
+}

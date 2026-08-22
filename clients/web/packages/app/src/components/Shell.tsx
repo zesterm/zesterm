@@ -49,6 +49,7 @@ import {
   type TabsState,
 } from '../state/tabs.ts';
 import { loadLayout, saveLayout, toggleLayout, type Layout } from '../state/layout.ts';
+import { keyBarDefault, loadKeyBar, saveKeyBar } from '../keybar-model.ts';
 import {
   closePalette,
   moveSelection,
@@ -141,9 +142,18 @@ export const Shell = component<{
     launcherOpen: boolean;
     palette: PaletteState;
     error: string | null;
+    /** The key-cap row under each terminal: on by default where the keyboard is on the glass. */
+    keyBar: boolean;
   }>({
     tabs: NO_TABS,
     layout: loadLayout(window.localStorage),
+    keyBar: loadKeyBar(
+      window.localStorage,
+      keyBarDefault({
+        coarsePointer: window.matchMedia('(pointer: coarse)').matches,
+        maxTouchPoints: navigator.maxTouchPoints,
+      }),
+    ),
     launcherOpen: false,
     palette: PALETTE_CLOSED,
     error: null,
@@ -370,6 +380,13 @@ export const Shell = component<{
       case 'set-theme':
         themeStore()?.setTheme(target.themeId);
         break;
+      case 'keybar-toggle': {
+        // Persisted: an iPad with a hardware keyboard turns it off once.
+        const next = !store.keyBar;
+        store.keyBar = next;
+        saveKeyBar(window.localStorage, next);
+        break;
+      }
     }
   };
 
@@ -512,6 +529,7 @@ export const Shell = component<{
               if (hooks === null) termHooks.delete(id);
               else termHooks.set(id, hooks);
             }}
+            keyBar={store.keyBar}
           />
         );
       }
