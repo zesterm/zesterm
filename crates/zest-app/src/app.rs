@@ -1742,6 +1742,11 @@ pub struct App {
     /// A click resolves its value against exactly what was drawn — the same
     /// one-computation rule the block chrome follows.
     prompt_chips_view: Option<crate::chrome::prompt_chips::PromptChipsView>,
+    /// The context engine for in-process sessions (#434), built on first
+    /// need: a window that never runs one pays nothing, which is most
+    /// windows — their sessions live in the daemon, whose engine this is
+    /// the same type as.
+    local_context: std::sync::OnceLock<zest_daemon::context::ContextEngine>,
     chip_hits: crate::chrome::hit::ChromeHitMap,
     /// Folded blocks, per session — a view preference, never on the wire:
     /// two clients watching one session may disagree.
@@ -2097,6 +2102,7 @@ impl App {
             link_down: false,
             block_hits: crate::chrome::hit::ChromeHitMap::default(),
             prompt_chips_view: None,
+            local_context: std::sync::OnceLock::new(),
             chip_hits: crate::chrome::hit::ChromeHitMap::default(),
             folded_blocks: std::collections::HashMap::new(),
             selected_block: std::collections::HashMap::new(),
@@ -8355,6 +8361,12 @@ impl App {
         if let Some(dir) = zest_config::paths::config_dir() {
             spec.enable_shell_integration(&dir.join("shell-integration"));
         }
+        // The daemon's spawn makes the same read (#426); an in-process
+        // session diverging from a daemon-backed one over which prompt it
+        // got would be the two paths quietly disagreeing about the product.
+        if self.settings.prompt.compact_ps1 {
+            spec.env.push(("ZESTERM_COMPACT_PS1".into(), "1".into()));
+        }
         let injected: Vec<String> =
             spec.env[injected_from..].iter().map(|(k, _)| k.clone()).collect();
         apply_shell_settings(&mut spec, &self.config, &injected);
@@ -9475,7 +9487,35 @@ impl App {
         }
         let tab = self.tabs.active()?;
         let addr = tab.focused_addr();
-        let context = self.fleet.as_ref().and_then(|f| f.session_context(addr));
+        let context = self.fleet.as_ref().and_then(|f| f.session_context(addr)).or_else(|| {
+            // An in-process session has no daemon listing to carry its
+            // context — but this window *is* its host, so it probes like one
+            // (#434): the same engine, the same filesystem, the same trust
+            // posture. Gated on the origin, never on the listing's absence:
+            // a daemon-backed session whose listing has not arrived yet must
+            // stay blank rather than have its cwd probed against the local
+            // disk, which is the ssh trap wearing a race's clothes.
+            if !matches!(tab.focused_source().origin(), crate::source::Origin::InProcess) {
+                return None;
+            }
+            let engine = self.local_context.get_or_init(|| {
+                // A no-op change callback on purpose: the chip row is
+                // rebuilt per frame and the cursor blink repaints anyway,
+                // so an async answer (the dirty star) surfaces within a
+                // blink without a wakeup plumbed through.
+                zest_daemon::context::ContextEngine::new(std::sync::Arc::new(|| {}))
+            });
+            let term = tab.focused_source().terminal();
+            let term = term.lock();
+            // The daemon's own merge, not a re-derivation: the probe half
+            // plus the terminal's shell facts, with one copy of the rules
+            // (labels, the nvm→node replacement).
+            zest_daemon::context::with_shell_facts(
+                engine.context_for(term.cwd(), term.cwd_host()),
+                term.shell_facts().iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                0,
+            )
+        });
 
         let term = tab.focused_source().terminal();
         let term = term.lock();

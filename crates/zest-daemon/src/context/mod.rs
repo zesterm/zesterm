@@ -42,6 +42,9 @@ struct Inner {
     /// coalesced touch. A callback rather than the registry itself, so the
     /// engine is testable with a counter.
     on_change: Arc<dyn Fn() + Send + Sync>,
+    /// This machine's own name, asked once: the yardstick for whether an
+    /// OSC 7 authority means "elsewhere" (#434).
+    local_host: std::sync::OnceLock<Option<String>>,
     /// Bumped on every invalidation; snapshotted into each
     /// [`SessionContext::revision`] so clients can skip unchanged chrome.
     revision: AtomicU64,
@@ -105,6 +108,7 @@ impl ContextEngine {
         Self {
             inner: Arc::new(Inner {
                 on_change,
+                local_host: std::sync::OnceLock::new(),
                 revision: AtomicU64::new(1),
                 state: Mutex::new(State::default()),
             }),
@@ -115,17 +119,27 @@ impl ContextEngine {
     /// there is nothing to say, which is every session until shell
     /// integration reports a directory.
     ///
-    /// `host` is OSC 7's authority part when the shell sent one. Any host at
-    /// all suppresses the filesystem probes: the path is not on this machine,
-    /// and a branch read from a same-named local directory would be a chip
-    /// confidently describing the wrong computer. The host becomes a fact
-    /// instead — labeled `ShellReport`, because that is who said it.
+    /// `host` is OSC 7's authority part when the shell sent one. An
+    /// authority naming *another* machine suppresses the filesystem probes:
+    /// the path is not on this machine, and a branch read from a same-named
+    /// local directory would be a chip confidently describing the wrong
+    /// computer. The host becomes a fact instead — labeled `ShellReport`,
+    /// because that is who said it. This machine's own name is not
+    /// elsewhere (#434) — see `is_this_machine`.
     #[must_use]
     pub fn context_for(&self, cwd: &str, host: Option<&str>) -> Option<SessionContext> {
         if cwd.is_empty() {
             return None;
         }
-        if let Some(host) = host {
+        // An authority naming *this* machine is not elsewhere: zsh's OSC 7
+        // sends `file://$HOST/...`, so every local zsh session arrives with
+        // an authority — and reading any authority as "remote" suppressed
+        // the git chip for exactly the people the feature was built for
+        // (#434). Matching is deliberately strict — equal, or one being the
+        // other's dot-prefix (short name vs FQDN) — because the failure
+        // directions are not symmetric: a remote read as local probes the
+        // wrong disk; a local read as remote merely shows one chip fewer.
+        if let Some(host) = host.filter(|h| !self.is_this_machine(h)) {
             return Some(SessionContext {
                 git: None,
                 facts: vec![ContextFact {
@@ -176,6 +190,17 @@ impl ContextEngine {
             g
         });
         Some(SessionContext { git, facts, revision })
+    }
+
+    /// Whether an OSC 7 authority names this machine (#434). Equal, or one
+    /// a dot-prefix of the other — `Mac` vs `Mac.localdomain` — compared
+    /// case-insensitively, because DNS is.
+    fn is_this_machine(&self, host: &str) -> bool {
+        let Some(local) = self.inner.local_host.get_or_init(os_hostname) else { return false };
+        let (h, l) = (host.to_ascii_lowercase(), local.to_ascii_lowercase());
+        h == l
+            || h.strip_prefix(&l).is_some_and(|r| r.starts_with('.'))
+            || l.strip_prefix(&h).is_some_and(|r| r.starts_with('.'))
     }
 
     /// The last `git status` answer for this repository, refreshing it in
@@ -451,6 +476,39 @@ fn pin_facts(dir: &Path) -> Vec<ContextFact> {
         cur = d.parent();
     }
     facts
+}
+
+/// What the operating system calls this machine, asked directly.
+///
+/// Both arms exist because the test that matters runs with no environment at
+/// all, and a platform that could only answer from `COMPUTERNAME` would fail
+/// it — which is how the original bug got in: Windows genuinely does export
+/// that variable, so the unix hole was invisible from there.
+#[cfg(unix)]
+pub fn os_hostname() -> Option<String> {
+    Some(rustix::system::uname().nodename().to_string_lossy().into_owned())
+}
+
+#[cfg(windows)]
+pub fn os_hostname() -> Option<String> {
+    use windows_sys::Win32::System::SystemInformation::{
+        ComputerNameDnsHostname, GetComputerNameExW,
+    };
+
+    let mut len: u32 = 0;
+    // First call sizes the buffer; it is expected to fail with the length set.
+    unsafe { GetComputerNameExW(ComputerNameDnsHostname, std::ptr::null_mut(), &mut len) };
+    if len == 0 {
+        return None;
+    }
+
+    let mut buf = vec![0u16; len as usize];
+    let ok = unsafe { GetComputerNameExW(ComputerNameDnsHostname, buf.as_mut_ptr(), &mut len) };
+    if ok == 0 {
+        return None;
+    }
+    buf.truncate(len as usize);
+    Some(String::from_utf16_lossy(&buf))
 }
 
 /// Ask git whether the tree at `cwd` is dirty, bounded in time and output.
@@ -777,6 +835,32 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_machines_own_name_as_an_authority_still_probes() {
+        // zsh's OSC 7 sends `file://$HOST/...`, so every local zsh session
+        // arrives with an authority — and reading any authority as remote
+        // suppressed the git chip for exactly the people the feature was
+        // built for (#434). Found by a screenshot, not a test, which is why
+        // this one exists.
+        let (engine, _) = engine();
+        let here = env!("CARGO_MANIFEST_DIR");
+        let local = os_hostname().expect("a machine has a name");
+
+        let ctx = engine.context_for(here, Some(&local)).expect("a context");
+        assert!(ctx.git.is_some(), "the machine's own name is not elsewhere");
+
+        // The FQDN of the same short name — one being the other's
+        // dot-prefix — is the same machine as DNS sees it.
+        let fqdn = format!("{local}.localdomain");
+        let ctx = engine.context_for(here, Some(&fqdn)).expect("a context");
+        assert!(ctx.git.is_some(), "short name vs FQDN is a spelling, not a machine");
+
+        // A genuinely foreign name still suppresses, exactly as before.
+        let ctx = engine.context_for(here, Some("some-other-box.example.net")).expect("a context");
+        assert!(ctx.git.is_none(), "a foreign authority still means elsewhere");
+        assert!(ctx.facts.iter().any(|f| f.key == "ssh_host"));
     }
 
     #[test]
