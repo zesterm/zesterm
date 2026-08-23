@@ -39,6 +39,7 @@ export function startFeed(options: FeedOptions): () => void {
   const { host, dial, dataPlane } = options;
   const log = options.onLog ?? (() => {});
   const directory = host.actor(SessionDirectory, LOCAL_DIRECTORY_KEY);
+  let welcomed: { id: string; label: string } | null = null;
 
   const client = new ConnectionClient({
     dial,
@@ -61,13 +62,16 @@ export function startFeed(options: FeedOptions): () => void {
       onHostOffer: (offer) => {
         void directory.setFacts(hostFactsOf(offer));
       },
+      // Held until the connection event, which follows it at once: one
+      // `setLink` carrying all three facts, so a reader never sees a host
+      // without its link or a link without its host.
+      onWelcome: (h) => {
+        welcomed = h;
+      },
       onConnection: (state) => {
         log(`daemon link: ${state.phase}`);
         if (state.phase === 'connected') {
-          // Host identity arrives with the welcome; the ConnectionClient
-          // does not surface it in v1, so the directory carries the data
-          // plane and the connected bit — which is what the UI needs first.
-          void directory.setLink(true, null, dataPlane);
+          void directory.setLink(true, welcomed, dataPlane);
         } else if (state.phase === 'reconnecting' || state.phase === 'failed') {
           void directory.setLink(false, null, null);
         }
