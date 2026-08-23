@@ -232,6 +232,13 @@ cwd: string,
  * The repository root the diff describes, host-absolute — the panel's
  * title, and what the repo-relative paths inside `diff` are relative
  * to.
+ *
+ * **Spelled as git spells it, which on Windows is not how
+ * [`Self::FileContents::path`] is spelled**: `rev-parse` answers
+ * `C:/Users/…` where a canonicalized path is `\\?\C:\Users\…`. Same
+ * directory, different dialect — so a client joining this with a
+ * diff's path and handing the result to `ReadFile` is fine (the host
+ * resolves it), but one *comparing* the two strings is not.
  */
 repo_root: string, 
 /**

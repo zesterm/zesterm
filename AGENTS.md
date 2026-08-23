@@ -540,6 +540,24 @@ you need before you trip on it.
   it; the tests are hand-built because no recording can currently drive this.
   (#314)
 
+### Subprocesses and paths
+
+- **`git` speaks its own path dialect on Windows, and it is not the one
+  `canonicalize` speaks.** `rev-parse --show-toplevel` answers
+  `C:/Users/…`; `std::fs::canonicalize` answers `\\?\C:\Users\…`. Same
+  directory, three differences at once — the UNC prefix, the separator, and
+  the case a temp path comes back in — so a comparison between a path git
+  produced and a path Rust produced passes on unix and fails only on Windows.
+  `GitDiffResult.repo_root` is therefore *not* spelled like
+  `FileContents.path`: joining them and letting the host resolve the result is
+  fine, comparing them as strings is not. (`zest-daemon/src/gitcmd.rs`, #453.)
+- **A subprocess whose output you do not drain deadlocks against its own
+  pipe**, and only in a repository big enough to fill it — so the version
+  without a drain thread passes every small test. `gitcmd::run_git` is the one
+  copy of the four bounds that matter together (drain thread, output cap,
+  deadline poll, and a reap on every early exit past the spawn); a second copy
+  is how one of them loses the drain.
+
 ### Sockets and pipes on Windows
 
 - **Windows serializes I/O per handle on a *synchronous* named pipe**, so a

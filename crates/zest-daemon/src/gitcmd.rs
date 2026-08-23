@@ -298,6 +298,19 @@ mod tests {
         assert!(dropped);
     }
 
+    /// One spelling of a path, for comparing git's against the filesystem's.
+    ///
+    /// **Git speaks its own path dialect on Windows** and this is the whole
+    /// reason the helper exists: `rev-parse --show-toplevel` answers
+    /// `C:/Users/…` while Rust's `canonicalize` answers
+    /// `\\?\C:\Users\…` — same directory, three differences (the UNC prefix,
+    /// the separator, and the case a temp path arrives in). Comparing them
+    /// literally passes on unix and fails only on Windows, which is the
+    /// expensive kind of test to write.
+    fn same_path(p: &str) -> String {
+        p.trim_start_matches(r"\\?\").replace('\\', "/").to_lowercase()
+    }
+
     /// A throwaway repository, or `None` when this machine has no git.
     ///
     /// `-c` for identity rather than `git config`, and `commit` only where a
@@ -372,8 +385,8 @@ mod tests {
         let (root, diff, _, untracked, error) = parts(&msg);
         assert!(error.is_empty(), "{error}");
         assert_eq!(
-            std::path::PathBuf::from(root),
-            repo.0,
+            same_path(root),
+            same_path(&repo.path()),
             "the root is where the diff's paths are relative to"
         );
         assert!(diff.contains("tracked.txt"), "the modified file is in the diff:\n{diff}");
