@@ -350,6 +350,14 @@ pub enum ClientMessage {
         #[serde(default)]
         base_hash: String,
     },
+    /// What is uncommitted in the repository containing `cwd` (#453).
+    ///
+    /// Host-scoped like [`Self::ReadFile`], and for the same reason: the
+    /// checkout is on the session's machine, so the question is answered by
+    /// the daemon that can see it. Answered by
+    /// [`HostMessage::GitDiffResult`], and degrading on an old daemon through
+    /// the same could-not-understand `Error`.
+    GitDiff { cwd: String },
 }
 
 /// What a host sends.
@@ -688,6 +696,50 @@ pub enum HostMessage {
         #[serde(default)]
         conflict: bool,
         /// Why nothing was written, phrased for a person. Empty on success.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        error: String,
+    },
+    /// The answer to [`ClientMessage::GitDiff`] (#453).
+    ///
+    /// A reply, never a push, so no `Hello` flag — see
+    /// [`Self::FileContents`]. `cwd` echoes the question, which is the
+    /// correlation: a panel that has since been pointed at another session
+    /// drops a stale answer by comparing it.
+    GitDiffResult {
+        /// The directory that was asked about, echoed.
+        cwd: String,
+        /// The repository root the diff describes, host-absolute — the panel's
+        /// title, and what the repo-relative paths inside `diff` are relative
+        /// to.
+        #[serde(default)]
+        repo_root: String,
+        /// Raw unified diff: staged *and* unstaged against HEAD, so the panel
+        /// has one truth rather than two lists a person has to add up.
+        ///
+        /// **Raw text rather than a parsed structure** on purpose. Splitting
+        /// on `diff --git ` is a small pure function in each client, while a
+        /// wire-level hunk/rename/mode vocabulary would freeze a large surface
+        /// on the day it shipped — and every client renders it differently
+        /// anyway.
+        #[serde(default)]
+        diff: String,
+        /// More files changed than `diff` carries. Whole files are dropped,
+        /// never half of one: a header promising six lines followed by two is
+        /// something a parser is entitled to call corrupt.
+        #[serde(default)]
+        truncated: bool,
+        /// Untracked files, repo-relative, by **name only**.
+        ///
+        /// Their content is absent because `git diff` structurally cannot show
+        /// it — an untracked file has no index entry to diff against — and a
+        /// client that wants it already has [`ClientMessage::ReadFile`].
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        untracked: Vec<String>,
+        #[serde(default)]
+        untracked_truncated: bool,
+        /// Why there is no diff, when there is none for a reason — not a
+        /// repository, or git did not answer. Empty when the tree is simply
+        /// clean, which must not render as a failure.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         error: String,
     },
@@ -1224,6 +1276,29 @@ mod tests {
             let back: HostMessage = crate::frame::decode(&body).expect("decode");
             assert_eq!(msg, back);
         }
+    }
+
+    #[test]
+    fn a_diff_crosses_the_wire_intact() {
+        let ask = ClientMessage::GitDiff { cwd: "/home/a/p".into() };
+        let body = crate::frame::encode_body(&ask).expect("encode");
+        assert_eq!(ask, crate::frame::decode::<ClientMessage>(&body).expect("decode"));
+
+        let msg = HostMessage::GitDiffResult {
+            cwd: "/home/a/p".into(),
+            repo_root: "/home/a/p".into(),
+            // Newlines and a non-ASCII byte, since the diff is the one field
+            // here that carries arbitrary file content.
+            diff: "diff --git a/é.txt b/é.txt\n@@ -1 +1 @@\n-a\n+b\n".into(),
+            truncated: true,
+            // A space in a name is the case `-z` exists for; it has to survive
+            // the wire as well as the parse.
+            untracked: vec!["two words.txt".into()],
+            untracked_truncated: true,
+            error: String::new(),
+        };
+        let body = crate::frame::encode_body(&msg).expect("encode");
+        assert_eq!(msg, crate::frame::decode::<HostMessage>(&body).expect("decode"));
     }
 
     #[test]

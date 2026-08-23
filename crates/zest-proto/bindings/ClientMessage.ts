@@ -125,4 +125,4 @@ data: Array<number>,
  * `conflict`, so the client has one branch to write rather than four
  * that each have to be told apart from an I/O failure.
  */
-base_hash: string, };
+base_hash: string, } | { "t": "git_diff", cwd: string, };
