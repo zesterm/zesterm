@@ -380,6 +380,50 @@ fn a_second_call_while_one_dial_is_pending_does_not_queue_a_second_prompt() {
     );
 }
 
+#[test]
+fn a_machine_that_answers_slowly_is_not_reported_as_a_pairing_prompt() {
+    // A dial can outlast its budget for two quite different reasons, and only
+    // one of them has digits to compare. A silent peer is *slow*; saying
+    // "approve this agent, the code is " with nothing after it reads as a
+    // pairing flow gone wrong and sends a person looking for a prompt that was
+    // never raised.
+    let here = machine("studio", false);
+
+    // Accepts the connection and then says nothing at all -- so the handshake
+    // starts, never completes, and no pairing is ever queued.
+    let mute = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let mute_addr = mute.local_addr().expect("addr").to_string();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in mute.incoming() {
+            match stream {
+                Ok(s) => held.push(s),
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut silent = zest_fleet::fixture::host(7, "mute");
+    silent.address = Some(mute_addr);
+    let mut t = tools(&here, vec![row(&here, true), silent]);
+    ok(t.call("hosts", &json!({})));
+
+    for attempt in 0..2 {
+        let err = t
+            .call("sessions", &json!({ "host": "mute" }))
+            .expect_err("a peer that never speaks never connects");
+        let said = err.to_string();
+        assert!(
+            !said.contains("code to compare"),
+            "attempt {attempt}: nobody was asked to approve anything: {said}"
+        );
+        assert!(
+            said.contains("not finished answering") || said.contains("has not answered"),
+            "attempt {attempt}: it says it is still waiting, and on what: {said}"
+        );
+    }
+}
+
 /// Poll `f` until it answers, up to a few seconds.
 ///
 /// A poll rather than a sleep because what is being waited for is another

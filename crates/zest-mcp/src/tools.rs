@@ -192,14 +192,24 @@ pub struct ToolSet {
     roots: zest_cloud::tls::Roots,
 }
 
-/// A dial parked on somebody's approval.
+/// A dial still running after the call that started it has answered.
+///
+/// Two states, and telling them apart is the whole reason the code is an
+/// `Option`: a dial waiting on a **person** is a different thing to report from
+/// one that is merely slow, and only the first has digits to compare. Collapsing
+/// them offers an approval message with a blank code, which reads as a pairing
+/// flow that has gone wrong rather than as a machine still connecting.
 struct PendingDial {
-    /// The six digits the person at the far machine is comparing.
-    code: String,
+    /// The six digits the person at the far machine is comparing, once the host
+    /// has asked anybody. `None` while this is only slow.
+    code: Option<String>,
     label: String,
     started: Instant,
     /// Answers once, when the handshake finally resolves.
     done: crossbeam_channel::Receiver<Result<Conn, String>>,
+    /// Carries the code if the host asks for approval *after* the first call
+    /// gave up waiting -- a handshake that was slow and then met a person.
+    code_rx: crossbeam_channel::Receiver<(String, u32)>,
 }
 
 impl ToolSet {
@@ -337,7 +347,16 @@ impl ToolSet {
     /// so this call does not have to wait for a human, and a tool that blocked
     /// here would be the hang the whole arrangement exists to avoid.
     fn claim_pending(&mut self, host: HostId) -> Result<Option<Arc<Conn>>, ToolError> {
-        let Some(p) = self.pending.get(&host) else { return Ok(None) };
+        let Some(p) = self.pending.get_mut(&host) else { return Ok(None) };
+        // A dial that was merely slow may have met a person since. Checked
+        // before the arms below, so the first call after that reports the code
+        // rather than "not answered yet" for the rest of the approval window.
+        if p.code.is_none() {
+            if let Ok((code, _)) = p.code_rx.try_recv() {
+                p.code = Some(code);
+                p.started = Instant::now();
+            }
+        }
         // Read off what the arms need before any of them touches the map: the
         // entry is borrowed out of `self`, and removing it is the first thing
         // two of the three do.
@@ -356,12 +375,20 @@ impl ToolSet {
                 self.fleet.report_dial(host, false);
                 Err(ToolError::Unreachable { label, why: format!("it refused this agent: {e}") })
             }
-            Err(crossbeam_channel::TryRecvError::Empty) => Err(ToolError::AwaitingApproval {
-                label,
-                code,
-                secs_left: zest_mesh::pairing::APPROVAL_TIMEOUT
-                    .saturating_sub(started.elapsed())
-                    .as_secs(),
+            Err(crossbeam_channel::TryRecvError::Empty) => Err(match code {
+                Some(code) => ToolError::AwaitingApproval {
+                    label,
+                    code,
+                    secs_left: zest_mesh::pairing::APPROVAL_TIMEOUT
+                        .saturating_sub(started.elapsed())
+                        .as_secs(),
+                },
+                // Slow, not waiting on anybody. Reporting this as an approval
+                // would hand the agent a blank code to read out.
+                None => ToolError::Unreachable {
+                    label,
+                    why: "it has not finished answering yet; ask again in a moment".into(),
+                },
             }),
             // The thread ended without answering, which it cannot do; treat it
             // as no dial in flight and let the next call start a fresh one.
@@ -480,7 +507,13 @@ impl ToolSet {
                     };
                     self.pending.insert(
                         host,
-                        PendingDial { code, label, started: Instant::now(), done: rx },
+                        PendingDial {
+                            code: Some(code),
+                            label,
+                            started: Instant::now(),
+                            done: rx,
+                            code_rx,
+                        },
                     );
                     Err(err)
                 }
@@ -495,10 +528,11 @@ impl ToolSet {
                     self.pending.insert(
                         host,
                         PendingDial {
-                            code: String::new(),
+                            code: None,
                             label,
                             started: Instant::now(),
                             done: rx,
+                            code_rx,
                         },
                     );
                     Err(err)
