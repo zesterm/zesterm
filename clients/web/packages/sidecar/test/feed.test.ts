@@ -147,6 +147,14 @@ test('a daemon push lands in the directory, projected to plain JSON', async () =
 
     const view = await host.actor(SessionDirectory, LOCAL_DIRECTORY_KEY).list();
     assert.equal(view.connected, true);
+    // #447: without this, `localHostSource.own()` is null for ever and every
+    // row, the create button and the launcher on the loopback path are
+    // disabled -- a machine the page is talking to, listed as unreachable.
+    assert.deepEqual(
+      view.host,
+      { id: daemon.identity.clientId, label: 'scripted' },
+      'the directory learns which machine this is from the welcome',
+    );
     assert.deepEqual(
       view.dataPlane,
       { kind: 'ws', host: '127.0.0.1', port: 7718 },

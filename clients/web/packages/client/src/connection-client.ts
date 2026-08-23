@@ -43,6 +43,14 @@ export interface ConnectionEvents {
    * ordinary session push.
    */
   onHostOffer?(offer: HostOffer): void;
+  /**
+   * Which machine answered, as the welcome names it — before `onConnection`
+   * says `connected`, so a consumer that records the link can record who is
+   * on the other end of it in the same breath. Without this the sidecar's
+   * directory never learned its own host and the loopback page listed a
+   * machine it could not press (#447).
+   */
+  onWelcome?(host: { readonly id: string; readonly label: string }): void;
   onConnection?(state: ConnectionState): void;
   onError?(message: string): void;
 }
@@ -260,6 +268,7 @@ export class ConnectionClient {
         if (state.phase === 'welcomed') {
           this.#connected = true;
           this.#redialAttempt = 0;
+          this.#events.onWelcome?.({ id: state.host, label: state.hostLabel });
           this.#events.onConnection?.({ phase: 'connected' });
           // Prime the list; pushes keep it fresh from here.
           this.#send({ t: 'list_sessions' });
