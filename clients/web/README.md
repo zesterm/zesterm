@@ -173,8 +173,10 @@ Two gates, catching different things:
 
 ## Not here yet
 
-- **Local echo prediction** (mosh's other trick) — the largest perceived-latency
-  win still on the table; see the roadmap's open work.
+- **Local echo prediction's overlay.** The engine is here (`proto/src/predict.ts`,
+  the port of `zest-proto::predict`, replaying the same fixture); what is not
+  yet is the painter drawing its guesses on `PaintOptions`'s overlay seam and
+  `SessionClient` feeding it keys. ADR-016, #442.
 - **A Worker for the decoder.** Decode + apply runs on the main thread, and
   measurement says that is fine: the whole 82k-cell corpus replays in well under
   a second, and `fillText` — which must be on the main thread anyway — is where

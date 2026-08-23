@@ -47,6 +47,7 @@ describes only the current shape.
 | Cloud enrolment HTTP bodies — `/api/enroll/claim`, `/api/devices/register`, `/api/link/{start,claim}` requests, success envelopes and refusal shapes (`{error, detail?}`) | `cloud/packages/web/src/api/{enroll,devices,link}.ts` | **frozen** — de facto: deployed `zest-daemon` and `zest-app` binaries parse these bodies (`crates/zest-daemon/src/enroll.rs`, `crates/zest-app/src/cloud.rs`) and cannot be recompiled alongside the Worker; additive fields fine (`detail` on the 409 is one, #367) | `zest-daemon`, `zest-app`, `clients/web` |
 | TypeScript bindings | `crates/zest-proto/bindings/` | **generated** — `cargo xtask check-bindings` | `clients/web`, `cloud/` |
 | Conformance fixtures | `crates/zest-proto/fixtures/` | **generated** — `cargo xtask check-fixtures` | `clients/web` |
+| `Predictor`, `Key`, `Policy` | `crates/zest-proto/src/predict.rs` | **frozen rules, not a wire type** — the echo predictor has a second implementation (`clients/web/packages/proto/src/predict.ts`); both replay the hand-authored `fixtures/predict.json`, so a rule change is a fixture change (ADR-016) | `zest-app`, `clients/web` |
 | Settings schema + walked UI fields | `clients/web/packages/settings/generated/` | **generated** — `cargo xtask check-export-web` | `clients/web` |
 | Built-in themes, as TypeScript | `clients/web/packages/theme/src/builtin.generated.ts` | **generated** — `cargo xtask check-export-web` | `clients/web` |
 

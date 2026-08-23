@@ -212,9 +212,17 @@ own fleet model, loopback deliberately silent.
       can silently reopen.
 - [ ] SQLite scrollback. Scrollback is in memory and bounded; a session that
       outlives its window does not yet outlive the daemon.
-- [ ] Local echo prediction for high-latency links (mosh's other trick):
-      predict printable-char echo when not in alt-screen, render dim, reconcile
-      on delta arrival. The largest perceived-latency win available.
+- [ ] **Local echo prediction** (mosh's other trick; #442, ADR-016). The
+      engine landed first: `zest-proto::predict` and its TypeScript port
+      reconcile guesses from a delta's own rows and cursor, held to one rule
+      set by `fixtures/predict.json`. What remains, in landable slices: the
+      native overlay (`Viewport.predictions` beside `preedit`, a
+      `SessionSource` hook before `key::encode`, an `input.predict_echo`
+      setting, and a `--simulated-latency` flag so the edit-run loop needs no
+      relay); the web overlay on `PaintOptions`'s pre-cut seam; and — only
+      once the heuristic is seen failing on a real link — an additive `echo`
+      sequence on `Input`/`Update`, which is what would let "not echoed yet"
+      be told from "never echoed".
 
 ### Web client & devices
 

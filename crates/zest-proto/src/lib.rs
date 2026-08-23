@@ -38,6 +38,7 @@ pub mod encode;
 pub mod frame;
 pub(crate) mod hex;
 pub mod ids;
+pub mod predict;
 
 pub use apply::{Applied, Applier};
 pub use auth::{AuthFailure, Nonce32, Pub32, Sig64};
@@ -49,6 +50,7 @@ pub use decode::GridView;
 pub use encode::{Encoder, Keyframe};
 pub use frame::{FrameError, FrameReader};
 pub use ids::{ClientId, HostId, SessionAddr, SessionId};
+pub use predict::{Key, Policy, Prediction, Predictor};
 
 /// Wire format version.
 ///

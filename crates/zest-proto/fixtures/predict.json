@@ -1,0 +1,1620 @@
+{
+ "schema": 1,
+ "about": "Hand-authored scenarios for the echo predictor; replayed by crates/zest-proto/tests/predict.rs and clients/web/packages/proto/test/predict.test.ts, which must agree with it and with each other.",
+ "scenarios": [
+  {
+   "name": "plain-typing",
+   "note": "Two keys on a relayed host show on faith, then the echo confirms both and measures the link.",
+   "policy": "auto",
+   "remote_hint": true,
+   "cols": 80,
+   "cursor": {
+    "row": 0,
+    "col": 2
+   },
+   "steps": [
+    {
+     "at": 0,
+     "input": {
+      "key": "printable",
+      "ch": "a"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        2,
+        "a"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 5,
+     "input": {
+      "key": "printable",
+      "ch": "b"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        2,
+        "a"
+       ],
+       [
+        0,
+        3,
+        "b"
+       ]
+      ],
+      "pending": 2,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 60,
+     "delta": {
+      "attrs": [],
+      "ops": [
+       {
+        "op": "row",
+        "row": 0,
+        "payload": {
+         "line": 0,
+         "runs": [
+          {
+           "attr": 0,
+           "cells": 4,
+           "text": "$ ab"
+          }
+         ],
+         "wrapped": false
+        }
+       },
+       {
+        "op": "cursor",
+        "cursor": {
+         "row": 0,
+         "col": 4,
+         "visible": true,
+         "shape": 0
+        }
+       }
+      ]
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": 58.5
+     }
+    }
+   ]
+  },
+  {
+   "name": "fast-typing-partial-echo",
+   "note": "The first echo lands while the second key is in flight: the row has no `b` yet and the cursor has not reached it, so `b` stays pending rather than being refuted.",
+   "policy": "auto",
+   "remote_hint": true,
+   "cols": 80,
+   "cursor": {
+    "row": 0,
+    "col": 2
+   },
+   "steps": [
+    {
+     "at": 0,
+     "input": {
+      "key": "printable",
+      "ch": "a"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        2,
+        "a"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 5,
+     "input": {
+      "key": "printable",
+      "ch": "b"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        2,
+        "a"
+       ],
+       [
+        0,
+        3,
+        "b"
+       ]
+      ],
+      "pending": 2,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 60,
+     "delta": {
+      "attrs": [],
+      "ops": [
+       {
+        "op": "row",
+        "row": 0,
+        "payload": {
+         "line": 0,
+         "runs": [
+          {
+           "attr": 0,
+           "cells": 3,
+           "text": "$ a"
+          }
+         ],
+         "wrapped": false
+        }
+       },
+       {
+        "op": "cursor",
+        "cursor": {
+         "row": 0,
+         "col": 3,
+         "visible": true,
+         "shape": 0
+        }
+       }
+      ]
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        3,
+        "b"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": 60
+     }
+    },
+    {
+     "at": 65,
+     "delta": {
+      "attrs": [],
+      "ops": [
+       {
+        "op": "row",
+        "row": 0,
+        "payload": {
+         "line": 0,
+         "runs": [
+          {
+           "attr": 0,
+           "cells": 4,
+           "text": "$ ab"
+          }
+         ],
+         "wrapped": false
+        }
+       },
+       {
+        "op": "cursor",
+        "cursor": {
+         "row": 0,
+         "col": 4,
+         "visible": true,
+         "shape": 0
+        }
+       }
+      ]
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": 60
+     }
+    }
+   ]
+  },
+  {
+   "name": "right-edge",
+   "note": "A guess at the last column is made; the one past it is the shell's wrapping decision and is not.",
+   "policy": "auto",
+   "remote_hint": true,
+   "cols": 4,
+   "cursor": {
+    "row": 0,
+    "col": 3
+   },
+   "steps": [
+    {
+     "at": 0,
+     "input": {
+      "key": "printable",
+      "ch": "x"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        3,
+        "x"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 1,
+     "input": {
+      "key": "printable",
+      "ch": "y"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        3,
+        "x"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "backspace-pops-own",
+   "note": "Backspace takes back the newest guess and never touches a real cell.",
+   "policy": "auto",
+   "remote_hint": true,
+   "cols": 80,
+   "cursor": {
+    "row": 0,
+    "col": 2
+   },
+   "steps": [
+    {
+     "at": 0,
+     "input": {
+      "key": "printable",
+      "ch": "a"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        2,
+        "a"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 1,
+     "input": {
+      "key": "printable",
+      "ch": "b"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        2,
+        "a"
+       ],
+       [
+        0,
+        3,
+        "b"
+       ]
+      ],
+      "pending": 2,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 2,
+     "input": {
+      "key": "backspace"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        2,
+        "a"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 3,
+     "input": {
+      "key": "backspace"
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 4,
+     "input": {
+      "key": "backspace"
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "other-key-flushes",
+   "note": "Enter, an arrow, a chord: the line is the shell's now.",
+   "policy": "auto",
+   "remote_hint": true,
+   "cols": 80,
+   "cursor": {
+    "row": 0,
+    "col": 2
+   },
+   "steps": [
+    {
+     "at": 0,
+     "input": {
+      "key": "printable",
+      "ch": "a"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        2,
+        "a"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 1,
+     "input": {
+      "key": "other"
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "coalesced-cursor-confirms",
+   "note": "The row rode an earlier state; the cursor alone passing the cell is the confirmation.",
+   "policy": "auto",
+   "remote_hint": true,
+   "cols": 80,
+   "cursor": {
+    "row": 0,
+    "col": 2
+   },
+   "steps": [
+    {
+     "at": 0,
+     "input": {
+      "key": "printable",
+      "ch": "a"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        2,
+        "a"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 50,
+     "delta": {
+      "attrs": [],
+      "ops": [
+       {
+        "op": "cursor",
+        "cursor": {
+         "row": 0,
+         "col": 3,
+         "visible": true,
+         "shape": 0
+        }
+       }
+      ]
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": 50
+     }
+    }
+   ]
+  },
+  {
+   "name": "mismatch-refutes",
+   "note": "The host put something else where the cursor passed: everything is flushed and the line goes quiet.",
+   "policy": "auto",
+   "remote_hint": true,
+   "cols": 80,
+   "cursor": {
+    "row": 0,
+    "col": 2
+   },
+   "steps": [
+    {
+     "at": 0,
+     "input": {
+      "key": "printable",
+      "ch": "a"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        2,
+        "a"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 60,
+     "delta": {
+      "attrs": [],
+      "ops": [
+       {
+        "op": "row",
+        "row": 0,
+        "payload": {
+         "line": 0,
+         "runs": [
+          {
+           "attr": 0,
+           "cells": 3,
+           "text": "$ b"
+          }
+         ],
+         "wrapped": false
+        }
+       },
+       {
+        "op": "cursor",
+        "cursor": {
+         "row": 0,
+         "col": 3,
+         "visible": true,
+         "shape": 0
+        }
+       }
+      ]
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": false,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 61,
+     "input": {
+      "key": "printable",
+      "ch": "c"
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 1,
+      "showing": false,
+      "latency_ms": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "password-prompt",
+   "note": "A measured link, then a prompt that echoes nothing: the guess outlives three round trips and is refuted; the next line proves itself by echoing before anything is shown again.",
+   "policy": "auto",
+   "remote_hint": true,
+   "cols": 80,
+   "cursor": {
+    "row": 0,
+    "col": 2
+   },
+   "steps": [
+    {
+     "at": 0,
+     "input": {
+      "key": "printable",
+      "ch": "a"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        2,
+        "a"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 60,
+     "delta": {
+      "attrs": [],
+      "ops": [
+       {
+        "op": "row",
+        "row": 0,
+        "payload": {
+         "line": 0,
+         "runs": [
+          {
+           "attr": 0,
+           "cells": 3,
+           "text": "$ a"
+          }
+         ],
+         "wrapped": false
+        }
+       },
+       {
+        "op": "cursor",
+        "cursor": {
+         "row": 0,
+         "col": 3,
+         "visible": true,
+         "shape": 0
+        }
+       }
+      ]
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": 60
+     }
+    },
+    {
+     "at": 100,
+     "input": {
+      "key": "other"
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": 60
+     }
+    },
+    {
+     "at": 160,
+     "delta": {
+      "attrs": [],
+      "ops": [
+       {
+        "op": "row",
+        "row": 1,
+        "payload": {
+         "line": 0,
+         "runs": [
+          {
+           "attr": 0,
+           "cells": 10,
+           "text": "Password: "
+          }
+         ],
+         "wrapped": false
+        }
+       },
+       {
+        "op": "cursor",
+        "cursor": {
+         "row": 1,
+         "col": 10,
+         "visible": true,
+         "shape": 0
+        }
+       }
+      ]
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": 60
+     }
+    },
+    {
+     "at": 200,
+     "input": {
+      "key": "printable",
+      "ch": "p"
+     },
+     "expect": {
+      "overlay": [
+       [
+        1,
+        10,
+        "p"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": 60
+     }
+    },
+    {
+     "at": 300,
+     "tick": true,
+     "expect": {
+      "overlay": [
+       [
+        1,
+        10,
+        "p"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": 60
+     }
+    },
+    {
+     "at": 400,
+     "tick": true,
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": false,
+      "latency_ms": 60
+     }
+    },
+    {
+     "at": 410,
+     "input": {
+      "key": "printable",
+      "ch": "q"
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 1,
+      "showing": false,
+      "latency_ms": 60
+     }
+    },
+    {
+     "at": 500,
+     "input": {
+      "key": "other"
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": false,
+      "latency_ms": 60
+     }
+    },
+    {
+     "at": 560,
+     "delta": {
+      "attrs": [],
+      "ops": [
+       {
+        "op": "row",
+        "row": 2,
+        "payload": {
+         "line": 0,
+         "runs": [
+          {
+           "attr": 0,
+           "cells": 2,
+           "text": "$ "
+          }
+         ],
+         "wrapped": false
+        }
+       },
+       {
+        "op": "cursor",
+        "cursor": {
+         "row": 2,
+         "col": 2,
+         "visible": true,
+         "shape": 0
+        }
+       }
+      ]
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": false,
+      "latency_ms": 60
+     }
+    },
+    {
+     "at": 600,
+     "input": {
+      "key": "printable",
+      "ch": "z"
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 1,
+      "showing": false,
+      "latency_ms": 60
+     }
+    },
+    {
+     "at": 660,
+     "delta": {
+      "attrs": [],
+      "ops": [
+       {
+        "op": "row",
+        "row": 2,
+        "payload": {
+         "line": 0,
+         "runs": [
+          {
+           "attr": 0,
+           "cells": 3,
+           "text": "$ z"
+          }
+         ],
+         "wrapped": false
+        }
+       },
+       {
+        "op": "cursor",
+        "cursor": {
+         "row": 2,
+         "col": 3,
+         "visible": true,
+         "shape": 0
+        }
+       }
+      ]
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": 60
+     }
+    },
+    {
+     "at": 670,
+     "input": {
+      "key": "printable",
+      "ch": "w"
+     },
+     "expect": {
+      "overlay": [
+       [
+        2,
+        3,
+        "w"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": 60
+     }
+    }
+   ]
+  },
+  {
+   "name": "unmeasured-expiry",
+   "note": "With no measurement, a guess that nothing answers for a second is dropped silently rather than refuted.",
+   "policy": "auto",
+   "remote_hint": true,
+   "cols": 80,
+   "cursor": {
+    "row": 0,
+    "col": 2
+   },
+   "steps": [
+    {
+     "at": 0,
+     "input": {
+      "key": "printable",
+      "ch": "a"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        2,
+        "a"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 900,
+     "tick": true,
+     "expect": {
+      "overlay": [
+       [
+        0,
+        2,
+        "a"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 1001,
+     "tick": true,
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 1002,
+     "input": {
+      "key": "printable",
+      "ch": "b"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        2,
+        "b"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "keyframe-voids",
+   "note": "A keyframe replaced the state; every guess with it.",
+   "policy": "auto",
+   "remote_hint": true,
+   "cols": 80,
+   "cursor": {
+    "row": 0,
+    "col": 2
+   },
+   "steps": [
+    {
+     "at": 0,
+     "input": {
+      "key": "printable",
+      "ch": "a"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        2,
+        "a"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 1,
+     "keyframe": {
+      "cursor": {
+       "row": 3,
+       "col": 0
+      },
+      "cols": 80,
+      "alt_screen": false
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 2,
+     "input": {
+      "key": "printable",
+      "ch": "b"
+     },
+     "expect": {
+      "overlay": [
+       [
+        3,
+        0,
+        "b"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "alt-screen-gate",
+   "note": "A full-screen program decides what a key does.",
+   "policy": "auto",
+   "remote_hint": true,
+   "cols": 80,
+   "cursor": {
+    "row": 0,
+    "col": 2
+   },
+   "steps": [
+    {
+     "at": 0,
+     "delta": {
+      "attrs": [],
+      "ops": [
+       {
+        "op": "alt_screen",
+        "active": true
+       }
+      ]
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 1,
+     "input": {
+      "key": "printable",
+      "ch": "a"
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 2,
+     "delta": {
+      "attrs": [],
+      "ops": [
+       {
+        "op": "alt_screen",
+        "active": false
+       },
+       {
+        "op": "cursor",
+        "cursor": {
+         "row": 0,
+         "col": 2,
+         "visible": true,
+         "shape": 0
+        }
+       }
+      ]
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 3,
+     "input": {
+      "key": "printable",
+      "ch": "a"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        2,
+        "a"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "scroll-voids",
+   "note": "The line a guess sat on moved.",
+   "policy": "auto",
+   "remote_hint": true,
+   "cols": 80,
+   "cursor": {
+    "row": 0,
+    "col": 2
+   },
+   "steps": [
+    {
+     "at": 0,
+     "input": {
+      "key": "printable",
+      "ch": "a"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        2,
+        "a"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 1,
+     "delta": {
+      "attrs": [],
+      "ops": [
+       {
+        "op": "scroll",
+        "top": 0,
+        "bottom": 23,
+        "lines": 1
+       }
+      ]
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "adaptive-threshold",
+   "note": "No hint, a fast link: tracked and measured but never shown; a slow sample raises the estimate past 40 ms and the overlay appears.",
+   "policy": "auto",
+   "remote_hint": false,
+   "cols": 80,
+   "cursor": {
+    "row": 0,
+    "col": 2
+   },
+   "steps": [
+    {
+     "at": 0,
+     "input": {
+      "key": "printable",
+      "ch": "a"
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 1,
+      "showing": false,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 10,
+     "delta": {
+      "attrs": [],
+      "ops": [
+       {
+        "op": "row",
+        "row": 0,
+        "payload": {
+         "line": 0,
+         "runs": [
+          {
+           "attr": 0,
+           "cells": 3,
+           "text": "$ a"
+          }
+         ],
+         "wrapped": false
+        }
+       },
+       {
+        "op": "cursor",
+        "cursor": {
+         "row": 0,
+         "col": 3,
+         "visible": true,
+         "shape": 0
+        }
+       }
+      ]
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": false,
+      "latency_ms": 10
+     }
+    },
+    {
+     "at": 20,
+     "input": {
+      "key": "printable",
+      "ch": "b"
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 1,
+      "showing": false,
+      "latency_ms": 10
+     }
+    },
+    {
+     "at": 220,
+     "delta": {
+      "attrs": [],
+      "ops": [
+       {
+        "op": "row",
+        "row": 0,
+        "payload": {
+         "line": 0,
+         "runs": [
+          {
+           "attr": 0,
+           "cells": 4,
+           "text": "$ ab"
+          }
+         ],
+         "wrapped": false
+        }
+       },
+       {
+        "op": "cursor",
+        "cursor": {
+         "row": 0,
+         "col": 4,
+         "visible": true,
+         "shape": 0
+        }
+       }
+      ]
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": 67
+     }
+    },
+    {
+     "at": 230,
+     "input": {
+      "key": "printable",
+      "ch": "c"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        4,
+        "c"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": 67
+     }
+    }
+   ]
+  },
+  {
+   "name": "always-shows-fast-link",
+   "note": "`always` shows on a link `auto` would not.",
+   "policy": "always",
+   "remote_hint": false,
+   "cols": 80,
+   "cursor": {
+    "row": 0,
+    "col": 2
+   },
+   "steps": [
+    {
+     "at": 0,
+     "input": {
+      "key": "printable",
+      "ch": "a"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        2,
+        "a"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 10,
+     "delta": {
+      "attrs": [],
+      "ops": [
+       {
+        "op": "row",
+        "row": 0,
+        "payload": {
+         "line": 0,
+         "runs": [
+          {
+           "attr": 0,
+           "cells": 3,
+           "text": "$ a"
+          }
+         ],
+         "wrapped": false
+        }
+       },
+       {
+        "op": "cursor",
+        "cursor": {
+         "row": 0,
+         "col": 3,
+         "visible": true,
+         "shape": 0
+        }
+       }
+      ]
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": 10
+     }
+    },
+    {
+     "at": 20,
+     "input": {
+      "key": "printable",
+      "ch": "b"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        3,
+        "b"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": 10
+     }
+    }
+   ]
+  },
+  {
+   "name": "off-tracks-nothing",
+   "note": "`off` neither shows nor measures.",
+   "policy": "off",
+   "remote_hint": true,
+   "cols": 80,
+   "cursor": {
+    "row": 0,
+    "col": 2
+   },
+   "steps": [
+    {
+     "at": 0,
+     "input": {
+      "key": "printable",
+      "ch": "a"
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": false,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 60,
+     "delta": {
+      "attrs": [],
+      "ops": [
+       {
+        "op": "row",
+        "row": 0,
+        "payload": {
+         "line": 0,
+         "runs": [
+          {
+           "attr": 0,
+           "cells": 3,
+           "text": "$ a"
+          }
+         ],
+         "wrapped": false
+        }
+       },
+       {
+        "op": "cursor",
+        "cursor": {
+         "row": 0,
+         "col": 3,
+         "visible": true,
+         "shape": 0
+        }
+       }
+      ]
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": false,
+      "latency_ms": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "unknown-width-flushes",
+   "note": "A client never computes cell widths, so a CJK glyph, an emoji, a ZWJ sequence or a combining mark makes no guess and ends the guessing; the host's cursor says where the line got to, and guessing resumes from there.",
+   "policy": "auto",
+   "remote_hint": true,
+   "cols": 80,
+   "cursor": {
+    "row": 0,
+    "col": 2
+   },
+   "steps": [
+    {
+     "at": 0,
+     "input": {
+      "key": "printable",
+      "ch": "a"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        2,
+        "a"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 1,
+     "input": {
+      "key": "printable",
+      "ch": "你"
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 2,
+     "input": {
+      "key": "printable",
+      "ch": "b"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        2,
+        "b"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 3,
+     "input": {
+      "key": "printable",
+      "ch": "👨‍👩‍👧"
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 4,
+     "input": {
+      "key": "printable",
+      "ch": "é"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        2,
+        "é"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 5,
+     "input": {
+      "key": "printable",
+      "ch": "́"
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 6,
+     "input": {
+      "key": "printable",
+      "ch": ""
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 60,
+     "delta": {
+      "attrs": [],
+      "ops": [
+       {
+        "op": "row",
+        "row": 0,
+        "payload": {
+         "line": 0,
+         "runs": [
+          {
+           "attr": 0,
+           "cells": 6,
+           "text": "$ a你bé"
+          }
+         ],
+         "wrapped": false
+        }
+       },
+       {
+        "op": "cursor",
+        "cursor": {
+         "row": 0,
+         "col": 7,
+         "visible": true,
+         "shape": 0
+        }
+       }
+      ]
+     },
+     "expect": {
+      "overlay": [],
+      "pending": 0,
+      "showing": true,
+      "latency_ms": null
+     }
+    },
+    {
+     "at": 61,
+     "input": {
+      "key": "printable",
+      "ch": "c"
+     },
+     "expect": {
+      "overlay": [
+       [
+        0,
+        7,
+        "c"
+       ]
+      ],
+      "pending": 1,
+      "showing": true,
+      "latency_ms": null
+     }
+    }
+   ]
+  }
+ ]
+}
