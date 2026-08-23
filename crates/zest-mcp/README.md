@@ -267,6 +267,14 @@ anybody's laptop. It is read from the OS keychain on the first *remote* dial and
 never at startup, which keeps the macOS prompt off the path that must answer
 `initialize`.
 
+A machine with **no usable credential store** — a headless box with no Secret
+Service, a container, a locked keychain — still reaches the fleet: the key falls
+back to one per process, so pairing still works and holds for as long as this
+server runs. What is lost is durability, and `hosts` says so in `notes`, because
+the person who needs to know is the one being asked to approve the same agent a
+second time. Refusing instead would make the fleet unreachable from exactly the
+machines most likely to be driven by an agent.
+
 The first call naming an unapproved machine comes back with the code rather than
 hanging, and the dial stays open behind it: `PendingHandle::Drop` **cancels** a
 pairing request, so refusing by hanging up would delete the prompt the person is

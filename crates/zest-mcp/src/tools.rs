@@ -180,6 +180,18 @@ pub struct ToolSet {
     /// genuinely gates, so there the key has to survive a restart or every
     /// launch asks a person to approve the same agent again.
     agent_key: Option<Arc<ClientIdentity>>,
+    /// Where the durable key is kept.
+    ///
+    /// A field rather than `OsKeyStore` reached for at the point of use, and
+    /// that is not only for tests: a test that minted the *real* `agent-key`
+    /// would write into the developer's own credential store as a side effect
+    /// of `cargo test`, which is a thing a suite must never do.
+    keys: Arc<dyn zest_mesh::keystore::KeyStore>,
+    /// Whether [`Self::agent_key`] will survive this process.
+    ///
+    /// `false` once the store has refused, so `hosts` can say the pairing will
+    /// have to be repeated next launch rather than leaving somebody to notice.
+    durable_key: bool,
     /// Where this machine's daemon was reached, so a redial goes back to the
     /// *same* one.
     ///
@@ -226,9 +238,19 @@ impl ToolSet {
             fleet,
             pending: BTreeMap::new(),
             agent_key: None,
+            keys: Arc::new(zest_mesh::keystore::OsKeyStore),
+            durable_key: true,
             local_socket: zest_daemon::default_socket_path(),
             roots: zest_cloud::tls::Roots::Platform,
         }
+    }
+
+    /// Keep the durable key somewhere other than this machine's credential
+    /// store -- which every test does, so none of them writes a real one.
+    #[must_use]
+    pub fn with_key_store(mut self, keys: Arc<dyn zest_mesh::keystore::KeyStore>) -> Self {
+        self.keys = keys;
+        self
     }
 
     /// Where this machine's daemon lives, when it is not the default path.
@@ -552,21 +574,36 @@ impl ToolSet {
         if let Some(key) = &self.agent_key {
             return Ok(Arc::clone(key));
         }
-        // First remote dial in this process, and the first moment the OS
-        // keychain is touched at all.
-        let key = ClientIdentity::load_or_create_named(
-            &zest_mesh::keystore::OsKeyStore,
+        // First remote dial in this process, and the first moment the
+        // credential store is touched at all.
+        let key = match ClientIdentity::load_or_create_named(
+            self.keys.as_ref(),
             zest_mesh::keystore::AGENT_KEY_NAME,
-        )
-        .map(Arc::new)
-        .map_err(|e| ToolError::Unreachable {
-            label: "any other machine".into(),
-            why: format!(
-                "this server has no durable key to prove itself with ({e}); a remote host \
-                 pairs a key that survives a restart, so an in-memory one would ask somebody \
-                 to approve this agent again every launch"
-            ),
-        })?;
+        ) {
+            Ok(k) => k,
+            Err(e) => {
+                // **Degrade, do not refuse.** A machine with no usable
+                // credential store is ordinary -- a headless Linux box with no
+                // Secret Service, a container, a locked keychain -- and
+                // refusing every remote host there would make the fleet
+                // unreachable from exactly the machines most likely to be
+                // driven by an agent. What is lost is only *durability*: one
+                // key per process still pairs, and still holds for the life of
+                // this server. It has to be one per process rather than one
+                // per dial, or a redial would arrive as a stranger and ask
+                // somebody to approve the same agent twice in a minute.
+                tracing::warn!(
+                    error = %e,
+                    "no durable key store; pairing will have to be repeated next launch"
+                );
+                self.durable_key = false;
+                ClientIdentity::generate().map_err(|e| ToolError::Unreachable {
+                    label: "any other machine".into(),
+                    why: format!("this server could not mint a key to prove itself with ({e})"),
+                })?
+            }
+        };
+        let key = Arc::new(key);
         self.agent_key = Some(Arc::clone(&key));
         Ok(key)
     }
@@ -585,7 +622,18 @@ impl ToolSet {
     /// row, so an id in a build log cannot address a machine until this server
     /// has listed it.
     fn hosts(&mut self) -> Result<Value, ToolError> {
-        let view = self.fleet.view();
+        let mut view = self.fleet.view();
+        if !self.durable_key {
+            // Said here rather than only in the log, because the person who
+            // needs it is the one being asked to approve this agent for the
+            // second time.
+            view.notes.push(
+                "this machine has no usable credential store, so this agent's key lasts only \
+                 as long as this server runs -- any machine you approve it on will ask again \
+                 next launch"
+                    .into(),
+            );
+        }
         let mut rows = Vec::with_capacity(view.hosts.len());
         for h in &view.hosts {
             self.resolver.learn(h.host, &h.label);

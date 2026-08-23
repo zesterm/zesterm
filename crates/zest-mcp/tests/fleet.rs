@@ -132,7 +132,13 @@ fn row(m: &Machine, local: bool) -> FleetHost {
 }
 
 fn tools(local: &Machine, fleet: Vec<FleetHost>) -> ToolSet {
+    // A memory store, always. The durable `agent-key` lives in the OS
+    // credential store, and a test that minted the real one would write into
+    // the developer's own keychain as a side effect of `cargo test` -- and
+    // would then behave differently on a CI runner that has no store at all,
+    // which is exactly how this arrived.
     ToolSet::new(dial(&local.addr), Box::new(StaticFleet::new(fleet)))
+        .with_key_store(Arc::new(zest_mesh::keystore::MemoryKeyStore::new()))
 }
 
 fn ok(v: Result<Value, zest_mcp::ToolError>) -> Value {
@@ -422,6 +428,71 @@ fn a_machine_that_answers_slowly_is_not_reported_as_a_pairing_prompt() {
             "attempt {attempt}: it says it is still waiting, and on what: {said}"
         );
     }
+}
+
+/// A credential store that refuses everything, as a headless Linux box with no
+/// Secret Service does.
+struct NoStore;
+
+impl zest_mesh::keystore::KeyStore for NoStore {
+    fn load(
+        &self,
+        _name: &str,
+    ) -> Result<Option<zest_mesh::keystore::Zeroizing<[u8; zest_mesh::keystore::SECRET_LEN]>>, zest_mesh::MeshError>
+    {
+        Err(zest_mesh::MeshError::Identity("no default store has been set".into()))
+    }
+
+    fn store(
+        &self,
+        _name: &str,
+        _secret: &[u8; zest_mesh::keystore::SECRET_LEN],
+    ) -> Result<(), zest_mesh::MeshError> {
+        Err(zest_mesh::MeshError::Identity("no default store has been set".into()))
+    }
+
+    fn delete(&self, _name: &str) -> Result<(), zest_mesh::MeshError> {
+        Err(zest_mesh::MeshError::Identity("no default store has been set".into()))
+    }
+
+    fn describe(&self) -> String {
+        "no store".into()
+    }
+}
+
+#[test]
+fn a_machine_with_no_credential_store_still_reaches_the_fleet_and_says_what_it_costs() {
+    // Refusing here would make the fleet unreachable from exactly the machines
+    // most likely to be driven by an agent -- a headless box, a container, a
+    // locked keychain. What is actually lost is durability, not reach: one key
+    // per process still pairs and still holds for the life of this server.
+    let here = machine("studio", false);
+    let there = machine("forge", false);
+    let mut t = ToolSet::new(dial(&here.addr), Box::new(StaticFleet::new(vec![
+        row(&here, true),
+        row(&there, false),
+    ])))
+    .with_key_store(Arc::new(NoStore));
+
+    let listed = ok(t.call("hosts", &json!({})));
+    // Nothing has needed a key yet, so nothing has been said yet.
+    assert!(
+        listed["notes"].as_array().expect("array").is_empty(),
+        "the store is only touched by a remote dial"
+    );
+
+    let made = ok(t.call("create_session", &json!({ "host": "forge", "command": quiet_cmd() })));
+    let id = made["session"].as_str().expect("an id").to_string();
+    assert!(id.starts_with(&there.host.short()), "it reached the second machine anyway");
+
+    let after = ok(t.call("hosts", &json!({})));
+    let notes = after["notes"].as_array().expect("array");
+    assert!(
+        notes.iter().any(|n| n.as_str().is_some_and(|n| n.contains("ask again next launch"))),
+        "and it says what that cost, where the person approving it will read it: {notes:?}"
+    );
+
+    ok(t.call("close_session", &json!({ "session": id })));
 }
 
 /// Poll `f` until it answers, up to a few seconds.
