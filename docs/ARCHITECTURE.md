@@ -1455,8 +1455,8 @@ at the two halves of one hazard.
 
 ## ADR-016 — Predicted echo is an overlay, and the client still parses no VT
 
-**Status:** accepted (#442). The engine and its cross-port fixture landed
-first, then the native overlay; the browser overlay follows as its own PR.
+**Status:** accepted (#442). Landed in three parts: the engine and its
+cross-port fixture, the native overlay, the browser overlay.
 
 Over the relay a keystroke round-trips 60–120 ms before its echo comes back as
 a delta, and that is the whole felt difference between a local shell and a
@@ -1480,8 +1480,9 @@ or a line in someone else's scrollback.
 The IME preedit had already settled this (`Viewport.preedit`, "not in the
 grid, deliberately"): provisional text is an **overlay** the renderer draws on
 top of cells. Predictions ride the same seam in both clients — `Viewport` in
-`zest-render-wgpu`, `PaintOptions` in the web painter — so nothing that reads
-the grid can ever see one. That is not a nicety; it is what keeps ADR-015's
+`zest-render-wgpu`, a `predicted` span on the DOM prompt row in the browser
+(the canvas painter needs nothing: the alternate screen is never guessed
+into) — so nothing that reads the grid can ever see one. That is not a nicety; it is what keeps ADR-015's
 "an agent never reads a guess" true without a single line of code in `zest-mcp`.
 
 ### The client still interprets no VT

@@ -31,7 +31,9 @@ import {
   isExited,
   isErrorMessage,
   isScrollback,
+  Predictor,
   type ClientMessage,
+  type PredictKey,
   type SessionAddr,
 } from '@zesterm/proto';
 import type { ClientSigner } from '@zesterm/auth';
@@ -65,6 +67,15 @@ export type ConnectionState =
 /** Which rows changed, for a renderer that repaints by row. */
 export type DirtyRows = ReadonlySet<number> | 'all';
 
+/** How often a standing guess is re-examined for expiry. */
+const PREDICT_TICK_MS = 100;
+
+/** The drawn guesses at one moment: their rows, and a signature to diff by. */
+interface Guesses {
+  readonly rows: ReadonlySet<number>;
+  readonly sig: string;
+}
+
 export interface SessionEvents {
   onChange?(dirty: DirtyRows): void;
   onBlocksChanged?(): void;
@@ -90,6 +101,20 @@ export interface SessionClientOptions {
 
 export class SessionClient {
   readonly grid = new GridView();
+
+  /**
+   * Guessed echo (ADR-016): what a printable will come back as, shown before
+   * the host says so. Fed by `input()` with the key as the keyboard knew it,
+   * judged against every delta applied below, and read by the view as an
+   * overlay — never written into `grid`, which every other attached device
+   * shares. `auto` with the remote hint on: every host a browser reaches is
+   * on the far side of a socket, and the first confirmed echo replaces the
+   * hint with a measurement, so a loopback daemon hides the overlay on its
+   * own within one round trip.
+   */
+  readonly predictor = new Predictor('auto');
+  /** Armed while a guess stands, so one nothing answers expires on screen. */
+  #predictTimer: TimerHandle | null = null;
 
   #options: SessionClientOptions;
   #clock: Clock;
@@ -163,6 +188,7 @@ export class SessionClient {
     this.#events = options.events ?? {};
     this.#cols = options.cols;
     this.#rows = options.rows;
+    this.predictor.setRemoteHint(true);
   }
 
   /** Open the first connection. One code path with reconnect, deliberately. */
@@ -174,6 +200,7 @@ export class SessionClient {
     this.#closed = true;
     if (this.#ackTimer !== null) this.#clock.cancel(this.#ackTimer);
     if (this.#redialTimer !== null) this.#clock.cancel(this.#redialTimer);
+    if (this.#predictTimer !== null) this.#clock.cancel(this.#predictTimer);
     this.#link?.close();
     this.#link = null;
   }
@@ -182,10 +209,58 @@ export class SessionClient {
     return this.#connected;
   }
 
-  /** Encoded terminal bytes. Dropped while disconnected — see the module doc. */
-  input(bytes: Uint8Array): void {
+  /**
+   * Encoded terminal bytes. Dropped while disconnected — see the module doc.
+   *
+   * `keys` are the keystrokes as the keyboard knew them, for the predictor;
+   * the bytes are never un-encoded. One key for a keystroke, one per code
+   * point for composed text (a single write, since a composed word must not
+   * arrive as a paste), and none for writes that are not typing — a focus
+   * report, a mouse event — which guess nothing and flush nothing. Dropped
+   * bytes drop their keys with them: a guess for a keystroke that never left
+   * would stand until reconnect and be wrong for the whole of it.
+   */
+  input(bytes: Uint8Array, keys: readonly PredictKey[] = []): void {
     if (!this.#connected || bytes.length === 0) return;
+    const before = this.#guesses();
+    const now = this.#clock.now();
+    for (const k of keys) this.predictor.onInput(k, now);
     this.#send({ t: 'input', session: this.#options.session, bytes });
+    const dirty = this.#guessesChanged(before);
+    if (dirty.size > 0) this.#events.onChange?.(dirty);
+  }
+
+  /** What is drawn right now, as something two moments can be compared by. */
+  #guesses(): Guesses {
+    const cells = this.predictor.overlay();
+    return { rows: new Set(cells.map((p) => p.row)), sig: cells.map((p) => `${p.row}:${p.col}${p.ch}`).join(' ') };
+  }
+
+  /**
+   * The rows to repaint because a guess left or arrived on them — empty when
+   * what is drawn did not change, so the expiry clock below is not a repaint
+   * clock. Returned rather than fired, so a caller that is about to announce
+   * a delta's own rows folds these in and the view hears once. Also keeps
+   * that clock on what still stands: a guess the host never answers is taken
+   * back by time, and nothing else would wake the view to show that.
+   */
+  #guessesChanged(before: Guesses): Set<number> {
+    const after = this.#guesses();
+    const dirty = after.sig === before.sig ? new Set<number>() : new Set([...before.rows, ...after.rows]);
+    if (this.#predictTimer !== null) {
+      this.#clock.cancel(this.#predictTimer);
+      this.#predictTimer = null;
+    }
+    if (this.predictor.pending().length > 0) {
+      this.#predictTimer = this.#clock.schedule(() => {
+        this.#predictTimer = null;
+        const was = this.#guesses();
+        this.predictor.tick(this.#clock.now());
+        const gone = this.#guessesChanged(was);
+        if (gone.size > 0) this.#events.onChange?.(gone);
+      }, PREDICT_TICK_MS);
+    }
+    return dirty;
   }
 
   resize(cols: number, rows: number): void {
@@ -380,6 +455,7 @@ export class SessionClient {
       const hadCols = this.grid.cols;
       const hadScrollback = this.grid.scrollback.length;
       this.grid.applyKeyframe(msg);
+      this.predictor.onKeyframe(this.grid.cursor, this.grid.cols, this.grid.altScreen);
       this.#refetchDiscardedScrollback(hadCols, hadScrollback);
       this.#appliedSeq = msg.seq;
       this.#awaitingKeyframe = false;
@@ -405,13 +481,20 @@ export class SessionClient {
       const before = this.grid.title;
       const modesBefore = this.grid.modes;
       const dirty = dirtyRowsOf(msg.delta, this.grid.rows.length);
+      // The rows the guesses stood on before the delta judged them: a guess
+      // the delta took back has to be erased even when the delta itself
+      // touched no row (a cursor-only confirmation).
+      const guessed = this.#guesses();
       this.grid.applyDelta(msg.delta);
+      this.predictor.reconcile(msg.delta, this.#clock.now());
+      const changed = this.#guessesChanged(guessed);
+      const dirtyNow: DirtyRows = dirty === 'all' ? 'all' : new Set([...dirty, ...changed]);
       this.#appliedSeq = msg.seq;
       this.#queueAck(msg.seq);
       if (this.grid.title !== before) this.#events.onTitle?.(this.grid.title);
       if (this.grid.modes !== modesBefore) this.#events.onModes?.(this.grid.modes);
       if (msg.delta.blocks.length > 0) this.#events.onBlocksChanged?.();
-      this.#events.onChange?.(dirty);
+      this.#events.onChange?.(dirtyNow);
       return;
     }
     if (isScrollback(msg)) {

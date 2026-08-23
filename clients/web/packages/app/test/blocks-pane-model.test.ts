@@ -43,6 +43,7 @@ import {
   promptChips,
   type HeaderItem,
   type RenderItem,
+  predictedText,
 } from '../src/blocks-pane-model.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -322,6 +323,36 @@ test('a trailing prompt-state block renders as the prompt line, not a header', (
     prompt.rows.map((r) => r.line),
     [2],
     "the prompt item carries the shell's own prompt row, where the caret goes",
+  );
+});
+
+test('the prompt item carries the guessed echo, on the cursor row only, in column order', () => {
+  const view = {
+    scrollback: [],
+    rows: [synthRow(0, '❯ echo hi'), synthRow(1, 'hi'), synthRow(2, '❯ ')],
+    blocks: [
+      synthBlock(0, 0, 1, 1, { state: 'finished', exit_code: 0 }, 'echo hi'),
+      synthBlock(1, 2, null, null, { state: 'prompt' }, ''),
+    ],
+    cursor: { row: 2, col: 2, visible: true, shape: 0 } as const,
+    attrs: new Map(),
+  };
+  const guesses = [
+    { row: 2, col: 3, ch: 'b', madeAt: 0 },
+    { row: 2, col: 2, ch: 'a', madeAt: 0 },
+    // Never produced by the predictor; if it were, it has nowhere to go.
+    { row: 1, col: 0, ch: 'x', madeAt: 0 },
+  ];
+  const items = paneModel(view, new Set(), 'live', NOW, [], guesses);
+  const prompt = items.find(
+    (i): i is Extract<RenderItem, { kind: 'prompt' }> => i.kind === 'prompt',
+  );
+  assert.ok(prompt);
+  assert.equal(prompt.predicted, 'ab', 'the guesses read as typed, after the prompt, before the caret');
+  assert.equal(
+    predictedText([], 2),
+    '',
+    'no guesses is an empty string, which the view draws as nothing at all',
   );
 });
 

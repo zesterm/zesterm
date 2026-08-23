@@ -267,6 +267,9 @@ export const BlocksPane = component<{
               {item.rows.map((r, idx) => (
                 <span class="prompt-row" key={String(r.line)}>
                   {r.spans.map((s) => spanEl(s, palette))}
+                  {idx === item.rows.length - 1 && item.predicted !== '' ? (
+                    <span class="predicted">{item.predicted}</span>
+                  ) : null}
                   {idx === item.rows.length - 1 ? <span class="caret" /> : null}
                 </span>
               ))}

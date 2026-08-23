@@ -170,13 +170,17 @@ Two gates, catching different things:
 - **`GridView` grows when a row lands past the end**; the Rust `Applier` asks for
   a keyframe instead. This is a port of `GridView`, and following the wrong one
   is a divergence no test outside the fixtures would catch.
+- **A guessed echo is never in `GridView`.** `SessionClient.predictor` (the
+  port of `zest-proto::predict`, ADR-016) guesses what a typed printable will
+  echo as; `input(bytes, key)` takes the key *beside* the bytes because the
+  predictor never un-encodes them, and the guess is drawn as a `predicted`
+  span on the DOM prompt row — `paneModel`'s prompt item carries it. The
+  canvas painter needs nothing: the alternate screen is never guessed into.
+  Both ports replay `crates/zest-proto/fixtures/predict.json`; a rule that
+  changes changes that file. `#442`.
 
 ## Not here yet
 
-- **Local echo prediction's overlay.** The engine is here (`proto/src/predict.ts`,
-  the port of `zest-proto::predict`, replaying the same fixture); what is not
-  yet is the painter drawing its guesses on `PaintOptions`'s overlay seam and
-  `SessionClient` feeding it keys. ADR-016, #442.
 - **A Worker for the decoder.** Decode + apply runs on the main thread, and
   measurement says that is fine: the whole 82k-cell corpus replays in well under
   a second, and `fillText` — which must be on the main thread anyway — is where

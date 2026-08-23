@@ -24,6 +24,7 @@ import {
   type BlockSlice,
   type BlocksLayout,
   type CursorState,
+  type Prediction,
   type RowPayload,
   type Span,
 } from '@zesterm/proto';
@@ -132,8 +133,19 @@ export type RenderItem =
   | { readonly kind: 'rows'; readonly key: string; readonly rows: readonly PaneRow[] }
   | HeaderItem
   | { readonly kind: 'output'; readonly blockId: number; readonly rows: readonly PaneRow[] }
-  /** The live shell prompt awaiting input; the view appends the blinking caret. */
-  | { readonly kind: 'prompt'; readonly rows: readonly PaneRow[]; readonly chips: readonly PromptChip[] }
+  /**
+   * The live shell prompt awaiting input; the view appends the blinking
+   * caret. `predicted` is the echo guessed for keys the host has not
+   * answered yet (ADR-016), drawn after the prompt's own text and before the
+   * caret — the one place a guess can stand, since the predictor never
+   * guesses past the cursor's row.
+   */
+  | {
+      readonly kind: 'prompt';
+      readonly rows: readonly PaneRow[];
+      readonly chips: readonly PromptChip[];
+      readonly predicted: string;
+    }
   | { readonly kind: 'overlay'; readonly link: 'stalled' | 'reconnecting'; readonly text: string };
 
 /**
@@ -337,6 +349,7 @@ export function paneModel(
   link: LinkHealth,
   nowMs: number = Date.now(),
   chips: readonly PromptChip[] = [],
+  predicted: readonly Prediction[] = [],
 ): RenderItem[] {
   const layout = sliceBlocks(view);
   const items: RenderItem[] = [];
@@ -359,6 +372,7 @@ export function paneModel(
         kind: 'prompt',
         rows: toPaneRows(upToCaret([...slice.promptRows, ...slice.outputRows], view), view.attrs),
         chips,
+        predicted: predictedText(predicted, view.cursor.row),
       });
       continue;
     }
@@ -430,6 +444,22 @@ export function paneModel(
  * the strength of a caret that is not in the slice at all. Rendering the whole
  * prompt is the harmless answer; dropping a row of it is not.
  */
+/**
+ * The guesses on the cursor's row, in column order, as one string.
+ *
+ * Only that row: the predictor never guesses off it, and a guess that
+ * somehow named another would have nowhere to be drawn. Column order rather
+ * than arrival order so a Backspace that popped the newest guess reads
+ * right.
+ */
+export function predictedText(predicted: readonly Prediction[], cursorRow: number): string {
+  return predicted
+    .filter((p) => p.row === cursorRow)
+    .sort((a, b) => a.col - b.col)
+    .map((p) => p.ch)
+    .join('');
+}
+
 function upToCaret(rows: readonly RowPayload[], view: PaneView): readonly RowPayload[] {
   const caretLine = view.rows[view.cursor.row]?.line;
   if (caretLine === undefined) return rows;
