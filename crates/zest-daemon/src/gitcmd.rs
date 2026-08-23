@@ -151,6 +151,31 @@ const DIFF_CAP: usize = 1024 * 1024;
 /// How many untracked names come back before `untracked_truncated`.
 const UNTRACKED_CAP: usize = 1000;
 
+/// The `??` entries of a `git status --porcelain -z`, and whether the list is
+/// short of the truth.
+///
+/// Split out from [`git_diff`] so the awkward case is testable without a
+/// repository half a megabyte wide: when the output was capped mid-name, the
+/// final entry is a *fragment* — a path that names nothing, which the panel
+/// would render as a row that cannot be opened. A complete listing always ends
+/// with its terminator, so the absence of one is what identifies the fragment.
+fn untracked_names(out: &[u8], truncated: bool) -> (Vec<String>, bool) {
+    let mut entries: Vec<&[u8]> = out.split(|&b| b == 0).collect();
+    let mut cut = truncated;
+    if truncated && !out.ends_with(&[0]) {
+        entries.pop();
+        cut = true;
+    }
+    let mut names: Vec<String> = entries
+        .into_iter()
+        .filter(|e| e.len() > 3 && &e[..3] == b"?? ")
+        .map(|e| String::from_utf8_lossy(&e[3..]).into_owned())
+        .collect();
+    cut |= names.len() > UNTRACKED_CAP;
+    names.truncate(UNTRACKED_CAP);
+    (names, cut)
+}
+
 /// Answer [`zest_proto::ClientMessage::GitDiff`]: what is uncommitted in the
 /// repository containing `cwd`.
 ///
@@ -216,13 +241,9 @@ pub fn git_diff(cwd: &str) -> zest_proto::HostMessage {
     if let Some(st) = run_git(&repo_root, &["status", "--porcelain", "-z"], 512 * 1024, DIFF_DEADLINE)
         .filter(|st| st.ok)
     {
-        for entry in st.out.split(|&b| b == 0) {
-            if entry.len() > 3 && &entry[..3] == b"?? " {
-                untracked.push(String::from_utf8_lossy(&entry[3..]).into_owned());
-            }
-        }
-        untracked_truncated = untracked.len() > UNTRACKED_CAP || st.truncated;
-        untracked.truncate(UNTRACKED_CAP);
+        let (names, cut) = untracked_names(&st.out, st.truncated);
+        untracked = names;
+        untracked_truncated = cut;
     }
 
     HostMessage::GitDiffResult {
@@ -447,6 +468,30 @@ mod tests {
         assert!(diff.is_empty(), "nothing changed:\n{diff}");
         assert!(untracked.is_empty());
         assert!(!truncated);
+    }
+
+    #[test]
+    fn a_listing_cut_mid_filename_drops_the_fragment_rather_than_naming_it() {
+        // Only `??` rows are ours; the modified one is git's answer to a
+        // different question and must not appear.
+        let whole = b"?? one.txt\0 M tracked.txt\0?? two words.txt\0";
+        let (names, cut) = untracked_names(whole, false);
+        assert_eq!(names, ["one.txt".to_string(), "two words.txt".to_string()]);
+        assert!(!cut);
+
+        // Capped mid-name: no trailing NUL, so the tail is a fragment. Naming
+        // it would put a row in the panel that opens nothing.
+        let clipped = b"?? one.txt\0?? two wor";
+        let (names, cut) = untracked_names(clipped, true);
+        assert_eq!(names, ["one.txt".to_string()], "the fragment is dropped, not reported");
+        assert!(cut, "and the client is told the list is short");
+
+        // Capped exactly on a boundary: everything present is whole, and the
+        // only thing missing is what never arrived.
+        let aligned = b"?? one.txt\0";
+        let (names, cut) = untracked_names(aligned, true);
+        assert_eq!(names, ["one.txt".to_string()]);
+        assert!(cut);
     }
 
     #[test]

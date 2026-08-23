@@ -1519,7 +1519,19 @@ impl Connection {
                 /// without bound.
                 const MAX_DEFERRED: usize = 4;
 
-                if self.deferred_running.load(Ordering::Relaxed) >= MAX_DEFERRED {
+                // Claimed with one atomic rather than a `load` and then a
+                // `fetch_add`. Only the reader thread reaches this today, so
+                // the two-step version cannot actually over-admit — but that
+                // is an invariant held somewhere else entirely, and a bound on
+                // how many threads a client can make us spawn should not
+                // depend on it staying true.
+                let claimed = self
+                    .deferred_running
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                        (n < MAX_DEFERRED).then_some(n + 1)
+                    })
+                    .is_ok();
+                if !claimed {
                     // Refused by name rather than queued, because a queued
                     // refresh is one that arrives after the person has stopped
                     // looking — and an honest "ask again" is something the
@@ -1534,7 +1546,10 @@ impl Connection {
                         error: "too many git questions in flight; ask again".into(),
                     }];
                 }
-                self.deferred_running.fetch_add(1, Ordering::Relaxed);
+                // Kept for the reply, because every answer — including a
+                // refusal — has to echo the question. It is the only
+                // correlation this pair has.
+                let asked = cwd.clone();
                 let cell = Arc::clone(&self.deferred);
                 let running = Arc::clone(&self.deferred_running);
                 let waker = self.waker.clone();
@@ -1557,7 +1572,7 @@ impl Connection {
                     // leaks one for good.
                     self.deferred_running.fetch_sub(1, Ordering::Relaxed);
                     return vec![HostMessage::GitDiffResult {
-                        cwd: String::new(),
+                        cwd: asked,
                         repo_root: String::new(),
                         diff: String::new(),
                         truncated: false,
