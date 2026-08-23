@@ -431,3 +431,14 @@ export function paneFor(args: {
   // sidecar…", and a blank pane would make a slow start look like a broken one.
   return { kind: 'list', hostId: args.defaultHostId ?? '' };
 }
+
+/**
+ * A tab chip's ref. sigx calls it with the element on mount and with `null`
+ * on unmount (its typing says only the former, #440); the null is the
+ * removal, so a closed tab leaves no entry for `keepActiveVisible` to read
+ * `.isConnected` off.
+ */
+export function trackChip(els: Map<string, HTMLElement>, id: string, el: HTMLElement | null): void {
+  if (el === null) els.delete(id);
+  else els.set(id, el);
+}

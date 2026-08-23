@@ -13,6 +13,7 @@ import {
   chipTooltip,
   launcherAlign,
   shouldScrollIntoView,
+  trackChip,
   type LauncherRow,
   type LauncherTargetRow,
 } from '../chrome-model.ts';
@@ -40,11 +41,6 @@ export const TabStrip = component<{
   // acts. Guarded rather than unconditional: scrollIntoView on every render
   // would fight the user's own scroll through the strip.
   const keepActiveVisible = (): void => {
-    // Prune closed tabs' entries first — the ref callback only ever adds, so
-    // without this the map holds every chip element a long session has seen.
-    for (const [id, el] of chipEls) {
-      if (!el.isConnected) chipEls.delete(id);
-    }
     const id = ctx.props.activeId;
     if (id === null || scrollEl === null) return;
     const chip = chipEls.get(id);
@@ -63,7 +59,7 @@ export const TabStrip = component<{
       <div
         class="tabs-scroll"
         role="tablist"
-        ref={(el: HTMLElement) => {
+        ref={(el: HTMLElement | null) => {
           scrollEl = el;
         }}
       >
@@ -95,7 +91,7 @@ export const TabStrip = component<{
                 ctx.props.onActivate(t.id);
               }
             }}
-            ref={(el: HTMLElement) => chipEls.set(t.id, el)}
+            ref={(el: HTMLElement | null) => trackChip(chipEls, t.id, el)}
           >
             <span class="tab-glyph">❯</span>
             <span class="tab-title">{chipTitle(t)}</span>
@@ -116,7 +112,7 @@ export const TabStrip = component<{
       </div>
       <div
         class="launcher-anchor"
-        ref={(el: HTMLElement) => {
+        ref={(el: HTMLElement | null) => {
           anchorEl = el;
         }}
       >
