@@ -104,7 +104,8 @@ fn main() -> std::process::ExitCode {
     // the keychain -- which is what keeps this the same startup it has always
     // been.
     let fleet = LiveFleet::new(conn.host(), conn.label());
-    let mut server = Server::new(ToolSet::new(conn, Box::new(fleet)));
+    let mut server =
+        Server::new(ToolSet::new(conn, Box::new(fleet)).with_local_socket(&socket));
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     match server.serve(BufReader::new(stdin.lock()), stdout.lock()) {

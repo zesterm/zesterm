@@ -180,6 +180,15 @@ pub struct ToolSet {
     /// genuinely gates, so there the key has to survive a restart or every
     /// launch asks a person to approve the same agent again.
     agent_key: Option<Arc<ClientIdentity>>,
+    /// Where this machine's daemon was reached, so a redial goes back to the
+    /// *same* one.
+    ///
+    /// Not `default_socket_path()` at the moment of need: this server may have
+    /// been launched with `--socket`, and re-deriving the default would
+    /// reconnect the local row to a different daemon than the one it has been
+    /// describing -- with the same host id in every id it had already handed
+    /// out.
+    local_socket: String,
     roots: zest_cloud::tls::Roots,
 }
 
@@ -207,8 +216,26 @@ impl ToolSet {
             fleet,
             pending: BTreeMap::new(),
             agent_key: None,
+            local_socket: zest_daemon::default_socket_path(),
             roots: zest_cloud::tls::Roots::Platform,
         }
+    }
+
+    /// Where this machine's daemon lives, when it is not the default path.
+    #[must_use]
+    pub fn with_local_socket(mut self, path: &str) -> Self {
+        self.local_socket = path.to_string();
+        self
+    }
+
+    /// This client's own route, which is what "local" means to `best_route`.
+    ///
+    /// `None` once the local connection is gone and cannot be reopened by a
+    /// path we still hold, because `best_route`'s local arm returns whatever
+    /// this is -- and answering `Some` there for a socket that is not ours
+    /// would be a route to a different machine wearing this one's id.
+    fn local_route(&self) -> Option<zest_fleet::HostRoute> {
+        local_route(&self.local_socket)
     }
 
     /// Verify remote hosts against `roots` -- a test's own CA, or a platform
@@ -380,9 +407,7 @@ impl ToolSet {
                 why: "it is no longer in this server's fleet listing".into(),
             });
         };
-        let local_route = self.conns.get(&self.local).map(|_| {
-            zest_fleet::HostRoute::LocalSocket(zest_daemon::default_socket_path())
-        });
+        let local_route = self.local_route();
         let route = zest_fleet::best_route(
             row,
             local_route.as_ref(),
@@ -539,9 +564,7 @@ impl ToolSet {
                 .or_else(|| h.offer.clone());
             let route = zest_fleet::best_route(
                 h,
-                (h.local && live.is_some())
-                    .then(|| zest_fleet::HostRoute::LocalSocket(zest_daemon::default_socket_path()))
-                    .as_ref(),
+                self.local_route().as_ref(),
                 view.relay_origin.as_deref(),
                 view.signed_in,
             );
@@ -1668,6 +1691,19 @@ const DEFAULT_SIZE: (u16, u16) = (200, 50);
 /// running either way -- this bounds the reply, not the attempt.
 const DIAL_BUDGET: Duration = Duration::from_secs(12);
 
+/// The route to this machine's own daemon, from the socket this server was
+/// pointed at.
+///
+/// A free function so it can be tested without a daemon, which matters more
+/// than it looks: the failure it guards against is silent. Re-deriving
+/// `default_socket_path()` at the moment of need would send a redial of the
+/// local connection to a *different* daemon than the one this server has been
+/// describing -- under `--socket`, with the first daemon's host id already
+/// inside every session id it had handed out.
+fn local_route(socket: &str) -> Option<zest_fleet::HostRoute> {
+    (!socket.is_empty()).then(|| zest_fleet::HostRoute::LocalSocket(socket.to_string()))
+}
+
 /// One session row, as every listing spells it.
 ///
 /// A function rather than a closure because two callers now share it, and the
@@ -2225,6 +2261,26 @@ mod input_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_local_route_names_the_socket_this_server_was_given() {
+        // Under `--socket`, re-deriving the default at the moment of need would
+        // point a redial of the local connection at a *different* daemon --
+        // while every session id already handed out carries the first one's
+        // host. Silent, and only reachable after a local link drops, which is
+        // why it is pinned here rather than left to a live test that would have
+        // to kill a daemon to reach it.
+        assert_eq!(
+            local_route("/tmp/somewhere-else.sock"),
+            Some(zest_fleet::HostRoute::LocalSocket("/tmp/somewhere-else.sock".into())),
+            "the configured socket, not `default_socket_path()`"
+        );
+        assert_eq!(
+            local_route(""),
+            None,
+            "no socket is no route -- `best_route`'s local arm returns this verbatim, so a              `Some` here would be a route to whatever answered that path"
+        );
+    }
+
     use super::*;
 
     #[test]
