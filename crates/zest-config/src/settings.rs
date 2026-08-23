@@ -574,12 +574,29 @@ pub enum CursorTrail {
     Smear,
 }
 
+/// Whether a keystroke's echo is guessed before the host confirms it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum PredictEcho {
+    /// Guess once the link measures slow enough for it to help (above ~40 ms).
+    Auto,
+    /// Guess on every remote session, however fast the link.
+    Always,
+    /// Never guess.
+    Off,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Cursor {
     /// Shape, unless the program sets one with DECSCUSR.
     #[schemars(extend("x_zest_group" = "Cursor", "x_zest_widget" = "select"))]
     pub shape: CursorShape,
+    /// Show what a keystroke will echo as before the remote host confirms it
+    /// — dim and underlined, taken back if the host disagrees. What makes a
+    /// session over the relay feel local. Local sessions never guess.
+    #[schemars(extend("x_zest_group" = "Cursor", "x_zest_widget" = "select"))]
+    pub predict_echo: PredictEcho,
     /// Blink the cursor.
     ///
     /// Blinking is the most common way a terminal loses its 0%-idle claim: it
@@ -599,6 +616,7 @@ impl Default for Cursor {
     fn default() -> Self {
         Self {
             shape: CursorShape::Block,
+            predict_echo: PredictEcho::Auto,
             blink: true,
             blink_interval_ms: 530,
             trail: CursorTrail::None,

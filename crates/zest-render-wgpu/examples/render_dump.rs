@@ -201,6 +201,7 @@ async fn run() {
                 cursor: Some((text.len() / 2, text.len() / 2)),
                 text,
             }),
+            predicted: None,
             cursor_on: true,
             row_map: None,
         }],

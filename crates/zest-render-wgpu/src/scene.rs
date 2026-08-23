@@ -96,6 +96,14 @@ pub struct Viewport<'a> {
     /// Drawing it here rather than writing it into cells is what keeps
     /// half-typed characters out of someone else's scrollback.
     pub preedit: Option<Preedit<'a>>,
+    /// Keystrokes whose echo the host has not confirmed yet, drawn as guesses.
+    ///
+    /// The same seam as the preedit, for the same reason: a guess belongs to
+    /// the keyboard in front of this person and must never reach the grid
+    /// that every other attached device, the block index and an agent read.
+    /// `None` and an empty list draw nothing; the cursor moves to the caret
+    /// only while there is something to draw. → ADR-016.
+    pub predicted: Option<Predicted<'a>>,
     /// Blink phase: `false` hides the focused block cursor (the off half of
     /// the cycle). The hollow unfocused cursor never blinks — it marks where
     /// focus would land, and a vanishing landmark is worse than none.
@@ -150,6 +158,23 @@ fn cursor_visual_row(grid: &Grid, vp: &Viewport<'_>) -> Option<usize> {
         }
         None => Some(grid.cursor.row),
     }
+}
+
+/// One guessed cell. `ch` is one cell wide by construction — the predictor
+/// refuses anything whose width only the host knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PredictedCell {
+    pub row: u16,
+    pub col: u16,
+    pub ch: char,
+}
+
+/// The guesses to draw, and where the caret belongs while they stand.
+#[derive(Debug, Clone, Copy)]
+pub struct Predicted<'a> {
+    pub cells: &'a [PredictedCell],
+    /// After the last guess, so the line reads as the user typed it.
+    pub caret: (u16, u16),
 }
 
 /// Composing text and the input method's own caret within it.
@@ -329,7 +354,88 @@ impl Scene {
         if let Some(pre) = vp.preedit {
             self.emit_preedit(device, queue, atlas, fonts, metrics, grid, vp, &pre, ox, oy, clip);
         } else {
-            self.emit_cursor(grid, vp, metrics, ox, oy, clip);
+            let caret = vp
+                .predicted
+                .filter(|p| !p.cells.is_empty())
+                .map(|p| (usize::from(p.caret.0), usize::from(p.caret.1)));
+            if let Some(p) = vp.predicted {
+                self.emit_predicted(device, queue, atlas, fonts, metrics, grid, vp, &p, ox, oy, clip);
+            }
+            self.emit_cursor(grid, vp, metrics, ox, oy, clip, caret);
+        }
+    }
+
+    /// Guessed echo, drawn over the grid one cell at a time.
+    ///
+    /// Dim and underlined — the glyph says what was typed, the treatment says
+    /// the host has not agreed yet — and on the default background only where
+    /// the cell underneath already shows something, so a guess over blank
+    /// space costs one glyph and no rectangle. Suppressed while scrolled back
+    /// for the cursor's reason — the cells it names are not on screen — and
+    /// in a folded view, where a viewport row is not a grid row and a guess
+    /// on a folded line has nowhere honest to land.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_predicted(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        atlas: &mut Atlas,
+        fonts: &mut Fonts,
+        metrics: CellMetrics,
+        grid: &Grid,
+        vp: &Viewport<'_>,
+        p: &Predicted<'_>,
+        ox: f32,
+        oy: f32,
+        clip: [f32; 4],
+    ) {
+        if grid.display_offset() != 0 || vp.row_map.is_some() {
+            return;
+        }
+        let (cw, ch) = (metrics.cell_w as f32, metrics.cell_h as f32);
+        // SGR dim's own alpha, so a guess reads exactly as dim text does.
+        let fg = LinearRgba::from_srgb(
+            vp.palette.foreground.r,
+            vp.palette.foreground.g,
+            vp.palette.foreground.b,
+            0.55,
+        );
+        let bg = LinearRgba::opaque(
+            vp.palette.background.r,
+            vp.palette.background.g,
+            vp.palette.background.b,
+        );
+        for cell in p.cells {
+            let (row, col) = (usize::from(cell.row), usize::from(cell.col));
+            if row >= grid.rows() || col >= grid.cols() {
+                continue;
+            }
+            let x = ox + col as f32 * cw;
+            let y = oy + row as f32 * ch;
+            if grid.row(row).cells()[col].ch != ' ' {
+                self.rects.push(RectInstance::filled([x, y, cw, ch], bg, clip));
+            }
+            if let Some(inst) = self.glyph_instance(
+                device,
+                queue,
+                atlas,
+                fonts,
+                cell.ch,
+                Style::new(false, false),
+                x,
+                y + metrics.baseline as f32,
+                fg,
+                clip,
+            ) {
+                self.glyphs.push(inst);
+            }
+            self.decors.push(DecorInstance {
+                rect: [x, y + metrics.underline_y as f32, cw, metrics.underline_thickness as f32],
+                color: fg,
+                clip,
+                kind: DecorKind::Underline as u32,
+                _pad: [0; 3],
+            });
         }
     }
 
@@ -866,6 +972,7 @@ impl Scene {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_cursor(
         &mut self,
         grid: &Grid,
@@ -874,6 +981,10 @@ impl Scene {
         ox: f32,
         oy: f32,
         clip: [f32; 4],
+        // Where the caret goes while guesses stand: after the last one. The
+        // grid's cursor is untouched — input, IME placement and hit testing
+        // still read the host's position, exactly as with the trail.
+        caret: Option<(usize, usize)>,
     ) {
         // The cursor is hidden while scrolled back -- it refers to a position in
         // the live viewport, not wherever the user happens to be looking.
@@ -885,11 +996,15 @@ impl Scene {
         // In a folded view the cursor's row may sit elsewhere (or, if the
         // fold hid it — which folds of *finished* output never do — nowhere).
         let Some(visual_row) = cursor_visual_row(grid, vp) else { return };
+        let (visual_row, col) = match caret {
+            Some((r, col)) if vp.row_map.is_none() => (r, col.min(grid.cols().saturating_sub(1))),
+            _ => (visual_row, c.col),
+        };
         let (cw, ch) = (metrics.cell_w as f32, metrics.cell_h as f32);
         // The trail offset applies to the *focused* caret only. The unfocused
         // hollow box marks where focus would land, and a landmark that drifts
         // is worse than one that does not move at all.
-        let x = ox + c.col as f32 * cw + if vp.focused { vp.cursor_offset[0] } else { 0.0 };
+        let x = ox + col as f32 * cw + if vp.focused { vp.cursor_offset[0] } else { 0.0 };
         let y = oy + visual_row as f32 * ch + if vp.focused { vp.cursor_offset[1] } else { 0.0 };
         let color = LinearRgba::opaque(vp.palette.cursor.r, vp.palette.cursor.g, vp.palette.cursor.b);
 
@@ -1177,6 +1292,7 @@ mod tests {
             selection: None,
             selection_bg: Rgb::new(0x33, 0x44, 0x55),
             preedit: None,
+            predicted: None,
             cursor_on: true,
             row_map: None,
         }
@@ -1480,6 +1596,42 @@ mod tests {
         assert!(
             breaks_run(&g.row(0).get(1).copied().unwrap(), g.row(0)),
             "the wide cell is the one that has to fall to the per-cell path"
+        );
+    }
+
+    /// ADR-016: a guess moves the *drawn* caret after itself and nothing
+    /// else — the grid's cursor is the host's, and input, IME placement and
+    /// hit testing keep reading it. Asserted on the cursor rect's x alone,
+    /// because that is the whole visible effect.
+    #[test]
+    fn the_caret_sits_after_the_guesses_and_the_grid_cursor_stays_put() {
+        let p = palette();
+        let mut grid = lined(4, 10);
+        grid.cursor.row = 1;
+        grid.cursor.col = 2;
+        let m = CellMetrics {
+            cell_w: 10,
+            cell_h: 20,
+            baseline: 16,
+            underline_y: 18,
+            underline_thickness: 2,
+            strikeout_y: 10,
+        };
+        let cursor_x = |caret: Option<(usize, usize)>| {
+            let mut s = Scene::default();
+            let vp = viewport(&grid, &p, 1.0);
+            s.emit_cursor(&grid, &vp, m, 0.0, 0.0, vp.rect, caret);
+            s.rects.last().expect("a focused cursor is a rect").rect
+        };
+        assert_eq!(cursor_x(None)[0], 20.0, "no guess: the caret is the grid cursor");
+        let with = cursor_x(Some((1, 5)));
+        assert_eq!(with[0], 50.0, "three guesses standing: the caret sits after the last");
+        assert_eq!(with[1], 20.0, "...on the same row");
+        assert_eq!((grid.cursor.row, grid.cursor.col), (1, 2), "the grid's cursor is untouched");
+        assert_eq!(
+            cursor_x(Some((1, 99)))[0],
+            90.0,
+            "a caret past the edge clamps to the last column rather than leaving the pane"
         );
     }
 

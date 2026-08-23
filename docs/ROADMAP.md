@@ -215,14 +215,16 @@ own fleet model, loopback deliberately silent.
 - [ ] **Local echo prediction** (mosh's other trick; #442, ADR-016). The
       engine landed first: `zest-proto::predict` and its TypeScript port
       reconcile guesses from a delta's own rows and cursor, held to one rule
-      set by `fixtures/predict.json`. What remains, in landable slices: the
-      native overlay (`Viewport.predictions` beside `preedit`, a
-      `SessionSource` hook before `key::encode`, an `input.predict_echo`
-      setting, and a `--simulated-latency` flag so the edit-run loop needs no
-      relay); the web overlay on `PaintOptions`'s pre-cut seam; and — only
-      once the heuristic is seen failing on a real link — an additive `echo`
-      sequence on `Input`/`Update`, which is what would let "not echoed yet"
-      be told from "never echoed".
+      set by `fixtures/predict.json`. The native window draws them
+      (`Viewport.predicted` beside `preedit`; `SessionSource::predict` takes
+      the key *before* `key::encode`; `cursor.predict_echo` is
+      `auto|always|off`; `--simulated-latency <ms>` holds every host update
+      on the reader so the edit-run loop needs no relay). What remains: the
+      web overlay on `PaintOptions`'s pre-cut seam; the measured echo latency
+      feeding the `link` chip, which today shows a TCP-connect probe; guesses
+      through a wrap; and — only once the heuristic is seen failing on a real
+      link — an additive `echo` sequence on `Input`/`Update`, which is what
+      would let "not echoed yet" be told from "never echoed".
 
 ### Web client & devices
 

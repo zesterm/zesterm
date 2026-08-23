@@ -1456,7 +1456,7 @@ at the two halves of one hazard.
 ## ADR-016 — Predicted echo is an overlay, and the client still parses no VT
 
 **Status:** accepted (#442). The engine and its cross-port fixture landed
-first; the native overlay and the browser overlay follow as their own PRs.
+first, then the native overlay; the browser overlay follows as its own PR.
 
 Over the relay a keystroke round-trips 60–120 ms before its echo comes back as
 a delta, and that is the whole felt difference between a local shell and a

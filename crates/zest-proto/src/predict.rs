@@ -139,6 +139,15 @@ impl Predictor {
         self.policy
     }
 
+    /// The setting changed under a live session. `Off` drops what is pending
+    /// so nothing lingers on screen waiting for an echo nobody will judge.
+    pub fn set_policy(&mut self, policy: Policy) {
+        self.policy = policy;
+        if policy == Policy::Off {
+            self.pending.clear();
+        }
+    }
+
     /// Before a measurement exists, whether to show on faith.
     pub fn set_remote_hint(&mut self, remote: bool) {
         self.remote_hint = remote;
