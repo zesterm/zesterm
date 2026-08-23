@@ -170,11 +170,17 @@ pub enum HitRegion {
     PickerScrim,
     /// One runnable row of the command palette, by index; clicking runs it.
     PaletteRow(usize),
+    /// One row of the cwd chip's directory browser (#439).
+    DirPickerRow(usize),
     /// The palette's panel between rows (filter line, headers, reference
     /// rows) — swallows clicks so they cannot fall through to the grid.
     PalettePanel,
+    /// The browser's panel; a missed click must not fall through and dismiss.
+    DirPickerPanel,
     /// The dimmed backdrop behind the palette; clicking it dismisses.
     PaletteScrim,
+    /// The browser's click-away scrim.
+    DirPickerScrim,
     /// One row of the settings tab, by index; clicking selects it.
     SettingsRow(usize),
     /// A toggle's track inside its settings row; clicking flips the value.
@@ -393,6 +399,9 @@ pub fn wheel_target(hit: Option<HitRegion>, pane_focus: Option<usize>) -> WheelT
         | R::PaletteRow(_)
         | R::PalettePanel
         | R::PaletteScrim
+        | R::DirPickerRow(_)
+        | R::DirPickerPanel
+        | R::DirPickerScrim
         | R::LauncherRow(_)
         | R::LauncherPanel
         | R::LauncherScrim

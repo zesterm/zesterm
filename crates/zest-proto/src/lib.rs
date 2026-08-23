@@ -222,6 +222,18 @@ pub enum ClientMessage {
     /// "daemon too old" and names the fallback (`--enroll`). See
     /// docs/CONTRACTS.md.
     Enroll { code: String },
+    /// What directories does `path` hold, on this host's filesystem?
+    ///
+    /// The cwd chip's browser (#439): a picker that only worked for local
+    /// sessions would silently no-op on remote tabs, so the listing is a
+    /// question the daemon answers about *its* disk — the connection is
+    /// per-host, which is the routing. Additive on the `Enroll` precedent:
+    /// only a person opening the browser sends it, an old daemon answers
+    /// with its generic could-not-understand `Error` and keeps serving, and
+    /// the picker reads that as "daemon too old". No more power than the
+    /// client already has — anything attached can type `ls` into a shell —
+    /// and it changes nothing: a listing is a question.
+    ListDir { path: String },
     /// Resend the whole state; this client cannot apply what it is being sent.
     ///
     /// Detach-and-reattach has the same effect and is what a client had to do
@@ -625,6 +637,35 @@ pub enum HostMessage {
         readonly: bool,
         /// Why there is no content, when there is none for a *reason*.
         /// Empty when the read simply succeeded — an empty file and a refused
+        /// one must not render the same.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        error: String,
+    },
+    /// The answer to [`ClientMessage::ListDir`] (#439).
+    ///
+    /// A plain reply, not a push: only the asker receives it, so — unlike
+    /// `Attention` and `Progress` — no `Hello` flag guards it; a peer that
+    /// never asks is never handed a tag it cannot decode. `path` echoes the
+    /// question, which is the correlation: a picker that navigated on while
+    /// a slow answer was in flight drops the stale one by path.
+    DirListing {
+        /// The listed directory, as asked.
+        path: String,
+        /// Its parent, for the `..` row. `None` at a filesystem root.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        parent: Option<String>,
+        /// Child directory *names* (not paths), hidden ones skipped, sorted
+        /// case-insensitively.
+        dirs: Vec<String>,
+        /// The cap bit: more existed than `dirs` carries. Said rather than
+        /// silently cut, because a truncated listing that looks complete
+        /// reads as "covered everything" when it didn't.
+        #[serde(default)]
+        truncated: bool,
+        /// Why the listing is empty, when it is empty for a *reason* —
+        /// permission denied, not a directory, gone. Empty string when the
+        /// listing simply is what it is; an empty directory and a refused
         /// one must not render the same.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         error: String,

@@ -96,7 +96,7 @@ watch_hosts: boolean,
  * an old daemon ignores the flag and sends nothing, which is exactly
  * today's behaviour at both ends.
  */
-watch_signals: boolean, } | { "t": "auth", signature: Sig64, } | { "t": "pairing_decision", client: ClientId, approve: boolean, } | { "t": "enroll", code: string, } | { "t": "request_keyframe", session: SessionAddr, } | { "t": "list_sessions" } | { "t": "create_session", 
+watch_signals: boolean, } | { "t": "auth", signature: Sig64, } | { "t": "pairing_decision", client: ClientId, approve: boolean, } | { "t": "enroll", code: string, } | { "t": "list_dir", path: string, } | { "t": "request_keyframe", session: SessionAddr, } | { "t": "list_sessions" } | { "t": "create_session", 
 /**
  * Empty means the host's default shell.
  */

@@ -324,8 +324,8 @@ cargo run --profile fast -p zest-app           # the terminal, quick rebuild
 ./target/fast/zesterm --theme paper --screenshot-size 1200x800 --screenshot out.png
 ./target/fast/zesterm --screen themes --screenshot out.png
                                                # open on a design screen: fleet|themes|settings|
-                                               #   settings-menu|palette|launcher|profiles|
-                                               #   profiles-rename
+                                               #   settings-menu|palette|dir-picker|launcher|
+                                               #   profiles|profiles-rename
                                                # ('palette' = the ⌘K search; 'settings-menu' is Settings
                                                #   with the theme dropdown open and 'profiles-rename' is
                                                #   Profiles with the name entry open — the states a

@@ -63,6 +63,7 @@ fn discarded(waiting_for: &str, msg: &HostMessage) {
         HostMessage::Error { .. } => "Error",
         HostMessage::FileContents { .. } => "FileContents",
         HostMessage::FileWritten { .. } => "FileWritten",
+        HostMessage::DirListing { .. } => "DirListing",
     };
     tracing::warn!(
         message = kind,

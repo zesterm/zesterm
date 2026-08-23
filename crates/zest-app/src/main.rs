@@ -153,13 +153,14 @@ fn screen_from(value: Option<&str>) -> Result<app::StartScreen, String> {
         Some("themes") => Ok(app::StartScreen::Themes),
         Some("settings") => Ok(app::StartScreen::Settings),
         Some("palette") => Ok(app::StartScreen::Palette),
+        Some("dir-picker") => Ok(app::StartScreen::DirPicker),
         Some("launcher") => Ok(app::StartScreen::Launcher),
         Some("profiles") => Ok(app::StartScreen::Profiles),
         Some("settings-menu") => Ok(app::StartScreen::SettingsMenu),
         Some("profiles-rename") => Ok(app::StartScreen::ProfilesRename),
         _ => Err(
-            "--screen needs one of fleet|themes|settings|settings-menu|palette|launcher|\
-             profiles|profiles-rename"
+            "--screen needs one of fleet|themes|settings|settings-menu|palette|dir-picker|\
+             launcher|profiles|profiles-rename"
                 .into(),
         ),
     }
@@ -543,7 +544,7 @@ fn parse_args(args: &[String]) -> Result<Flags, EarlyExit> {
                      --no-daemon       own the pty in this process, do not attach\n\
                      --new-session     start a fresh shell instead of restoring your tabs\n\
                      --screen <name>   open on fleet|themes|settings|settings-menu|\n\
-                     \x20                 palette|launcher|profiles|profiles-rename\n\
+                     \x20                 palette|dir-picker|launcher|profiles|profiles-rename\n\
                      \x20                 instead of the terminal\n\
                      \x20                 ('palette' is the ⌘K search, not the keymap's\n\
                      \x20                 command palette; 'launcher' is the + menu over the\n\
@@ -795,6 +796,7 @@ mod tests {
         assert_eq!(screen_from(Some("themes")), Ok(S::Themes));
         assert_eq!(screen_from(Some("settings")), Ok(S::Settings));
         assert_eq!(screen_from(Some("palette")), Ok(S::Palette));
+        assert_eq!(screen_from(Some("dir-picker")), Ok(S::DirPicker));
         assert_eq!(screen_from(Some("launcher")), Ok(S::Launcher));
         assert_eq!(screen_from(Some("profiles")), Ok(S::Profiles));
     }

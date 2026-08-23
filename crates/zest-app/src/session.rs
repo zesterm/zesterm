@@ -112,6 +112,15 @@ pub enum Wakeup {
     /// and skips. The dot lives in the chrome, which needs its own
     /// invalidation — the same argument `PairingChanged` already makes.
     Attention(zest_proto::SessionAddr, zest_proto::AttentionCause),
+    /// A host answered [`ClientMessage::ListDir`] (#439); the answer is
+    /// parked in the session's cell (`SessionSource::take_dir_listing`).
+    ///
+    /// The `PairingChanged` pattern: the payload rides a shared cell with
+    /// last-write-wins — which is also the right coalescing for a reply to
+    /// a question the picker just asked — and the event only says "look".
+    /// A `Wakeup` stays `Copy`; the picker drops a stale answer by
+    /// comparing the cell's `path` against where it has since navigated.
+    DirListingReady,
     /// A session's `OSC 9;4` progress moved.
     ///
     /// Carries nothing: the value is already on that tab's terminal, where
@@ -120,6 +129,22 @@ pub enum Wakeup {
     /// redraw reaches a frame that finds nothing to draw and skips, and the
     /// indicator lives in the chrome.
     SignalChanged,
+}
+
+/// A host's answer to "what directories does this path hold" (#439),
+/// parked for the picker; [`Wakeup::DirListingReady`] says it is there.
+#[derive(Debug, Clone)]
+pub struct DirListing {
+    pub path: String,
+    /// `None` at a filesystem root.
+    pub parent: Option<String>,
+    /// Child directory names, as the host sorted them.
+    pub dirs: Vec<String>,
+    /// More existed than `dirs` carries.
+    pub truncated: bool,
+    /// Why the listing is empty when it is empty for a reason; empty when
+    /// the listing simply is what it is.
+    pub error: String,
 }
 
 pub struct Session {

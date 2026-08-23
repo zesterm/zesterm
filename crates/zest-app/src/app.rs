@@ -356,6 +356,30 @@ struct PaletteState {
     actions: Vec<Option<keymap::Action>>,
 }
 
+/// The cwd chip's directory browser (#439): the palette's chassis around a
+/// host-answered listing. `rows` is the answer list parallel to the drawn
+/// rows — built in the same pass as the model, so index `n` means one thing
+/// to the renderer and the input path by construction (`None` is the `..`
+/// row, which *navigates*; `Some(path)` switches).
+struct DirPickerState {
+    /// The directory whose children are listed — the browse position.
+    path: String,
+    /// Its parent, from the answer; `None` at a root, which drops the `..`
+    /// row rather than drawing one that goes nowhere.
+    parent: Option<String>,
+    /// The children, as the host sent them.
+    dirs: Vec<String>,
+    /// No answer for `path` yet.
+    loading: bool,
+    truncated: bool,
+    error: String,
+    filter: TextField,
+    selected: usize,
+    scroll: f32,
+    scroll_to_selected: bool,
+    rows: Vec<Option<String>>,
+}
+
 /// The Settings tab's state — created when the tab opens, dropped when it
 /// closes, surviving activation changes in between: the tab is a place you
 /// sit in (design §11), and its selection, filter and buffers belong to it.
@@ -515,33 +539,15 @@ struct LauncherState {
 /// A block's open ⋯ menu (design §3), and the action list parallel to its
 /// drawn rows — built in one `block_menu::build_rows` pass, so index `n` means
 /// the same thing in both by construction, exactly as the launcher's does.
-///
-/// The cwd chip's menu (#426) rides the same chassis: one state slot, one
-/// overlay renderer, one set of key and click arms — the alternative was a
-/// second copy of all three that could each drift alone.
 struct BlockMenuState {
-    /// What the menu is about: a block's ⋯, or the cwd chip's recents.
-    menu: OpenMenu,
+    /// The block it acts on. Opening the menu also *selects* that block, so
+    /// the accent rail and the menu can never name different ones.
+    block: u32,
     /// What the panel hangs off, physical px: the `⋯` rect the block pass drew
     /// for a left click, or a zero-size rect at the pointer for a right click.
     anchor: [f32; 4],
     selected: usize,
     actions: Vec<crate::block_menu::BlockMenuAction>,
-    /// The cwd-chip menu's recents, indexed by `BlockMenuAction::CdTo`.
-    /// Empty for a block's menu.
-    cwds: Vec<String>,
-    /// The cwd the chip showed when its menu opened, for `CopyPath`.
-    chip_cwd: String,
-}
-
-/// Which menu [`BlockMenuState`] is showing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OpenMenu {
-    /// A block's ⋯. Opening it also *selects* that block, so the accent rail
-    /// and the menu can never name different ones.
-    Block(u32),
-    /// The cwd chip's recent-directories menu.
-    CwdChip,
 }
 
 /// Which full-pane screen the window shows in place of the grid.
@@ -1794,6 +1800,8 @@ pub struct App {
     /// The fleet picker's transient state, while open.
     picker: Option<PickerState>,
     palette_ui: Option<PaletteState>,
+    /// The cwd chip's directory browser, when open (#439).
+    dir_picker: Option<DirPickerState>,
     settings_ui: Option<SettingsUiState>,
     /// The Profiles tab's editor state, while that tab exists (§12).
     profiles_ui: Option<ProfilesUiState>,
@@ -2055,6 +2063,9 @@ pub enum StartScreen {
     Themes,
     Settings,
     Palette,
+    /// The cwd chip's directory browser, listing the session's own cwd —
+    /// in-process at launch, so the listing is real (#439).
+    DirPicker,
     /// The + launcher menu, open over the default screen (design §1).
     Launcher,
     /// The Profiles tab (design §12 — the placeholder pane, until the
@@ -2132,6 +2143,7 @@ impl App {
             fleet: None,
             picker: None,
             palette_ui: None,
+            dir_picker: None,
             settings_ui: None,
             profiles_ui: None,
             launcher: None,
@@ -2710,97 +2722,152 @@ impl App {
         self.palette_ui = None;
         self.launcher = None;
         self.set_selected_block(Some(id));
-        self.block_menu = Some(BlockMenuState {
-            menu: OpenMenu::Block(id),
-            anchor,
-            selected: 0,
-            actions: Vec::new(),
-            cwds: Vec::new(),
-            chip_cwd: String::new(),
-        });
+        self.block_menu =
+            Some(BlockMenuState { block: id, anchor, selected: 0, actions: Vec::new() });
         self.mark_chrome_dirty();
     }
 
-    /// Open the cwd chip's menu: where this shell has recently been, plus a
-    /// copy row. The recents come from the session's own blocks — the honest
-    /// source needing no new wire message: they are where commands actually
-    /// ran, which is precisely what "recent" should mean here.
-    fn open_cwd_chip_menu(&mut self, chip_cwd: String, anchor: [f32; 4]) {
+    /// Open the cwd chip's directory browser (#439) on `path`.
+    fn open_dir_picker(&mut self, path: String) {
+        // The overlays are mutually exclusive — two panels floating over one
+        // grid is two things claiming the keyboard.
         self.picker = None;
         self.palette_ui = None;
         self.launcher = None;
-        let cwds = self.tabs.active().map_or_else(Vec::new, |tab| {
-            let term = tab.focused_source().terminal();
-            let term = term.lock();
-            let mut out: Vec<String> = Vec::new();
-            for b in term.blocks().blocks().iter().rev() {
-                // What the menu offers is exactly what `cd_bytes` will type
-                // — asked of the same function, so the quoting rule and the
-                // control-byte rejection have one home and the menu cannot
-                // render a row the click then refuses (or, worse, one a
-                // regression would type).
-                if b.cwd == chip_cwd || block_actions::cd_bytes(&b.cwd).is_none() {
-                    continue;
-                }
-                if !out.contains(&b.cwd) {
-                    out.push(b.cwd.clone());
-                }
-                if out.len() >= 8 {
-                    break;
+        self.block_menu = None;
+        self.dir_picker = Some(DirPickerState {
+            path: path.clone(),
+            parent: None,
+            dirs: Vec::new(),
+            loading: true,
+            truncated: false,
+            error: String::new(),
+            filter: TextField::default(),
+            selected: 0,
+            scroll: 0.0,
+            scroll_to_selected: true,
+            rows: Vec::new(),
+        });
+        self.request_dir_listing(path);
+        self.mark_chrome_dirty();
+    }
+
+    /// Move the open browser to another directory and ask again.
+    fn dir_picker_navigate(&mut self, path: String) {
+        let Some(p) = self.dir_picker.as_mut() else { return };
+        p.path = path.clone();
+        p.parent = None;
+        p.dirs.clear();
+        p.loading = true;
+        p.truncated = false;
+        p.error.clear();
+        p.filter = TextField::default();
+        p.selected = 0;
+        p.scroll = 0.0;
+        p.scroll_to_selected = true;
+        self.request_dir_listing(path);
+        self.mark_chrome_dirty();
+    }
+
+    /// Ask whoever can answer what `path` holds.
+    ///
+    /// A daemon-backed session is asked over its own wire and answers with
+    /// `Wakeup::DirListingReady`; an in-process one is answered on the spot
+    /// — the window is its host (#434), so the daemon's own lister runs
+    /// here, and both paths produce one shape.
+    fn request_dir_listing(&mut self, path: String) {
+        let asked = self.tabs.active_source().is_some_and(|s| s.request_dirs(&path));
+        if asked {
+            return;
+        }
+        if let zest_proto::HostMessage::DirListing { path, parent, dirs, truncated, error } =
+            zest_daemon::server::list_dir(&path)
+        {
+            self.apply_dir_listing(crate::session::DirListing {
+                path,
+                parent,
+                dirs,
+                truncated,
+                error,
+            });
+        }
+    }
+
+    /// An answer landed; keep it only if it is still the question.
+    fn apply_dir_listing(&mut self, listing: crate::session::DirListing) {
+        let Some(p) = self.dir_picker.as_mut() else { return };
+        if p.path != listing.path {
+            // Navigated on while this was in flight: a stale answer drawn
+            // over a newer question is the picker lying about where it is.
+            return;
+        }
+        p.parent = listing.parent;
+        p.dirs = listing.dirs;
+        p.truncated = listing.truncated;
+        p.error = listing.error;
+        p.loading = false;
+        p.selected = 0;
+        p.scroll = 0.0;
+        p.scroll_to_selected = true;
+        self.mark_chrome_dirty();
+    }
+
+    /// Act on the browser's row `i`: the `..` row navigates, a directory
+    /// switches the shell there — the same `cd_bytes` and at-prompt gates
+    /// the recents menu used, for the same reasons.
+    fn dir_picker_activate(&mut self, i: usize) {
+        let Some(p) = self.dir_picker.as_ref() else { return };
+        match p.rows.get(i) {
+            Some(None) => {
+                if let Some(parent) = p.parent.clone() {
+                    self.dir_picker_navigate(parent);
                 }
             }
-            out
-        });
-        self.block_menu = Some(BlockMenuState {
-            menu: OpenMenu::CwdChip,
-            anchor,
-            selected: 0,
-            actions: Vec::new(),
-            cwds,
-            chip_cwd,
-        });
-        self.mark_chrome_dirty();
+            Some(Some(path)) => {
+                let path = path.clone();
+                self.dir_picker = None;
+                self.mark_chrome_dirty();
+                let Some(bytes) = block_actions::cd_bytes(&path) else { return };
+                let Some(session) = self.tabs.active_source() else { return };
+                // Re-checked at the act, not only at build: the picker can
+                // sit open across a state change, and a row a moment ago is
+                // not a licence to type into a program now running.
+                if !block_actions::at_shell_prompt(&session.terminal().lock()) {
+                    return;
+                }
+                session.write(bytes);
+                session.terminal().lock().scroll_to_bottom();
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Browse *into* the browser's row `i` without switching — Tab's verb.
+    fn dir_picker_descend(&mut self, i: usize) {
+        let Some(p) = self.dir_picker.as_ref() else { return };
+        match p.rows.get(i) {
+            Some(None) => {
+                if let Some(parent) = p.parent.clone() {
+                    self.dir_picker_navigate(parent);
+                }
+            }
+            Some(Some(path)) => {
+                let path = path.clone();
+                self.dir_picker_navigate(path);
+            }
+            None => {}
+        }
     }
 
     /// Act on a block menu row. Every action closes the menu: the user chose.
     fn run_block_menu_action(&mut self, action: crate::block_menu::BlockMenuAction) {
         use crate::block_menu::BlockMenuAction as A;
         let Some(state) = self.block_menu.take() else { return };
+        let id = state.block;
         self.mark_chrome_dirty();
-
-        // The chip menu's verbs first: they have no block to fetch, and the
-        // block path below would decline them for exactly that reason.
-        match action {
-            A::CopyPath => {
-                if !state.chip_cwd.is_empty() {
-                    self.set_clipboard(state.chip_cwd);
-                }
-                return;
-            }
-            A::CdTo(i) => {
-                let Some(bytes) = state.cwds.get(i).and_then(|p| block_actions::cd_bytes(p))
-                else {
-                    return;
-                };
-                let Some(session) = self.tabs.active_source() else { return };
-                // Re-checked at the click, not only at build: the menu can
-                // sit open across a state change, and `enabled` a frame ago
-                // is not a licence to type into a program now running.
-                if !block_actions::at_shell_prompt(&session.terminal().lock()) {
-                    return;
-                }
-                session.write(bytes);
-                // To the bottom, as typing would: the prompt about to move
-                // is not something to watch from the scrollback.
-                session.terminal().lock().scroll_to_bottom();
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
-                }
-                return;
-            }
-            _ => {}
-        }
-        let OpenMenu::Block(id) = state.menu else { return };
 
         // Everything that reads the block does so under one short lock and
         // hands back plain data, so the clipboard and tab calls below — all of
@@ -2814,10 +2881,6 @@ impl App {
 
         match action {
             A::None => {}
-            // Handled before the block fetch above; unreachable here, and an
-            // arm rather than a `_` so the next verb added is a compile
-            // error in this match too.
-            A::CdTo(_) | A::CopyPath => {}
             A::Fold => self.toggle_fold(id),
             A::CopyOutput => {
                 let text = {
@@ -4874,6 +4937,7 @@ impl App {
         if !self.strip_shown()
             && self.picker.is_none()
             && self.palette_ui.is_none()
+            && self.dir_picker.is_none()
             && self.launcher.is_none()
             // Load-bearing: with one tab and no custom chrome `strip_shown` is
             // false, so without this the block menu lives in a layout that is
@@ -4970,28 +5034,22 @@ impl App {
         // Rebuilt every pass, like the launcher's: output can arrive under an
         // open menu and turn "Copy output" from faint to live — or, on the
         // chip menu, a command finishing turns the cd rows live.
-        let block_menu_rows = self.block_menu.as_ref().and_then(|m| match m.menu {
-            OpenMenu::Block(id) => {
-                let tab = self.tabs.active()?;
-                let folded =
-                    self.folded_blocks.get(&tab.focused_addr()).is_some_and(|f| f.contains(&id));
-                let term = tab.focused_source().terminal();
-                let term = term.lock();
-                let block = term.blocks().get(zest_core::BlockId(id))?.clone();
-                Some(crate::block_menu::build_rows(
-                    &term,
-                    &block,
-                    folded,
-                    &keymap::chord_for(keymap::Action::CopyBlockOutput),
-                    &keymap::chord_for(keymap::Action::RerunLastCommand),
-                ))
-            }
-            OpenMenu::CwdChip => {
-                let tab = self.tabs.active()?;
-                let term = tab.focused_source().terminal();
-                let at_prompt = block_actions::at_shell_prompt(&term.lock());
-                Some(crate::block_menu::cwd_rows(&m.cwds, &m.chip_cwd, at_prompt))
-            }
+        let block_menu_rows = self.block_menu.as_ref().and_then(|m| {
+            let tab = self.tabs.active()?;
+            let folded = self
+                .folded_blocks
+                .get(&tab.focused_addr())
+                .is_some_and(|f| f.contains(&m.block));
+            let term = tab.focused_source().terminal();
+            let term = term.lock();
+            let block = term.blocks().get(zest_core::BlockId(m.block))?.clone();
+            Some(crate::block_menu::build_rows(
+                &term,
+                &block,
+                folded,
+                &keymap::chord_for(keymap::Action::CopyBlockOutput),
+                &keymap::chord_for(keymap::Action::RerunLastCommand),
+            ))
         });
         let block_menu_model = block_menu_rows.map(|(rows, actions)| {
             let state = self.block_menu.as_mut().expect("is_some gated the build");
@@ -5007,6 +5065,42 @@ impl App {
                 rows,
                 selected: state.selected,
                 anchor: state.anchor,
+            }
+        });
+
+        let dir_picker_model = self.dir_picker.as_mut().map(|state| {
+            // Rows and their answers in one pass: `..` first when there is a
+            // parent, then the children the filter keeps. The parallel
+            // `rows` list is what Enter and a click act on, so the two are
+            // built together and cannot drift.
+            let filter = state.filter.text().to_lowercase();
+            let mut rows = Vec::new();
+            let mut answers: Vec<Option<String>> = Vec::new();
+            if state.parent.is_some() {
+                rows.push("\u{2191}  .. (parent directory)".to_string());
+                answers.push(None);
+            }
+            let base = std::path::Path::new(&state.path);
+            for name in &state.dirs {
+                if !filter.is_empty() && !name.to_lowercase().contains(&filter) {
+                    continue;
+                }
+                rows.push(name.clone());
+                answers.push(Some(base.join(name).to_string_lossy().into_owned()));
+            }
+            state.selected = state.selected.min(rows.len().saturating_sub(1));
+            state.rows = answers;
+            crate::chrome::model::DirPickerModel {
+                rows,
+                has_parent: state.parent.is_some(),
+                selected: state.selected,
+                filter: state.filter.text().to_string(),
+                filter_caret: caret_of(&state.filter),
+                scroll: state.scroll,
+                ensure_visible: state.scroll_to_selected,
+                loading: state.loading,
+                error: state.error.clone(),
+                truncated: state.truncated,
             }
         });
 
@@ -5685,6 +5779,7 @@ impl App {
             picker: picker_model,
             // The picker wins: it opens *over* the settings tab's content.
             palette: palette_model,
+            dir_picker: dir_picker_model,
             settings: settings_model,
             launcher: launcher_model,
             block_menu: block_menu_model,
@@ -5710,6 +5805,10 @@ impl App {
         if let Some(state) = self.palette_ui.as_mut() {
             state.scroll = laid.palette_scroll;
             // One layout consumed the request; the wheel is free again.
+            state.scroll_to_selected = false;
+        }
+        if let Some(state) = self.dir_picker.as_mut() {
+            state.scroll = laid.dir_picker_scroll;
             state.scroll_to_selected = false;
         }
         // Written back only when the pane actually laid out — a covered tab
@@ -6074,9 +6173,7 @@ impl App {
                 if let Some(chip) = chip {
                     match kind {
                         ChipKind::Cwd => {
-                            let at =
-                                [self.pointer_pos.0 as f32, self.pointer_pos.1 as f32, 0.0, 0.0];
-                            self.open_cwd_chip_menu(chip.value, at);
+                            self.open_dir_picker(chip.value);
                         }
                         ChipKind::Exit => {
                             if let Ok(id) = chip.value.parse::<u32>() {
@@ -6154,6 +6251,19 @@ impl App {
                 self.palette_ui = None;
                 self.mark_chrome_dirty();
             }
+            (HitRegion::DirPickerRow(i), MouseButton::Left) => {
+                if let Some(p) = self.dir_picker.as_mut() {
+                    p.selected = i;
+                }
+                self.dir_picker_activate(i);
+            }
+            (HitRegion::DirPickerScrim, MouseButton::Left) => {
+                self.dir_picker = None;
+                self.mark_chrome_dirty();
+            }
+            // A missed click inside the panel must not fall through to the
+            // scrim and dismiss what the user is reading.
+            (HitRegion::DirPickerPanel | HitRegion::DirPickerRow(_) | HitRegion::DirPickerScrim, _) => {}
             // The Settings* widget regions are the shared §11 vocabulary:
             // while the Profiles screen is up they were drawn by it (the
             // Settings tab's model is not even built then), so they route
@@ -9534,10 +9644,7 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64);
         let selected = self.selected_block.get(&tab.focused_addr()).copied();
-        let menu_block = self.block_menu.as_ref().and_then(|m| match m.menu {
-            OpenMenu::Block(id) => Some(id),
-            OpenMenu::CwdChip => None,
-        });
+        let menu_block = self.block_menu.as_ref().map(|m| m.block);
 
         let views = term
             .blocks()
@@ -11217,6 +11324,15 @@ impl ApplicationHandler<Wakeup> for App {
             Some(StartScreen::Themes) => self.show_screen(AppScreen::Themes),
             Some(StartScreen::Settings) => self.open_settings_tab(),
             Some(StartScreen::Palette) => self.toggle_picker(),
+            Some(StartScreen::DirPicker) => {
+                // The session's shell has not reported a cwd yet this early;
+                // the process's own is the honest stand-in, and in-process
+                // is exactly whose filesystem the listing reads.
+                let cwd = std::env::current_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| "/".to_string());
+                self.open_dir_picker(cwd);
+            }
             // Over the default screen, exactly as clicking the + would.
             Some(StartScreen::Launcher) => self.toggle_launcher(),
             Some(StartScreen::Profiles) => self.open_profiles_tab(),
@@ -11354,6 +11470,14 @@ impl ApplicationHandler<Wakeup> for App {
             Wakeup::Exited => el.exit(),
             Wakeup::Attention(addr, cause) => self.note_attention(addr, cause),
             Wakeup::SignalChanged => self.mark_chrome_dirty(),
+            // The active source parked the answer; a stale or unsolicited
+            // one falls out in `apply_dir_listing`'s path comparison.
+            Wakeup::DirListingReady => {
+                let listing = self.tabs.active_source().and_then(|s| s.take_dir_listing());
+                if let Some(listing) = listing {
+                    self.apply_dir_listing(listing);
+                }
+            }
             // The link died, not the shell. The window stays open showing the
             // last state that was true -- closing it would throw away a session
             // that is still running in a daemon that does not care we went
@@ -12014,6 +12138,96 @@ impl ApplicationHandler<Wakeup> for App {
                 // The open command palette likewise owns the keyboard. It and
                 // the picker are mutually exclusive (the toggles enforce it),
                 // so the order of these blocks carries no meaning.
+                if self.dir_picker.is_some() {
+                    use winit::keyboard::{Key, NamedKey};
+                    // The palette's rules verbatim: overlay chords outrank
+                    // the filter, text goes to the filter, and the rest are
+                    // the picker's own verbs.
+                    match keymap::lookup(&event.logical_key, event.physical_key, self.modifiers)
+                        .map(|b| b.action)
+                    {
+                        Some(keymap::Action::TogglePalette) => {
+                            self.dir_picker = None;
+                            self.toggle_palette();
+                            self.mark_chrome_dirty();
+                            return;
+                        }
+                        Some(keymap::Action::ToggleSettings) => {
+                            self.dir_picker = None;
+                            self.open_settings_tab();
+                            self.mark_chrome_dirty();
+                            return;
+                        }
+                        Some(keymap::Action::ToggleFleetPicker) => {
+                            self.dir_picker = None;
+                            self.toggle_picker();
+                            self.mark_chrome_dirty();
+                            return;
+                        }
+                        _ => {}
+                    }
+                    // Tab descends — an *un-typeable* browse verb on purpose:
+                    // the arrows belong to the filter's caret and the rows'
+                    // selection, and Enter is the switch itself.
+                    if matches!(&event.logical_key, Key::Named(NamedKey::Tab)) {
+                        let i = self.dir_picker.as_ref().map_or(0, |p| p.selected);
+                        self.dir_picker_descend(i);
+                        return;
+                    }
+                    if let Some(cmd) = command_for(&event.logical_key, self.modifiers) {
+                        let pasted = self.paste_text(&cmd);
+                        let mut copied = None;
+                        if let Some(p) = self.dir_picker.as_mut() {
+                            let out = p.filter.apply(cmd, pasted.as_deref());
+                            if out.changed {
+                                p.selected = 0;
+                                p.scroll_to_selected = true;
+                            }
+                            copied = out.copied;
+                        }
+                        if let Some(text) = copied {
+                            self.set_clipboard(text);
+                        }
+                        self.mark_chrome_dirty();
+                        return;
+                    }
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            self.dir_picker = None;
+                        }
+                        Key::Named(NamedKey::Enter) => {
+                            let i = self.dir_picker.as_ref().map_or(0, |p| p.selected);
+                            self.dir_picker_activate(i);
+                        }
+                        Key::Named(NamedKey::ArrowDown) => {
+                            if let Some(p) = self.dir_picker.as_mut() {
+                                let last = p.rows.len().saturating_sub(1);
+                                p.selected = (p.selected + 1).min(last);
+                                p.scroll_to_selected = true;
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowUp) => {
+                            if let Some(p) = self.dir_picker.as_mut() {
+                                p.selected = p.selected.saturating_sub(1);
+                                p.scroll_to_selected = true;
+                            }
+                        }
+                        Key::Named(NamedKey::PageDown) => {
+                            if let Some(p) = self.dir_picker.as_mut() {
+                                p.scroll += 300.0;
+                            }
+                        }
+                        Key::Named(NamedKey::PageUp) => {
+                            if let Some(p) = self.dir_picker.as_mut() {
+                                p.scroll -= 300.0;
+                            }
+                        }
+                        _ => {}
+                    }
+                    self.mark_chrome_dirty();
+                    return;
+                }
+
                 if self.palette_ui.is_some() {
                     use winit::keyboard::{Key, NamedKey};
                     // The overlay-switching chords outrank the filter — the

@@ -1247,6 +1247,10 @@ impl Connection {
                 }]
             }
 
+            ClientMessage::ListDir { path } => {
+                vec![list_dir(&path)]
+            }
+
             ClientMessage::CreateSession { command, cwd, cols, rows } => {
                 let mut spec = CommandSpec::default_shell();
                 if !command.is_empty() {
@@ -1950,6 +1954,54 @@ enum Wake {
 /// Falls back to the current directory when there is no config directory at
 /// all, which is a machine with no home. A shim written somewhere odd still
 /// works; refusing to spawn a shell would not.
+/// How many children a [`HostMessage::DirListing`] carries before the
+/// `truncated` bit says the rest exist. Generous — this is a picker, not a
+/// backup tool — and said rather than silently cut.
+const LIST_DIR_CAP: usize = 500;
+
+/// Answer [`ClientMessage::ListDir`] (#439): the directories under `path`,
+/// on this machine, as a picker wants them — directories only (through
+/// symlinks, which is what a person means by "folder"), hidden ones
+/// skipped, sorted case-insensitively. A path that cannot be listed answers
+/// with *why* rather than an empty success: an empty directory and a
+/// refused one must not render the same.
+pub fn list_dir(path: &str) -> HostMessage {
+    let dir = std::path::Path::new(path);
+    let parent = dir.parent().map(|p| p.to_string_lossy().into_owned());
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            return HostMessage::DirListing {
+                path: path.to_string(),
+                parent,
+                dirs: Vec::new(),
+                truncated: false,
+                error: e.to_string(),
+            };
+        }
+    };
+    let mut dirs: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter(|e| {
+            // `metadata()`, not `file_type()`: it follows symlinks, and a
+            // symlink to a directory is a directory to the person browsing.
+            e.metadata().is_ok_and(|m| m.is_dir())
+        })
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    dirs.sort_by_key(|a| a.to_lowercase());
+    let truncated = dirs.len() > LIST_DIR_CAP;
+    dirs.truncate(LIST_DIR_CAP);
+    HostMessage::DirListing {
+        path: path.to_string(),
+        parent,
+        dirs,
+        truncated,
+        error: String::new(),
+    }
+}
+
 fn shell_integration_dir() -> std::path::PathBuf {
     directories::ProjectDirs::from("dev", "zesterm", "zesterm").map_or_else(
         || std::path::PathBuf::from("zesterm-shell-integration"),
@@ -3299,6 +3351,63 @@ mod tests {
         );
         assert!(matches!(&out[..], [HostMessage::Sessions { sessions, .. }] if sessions.len() == 1));
         assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn list_dir_answers_directories_only_sorted_and_says_why_when_it_cannot() {
+        let root = std::env::temp_dir().join(format!("zest-listdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["Beta", "alpha", ".hidden", "gamma"] {
+            std::fs::create_dir_all(root.join(d)).expect("mkdir");
+        }
+        std::fs::write(root.join("file.txt"), "x").expect("write");
+
+        let HostMessage::DirListing { parent, dirs, truncated, error, .. } =
+            list_dir(&root.to_string_lossy())
+        else {
+            panic!("list_dir answers with a listing");
+        };
+        assert_eq!(
+            dirs,
+            vec!["alpha".to_string(), "Beta".to_string(), "gamma".to_string()],
+            "directories only, hidden skipped, sorted case-insensitively"
+        );
+        assert!(!truncated);
+        assert!(error.is_empty());
+        assert!(parent.is_some(), "a temp subdirectory has a parent for the .. row");
+
+        let HostMessage::DirListing { dirs, error, .. } =
+            list_dir(&root.join("does-not-exist").to_string_lossy())
+        else {
+            panic!("a refused listing is still a listing");
+        };
+        assert!(dirs.is_empty());
+        assert!(
+            !error.is_empty(),
+            "an empty directory and a refused one must not render the same"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_client_can_ask_what_a_directory_holds() {
+        // The wire half of #439, over the same harness every message uses:
+        // the request routes, the reply comes back alone, and it is the
+        // asker's — not a push.
+        let root = std::env::temp_dir().join(format!("zest-listdir-wire-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub")).expect("mkdir");
+
+        let (mut c, _registry) = conn();
+        let mut peer = authenticate(&mut c);
+        let out = peer.send(&mut c, &ClientMessage::ListDir { path: root.to_string_lossy().into_owned() });
+        let [HostMessage::DirListing { dirs, .. }] = &out[..] else {
+            panic!("one question, one answer: {out:?}");
+        };
+        assert_eq!(dirs, &vec!["sub".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
