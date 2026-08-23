@@ -1450,6 +1450,40 @@ impl Connection {
                 self.registry.close(session.session);
                 Vec::new()
             }
+
+            // The editor's two questions (#446). Answered here on the serve
+            // loop rather than off a worker, because both are bounded: a read
+            // stops at `files::READ_CAP` and a write is the buffer the client
+            // already sent. That is the same bargain `ListDir` makes, and the
+            // opposite of `Enroll`, whose keychain probe and HTTPS round trip
+            // are why *it* has a worker.
+            ClientMessage::ReadFile { path, cwd } => {
+                vec![crate::files::read_file(&path, &cwd)]
+            }
+
+            ClientMessage::WriteFile { path, cwd, data, base_hash } => {
+                let reply = crate::files::write_file(&path, &cwd, &data, &base_hash);
+                // Logged, unlike a read: this one changes somebody's disk, and
+                // "which client wrote that" is the question asked afterwards.
+                //
+                // Logged *after*, and keyed on the resolved path the reply
+                // carries, because the requested one may be relative or a
+                // symlink — an audit line naming `../x` or a link rather than
+                // the file whose bytes changed is one that cannot be acted on.
+                // Both are recorded when they differ; the outcome too, since a
+                // refused write and a completed one must not read alike.
+                if let HostMessage::FileWritten { path: real, conflict, error, .. } = &reply {
+                    tracing::info!(
+                        remote = %self.remote,
+                        path = %real,
+                        requested = if real == &path { "" } else { path.as_str() },
+                        bytes = data.len(),
+                        wrote = !conflict && error.is_empty(),
+                        "client wrote a file"
+                    );
+                }
+                vec![reply]
+            }
         }
     }
 
@@ -3959,6 +3993,122 @@ mod tests {
         peer.send(&mut c, &ClientMessage::Detach { session: addr });
         assert_eq!(registry.len(), 1, "detaching removed the session");
         assert!(registry.get(addr.session).is_some());
+    }
+
+    /// A scratch directory for the file tests, cleaned up on drop.
+    struct FileScratch(std::path::PathBuf);
+    impl FileScratch {
+        fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir().join(format!("zest-srv-files-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).expect("scratch");
+            Self(p.canonicalize().expect("canonical scratch"))
+        }
+        fn path(&self) -> String {
+            self.0.to_string_lossy().into_owned()
+        }
+    }
+    impl Drop for FileScratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The wire half of #446: a client asks for a file and gets it back, over
+    /// the same harness every other message uses. `files.rs` owns the
+    /// semantics and tests them directly; what this asserts is that the
+    /// request routes, and that the answer comes back **alone** — one
+    /// question, one reply, addressed to the asker rather than pushed.
+    #[test]
+    fn a_client_can_read_a_file_on_this_host() {
+        let s = FileScratch::new("read");
+        std::fs::write(s.0.join("hello.txt"), b"hi\n").expect("write");
+
+        let (mut c, _registry) = conn();
+        let mut peer = authenticate(&mut c);
+        let out = peer.send(
+            &mut c,
+            &ClientMessage::ReadFile { path: "hello.txt".into(), cwd: s.path() },
+        );
+        let [HostMessage::FileContents { data, error, hash, .. }] = &out[..] else {
+            panic!("one question, one answer: {out:?}");
+        };
+        assert!(error.is_empty(), "{error}");
+        assert_eq!(data, b"hi\n");
+        assert!(!hash.is_empty(), "the reply carries the base a save is checked against");
+    }
+
+    /// A refused read is still a `FileContents`, never a bare `Error`.
+    ///
+    /// Load-bearing rather than tidy: a sessionless `Error` is exactly what an
+    /// **old** daemon answers a message it cannot decode, and the app reads
+    /// that as "this host is too old for the editor". If a refusal took the
+    /// same shape, every missing file on a current daemon would be reported as
+    /// an out-of-date one.
+    #[test]
+    fn a_refused_read_is_a_listing_with_a_reason_not_an_error_message() {
+        let s = FileScratch::new("refused");
+        let (mut c, _registry) = conn();
+        let mut peer = authenticate(&mut c);
+        let out = peer.send(
+            &mut c,
+            &ClientMessage::ReadFile { path: "nope.txt".into(), cwd: s.path() },
+        );
+        let [HostMessage::FileContents { data, error, .. }] = &out[..] else {
+            panic!("a refusal is still a FileContents: {out:?}");
+        };
+        assert!(data.is_empty());
+        assert!(!error.is_empty(), "and it says why");
+    }
+
+    #[test]
+    fn a_client_can_write_a_file_and_is_refused_when_the_disk_moved() {
+        let s = FileScratch::new("write");
+        std::fs::write(s.0.join("w.txt"), b"one").expect("write");
+
+        let (mut c, _registry) = conn();
+        let mut peer = authenticate(&mut c);
+
+        // Read first, because the base a save is checked against is the read's
+        // answer -- driving the two in sequence is what proves they agree.
+        let out = peer.send(&mut c, &ClientMessage::ReadFile { path: "w.txt".into(), cwd: s.path() });
+        let [HostMessage::FileContents { hash, .. }] = &out[..] else { panic!("contents") };
+        let base = hash.clone();
+
+        let out = peer.send(
+            &mut c,
+            &ClientMessage::WriteFile {
+                path: "w.txt".into(),
+                cwd: s.path(),
+                data: b"two".to_vec(),
+                base_hash: base.clone(),
+            },
+        );
+        let [HostMessage::FileWritten { conflict, error, .. }] = &out[..] else {
+            panic!("one write, one answer: {out:?}");
+        };
+        assert!(!conflict && error.is_empty(), "{error}");
+        assert_eq!(std::fs::read(s.0.join("w.txt")).expect("read"), b"two");
+
+        // The same base a second time is now stale, which is the case the
+        // whole `base_hash` field exists for.
+        let out = peer.send(
+            &mut c,
+            &ClientMessage::WriteFile {
+                path: "w.txt".into(),
+                cwd: s.path(),
+                data: b"three".to_vec(),
+                base_hash: base,
+            },
+        );
+        let [HostMessage::FileWritten { conflict, hash, .. }] = &out[..] else { panic!("written") };
+        assert!(conflict, "a stale base is refused rather than obeyed");
+        assert!(!hash.is_empty(), "and the refusal carries what is on disk");
+        assert_eq!(
+            std::fs::read(s.0.join("w.txt")).expect("read"),
+            b"two",
+            "nothing was written"
+        );
     }
 
     #[test]

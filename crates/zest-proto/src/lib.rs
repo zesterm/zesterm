@@ -36,7 +36,10 @@ pub mod decode;
 pub mod delta;
 pub mod encode;
 pub mod frame;
-pub(crate) mod hex;
+/// Public since #446: a file's content hash is a fixed-width value that
+/// travels on this wire as hex, so it is spelled by the same module the ids
+/// and signatures use rather than by a second loop in the daemon.
+pub mod hex;
 pub mod ids;
 pub mod predict;
 
@@ -290,6 +293,51 @@ pub enum ClientMessage {
     },
     /// End the session and its child process.
     CloseSession { session: SessionAddr },
+    /// Read a file on this host, for the built-in editor (#446).
+    ///
+    /// Host-scoped, not session-scoped: the connection is per-host, which is
+    /// the routing. A session's cwd is what a *relative* `path` resolves
+    /// against, and the client sends that as `cwd` rather than an address,
+    /// because the question is about a filesystem and not about a terminal.
+    ///
+    /// Answered by [`HostMessage::FileContents`]. The `Enroll` bargain
+    /// applies: an old daemon cannot decode the variant, answers its generic
+    /// could-not-understand `Error` and keeps serving, and the app reads that
+    /// as "this host's daemon is too old for the editor" and says so.
+    ///
+    /// No more authority than the client already holds — pairing grants
+    /// `CreateSession { command }`, so `cat` through a shell is strictly more
+    /// powerful than this.
+    ReadFile {
+        /// The file, as the host reads paths. Absolute, or resolved against
+        /// `cwd`; opaque to the client, like `CreateSession.cwd`.
+        path: String,
+        /// The base a relative `path` resolves against. Empty means `path`
+        /// must already be absolute.
+        #[serde(default)]
+        cwd: String,
+    },
+    /// Save a file this client previously read (#446).
+    ///
+    /// Answered by [`HostMessage::FileWritten`], and refused there rather
+    /// than obeyed when `base_hash` no longer describes what is on disk.
+    WriteFile {
+        path: String,
+        #[serde(default)]
+        cwd: String,
+        /// The whole new content. Bounded by `MAX_FRAME` at the encoder.
+        data: Vec<u8>,
+        /// [`HostMessage::FileContents::hash`] from the read this edit was
+        /// based on, so a file that moved underneath is refused instead of
+        /// clobbered. Empty means "create it, and refuse if it exists".
+        ///
+        /// Every way the disk can disagree — it changed, it is gone, it
+        /// appeared where the client expected nothing — comes back as one
+        /// `conflict`, so the client has one branch to write rather than four
+        /// that each have to be told apart from an I/O failure.
+        #[serde(default)]
+        base_hash: String,
+    },
 }
 
 /// What a host sends.
@@ -525,6 +573,83 @@ pub enum HostMessage {
     Progress { session: SessionAddr, progress: delta::Progress },
     /// Something went wrong, phrased for a person.
     Error { session: Option<SessionAddr>, message: String },
+    /// The answer to [`ClientMessage::ReadFile`] (#446).
+    ///
+    /// A reply, not a push: only the asker receives it, so — unlike
+    /// `Attention` and `Progress` — no `Hello` flag guards it. A peer that
+    /// cannot decode this tag structurally never asks for it. `path` echoes
+    /// the question, which is the correlation: an editor that moved on drops
+    /// a stale answer by comparing paths.
+    ///
+    /// A refusal is *this* message with `error` set, never `Error` — a
+    /// sessionless `Error` is what an **old** daemon says, and the app reads
+    /// that as "too old". The two must not be confusable.
+    FileContents {
+        /// The path as the host resolved it: absolute, symlinks followed.
+        ///
+        /// What the editor titles itself with, and deliberately not what was
+        /// asked: a relative path resolves against a cwd the shell reported,
+        /// and anything that can print can forge one. The resolved path is
+        /// disk truth, which is the only kind worth showing a person.
+        path: String,
+        /// At most the read cap; `truncated` says the disk holds more.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        data: Vec<u8>,
+        /// More existed than `data` carries. Said rather than silently cut.
+        #[serde(default)]
+        truncated: bool,
+        /// A NUL in the first 8 KiB. Display guidance, not a gate — the bytes
+        /// are sent either way, and what to do with them is the client's call.
+        #[serde(default)]
+        binary: bool,
+        /// SHA-256, lowercase hex, of the content — the base a later
+        /// [`ClientMessage::WriteFile`] is checked against.
+        ///
+        /// **Empty when `truncated`, and that is the mechanism rather than an
+        /// omission.** An empty `base_hash` means "create, and refuse if it
+        /// exists", and the file plainly exists — so a buffer holding only the
+        /// first few megabytes of a larger file *cannot* save over the rest of
+        /// it. The alternative, hashing a file of any size to hand back a base
+        /// the client must then be trusted not to use, is unbounded work
+        /// guarded by good intentions.
+        #[serde(default)]
+        hash: String,
+        /// Bytes on disk. `ts(type = "number")` for
+        /// [`RowPayload::line`](crate::delta::RowPayload)'s reason (#14): a
+        /// file past 2^53 bytes is not an editor's problem.
+        #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(type = "number"))]
+        size: u64,
+        /// The file cannot be written by the daemon's user.
+        #[serde(default)]
+        readonly: bool,
+        /// Why there is no content, when there is none for a *reason*.
+        /// Empty when the read simply succeeded — an empty file and a refused
+        /// one must not render the same.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        error: String,
+    },
+    /// The answer to [`ClientMessage::WriteFile`] (#446).
+    FileWritten {
+        /// The resolved path, as [`Self::FileContents::path`].
+        path: String,
+        /// On success, the hash of what was written — the editor's next base.
+        /// On a conflict, the hash of what *stands* on disk, which is what
+        /// lets the app offer "reload theirs" without a second round trip and
+        /// lets it tell "somebody saved exactly what I have" apart from a real
+        /// divergence.
+        #[serde(default)]
+        hash: String,
+        /// The disk no longer matched `base_hash`, so nothing was written.
+        ///
+        /// A bool rather than one of several error strings because it is the
+        /// one answer the client must *branch* on rather than display.
+        #[serde(default)]
+        conflict: bool,
+        /// Why nothing was written, phrased for a person. Empty on success.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        error: String,
+    },
 }
 
 /// Why a session is asking to be noticed.
@@ -1010,6 +1135,87 @@ mod tests {
         let body = crate::frame::encode_body(&msg).expect("encode");
         let back: ClientMessage = crate::frame::decode(&body).expect("decode");
         assert_eq!(msg, back, "command, cwd and size all survive the frame");
+    }
+
+    #[test]
+    fn the_editors_messages_cross_the_wire_intact() {
+        // Through the real msgpack framing, not serde_json, for
+        // `a_create_sessions_cwd_crosses_the_wire_intact`'s reason:
+        // `to_vec_named` is what the peer decodes.
+        for msg in [
+            ClientMessage::ReadFile { path: "src/main.rs".into(), cwd: "/home/a/p".into() },
+            ClientMessage::WriteFile {
+                path: "/abs/f.txt".into(),
+                cwd: String::new(),
+                // A high byte and a NUL: `Vec<u8>` goes through serde's seq
+                // path under `to_vec_named`, so a byte that is not ASCII is
+                // the one worth pinning.
+                data: vec![0xff, 0x00, b'x'],
+                base_hash: "abc123".into(),
+            },
+        ] {
+            let body = crate::frame::encode_body(&msg).expect("encode");
+            let back: ClientMessage = crate::frame::decode(&body).expect("decode");
+            assert_eq!(msg, back);
+        }
+
+        for msg in [
+            HostMessage::FileContents {
+                path: "/home/a/p/src/main.rs".into(),
+                data: vec![b'f', b'n', 0xc3, 0xa9],
+                truncated: true,
+                binary: false,
+                hash: String::new(),
+                // Past a u32, to pin the `ts(type = "number")` field against a
+                // narrowing that msgpack's own encoding would happily hide.
+                size: 5_000_000_000,
+                readonly: true,
+                error: String::new(),
+            },
+            HostMessage::FileWritten {
+                path: "/home/a/p/src/main.rs".into(),
+                hash: "deadbeef".into(),
+                conflict: true,
+                error: "the file changed on disk since it was opened".into(),
+            },
+        ] {
+            let body = crate::frame::encode_body(&msg).expect("encode");
+            let back: HostMessage = crate::frame::decode(&body).expect("decode");
+            assert_eq!(msg, back);
+        }
+    }
+
+    #[test]
+    fn a_minimal_file_reply_decodes_through_its_defaults() {
+        // Every field but the tag and `path` is `#[serde(default)]` and
+        // skipped when empty, so what actually goes out for a plain empty file
+        // is close to this map. A peer that could not decode it would fail on
+        // the *successful* case, which is the one nobody tests by hand.
+        let mut buf = Vec::new();
+        let mut s = rmp_serde::Serializer::new(&mut buf).with_struct_map();
+        use serde::Serialize as _;
+        #[derive(Serialize)]
+        struct Minimal<'a> {
+            t: &'a str,
+            path: &'a str,
+        }
+        Minimal { t: "file_contents", path: "/tmp/empty" }.serialize(&mut s).expect("encode");
+
+        let back: HostMessage = crate::frame::decode(&buf).expect("decode");
+        assert_eq!(
+            back,
+            HostMessage::FileContents {
+                path: "/tmp/empty".into(),
+                data: Vec::new(),
+                truncated: false,
+                binary: false,
+                hash: String::new(),
+                size: 0,
+                readonly: false,
+                error: String::new(),
+            },
+            "an empty file's reply is mostly absence, and absence has to decode"
+        );
     }
 
     #[test]

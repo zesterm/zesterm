@@ -360,6 +360,11 @@ fn run<R: Read + Send + 'static, W: Write + Send + 'static>(
                 }
                 HostMessage::Error { message, .. } => eprintln!("[attach] error: {message}"),
                 HostMessage::Scrollback { .. } => {}
+                // This probe drives a session, and never asks for a file — so
+                // these can only arrive as somebody else's reply on a shared
+                // connection, which does not happen. Named rather than swept
+                // into a `_` arm so the next tag is still a compile error here.
+                HostMessage::FileContents { .. } | HostMessage::FileWritten { .. } => {}
 
                 HostMessage::Challenge { host, label, nonce, dh, signature, version } => {
                     eprintln!("[attach] host {} ({label}) challenged", host.short());

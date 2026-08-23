@@ -123,4 +123,78 @@ from_line: number, rows_data: Array<RowPayload>,
  * scrollback is prepended rather than diffed and no later delta will
  * define these ids.
  */
-attrs: Array<AttrDef>, } | { "t": "exited", session: SessionAddr, code: number | null, } | { "t": "attention", session: SessionAddr, cause: AttentionCause, } | { "t": "progress", session: SessionAddr, progress: Progress, } | { "t": "error", session: SessionAddr | null, message: string, };
+attrs: Array<AttrDef>, } | { "t": "exited", session: SessionAddr, code: number | null, } | { "t": "attention", session: SessionAddr, cause: AttentionCause, } | { "t": "progress", session: SessionAddr, progress: Progress, } | { "t": "error", session: SessionAddr | null, message: string, } | { "t": "file_contents", 
+/**
+ * The path as the host resolved it: absolute, symlinks followed.
+ *
+ * What the editor titles itself with, and deliberately not what was
+ * asked: a relative path resolves against a cwd the shell reported,
+ * and anything that can print can forge one. The resolved path is
+ * disk truth, which is the only kind worth showing a person.
+ */
+path: string, 
+/**
+ * At most the read cap; `truncated` says the disk holds more.
+ */
+data: Array<number>, 
+/**
+ * More existed than `data` carries. Said rather than silently cut.
+ */
+truncated: boolean, 
+/**
+ * A NUL in the first 8 KiB. Display guidance, not a gate — the bytes
+ * are sent either way, and what to do with them is the client's call.
+ */
+binary: boolean, 
+/**
+ * SHA-256, lowercase hex, of the content — the base a later
+ * [`ClientMessage::WriteFile`] is checked against.
+ *
+ * **Empty when `truncated`, and that is the mechanism rather than an
+ * omission.** An empty `base_hash` means "create, and refuse if it
+ * exists", and the file plainly exists — so a buffer holding only the
+ * first few megabytes of a larger file *cannot* save over the rest of
+ * it. The alternative, hashing a file of any size to hand back a base
+ * the client must then be trusted not to use, is unbounded work
+ * guarded by good intentions.
+ */
+hash: string, 
+/**
+ * Bytes on disk. `ts(type = "number")` for
+ * [`RowPayload::line`](crate::delta::RowPayload)'s reason (#14): a
+ * file past 2^53 bytes is not an editor's problem.
+ */
+size: number, 
+/**
+ * The file cannot be written by the daemon's user.
+ */
+readonly: boolean, 
+/**
+ * Why there is no content, when there is none for a *reason*.
+ * Empty when the read simply succeeded — an empty file and a refused
+ * one must not render the same.
+ */
+error: string, } | { "t": "file_written", 
+/**
+ * The resolved path, as [`Self::FileContents::path`].
+ */
+path: string, 
+/**
+ * On success, the hash of what was written — the editor's next base.
+ * On a conflict, the hash of what *stands* on disk, which is what
+ * lets the app offer "reload theirs" without a second round trip and
+ * lets it tell "somebody saved exactly what I have" apart from a real
+ * divergence.
+ */
+hash: string, 
+/**
+ * The disk no longer matched `base_hash`, so nothing was written.
+ *
+ * A bool rather than one of several error strings because it is the
+ * one answer the client must *branch* on rather than display.
+ */
+conflict: boolean, 
+/**
+ * Why nothing was written, phrased for a person. Empty on success.
+ */
+error: string, };

@@ -198,6 +198,40 @@ own fleet model, loopback deliberately silent.
       binary path: the pins say what was asked for; only a subprocess knows
       what answers.
 
+### Editor & code review
+
+Warp has two surfaces zesterm lacks — a built-in editor and a panel showing
+what changed — and they share one problem: a session runs on any host, so
+"open this file" has to be a question its own daemon answers about *its* disk.
+A local-only editor is the half-feature this roadmap declines. Epic: #445.
+
+- [x] **A file can be read and written on any host** (#446). `ReadFile` /
+      `FileContents` and `WriteFile` / `FileWritten`, on `ListDir`'s pattern:
+      correlation by echoing the path, a string `error` so a refusal is not
+      confusable with an old daemon's, and the whole answer computed in the
+      dispatch arm because a read is bounded by its cap. A save carries the
+      hash it was based on and is *refused* rather than obeyed when the disk
+      moved underneath — and a truncated read carries no hash at all, so a
+      buffer holding the first few megabytes of a larger file cannot save over
+      the rest of it.
+- [ ] **`GitDiff`**, for the review panel: the repo's uncommitted changes as
+      raw unified text plus the untracked names `git diff` structurally cannot
+      show. A subprocess with a deadline, so unlike the file reads it needs a
+      worker and a deferred-reply mailbox rather than the dispatch arm.
+- [ ] **A pane can be something other than a session.** `PaneContent` becomes a
+      sum type so a tab can hold an editor beside its shell; no runtime change.
+- [ ] **A file opens in a pane**: the buffer, gutter, ⌘S, and the conflict
+      answer that offers reload-or-overwrite rather than picking one. Design
+      §13.
+- [ ] **Syntax highlighting**, coloured from the theme's own tokens and ANSI
+      row in OKLCH rather than from a bundled highlighter theme that would
+      clash with every zesterm palette.
+- [ ] **Three ways to open a file**: a modifier-click on a path in output
+      (reconciled with the copy-block-output gesture that chord already has), a
+      palette command, and a ⋯ row when the block's command named a file.
+- [ ] **The review panel**: uncommitted changes grouped by file, expandable,
+      opening into the editor at the line. Staging is out. Design §14.
+
 ### Protocol & daemon
 
 - [ ] **Assert client scrollback equals the host's.** `SbPush` is emitted only
