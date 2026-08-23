@@ -39,7 +39,7 @@ test('a typed key is guessed on its row, and the echo takes the guess back', asy
   link.deliver(keyframe(1, ['']));
   changes.length = 0;
 
-  c.input(Uint8Array.of(0x61), { key: 'printable', ch: 'a' });
+  c.input(Uint8Array.of(0x61), [{ key: 'printable', ch: 'a' }]);
   assert.deepEqual(
     c.predictor.overlay().map((p) => [p.row, p.col, p.ch]),
     [[0, 0, 'a']],
@@ -72,7 +72,7 @@ test('a guess nothing answers is taken back by the clock, and the row repaints',
   await daemon.completeHandshake();
   daemon.current.deliver(keyframe(1, ['']));
 
-  c.input(Uint8Array.of(0x61), { key: 'printable', ch: 'a' });
+  c.input(Uint8Array.of(0x61), [{ key: 'printable', ch: 'a' }]);
   changes.length = 0;
   clock.advance(500);
   assert.equal(c.predictor.pending().length, 1, 'before any measurement a guess may wait a second');
@@ -80,6 +80,47 @@ test('a guess nothing answers is taken back by the clock, and the row repaints',
   clock.advance(600);
   assert.equal(c.predictor.pending().length, 0, 'past a second with no answer the guess is dropped');
   assert.deepEqual(rows(changes.at(-1) ?? 'all'), [0], 'and the row it stood on is repainted to erase it');
+});
+
+test('a delta that confirms a guess repaints once, with the guess row folded in', async () => {
+  const daemon = new FakeDaemon();
+  const clock = new FakeClock();
+  const changes: DirtyRows[] = [];
+  const c = guessing(daemon, clock, changes);
+  await daemon.completeHandshake();
+  daemon.current.deliver(keyframe(1, ['', '']));
+  c.input(Uint8Array.of(0x61), [{ key: 'printable', ch: 'a' }]);
+  changes.length = 0;
+  daemon.current.deliver({
+    t: 'update',
+    session: { host: ADDR.host, session: 1 },
+    base: 1,
+    seq: 2,
+    delta: {
+      attrs: [],
+      ops: [
+        {
+          op: 'row',
+          row: 1,
+          payload: { line: 1, runs: [{ attr: 0, cells: 1, text: 'x' }], wrapped: false },
+        },
+        { op: 'cursor', cursor: { row: 0, col: 1, visible: true, shape: 0 } },
+      ],
+    },
+  });
+  assert.equal(changes.length, 1, 'one delta, one repaint: never one for the rows and one for the guess');
+  assert.deepEqual(rows(changes[0] ?? 'all'), [0, 1], 'the delta row and the row the guess left, together');
+});
+
+test('composed text while disconnected guesses nothing', async () => {
+  const daemon = new FakeDaemon();
+  const clock = new FakeClock();
+  const c = guessing(daemon, clock, []);
+  c.input(Uint8Array.of(0x61, 0x62), [
+    { key: 'printable', ch: 'a' },
+    { key: 'printable', ch: 'b' },
+  ]);
+  assert.equal(c.predictor.pending().length, 0, 'bytes that never left carry no guess to stand until reconnect');
 });
 
 test('a write that is not typing guesses nothing', async () => {

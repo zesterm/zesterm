@@ -379,15 +379,14 @@ export const TerminalView = component<{
     e.preventDefault();
     // A latched Ctrl/Alt from the key bar is a modifier the event does not
     // carry; the bytes know, the classifier must too.
-    client.input(
-      bytes,
+    client.input(bytes, [
       predictKeyOf({
         key: e.key,
         ctrlKey: e.ctrlKey || mods.ctrl,
         altKey: e.altKey || mods.alt,
         metaKey: e.metaKey,
       }),
-    );
+    ]);
   };
 
   const onCap = (id: CapId): void => {
@@ -409,7 +408,7 @@ export const TerminalView = component<{
     // Every cap is a control key or a symbol the bar types; none is a
     // plain printable the shell would echo as itself except the `/ - | ~`
     // row, and one wrong guess there is not worth a second classifier.
-    if (r.bytes !== null) client.input(r.bytes, { key: 'other' });
+    if (r.bytes !== null) client.input(r.bytes, [{ key: 'other' }]);
   };
 
   /**
@@ -437,14 +436,9 @@ export const TerminalView = component<{
 
   const sendComposed = (text: string): void => {
     const bytes = encodeComposedText(text);
-    if (bytes !== null) {
-      // Typed, so guessed: the bytes go as one write (a composed word must
-      // not arrive as a paste) while the guesses are per character, which
-      // is how the echo will come back.
-      const keys = predictKeysOfText(text);
-      for (const k of keys.slice(0, -1)) client.predictor.onInput(k, Date.now());
-      client.input(bytes, keys[keys.length - 1] ?? { key: 'other' });
-    }
+    // Typed, so guessed: one write (a composed word must not arrive as a
+    // paste), one guess per character, which is how the echo will come back.
+    if (bytes !== null) client.input(bytes, predictKeysOfText(text));
     clearInput();
   };
 
@@ -468,7 +462,7 @@ export const TerminalView = component<{
     const text = e.clipboardData?.getData('text') ?? '';
     if (text === '') return;
     e.preventDefault();
-    client.input(encodePaste(text, client.grid.modes), { key: 'other' });
+    client.input(encodePaste(text, client.grid.modes), [{ key: 'other' }]);
   };
 
   const sendFocus = (focused: boolean): void => {

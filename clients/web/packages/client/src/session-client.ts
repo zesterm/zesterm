@@ -212,20 +212,22 @@ export class SessionClient {
   /**
    * Encoded terminal bytes. Dropped while disconnected — see the module doc.
    *
-   * `key` is the keystroke as the keyboard knew it, for the predictor; the
-   * bytes are never un-encoded. Omitted for writes that are not typing (a
-   * focus report, a mouse event), which guess nothing and flush nothing.
+   * `keys` are the keystrokes as the keyboard knew them, for the predictor;
+   * the bytes are never un-encoded. One key for a keystroke, one per code
+   * point for composed text (a single write, since a composed word must not
+   * arrive as a paste), and none for writes that are not typing — a focus
+   * report, a mouse event — which guess nothing and flush nothing. Dropped
+   * bytes drop their keys with them: a guess for a keystroke that never left
+   * would stand until reconnect and be wrong for the whole of it.
    */
-  input(bytes: Uint8Array, key?: PredictKey): void {
+  input(bytes: Uint8Array, keys: readonly PredictKey[] = []): void {
     if (!this.#connected || bytes.length === 0) return;
-    if (key !== undefined) {
-      const before = this.#guesses();
-      this.predictor.onInput(key, this.#clock.now());
-      this.#send({ t: 'input', session: this.#options.session, bytes });
-      this.#guessesChanged(before);
-      return;
-    }
+    const before = this.#guesses();
+    const now = this.#clock.now();
+    for (const k of keys) this.predictor.onInput(k, now);
     this.#send({ t: 'input', session: this.#options.session, bytes });
+    const dirty = this.#guessesChanged(before);
+    if (dirty.size > 0) this.#events.onChange?.(dirty);
   }
 
   /** What is drawn right now, as something two moments can be compared by. */
@@ -235,14 +237,16 @@ export class SessionClient {
   }
 
   /**
-   * Repaint the rows a guess left or arrived on — only when what is drawn
-   * actually changed, so the expiry clock below is not a repaint clock — and
-   * keep that clock on what still stands: a guess the host never answers is
-   * taken back by time, and nothing else would wake the view to show that.
+   * The rows to repaint because a guess left or arrived on them — empty when
+   * what is drawn did not change, so the expiry clock below is not a repaint
+   * clock. Returned rather than fired, so a caller that is about to announce
+   * a delta's own rows folds these in and the view hears once. Also keeps
+   * that clock on what still stands: a guess the host never answers is taken
+   * back by time, and nothing else would wake the view to show that.
    */
-  #guessesChanged(before: Guesses): void {
+  #guessesChanged(before: Guesses): Set<number> {
     const after = this.#guesses();
-    if (after.sig !== before.sig) this.#events.onChange?.(new Set([...before.rows, ...after.rows]));
+    const dirty = after.sig === before.sig ? new Set<number>() : new Set([...before.rows, ...after.rows]);
     if (this.#predictTimer !== null) {
       this.#clock.cancel(this.#predictTimer);
       this.#predictTimer = null;
@@ -252,9 +256,11 @@ export class SessionClient {
         this.#predictTimer = null;
         const was = this.#guesses();
         this.predictor.tick(this.#clock.now());
-        this.#guessesChanged(was);
+        const gone = this.#guessesChanged(was);
+        if (gone.size > 0) this.#events.onChange?.(gone);
       }, PREDICT_TICK_MS);
     }
+    return dirty;
   }
 
   resize(cols: number, rows: number): void {
@@ -481,8 +487,8 @@ export class SessionClient {
       const guessed = this.#guesses();
       this.grid.applyDelta(msg.delta);
       this.predictor.reconcile(msg.delta, this.#clock.now());
-      const dirtyNow: DirtyRows = dirty === 'all' ? 'all' : new Set([...dirty, ...guessed.rows]);
-      this.#guessesChanged(guessed);
+      const changed = this.#guessesChanged(guessed);
+      const dirtyNow: DirtyRows = dirty === 'all' ? 'all' : new Set([...dirty, ...changed]);
       this.#appliedSeq = msg.seq;
       this.#queueAck(msg.seq);
       if (this.grid.title !== before) this.#events.onTitle?.(this.grid.title);
