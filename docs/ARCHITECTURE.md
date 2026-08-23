@@ -1450,3 +1450,94 @@ The no-call-outstanding rule above keeps such text from manufacturing a turn;
 redaction in core bounds what a steered agent can be made to leak, because an
 agent cannot exfiltrate what no client was ever shown. Two mitigations, aimed
 at the two halves of one hazard.
+
+---
+
+## ADR-016 — Predicted echo is an overlay, and the client still parses no VT
+
+**Status:** accepted (#442). The engine and its cross-port fixture landed
+first; the native overlay and the browser overlay follow as their own PRs.
+
+Over the relay a keystroke round-trips 60–120 ms before its echo comes back as
+a delta, and that is the whole felt difference between a local shell and a
+remote one. mosh's answer — guess that a printable lands as itself at the
+cursor, draw the guess provisionally, take it back when the server disagrees —
+is the largest perceived-latency win available, and ADR-004 already describes
+this protocol as mosh's state synchronization with a block layer on top. This
+ADR is the other half, and three decisions about where it may not go.
+
+### A prediction never enters the grid
+
+`Terminal::remote()` is the one door for writing a replica without parsing VT,
+and its rule is that a delta stream and any other writer are two authorities
+over one grid, the loser being whichever wrote last. A predictor writing cells
+is exactly that second writer. It is also a *sharing* problem before it is a
+consistency one: the replica grid is what the block index, the selection,
+`zest-mcp screen` and every other attached device read. A guess made by the
+keyboard in front of one person must not become a character an agent acts on
+or a line in someone else's scrollback.
+
+The IME preedit had already settled this (`Viewport.preedit`, "not in the
+grid, deliberately"): provisional text is an **overlay** the renderer draws on
+top of cells. Predictions ride the same seam in both clients — `Viewport` in
+`zest-render-wgpu`, `PaintOptions` in the web painter — so nothing that reads
+the grid can ever see one. That is not a nicety; it is what keeps ADR-015's
+"an agent never reads a guess" true without a single line of code in `zest-mcp`.
+
+### The client still interprets no VT
+
+ADR-004's "two emulators means two truths" is a structural property, and the
+predictor does not dent it: it handles printable characters and a Backspace
+over its *own* guesses, and nothing else. Enter, arrows, control characters and
+chords flush the pending guesses, because what they do is the shell's business.
+The alternate screen is never predicted into — a full-screen program decides
+for itself what a key does — and neither is the cell past the right edge,
+because where the next glyph goes is the shell's wrapping rule, not ours. No
+escape sequence is ever read client-side, so a client still never parses
+attacker-authored bytes.
+
+### Reconciliation reads the delta, not a new wire field — for now
+
+Nothing on the wire says "this delta reflects input up to N". mosh has that
+(the server acknowledges input sequence numbers); protocol 3 carries
+`Input { session, bytes }` and nothing more. The engine (`zest-proto::predict`,
+ported rule for rule to `clients/web/packages/proto/src/predict.ts`) reconciles
+from what a delta already carries: a `Row` op is the whole row, a `Cursor` op
+is where the host has got to, and the caller supplies a clock.
+
+- A guess is **confirmed** when the host's cursor has passed its cell and the
+  row delivered in the same delta holds the character — or, with no row
+  delivered, when the cursor alone has passed it, the row having ridden a
+  state the client already held. A confirmation is also one latency sample.
+- A guess is **refuted** when a delivered row holds something else where the
+  cursor has passed, or when it outlives three measured round trips. One
+  refutation flushes everything and goes *quiet*: guesses are still tracked,
+  so the link is still measured, but none is shown until one confirms. This
+  is the `Password:` prompt — a line that is not echoing stays that way, and
+  the next line proves itself by echoing.
+- A row the cursor has **not** reached says nothing. The host may simply not
+  have processed that key yet — typing `ab` fast lands `a`'s echo with `b`
+  still in flight — and nothing on the wire distinguishes "not yet" from
+  "never". That ambiguity is the exact thing an additive `echo` sequence on
+  `Input` and `Update` would close. It is deliberately not built yet: the
+  additive rule allows it, but it touches the daemon, both clients, the
+  bindings and the fixtures in one PR, and the heuristic has to be seen
+  failing on a real link before that is paid for.
+
+### Shown only where it helps
+
+A dim glyph a millisecond ahead of the real one is a flicker, not a feature,
+so the overlay is drawn only once the measured press-to-echo latency exceeds
+40 ms (hysteresis down to 20 ms). Before any measurement exists the caller's
+hint decides — a relayed host is worth predicting on sight, loopback never is.
+The policy is three-valued (`auto`, `always`, `off`) and lives in the shared
+engine, so the two clients cannot disagree about it.
+
+### Why one fixture and two ports
+
+The three keyframe take-back rules drifted into three semantics because each
+reader had its own (#313). The predictor has two readers by construction and
+one rule set by construction: `fixtures/predict.json` is hand-authored, one
+scenario per rule above, and both `tests/predict.rs` and `predict.test.ts`
+replay it step for step. A rule that changes changes the fixture, and a port
+that disagrees fails by name.

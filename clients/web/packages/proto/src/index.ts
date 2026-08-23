@@ -12,6 +12,7 @@
  */
 
 export { decode, MsgpackError } from './msgpack.ts';
+export { Predictor, type PredictKey, type PredictPolicy, type Prediction } from './predict.ts';
 export { encode } from './msgpack-encode.ts';
 export { FrameReader, FrameError, MAX_FRAME, encodeFrame } from './frame.ts';
 export {
