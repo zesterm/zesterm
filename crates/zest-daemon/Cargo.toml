@@ -59,6 +59,10 @@ ctrlc = { version = "3.5", features = ["termination"] }
 # The Sec-WebSocket-Accept digest and nothing else. A protocol checksum, not a
 # security boundary; the hashes that matter are SHA-256 in zest-mesh.
 sha1 = "0.10"
+# The editor's save check (#446): a file's content hash, so a save that would
+# clobber a change made underneath is refused instead. Already in the tree via
+# zest-mesh, at the same version, so this costs no build time.
+sha2 = "0.10"
 
 [dev-dependencies]
 # The end-to-end WebSocket tests drive our hand-rolled server with an

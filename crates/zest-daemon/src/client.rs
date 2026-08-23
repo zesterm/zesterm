@@ -61,6 +61,8 @@ fn discarded(waiting_for: &str, msg: &HostMessage) {
         HostMessage::Attention { .. } => "Attention",
         HostMessage::Progress { .. } => "Progress",
         HostMessage::Error { .. } => "Error",
+        HostMessage::FileContents { .. } => "FileContents",
+        HostMessage::FileWritten { .. } => "FileWritten",
     };
     tracing::warn!(
         message = kind,

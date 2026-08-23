@@ -100,4 +100,29 @@ watch_signals: boolean, } | { "t": "auth", signature: Sig64, } | { "t": "pairing
 /**
  * Empty means the host's default shell.
  */
-command: string, cwd: string, cols: number, rows: number, } | { "t": "attach", session: SessionAddr, cols: number, rows: number, observe: boolean, } | { "t": "detach", session: SessionAddr, } | { "t": "input", session: SessionAddr, bytes: Array<number>, } | { "t": "resize", session: SessionAddr, cols: number, rows: number, } | { "t": "ack", session: SessionAddr, seq: Seq, } | { "t": "request_scrollback", session: SessionAddr, from_line: number, count: number, } | { "t": "close_session", session: SessionAddr, };
+command: string, cwd: string, cols: number, rows: number, } | { "t": "attach", session: SessionAddr, cols: number, rows: number, observe: boolean, } | { "t": "detach", session: SessionAddr, } | { "t": "input", session: SessionAddr, bytes: Array<number>, } | { "t": "resize", session: SessionAddr, cols: number, rows: number, } | { "t": "ack", session: SessionAddr, seq: Seq, } | { "t": "request_scrollback", session: SessionAddr, from_line: number, count: number, } | { "t": "close_session", session: SessionAddr, } | { "t": "read_file", 
+/**
+ * The file, as the host reads paths. Absolute, or resolved against
+ * `cwd`; opaque to the client, like `CreateSession.cwd`.
+ */
+path: string, 
+/**
+ * The base a relative `path` resolves against. Empty means `path`
+ * must already be absolute.
+ */
+cwd: string, } | { "t": "write_file", path: string, cwd: string, 
+/**
+ * The whole new content. Bounded by `MAX_FRAME` at the encoder.
+ */
+data: Array<number>, 
+/**
+ * [`HostMessage::FileContents::hash`] from the read this edit was
+ * based on, so a file that moved underneath is refused instead of
+ * clobbered. Empty means "create it, and refuse if it exists".
+ *
+ * Every way the disk can disagree — it changed, it is gone, it
+ * appeared where the client expected nothing — comes back as one
+ * `conflict`, so the client has one branch to write rather than four
+ * that each have to be told apart from an I/O failure.
+ */
+base_hash: string, };

@@ -5584,6 +5584,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
+ "sha2 0.10.9",
  "thiserror 2.0.19",
  "tracing",
  "tracing-subscriber",

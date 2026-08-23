@@ -36,6 +36,7 @@ pub mod client;
 pub mod auth;
 pub mod context;
 pub mod enroll;
+pub mod files;
 pub mod history;
 pub mod lan;
 pub mod local;
