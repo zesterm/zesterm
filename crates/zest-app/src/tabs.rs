@@ -46,6 +46,15 @@ pub struct ProfileIdentity {
     pub color_from: Option<ColorFrom>,
     /// `window.opacity` override, riding this tab's viewport only.
     pub opacity: Option<f32>,
+    /// `window.background_image` override: this profile's own picture.
+    ///
+    /// The three background keys are separate `Option`s rather than one bundle
+    /// because the cascade resolves them separately — a profile that sets only
+    /// `background_dim` dims the window's picture, which is what "overrides
+    /// Defaults" means on a per-row editor.
+    pub background_image: Option<String>,
+    pub background_fit: Option<zest_config::settings::BackgroundFit>,
+    pub background_dim: Option<f32>,
     /// Where the tab's title comes from.
     pub title: TabTitle,
 }
@@ -69,21 +78,43 @@ impl ProfileIdentity {
         // Lenient like the rest of the profile keys: a wrong-typed opacity is
         // ignored, an integer one (`opacity = 1`) is accepted — TOML has no
         // float coercion, and `1` is how a hand edit spells "opaque".
-        let opacity = resolved
-            .overrides
-            .get("window")
-            .and_then(toml::Value::as_table)
-            .and_then(|w| w.get("opacity"))
-            .and_then(|v| match v {
-                toml::Value::Float(f) => Some(*f as f32),
-                toml::Value::Integer(i) => Some(*i as f32),
+        let window_key = |key: &str| {
+            resolved
+                .overrides
+                .get("window")
+                .and_then(toml::Value::as_table)
+                .and_then(|w| w.get(key))
+                .cloned()
+        };
+        // TOML admits `nan`, and clamp preserves it — a non-finite value must
+        // degrade to None (the window's own), not ride NaN into the render
+        // path, where it is a quad at infinity rather than a wrong pixel.
+        let unit = |key: &str| {
+            window_key(key)
+                .and_then(|v| match v {
+                    toml::Value::Float(f) => Some(f as f32),
+                    toml::Value::Integer(i) => Some(i as f32),
+                    _ => None,
+                })
+                .filter(|o: &f32| o.is_finite())
+                .map(|o| o.clamp(0.0, 1.0))
+        };
+
+        let opacity = unit("opacity");
+        let background_dim = unit("background_dim");
+        // An empty string is how the settings form spells "no picture", so a
+        // profile may use it to *turn off* one Defaults set — which is why it
+        // stays `Some("")` rather than collapsing to `None`.
+        let background_image =
+            window_key("background_image").and_then(|v| v.as_str().map(str::to_string));
+        let background_fit = window_key("background_fit")
+            .and_then(|v| v.as_str().map(str::to_string))
+            .and_then(|name| match name.as_str() {
+                "fill" => Some(zest_config::settings::BackgroundFit::Fill),
+                "fit" => Some(zest_config::settings::BackgroundFit::Fit),
+                "watermark" => Some(zest_config::settings::BackgroundFit::Watermark),
                 _ => None,
-            })
-            // TOML admits `nan`, and clamp preserves it — a non-finite value
-            // must degrade to None (the window's opacity), not ride NaN into
-            // the render path.
-            .filter(|o| o.is_finite())
-            .map(|o| o.clamp(0.0, 1.0));
+            });
 
         let scheme = resolved.meta.color_scheme;
         Self {
@@ -94,6 +125,9 @@ impl ProfileIdentity {
             icon: resolved.meta.icon,
             color_from: resolved.meta.color_from,
             opacity,
+            background_image,
+            background_fit,
+            background_dim,
             title: resolved.meta.tab_title,
         }
     }
@@ -124,6 +158,12 @@ impl ProfileIdentity {
             // person looking at it, not something the far host gets a vote on.
             color_from: None,
             opacity: None,
+            // Window-side too, and for the same reason: the file named by a far
+            // host's `background_image` is a path on *that* machine, which this
+            // one cannot read (#20's trap, one layer up).
+            background_image: None,
+            background_fit: None,
+            background_dim: None,
             title: TabTitle::default(),
         }
     }

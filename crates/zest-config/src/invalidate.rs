@@ -88,6 +88,13 @@ pub const KEYS: &[(&str, Invalidation)] = &[
     ("window.opacity", Invalidation::SurfaceRebuild),
     ("window.chrome_opacity", Invalidation::Free),
     ("window.backdrop", Invalidation::SurfaceRebuild),
+    // Free, unlike the two above: a picture reconfigures no surface and
+    // changes no alpha mode. Re-reading the *file* is not an invalidation
+    // class at all -- `App::apply_background` compares the resolved path on
+    // every reload and decodes only when it moved.
+    ("window.background_image", Invalidation::Free),
+    ("window.background_fit", Invalidation::Free),
+    ("window.background_dim", Invalidation::Free),
     // Padding does not change cell size, but it does change how many cells fit.
     ("window.padding", Invalidation::Geometry),
     ("window.custom_chrome", Invalidation::Restart),

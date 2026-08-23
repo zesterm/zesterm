@@ -80,6 +80,14 @@ the history behind them is in closed issues and PRs.
       tab does, as its primary). Per-pane scroll wheel routing is still the
       focused pane's (`hit::wheel_target` swallows the rest), and a pane on a
       relayed host has no dial hint for restore, like a relayed tab.
+- [ ] Background pictures after #450: the pipeline, the three `window.background_*`
+      keys and their rows in Settings and the profiles editor are in, but the
+      row is a path *text field* — #144's `<image-slot>` drop target and the OS
+      drag-and-drop behind it are still open, and there is no file picker
+      anywhere in `crates/` to build it on. The browser ignores the keys: it
+      cannot read a native host's path, and `painter.ts`'s per-dirty-row
+      `fillRect` of the default background would erase an image layer strip by
+      strip.
 - [ ] Render `SessionInfo.busy` in the ⌘K picker and the fleet cards. The
       field and the push behind it landed with #416 (`Registry`'s coalesced
       pulse also ends the stale-`title`/`cwd` watcher problem); what remains

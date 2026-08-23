@@ -90,6 +90,26 @@
         }
       ]
     },
+    "BackgroundFit": {
+      "description": "How a background picture is placed inside the pane it decorates.\n\nThree variants and no more, deliberately: `select_is_segmented` renders a\n`Select` of three or fewer as a segmented control, which is the shape the\nclient-UI handoff draws for this row (§12). A fourth would silently demote\nit to a dropdown.",
+      "oneOf": [
+        {
+          "const": "fill",
+          "description": "Scale to cover the pane, cropping whichever axis overhangs. The default:\na photograph with a letterbox around it reads as a bug rather than as a\nchoice.",
+          "type": "string"
+        },
+        {
+          "const": "fit",
+          "description": "Scale to fit inside the pane; the slack stays the plain background.",
+          "type": "string"
+        },
+        {
+          "const": "watermark",
+          "description": "Natural size, in the bottom-right corner. The design's own\nrecommendation — a watermark in the corner reads better than a\nfull-bleed photo behind text.",
+          "type": "string"
+        }
+      ]
+    },
     "CloseAction": {
       "description": "What closing a tab does to a session that runs on this machine.\n\nOnly local sessions have a choice to make. A remote one always detaches —\na window here closing must not end a shell there, which is the whole point\nof the fleet (ADR-007) — and a dead one has nothing left to end.",
       "oneOf": [
@@ -574,6 +594,30 @@
           "x_zest_group": "Window",
           "x_zest_widget": "select"
         },
+        "background_dim": {
+          "default": 0.5,
+          "description": "How far the picture is faded toward the background. 1 hides it entirely.",
+          "format": "float",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number",
+          "x_zest_group": "Window",
+          "x_zest_widget": "slider"
+        },
+        "background_fit": {
+          "$ref": "#/$defs/BackgroundFit",
+          "default": "fill",
+          "description": "How the picture is placed in the pane.",
+          "x_zest_group": "Window",
+          "x_zest_widget": "select"
+        },
+        "background_image": {
+          "default": "",
+          "description": "Picture drawn behind the cells. Empty draws none.\n\nA relative path resolves against the config directory, so a config that\ntravels with its pictures keeps working on another machine.",
+          "type": "string",
+          "x_zest_group": "Window",
+          "x_zest_widget": "path"
+        },
         "chrome_opacity": {
           "default": 1.0,
           "description": "Chrome opacity, independent of the grid's.",
@@ -758,6 +802,9 @@
       "$ref": "#/$defs/Window",
       "default": {
         "backdrop": "none",
+        "background_dim": 0.5,
+        "background_fit": "fill",
+        "background_image": "",
         "chrome_opacity": 1.0,
         "columns": 100,
         "custom_chrome": "auto",

@@ -8,6 +8,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod background;
 mod block_actions;
 mod block_menu;
 mod chrome;
@@ -319,6 +320,45 @@ fn parse_args(args: &[String]) -> Result<Flags, EarlyExit> {
                 }
                 i += 2;
             }
+            "--background-image" => {
+                // A path, so it goes in verbatim -- `background::resolve_path`
+                // decides what a relative one means, in one place, rather than
+                // the CLI having its own idea of the config directory.
+                f.cli.set_str(
+                    "window.background_image",
+                    value_of("--background-image", args.get(i + 1))?,
+                );
+                i += 2;
+            }
+            "--background-fit" => {
+                // Here for the same reason `--screen` is: Fit and Watermark are
+                // states a screenshot cannot otherwise reach without editing a
+                // config file first, and comparing the three modes is the whole
+                // question anyone asks about placement.
+                match args.get(i + 1).map(String::as_str) {
+                    Some(v @ ("fill" | "fit" | "watermark")) => {
+                        f.cli.set_str("window.background_fit", v);
+                    }
+                    _ => {
+                        return Err(EarlyExit::Refused(
+                            "--background-fit takes fill, fit or watermark".into(),
+                        ));
+                    }
+                }
+                i += 2;
+            }
+            "--background-dim" => {
+                let v = value_of("--background-dim", args.get(i + 1))?;
+                match v.parse::<f64>() {
+                    Ok(d) => f.cli.set_float("window.background_dim", d),
+                    Err(_) => {
+                        return Err(EarlyExit::Refused(
+                            "--background-dim needs a number from 0 to 1".into(),
+                        ));
+                    }
+                }
+                i += 2;
+            }
             "--tabs-position" => {
                 match tabs_position_from(args.get(i + 1).map(String::as_str)) {
                     // The same mechanism `--theme` uses: a CommandLine-layer
@@ -477,6 +517,12 @@ fn parse_args(args: &[String]) -> Result<Flags, EarlyExit> {
                      --font <family>   preferred font family\n\
                      --size <pt>       font size in points\n\
                      --opacity <0..1>  window background opacity\n\
+                     --background-image <path>\n\
+                     \x20                 a picture behind the cells; a relative path is\n\
+                     \x20                 taken from the config directory\n\
+                     --background-fit <fill|fit|watermark>\n\
+                     --background-dim <0..1>\n\
+                     \x20                 how far the picture fades into the background\n\
                      --tabs-position <top|left>\n\
                      \x20                 tab strip along the top, or a sidebar on the left\n\
                      --profile <name>  apply a named profile from the config\n\
@@ -904,6 +950,12 @@ mod tests {
             v(&["--size", "--opacity", "0.9"]),
             v(&["--size", "abc"]),
             v(&["--opacity", "much"]),
+            v(&["--background-image", "--theme", "paper"]),
+            v(&["--background-dim", "half"]),
+            // Not a `value_of` flag -- it matches three literals -- so it needs
+            // its own cases, or the one thing it can get wrong is untested.
+            v(&["--background-fit", "cover"]),
+            v(&["--background-fit"]),
             v(&["--profile", "--no-daemon"]),
         ] {
             assert!(

@@ -323,6 +323,27 @@ pub enum Backdrop {
     Vibrancy,
 }
 
+/// How a background picture is placed inside the pane it decorates.
+///
+/// Three variants and no more, deliberately: `select_is_segmented` renders a
+/// `Select` of three or fewer as a segmented control, which is the shape the
+/// client-UI handoff draws for this row (§12). A fourth would silently demote
+/// it to a dropdown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum BackgroundFit {
+    /// Scale to cover the pane, cropping whichever axis overhangs. The default:
+    /// a photograph with a letterbox around it reads as a bug rather than as a
+    /// choice.
+    Fill,
+    /// Scale to fit inside the pane; the slack stays the plain background.
+    Fit,
+    /// Natural size, in the bottom-right corner. The design's own
+    /// recommendation — a watermark in the corner reads better than a
+    /// full-bleed photo behind text.
+    Watermark,
+}
+
 /// Who draws the titlebar.
 ///
 /// Three states rather than a bool, because the right answer differs by
@@ -362,6 +383,19 @@ pub struct Window {
     /// Platform backdrop material.
     #[schemars(extend("x_zest_group" = "Window", "x_zest_widget" = "select"))]
     pub backdrop: Backdrop,
+    /// Picture drawn behind the cells. Empty draws none.
+    ///
+    /// A relative path resolves against the config directory, so a config that
+    /// travels with its pictures keeps working on another machine.
+    #[schemars(extend("x_zest_group" = "Window", "x_zest_widget" = "path"))]
+    pub background_image: String,
+    /// How the picture is placed in the pane.
+    #[schemars(extend("x_zest_group" = "Window", "x_zest_widget" = "select"))]
+    pub background_fit: BackgroundFit,
+    /// How far the picture is faded toward the background. 1 hides it entirely.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    #[schemars(extend("x_zest_group" = "Window", "x_zest_widget" = "slider"))]
+    pub background_dim: f32,
     /// Padding between the window edge and the grid, in logical pixels.
     #[schemars(range(min = 0, max = 64))]
     #[schemars(extend("x_zest_group" = "Window", "x_zest_widget" = "number"))]
@@ -387,6 +421,14 @@ impl Default for Window {
             opacity: 1.0,
             chrome_opacity: 1.0,
             backdrop: Backdrop::None,
+            background_image: String::new(),
+            background_fit: BackgroundFit::Fill,
+            // Half, not zero. Nobody sets a picture and then goes looking for
+            // the dim slider; they set one, find the text unreadable over it,
+            // and conclude the feature is broken. The first thing this can
+            // show has to be legible, which is the design copy's own point
+            // about a watermark reading better than a full-bleed photo.
+            background_dim: 0.5,
             padding: 8,
             custom_chrome: CustomChrome::Auto,
             columns: 100,

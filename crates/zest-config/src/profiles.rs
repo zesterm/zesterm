@@ -52,6 +52,9 @@ pub const PROFILE_SETTINGS_KEYS: &[&str] = &[
     "typography.size_pt",
     "window.opacity",
     "window.backdrop",
+    "window.background_image",
+    "window.background_fit",
+    "window.background_dim",
     "cursor.shape",
     "cursor.blink",
 ];

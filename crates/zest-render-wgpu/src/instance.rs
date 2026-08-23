@@ -7,6 +7,8 @@
 
 use bytemuck::{Pod, Zeroable};
 
+use crate::image::ImageId;
+
 /// A linear premultiplied colour, as the shaders consume it.
 ///
 /// `Default` is [`Self::TRANSPARENT`] — the only sensible zero for a
@@ -201,6 +203,70 @@ pub struct DecorInstance {
     pub _pad: [u32; 3],
 }
 
+/// One instance for the background-picture pipeline.
+///
+/// Not a [`RectInstance`] with a texture bolted on: this quad *replaces* the
+/// window background rather than blending over it (see `base`), so it needs a
+/// pipeline with a different blend state, and that is the whole difference.
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+pub struct ImageInstance {
+    /// The pane this picture fills: x, y, width, height in physical pixels.
+    pub rect: [f32; 4],
+    pub clip: [f32; 4],
+    /// Where the picture lands *inside* `rect`, relative to its origin.
+    ///
+    /// May sit outside it — a [`crate::image::BackgroundFit::Fill`] crop is
+    /// exactly that — and the shader reads everything beyond it as plain
+    /// background, which is also what makes a Fit letterbox match the padding.
+    pub src: [f32; 4],
+    /// The window background this pane would otherwise have been filled with.
+    ///
+    /// Carried per instance because the quad replaces that fill instead of
+    /// blending over it: the pass is already cleared to `Scene::backdrop`, and
+    /// a second translucent layer over it composites the opacity twice —
+    /// `Scene::push_window_background` has the arithmetic.
+    pub base: LinearRgba,
+    /// `0` shows the picture as it is, `1` is the plain background verbatim.
+    pub dim: f32,
+    /// Which picture to bind, as two `u32` because this struct is `Pod`.
+    ///
+    /// Never a vertex attribute — `shaders/image.wgsl` declares locations
+    /// `0..=4` and stops, so these bytes are padding as far as the GPU is
+    /// concerned. It lives here rather than in a parallel `Vec<ImageId>`
+    /// because those two would have to stay index-aligned, and the failure when
+    /// they do not is one pane wearing another pane's picture.
+    pub id: [u32; 2],
+    pub _pad: f32,
+}
+
+impl ImageInstance {
+    #[must_use]
+    pub fn new(
+        rect: [f32; 4],
+        clip: [f32; 4],
+        src: [f32; 4],
+        base: LinearRgba,
+        dim: f32,
+        id: ImageId,
+    ) -> Self {
+        Self {
+            rect,
+            clip,
+            src,
+            base,
+            dim: dim.clamp(0.0, 1.0),
+            id: [(id.0 & 0xffff_ffff) as u32, (id.0 >> 32) as u32],
+            _pad: 0.0,
+        }
+    }
+
+    #[must_use]
+    pub fn id(&self) -> ImageId {
+        ImageId(u64::from(self.id[0]) | (u64::from(self.id[1]) << 32))
+    }
+}
+
 /// Uniforms shared by every pipeline.
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
@@ -239,8 +305,30 @@ mod tests {
         // struct.
         assert_eq!(std::mem::size_of::<RectInstance>(), 116);
         assert_eq!(std::mem::size_of::<DecorInstance>(), 64);
+        // 80, of which 12 bytes are the id and its padding -- and there is one
+        // of these per pane, not per cell, so the cost is unmeasurable.
+        assert_eq!(std::mem::size_of::<ImageInstance>(), 80);
         // std140/430 alignment: uniform buffers need 16-byte alignment.
         assert_eq!(std::mem::size_of::<Globals>() % 16, 0);
+    }
+
+    #[test]
+    fn an_image_instance_round_trips_its_id() {
+        // The split is the only place a `u64` is taken apart in this crate, and
+        // getting the halves the wrong way round would bind a picture that
+        // exists for exactly the ids below 2^32 -- which is all of them, until
+        // the day a hash lands above it.
+        for raw in [0u64, 1, u64::from(u32::MAX), u64::from(u32::MAX) + 1, u64::MAX] {
+            let inst = ImageInstance::new(
+                [0.0; 4],
+                [0.0; 4],
+                [0.0; 4],
+                LinearRgba::TRANSPARENT,
+                0.0,
+                ImageId(raw),
+            );
+            assert_eq!(inst.id().0, raw, "{raw:#x}");
+        }
     }
 
     #[test]

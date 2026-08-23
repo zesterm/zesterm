@@ -1542,3 +1542,88 @@ one rule set by construction: `fixtures/predict.json` is hand-authored, one
 scenario per rule above, and both `tests/predict.rs` and `predict.test.ts`
 replay it step for step. A rule that changes changes the fixture, and a port
 that disagrees fails by name.
+
+---
+
+## ADR-017 — A background picture *is* the window background, not a layer over it
+
+**Status:** accepted (#450). The pipeline half of #144, which specified the
+per-profile field and could not have it.
+
+The renderer had SDF rects, glyphs and decorations, and the only textures it
+could sample were the glyph atlas's mask and colour layers. A background
+picture therefore needed a fourth pipeline, and the interesting question was
+never how to sample a texture — it was where the picture sits relative to the
+three things that already paint a pane's background.
+
+### It replaces the window background; it does not blend over it
+
+The offscreen is cleared to `Scene::backdrop`, which carries `window.opacity`
+premultiplied. Drawn with the usual `One / OneMinusSrcAlpha`, a quad whose own
+alpha is also the window opacity composites against that clear to
+`1-(1-o)²` — the pane comes out visibly *less* transparent than the padding
+around it. This is not a new hazard: `Scene::push_window_background` already
+skips its rect whenever the clear is the same colour, and its comment does the
+arithmetic. The picture is the same layer, so it inherits the same rule.
+
+So the image pipeline is the only one built with **`blend: None`**, and its
+fragment stage emits the finished pixel:
+
+```
+rgb   = mix(base.rgb, texel.rgb * base.a, texel.a * (1 - dim) * inside)
+alpha = base.a
+```
+
+`base` is the window background the pane would otherwise have been filled
+with, carried per instance rather than read from the clear — a split pane on
+its own palette, or a session that ran `OSC 11`, does not have the clear's
+colour. `inside` is zero outside the picture's placement, which is what makes a
+Fit letterbox and a Watermark's margins come out as plain background rather
+than as black.
+
+The property this buys is worth stating as an invariant, because it is what
+the tests assert and what a future change would break silently:
+**at `dim = 1` the output is byte-identical to the rect it replaced.**
+`dimming_all_the_way_is_the_plain_background` compares the two through the
+same resolve pass, and `a_picture_composites_the_window_opacity_exactly_once`
+pins the alpha at 0.8 rather than 0.96.
+
+### The cells need no new rule at all
+
+ADR-003's discipline — window opacity applies only to cells whose background is
+`Color::Default` — turns out to be exactly the discriminator a picture wants.
+`emit_row_backgrounds` already skips any run whose resolved fill equals the
+window background, so a default cell emits **no rect**, and the picture below
+shows through it. A cell with an explicit background emits one and hides the
+picture, which is what keeps `ls` colours, TUI panels and `@sigx/terminal-ui`
+boxes readable over a photograph. Not one line of `cell_bg` changed.
+
+### Per viewport, never under the chrome
+
+ADR-012 settled that a profile's scheme applies to its grid only. A picture is
+the same kind of thing, so it rides `Viewport` beside `opacity` and is clipped
+to the pane: two panes running two profiles can carry two different pictures,
+and the tab strip stays in the window's theme. A window-level picture behind
+the chrome would have been less code and is the wrong shape — it cannot be
+per-profile, which is where §12 puts the field.
+
+### The decoder lives in `zest-app`
+
+`zest-render-wgpu` takes RGBA8 bytes and a size and nothing else, so it gains
+no dependency on the image-format zoo; `image` is already linked into
+`zest-app` for `--screenshot`. Two details ride along:
+
+- The texture is **`Rgba8UnormSrgb`**, so the sampler linearizes for free. This
+  is the opposite of the atlas's masks, which ADR-010 insists are *never* sRGB
+  views — and the two are consistent, not in tension: a photograph is colour,
+  a mask is coverage, and only one of them has been through a transfer
+  function.
+- Pictures are capped at 4096 per axis. A phone camera's 6000×4000 is 96 MB of
+  RGBA8 sampled onto a pane a fraction of that size, and the cache is keyed by
+  path with a generation bump on config reload, so experimenting with five
+  wallpapers does not leave all five resident.
+
+**A picture that cannot be loaded draws nothing** — not a black pane, not a
+dialog. The settings row is a text field, so every prefix of a path someone is
+typing is a file that does not exist, and the only honest behaviour is for the
+window to look exactly as it did before they started.

@@ -635,6 +635,55 @@
     "restartHint": false
   },
   {
+    "key": "window.background_dim",
+    "group": "Window",
+    "widget": "slider",
+    "description": "How far the picture is faded toward the background. 1 hides it entirely.",
+    "range": [
+      0.0,
+      1.0
+    ],
+    "integer": false,
+    "variants": [],
+    "default": 0.5,
+    "restartHint": false
+  },
+  {
+    "key": "window.background_fit",
+    "group": "Window",
+    "widget": "select",
+    "description": "How the picture is placed in the pane.",
+    "range": null,
+    "integer": false,
+    "variants": [
+      {
+        "value": "fill",
+        "description": "Scale to cover the pane, cropping whichever axis overhangs. The default:\na photograph with a letterbox around it reads as a bug rather than as a\nchoice."
+      },
+      {
+        "value": "fit",
+        "description": "Scale to fit inside the pane; the slack stays the plain background."
+      },
+      {
+        "value": "watermark",
+        "description": "Natural size, in the bottom-right corner. The design's own\nrecommendation — a watermark in the corner reads better than a\nfull-bleed photo behind text."
+      }
+    ],
+    "default": "fill",
+    "restartHint": false
+  },
+  {
+    "key": "window.background_image",
+    "group": "Window",
+    "widget": "path",
+    "description": "Picture drawn behind the cells. Empty draws none.\n\nA relative path resolves against the config directory, so a config that\ntravels with its pictures keeps working on another machine.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": "",
+    "restartHint": false
+  },
+  {
     "key": "window.chrome_opacity",
     "group": "Window",
     "widget": "slider",
