@@ -360,7 +360,7 @@ pub fn forget_token(secrets: &dyn SecretStore) -> Result<bool, EnrollError> {
 /// of it is an HTML page, so this falls back to the raw body rather than
 /// reporting nothing when the JSON does not parse — "the control plane refused
 /// this" with no reason is the least actionable error there is.
-fn refusal_from(body: &str) -> (String, Option<String>) {
+pub(crate) fn refusal_from(body: &str) -> (String, Option<String>) {
     #[derive(serde::Deserialize)]
     struct Refusal {
         error: Option<String>,
@@ -406,7 +406,7 @@ pub fn refusal_text(e: &EnrollError) -> String {
 }
 
 /// Enough of a response to diagnose it, and not a whole error page.
-fn clip(body: &str) -> String {
+pub(crate) fn clip(body: &str) -> String {
     const LIMIT: usize = 200;
     let trimmed = body.trim();
     match trimmed.char_indices().nth(LIMIT) {

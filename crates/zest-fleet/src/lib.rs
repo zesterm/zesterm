@@ -231,6 +231,73 @@ pub fn best_route(
     None
 }
 
+/// One machine the account lists, as the fleet consumes it.
+///
+/// Deliberately not `zest_daemon::account::AccountHosts`: this crate merges
+/// facts and owns no transport, so it names only the three it merges *on* and
+/// lets each consumer convert at its own edge. That is the same rule the
+/// crate's `check-deps` boundary states — a rule that can dial has stopped
+/// being a rule — and it is why `zest-mcp` can build these rows without
+/// linking an HTTP client into the decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountEntry {
+    pub host: HostId,
+    pub label: String,
+    /// The relay says this machine's control link is parked right now.
+    ///
+    /// The third fact, and #237 is what its absence cost: with only id and
+    /// label here, a machine that discovery cannot see got `Presence::Unseen`
+    /// and rendered as *asleep* — while clicking the same card opened a shell
+    /// through the relay immediately, because the route is chosen from
+    /// `enrolled + relay origin` and never from presence.
+    pub relay_online: bool,
+}
+
+/// Lay the account's listing over what discovery built (ROADMAP WS-G:
+/// enrolment is the spine, discovery decorates). A host both know is one row
+/// keeping its observed label, address and presence — the live facts — with
+/// `enrolled` flipped; a host only the account knows is appended with the
+/// account's label and no address, reached only through the tunnel, and `Unseen` because nothing local has observed it.
+///
+/// Free of `State` so the tests can drive it with hand-built rows.
+pub fn merge_account(out: &mut Vec<FleetHost>, account: Option<&[AccountEntry]>) {
+    let Some(entries) = account else { return };
+    for entry in entries {
+        if let Some(seen) = out.iter_mut().find(|h| h.host == entry.host) {
+            seen.enrolled = true;
+            // Carried onto the matched row too, though the LAN decoration is
+            // what the card will show: a machine on this network reached over
+            // mDNS keeps its `Online` presence, its address and its measured
+            // RTT, and is not relabelled "via tunnel" for also being dialable
+            // that way. The fact is still recorded, because the two sources
+            // can disagree — a machine whose mDNS record has gone stale but
+            // whose relay link is parked is reachable, and `is_online` is
+            // where that gets decided.
+            seen.relay_online = entry.relay_online;
+        } else {
+            out.push(FleetHost {
+                host: entry.host,
+                label: entry.label.clone(),
+                // Still `Unseen`, and deliberately: this is discovery's word,
+                // and nothing local has observed this machine. What stops the
+                // card saying *asleep* is `relay_online` beside it — #237.
+                presence: Presence::Unseen,
+                local: false,
+                address: None,
+                reachability: Some(zest_mesh::Reachability::Cloud),
+                rtt_ms: None,
+                sessions: SessionsState::default(),
+                // Nothing has connected to this machine, so it has told us
+                // nothing — the same `None` a daemon predating the field
+                // produces, and read the same way.
+                offer: None,
+                enrolled: true,
+                relay_online: entry.relay_online,
+            });
+        }
+    }
+}
+
 /// Ready-made hosts for tests — this crate's and every consumer's.
 ///
 /// **The default [`fleet`](fixture::fleet) contains two machines that share a
@@ -354,6 +421,19 @@ mod tests {
         assert_ne!(a.host, b.host, "same label, different machines");
         assert_ne!(a.address, b.address, "and different addresses — they are both real");
         assert!(fleet[0].local && fleet.iter().filter(|h| h.local).count() == 1);
+    }
+
+    /// A row as discovery would have built it, with an id of the test's own.
+    ///
+    /// Through the shared fixture rather than hand-rolled, for the reason
+    /// `fixture`'s doc gives: a `FleetHost` literal in a test is how the next
+    /// label-keyed lookup stays invisible. Re-keyed because merge logic reads
+    /// the id and never the address.
+    fn discovered(host: HostId, label: &str) -> FleetHost {
+        let mut h = fixture::host(9, label);
+        h.host = host;
+        h.address = Some("192.168.1.9:7717".into());
+        h
     }
 
     const RELAY: Option<&str> = Some("wss://relay.example");
@@ -531,4 +611,172 @@ mod tests {
             None
         );
     }
+    #[test]
+    fn a_host_both_sources_know_is_one_row_carrying_both_facts() {
+        let id = HostId::from_bytes([1; 32]);
+        let mut out = vec![discovered(id, "studio")];
+        merge_account(
+            &mut out,
+            Some(&[AccountEntry {
+                host: id,
+                label: "studio (enrolled label)".into(),
+                relay_online: false,
+            }]),
+        );
+
+        assert_eq!(out.len(), 1, "merge is by id; two rows for one machine would offer the \
+             same shell twice and let the copies disagree");
+        assert!(out[0].enrolled, "the account's word survives the merge");
+        assert_eq!(
+            out[0].address.as_deref(),
+            Some("192.168.1.9:7717"),
+            "discovery's decoration survives too — the LAN route is the better one and \
+             must not be erased by the account knowing the machine"
+        );
+        assert_eq!(
+            out[0].label, "studio",
+            "the advertised label wins: the daemon speaks for its current name, the \
+             account row remembers whatever it was enrolled as"
+        );
+    }
+
+    #[test]
+    fn an_account_only_host_the_relay_can_reach_is_online_through_the_tunnel() {
+        // #237, in the shape it was reported: the `win` card read *asleep*
+        // while clicking it opened a Windows shell through the relay
+        // immediately. Nothing local has observed the machine, so discovery's
+        // word is still `Unseen` — what changed is that the account now
+        // carries a second fact, and `is_online` reads both.
+        let id = HostId::from_bytes([3; 32]);
+        let mut out = Vec::new();
+        merge_account(
+            &mut out,
+            Some(&[AccountEntry { host: id, label: "win".into(), relay_online: true }]),
+        );
+
+        let row = &out[0];
+        assert!(
+            row.is_online(),
+            "a machine whose control link is parked at the relay is reachable right now, \
+             and a card that says asleep must mean nobody can reach it"
+        );
+        assert_eq!(
+            row.presence,
+            Presence::Unseen,
+            "discovery's word is untouched: minting `Online` here would send the prober \
+             off to dial a LAN address this machine does not have"
+        );
+        assert_eq!(
+            row.reachability,
+            Some(zest_mesh::Reachability::Cloud),
+            "and the route it is online *by* is still the tunnel, which is what the pill says"
+        );
+    }
+
+    #[test]
+    fn an_account_only_host_the_relay_cannot_reach_stays_asleep() {
+        // The other direction, and the reason the flag is a bound rather than
+        // a latch: a machine that is enrolled and switched off must keep
+        // reading asleep, or the fix would simply invert the bug.
+        let id = HostId::from_bytes([4; 32]);
+        let mut out = Vec::new();
+        merge_account(
+            &mut out,
+            Some(&[AccountEntry { host: id, label: "attic-pc".into(), relay_online: false }]),
+        );
+
+        assert!(
+            !out[0].is_online(),
+            "enrolment is not reachability — the account lists machines that are off"
+        );
+    }
+
+    #[test]
+    fn a_machine_on_the_lan_keeps_its_lan_decoration_either_way() {
+        // mDNS facts win for a machine on your desk: it is Online with an RTT
+        // and an address, not "online via tunnel". The relay fact is still
+        // recorded — the two sources can disagree, and `is_online` is where
+        // that is resolved — but none of discovery's decoration is disturbed.
+        let id = HostId::from_bytes([5; 32]);
+        for relay_online in [false, true] {
+            let mut out = vec![discovered(id, "studio")];
+            merge_account(
+                &mut out,
+                Some(&[AccountEntry { host: id, label: "studio".into(), relay_online }]),
+            );
+
+            let row = &out[0];
+            assert!(row.is_online(), "it is on the LAN and advertising, whatever the relay says");
+            assert_eq!(
+                row.reachability,
+                Some(zest_mesh::Reachability::Lan),
+                "the LAN route is the better one and must not be relabelled as a tunnel"
+            );
+            assert_eq!(row.rtt_ms, Some(0.4), "nor may its measured round trip be dropped");
+            assert_eq!(row.relay_online, relay_online, "and the account's fact is still carried");
+        }
+    }
+
+    #[test]
+    fn every_way_of_being_reachable_counts_as_online() {
+        // The rule had five callers before it was a function, each spelling it
+        // `local || presence == Online` — which is exactly the expression that
+        // made #237 possible in four places at once. Pinned here so a fifth
+        // caller cannot quietly disagree.
+        let id = HostId::from_bytes([6; 32]);
+        let mut lan = discovered(id, "studio");
+        assert!(lan.is_online(), "advertising on the LAN");
+
+        lan.presence = Presence::Away;
+        assert!(!lan.is_online(), "and a lid that closed is not");
+
+        lan.relay_online = true;
+        assert!(lan.is_online(), "but the same machine reachable through the relay is");
+
+        lan.relay_online = false;
+        lan.local = true;
+        assert!(lan.is_online(), "and the machine the window is running on always is");
+    }
+
+    #[test]
+    fn an_account_only_host_is_listed_durable_with_nothing_it_does_not_have() {
+        let id = HostId::from_bytes([2; 32]);
+        let mut out = Vec::new();
+        merge_account(
+            &mut out,
+            Some(&[AccountEntry { host: id, label: "attic-pc".into(), relay_online: false }]),
+        );
+
+        assert_eq!(out.len(), 1, "an enrolled host is in the listing whether or not the \
+             LAN has ever seen it — that durability is the account's whole contribution");
+        let row = &out[0];
+        assert!(row.enrolled);
+        assert_eq!(row.label, "attic-pc", "the account's label is the only one there is");
+        assert_eq!(row.address, None, "no address may be invented for it");
+        assert_eq!(
+            row.reachability,
+            Some(zest_mesh::Reachability::Cloud),
+            "the only conceivable path is the tunnel, and the card says so"
+        );
+        assert_eq!(
+            row.presence,
+            Presence::Unseen,
+            "nothing local has observed it, and Unseen is exactly that claim"
+        );
+        assert!(!row.local);
+    }
+
+    #[test]
+    fn no_account_listing_leaves_discovery_alone() {
+        let id = HostId::from_bytes([3; 32]);
+        let mut out = vec![discovered(id, "studio")];
+        merge_account(&mut out, None);
+        assert_eq!(out.len(), 1);
+        assert!(
+            !out[0].enrolled,
+            "signed out (or never fetched), no row may claim the account's word"
+        );
+    }
+
+
 }

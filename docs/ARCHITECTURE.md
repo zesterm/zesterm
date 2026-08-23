@@ -85,10 +85,10 @@ two reference decoders cell-for-cell equal against recorded sessions.
 | `crates/zest-config` | Settings cascade, provenance, profiles, migrations, hot reload, JSON Schema |
 | `crates/zest-app` | The `zesterm` binary: window, chrome, tabs, wiring — a client of its own daemon |
 | `crates/zest-proto` | The delta protocol: encoder, `Applier`, framing, sealing, conformance fixtures |
-| `crates/zest-daemon` | Session ownership and lifecycle; loopback, LAN, WebSocket and relay transports |
+| `crates/zest-daemon` | Session ownership and lifecycle; loopback, LAN, WebSocket and relay transports; the account client every device shares |
 | `crates/zest-mesh` | Ed25519 identity, keystore, mDNS discovery, pairing, trust store |
 | `crates/zest-cloud` | The one crate that owns rustls and HTTP: `TlsDuplex`, enrolment, relay dialling |
-| `crates/zest-fleet` | What a machine in the fleet is, and the one rule that picks how to reach it. Pure; no discovery, no sockets |
+| `crates/zest-fleet` | What a machine in the fleet is, how its two sources merge into one row, and the one rule that picks how to reach it. Pure; no discovery, no sockets |
 | `crates/zest-mcp` | Terminals as an agent's tools, over MCP on stdio (ADR-015) |
 | `xtask/` | The gates: `check-deps` plus schema / bindings / fixtures / web-export generation and checks |
 | `schemas/` | The generated settings JSON Schema |
