@@ -33,6 +33,7 @@ import { resolveTerminalPalette, type Theme } from '@zesterm/theme';
 import type { SessionEntry } from '@zesterm/control';
 
 import { fitGrid } from '../grid-fit.ts';
+import { predictKeyOf, predictKeysOfText } from '../predict-key.ts';
 import { currentTheme, themeStore } from '../state/theme.ts';
 import { NO_FOLDS, foldedFor, toggle, type FoldsState } from '../state/folds.ts';
 import {
@@ -169,6 +170,7 @@ export const TerminalView = component<{
       pane.link,
       undefined,
       promptChips(entry.cwd, entry.context),
+      client.predictor.overlay(),
     );
   };
 
@@ -375,7 +377,17 @@ export const TerminalView = component<{
     // `input` event, which is the coordination that keeps ordinary typing
     // from arriving twice — once encoded, once as composed text.
     e.preventDefault();
-    client.input(bytes);
+    // A latched Ctrl/Alt from the key bar is a modifier the event does not
+    // carry; the bytes know, the classifier must too.
+    client.input(
+      bytes,
+      predictKeyOf({
+        key: e.key,
+        ctrlKey: e.ctrlKey || mods.ctrl,
+        altKey: e.altKey || mods.alt,
+        metaKey: e.metaKey,
+      }),
+    );
   };
 
   const onCap = (id: CapId): void => {
@@ -394,7 +406,10 @@ export const TerminalView = component<{
     }
     const r = tapCap(id, bar.latch, client.grid.modes);
     bar.latch = r.next;
-    if (r.bytes !== null) client.input(r.bytes);
+    // Every cap is a control key or a symbol the bar types; none is a
+    // plain printable the shell would echo as itself except the `/ - | ~`
+    // row, and one wrong guess there is not worth a second classifier.
+    if (r.bytes !== null) client.input(r.bytes, { key: 'other' });
   };
 
   /**
@@ -422,7 +437,14 @@ export const TerminalView = component<{
 
   const sendComposed = (text: string): void => {
     const bytes = encodeComposedText(text);
-    if (bytes !== null) client.input(bytes);
+    if (bytes !== null) {
+      // Typed, so guessed: the bytes go as one write (a composed word must
+      // not arrive as a paste) while the guesses are per character, which
+      // is how the echo will come back.
+      const keys = predictKeysOfText(text);
+      for (const k of keys.slice(0, -1)) client.predictor.onInput(k, Date.now());
+      client.input(bytes, keys[keys.length - 1] ?? { key: 'other' });
+    }
     clearInput();
   };
 
@@ -446,7 +468,7 @@ export const TerminalView = component<{
     const text = e.clipboardData?.getData('text') ?? '';
     if (text === '') return;
     e.preventDefault();
-    client.input(encodePaste(text, client.grid.modes));
+    client.input(encodePaste(text, client.grid.modes), { key: 'other' });
   };
 
   const sendFocus = (focused: boolean): void => {

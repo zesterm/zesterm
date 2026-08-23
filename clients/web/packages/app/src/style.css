@@ -471,6 +471,14 @@ body {
   white-space: pre-wrap;
 }
 
+/* Guessed echo (ADR-016): dim and underlined, exactly as SGR dim text reads,
+   so what the host has not confirmed is visibly provisional. */
+.predicted {
+  opacity: 0.6;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 .caret {
   display: inline-block;
   width: 8px;

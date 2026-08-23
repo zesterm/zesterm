@@ -219,12 +219,19 @@ own fleet model, loopback deliberately silent.
       (`Viewport.predicted` beside `preedit`; `SessionSource::predict` takes
       the key *before* `key::encode`; `cursor.predict_echo` is
       `auto|always|off`; `--simulated-latency <ms>` holds every host update
-      on the reader so the edit-run loop needs no relay). What remains: the
-      web overlay on `PaintOptions`'s pre-cut seam; the measured echo latency
-      feeding the `link` chip, which today shows a TCP-connect probe; guesses
-      through a wrap; and — only once the heuristic is seen failing on a real
-      link — an additive `echo` sequence on `Input`/`Update`, which is what
-      would let "not echoed yet" be told from "never echoed".
+      on the reader so the edit-run loop needs no relay). The browser draws
+      them too: `SessionClient` owns the port's `Predictor`, fed the key
+      beside the bytes, and the guess is a `predicted` span on the DOM
+      prompt row — the canvas painter is untouched, because the alternate
+      screen is never guessed into. What remains: the measured echo latency
+      feeding the `link` chip, which today shows a TCP-connect probe; a
+      browser-side policy once a browser has somewhere to read a preference
+      from (it is `auto` with the remote hint on, which a loopback daemon
+      turns off by measurement); guesses through a wrap; and — only once the
+      heuristic is seen failing on a real link — an additive `echo` sequence
+      on `Input`/`Update`, which is what would let "not echoed yet" be told
+      from "never echoed". Seen working in tests on both ports; the loopback
+      web rig could not show it live because of #447.
 
 ### Web client & devices
 
