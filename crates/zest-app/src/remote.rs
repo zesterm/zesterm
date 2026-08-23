@@ -883,6 +883,14 @@ impl SessionSource for RemoteSession {
         p.on_input(key, now_ms(self.epoch));
     }
 
+    fn predicting(&self, policy: Policy) -> bool {
+        let mut p = self.predictor.lock();
+        if p.policy() != policy {
+            p.set_policy(policy);
+        }
+        !p.overlay().is_empty()
+    }
+
     fn predicted(&self, policy: Policy) -> Option<PredictedEcho> {
         let mut p = self.predictor.lock();
         if p.policy() != policy {

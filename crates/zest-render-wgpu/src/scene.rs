@@ -371,7 +371,9 @@ impl Scene {
     /// the host has not agreed yet — and on the default background only where
     /// the cell underneath already shows something, so a guess over blank
     /// space costs one glyph and no rectangle. Suppressed while scrolled back
-    /// for the cursor's reason: the cells it names are not on screen.
+    /// for the cursor's reason — the cells it names are not on screen — and
+    /// in a folded view, where a viewport row is not a grid row and a guess
+    /// on a folded line has nowhere honest to land.
     #[allow(clippy::too_many_arguments)]
     fn emit_predicted(
         &mut self,

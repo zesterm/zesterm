@@ -3877,7 +3877,7 @@ impl App {
         if self
             .tabs
             .active_source()
-            .is_some_and(|s| s.predicted(self.predict_policy()).is_some())
+            .is_some_and(|s| s.predicting(self.predict_policy()))
         {
             consider(50);
         }

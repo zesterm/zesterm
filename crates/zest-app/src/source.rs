@@ -86,6 +86,13 @@ pub trait SessionSource {
     fn predicted(&self, _policy: Policy) -> Option<PredictedEcho> {
         None
     }
+
+    /// Whether a guess is standing — the frame scheduler's question, answered
+    /// without building the overlay it would otherwise have to build twice a
+    /// frame.
+    fn predicting(&self, _policy: Policy) -> bool {
+        false
+    }
 }
 
 /// Guessed echo, as the renderer wants it: owned, because the predictor lives
