@@ -129,6 +129,13 @@
           "x_zest_group": "Cursor",
           "x_zest_widget": "number"
         },
+        "predict_echo": {
+          "$ref": "#/$defs/PredictEcho",
+          "default": "auto",
+          "description": "Show what a keystroke will echo as before the remote host confirms it\n— dim and underlined, taken back if the host disagrees. What makes a\nsession over the relay feel local. Local sessions never guess.",
+          "x_zest_group": "Cursor",
+          "x_zest_widget": "select"
+        },
         "shape": {
           "$ref": "#/$defs/CursorShape",
           "default": "block",
@@ -236,6 +243,26 @@
         }
       },
       "type": "object"
+    },
+    "PredictEcho": {
+      "description": "Whether a keystroke's echo is guessed before the host confirms it.",
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "Guess once the link measures slow enough for it to help (above ~40 ms).",
+          "type": "string"
+        },
+        {
+          "const": "always",
+          "description": "Guess on every remote session, however fast the link.",
+          "type": "string"
+        },
+        {
+          "const": "off",
+          "description": "Never guess.",
+          "type": "string"
+        }
+      ]
     },
     "Prompt": {
       "description": "The context chips beside the live prompt: which show, in what order.",
@@ -630,6 +657,7 @@
       "default": {
         "blink": true,
         "blink_interval_ms": 530,
+        "predict_echo": "auto",
         "shape": "block",
         "trail": "none"
       },

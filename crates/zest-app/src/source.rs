@@ -32,6 +32,7 @@
 use std::sync::Arc;
 
 use zest_core::Terminal;
+use zest_proto::{Key, Policy};
 
 use crate::fair_mutex::FairMutex;
 use crate::session::Session;
@@ -71,6 +72,28 @@ pub trait SessionSource {
     fn origin(&self) -> Origin {
         Origin::InProcess
     }
+
+    /// A keystroke is about to be written: guess its echo, if this session
+    /// guesses at all. Called *before* `write`, with the key as the keyboard
+    /// knew it — the predictor never un-encodes bytes. A local pty never
+    /// guesses: its echo is a lock away, and a guess would only ever be a
+    /// flicker ahead of the truth. → ADR-016.
+    fn predict(&self, _key: Key, _policy: Policy) {}
+
+    /// The guesses still standing, and where the caret belongs while they do.
+    /// `None` for a session that never guesses, and for one with nothing to
+    /// show — so the renderer's ordinary path is untouched in both cases.
+    fn predicted(&self, _policy: Policy) -> Option<PredictedEcho> {
+        None
+    }
+}
+
+/// Guessed echo, as the renderer wants it: owned, because the predictor lives
+/// behind the reader thread's lock and a frame must not hold that.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PredictedEcho {
+    pub cells: Vec<zest_render_wgpu::PredictedCell>,
+    pub caret: (u16, u16),
 }
 
 // Deliberately *not* on this trait: `has_exited`. Nothing calls it — exit

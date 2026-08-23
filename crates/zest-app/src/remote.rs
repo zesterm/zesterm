@@ -27,13 +27,13 @@ use zest_core::Terminal;
 use zest_mesh::identity::ClientIdentity;
 use zest_mesh::secure::Sealer;
 use zest_proto::{
-    frame, Applied, Applier, ClientMessage, HostMessage, SessionAddr, Seq,
+    frame, Applied, Applier, ClientMessage, HostMessage, Key, Policy, Predictor, SessionAddr, Seq,
 };
 
 use zest_daemon::client::DaemonClient;
 use crate::fair_mutex::FairMutex;
 use crate::session::Wakeup;
-use crate::source::{Origin, SessionSource};
+use crate::source::{Origin, PredictedEcho, SessionSource};
 
 /// How often to acknowledge, at most.
 ///
@@ -159,6 +159,14 @@ enum Target {
 
 pub struct RemoteSession {
     terminal: Arc<FairMutex<Terminal>>,
+    /// Guessed echo. Written by the keyboard (`predict`) and judged by the
+    /// reader (`reconcile`) under this lock; read per frame. Never inside the
+    /// `terminal` lock's scope on the keyboard side, so a frame that holds
+    /// the grid cannot wait on a reader holding this.
+    predictor: Arc<parking_lot::Mutex<Predictor>>,
+    /// The clock every guess is stamped on. `Instant` rather than wall time:
+    /// a latency is a difference, and the wall clock can step.
+    epoch: Instant,
     /// Set by the reader, cleared by the renderer. Also the coalescing latch.
     needs_redraw: Arc<AtomicBool>,
     /// Interior mutability for `write`/`resize` on `&self` — the same trick
@@ -339,6 +347,16 @@ impl RemoteSession {
             let mut term = terminal.lock();
             applier.apply_keyframe(&mut term, &keyframe, keyframe_seq);
         }
+        let epoch = Instant::now();
+        let predictor = {
+            let mut p = Predictor::new(Policy::Auto);
+            // Before the link has been measured, a remote host is worth
+            // guessing on sight; the loopback daemon never is. The first
+            // confirmation replaces the hint with a number.
+            p.set_remote_hint(!local);
+            p.on_keyframe(keyframe.cursor, keyframe.cols, keyframe.modes.contains(zest_core::Modes::ALT_SCREEN));
+            Arc::new(parking_lot::Mutex::new(p))
+        };
 
         // --- writer thread ---
         let writer_thread = {
@@ -405,6 +423,8 @@ impl RemoteSession {
             let on_pending = on_pending.clone();
             let addr_cell = Arc::clone(&addr_cell);
             let size_cell = Arc::clone(&size_cell);
+            let predictor = Arc::clone(&predictor);
+            let simulated_latency = simulated_latency();
             std::thread::Builder::new()
                 .name("zest-remote-reader".into())
                 .spawn(move || {
@@ -523,20 +543,33 @@ impl RemoteSession {
                                         title,
                                         history_clears,
                                     };
+                                    if let Some(d) = simulated_latency {
+                                        std::thread::sleep(d);
+                                    }
                                     {
                                         let mut term = terminal.lock_unfair();
                                         applier.apply_keyframe(&mut term, &k, seq.0);
                                     }
+                                    predictor.lock().on_keyframe(k.cursor, k.cols, k.modes.contains(zest_core::Modes::ALT_SCREEN));
                                     pending_ack = Some(seq.0);
                                     mark(&needs_redraw, &wake);
                                 }
                                 HostMessage::Update { base, seq, delta, .. } => {
+                                    // `--simulated-latency`: the echo is held
+                                    // here, on the reader, so the guess is made
+                                    // and judged exactly as it would be over a
+                                    // slow link -- nothing else in the path
+                                    // knows the delay is fake.
+                                    if let Some(d) = simulated_latency {
+                                        std::thread::sleep(d);
+                                    }
                                     let outcome = {
                                         let mut term = terminal.lock_unfair();
                                         applier.apply_delta(&mut term, &delta, base.0, seq.0)
                                     };
                                     match outcome {
                                         Applied::Ok => {
+                                            predictor.lock().reconcile(&delta, now_ms(epoch));
                                             pending_ack = Some(seq.0);
                                             mark(&needs_redraw, &wake);
                                         }
@@ -702,6 +735,7 @@ impl RemoteSession {
                             let mut term = terminal.lock_unfair();
                             applier.apply_keyframe(&mut term, &keyframe, seq);
                         }
+                        predictor.lock().on_keyframe(keyframe.cursor, keyframe.cols, keyframe.modes.contains(zest_core::Modes::ALT_SCREEN));
                         pending_ack = Some(seq);
                         frames = carried;
                         reader = r;
@@ -718,6 +752,8 @@ impl RemoteSession {
 
         Ok(Self {
             terminal,
+            predictor,
+            epoch,
             needs_redraw,
             tx,
             addr: addr_cell,
@@ -818,9 +854,50 @@ fn mark(needs_redraw: &Arc<AtomicBool>, wake: &impl Fn(Wakeup)) {
     }
 }
 
+/// Milliseconds since `epoch`, the predictor's clock.
+fn now_ms(epoch: Instant) -> u64 {
+    epoch.elapsed().as_millis() as u64
+}
+
+/// `--simulated-latency <ms>`, carried as an environment variable because
+/// the reader is three constructors away from the command line and every
+/// one of them is a frozen signature. Read once per session.
+fn simulated_latency() -> Option<Duration> {
+    std::env::var("ZESTERM_SIMULATED_LATENCY_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&ms| ms > 0)
+        .map(Duration::from_millis)
+}
+
 impl SessionSource for RemoteSession {
     fn terminal(&self) -> &Arc<FairMutex<Terminal>> {
         &self.terminal
+    }
+
+    fn predict(&self, key: Key, policy: Policy) {
+        let mut p = self.predictor.lock();
+        if p.policy() != policy {
+            p.set_policy(policy);
+        }
+        p.on_input(key, now_ms(self.epoch));
+    }
+
+    fn predicted(&self, policy: Policy) -> Option<PredictedEcho> {
+        let mut p = self.predictor.lock();
+        if p.policy() != policy {
+            p.set_policy(policy);
+        }
+        // A frame is the tick: a guess nothing ever answers expires here,
+        // which is why `anim_deadline` keeps frames coming while one stands.
+        p.tick(now_ms(self.epoch));
+        let cells: Vec<_> = p
+            .overlay()
+            .iter()
+            .map(|x| zest_render_wgpu::PredictedCell { row: x.row, col: x.col, ch: x.ch })
+            .collect();
+        let caret = p.caret()?;
+        (!cells.is_empty()).then_some(PredictedEcho { cells, caret })
     }
 
     fn write(&self, bytes: Vec<u8>) {
@@ -1246,6 +1323,44 @@ mod tests {
             "/bin/sh -c 'i=0; while [ $i -lt 20 ]; do echo drip-$i; sleep 0.1; \
              i=$((i+1)); done; echo {marker}'"
         )
+    }
+
+    /// The whole feature, end to end, with the echo held on the socket.
+    ///
+    /// `cat` echoes a line back only on Enter, so the *shell-less* echo here
+    /// is the pty's own: a typed `a` comes back as `a` from the tty line
+    /// discipline, exactly as it does from a readline prompt. With every read
+    /// stalled, the guess is on screen before the pty has answered, and gone
+    /// — with the real `a` in the grid — once it has. `Always` because the
+    /// loopback hint says "do not bother" and this test is about the
+    /// mechanism, not the policy.
+    #[test]
+    fn a_guess_shows_before_the_echo_and_clears_on_it() {
+        let h = Harness::start("guess");
+        let s = h.attach_stalled("/bin/cat", Duration::from_millis(400), |_| {});
+        assert!(wait_for(|| s.terminal().lock().grid().cols() > 0));
+        let always = Policy::Always;
+
+        s.predict(Key::Printable('a'), always);
+        s.write(b"a".to_vec());
+        let shown = s.predicted(always).expect("a guess stands while the echo is in flight");
+        assert_eq!(shown.cells.len(), 1);
+        assert_eq!(shown.cells[0].ch, 'a');
+        assert_eq!(shown.caret, (shown.cells[0].row, shown.cells[0].col + 1));
+
+        assert!(
+            wait_for(|| s.terminal().lock().screen_text().contains('a')),
+            "the echo never arrived; grid was:\n{}",
+            s.terminal().lock().screen_text()
+        );
+        assert!(
+            wait_for(|| s.predicted(always).is_none()),
+            "the echo landed but the guess is still drawn over it"
+        );
+        assert!(
+            s.predictor.lock().echo_latency_ms().is_some_and(|ms| ms >= 300.0),
+            "a confirmed guess is a latency sample, and this link is stalled 400ms per read"
+        );
     }
 
     /// Frames that arrive in the same read as the attach keyframe must not be lost.

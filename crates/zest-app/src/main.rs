@@ -344,6 +344,24 @@ fn parse_args(args: &[String]) -> Result<Flags, EarlyExit> {
                 f.startup_probe = true;
                 i += 1;
             }
+            // Held on the daemon reader rather than anywhere nearer the
+            // keyboard, so the guess is made and judged exactly as it would
+            // be over a slow link. An environment variable because the
+            // reader is three frozen signatures away from here, and because
+            // it then reaches every session this process attaches.
+            "--simulated-latency" => {
+                let ms = value_of("--simulated-latency", args.get(i + 1))?;
+                if ms.parse::<u64>().is_err() {
+                    return Err(EarlyExit::Refused(
+                        "--simulated-latency needs a whole number of milliseconds".into(),
+                    ));
+                }
+                // SAFETY: set once, during argument parsing, before any
+                // thread exists -- the same moment every other process-wide
+                // default here is decided.
+                unsafe { std::env::set_var("ZESTERM_SIMULATED_LATENCY_MS", ms) };
+                i += 2;
+            }
             "--no-daemon" => {
                 f.no_daemon = true;
                 i += 1;
@@ -472,6 +490,9 @@ fn parse_args(args: &[String]) -> Result<Flags, EarlyExit> {
                      \x20                 (ssh, tmux and subshells; injection covers the rest)\n\
                      --config          print the config file path\n\
                      --startup-probe   report time to first paint, then exit\n\
+                     --simulated-latency <ms>\n\
+                     \x20                 hold every host update that long: see the\n\
+                     \x20                 predicted echo without a slow link\n\
                      --attach-probe    report what attaching to the daemon cost, then exit\n\
                      --no-daemon       own the pty in this process, do not attach\n\
                      --new-session     start a fresh shell instead of restoring your tabs\n\

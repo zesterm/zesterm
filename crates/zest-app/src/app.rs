@@ -3871,7 +3871,26 @@ impl App {
         if caret_active {
             consider(u64::from(self.config.cursor_blink_interval_ms.max(100)));
         }
+        // A guess nothing answers expires on a frame (`predicted` ticks), so
+        // while one stands the frames must keep coming; the moment none does
+        // this adds nothing, which keeps 0%-idle true.
+        if self
+            .tabs
+            .active_source()
+            .is_some_and(|s| s.predicted(self.predict_policy()).is_some())
+        {
+            consider(50);
+        }
         next.map(std::time::Duration::from_millis)
+    }
+
+    /// `cursor.predict_echo`, as the predictor's own three-way policy.
+    fn predict_policy(&self) -> zest_proto::Policy {
+        match self.settings.cursor.predict_echo {
+            zest_config::PredictEcho::Auto => zest_proto::Policy::Auto,
+            zest_config::PredictEcho::Always => zest_proto::Policy::Always,
+            zest_config::PredictEcho::Off => zest_proto::Policy::Off,
+        }
     }
 
     /// Back to the terminal if a full-pane screen is up; free otherwise.
@@ -4610,6 +4629,10 @@ impl App {
                     // keyboard would have delivered it. Not `encode_paste`:
                     // this is typing, and bracketing it would make a program
                     // that reads paste-mode treat a composed word as pasted.
+                    let policy = self.predict_policy();
+                    for c in text.chars() {
+                        session.predict(zest_proto::Key::Printable(c), policy);
+                    }
                     session.write(text.into_bytes());
                     let mut term = session.terminal().lock();
                     // Same gate as a physical keystroke: the comment above says
@@ -9939,6 +9962,7 @@ impl App {
         };
 
         let selected_blocks = self.selected_block.clone();
+        let predict_policy = self.predict_policy();
         let (Some(gpu), Some(fonts), Some(session), Some(window)) = (
             self.gpu.as_mut(),
             self.fonts.as_mut(),
@@ -10180,6 +10204,10 @@ impl App {
                     let preedit = self.ime.preedit().map(|p| {
                         zest_render_wgpu::Preedit { text: &p.text, cursor: p.cursor }
                     });
+                    // The focused pane's guesses only: the keyboard feeds one
+                    // pane, so only one can have any.
+                    let predicted =
+                        active_tab.pane_source(active_tab.focus).predicted(predict_policy);
                     // Per pane, and each looks up its *own* address: the panes
                     // select independently, so reading `focused_addr` for all
                     // would light the same block in every one.
@@ -10208,6 +10236,14 @@ impl App {
                                 selection: terms[i].selection(),
                                 selection_bg: pane_selection_bg(self.selection_bg, identity),
                                 preedit: if focused { preedit } else { None },
+                                predicted: if focused {
+                                    predicted.as_ref().map(|p| zest_render_wgpu::Predicted {
+                                        cells: &p.cells,
+                                        caret: p.caret,
+                                    })
+                                } else {
+                                    None
+                                },
                                 cursor_on: caret_on,
                                 features: &self.config.features,
                                 ligatures: self.config.ligatures,
@@ -10255,6 +10291,10 @@ impl App {
                         addr.and_then(|a| selected_blocks.get(&a).copied()),
                         dead,
                     );
+                    let predicted = self
+                        .tabs
+                        .active_source()
+                        .and_then(|s| s.predicted(predict_policy));
                     self.scene.build(
                         &gpu.device,
                         &gpu.queue,
@@ -10275,6 +10315,10 @@ impl App {
                             selection_bg: pane_selection_bg(self.selection_bg, identity),
                             preedit: self.ime.preedit().map(|p| {
                                 zest_render_wgpu::Preedit { text: &p.text, cursor: p.cursor }
+                            }),
+                            predicted: predicted.as_ref().map(|p| zest_render_wgpu::Predicted {
+                                cells: &p.cells,
+                                caret: p.caret,
                             }),
                             cursor_on: caret_on,
                             features: &self.config.features,
@@ -12655,6 +12699,16 @@ impl ApplicationHandler<Wakeup> for App {
                 let modes = session.terminal().lock().modes();
 
                 if let Some(bytes) = key::encode(&event, self.modifiers, modes) {
+                    // The guess is made from the key, never from the bytes,
+                    // and before the write so it is on screen the same frame
+                    // the keystroke leaves. Only a press: the release the
+                    // kitty protocol encodes echoes nothing.
+                    if event.state == ElementState::Pressed {
+                        session.predict(
+                            predict_key(&event.logical_key, self.modifiers),
+                            self.predict_policy(),
+                        );
+                    }
                     // Written synchronously, before anything else. Deferring
                     // input to the next frame adds a whole frame of latency for
                     // nothing.
@@ -13189,6 +13243,32 @@ enum NextWake {
 /// idle guarantee. And the wake-up could not have helped anyway, since what it
 /// does is ask the window to repaint and screenshot mode has no visible window
 /// to repaint. Both are why `--screenshot-delay` wrote nothing at all (#255).
+/// What a keystroke is to the echo predictor, read off the key the keyboard
+/// reported — never off the encoded bytes.
+///
+/// A printable is a single code point with no Ctrl, Alt or Super held (Shift
+/// is part of the character). Everything else is `Other`: the predictor
+/// flushes on it, because what Enter, an arrow or a chord does is the
+/// shell's business. The predictor applies its own width rule on top.
+fn predict_key(key: &winit::keyboard::Key, mods: ModifiersState) -> zest_proto::Key {
+    use winit::keyboard::{Key, NamedKey};
+    if mods.control_key() || mods.alt_key() || mods.super_key() {
+        return zest_proto::Key::Other;
+    }
+    match key {
+        Key::Named(NamedKey::Backspace) => zest_proto::Key::Backspace,
+        Key::Named(NamedKey::Space) => zest_proto::Key::Printable(' '),
+        Key::Character(s) => {
+            let mut it = s.chars();
+            match (it.next(), it.next()) {
+                (Some(c), None) => zest_proto::Key::Printable(c),
+                _ => zest_proto::Key::Other,
+            }
+        }
+        _ => zest_proto::Key::Other,
+    }
+}
+
 fn next_wake(
     screenshot_in: Option<std::time::Duration>,
     anim_in: Option<std::time::Duration>,
@@ -14464,6 +14544,39 @@ mod scrolling_tests {
         assert_eq!(config_with(0, true).lines_per_notch, 1);
         assert_eq!(wheel_rows(1.0, 0), 1);
         assert_eq!(config_with(9_000, true).lines_per_notch, 50);
+    }
+
+    /// What reaches the predictor is the key, never the bytes: a chord is
+    /// `Other` even when it would encode to a printable-looking byte, a shifted
+    /// letter is the letter, and a ZWJ sequence the IME hands over is not one
+    /// character. The predictor's own width rule sits on top of this.
+    #[test]
+    fn predict_key_reads_the_key_not_the_bytes() {
+        use super::{predict_key, ModifiersState};
+        use winit::keyboard::{Key, NamedKey};
+        use zest_proto::Key as P;
+        let ev = |k: Key| k;
+        let none = ModifiersState::empty();
+        assert_eq!(predict_key(&ev(Key::Character("a".into())), none), P::Printable('a'));
+        assert_eq!(
+            predict_key(&ev(Key::Character("A".into())), ModifiersState::SHIFT),
+            P::Printable('A'),
+            "shift is part of the character"
+        );
+        assert_eq!(predict_key(&ev(Key::Named(NamedKey::Space)), none), P::Printable(' '));
+        assert_eq!(predict_key(&ev(Key::Named(NamedKey::Backspace)), none), P::Backspace);
+        assert_eq!(
+            predict_key(&ev(Key::Character("c".into())), ModifiersState::CONTROL),
+            P::Other,
+            "^C echoes nothing a guess could stand for"
+        );
+        assert_eq!(predict_key(&ev(Key::Named(NamedKey::Enter)), none), P::Other);
+        assert_eq!(predict_key(&ev(Key::Named(NamedKey::ArrowLeft)), none), P::Other);
+        assert_eq!(
+            predict_key(&ev(Key::Character("👨‍👩".into())), none),
+            P::Other,
+            "more than one code point is not one character"
+        );
     }
 
     #[test]

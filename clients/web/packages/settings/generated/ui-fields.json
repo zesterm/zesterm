@@ -126,6 +126,30 @@
     "restartHint": false
   },
   {
+    "key": "cursor.predict_echo",
+    "group": "Cursor",
+    "widget": "select",
+    "description": "Show what a keystroke will echo as before the remote host confirms it\n— dim and underlined, taken back if the host disagrees. What makes a\nsession over the relay feel local. Local sessions never guess.",
+    "range": null,
+    "integer": false,
+    "variants": [
+      {
+        "value": "auto",
+        "description": "Guess once the link measures slow enough for it to help (above ~40 ms)."
+      },
+      {
+        "value": "always",
+        "description": "Guess on every remote session, however fast the link."
+      },
+      {
+        "value": "off",
+        "description": "Never guess."
+      }
+    ],
+    "default": "auto",
+    "restartHint": false
+  },
+  {
     "key": "cursor.shape",
     "group": "Cursor",
     "widget": "select",

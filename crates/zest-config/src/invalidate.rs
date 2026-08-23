@@ -115,6 +115,8 @@ pub const KEYS: &[(&str, Invalidation)] = &[
     ("scrolling.scroll_on_output", Invalidation::Free),
     ("scrolling.scroll_on_keypress", Invalidation::Free),
     ("cursor.shape", Invalidation::Free),
+    // Read on every keystroke and every frame, so a change is in force at once.
+    ("cursor.predict_echo", Invalidation::Free),
     ("cursor.blink", Invalidation::Free),
     ("cursor.blink_interval_ms", Invalidation::Free),
     ("cursor.trail", Invalidation::Free),

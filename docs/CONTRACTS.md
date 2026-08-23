@@ -35,7 +35,7 @@ describes only the current shape.
 | `Block`, `BlockIndex`, `BlockState` | `crates/zest-core/src/blocks.rs` | **frozen**, additively extended: `Block.context` (`BlockContext`, embedder-stamped, #429) | `zest-app`, `zest-daemon`, `zest-mcp`, `clients/web` |
 | `BlockPayload`, `BlockState` (wire) | `crates/zest-proto/src/delta.rs` | **frozen**, additively extended: `context` (`BlockContextPayload`, `#[serde(default)]`, #429) | `zest-daemon`, `zest-app`, `zest-mcp`, `clients/web` |
 | `ChangeSource`, `Update`, `update_for` | `crates/zest-core/src/subscribe.rs` | **frozen** | `zest-daemon` |
-| `SessionSource`, `Origin` | `crates/zest-app/src/source.rs` | **frozen** — the seam between the app's chrome/input half and its session half | `zest-app` |
+| `SessionSource`, `Origin` | `crates/zest-app/src/source.rs` | **frozen**, additively extended: `predict`/`predicted` with default bodies (#442) — a source that never guesses implements neither, and the renderer's path is untouched for it | `zest-app` |
 | `Peer`, `Endpoint`, `Reachability`, `Discovery` | `crates/zest-mesh/` | **frozen** | `zest-daemon`, `zest-app` |
 | `HostIdentity`, `ClientIdentity`, `Signature`, `Nonce`, `Purpose` | `crates/zest-mesh/src/identity.rs` | draft — `zest-mesh` may change it freely | `zest-mesh`, `zest-daemon` |
 | `Attestation`, `attestation_message`, `sign_attestation`, `verify_attestation`, `decode_attestation` | `crates/zest-mesh/src/attest.rs` | **frozen** — the `zesterm-attest-v1` layout and its `base64url(message).base64url(sig)` framing; the TS port (`cloud/packages/shared/src/attestation.ts`) and `crates/zest-daemon/src/attest_sync.rs` are both pinned to `fixtures/attest.json` | `zest-daemon`, `cloud/` |

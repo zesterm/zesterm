@@ -318,6 +318,8 @@ zesterm-dev --no-build --attach-probe          # probe flags stay in the foregro
 .\scripts\zesterm-dev.ps1                      # the same thing, in PowerShell on Windows
 cargo run --profile fast -p zest-app           # the terminal, quick rebuild
 ./target/fast/zesterm --startup-probe          # time to first paint; fails over 100ms
+./target/fast/zesterm --simulated-latency 300  # hold every host update 300ms: the predicted
+                                               #   echo (ADR-016) without a slow link
 ./target/fast/zesterm --screenshot out.png     # one real frame to a PNG; no window is ever shown
 ./target/fast/zesterm --theme paper --screenshot-size 1200x800 --screenshot out.png
 ./target/fast/zesterm --screen themes --screenshot out.png

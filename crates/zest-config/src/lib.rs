@@ -47,8 +47,8 @@ pub use watch::Watcher;
 #[cfg(feature = "fs")]
 pub use toml_edit;
 pub use settings::{
-    Appearance, Backdrop, Cursor, CursorShape, CursorTrail, Motion, Prompt, Scrolling, Settings,
-    Shell, TextAntialias, TextHinting, Typography, Window, CURRENT_SCHEMA_VERSION,
+    Appearance, Backdrop, Cursor, CursorShape, CursorTrail, Motion, PredictEcho, Prompt, Scrolling,
+    Settings, Shell, TextAntialias, TextHinting, Typography, Window, CURRENT_SCHEMA_VERSION,
 };
 
 #[cfg(feature = "fs")]
