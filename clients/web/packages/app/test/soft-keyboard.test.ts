@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 
 import {
   applyFocusAction,
+  bindTerminalInput,
   kbdCapAction,
   keyboardUp,
   setKeyboardUp,
@@ -55,4 +56,15 @@ test('the keyboard-up fact is what the viewport watcher last wrote', () => {
   setKeyboardUp(true);
   assert.equal(keyboardUp(), true);
   setKeyboardUp(false);
+});
+
+test('the textarea ref survives the null sigx passes on unmount', () => {
+  // sigx calls every ref with null when the node is removed, and its JSX
+  // typing says otherwise — so this was a production TypeError on every tab
+  // switch (Shell keys TerminalView per tab), not a type error (#440).
+  assert.doesNotThrow(() => bindTerminalInput(null));
+  const set: string[][] = [];
+  const el = { setAttribute: (k: string, v: string) => set.push([k, v]) } as unknown as HTMLTextAreaElement;
+  bindTerminalInput(el);
+  assert.deepEqual(set, [['autocorrect', 'off']], 'the Safari-only attribute the JSX typings cannot spell (#422)');
 });

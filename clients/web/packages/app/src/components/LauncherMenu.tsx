@@ -129,7 +129,7 @@ export const LauncherMenu = component<{
             key={`${r.hostId}:${r.profile ?? ''}`}
             class="launcher-row"
             role="menuitem"
-            ref={(el: HTMLButtonElement) => {
+            ref={(el: HTMLButtonElement | null) => {
               if (r === first) firstHostRow = el;
             }}
             onClick={() => ctx.props.onRun(r)}

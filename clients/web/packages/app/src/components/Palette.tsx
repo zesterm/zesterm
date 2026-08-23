@@ -115,7 +115,7 @@ export const Palette = component<{
             <input
               class="palette-input"
               aria-label="Search sessions, blocks, hosts"
-              ref={(el: HTMLInputElement) => {
+              ref={(el: HTMLInputElement | null) => {
                 inputEl = el;
               }}
               value={ctx.props.query}
@@ -140,7 +140,7 @@ export const Palette = component<{
                     <button
                       key={`${item.kind}-${i}`}
                       class={`palette-row${isSel ? ' selected' : ''}`}
-                      ref={(el: HTMLElement) => {
+                      ref={(el: HTMLElement | null) => {
                         if (isSel) selectedEl = el;
                       }}
                       onPointerDown={(e: PointerEvent) => e.preventDefault() /* the chip focus rule */}

@@ -66,3 +66,19 @@ export function keyboardUp(): boolean {
 export function setKeyboardUp(v: boolean): void {
   up = v;
 }
+
+/**
+ * The terminal textarea's ref. `null` is sigx's unmount call — it passes
+ * one to every ref when the node leaves, and its JSX typing does not say so
+ * (#440) — so this must assign and return, never dereference, on null.
+ *
+ * `autocorrect` is Safari-only and absent from the JSX typings, hence an
+ * attribute rather than a prop. An autocorrect replacement arrives as
+ * deleteContentBackward + insertText against a textarea that onInput already
+ * emptied, so the deletion is never forwarded and the shell keeps the word
+ * it corrected away. Off is the honest setting (#422).
+ */
+export function bindTerminalInput(el: HTMLTextAreaElement | null): void {
+  if (el === null) return;
+  el.setAttribute('autocorrect', 'off');
+}

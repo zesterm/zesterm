@@ -21,6 +21,7 @@ import {
   shouldScrollIntoView,
   shortHostId,
   tabIdOf,
+  trackChip,
   type HostChoice,
 } from '../src/chrome-model.ts';
 
@@ -569,4 +570,15 @@ test('an unreachable machine is cached as unreachable, not re-asked', () => {
     rows.map((r) => r.dial),
     [null, null],
   );
+});
+
+test('a chip ref called with null removes the entry instead of storing null', () => {
+  // sigx calls the ref with null on unmount; storing that left a null for
+  // keepActiveVisible to read `.isConnected` off (#440).
+  const els = new Map<string, HTMLElement>();
+  const a = { isConnected: true } as unknown as HTMLElement;
+  trackChip(els, 'a', a);
+  assert.equal(els.get('a'), a);
+  trackChip(els, 'a', null);
+  assert.equal(els.has('a'), false, 'a closed tab leaves nothing behind to dereference');
 });

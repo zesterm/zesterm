@@ -54,7 +54,13 @@ import {
   type CapId,
   type LatchState,
 } from '../keybar-model.ts';
-import { applyFocusAction, kbdCapAction, keyboardUp, tapTerminalAction } from '../soft-keyboard.ts';
+import {
+  applyFocusAction,
+  bindTerminalInput,
+  kbdCapAction,
+  keyboardUp,
+  tapTerminalAction,
+} from '../soft-keyboard.ts';
 import { GridPane, type GridPaneHooks } from './GridPane.tsx';
 import { BlocksPane } from './BlocksPane.tsx';
 import { KeyBar } from './KeyBar.tsx';
@@ -474,7 +480,7 @@ export const TerminalView = component<{
       <div class="terminal-view">
         <div
           class="term-wrap"
-          ref={(el: HTMLElement) => {
+          ref={(el: HTMLElement | null) => {
             wrapEl = el;
           }}
           onPointerDown={(e: PointerEvent) => {
@@ -536,14 +542,9 @@ export const TerminalView = component<{
           )}
           <textarea
             class="term-input"
-            ref={(el: HTMLTextAreaElement) => {
+            ref={(el: HTMLTextAreaElement | null) => {
               inputEl = el;
-              // Safari-only attribute, absent from the JSX typings. An
-              // autocorrect replacement arrives as deleteContentBackward +
-              // insertText against a textarea that onInput already emptied,
-              // so the deletion is never forwarded and the shell keeps the
-              // word it corrected away. Off is the honest setting.
-              el.setAttribute('autocorrect', 'off');
+              bindTerminalInput(el);
             }}
             autoComplete="off"
             autocapitalize="off"

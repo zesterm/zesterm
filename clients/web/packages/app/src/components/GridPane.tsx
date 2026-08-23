@@ -140,12 +140,12 @@ export const GridPane = component<{
   return () => (
     <div
       class="grid-pane"
-      ref={(el: HTMLElement) => {
+      ref={(el: HTMLElement | null) => {
         wrapper = el;
       }}
     >
       <canvas
-        ref={(el: HTMLCanvasElement) => {
+        ref={(el: HTMLCanvasElement | null) => {
           canvas = el;
         }}
       />

@@ -643,7 +643,7 @@ export const Shell = component<{
               onPalette={() => dispatch({ kind: 'palette' })}
               onHosts={() => void navigate('/hosts')}
             />
-            <section class="pane" ref={(el: HTMLElement) => (paneEl = el)}>
+            <section class="pane" ref={(el: HTMLElement | null) => (paneEl = el)}>
               {pane}
             </section>
           </div>
@@ -668,7 +668,7 @@ export const Shell = component<{
           onLauncherDismiss={() => (store.launcherOpen = false)}
           onPalette={() => dispatch({ kind: 'palette' })}
         />
-        <section class="pane" ref={(el: HTMLElement) => (paneEl = el)}>
+        <section class="pane" ref={(el: HTMLElement | null) => (paneEl = el)}>
           {pane}
         </section>
       </div>

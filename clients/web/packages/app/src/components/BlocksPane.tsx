@@ -286,7 +286,7 @@ export const BlocksPane = component<{
     return (
       <div
         class={`blocks-pane${link === 'reconnecting' ? ' degraded' : ''}`}
-        ref={(el: HTMLElement) => {
+        ref={(el: HTMLElement | null) => {
           paneEl = el;
         }}
         onScroll={onScroll}

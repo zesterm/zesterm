@@ -841,6 +841,18 @@ you need before you trip on it.
   with `maxTouchPoints` / `(pointer: coarse)`. And the layout viewport does
   not shrink for the keyboard there: `visual-viewport.ts` sizes the shell to
   the visual one. (#421)
+- **A sigx `ref` is called with `null` on unmount, and its JSX typing says
+  otherwise.** `ref?: (el: T) => void` is what `@sigx/runtime-dom` declares;
+  what the runtime does is call every ref with the element on mount and with
+  `null` when the node leaves — so a ref that *dereferences* is a production
+  TypeError that `tsc` cannot see, and `Shell` keys `TerminalView` per tab, so
+  "when the node leaves" is every tab switch. The textarea's
+  `el.setAttribute('autocorrect', 'off')` (#422) was that error on the hosted
+  client; the tab strip's `chipEls.set(id, el)` stored the null for a later
+  `.isConnected` to trip on. A ref assigns and returns; anything more lives in
+  a helper that takes `T | null` and is tested with the null
+  (`bindTerminalInput`, `trackChip`). Every ref in the client is annotated
+  `(el: T | null)` so the next dereference is a type error. (#440)
 
 ### The dev harness on this box
 
