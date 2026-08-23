@@ -2776,8 +2776,15 @@ impl App {
     /// — the window is its host (#434), so the daemon's own lister runs
     /// here, and both paths produce one shape.
     fn request_dir_listing(&mut self, path: String) {
-        let asked = self.tabs.active_source().is_some_and(|s| s.request_dirs(&path));
-        if asked {
+        let Some(source) = self.tabs.active_source() else { return };
+        // Asked first, then the origin decides whether anything may stand in
+        // for the answer. Belt and braces on purpose: `request_dirs` says it
+        // took the question, and this says only an in-process session may be
+        // answered from this machine's disk — so no source returning the
+        // wrong bool can make a remote tab list the wrong computer.
+        let asked = source.request_dirs(&path);
+        let in_process = matches!(source.origin(), crate::source::Origin::InProcess);
+        if asked || !in_process {
             return;
         }
         if let zest_proto::HostMessage::DirListing { path, parent, dirs, truncated, error } =

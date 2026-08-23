@@ -1501,7 +1501,12 @@ fn dir_picker_overlay(
     // eight directories in a panel built for forty reads as half-loaded,
     // and the empty states below need one row, not a screenful of nothing.
     let listed = picker.rows.len().max(1) as f32;
-    let wanted = filter_h + HAIRLINE * s + listed * PALETTE_ROW_H * s + PICKER_PAD * s;
+    // The truncation note gets a row of its own; drawn into the listing's
+    // space it would sit on top of the last directory, since the padding is
+    // a third of a row tall.
+    let footer_h = if picker.truncated { PALETTE_ROW_H * s } else { 0.0 };
+    let wanted =
+        filter_h + HAIRLINE * s + listed * PALETTE_ROW_H * s + footer_h + PICKER_PAD * s;
     let h = wanted.min((PALETTE_H * s).min(m.height - PICKER_MARGIN * s));
     let panel = [(m.width - w) / 2.0, (m.height - h) / 2.5, w, h];
     let mut panel_rect = RectInstance::rounded(panel, PICKER_RADIUS * s, colors.panel_bg, no_clip);
@@ -1552,8 +1557,12 @@ fn dir_picker_overlay(
         no_clip,
     ));
 
-    let rows_clip =
-        [panel[0], panel[1] + filter_h + HAIRLINE * s, w, h - filter_h - HAIRLINE * s];
+    let rows_clip = [
+        panel[0],
+        panel[1] + filter_h + HAIRLINE * s,
+        w,
+        (h - filter_h - HAIRLINE * s - footer_h).max(0.0),
+    ];
 
     // The three empty states, each saying which it is: an answer in flight,
     // a listing that was refused, and a filter that matches nothing.
@@ -4154,6 +4163,55 @@ mod tests {
             seen_rows,
             (0..4).collect::<std::collections::HashSet<_>>(),
             "all four rows are clickable, the parent row included"
+        );
+    }
+
+    #[test]
+    fn a_truncated_listing_reserves_its_footer_instead_of_sitting_on_a_row() {
+        // The note has to go somewhere the rows are not: the panel's padding
+        // is a third of a row tall, so a footer drawn into the listing's own
+        // space lands on the last directory. Asserted through the hit map,
+        // which is the only thing that knows where rows actually ended up.
+        use crate::chrome::model::DirPickerModel;
+        let m = metrics(1200.0, 800.0, 1.0);
+        let rows: Vec<String> = (0..6).map(|i| format!("dir-{i}")).collect();
+
+        let bottom_gap = |truncated: bool| {
+            let mut mo = model(
+                vec![tab(1, TabOrigin::Local, TabPresence::Online)],
+                TabsPosition::Top,
+            );
+            mo.dir_picker = Some(DirPickerModel {
+                rows: rows.clone(),
+                has_parent: false,
+                selected: 0,
+                filter: String::new(),
+                filter_caret: Default::default(),
+                scroll: 0.0,
+                ensure_visible: false,
+                loading: false,
+                error: String::new(),
+                truncated,
+            });
+            let l = layout(&mo, &colors(), &m, &mut measure);
+            let (mut last_row_y, mut panel_bottom) = (0.0f32, 0.0f32);
+            for y in (0..800).step_by(2) {
+                match l.hit.hit(600.0, y as f32) {
+                    Some(HitRegion::DirPickerRow(_)) => last_row_y = y as f32,
+                    Some(HitRegion::DirPickerPanel) => panel_bottom = y as f32,
+                    _ => {}
+                }
+            }
+            panel_bottom - last_row_y
+        };
+
+        let plain = bottom_gap(false);
+        let truncated = bottom_gap(true);
+        assert!(
+            truncated - plain >= PALETTE_ROW_H - 2.0,
+            "a truncated listing must reserve a whole row for its note \
+             (gap grew by {}, wanted about {PALETTE_ROW_H})",
+            truncated - plain
         );
     }
 

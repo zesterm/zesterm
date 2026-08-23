@@ -948,10 +948,18 @@ impl SessionSource for RemoteSession {
 
     fn request_dirs(&self, path: &str) -> bool {
         // Fire-and-forget like `write`: the answer arrives on the reader as
-        // `Wakeup::DirListing`, and a send that failed means the writer is
-        // gone — the supervisor is already reconnecting, and the picker's
-        // spinner is the honest interim either way.
-        self.tx.send(Outbound::Msg(ClientMessage::ListDir { path: path.to_string() })).is_ok()
+        // `Wakeup::DirListingReady`, and a send that failed means the writer
+        // is gone — the supervisor is already reconnecting, and the picker's
+        // spinner is the honest interim.
+        //
+        // **`true` regardless of that send**, which is the load-bearing
+        // part: `false` means "nobody here can answer, list locally", and a
+        // remote tab answered from *this* machine's disk would be a picker
+        // confidently showing the wrong computer's directories — the ssh
+        // trap in a different coat. A dropped question costs a spinner; a
+        // wrong answer costs a `cd` into a path that does not exist there.
+        let _ = self.tx.send(Outbound::Msg(ClientMessage::ListDir { path: path.to_string() }));
+        true
     }
 
     fn resize(&self, cols: u16, rows: u16) {
