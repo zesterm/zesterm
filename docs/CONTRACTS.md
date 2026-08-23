@@ -48,7 +48,7 @@ describes only the current shape.
 | TypeScript bindings | `crates/zest-proto/bindings/` | **generated** — `cargo xtask check-bindings` | `clients/web`, `cloud/` |
 | Conformance fixtures | `crates/zest-proto/fixtures/` | **generated** — `cargo xtask check-fixtures` | `clients/web` |
 | `Predictor`, `Key`, `Policy` | `crates/zest-proto/src/predict.rs` | **frozen rules, not a wire type** — the echo predictor has a second implementation (`clients/web/packages/proto/src/predict.ts`); both replay the hand-authored `fixtures/predict.json`, so a rule change is a fixture change (ADR-016) | `zest-app`, `clients/web` |
-| Settings schema + walked UI fields | `clients/web/packages/settings/generated/` | **generated** — `cargo xtask check-export-web` | `clients/web` |
+| Settings schema + walked UI fields | `clients/web/packages/settings/generated/` | **generated** — `cargo xtask check-export-web`. The `window.background_*` keys are carried and deliberately unread there (#450): a browser cannot open a native host's path | `clients/web` |
 | Built-in themes, as TypeScript | `clients/web/packages/theme/src/builtin.generated.ts` | **generated** — `cargo xtask check-export-web` | `clients/web` |
 
 "Draft" means it has a single consumer and may still change freely. It freezes

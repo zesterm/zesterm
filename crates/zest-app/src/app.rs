@@ -99,6 +99,12 @@ pub struct Config {
     pub custom_chrome: bool,
     /// What the compositor puts behind the window (Mica and friends).
     pub backdrop: zest_config::settings::Backdrop,
+    /// Picture drawn behind the cells; empty draws none. A relative path
+    /// resolves against the config directory (`background::resolve_path`).
+    pub background_image: String,
+    pub background_fit: zest_config::settings::BackgroundFit,
+    /// How far the picture fades toward the background. 1 hides it entirely.
+    pub background_dim: f32,
     /// Initial window size in cells. Read once, at window creation.
     pub columns: u16,
     /// Initial window size in cells. Read once, at window creation.
@@ -224,6 +230,12 @@ impl From<&zest_config::Settings> for Config {
                 zest_config::settings::CustomChrome::Auto => cfg!(windows),
             },
             backdrop: s.window.backdrop,
+            background_image: s.window.background_image.clone(),
+            background_fit: s.window.background_fit,
+            // `finite_or` rather than a bare clamp: `clamp` preserves NaN, and
+            // a hand-edited `nan` here reaches the vertex stage as a quad at
+            // infinity rather than as a wrong pixel.
+            background_dim: finite_or(s.window.background_dim, 0.5).clamp(0.0, 1.0),
             columns: s.window.columns,
             rows: s.window.rows,
             tabs: s.tabs.clone(),
@@ -1901,6 +1913,10 @@ pub struct App {
     /// Stored rather than recomputed per frame: resolving it looks the theme up
     /// by name, and this is read on the render path.
     text_tuning: zest_render_wgpu::TextTuning,
+    /// Decoded background pictures, keyed by the settings value that named
+    /// them. Owned by the app rather than the renderer because the decoder is,
+    /// and re-examined only on a config reload.
+    backgrounds: crate::background::Backgrounds,
     /// Last laid-out chrome, shared by redraw and the input path so a click
     /// is tested against exactly what is on screen.
     chrome_layout: Option<ChromeLayout>,
@@ -2148,6 +2164,7 @@ impl App {
             fonts: None,
             palette,
             chrome_colors,
+            backgrounds: crate::background::Backgrounds::default(),
             chrome_layout: None,
             chrome_dirty: true,
             chrome_hover: None,
@@ -9973,6 +9990,30 @@ impl App {
         };
 
         let metrics = fonts.cell_metrics();
+
+        // Resolved once, before the viewports, for the same reason `backdrop`
+        // is: the pane loop must not do file work. `Backgrounds::get` is a hash
+        // lookup after the first sight of a path in this config generation, so
+        // this costs nothing on the steady-state frame -- and nothing at all
+        // for the overwhelming majority of windows, which name no picture.
+        let background = {
+            let identity = self.tabs.active().and_then(|t| t.identity.as_ref());
+            let path = identity
+                .and_then(|i| i.background_image.as_deref())
+                .unwrap_or(self.config.background_image.as_str());
+            let fit =
+                identity.and_then(|i| i.background_fit).unwrap_or(self.config.background_fit);
+            let dim = identity.and_then(|i| i.background_dim).unwrap_or(self.config.background_dim);
+            self.backgrounds
+                .get(&gpu.device, &gpu.queue, &mut gpu.renderer.images, path)
+                .map(|(image, size)| zest_render_wgpu::BackgroundImage {
+                    image,
+                    size,
+                    fit: crate::background::fit_of(fit),
+                    dim,
+                })
+        };
+
         let cursor_offset_px =
             [cursor_offset.0 * metrics.cell_w as f32, cursor_offset.1 * metrics.cell_h as f32];
 
@@ -10231,6 +10272,11 @@ impl App {
                                 scroll_px,
                                 focused: self.focused && focused,
                                 opacity: pane_opacity(self.config.opacity, identity),
+                                // The same picture in every pane of the tab,
+                                // fitted to each one: the identity is the
+                                // tab's, and a split is two views of one
+                                // profile rather than two profiles.
+                                background,
                                 blocks: &bands[i],
                                 gutter: rects[i][0] - bodies[i][0],
                                 selection: terms[i].selection(),
@@ -10309,6 +10355,7 @@ impl App {
                             scroll_px,
                             focused: self.focused,
                             opacity: pane_opacity(self.config.opacity, identity),
+                            background,
                             blocks: &bands,
                             gutter: gutter_px,
                             selection: term.selection(),
@@ -10484,6 +10531,14 @@ impl App {
         // The overlay, if open, is showing values that just moved under it.
         if self.settings_ui.is_some() {
             self.mark_chrome_dirty();
+        }
+
+        // A new generation for the picture cache, outside the `match` because
+        // it is right for every class: the file behind an unchanged path may
+        // still have been saved over, and a path the settings no longer name
+        // holds up to 64 MB of VRAM until something drops it.
+        if let Some(gpu) = self.gpu.as_mut() {
+            self.backgrounds.invalidate(&mut gpu.renderer.images);
         }
 
         match class {
@@ -14604,6 +14659,9 @@ mod palette_tests {
             icon: None,
             color_from: None,
             opacity: None,
+            background_image: None,
+            background_fit: None,
+            background_dim: None,
             title: zest_config::TabTitle::FromShell,
         }
     }

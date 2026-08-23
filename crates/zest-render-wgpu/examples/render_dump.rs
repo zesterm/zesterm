@@ -186,6 +186,9 @@ async fn run() {
             scroll_px: 0.0,
             focused: true,
             opacity: 1.0,
+            // No picture either: a wallpaper is a window-level choice, and this
+            // dump exists to answer questions about the grid without one.
+            background: None,
             // No block decoration: this dump answers "is the *renderer* wrong",
             // one layer below anything that knows what a command block is.
             blocks: &[],

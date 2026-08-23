@@ -9,8 +9,9 @@ use zest_core::{Cell, CellFlags, Color, CursorShape, Grid, PaletteSnapshot};
 use zest_font::{CellMetrics, Fonts, GlyphKey, Style};
 
 use crate::atlas::{Atlas, Cached};
+use crate::image::{source_rect, BackgroundImage};
 use crate::instance::{
-    glyph_flags, DecorInstance, DecorKind, GlyphInstance, LinearRgba, RectInstance,
+    glyph_flags, DecorInstance, DecorKind, GlyphInstance, ImageInstance, LinearRgba, RectInstance,
 };
 
 /// The block rail's width, physical px. Matches the header band's own rail
@@ -67,6 +68,17 @@ pub struct Viewport<'a> {
     /// `@sigx/terminal-ui` box — must stay opaque. Applying opacity to every
     /// cell double-darkens *and* makes every TUI look broken. → ADR-003.
     pub opacity: f32,
+    /// A picture drawn behind this pane's cells, in place of its plain
+    /// background.
+    ///
+    /// **Per viewport, not per window**, and the reason is ADR-012: a profile's
+    /// scheme applies to its grid only, so two panes running two profiles can
+    /// carry two different pictures and the chrome stays the window's
+    /// throughout. It reaches the cells through exactly the same rule as
+    /// [`Self::opacity`] — a default background emits no rect, so the picture
+    /// shows through it, and an explicit one paints over the picture just as it
+    /// paints over the window colour.
+    pub background: Option<BackgroundImage>,
     /// Command blocks to decorate: a rail down each, a wash under the selected
     /// one. Empty on the everyday path and for a session with no shell
     /// integration loaded.
@@ -208,6 +220,8 @@ pub struct Scene {
     pub rects: Vec<RectInstance>,
     pub glyphs: Vec<GlyphInstance>,
     pub decors: Vec<DecorInstance>,
+    /// One per viewport that carries a picture, drawn before every rect.
+    pub images: Vec<ImageInstance>,
     /// What every pixel no instance covers is painted with.
     ///
     /// The grid does not own the window — `window.padding`, the gap between the
@@ -241,6 +255,7 @@ impl Scene {
         self.rects.clear();
         self.glyphs.clear();
         self.decors.clear();
+        self.images.clear();
         self.backdrop = LinearRgba::TRANSPARENT;
         self.grid_origin = [0.0, 0.0];
         self.chrome_rects_at = 0;
@@ -304,6 +319,25 @@ impl Scene {
     /// be the backdrop.
     fn push_window_background(&mut self, vp: &Viewport<'_>) {
         let window = window_bg(vp.palette, vp.opacity);
+
+        // A picture *is* this pane's window background, so it goes in instead
+        // of the rect -- and unconditionally, where the rect is skipped when
+        // the clear already painted it. The quad carries `window` itself and
+        // is drawn with the blend disabled, so at `dim = 1` it writes exactly
+        // what the rect would have and the double-composite the branch below
+        // avoids cannot happen here either.
+        if let Some(bg) = vp.background {
+            self.images.push(ImageInstance::new(
+                vp.rect,
+                vp.rect,
+                source_rect(bg.fit, bg.size, [vp.rect[2], vp.rect[3]]),
+                window,
+                bg.dim,
+                bg.image,
+            ));
+            return;
+        }
+
         if window != self.backdrop {
             self.rects.push(RectInstance::filled(vp.rect, window, vp.rect));
         }
@@ -1287,6 +1321,7 @@ mod tests {
             cursor_offset: [0.0, 0.0],
             focused: true,
             opacity,
+            background: None,
             blocks: &[],
             gutter: 0.0,
             selection: None,
@@ -1690,6 +1725,91 @@ mod tests {
         let cell = [0.0, 0.0, 6.0, 12.0];
         assert_eq!(cursor_rect(CursorShape::Bar, cell, m)[2], 1.0, "at least one physical pixel");
         assert_eq!(cursor_rect(CursorShape::Underline, cell, m)[3], 1.0);
+    }
+
+    #[test]
+    fn a_picture_replaces_the_window_background_rather_than_joining_it() {
+        // The pair of assertions that keeps the two layers from both painting:
+        // the picture goes in, and the rect that would have blended over it
+        // (and composited the opacity a second time) does not.
+        let p = palette();
+        let grid = Grid::new(4, 2, 0);
+        let mut scene = Scene { backdrop: window_bg(&p, 0.8), ..Default::default() };
+        let mut vp = viewport(&grid, &p, 0.8);
+        vp.background = Some(BackgroundImage {
+            image: crate::image::ImageId(7),
+            size: [10, 10],
+            fit: crate::image::BackgroundFit::Fill,
+            dim: 0.25,
+        });
+
+        scene.push_window_background(&vp);
+
+        assert_eq!(scene.images.len(), 1, "the pane's background is the picture");
+        assert!(scene.rects.is_empty(), "a rect over it would composite opacity twice");
+        assert_eq!(scene.images[0].id(), crate::image::ImageId(7));
+        assert_eq!(
+            scene.images[0].base,
+            window_bg(&p, 0.8),
+            "the quad carries the background it replaced, or `dim = 1` is not a no-op"
+        );
+    }
+
+    #[test]
+    fn a_picture_is_drawn_even_when_the_clear_already_is_the_background() {
+        // The rect is skipped in that case, deliberately. The picture must not
+        // be: skipping it is a pane that silently loses its wallpaper whenever
+        // it happens to be the window's own palette, which is the usual case.
+        let p = palette();
+        let grid = Grid::new(4, 2, 0);
+        let mut scene = Scene { backdrop: window_bg(&p, 1.0), ..Default::default() };
+        let mut vp = viewport(&grid, &p, 1.0);
+
+        scene.push_window_background(&vp);
+        assert!(scene.rects.is_empty() && scene.images.is_empty(), "nothing to draw without one");
+
+        vp.background = Some(BackgroundImage {
+            image: crate::image::ImageId(1),
+            size: [10, 10],
+            fit: crate::image::BackgroundFit::Fit,
+            dim: 0.0,
+        });
+        scene.push_window_background(&vp);
+        assert_eq!(scene.images.len(), 1, "the picture is drawn regardless of the clear");
+    }
+
+    #[test]
+    fn a_default_background_cell_still_emits_nothing_over_a_picture() {
+        // This is the whole feature: the picture is visible through default
+        // cells because they draw no rect, and hidden behind explicit ones
+        // because they do. Both halves, on the same row.
+        let p = palette();
+        let mut grid = Grid::new(4, 1, 0);
+        grid.row_mut(0).get_mut(0).unwrap().bg = Color::Rgb(0x80, 0x00, 0x00);
+        let mut scene = Scene::default();
+        let mut vp = viewport(&grid, &p, 1.0);
+        vp.background = Some(BackgroundImage {
+            image: crate::image::ImageId(2),
+            size: [4, 4],
+            fit: crate::image::BackgroundFit::Fill,
+            dim: 0.0,
+        });
+
+        scene.push_window_background(&vp);
+        assert!(scene.rects.is_empty(), "the pane's own background is the picture");
+
+        let r = vp.rect;
+        scene.emit_row_backgrounds(&grid, 0, &vp, r[0], r[1], 10.0, 20.0, r);
+
+        assert_eq!(
+            scene.rects.len(),
+            1,
+            "only the explicitly coloured cell paints; the other three let the picture through"
+        );
+        assert_eq!(
+            scene.rects[0].rect[2], 10.0,
+            "and it is one cell wide, not the whole row"
+        );
     }
 
     #[test]

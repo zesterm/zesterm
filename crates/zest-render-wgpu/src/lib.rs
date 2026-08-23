@@ -1,12 +1,15 @@
 //! The GPU renderer.
 //!
-//! Three pipelines in one render pass, then a resolve:
+//! Four pipelines in one render pass, then a resolve:
 //!
 //! 1. **SDF rects** — cell backgrounds, selection, cursor, *and* all window
 //!    chrome. One pipeline for everything rectangular.
 //! 2. **Glyphs** — instanced quads from a dual atlas, serving the grid and UI
 //!    text alike.
 //! 3. **Decorations** — underline, undercurl, strikethrough.
+//! 4. **Background pictures** — one textured quad per pane. Built lazily and
+//!    drawn first, because it *is* the window background for the panes that
+//!    have one rather than a layer over it (`shaders/image.wgsl`).
 //!
 //! Everything renders into an `Rgba16Float` offscreen target and is resolved to
 //! the surface by a fullscreen triangle. See `shaders/resolve.wgsl` for why that
@@ -15,6 +18,7 @@
 //! Draw order is fixed and there is no depth buffer or sorting:
 //!
 //! ```text
+//! image  background pictures, replacing the window background per pane
 //! rect   window + chrome backgrounds
 //! rect   cell backgrounds, selection, cursor
 //! glyph  grid text
@@ -28,15 +32,17 @@
 
 pub mod atlas;
 pub mod capture;
+pub mod image;
 pub mod instance;
 pub mod scene;
 pub mod ui_text;
 
 pub use atlas::{Atlas, AtlasEntry, Cached};
 pub use capture::read_rgba;
+pub use image::{source_rect, BackgroundFit, BackgroundImage, ImageId, ImageStore};
 pub use instance::{
-    border_sides, glyph_flags, DecorInstance, DecorKind, GlyphInstance, Globals, LinearRgba,
-    RectInstance, RectShape,
+    border_sides, glyph_flags, DecorInstance, DecorKind, GlyphInstance, Globals, ImageInstance,
+    LinearRgba, RectInstance, RectShape,
 };
 pub use scene::{BlockBand, Chrome, Predicted, PredictedCell, Preedit, Scene, Viewport};
 pub use ui_text::{emit_ui_run, measure_ui_run};
@@ -113,6 +119,12 @@ pub struct Renderer {
     decor_pipeline: wgpu::RenderPipeline,
     resolve_pipeline: wgpu::RenderPipeline,
 
+    /// The background-picture pipeline, built the first time a scene carries
+    /// one. Lazily for the same reason as the subpixel glyph pipeline above:
+    /// pipeline creation is a large share of a cold start, and the
+    /// overwhelming majority of sessions never set a picture at all.
+    image_pipeline: Option<wgpu::RenderPipeline>,
+
     /// The dual-source glyph pipeline, built the first time subpixel text is
     /// asked for. Lazily, because building it costs a shader module and a
     /// pipeline, and most sessions never switch mode.
@@ -144,8 +156,12 @@ pub struct Renderer {
     rects: GrowBuffer,
     glyphs: GrowBuffer,
     decors: GrowBuffer,
+    image_instances: GrowBuffer,
 
     pub atlas: Atlas,
+    /// The uploaded background pictures. Filled by the embedder, which owns the
+    /// decoder — this crate never reads a file.
+    pub images: ImageStore,
     pub tuning: TextTuning,
 }
 
@@ -174,6 +190,13 @@ const GRID_WGSL: &str = concat!(
 /// `enable` must precede every declaration, so it is prepended here rather than
 /// written at the top of `glyph_subpixel.wgsl`. Rect and decor are left out:
 /// this module exists only to supply the glyph pipeline.
+/// The background-picture module: `common.wgsl` plus its own stages.
+const IMAGE_WGSL: &str = concat!(
+    include_str!("shaders/common.wgsl"),
+    "\n",
+    include_str!("shaders/image.wgsl"),
+);
+
 const GRID_WGSL_SUBPIXEL: &str = concat!(
     "enable dual_source_blending;\n",
     include_str!("shaders/common.wgsl"),
@@ -278,7 +301,7 @@ impl Renderer {
             ("vs_rect", "fs_rect"),
             &[&globals_layout],
             rect_vertex_layout(),
-            PREMULTIPLIED_OVER,
+            Some(PREMULTIPLIED_OVER),
             cache,
         );
         let glyph_pipeline = make_pipeline(
@@ -288,7 +311,7 @@ impl Renderer {
             ("vs_glyph", "fs_glyph"),
             &[&globals_layout, &atlas_bind_group_layout],
             glyph_vertex_layout(),
-            PREMULTIPLIED_OVER,
+            Some(PREMULTIPLIED_OVER),
             cache,
         );
         let decor_pipeline = make_pipeline(
@@ -298,7 +321,7 @@ impl Renderer {
             ("vs_decor", "fs_decor"),
             &[&globals_layout],
             decor_vertex_layout(),
-            PREMULTIPLIED_OVER,
+            Some(PREMULTIPLIED_OVER),
             cache,
         );
 
@@ -374,6 +397,7 @@ impl Renderer {
             glyph_pipeline,
             decor_pipeline,
             resolve_pipeline,
+            image_pipeline: None,
             glyph_pipeline_subpixel: None,
             // Starts grayscale and is raised by `set_text_antialias`, so there
             // is exactly one place that decides -- and one place that logs when
@@ -396,7 +420,9 @@ impl Renderer {
             rects: GrowBuffer::new("zest rects"),
             glyphs: GrowBuffer::new("zest glyphs"),
             decors: GrowBuffer::new("zest decors"),
+            image_instances: GrowBuffer::new("zest images"),
             atlas: Atlas::new(device, zest_font::TextAntialias::Grayscale),
+            images: ImageStore::new(device),
             tuning: TextTuning::default(),
         };
         me.set_text_antialias(device, antialias);
@@ -467,7 +493,7 @@ impl Renderer {
                 ("vs_glyph", "fs_glyph_subpixel"),
                 &[&self.globals_layout, &self.atlas_bind_group_layout],
                 glyph_vertex_layout(),
-                PREMULTIPLIED_OVER_DUAL,
+                Some(PREMULTIPLIED_OVER_DUAL),
                 None,
             ));
         }
@@ -552,6 +578,11 @@ impl Renderer {
         self.rects.upload(device, queue, bytemuck::cast_slice(&scene.rects));
         self.glyphs.upload(device, queue, bytemuck::cast_slice(&scene.glyphs));
         self.decors.upload(device, queue, bytemuck::cast_slice(&scene.decors));
+        self.image_instances.upload(device, queue, bytemuck::cast_slice(&scene.images));
+
+        if !scene.images.is_empty() && self.image_pipeline.is_none() {
+            self.image_pipeline = Some(self.build_image_pipeline(device));
+        }
 
         // Rebuild the atlas bind group only when the atlas actually changed --
         // it is recreated on growth, so the view can go stale.
@@ -583,6 +614,28 @@ impl Renderer {
                 ..Default::default()
             });
             pass.set_bind_group(0, &self.globals_bind_group, &[]);
+
+            // The pictures first: for a pane that has one this quad *is* the
+            // window background, so it must land after nothing but the clear
+            // and before any cell fill. One draw each, because each binds its
+            // own texture -- there are at most a handful, one per pane.
+            if let Some(pipeline) = self.image_pipeline.as_ref() {
+                let mut bound = false;
+                for (i, inst) in scene.images.iter().enumerate() {
+                    // A picture the embedder has not uploaded yet (or has
+                    // evicted) draws nothing at all rather than a black hole:
+                    // the pane then looks exactly as it did before the setting
+                    // was touched, which is the honest thing for one frame.
+                    let Some((group, _)) = self.images.get(inst.id()) else { continue };
+                    if !bound {
+                        pass.set_pipeline(pipeline);
+                        pass.set_vertex_buffer(0, self.image_instances.slice());
+                        bound = true;
+                    }
+                    pass.set_bind_group(1, group, &[]);
+                    pass.draw(0..4, i as u32..i as u32 + 1);
+                }
+            }
 
             // The documented order, honoured with split instance ranges: the
             // buffers hold grid and chrome together, but a single whole-buffer
@@ -644,6 +697,29 @@ impl Renderer {
         }
 
         self.resolve(encoder, target);
+    }
+
+    /// Build the background-picture pipeline.
+    ///
+    /// Its own shader module rather than an entry point in `GRID_WGSL`: the
+    /// glyph shader already claims `@group(1)` there for the atlas, and this
+    /// one needs that slot for the picture.
+    fn build_image_pipeline(&self, device: &wgpu::Device) -> wgpu::RenderPipeline {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("zest image"),
+            source: wgpu::ShaderSource::Wgsl(IMAGE_WGSL.into()),
+        });
+        make_pipeline(
+            device,
+            "zest image",
+            &module,
+            ("vs_image", "fs_image"),
+            &[&self.globals_layout, self.images.layout()],
+            image_vertex_layout(),
+            // Replace, not source-over. See `shaders/image.wgsl`.
+            None,
+            None,
+        )
     }
 
     /// Run only the resolve pass.
@@ -788,7 +864,7 @@ fn make_pipeline(
     entry_points: (&str, &str),
     bind_group_layouts: &[&wgpu::BindGroupLayout],
     vertex_layout: wgpu::VertexBufferLayout<'_>,
-    blend: wgpu::BlendState,
+    blend: Option<wgpu::BlendState>,
     cache: Option<&wgpu::PipelineCache>,
 ) -> wgpu::RenderPipeline {
     let layouts: Vec<Option<&wgpu::BindGroupLayout>> =
@@ -813,7 +889,11 @@ fn make_pipeline(
             entry_point: Some(entry_points.1),
             targets: &[Some(wgpu::ColorTargetState {
                 format: OFFSCREEN_FORMAT,
-                blend: Some(blend),
+                // `None` means replace, and exactly one pipeline wants it: the
+                // background picture writes the finished window background, so
+                // blending it over the clear would apply the window opacity a
+                // second time.
+                blend,
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: Default::default(),
@@ -827,6 +907,25 @@ fn make_pipeline(
         multiview_mask: None,
         cache,
     })
+}
+
+fn image_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
+    // Five attributes for a struct of seven fields: `id` and `_pad` are CPU
+    // state riding along in the padding, and `shaders/image.wgsl` declares
+    // locations 0..=4 and stops. A vertex buffer may be longer than the
+    // attributes that read it.
+    const ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+        0 => Float32x4,  // rect
+        1 => Float32x4,  // clip
+        2 => Float32x4,  // src
+        3 => Float32x4,  // base
+        4 => Float32,    // dim
+    ];
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<ImageInstance>() as u64,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &ATTRS,
+    }
 }
 
 fn rect_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
@@ -883,7 +982,13 @@ fn decor_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
 
 #[cfg(test)]
 mod tests {
-    use super::{border_sides, LinearRgba, RectInstance, Renderer, Scene, TextTuning};
+    use super::{
+        border_sides, ImageId, ImageInstance, LinearRgba, RectInstance, Renderer, Scene,
+        TextTuning,
+    };
+
+    /// Side of the square frame the background-picture probes render into.
+    const IMAGE_PROBE: u32 = 16;
 
     /// A headless device, or `None` where there is no adapter at all.
     ///
@@ -940,6 +1045,166 @@ mod tests {
 
         let px = crate::read_rgba(&device, &queue, &texture, 4, 4, format);
         Some([px[0], px[1], px[2], px[3]])
+    }
+
+    /// Draw one background picture over a black backdrop and read a pixel back.
+    ///
+    /// `texel` is one straight-alpha sRGB pixel, uploaded as a 1x1 picture and
+    /// stretched over the whole target — so every pixel of the frame answers
+    /// the same question and the test does not depend on the sampler's
+    /// filtering.
+    ///
+    /// 16 square rather than 4: the pixel read back is the centre, far enough
+    /// from every edge that no antialiasing reaches it. At 4 the rect this is
+    /// compared against in `dimming_all_the_way_is_the_plain_background` loses
+    /// five levels to its own SDF edge — a fact about that pipeline, not this
+    /// one.
+    fn image_pixel(texel: [u8; 4], base: LinearRgba, dim: f32) -> Option<[u8; 4]> {
+        let (device, queue) = headless()?;
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut renderer = Renderer::new(&device, format, zest_font::TextAntialias::Grayscale);
+        renderer.resize(&device, IMAGE_PROBE, IMAGE_PROBE);
+
+        let id = ImageId(0xdead_beef_0000_0001);
+        assert!(renderer.images.upload(&device, &queue, id, [1, 1], &texel), "upload");
+
+        let rect = [0.0, 0.0, IMAGE_PROBE as f32, IMAGE_PROBE as f32];
+        let scene = Scene {
+            images: vec![ImageInstance::new(rect, rect, rect, base, dim, id)],
+            // Deliberately *not* the base: the picture must write the finished
+            // pixel rather than blend with whatever the clear left, so a
+            // contrasting clear is what would expose a blend that crept back in.
+            backdrop: LinearRgba::opaque(0, 255, 0),
+            ..Default::default()
+        };
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("zest image probe"),
+            size: wgpu::Extent3d { width: IMAGE_PROBE, height: IMAGE_PROBE, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let mut encoder = device.create_command_encoder(&Default::default());
+        renderer.render(&device, &queue, &mut encoder, &view, &scene);
+        queue.submit([encoder.finish()]);
+
+        let px = crate::read_rgba(&device, &queue, &texture, IMAGE_PROBE, IMAGE_PROBE, format);
+        let i = image_probe_centre();
+        Some([px[i], px[i + 1], px[i + 2], px[i + 3]])
+    }
+
+    /// Byte offset of the centre pixel of a `IMAGE_PROBE`-square frame.
+    fn image_probe_centre() -> usize {
+        ((IMAGE_PROBE / 2) * IMAGE_PROBE + IMAGE_PROBE / 2) as usize * 4
+    }
+
+    #[test]
+    fn a_picture_reaches_the_frame_as_its_own_colour() {
+        let Some(px) = image_pixel([255, 0, 0, 255], LinearRgba::opaque(0, 0, 255), 0.0) else {
+            return;
+        };
+        // Red in, red out. A green frame means the clear won and the pipeline
+        // never drew; blue means `dim` is inverted.
+        assert!(px[0] > 240 && px[1] < 16 && px[2] < 16, "wanted the picture's red, got {px:?}");
+        assert_eq!(px[3], 255, "an opaque pane stays opaque: {px:?}");
+    }
+
+    #[test]
+    fn dimming_all_the_way_is_the_plain_background() {
+        // The load-bearing one. `dim = 1` must be byte-identical to the rect
+        // this quad replaced, or every Fit letterbox and Watermark margin is a
+        // visible seam against the padding beside it -- the same property
+        // `the_clear_value_matches_an_instance_of_the_same_colour` pins for the
+        // clear.
+        let base = LinearRgba::opaque(0, 0, 255);
+        let Some(dimmed) = image_pixel([255, 0, 0, 255], base, 1.0) else { return };
+        let full = [0.0, 0.0, IMAGE_PROBE as f32, IMAGE_PROBE as f32];
+        let Some(plain) = rect_pixels(vec![RectInstance::filled(full, base, full)], IMAGE_PROBE) else {
+            return;
+        };
+        let i = image_probe_centre();
+        assert_eq!(
+            dimmed,
+            [plain[i], plain[i + 1], plain[i + 2], plain[i + 3]],
+            "a fully dimmed picture must be indistinguishable from no picture"
+        );
+    }
+
+    #[test]
+    fn a_picture_composites_the_window_opacity_exactly_once() {
+        // The bug this exists to prevent, and the reason the pipeline replaces
+        // instead of blending: drawn with source-over, this quad would land on
+        // a clear that already carries the same alpha and come out at
+        // 1-(1-0.8)^2 = 0.96 -- a grid visibly less transparent than the
+        // padding around it, which is #44 wearing a photograph.
+        let base = LinearRgba::from_srgb(0, 0, 255, 0.8);
+        let Some(px) = image_pixel([255, 0, 0, 255], base, 0.0) else { return };
+        assert!(
+            (i16::from(px[3]) - 204).abs() <= 2,
+            "wanted alpha 0.8 (204), got {px:?}; 245 means the opacity blended twice"
+        );
+    }
+
+    #[test]
+    fn a_transparent_texel_leaves_the_background_alone() {
+        // A PNG with an alpha channel is the ordinary case for a watermark, and
+        // its transparent corner must read as "no picture here" rather than as
+        // a black hole punched through the pane.
+        let base = LinearRgba::opaque(0, 0, 255);
+        let Some(px) = image_pixel([255, 0, 0, 0], base, 0.0) else { return };
+        assert!(px[2] > 240 && px[0] < 16, "wanted the plain background, got {px:?}");
+    }
+
+    #[test]
+    fn a_picture_with_no_texture_uploaded_draws_nothing_at_all() {
+        // A path that has not finished decoding, or one the store evicted. The
+        // pane must look exactly as it did before the setting was touched --
+        // never a hole, and never a panic.
+        let (device, queue) = match headless() {
+            Some(pair) => pair,
+            None => return,
+        };
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut renderer = Renderer::new(&device, format, zest_font::TextAntialias::Grayscale);
+        renderer.resize(&device, IMAGE_PROBE, IMAGE_PROBE);
+
+        let rect = [0.0, 0.0, IMAGE_PROBE as f32, IMAGE_PROBE as f32];
+        let scene = Scene {
+            images: vec![ImageInstance::new(
+                rect,
+                rect,
+                rect,
+                LinearRgba::opaque(255, 0, 0),
+                0.0,
+                ImageId(404),
+            )],
+            backdrop: LinearRgba::opaque(0, 0, 255),
+            ..Default::default()
+        };
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("zest missing image probe"),
+            size: wgpu::Extent3d { width: IMAGE_PROBE, height: IMAGE_PROBE, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let mut encoder = device.create_command_encoder(&Default::default());
+        renderer.render(&device, &queue, &mut encoder, &view, &scene);
+        queue.submit([encoder.finish()]);
+
+        let px = crate::read_rgba(&device, &queue, &texture, IMAGE_PROBE, IMAGE_PROBE, format);
+        let i = image_probe_centre();
+        assert!(px[i + 2] > 240 && px[i] < 16, "wanted the untouched backdrop, got {:?}", &px[i..i + 4]);
     }
 
     /// Render `rects` over a black backdrop into a `size`-square target.

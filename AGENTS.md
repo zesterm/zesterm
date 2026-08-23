@@ -335,6 +335,11 @@ cargo run --profile fast -p zest-app           # the terminal, quick rebuild
                                                #   daemon, which screenshot mode never attaches to, so
                                                #   --screen fleet --screenshot is refused rather than
                                                #   rendered describing the local machine wrongly (#236)
+./target/fast/zesterm --background-image wall.png --background-dim 0.35
+                                               # a picture behind the cells (ADR-017). Relative
+                                               #   paths resolve against the config dir; --dim 1
+                                               #   is byte-identical to no picture at all, which
+                                               #   is what the pixel test asserts
 ./target/fast/zesterm --tabs-position left     # tab strip placement override, top|left
 cargo build --release && ./target/release/zesterm   # the shipping build
 cargo run -p zest-app  --example headless      # a terminal with no window

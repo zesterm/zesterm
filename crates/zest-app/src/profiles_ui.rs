@@ -50,6 +50,9 @@ const APPEARANCE_ORDER: &[&str] = &[
     "typography.size_pt",
     "window.opacity",
     "window.backdrop",
+    "window.background_image",
+    "window.background_fit",
+    "window.background_dim",
     "color_from",
     "tab_color",
     "icon",
@@ -1118,6 +1121,9 @@ mod tests {
                 icon: None,
                 color_from: from,
                 opacity: None,
+                background_image: None,
+                background_fit: None,
+                background_dim: None,
                 title: TabTitle::FromShell,
             };
             assert_eq!(

@@ -1120,6 +1120,9 @@ mod tests {
             icon: None,
             color_from,
             opacity: None,
+            background_image: None,
+            background_fit: None,
+            background_dim: None,
             title: zest_config::TabTitle::FromShell,
         }
     }
